@@ -90,7 +90,9 @@ parameter list:
 | A directly named local or exported Titan function | Yes |
 | An imported Titan module function | Yes |
 | A record static function, including `Rec.new` | Yes |
-| A direct record method call | Yes; the implicit receiver is not a named parameter |
+| A user-declared union static function | Yes |
+| A generated union-variant constructor | **No; positional-only** |
+| A direct record or union method call | Yes; the implicit receiver is not a named parameter |
 | A direct, fixed-arity C function with complete, unique prototype names | Yes |
 | A function value, anonymous function, or bound-method value | No |
 | A C function-pointer value or C pseudo-constructor such as `T.new` | No |
@@ -132,7 +134,19 @@ its matched formal and receives the ordinary implicit argument coercions.
 Every omitted formal is treated as a synthesized `nil`. The omission is
 accepted only when that formal's type accepts or can coerce `nil`. This includes
 option types, `value`, `boolean`, `nil`, and nullable pointer forms. Required
-numbers, strings, containers, records, and functions cannot be omitted.
+numbers, strings, containers, records, unions, and functions cannot be omitted.
+
+Union-variant constructors deliberately publish no parameter-name metadata.
+Their only accepted spelling is positional:
+
+```titan
+local text = Message.write("hello")
+local moved = Message.move({ x = 10.0, y = 20.0 })
+```
+
+The parentheses in the second example are required: the record value is the
+one positional union payload. `Message.move { x = ..., y = ... }` selects
+named-call syntax and is rejected.
 
 ```lua
 function configure(label: string?, enabled: boolean, payload: value)

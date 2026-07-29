@@ -103,7 +103,7 @@ them `_ignore`.
 
 `collect_type_aliases` enters every alias in a separate module-wide type
 namespace, chooses the first duplicate alias by AST order, and keeps a
-surviving record declaration authoritative over a same-named alias regardless
+surviving record or union declaration authoritative over a same-named alias regardless
 of relative placement. This makes forward aliases available without creating
 value symbols. Lazy resolution stores the exact RHS type on the declaration
 and detects cycles with a `resolving` state.
@@ -112,20 +112,24 @@ and detects cycles with a `resolving` state.
 
 1. `reserve_toplevel_names` publishes every surviving ordinary name before any
    signature needs it.
-2. `collect_record_constructors` recognizes the parser-marked synthesized
-   `TopLevelStatic` immediately following each `TopLevelRecord`. A duplicate
-   record also suppresses its constructor, preventing a secondary `new`
-   diagnostic.
+2. `collect_nominal_constructors` recognizes parser-marked synthesized
+   `TopLevelStatic` nodes: one `new` immediately after each `TopLevelRecord`,
+   and one positional constructor per variant immediately after each
+   `TopLevelUnion`. A duplicate nominal owner also suppresses its constructors,
+   preventing secondary namespace diagnostics.
 3. All Titan and foreign imports are visited in AST order. This establishes
    module and C type environments before non-variable declarations, while
    `current_toplevel_order` records the origin of each C declaration in its
    symbol-table history.
-4. Aliases are resolved, then every record is built and registered in
-   `types.registry`, then every synthesized `new` is attached to its complete
-   record namespace.
+4. Aliases are resolved, then every record and union is built and registered
+   in `types.registry`, then each synthesized constructor is attached to its
+   complete nominal namespace. Record fields and union payloads share
+   `types.has_tvalue_representation`: Titan function values are legal, while
+   direct C aggregates, C arrays, direct C functions, and C function pointers
+   are rejected.
 5. Ordinary function and module-initializer signatures are collected, followed
-   by explicit methods and record functions. Because names, imports, aliases,
-   records, and synthesized constructors are already available, these
+   by explicit methods and nominal functions. Because names, imports, aliases,
+   nominal owners, and synthesized constructors are already available, these
    declarations are independent of their relative AST order.
 6. Module variables are checked in AST order. For each node the checker sets
    `st.initializer_order` to its `_toplevel_order`; symbol lookup then exposes
@@ -134,17 +138,17 @@ and detects cycles with a `resolving` state.
    checked under the same frontier, followed by the ordinary constant-expression
    validation.
 
-Methods and record functions still perform their own conflict checks against
-fields and one another. Every failed or duplicate top-level declaration is
+Methods and nominal functions still perform their own conflict checks against
+fields, variants, and one another. Every failed or duplicate top-level declaration is
 marked `_ignore`; everything downstream — body checking, `makemoduletype`, and
 the coder — must skip it.
 
 `checkbodies` walks the unchanged AST order. It checks ordinary function,
-method, record-function, and synthesized-constructor bodies (`checkfunc`, each
+method, nominal-function, and synthesized-constructor bodies (`checkfunc`, each
 in a fresh scope; `checkmethod` first synthesizes a `self` declaration typed as
-the record's `Type.Nominal`). It also validates resolved record field types and
-alias targets after all records have entered the registry; that is what permits
-recursive and mutually recursive records while still reporting an unresolved
+the owner's `Type.Nominal`). It also validates resolved record fields, union
+payloads, and alias targets after all nominal owners have entered the registry;
+that is what permits recursive and mutually recursive nominal declarations while still reporting an unresolved
 nominal. Module-variable annotations are instead resolved and validated in the
 module-variable stage, where every record is already registered but the
 import/module-variable frontier is still active. `checkfuncbody` also
@@ -158,11 +162,12 @@ initializer retains that initializer's frontier, so it reuses only an earlier
 After declaration and body checking, `makemoduletype` builds the module's
 interface by traversing the original AST order from the
 non-`islocal`, non-`_ignore`, non-import top levels (`TopLevelVar` →
-`Type.ModuleVariable`; `TopLevelFunc`/`TopLevelRecord` →
+`Type.ModuleVariable`; `TopLevelFunc`/`TopLevelRecord`/`TopLevelUnion` →
 `Type.ModuleMember`). Public `TopLevelTypeAlias` nodes instead populate the
 module's separate `type_members` map with their resolved RHS types. Local
-aliases, local record fields, methods and functions are left out of serialized
-public interfaces.
+aliases and local nominal members are left out of serialized public
+interfaces. Private union variants are omitted while retaining their absolute
+tags and the owner's total `nvariants`.
 See [Type aliases](type-aliases.md) for the resolution and interface details.
 
 `checker.has_main(ast)` is a post-check used by `titanc` to decide between
@@ -187,7 +192,7 @@ compares element types; Map/Map compares keys and values; Function/Function
 requires pointwise-equal fixed parameters/results and equal presence/element
 types for both the input-vararg and flexible-result tails;
 Option/Option compares bases; Nominal/Nominal compares **fqtn strings only**
-(record contents never participate); Pointer/Pointer compares pointed-to
+(record and union contents never participate); Pointer/Pointer compares pointed-to
 types and Typedef/Typedef compares names (FFI types); any other same-tag pair
 is equal; everything else is not.
 
@@ -230,7 +235,7 @@ Pointer-vs-Nil in either order → true (nullable pointers);
 gradual "value is consistent with everything" rule); Array/Array and Map/Map
 recurse with `compatible` (so `{value}` is compatible with `{float}` —
 Value-consistency reaches through containers); Nominal/Nominal compares fqtns
-(no recursion into record bodies). Function/Function is deliberately
+(no recursion into record or union bodies). Function/Function is deliberately
 **directional**: the first argument is the expected slot and the second the
 actual callable. Parameters are checked in the input direction, results in the
 output direction, shorter actual fixed-input lists may ignore an expected
@@ -735,6 +740,21 @@ with `_type = node._type`, the surrounding context applies its usual
   any type is a legal condition, and truthiness is the coder's problem.
   `repeat`'s condition is checked inside the body's scope, so it can see the
   body's locals.
+* **Union construction and dispatch.** Synthesized variant statics are
+  ordinary first-class `Type.StaticMethod` values, but publish
+  `paramnames = false`; fixed-call adjustment still nil-fills a missing
+  payload and evaluates/discards surplus arguments. `Ast.StatCase` applies
+  ordinary `tryforce` to its scrutinee, so `Union?` dispatches after the
+  normal nil check. It then requires a union owner, rejects duplicate arms and
+  bindings on empty variants, and opens a sibling scope per arm. Payload
+  bindings are installed outside the arm's possible `StatTry`, making them
+  visible to its body, `catch`, and `finally` while keeping body locals out of
+  the sibling clauses. Missing variants are permitted and an unmatched case
+  without `else` is a no-op.
+  `isconst` recognizes a record/union constructor only after its synthesized
+  nominal metadata validates against the owner projection, and only when all
+  arguments are recursively constant. An arbitrary static whose result is the
+  owner is not accepted as a module constant.
 * **Written `as` casts and `is` tests.** Both visitors call
   `check_explicit_cast_relation`: it resolves the target, checks the operand
   under that target context, accepts identity and exact option unwraps, and
@@ -743,16 +763,24 @@ with `_type = node._type`, the surrounding context applies its usual
   either node. `ExpCast._type` is the target; `ExpIs._type` is always
   `Type.Boolean`. `is` does not alter the operand or symbol-table type, so
   there is no flow narrowing. A rejected test deliberately uses the existing
-  `cannot cast '%s' to '%s'` diagnostic.
+  `cannot cast '%s' to '%s'` diagnostic. A `Type.Variant` descriptor is never
+  a source-resolvable type, so annotations, aliases, `as`, and `is` may name
+  `Message` but not `Message.move`; `case` is the only v1 variant test.
 
 ## The "always returns" analysis
 
 Every `checkstat` handler returns whether the statement is guaranteed to
 return from the enclosing function. `StatReturn` returns `true`; `StatIf`
 returns `true` only if every then-block returns *and* an `else` exists and
-returns; loops and everything else return `false`/`nil`, except `StatBlock`
-— a bare `do … end` propagates its own fold, so `do return 1 end` counts as
-returning (verified). `checkblock` folds
+returns. `StatCase` uses exactly that rule: it requires an explicit `else` and
+every arm plus the else must return; the checker does not infer exhaustiveness.
+`StatTry` uses its body/catch/finally rule from
+[Error handling](error-handling.md#checker-rules). The result is cached on
+every statement as `_always_returns`, which is the shared checker-to-coder
+reachability fact for direct terminators and compound `StatBlock`, `StatIf`,
+`StatTry`, and `StatCase` nodes. A bare `do … end` propagates its own fold, so
+`do return 1 end` counts as returning (verified); loops and ordinary
+fallthrough statements return `false`/`nil`. `checkblock` folds
 the results with `ret = ret or checkstat(stat, st, errors)` — and note the
 short-circuit: once `ret` is true, **later statements in the block are not
 visited at all**. A plain `return` can only be a block's final statement (the
@@ -789,19 +817,23 @@ On success, the import node's `_type` is the returned `Type.Module`, and
 errors found while checking the dependency propagate into this module's
 error list. `checkimport` then walks both the value `members` and alias
 `type_members` namespaces and registers each
-imported record into `types.registry`: it unwraps the `Type.ModuleMember`
-wrapper and, when the underlying type is a `Type.Record` (or
-`Type.Interface`), stores it under its fqtn. This is what makes a record
+imported nominal owner into `types.registry`: it unwraps the
+`Type.ModuleMember` wrapper and, when the underlying type is a `Type.Record`,
+`Type.Union` (or `Type.Interface`), stores it under its fqtn. This is what
+makes a record or union
 imported through a compiled interface — one with no `.titan` source to
 re-check — usable by nominal type. For a dependency *with* source the same
 registration also happens as a side effect of the dependency's own
-`checker.check`, which the loader runs recursively: the `TopLevelRecord`
-visitor writes into the process-global `types.registry`. A `Type.Nominal`
+`checker.check`, which the loader runs recursively: the
+`TopLevelRecord`/`TopLevelUnion` visitors write into the process-global
+`types.registry`. A `Type.Nominal`
 carries *only* its fqtn string and
 resolves through the registry at every use, so the qualified type
 `geo.Point` (parsed as `Ast.TypeQualName`, converted by `typefromnode` to
 `types.Nominal("geo.Point")`) means something only because checking module
-`geo` registered `"geo.Point"`. On loader failure the import errors with
+`geo` registered `"geo.Point"`. Union visibility follows this same record
+frontier, including the module-variable/lambda restriction and alias bridge.
+On loader failure the import errors with
 `problem loading module '%s': %s`.
 
 Two real loaders exist in `driver.lua`:
@@ -819,9 +851,9 @@ Two real loaders exist in `driver.lua`:
   `load("return " .. s, modname, "t", types)`, the `types` module itself
   serving as the environment. C FFI types are *not* serializable
   (`types.serialize` raises on any type tree containing one), so imported C
-  types cannot cross a compiled-interface boundary. Local record declarations
-  and local record members are omitted from the serialized interface; exported
-  records still serialize their total `nfields` count and each public
+  types cannot cross a compiled-interface boundary. Local nominal declarations
+  and members are omitted from the serialized interface; exported records
+  still serialize their total `nfields` count and each public
   `Field.index`, so public fields keep their real `Udata` slot even when local
   fields were skipped. `Type.Module.type_members` is serialized as a separate,
   deterministically ordered map, so aliases rehydrate without becoming runtime
@@ -829,7 +861,9 @@ Two real loaders exist in `driver.lua`:
   likewise serialize callable tail shape and formal `paramnames`; names remain
   absent from structural `Type.Function` values. The constructor schema
   includes `flexrettype`; ABI 0.14 gates that serialized arity so 0.13 modules
-  are rejected before rehydration.
+  are rejected before rehydration. ABI 0.19 additionally serializes
+  `Type.Union`/`Type.Variant` schemas, preserving absolute private-skipping
+  tags and `nvariants`; variant descriptors remain metadata, not type members.
 * `driver.tableloader` is the in-memory variant for tests; it deliberately
   serializes and re-loads every module type, so the round-trip is exercised
   by every import test in the suite.
@@ -876,16 +910,17 @@ headers imported from a contributor use the same directory without a
 per-file checker invocation.
 
 After the module interface is built, export validation rejects any public type
-tree, including an exported alias target, that mentions a local record type or
-a C FFI type. For records, the walkers skip local fields, local methods and
-local record functions before applying the C-type check, which is why an
-exported record may have a private C-typed field as long as that field is local.
+tree, including an exported alias target, that mentions a local nominal type
+or a C FFI type. For records and unions, the walkers skip private
+fields/variants, methods, and functions before applying the C-type check, so
+an exported owner may keep a private C-typed member that never enters its
+interface.
 
 ## Process-global state
 
 Two pieces of mutable state outlive a `checker.check` call, and any test or
 tool that checks more than one module (or the same module twice) must reset
-them: `types.registry`, the fqtn → `Type.Record` map (stale entries make
+them: `types.registry`, the fqtn → `Type.Record`/`Type.Union` map (stale entries make
 nominal types from a previous run resolve in the next one), and
 `driver.imported`, the import cache, including any `CIRCULAR_MARK` sentinels
 left by a failed run. The suite's helpers do exactly this

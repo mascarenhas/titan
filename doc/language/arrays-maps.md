@@ -211,7 +211,9 @@ local groups: {integer: {string}} = {}
 
 As for Arrays, the value type is de-optionized and a read has type `V?`.
 Map keys may be any Titan type except `nil` and option types. Arrays, Maps,
-records, and other identity-bearing values can be keys. An Array key uses its
+records, unions, and other identity-bearing values can be keys. A union key
+uses the identity of the constructed union value, not its variant/payload
+contents. An Array key uses its
 canonical identity, so the same Array reaches the same entry across exact,
 `value`, and Lua paths.
 
@@ -302,7 +304,8 @@ At a Lua-visible boundary the two container kinds are deliberately distinct:
 | `value` containing an Array | canonical proxy |
 
 Every Array backing/proxy pair is one-to-one. Passing an Array repeatedly
-through module fields, records, functions, `value`, or Lua returns the same
+through module fields, record fields, union payloads, functions, `value`, or
+Lua returns the same
 proxy identity. Map keys and values are Lua-visible storage, so an Array
 stored in a Map is stored as that proxy, never as its private table.
 
@@ -368,6 +371,9 @@ key type. Positional integer-Map construction preallocates the ordinary table
 array part, but it does not acquire deterministic Array semantics.
 
 Exact Titan-to-Titan Array calls pass the private native identity directly.
+An Array stored as a union payload likewise stays in Titan's internal
+`Table *` representation until a real Lua or `value` boundary needs the
+canonical proxy; case extraction does not manufacture a second proxy.
 Lua, `value`, Map storage, and other generic boundaries pay a constant-time
 proxy validation or lookup. See [Dense Arrays](../implementation/dense-arrays.md)
 for the backing/proxy protocol, GC barriers, and lowering details.

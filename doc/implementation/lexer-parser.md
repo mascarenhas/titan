@@ -54,11 +54,16 @@ Three layers provide it:
    `local` does not match the front of `localx`; and `lexer.NAME` is a
    match-time capture (`lpeg.Cmt`) that matches an identifier and then
    *fails* if it is a keyword — `andy`, `return17` and `_end` are NAMEs.
-   `lexer.NAMEDLABEL` is the narrow exception: it captures the same raw
-   identifier shape without the keyword rejection, but the parser references
-   it only before `=` inside a named-call list. It therefore accepts a C
-   parameter label such as `repeat` without making that spelling an ordinary
-   Titan name.
+   `lexer.NAMEDLABEL` and `lexer.CNAME` are contextual exceptions: both
+   capture the raw identifier shape without keyword rejection.
+   `NAMEDLABEL` is used only before `=` inside a named-call list, while
+   `CNAME` is used only for source-nameable C members and qualified C types.
+   A header symbol spelled `when`, `repeat`, or `type` therefore remains
+   usable without making that spelling an ordinary Titan name. The parser
+   stamps the resulting `Ast.VarDot` or `Ast.TypeQualName` with
+   `_contextual_c_name`; the checker accepts that marker only after the
+   qualifier resolves to the corresponding C context, and the coder emits the
+   stored spelling unchanged.
 
 2. **Symbols vs. longer symbols, generically.** A loop at the end of
    `lexer.lua` makes every symbol pattern subtract every longer symbol it is
@@ -320,6 +325,21 @@ The parser performs several rewrites that later passes rely on:
   local, and any local field also makes `new` local so outside code cannot
   construct private slots positionally.
 
+* **`union` declarations synthesize positional constructors.**
+  `defs.uniondecl` returns an `Ast.TopLevelUnion` followed by one
+  `Ast.TopLevelStatic` for each source-order `Ast.UnionVariant`. An empty
+  variant gets no parameters; a payload variant gets one hidden
+  `__union_payload` parameter and returns `Ast.ExpUnionInit`. The static is
+  marked `_union_constructor` and `_union_variant`, so the checker can
+  distinguish it from a user function and publish `paramnames = false`.
+  Consequently `Message.move(value)` is positional and first-class, while
+  `Message.move{...}` remains named-call syntax rather than constructor
+  sugar.
+  Variant-looking type targets add no parser form: local `Message.move` fits
+  the ordinary two-component qualified type and is rejected semantically,
+  while imported `m.Message.move` has three components and fails the type
+  grammar before checking.
+
 * **Record functions share the static node.** A declaration
   `function Point.origin(): Point ... end` parses to `Ast.TopLevelStatic`.
   The parser sets `islocal` when the declaration is written
@@ -338,6 +358,13 @@ The parser performs several rewrites that later passes rely on:
   initial condition/block pair to the captured `elseif` clauses, yielding one
   `Ast.StatIf` whose `thens` is a flat list of `Ast.Then` nodes (plus
   `elsestat`, a block or `false`) — not nested ifs.
+
+* **`case` arms are ordinary blocks.** The grammar requires one or more
+  `when Name [: binding] then block` arms and an optional `else block`.
+  It builds `Ast.StatCase` and `Ast.CaseArm` directly. Each `block` is the
+  same production used elsewhere, including its trailing `catch` and
+  `finally` support and the normal recursive `defer` transformation. There is
+  no fallthrough-oriented or statement-list-only arm grammar.
 
 * **Numeric and generic `for` share their prefix.** The grammar parses
   `FOR decl` once and then dispatches to `forrest`: `= exp, exp ...` builds

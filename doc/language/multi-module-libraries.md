@@ -92,7 +92,7 @@ Each logical module in a provider still has its own:
 * exported type interface and ABI marker;
 * initializer and `luaopen_*` entry;
 * private module state and once-per-Lua-state initialization guard;
-* module variables, functions, record metatables, and nominal record names.
+* module variables, functions, record/union metatables, and nominal names.
 
 Loading one member does not initialize every sibling. Ordinary import edges
 still determine initialization order, and unrelated siblings initialize only
@@ -103,8 +103,8 @@ create a logical module `a.b`; it may contain only `a.b.left` and
 Within one Lua state, repeated imports and requires of a logical module return
 that module's one instance. Different Lua states receive independent module
 instances even though the operating system reuses the same mapped DSO. Record
-identity remains the fully qualified logical record identity and the
-per-state metatable for that record, not the provider prefix.
+identity remains the fully qualified logical record/union identity and the
+per-state metatable for that nominal type, not the provider prefix.
 
 ## Finding a compiled module in a provider
 
@@ -122,8 +122,8 @@ a/b.so
 a/b/c.so
 ```
 
-The binary path comes from `TITAN_PATH_0_18` when set, otherwise `TITAN_PATH`,
-otherwise the default `.;<root>/lib/titan/0.18`. In an override, `;;` inserts
+The binary path comes from `TITAN_PATH_0_19` when set, otherwise `TITAN_PATH`,
+otherwise the default `.;<root>/lib/titan/0.19`. In an override, `;;` inserts
 that default at the same position. Search is **path-root first**: Titan walks
 all candidates in the first path root before moving to the second root. Once
 an earlier root contains a file at a relative candidate such as `a/b.so`, that
@@ -133,7 +133,7 @@ still advance to a deeper candidate such as `a/b/c.so`.
 
 A candidate claims `a.b.c` when it exports either member of the requested
 metadata pair, `a_b_c_abi` and `a_b_c_types`. Once claimed, validation is
-terminal: both entries must exist, the ABI marker must be `0.18`, and the type
+terminal: both entries must exist, the ABI marker must be `0.19`, and the type
 metadata must describe `a.b.c`. Broken, half-present, mismatched, or malformed
 metadata is an error rather than permission to skip to another file. An
 ancestor with neither entry is an unrelated nonclaim; an exact `a/b/c.so`
@@ -218,17 +218,26 @@ The standard library is the canonical provider with this name.
 
 ## Compiled compatibility
 
-The current provider contract is compiled-module ABI 0.18. Generated standard
-library archive objects now refer directly to callback trampolines promoted
-into the runtime's external symbol contract and no longer refer to the retired
-libuv/coroutine helpers. A provider and runtime must therefore both be 0.18;
-either direction of a 0.17/0.18 static pairing is incompatible.
+The current provider contract is compiled-module ABI 0.19. Serialized
+interfaces now carry union/variant schemas, generated code shares their
+userdata/tag protocol, and the module-state public prefix now includes public
+record and union static closures after exported variables and top-level
+function closures. This preserves first-class imported constructor/static
+identity. A 0.18 consumer cannot reconstruct that prefix or union metadata, so
+the marker, `TITAN_PATH_0_19`, and `lib/titan/0.19` namespace advance together.
+
+ABI 0.18 changed the standard-library archive/runtime contract: logical
+objects began referring directly to callback trampolines promoted into the
+runtime's external symbol contract and stopped referring to the retired
+libuv/coroutine helpers. A provider and runtime therefore both had to be 0.18;
+either direction of a 0.17/0.18 static pairing was incompatible.
 
 ABI 0.17 introduced the current Array meaning and representation: `{T}` is a
 canonical proxy over private dense-capacity backing storage, not an ordinary
 table. That semantic break changed what the existing native Array pointer slots
 mean, along with generated container code and Lua boundary checks, so 0.16 and
-0.17 providers could not be mixed. ABI 0.18 preserves that Array contract.
+0.17 providers could not be mixed. ABI 0.18 and 0.19 preserve that Array
+contract.
 
 Historically, ABI 0.16 introduced prefix-container discovery: a 0.15 consumer
 recorded only an imported module's exact child-DSO pathname and could not
@@ -249,8 +258,8 @@ Titan's complete installed standard library is the production example of this
 model. One paired provider:
 
 ```text
-$ROCKS_TREE/lib/titan/0.18/titan.so
-$ROCKS_TREE/lib/titan/0.18/titan.a
+$ROCKS_TREE/lib/titan/0.19/titan.so
+$ROCKS_TREE/lib/titan/0.19/titan.a
 ```
 
 contains the native support entry plus the independent logical modules

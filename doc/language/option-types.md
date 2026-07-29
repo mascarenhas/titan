@@ -50,7 +50,7 @@ projection stays `value`, because `value` already includes nil.
 ## Syntax
 
 In a type annotation, `?` is a suffix on any simple type, including array
-and map types and (qualified) record names:
+and map types and (qualified) record or union names:
 
 ```lua
 local a: integer?           = nil
@@ -59,6 +59,7 @@ local c: {integer}?         = nil      -- option of array
 local d: {string:integer}?  = nil      -- option of map
 local p: Point?             = nil      -- option of a record type
 local q: geom.Point?        = nil      -- imported record type
+local m: Message?           = nil      -- option of a union type
 ```
 
 The suffix does not nest (`integer??` is a syntax error), and it cannot be
@@ -182,7 +183,8 @@ every context that needs the bare value: operands of arithmetic, bitwise,
 relational and concatenation operators; the operands of unary `-`, `~` and
 `#`; numeric `for` bounds; the indexed expression itself (so if
 `a: {{string}}`, the inner read `a[1]` of type `{string}?` is unwrapped
-before `a[1][1]` indexes it); the receiver of a field access; and
+before `a[1][1]` indexes it); the receiver of a field access; a union
+`case` scrutinee; and
 unannotated initializers, as shown above. Notably *not* unwrapped:
 `==`/`~=` operands, conditions, `not`, `and`/`or` operands, and method-call
 receivers (each covered in its own section below).
@@ -204,7 +206,12 @@ The same unwrap fires when you **call through** an option-of-function. An
 array or map whose element type is a function yields a `T?` on indexing, so
 calling the result directly — `arr[i](x)` — auto-unwraps the option with a
 run-time nil check, raising cleanly if the element is nil, exactly as a
-method call unwraps an option record receiver.
+method call unwraps an option nominal receiver.
+
+`case` is another bare-value context. If its scrutinee has type `Union?`, the
+checker forces it to `Union` before reading a variant tag. A present union
+dispatches normally; nil raises the same `expected Union but found nil` error.
+Nil does not select the case statement's `else`.
 
 ### Conversions between different option types
 
@@ -422,7 +429,8 @@ print(m.greet("titan"))    --> hello titan
 print(pcall(m.greet, 42))  --> false   greet.titan:1:1: type error, expected string but found number
 ```
 
-The same applies to option-typed record fields written from Lua, and to
+The same applies to option-typed record fields and union payloads written from
+Lua, and to
 nil read out of arrays and maps — which is how most options are born: Lua
 passes a table with holes, and the holes surface in Titan as nil options.
 

@@ -255,8 +255,11 @@ function coder.external_symbols(modname, ast)
                 add(func_name(modname, node.name),
                     "function '" .. modname .. "." .. node.name .. "'")
             elseif node._tag == "Ast.TopLevelStatic" then
+                local owner = types.registry[node._type.fqtn]
+                local owner_kind = owner and owner._tag == "Type.Union"
+                    and "union" or "record"
                 add(static_name(node._type),
-                    "record function '" .. node._type.fqtn .. "." ..
+                    owner_kind .. " function '" .. node._type.fqtn .. "." ..
                         node._type.name .. "'")
             elseif node._tag == "Ast.TopLevelMethod" then
                 local owner = "method '" .. node._type.fqtn .. ":" ..
@@ -294,11 +297,13 @@ function coder.interface_external_symbols(modname, modtype)
             if typ._tag == "Type.Function" then
                 add(func_name(modname, member.name),
                     "function '" .. modname .. "." .. member.name .. "'")
-            elseif typ._tag == "Type.Record" then
+            elseif typ._tag == "Type.Record" or typ._tag == "Type.Union" then
+                local owner_kind = typ._tag == "Type.Record"
+                    and "record" or "union"
                 for _, static in pairs(typ.functions or {}) do
                     if not static.islocal then
                         add(static_name(static),
-                            "record function '" .. static.fqtn .. "." ..
+                            owner_kind .. " function '" .. static.fqtn .. "." ..
                                 static.name .. "'")
                     end
                 end
@@ -340,19 +345,31 @@ local function anon_qualname(loc)
     return "anonymous function"
 end
 
--- get name of the variable holding the metatable for this type.
+-- Get the module uservalue slot holding the canonical metatable for this
+-- nominal type. Records and unions share the Type.Nominal value
+-- representation, but their registry keys are intentionally distinct; retain
+-- the owner kind beside the slot so imported recovery uses the right key.
 -- `ctx` may be a per-function context (has `.tlcontext`) or the top-level
 -- tlcontext itself — genluaentry passes the latter into checkandget when
--- coercing a Lua-facing record parameter, and that may be the first use of the
+-- coercing a Lua-facing nominal parameter, and that may be the first use of the
 -- type's metatable. Resolve the tlcontext either way (`ctx.metatables` is the
 -- same shared table in both); allocating the slot here is safe because it
 -- happens before init_data_from_other_modules emits the per-state recovery.
 local function type2metatable(ctx, typ --[[:table]])
     local tlcontext = ctx.tlcontext or ctx
-    if not ctx.metatables[typ.fqtn] then
-        ctx.metatables[typ.fqtn] = nextupvalue(tlcontext)
+    local entry = ctx.metatables[typ.fqtn]
+    if not entry then
+        local owner = assert(types.registry[typ.fqtn],
+            "nominal type is missing from the registry: " .. typ.fqtn)
+        assert(owner._tag == "Type.Record" or owner._tag == "Type.Union",
+            "invalid nominal owner " .. owner._tag)
+        entry = {
+            slot = nextupvalue(tlcontext),
+            kind = owner._tag == "Type.Record" and "record" or "union",
+        }
+        ctx.metatables[typ.fqtn] = entry
     end
-    return ctx.metatables[typ.fqtn]
+    return entry.slot
 end
 
 -- Every ABI-0.17-or-newer module reserves one private uservalue slot for the canonical
@@ -1244,9 +1261,7 @@ end
 -- always produced unchecked nodes; it only became reachable now that `raise`
 -- routinely precedes dead code in try bodies.)
 local function is_terminator(node)
-    local tag = node._tag
-    return tag == "Ast.StatReturn" or tag == "Ast.StatBreak"
-        or tag == "Ast.StatRaise"
+    return node._tag == "Ast.StatBreak" or node._always_returns == true
 end
 
 -- The last statement that control can reach in a block's `stats` (the first
@@ -1383,6 +1398,8 @@ collect_reads_exp = function(node, out)
         for _, arg in ipairs(node.args.args) do
             collect_reads_exp(arg, out)
         end
+    elseif tag == "Ast.ExpUnionInit" then
+        collect_reads_exp(node.value, out)
     elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
             or tag == "Ast.ExpIs"
             or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex" then
@@ -1429,6 +1446,8 @@ function coder._collect_writes_exp(node, out)
         for _, arg in ipairs(node.args.args) do
             coder._collect_writes_exp(arg, out)
         end
+    elseif tag == "Ast.ExpUnionInit" then
+        coder._collect_writes_exp(node.value, out)
     elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
             or tag == "Ast.ExpIs"
             or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex"
@@ -1468,28 +1487,34 @@ collect_reads_stat = function(node, out)
         collect_reads_exp(node.exp, out)
     elseif tag == "Ast.StatWhile" then
         collect_reads_exp(node.condition, out)
-        collect_reads_block(node.block, out)
+        collect_reads_stat(node.block, out)
     elseif tag == "Ast.StatRepeat" then
-        collect_reads_block(node.block, out)
+        collect_reads_stat(node.block, out)
         collect_reads_exp(node.condition, out)
     elseif tag == "Ast.StatFor" then
         collect_reads_exp(node.start, out)
         collect_reads_exp(node.finish, out)
         collect_reads_exp(node.inc, out)
-        collect_reads_block(node.block, out)
+        collect_reads_stat(node.block, out)
     elseif tag == "Ast.StatForIn" then
         for _, exp in ipairs(node.exps) do collect_reads_exp(exp, out) end
-        collect_reads_block(node.block, out)
+        collect_reads_stat(node.block, out)
     elseif tag == "Ast.StatIf" then
         for _, t in ipairs(node.thens) do
             collect_reads_exp(t.condition, out)
-            collect_reads_block(t.block, out)
+            collect_reads_stat(t.block, out)
         end
-        collect_reads_block(node.elsestat, out)
+        collect_reads_stat(node.elsestat, out)
+    elseif tag == "Ast.StatCase" then
+        collect_reads_exp(node.exp, out)
+        for _, arm in ipairs(node.arms) do
+            collect_reads_stat(arm.block, out)
+        end
+        collect_reads_stat(node.elseblock, out)
     elseif tag == "Ast.StatTry" then
-        collect_reads_block(node.block, out)
-        collect_reads_block(node.catchblock, out)
-        collect_reads_block(node.finallyblock, out)
+        collect_reads_stat(node.block, out)
+        collect_reads_stat(node.catchblock, out)
+        collect_reads_stat(node.finallyblock, out)
     else
         -- StatBreak has no reads.
     end
@@ -1539,17 +1564,24 @@ collect_writes_stat = function(node, out)
         if tag == "Ast.StatForIn" then
             for _, decl in ipairs(node.decls) do set_add(out, decl) end
         end
-        collect_writes_block(node.block, out)
+        collect_writes_stat(node.block, out)
     elseif tag == "Ast.StatIf" then
         for _, t in ipairs(node.thens) do
             coder._collect_writes_exp(t.condition, out)
-            collect_writes_block(t.block, out)
+            collect_writes_stat(t.block, out)
         end
-        collect_writes_block(node.elsestat, out)
+        collect_writes_stat(node.elsestat, out)
+    elseif tag == "Ast.StatCase" then
+        coder._collect_writes_exp(node.exp, out)
+        for _, arm in ipairs(node.arms) do
+            set_add(out, arm.binding)
+            collect_writes_stat(arm.block, out)
+        end
+        collect_writes_stat(node.elseblock, out)
     elseif tag == "Ast.StatTry" then
-        collect_writes_block(node.block, out)
-        collect_writes_block(node.catchblock, out)
-        collect_writes_block(node.finallyblock, out)
+        collect_writes_stat(node.block, out)
+        collect_writes_stat(node.catchblock, out)
+        collect_writes_stat(node.finallyblock, out)
     end
     return out
 end
@@ -1560,8 +1592,64 @@ local function mark_spills(assigned, reads)
     end
 end
 
-local function analyze_try_spills_block(block, after_reads)
-    if not block or not block.stats then return end
+local analyze_try_spills_block
+
+function coder._analyze_try_spills_stat(stat, after)
+    if not stat or stat == false then return end
+    local tag = stat._tag
+    if tag == "Ast.StatBlock" then
+        analyze_try_spills_block(stat, after)
+    elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat"
+            or tag == "Ast.StatFor" or tag == "Ast.StatForIn" then
+        local loop_after = set_copy(after)
+        collect_reads_stat(stat, loop_after)
+        coder._analyze_try_spills_stat(stat.block, loop_after)
+    elseif tag == "Ast.StatIf" then
+        for _, t in ipairs(stat.thens) do
+            coder._analyze_try_spills_stat(t.block, after)
+        end
+        coder._analyze_try_spills_stat(stat.elsestat, after)
+    elseif tag == "Ast.StatCase" then
+        for _, arm in ipairs(stat.arms) do
+            coder._analyze_try_spills_stat(arm.block, after)
+        end
+        coder._analyze_try_spills_stat(stat.elseblock, after)
+    elseif tag == "Ast.StatTry" then
+        local catch_reads = collect_reads_stat(stat.catchblock)
+        local finally_reads = collect_reads_stat(stat.finallyblock)
+
+        -- A body error reaches code after the try only if a catch can handle
+        -- it. A finally-only body error re-raises after the finally, so only
+        -- the finally can observe body-written values on that longjmp path.
+        local body_boundary_reads = set_copy(catch_reads)
+        set_union(body_boundary_reads, finally_reads)
+        if stat.catchblock then set_union(body_boundary_reads, after) end
+        mark_spills(collect_writes_stat(stat.block), body_boundary_reads)
+
+        -- The catch has a protected boundary only when a finally follows; if
+        -- it raises, dispatch re-raises after the finally, so post-try code is
+        -- not reached on that longjmp path.
+        if stat.catchblock and stat.finallyblock then
+            mark_spills(collect_writes_stat(stat.catchblock), finally_reads)
+        end
+
+        local nested_body_after = set_copy(after)
+        set_union(nested_body_after, catch_reads)
+        set_union(nested_body_after, finally_reads)
+        coder._analyze_try_spills_stat(stat.block, nested_body_after)
+
+        local nested_catch_after = set_copy(after)
+        set_union(nested_catch_after, finally_reads)
+        coder._analyze_try_spills_stat(stat.catchblock, nested_catch_after)
+        coder._analyze_try_spills_stat(stat.finallyblock, after)
+    end
+end
+
+analyze_try_spills_block = function(block, after_reads)
+    if not block or not block.stats then
+        coder._analyze_try_spills_stat(block, after_reads or {})
+        return
+    end
     local stats = {}
     for _, stat in ipairs(block.stats) do
         table.insert(stats, stat)
@@ -1570,48 +1658,7 @@ local function analyze_try_spills_block(block, after_reads)
     local after = set_copy(after_reads or {})
     for i = #stats, 1, -1 do
         local stat = stats[i]
-        local tag = stat._tag
-        if tag == "Ast.StatBlock" then
-            analyze_try_spills_block(stat, after)
-        elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat"
-                or tag == "Ast.StatFor" or tag == "Ast.StatForIn" then
-            local loop_after = set_copy(after)
-            collect_reads_stat(stat, loop_after)
-            analyze_try_spills_block(stat.block, loop_after)
-        elseif tag == "Ast.StatIf" then
-            for _, t in ipairs(stat.thens) do
-                analyze_try_spills_block(t.block, after)
-            end
-            analyze_try_spills_block(stat.elsestat, after)
-        elseif tag == "Ast.StatTry" then
-            local catch_reads = collect_reads_block(stat.catchblock)
-            local finally_reads = collect_reads_block(stat.finallyblock)
-
-            -- A body error reaches code after the try only if a catch can handle
-            -- it. A finally-only body error re-raises after the finally, so only
-            -- the finally can observe body-written values on that longjmp path.
-            local body_boundary_reads = set_copy(catch_reads)
-            set_union(body_boundary_reads, finally_reads)
-            if stat.catchblock then set_union(body_boundary_reads, after) end
-            mark_spills(collect_writes_block(stat.block), body_boundary_reads)
-
-            -- The catch has a protected boundary only when a finally follows; if
-            -- it raises, dispatch re-raises after the finally, so post-try code is
-            -- not reached on that longjmp path.
-            if stat.catchblock and stat.finallyblock then
-                mark_spills(collect_writes_block(stat.catchblock), finally_reads)
-            end
-
-            local nested_body_after = set_copy(after)
-            set_union(nested_body_after, catch_reads)
-            set_union(nested_body_after, finally_reads)
-            analyze_try_spills_block(stat.block, nested_body_after)
-
-            local nested_catch_after = set_copy(after)
-            set_union(nested_catch_after, finally_reads)
-            analyze_try_spills_block(stat.catchblock, nested_catch_after)
-            analyze_try_spills_block(stat.finallyblock, after)
-        end
+        coder._analyze_try_spills_stat(stat, after)
 
         local reads = collect_reads_stat(stat)
         if is_terminator(stat) then
@@ -2434,6 +2481,11 @@ local function stat_contains_try(node)
             if stat_contains_try(t.block) then return true end
         end
         return stat_contains_try(node.elsestat)
+    elseif tag == "Ast.StatCase" then
+        for _, arm in ipairs(node.arms) do
+            if stat_contains_try(arm.block) then return true end
+        end
+        return stat_contains_try(node.elseblock)
     else
         -- StatDecl/StatAssign/StatCall/StatReturn/StatBreak/StatRaise and any
         -- expression-bearing statement: no nested block that is not a function
@@ -6566,6 +6618,175 @@ local function codeforin(ctx, node)
     })
 end
 
+-- Initialize one ordinary local declaration from an already materialized
+-- native value. Case payload binders use this same path as source StatDecls so
+-- capture boxes, GC roots, and setjmp spills remain one implementation.
+function coder._codeinitializeddecl(ctx, decl, cstats, cexp)
+    decl._boxed = decl._captured and decl._assigned
+    if decl._boxed then
+        -- Captured-and-mutated: storage is a heap box (Udata cell). Ordering
+        -- avoids an unanchored-box window: freeze+anchor the value, allocate
+        -- and anchor the box, then write it with the ordinary barrier.
+        local typ = decl._type
+        local isgc = types.is_gc(typ)
+        local n = localname(ctx, decl.name)
+        local ctmp, tmpname, tmpslot = newtmp(ctx, typ, isgc)
+        decl._box = "_box_" .. n
+        local boxslot = newslot(ctx)
+        local anchortmp = tmpslot
+            and setslot(typ, tmpslot, tmpname) or ""
+        return render([[
+            $CSTATS
+            $CTMP
+            $TMPNAME = $CEXP;
+            $ANCHORTMP
+            $NEWBOX
+            $SETSLOT
+        ]], {
+            CSTATS = cstats,
+            CTMP = ctmp,
+            TMPNAME = tmpname,
+            CEXP = cexp,
+            ANCHORTMP = anchortmp,
+            NEWBOX = newbox(ctx, typ, decl._box, boxslot),
+            SETSLOT = box_write(typ, decl._box, tmpname),
+        })
+    elseif decl._used then
+        local typ = decl._type
+        if not decl._cvar then
+            decl._cvar = "_local_" .. localname(ctx, decl.name)
+        end
+        local cdecl = decl._defer_tail_predeclared
+            and "" or cvardecl(ctx, typ, decl._cvar) .. ";"
+        local cset = ""
+        local cspilldecl = decl._defer_tail_spill_predeclared
+            and "" or spill_decl_zero(ctx, decl)
+        local cspillset = spill_update(decl)
+        if types.is_gc(typ) then
+            decl._slot = newslot(ctx)
+            cset = render([[
+                /* update slot */
+                $SETSLOT
+            ]], {
+                SETSLOT = setslot(typ, decl._slot, decl._cvar),
+            })
+        end
+        return render([[
+            $CDECL
+            $CSPILLDECL
+            $CSTATS
+            $CVAR = $CEXP;
+            $CSET
+            $CSPILLSET
+        ]], {
+            CDECL = cdecl,
+            CSPILLDECL = cspilldecl,
+            CSTATS = cstats,
+            CVAR = decl._cvar,
+            CEXP = cexp,
+            CSET = cset,
+            CSPILLSET = cspillset,
+        })
+    end
+    return render([[
+        $CSTATS
+        ((void)$CEXP);
+    ]], {
+        CSTATS = cstats,
+        CEXP = cexp,
+    })
+end
+
+-- Emit a tag-only switch whose arms live outside the switch. This preserves
+-- Titan's enclosing-loop `break` semantics while allowing each arm to be an
+-- ordinary full block (including catch/finally and lowered defers).
+function coder._codecase(ctx, node)
+    ctx.case_id = (ctx.case_id or 0) + 1
+    local id = ctx.case_id
+    local prefix = "_case_" .. id
+    local endlabel = prefix .. "_end"
+    local elselabel = prefix .. "_else"
+    local scrutinee_stats, scrutinee =
+        materialize(ctx, node.exp)
+    local dispatch, bodies = {}, {}
+
+    for i, arm in ipairs(node.arms) do
+        local label = prefix .. "_arm_" .. (i - 1)
+        table.insert(dispatch, render("case $TAG: goto $LABEL;", {
+            TAG = c_integer_literal(arm._variant_index),
+            LABEL = label,
+        }))
+
+        pushd(ctx)
+        push_spillscope(ctx)
+        local binding = ""
+        if arm.binding then
+            local payload = assert(arm._variant.payload)
+            assert(payload ~= false,
+                "empty union variant unexpectedly has a payload binder")
+            binding = coder._codeinitializeddecl(ctx, arm.binding, "",
+                getslot(payload, nil,
+                    "&" .. scrutinee .. "->uv[1].uv"))
+        end
+        local block = codestat(ctx, arm.block)
+        pop_spillscope(ctx)
+        popd(ctx)
+
+        table.insert(bodies, render([[
+            $LABEL: {
+                $BINDING
+                $BLOCK
+                goto $END;
+            }
+        ]], {
+            LABEL = label,
+            BINDING = binding,
+            BLOCK = block,
+            END = endlabel,
+        }))
+    end
+
+    local elsebody = ""
+    pushd(ctx)
+    push_spillscope(ctx)
+    if node.elseblock then
+        elsebody = codestat(ctx, node.elseblock)
+    end
+    pop_spillscope(ctx)
+    popd(ctx)
+    table.insert(bodies, render([[
+        $LABEL: {
+            $BLOCK
+            goto $END;
+        }
+    ]], {
+        LABEL = elselabel,
+        BLOCK = elsebody,
+        END = endlabel,
+    }))
+
+    return render([[
+        {
+            $SCRUTINEE_STATS
+            lua_Integer $TAGNAME = ivalue(&$SCRUTINEE->uv[0].uv);
+            switch ($TAGNAME) {
+                $DISPATCH
+                default: goto $ELSE;
+            }
+            $BODIES
+            $END: ;
+        }
+    ]], {
+        SCRUTINEE_STATS = scrutinee_stats,
+        TAGNAME = prefix .. "_tag",
+        SCRUTINEE = scrutinee,
+        DISPATCH = table.concat(dispatch, "\n"),
+        ELSE = elselabel,
+        BODIES = table.concat(bodies, "\n"),
+        END = endlabel,
+    })
+end
+
 local function codestat_dispatch(ctx, node)
     local tag = node._tag
     if tag == "Ast.StatDecl" then
@@ -6595,94 +6816,10 @@ local function codestat_dispatch(ctx, node)
         end
 
         local code, initnames = coder._codeadjustedfixed(ctx, node)
-        local fixed = node._result_adjustment
-            and node._result_adjustment.fixed or node.exps
         for i = 1, #node.decls do
-            local exp = fixed[i]
             local decl = node.decls[i]
-            local cstats, cexp = "", assert(initnames[i])
-            decl._boxed = decl._captured and decl._assigned
-            if decl._boxed then
-                -- Captured-and-mutated: storage is a heap box (Udata cell).
-                -- Ordering avoids an unanchored-box window: (1) evaluate the init
-                -- into a temp (it may allocate); (2) create+anchor the box with no
-                -- allocation between alloc and anchor; (3) store the init into the
-                -- box (with the back barrier if gc).
-                local typ = decl._type
-                local isgc = types.is_gc(typ)
-                local n = localname(ctx, decl.name)
-                -- A gc init value must be anchored in a stack slot before the box
-                -- allocation (luaC_newobj can run the GC), so the still-white
-                -- init is not swept while only held in a C local.
-                local ctmp, tmpname, tmpslot = newtmp(ctx, typ, isgc)
-                decl._box = "_box_" .. n
-                local boxslot = newslot(ctx)
-                local anchortmp = tmpslot
-                    and setslot(typ, tmpslot, tmpname) or ""
-                table.insert(code, render([[
-                    $CSTATS
-                    $CTMP
-                    $TMPNAME = $CEXP;
-                    $ANCHORTMP
-                    $NEWBOX
-                    $SETSLOT
-                ]], {
-                    CSTATS = cstats,
-                    CTMP = ctmp,
-                    TMPNAME = tmpname,
-                    CEXP = cexp,
-                    ANCHORTMP = anchortmp,
-                    NEWBOX = newbox(ctx, typ, decl._box, boxslot),
-                    SETSLOT = box_write(typ, decl._box, tmpname),
-                }))
-            elseif decl._used then
-                local typ = decl._type
-                if not decl._cvar then
-                    decl._cvar = "_local_" .. localname(ctx, decl.name)
-                end
-                local cdecl = decl._defer_tail_predeclared
-                    and "" or cvardecl(ctx, typ, decl._cvar) .. ";"
-                local cslot = ""
-                local cset = ""
-                local cspilldecl = decl._defer_tail_spill_predeclared
-                    and "" or spill_decl_zero(ctx, decl)
-                local cspillset = spill_update(decl)
-                if types.is_gc(typ) then
-                    decl._slot = newslot(ctx)
-                    cset = render([[
-                        /* update slot */
-                        $SETSLOT
-                    ]], {
-                        SETSLOT = setslot(typ, decl._slot, decl._cvar),
-                    })
-                end
-                table.insert(code, render([[
-                    $CDECL
-                    $CSPILLDECL
-                    $CSLOT
-                    $CSTATS
-                    $CVAR = $CEXP;
-                    $CSET
-                    $CSPILLSET
-                ]], {
-                    CDECL = cdecl,
-                    CSPILLDECL = cspilldecl,
-                    CSLOT = cslot,
-                    CSTATS = cstats,
-                    CVAR = decl._cvar,
-                    CEXP = cexp,
-                    CSET = cset,
-                    CSPILLSET = cspillset,
-                }))
-            else
-                table.insert(code, render([[
-                    $CSTATS
-                    ((void)$CEXP);
-                ]], {
-                    CSTATS = cstats,
-                    CEXP = cexp
-                }))
-            end
+            table.insert(code, coder._codeinitializeddecl(
+                ctx, decl, "", assert(initnames[i])))
         end
         return table.concat(code, "\n")
     elseif tag == "Ast.StatBlock" then
@@ -6693,6 +6830,8 @@ local function codestat_dispatch(ctx, node)
         return coderepeat(ctx, node)
     elseif tag == "Ast.StatIf" then
         return codeif(ctx, node)
+    elseif tag == "Ast.StatCase" then
+        return coder._codecase(ctx, node)
     elseif tag == "Ast.StatFor" then
         return codefor(ctx, node)
     elseif tag == "Ast.StatForIn" then
@@ -6917,11 +7056,20 @@ local function codevar(ctx, node)
             }))
         elseif node._decl._tag == "Type.StaticMethod"
                and ctx.tlcontext.static_slots[node._decl.fqtn .. "." .. node._decl.name] then
-            -- Reference to a record function (e.g. `Rec.new`) as a value: read its
-            -- canonical closure from the shadow slot allocated for it.
+            -- Same-module nominal static: read its canonical closure directly.
             return "", getslot(node._type, nil, render("&_mod->uv[$SLOT].uv", {
                 SLOT = c_integer_literal(
                     ctx.tlcontext.static_slots[node._decl.fqtn .. "." .. node._decl.name]),
+            }))
+        elseif node._decl._tag == "Type.StaticMethod"
+               and node._import_decl then
+            -- Imported nominal static: both modules reconstruct the ABI-visible
+            -- canonical-closure prefix, so no namespace-table lookup or fresh
+            -- closure is needed.
+            return "", getslot(node._type, nil, render(
+                "&(uvalue(&_mod->uv[$MODINDEX].uv)->uv[$FNINDEX].uv)", {
+                MODINDEX = c_integer_literal(node._import_decl._upvalue),
+                FNINDEX = c_integer_literal(node._decl._closure_upvalue),
             }))
         else
             assert(node._decl._tag == "Type.ModuleVariable")
@@ -7453,6 +7601,66 @@ local function coderecord(ctx, node, target)
             }))
         end
     end
+    return table.concat(stats, "\n"), tmpname
+end
+
+-- Lower the internal expression synthesized for one union-variant
+-- constructor. The union userdata is rooted immediately; its absolute tag and
+-- opaque payload then use ordinary internal TValue slots.
+function coder._codeunioninit(ctx, node, target)
+    local union = assert(node._union)
+    local variant = assert(node._variant)
+    assert(union._tag == "Type.Union" and variant._tag == "Type.Variant")
+    assert(node._type._tag == "Type.Nominal"
+        and node._type.fqtn == union.name)
+
+    local ctmp, tmpname, tmpslot
+    if target and target._cvar then
+        ctmp, tmpname, tmpslot = "", target._cvar, target._slot
+    else
+        ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
+    end
+
+    local stats = {
+        render([[
+            $CTMP
+            $TMPNAME = luaS_newudata(L, 0, $NUSERVALUES);
+            $TMPNAME->metatable = hvalue(&_mod->uv[$META].uv);
+            setuvalue(L, $TMPSLOT, $TMPNAME);
+            setivalue(&$TMPNAME->uv[0].uv, $TAG);
+        ]], {
+            CTMP = ctmp,
+            TMPNAME = tmpname,
+            TMPSLOT = tmpslot,
+            NUSERVALUES = variant.payload == false and "1" or "2",
+            META = c_integer_literal(type2metatable(ctx, node._type)),
+            TAG = c_integer_literal(variant.index),
+        }),
+    }
+
+    if variant.payload ~= false then
+        assert(node.value and node.value ~= false,
+            "payload variant initializer has no value")
+        local cstats, cexp = codeexp(ctx, node.value)
+        local payloadslot = "&" .. tmpname .. "->uv[1].uv"
+        table.insert(stats, render([[
+            $CSTATS
+            $SETSLOT
+            $BARRIER
+        ]], {
+            CSTATS = cstats,
+            SETSLOT = setslot(variant.payload, payloadslot, cexp),
+            BARRIER = types.is_gc(variant.payload)
+                and render("luaC_barrierback(L, obj2gco($UNION), $SLOT);", {
+                    UNION = tmpname,
+                    SLOT = payloadslot,
+                }) or "",
+        }))
+    else
+        assert(node.value == false or node.value == nil,
+            "empty variant initializer unexpectedly has a value")
+    end
+
     return table.concat(stats, "\n"), tmpname
 end
 
@@ -8353,6 +8561,8 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
             return codearray(ctx, node, target)
         end
         error("impossible init list")
+    elseif tag == "Ast.ExpUnionInit" then
+        return coder._codeunioninit(ctx, node, target)
     elseif tag == "Ast.ExpVar" then
         if node._foreign_function_pointer then
             return "", foreigncast(node._foreign_function_pointer, node._type)
@@ -9988,6 +10198,57 @@ TITAN_META_SECTION TITAN_META_NO_ADDRESS_SANITIZE
 static const unsigned char $METADATANAME[] = $METADATA;
 ]]
 
+-- Enumerate the ABI-visible prefix of a module userdata. Producers and
+-- importers must use this exact order: public variables, public top-level
+-- function closures, then public nominal static closures by module-member and
+-- bytewise static-name order.
+function coder._public_prefix_layout(modtype)
+    assert(modtype and modtype._tag == "Type.Module")
+    local layout = {}
+    for _, member in ipairs(modtype.members or {}) do
+        if member._tag == "Type.ModuleVariable" then
+            layout[#layout + 1] = {
+                kind = "variable",
+                value = member,
+                key = "variable:" .. member.name,
+            }
+        end
+    end
+    for _, member in ipairs(modtype.members or {}) do
+        if member._tag == "Type.ModuleMember"
+           and member.type._tag == "Type.Function" then
+            layout[#layout + 1] = {
+                kind = "function",
+                value = member,
+                key = "function:" .. member.name,
+            }
+        end
+    end
+    for _, member in ipairs(modtype.members or {}) do
+        local owner = member._tag == "Type.ModuleMember" and member.type
+        if owner and (owner._tag == "Type.Record"
+                      or owner._tag == "Type.Union") then
+            local names = {}
+            for name, static in pairs(owner.functions or {}) do
+                if not static.islocal then
+                    names[#names + 1] = name
+                end
+            end
+            table.sort(names, util.bytewise_less)
+            for _, name in ipairs(names) do
+                local static = owner.functions[name]
+                layout[#layout + 1] = {
+                    kind = "static",
+                    value = static,
+                    owner = owner,
+                    key = "static:" .. static.fqtn .. "." .. static.name,
+                }
+            end
+        end
+    end
+    return layout
+end
+
 -- Generates the code for importing the module, and storing it
 -- in the corresponding local state slot
 local function import_module(loadmods, initmods, sigs, mprefixes,
@@ -10029,23 +10290,13 @@ local function import_module(loadmods, initmods, sigs, mprefixes,
             }
         ]], { INIT = mprefix .. "init", INDEX = c_integer_literal(upvalue) }))
     end
-    -- Set upvalue indexes for public members in the module's type, mirroring
-    -- allocate_upvalues in the imported module: exported variables (slots
-    -- 0..V-1) first, then every exported function's canonical-closure slot
-    -- (V..V+F-1). 0-based to match the imported module's 0-based nextupvalue.
-    -- This lets us reference an imported function value by index instead of a
-    -- table lookup.
-    local memberslot = 0
-    for _, member in ipairs(node._type.members) do
-        if member._tag == "Type.ModuleVariable" then
-            member._upvalue = memberslot
-            memberslot = memberslot + 1
-        end
-    end
-    for _, member in ipairs(node._type.members) do
-        if member._tag == "Type.ModuleMember" and member.type._tag == "Type.Function" then
-            member._closure_upvalue = memberslot
-            memberslot = memberslot + 1
+    -- Reconstruct the complete ABI-visible prefix, including nominal statics.
+    for slot, entry in ipairs(coder._public_prefix_layout(node._type)) do
+        local index = slot - 1
+        if entry.kind == "variable" then
+            entry.value._upvalue = index
+        else
+            entry.value._closure_upvalue = index
         end
     end
 end
@@ -10106,14 +10357,15 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods,
         end
     end
 
-    for fqtn, upvalue in pairs(tlcontext.metatables) do
+    for fqtn, entry in pairs(tlcontext.metatables) do
         table.insert(initmetas, render([[
-            luaL_getmetatable(L, "Titan record $TYPE metatable");
+            luaL_getmetatable(L, "Titan $KIND $TYPE metatable");
             setobj2t(L, &_mod->uv[$INDEX].uv, s2v(L->top.p - 1));
             luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
             lua_pop(L, 1);
         ]], {
-            INDEX = c_integer_literal(upvalue),
+            INDEX = c_integer_literal(entry.slot),
+            KIND = entry.kind,
             TYPE = fqtn,
         }))
     end
@@ -10291,6 +10543,96 @@ local function coderecorddec(ctx, code, initrecs, node)
     }))
 end
 
+-- Generate the Lua-facing metatable for a union. Variants, tags, and payloads
+-- are opaque; only public methods participate in lookup, and all writes fail.
+function coder._codeuniondec(ctx, code, initnominals, node)
+    local methodmap = {}
+    local methodnames = {}
+    for name, method in pairs(node._type.methods or {}) do
+        if not method.islocal then
+            methodnames[#methodnames + 1] = name
+        end
+    end
+    table.sort(methodnames, util.bytewise_less)
+    for _, name in ipairs(methodnames) do
+        local method = node._type.methods[name]
+        methodmap[#methodmap + 1] = render([[
+            lua_pushliteral(L, $NAME);
+            titan_pushmodule(L, _mod);
+            lua_pushcclosure(L, $METHOD, 1);
+            lua_rawset(L, -3);
+        ]], {
+            NAME = c_string_literal(name),
+            METHOD = method_luaname(method),
+        })
+    end
+
+    table.insert(code, render([[
+        static int __index_$UNIONNAME(lua_State *L) {
+            TValue *_unionslot = s2v(L->ci->func.p + 1);
+            CClosure *_func = clCvalue(s2v(L->ci->func.p));
+            Udata *_mod = uvalue(&_func->upvalue[1]);
+            Udata *_union = NULL;
+            $CHECKANDGET;
+            (void)_union;
+            TValue *_memberslot = s2v(L->ci->func.p + 2);
+            Table *_membermap = hvalue(&_func->upvalue[0]);
+            TValue _memberv;
+            lu_byte _membertag =
+                luaH_get(_membermap, _memberslot, &_memberv);
+            if (TITAN_LIKELY(!tagisempty(_membertag)
+                             && ttisCclosure(&_memberv))) {
+                setobj2s(L, L->top.p - 1, &_memberv);
+                return 1;
+            }
+            return luaL_error(L,
+                "%s:%d:%d: member '%s' not found in union '%s'",
+                $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
+        }
+
+        static int __newindex_$UNIONNAME(lua_State *L) {
+            return luaL_error(L,
+                "%s:%d:%d: cannot assign member '%s' in union '%s'",
+                $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
+        }
+    ]], {
+        UNIONNAME = mangle_qn(node._type.name),
+        CHECKANDGET = checkandget(ctx, types.Nominal(node._type.name),
+            "_union", "_unionslot", node.loc),
+        FQTN = c_string_literal(node._type.name),
+        FILE = c_string_literal(node.loc.filename),
+        LINE = c_integer_literal(node.loc.line),
+        COL = c_integer_literal(node.loc.col),
+    }))
+
+    table.insert(initnominals, render([[
+        {
+            luaL_newmetatable(L, "Titan union $TYPE metatable");
+            const void *_mtp = lua_topointer(L, -1);
+            lua_pushliteral(L, "__metatable");
+            lua_pushliteral(L, "Titan union $TYPE");
+            lua_rawset(L, -3);
+            lua_newtable(L);
+            $METHODMAP
+            lua_pushliteral(L, "__index");
+            lua_pushvalue(L, -2);
+            titan_pushmodule(L, _mod);
+            lua_pushcclosure(L, __index_$UNIONNAME, 2);
+            lua_rawset(L, -4);
+            lua_pushliteral(L, "__newindex");
+            lua_pushcfunction(L, __newindex_$UNIONNAME);
+            lua_rawset(L, -4);
+            lua_pop(L, 2);
+            lua_pushstring(L, "$TYPE");
+            lua_rawsetp(L, LUA_REGISTRYINDEX, _mtp);
+        }
+    ]], {
+        UNIONNAME = mangle_qn(node._type.name),
+        TYPE = node._type.name,
+        METHODMAP = table.concat(methodmap, "\n"),
+    }))
+end
+
 -- Distribute local state slots for the variables and
 -- imported modules of the current module,
 -- starting with exported variables in the order they appear;
@@ -10299,24 +10641,32 @@ end
 -- Tags can be stored in C variables, as their value
 -- is the same across all instances of the module
 local function allocate_upvalues(tlcontext, ast)
-    -- Exported variables first (slots 1..V). Importers reconstruct these
-    -- indices purely from the module interface, enumerating members in
-    -- declaration order (see import_module), so the layout here must match.
-    for _, node in ipairs(ast) do
-        if not node._ignore then
-            local tag = node._tag
-            if tag == "Ast.TopLevelVar" and not node.islocal then
-                node._upvalue = nextupvalue(tlcontext)
-            end
+    -- Allocate the public ABI prefix from the serialized module interface, then
+    -- stamp the corresponding source declarations. Importers walk the same
+    -- helper, so these indices are reconstructible without loading a namespace
+    -- table.
+    local public_slots = {}
+    for _, entry in ipairs(coder._public_prefix_layout(ast._type)) do
+        local slot = nextupvalue(tlcontext)
+        public_slots[entry.key] = slot
+        if entry.kind == "variable" then
+            entry.value._upvalue = slot
+        else
+            entry.value._closure_upvalue = slot
         end
     end
-    -- Then a canonical-closure slot for *every* exported function (slots
-    -- V+1..V+F), exported-always: an importer may take the value even when this
-    -- module never references it, and indexing the closure (rather than a hash
-    -- lookup) keeps the cross-module reference O(1) and fast-path eligible.
     for _, node in ipairs(ast) do
-        if not node._ignore and node._tag == "Ast.TopLevelFunc" and not node.islocal then
-            node._closure_upvalue = nextupvalue(tlcontext)
+        if not node._ignore then
+            if node._tag == "Ast.TopLevelVar" and not node.islocal then
+                node._upvalue = assert(
+                    public_slots["variable:" .. node.decl.name])
+            elseif node._tag == "Ast.TopLevelFunc" and not node.islocal then
+                node._closure_upvalue = assert(
+                    public_slots["function:" .. node.name])
+            elseif node._tag == "Ast.TopLevelStatic" and not node.islocal then
+                node._closure_upvalue = public_slots[
+                    "static:" .. node._type.fqtn .. "." .. node._type.name]
+            end
         end
     end
     -- The first private slot is unconditional and ABI-visible: every generated
@@ -10333,22 +10683,22 @@ local function allocate_upvalues(tlcontext, ast)
             end
         end
     end
-    -- Referenced local functions (private, so only when used as a value) and
-    -- every record function (e.g. `Rec.new`) each get a canonical-closure slot.
+    -- Referenced local functions and every static not already in the public
+    -- prefix get private canonical-closure slots. Each nominal also gets a
+    -- private namespace-table slot used by Lua exposure and local selectors.
     for _, node in ipairs(ast) do
         if not node._ignore then
             if node._tag == "Ast.TopLevelFunc" and node.islocal and node._valref then
                 node._closure_upvalue = nextupvalue(tlcontext)
             elseif node._tag == "Ast.TopLevelStatic" then
-                node._closure_upvalue = nextupvalue(tlcontext)
+                if not node._closure_upvalue then
+                    node._closure_upvalue = nextupvalue(tlcontext)
+                end
                 tlcontext.static_slots[node._type.fqtn .. "." .. node._type.name] =
                     node._closure_upvalue
-            elseif node._tag == "Ast.TopLevelRecord" then
-                -- A per-record uv slot holding the record's static-namespace
-                -- table (what `m.Rec` returns). Allocated in the late group so
-                -- importer-visible slot math (vars 1..V, fn closures V+1..V+F)
-                -- is unchanged.
-                tlcontext.record_namespace_slots[node._type.name] =
+            elseif node._tag == "Ast.TopLevelRecord"
+                   or node._tag == "Ast.TopLevelUnion" then
+                tlcontext.nominal_namespace_slots[node._type.name] =
                     nextupvalue(tlcontext)
             end
         end
@@ -10375,7 +10725,7 @@ function coder.generate(modname, ast, static_deps, abi)
         functag_count = 0,
         bound_luas = {},     -- mangled bound-Lua-trampoline name -> { module }
         static_slots = {},   -- "fqtn.name" -> module upvalue slot of a static's closure
-        record_namespace_slots = {}, -- record fqtn -> module uv slot of its static-namespace table
+        nominal_namespace_slots = {}, -- nominal fqtn -> module uv slot of its static-namespace table
         lambdas = {},        -- ExpFunction nodes pending file-scope emission
         lambda_count = 0,    -- counter for unique lambda native/Lua names
         names = {},          -- { native C symbol, qualified Titan name } pairs for the trace name table
@@ -10461,17 +10811,20 @@ function coder.generate(modname, ast, static_deps, abi)
                 codevardec(initctx, initvars, switch_get, switch_set, gvar_map, node)
             elseif tag == "Ast.TopLevelRecord" then
                 coderecorddec(initctx, code, initrecs, node)
+            elseif tag == "Ast.TopLevelUnion" then
+                coder._codeuniondec(initctx, code, initrecs, node)
             end
         end
     end
 
-    -- Create each record's static-namespace table (what `m.Rec` returns) and
-    -- store it into the record's uv slot, BEFORE statics run so a static can be
-    -- installed into the namespace it belongs to. Register the namespace in the
-    -- module member map under the record's short name.
+    -- Create each nominal's static-namespace table (what `m.Rec`/`m.Union`
+    -- returns) before statics run, then expose public nominals as read-only
+    -- module members.
     for _, node in ipairs(ast) do
-        if not node._ignore and node._tag == "Ast.TopLevelRecord" then
-            local slot = tlcontext.record_namespace_slots[node._type.name]
+        if not node._ignore
+           and (node._tag == "Ast.TopLevelRecord"
+                or node._tag == "Ast.TopLevelUnion") then
+            local slot = tlcontext.nominal_namespace_slots[node._type.name]
             table.insert(funcs, render([[
                 lua_newtable(L);
                 setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
@@ -10582,7 +10935,7 @@ function coder.generate(modname, ast, static_deps, abi)
                     end
                     table.insert(funcs, render(closure_init, {
                         RECNSSLOT = c_integer_literal(
-                            tlcontext.record_namespace_slots[node._type.fqtn]),
+                            tlcontext.nominal_namespace_slots[node._type.fqtn]),
                         LUANAME = static_luaname(node._type),
                         NAMESTR = c_string_literal(node.name),
                         SLOT = c_integer_literal(node._closure_upvalue),

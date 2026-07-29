@@ -26,12 +26,17 @@ return typedecl("Ast", {
         TopLevelVar     = {"loc", "islocal", "decl", "value"},
         TopLevelTypeAlias = {"loc", "islocal", "name", "type"},
         TopLevelRecord  = {"loc", "name", "fields"},
+        TopLevelUnion   = {"loc", "name", "variants"},
         TopLevelImport  = {"loc", "localname", "modname"},
         TopLevelForeignImport = {"loc", "localname", "headername"},
     },
 
     Decl = {
         Decl = {"loc", "name", "type", "option"},
+    },
+
+    Union = {
+        UnionVariant = {"loc", "name", "payload"},
     },
 
     Stat = {
@@ -45,6 +50,7 @@ return typedecl("Ast", {
         StatDecl        = {"loc", "decls", "exps"},
         StatCall        = {"loc", "callexp"},
         StatReturn      = {"loc", "exps"},
+        StatCase        = {"loc", "exp", "arms", "elseblock"},
         StatBreak       = {"loc"},
         StatRaise       = {"loc", "exp"},   -- `raise <exp>`; `exp` false ⇒ bare re-raise
         StatTry         = {"loc", "block", "catchblock", "finallyblock"},
@@ -52,6 +58,10 @@ return typedecl("Ast", {
 
     Then = {
         Then            = {"loc", "condition", "block"},
+    },
+
+    Case = {
+        CaseArm         = {"loc", "name", "binding", "block"},
     },
 
     Var = {
@@ -78,6 +88,7 @@ return typedecl("Ast", {
         ExpExtra        = {"loc", "exp", "index", "_type"}, -- index-th (>1) value of call
         ExpFunction     = {"loc", "params", "rettypes", "flexrettype", "block"}, -- anonymous function expression
         ExpMethodRef    = {"loc", "exp", "name"}, -- bound method reference `obj:m` (no call)
+        ExpUnionInit    = {"loc", "owner", "variant", "value"}, -- synthesized union constructor body
         ExpDots         = {"loc"},          -- bare `...`
         ExpDotsIndex    = {"loc", "exp"},   -- `...[e]` (checker sets _nilfill, _type)
         ExpDotsLen      = {"loc"}           -- `#...` (checker-normalized, §3.5)

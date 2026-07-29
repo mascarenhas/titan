@@ -5,10 +5,11 @@ local function table_extend(t1, t2)
     table.move(t2, 1, #t2, #t1+1, t1)
 end
 
--- The parser uses NAMEDLABEL only in the contextual `label = exp` position.
--- It deliberately overlaps both NAME and keyword patterns, so it is not one
--- of the mutually-exclusive top-level tokens exercised by run_lexer.
-local contextual_patterns = { NAMEDLABEL = true }
+-- The parser uses NAMEDLABEL only in the contextual `label = exp` position
+-- and CNAME only for C member/type spellings after `.`. They deliberately
+-- overlap both NAME and keyword patterns, so neither is one of the
+-- mutually-exclusive top-level tokens exercised by run_lexer.
+local contextual_patterns = { NAMEDLABEL = true, CNAME = true }
 
 -- Find out how the lexer lexes a given string.
 -- Produces an error message if the string cannot be lexed or if there
@@ -78,12 +79,24 @@ describe("Titan lexer", function()
     function()
         assert.equal("label", lpeg.match(lexer.NAMEDLABEL, "label"))
         assert.equal("repeat", lpeg.match(lexer.NAMEDLABEL, "repeat"))
+        assert.equal("when", lpeg.match(lexer.NAMEDLABEL, "when"))
+    end)
+
+    it("captures ordinary and keyword spellings as contextual C names",
+    function()
+        assert.equal("field", lpeg.match(lexer.CNAME, "field"))
+        assert.equal("repeat", lpeg.match(lexer.CNAME, "repeat"))
+        assert.equal("type", lpeg.match(lexer.CNAME, "type"))
+        assert.equal("when", lpeg.match(lexer.CNAME, "when"))
     end)
 
     it("can lex some keywords", function()
         assert_lex("and", {"AND"}, {})
         assert_lex("is", {"IS"}, {})
         assert_lex("owned", {"OWNED"}, {})
+        assert_lex("union", {"UNION"}, {})
+        assert_lex("case", {"CASE"}, {})
+        assert_lex("when", {"WHEN"}, {})
     end)
 
     it("can lex keywords that contain other keywords", function()
@@ -113,6 +126,9 @@ describe("Titan lexer", function()
         assert_lex("andy",     {"NAME"}, {"andy"})
         assert_lex("island",   {"NAME"}, {"island"})
         assert_lex("_end",     {"NAME"}, {"_end"})
+        assert_lex("unionized", {"NAME"}, {"unionized"})
+        assert_lex("casefold",  {"NAME"}, {"casefold"})
+        assert_lex("whenever",  {"NAME"}, {"whenever"})
     end)
 
     it("can lex sequences of symbols without spaces", function()

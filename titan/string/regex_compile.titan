@@ -44,66 +44,88 @@ end
 
 local function regex_projected_size(node: RegexNode):
                                     (integer, integer)
-  if node.kind == REGEX_EMPTY then
+  case node
+  when empty then
     return 1, 0
-  elseif node.kind == REGEX_LITERAL then
+  when literal then
     return 3, 0
-  elseif node.kind == REGEX_ANY or node.kind == REGEX_CLASS then
+  when any then
     return 5, 0
-  elseif node.kind == REGEX_WORD_START or node.kind == REGEX_WORD_END or
-         node.kind == REGEX_BACKREFERENCE then
-    return 8, 0
-  elseif node.kind == REGEX_GROUP then
-    local child_size, overflow =
-      regex_projected_size(node.children[1])
-    if overflow ~= 0 then return child_size, overflow end
-    local size = regex_saturating_add(child_size, 8)
-    if size > REGEX_PATTERN_LIMIT then
-      return size, node.position
-    end
-    return size, 0
-  elseif node.kind == REGEX_SEQUENCE or node.kind == REGEX_CHOICE then
+  when class then
+    return 5, 0
+  when sequence: sequence then
     local size = 1
     local index = 1
-    while index <= #node.children do
-      local child = node.children[index]
+    while index <= #sequence.children do
+      local child = sequence.children[index]
       local child_size, overflow = regex_projected_size(child)
       if overflow ~= 0 then return child_size, overflow end
       size = regex_saturating_add(
         size, regex_saturating_add(child_size, 1))
       if size > REGEX_PATTERN_LIMIT then
-        return size, child.position
+        return size, child:position()
       end
       index = index + 1
     end
     return size, 0
-  elseif node.kind == REGEX_REPEAT then
+  when choice: choice then
+    local size = 1
+    local index = 1
+    while index <= #choice.children do
+      local child = choice.children[index]
+      local child_size, overflow = regex_projected_size(child)
+      if overflow ~= 0 then return child_size, overflow end
+      size = regex_saturating_add(
+        size, regex_saturating_add(child_size, 1))
+      if size > REGEX_PATTERN_LIMIT then
+        return size, child:position()
+      end
+      index = index + 1
+    end
+    return size, 0
+  when group: group then
     local child_size, overflow =
-      regex_projected_size(node.children[1])
+      regex_projected_size(group.child)
+    if overflow ~= 0 then return child_size, overflow end
+    local size = regex_saturating_add(child_size, 8)
+    if size > REGEX_PATTERN_LIMIT then
+      return size, group.position
+    end
+    return size, 0
+  when repetition: repetition then
+    local child_size, overflow =
+      regex_projected_size(repetition.child)
     if overflow ~= 0 then return child_size, overflow end
     local unit = regex_saturating_add(
       child_size, 4)
     local size = 0
-    if node.maximum < 0 then
+    if repetition.maximum < 0 then
       size = regex_saturating_add(
         regex_saturating_multiply(
-          unit, regex_saturating_add(node.minimum, 1)), 8)
+          unit, regex_saturating_add(repetition.minimum, 1)), 8)
     else
-      local optional = node.maximum - node.minimum
+      local optional = repetition.maximum - repetition.minimum
       local optional_overhead = REGEX_PATTERN_LIMIT + 1
       if optional <= REGEX_PATTERN_LIMIT then
         optional_overhead = optional + 1
       end
       size = regex_saturating_add(
-        regex_saturating_multiply(unit, node.maximum),
+        regex_saturating_multiply(unit, repetition.maximum),
         optional_overhead)
     end
     if size > REGEX_PATTERN_LIMIT then
-      return size, node.position
+      return size, repetition.position
     end
     return size, 0
+  when backreference then
+    return 8, 0
+  when word_start then
+    return 8, 0
+  when word_end then
+    return 8, 0
+  else
+    raise "internal regular-expression AST node is invalid"
   end
-  return REGEX_PATTERN_LIMIT + 1, node.position
 end
 
 local function regex_word_start_capture(
@@ -165,66 +187,56 @@ end
 local function regex_compile_node(node: RegexNode,
                                   continuation: peg.Pattern,
                                   state: RegexCompileState?): peg.Pattern
-  if node.kind == REGEX_EMPTY then
+  case node
+  when empty then
     return continuation
-  elseif node.kind == REGEX_LITERAL then
-    return peg.sequence(peg.literal(node.text), continuation)
-  elseif node.kind == REGEX_ANY then
+  when literal: literal then
+    return peg.sequence(peg.literal(literal.text), continuation)
+  when any then
     return peg.sequence(
       peg.difference(peg.any(), peg.literal("\n")), continuation)
-  elseif node.kind == REGEX_CLASS then
-    return peg.sequence(peg.set(node.text), continuation)
-  elseif node.kind == REGEX_WORD_START then
-    return peg.sequence(
-      peg.runtime(regex_word_start_capture), continuation)
-  elseif node.kind == REGEX_WORD_END then
-    return peg.sequence(
-      peg.runtime(regex_word_end_capture), continuation)
-  elseif node.kind == REGEX_BACKREFERENCE then
-    local captured = peg.back_capture(regex_group_key(node.number))
-    return peg.sequence(
-      peg.match_time(captured, regex_backreference_capture),
-      continuation)
-  elseif node.kind == REGEX_SEQUENCE then
+  when class: class then
+    return peg.sequence(peg.set(class.text), continuation)
+  when sequence: sequence then
     local result = continuation
-    local index = #node.children
+    local index = #sequence.children
     while index >= 1 do
       result = regex_compile_node(
-        node.children[index], result, state)
+        sequence.children[index], result, state)
       index = index - 1
     end
     return result
-  elseif node.kind == REGEX_CHOICE then
+  when choice: choice then
     local result = regex_compile_node(
-      node.children[1], continuation, state)
+      choice.children[1], continuation, state)
     local index = 2
-    while index <= #node.children do
+    while index <= #choice.children do
       result = peg.choice(
         result,
         regex_compile_node(
-          node.children[index], continuation, state))
+          choice.children[index], continuation, state))
       index = index + 1
     end
     return result
-  elseif node.kind == REGEX_GROUP then
+  when group: group then
     -- Keep group markers as siblings rather than wrapping the whole child in
     -- one named capture. LPeg scopes captures nested inside a named group;
     -- sibling markers leave nested numbered groups visible to the final Cb
     -- projection and to later backreferences.
     local start = peg.group(
-      peg.position(), regex_group_start_key(node.number))
+      peg.position(), regex_group_start_key(group.number))
     local finish = peg.group(
       peg.sequence(
-        peg.back_capture(regex_group_start_key(node.number)),
+        peg.back_capture(regex_group_start_key(group.number)),
         peg.position()),
-      regex_group_key(node.number))
+      regex_group_key(group.number))
     local body = regex_compile_node(
-      node.children[1], peg.sequence(finish, continuation), state)
+      group.child, peg.sequence(finish, continuation), state)
     return peg.sequence(start, body)
-  elseif node.kind == REGEX_REPEAT then
-    local atom = node.children[1]
+  when repetition: repetition then
+    local atom = repetition.child
     local result = continuation
-    if node.maximum < 0 then
+    if repetition.maximum < 0 then
       local active: RegexCompileState? = state
       local owns_scope = false
       if not active then
@@ -247,7 +259,7 @@ local function regex_compile_node(node: RegexNode,
         result = recursive
       end
     else
-      local optional_count = node.maximum - node.minimum
+      local optional_count = repetition.maximum - repetition.minimum
       local index = 1
       while index <= optional_count do
         result = peg.choice(
@@ -256,14 +268,26 @@ local function regex_compile_node(node: RegexNode,
       end
     end
     local index = 1
-    while index <= node.minimum do
+    while index <= repetition.minimum do
       result = regex_compile_node(atom, result, state)
       index = index + 1
     end
     return result
+  when backreference: backreference then
+    local captured = peg.back_capture(
+      regex_group_key(backreference.number))
+    return peg.sequence(
+      peg.match_time(captured, regex_backreference_capture),
+      continuation)
+  when word_start then
+    return peg.sequence(
+      peg.runtime(regex_word_start_capture), continuation)
+  when word_end then
+    return peg.sequence(
+      peg.runtime(regex_word_end_capture), continuation)
+  else
+    raise "internal regular-expression AST node is invalid"
   end
-  raise "internal regular-expression AST node is invalid"
-  return continuation
 end
 
 local function regex_build_pattern(parsed: ParsedRegex): peg.Pattern

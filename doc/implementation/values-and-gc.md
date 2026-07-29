@@ -55,7 +55,7 @@ for locals, parameters, return values and temporaries alike:
 | `{K:V}` (map) | `Table*` | ordinary Lua table in both domains |
 | `value` | `TValue` | a full boxed Lua value, held **by value** |
 | function type (`(P..., ...: I) -> (R..., ...: O)`) | `TValue` | boxed callable value; input/output tails change the callable type and native entry ABI, not the boxed representation |
-| record type (`Type.Nominal`) | `Udata*` | the record value *is* this userdata (below) |
+| record or union type (`Type.Nominal`) | `Udata*` | the nominal value *is* this userdata (below) |
 | `T?` (option) | `TValue` | boxed: nil or the payload |
 | foreign pointer except Lua `Udata *` | per `foreignctype` | e.g. `void*`, `char*`; ordinary borrowed pointers are not GC objects ([FFI internals](ffi-internals.md)) |
 | Lua-internal `Udata *` | `Udata *` | raw pointer to the full userdata object; GC-bearing |
@@ -90,16 +90,16 @@ Three helper families in `coder.lua` mediate between C variables and
 
 * `getslot(typ, dst, src)` reads a `TValue*` into a C variable —
   `ivalue`, `fltvalue`, `ttistrue`, `tsvalue`, `hvalue`, `uvalue` (for
-  records and non-nil `Udata *`), or a struct copy `*($SRC)` for
+  records, unions, and non-nil `Udata *`), or a struct copy `*($SRC)` for
   `value`/options. A nil slot becomes NULL for `Udata *`.
 * `setslot(typ, dst, src)` writes a C value into a `TValue*` —
   `setivalue`, `setfltvalue`, `titan_setbvalue` (a `titan.h` macro; 5.5
   removed `setbvalue` along with the boolean payload), `setsvalue`,
-  `sethvalue`, `setuvalue` (for records), `setobj2t` for
+  `sethvalue`, `setuvalue` (for nominal values), `setobj2t` for
   `value`/options. For `Udata *`, it emits `setuvalue` for a non-NULL pointer
   and nil for NULL rather than boxing the pointer as lightuserdata.
 * `setboxed(ctx, typ, dst, src)` and the corresponding unbox/mixed-read
-  helpers cross a representation domain. Records already are their
+  helpers cross a representation domain. Records and unions already are their
   Lua-visible Udata, but Arrays are not: boxing maps an internal backing
   `Table*` to its canonical proxy Udata, while unboxing validates that proxy
   and recovers the backing. Map keys/values, `value`, generic calls, and Lua
@@ -110,7 +110,7 @@ Three helper families in `coder.lua` mediate between C variables and
 
 `types.is_gc` in `types.lua` decides which types the collector cares
 about, and therefore which values need anchoring: string, value,
-function, array, map, record/nominal, C `TValue`, Lua-internal `Udata *`,
+function, array, map, record/union nominal, C `TValue`, Lua-internal `Udata *`,
 and `T?` when `T` is itself GC-able (the list also tests a
 `Type.Interface` tag for which no constructor exists). Integers, floats,
 booleans, nil and ordinary foreign pointers need none.
@@ -253,9 +253,40 @@ what a `Udata`'s `UValue uv[]` array is. `setboxed`/`checkandget`
 boundary is the record itself, leaving only the one-pointer metatable
 compare on the way in.
 
+## Unions: tag and optional payload user values
+
+A Titan union is also one zero-byte `Udata *`, with a distinct per-union
+metatable as its nominal identity. Its user-value layout is deliberately not
+the record field layout:
+
+```text
+uv[0]  integer absolute variant tag
+uv[1]  payload, only for a payload variant
+```
+
+An empty variant allocates with `luaS_newudata(L, 0, 1)`; a payload variant
+uses `luaS_newudata(L, 0, 2)`. The constructor roots the userdata before
+evaluating/storing a payload and applies `luaC_barrierback` when that payload
+may be collectable. No tag or payload is exposed as a Titan field or ordinary
+Lua member.
+
+Payloads use the same `types.has_tvalue_representation` rule as record fields
+because both are stored in a traced `TValue` user-value slot. Ordinary boxed
+Titan values—including Arrays, Maps, and function values—are eligible;
+options recurse into their base. Direct C aggregates, C arrays, direct C
+functions, and C function pointers have no such representation and are
+rejected. An Array payload stores its internal `Table *` backing in `uv[1]`,
+not its Lua proxy userdata.
+
+`case` materializes the union once, reads the integer tag, and extracts
+`uv[1]` only for a checked payload binding. Boxing into `value` keeps the same
+userdata, and unboxing compares the exact union metatable just as a record
+check compares the exact record metatable. The reverse metatable map includes
+the protected `"Titan union <fqtn>"` identity for diagnostics.
+
 ## The module userdata
 
-Module state uses the same representation as records: each module
+Module state uses the same representation family as nominal values: each module
 instance is one `Udata`, `_mod`, passed as the second argument to every
 generated function (`Udata *_mod` in every native signature). It is the
 value `require` returns directly — there is **no separate Lua-facing
@@ -421,11 +452,13 @@ a `Udata` or a `Table`; used for:
 
 * record field assignment, and record-literal field initialization (the
   owner is the record's `Udata`);
+* union payload initialization (the owner is the union's `Udata`);
 * module-variable writes — local
   (`luaC_barrierback(L, obj2gco(_mod), slot)`) and imported
   (`luaC_barrierback(L, obj2gco(_imod), _varslot)`), including writes
   coming from Lua through the module metatable's `__newindex`;
-* record field writes from Lua through the record's `__newindex`;
+* record field writes from Lua through the record's `__newindex` (union
+  `__newindex` always rejects);
 * Array backing-slot stores, Map stores, and container-literal fills, each
   gated on `types.is_gc` of the stored element or value type. Array stores
   barrier the backing Table, never its proxy; the cycle edges use the barrier

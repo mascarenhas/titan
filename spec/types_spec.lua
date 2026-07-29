@@ -493,6 +493,102 @@ describe("Titan types", function()
         assert.same({"x", "y"}, rebuilt.functions.new.paramnames)
     end)
 
+    it("round-trips public union metadata with absolute variant indices",
+    function()
+        local fqtn = "sample.Message"
+        local result = types.Nominal(fqtn)
+        local quit = types.Variant(fqtn, "quit", false, 0)
+        local hidden = types.Variant(fqtn, "hidden", types.Integer(), 1)
+        hidden.islocal = true
+        local write = types.Variant(fqtn, "write", types.String(), 2)
+
+        local quit_constructor = types.StaticMethod(
+            fqtn, "quit", {}, {result}, false, false, false)
+        local hidden_constructor = types.StaticMethod(
+            fqtn, "hidden", {types.Integer()}, {result},
+            false, false, false)
+        hidden_constructor.islocal = true
+        local write_constructor = types.StaticMethod(
+            fqtn, "write", {types.String()}, {result},
+            false, false, false)
+        local inspect = types.Method(
+            fqtn, "inspect", {}, {types.String()}, false, false, {})
+        local private = types.Method(
+            fqtn, "private", {}, {}, false, false, {})
+        private.islocal = true
+
+        local union = types.Union(fqtn, {quit, hidden, write}, {
+            write = write_constructor,
+            hidden = hidden_constructor,
+            quit = quit_constructor,
+        }, {
+            private = private,
+            inspect = inspect,
+        }, 3)
+        local projection, projection_error =
+            types.validate_union_source_projection(union)
+        assert.truthy(projection, projection_error)
+        assert.same({quit, write},
+            {projection.variants[1], projection.variants[2]})
+        assert.is_nil(projection.variants.hidden)
+        assert.is_nil(projection.functions.hidden)
+
+        hidden_constructor.islocal = false
+        local invalid, invalid_error =
+            types.validate_union_source_projection(union)
+        assert.falsy(invalid)
+        assert.match("disagree on locality", invalid_error)
+        hidden_constructor.islocal = true
+
+        local rebuilt = assert(load(
+            "return " .. types.serialize(union), "t", "t", types))()
+
+        assert.equal(3, rebuilt.nvariants)
+        assert.equal(2, #rebuilt.variants)
+        assert.equal(0, rebuilt.variants[1].index)
+        assert.equal(2, rebuilt.variants[2].index)
+        assert.is_true(rebuilt.variants.quit == rebuilt.variants[1])
+        assert.is_true(rebuilt.variants.write == rebuilt.variants[2])
+        assert.is_nil(rebuilt.variants.hidden)
+        assert.is_nil(rebuilt.functions.hidden)
+        assert.is_nil(rebuilt.methods.private)
+        assert.is_false(rebuilt.functions.quit.paramnames)
+        assert.is_false(rebuilt.functions.write.paramnames)
+        assert.truthy(types.equals(types.String(),
+            rebuilt.variants.write.payload))
+    end)
+
+    it("distinguishes an empty union variant from a nil payload", function()
+        local fqtn = "sample.Maybe"
+        local empty = types.Variant(fqtn, "empty", false, 0)
+        local explicit_nil = types.Variant(fqtn, "nil_value", types.Nil(), 1)
+        local rebuilt = assert(load("return " .. types.serialize(types.Union(
+            fqtn, {empty, explicit_nil}, {}, {}, 2)),
+            "t", "t", types))()
+
+        assert.is_false(rebuilt.variants.empty.payload)
+        assert.equal("Type.Nil", rebuilt.variants.nil_value.payload._tag)
+    end)
+
+    it("keeps variant descriptors out of value type relations", function()
+        local first = types.Variant(
+            "sample.Message", "write", types.String(), 0)
+        local second = types.Variant(
+            "sample.Message", "write", types.String(), 0)
+        local value = types.Value()
+
+        assert.truthy(types.equals(first, second),
+            "metadata comparison still needs structural equality")
+        assert.falsy(types.compatible(first, second))
+        assert.falsy(types.compatible(first, value))
+        assert.falsy(types.compatible(value, first))
+        assert.falsy(types.coerceable(first, value))
+        assert.falsy(types.coerceable(value, first))
+        assert.falsy(types.explicitly_coerceable(first, value))
+        assert.falsy(types.explicitly_coerceable(value, first))
+        assert.falsy(types.has_tvalue_representation(first))
+    end)
+
     it("round-trips record method and static flexible return tails", function()
         local method = types.Method("sample.Box", "items", {}, {}, false,
             types.String(), {"unused"})

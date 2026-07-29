@@ -777,6 +777,54 @@ end
         assert_type_ast("foo.bar", { _tag = "Ast.TypeQualName", module = "foo", name = "bar" } )
     end)
 
+    it("marks Titan-keyword spellings only in contextual C name positions",
+    function()
+        assert_type_ast("c.type", {
+            _tag = "Ast.TypeQualName",
+            module = "c",
+            name = "type",
+            _contextual_c_name = true,
+        })
+        assert_type_ast("c.when", {
+            _tag = "Ast.TypeQualName",
+            module = "c",
+            name = "when",
+            _contextual_c_name = true,
+        })
+        assert_expression_ast("c.when", {
+            _tag = "Ast.ExpVar",
+            var = {
+                _tag = "Ast.VarDot",
+                name = "when",
+                _contextual_c_name = true,
+            },
+        })
+        assert_expression_ast("c.repeat", {
+            _tag = "Ast.ExpVar",
+            var = {
+                _tag = "Ast.VarDot",
+                name = "repeat",
+                _contextual_c_name = true,
+            },
+        })
+
+        local ast = assert_parses_successfuly("local x: c.member = c.member")
+        assert.is_nil(ast[1].decl.type._contextual_c_name)
+        assert.is_nil(ast[1].value.var._contextual_c_name)
+
+        for _, source in ipairs({
+            "local when = 1",
+            "function when(): nil end",
+            "function R:when(): nil end",
+            "function R.when(): nil end",
+            "record R when: integer end",
+            "union U when end",
+        }) do
+            local rejected = parser.parse("(parser_spec)", source)
+            assert.falsy(rejected)
+        end
+    end)
+
     it("can parse scalar and counted owned C types", function()
         assert_type_ast("owned *ffi.Item", {
             _tag = "Ast.TypeCOwned",
@@ -1116,6 +1164,249 @@ end
         })
     end)
 
+    describe("can parse case statements", function()
+        it("parses one or more when arms, bindings, and else", function()
+            assert_statements_ast([[
+                case msg
+                when quit then
+                    stop()
+                when move: delta then
+                    apply(delta)
+                else
+                    ignore()
+                end
+            ]], {
+                {
+                    _tag = "Ast.StatCase",
+                    exp = {
+                        _tag = "Ast.ExpVar",
+                        var = { _tag = "Ast.VarName", name = "msg" },
+                    },
+                    arms = {
+                        {
+                            _tag = "Ast.CaseArm",
+                            name = "quit",
+                            binding = false,
+                            block = { _tag = "Ast.StatBlock" },
+                        },
+                        {
+                            _tag = "Ast.CaseArm",
+                            name = "move",
+                            binding = {
+                                _tag = "Ast.Decl",
+                                name = "delta",
+                                type = false,
+                                option = false,
+                            },
+                            block = { _tag = "Ast.StatBlock" },
+                        },
+                    },
+                    elseblock = { _tag = "Ast.StatBlock" },
+                },
+            })
+        end)
+
+        it("keeps each arm and else as an independent full block", function()
+            assert_statements_ast([[
+                case msg
+                when first then
+                    defer cleanup_body()
+                    body()
+                catch
+                    defer cleanup_catch()
+                    recover()
+                finally
+                    defer cleanup_finally()
+                    finish()
+                when second then
+                    if ready then
+                        nested()
+                    end
+                when third then
+                    later()
+                else
+                    defer cleanup_else_body()
+                    fallback()
+                catch
+                    defer cleanup_else_catch()
+                    recover_else()
+                finally
+                    defer cleanup_else_finally()
+                    finish_else()
+                end
+            ]], {
+                {
+                    _tag = "Ast.StatCase",
+                    arms = {
+                        {
+                            name = "first",
+                            block = {
+                                _tag = "Ast.StatTry",
+                                block = {
+                                    _tag = "Ast.StatBlock",
+                                    stats = {
+                                        {
+                                            _tag = "Ast.StatTry",
+                                            finallyblock = {
+                                                _tag = "Ast.StatBlock",
+                                            },
+                                        },
+                                    },
+                                },
+                                catchblock = {
+                                    _tag = "Ast.StatBlock",
+                                    stats = {
+                                        {
+                                            _tag = "Ast.StatTry",
+                                            finallyblock = {
+                                                _tag = "Ast.StatBlock",
+                                            },
+                                        },
+                                    },
+                                },
+                                finallyblock = {
+                                    _tag = "Ast.StatBlock",
+                                    stats = {
+                                        {
+                                            _tag = "Ast.StatTry",
+                                            finallyblock = {
+                                                _tag = "Ast.StatBlock",
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        {
+                            name = "second",
+                            block = {
+                                _tag = "Ast.StatBlock",
+                                stats = {
+                                    { _tag = "Ast.StatIf" },
+                                },
+                            },
+                        },
+                        {
+                            name = "third",
+                            block = { _tag = "Ast.StatBlock" },
+                        },
+                    },
+                    elseblock = {
+                        _tag = "Ast.StatTry",
+                        block = {
+                            _tag = "Ast.StatBlock",
+                            stats = {
+                                {
+                                    _tag = "Ast.StatTry",
+                                    finallyblock = {
+                                        _tag = "Ast.StatBlock",
+                                    },
+                                },
+                            },
+                        },
+                        catchblock = {
+                            _tag = "Ast.StatBlock",
+                            stats = {
+                                {
+                                    _tag = "Ast.StatTry",
+                                    finallyblock = {
+                                        _tag = "Ast.StatBlock",
+                                    },
+                                },
+                            },
+                        },
+                        finallyblock = {
+                            _tag = "Ast.StatBlock",
+                            stats = {
+                                {
+                                    _tag = "Ast.StatTry",
+                                    finallyblock = {
+                                        _tag = "Ast.StatBlock",
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            })
+        end)
+
+        it("parses nested cases inside loops and protected blocks", function()
+            assert_statements_ast([[
+                while running do
+                    do
+                        case outer
+                        when item then
+                            case inner
+                            when done then
+                                break
+                            end
+                        end
+                    finally
+                        cleanup()
+                    end
+                end
+            ]], {
+                {
+                    _tag = "Ast.StatWhile",
+                    block = {
+                        _tag = "Ast.StatBlock",
+                        stats = {
+                            {
+                                _tag = "Ast.StatTry",
+                                block = {
+                                    stats = {
+                                        {
+                                            _tag = "Ast.StatCase",
+                                            arms = {
+                                                {
+                                                    block = {
+                                                        stats = {
+                                                            {
+                                                                _tag = "Ast.StatCase",
+                                                            },
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            })
+        end)
+
+        it("keeps cases inside deferred cleanup blocks", function()
+            assert_statements_ast([[
+                defer do
+                    case pending
+                    when item then
+                        release()
+                    end
+                end
+                work()
+            ]], {
+                {
+                    _tag = "Ast.StatTry",
+                    finallyblock = {
+                        _tag = "Ast.StatBlock",
+                        stats = {
+                            {
+                                _tag = "Ast.StatBlock",
+                                stats = {
+                                    { _tag = "Ast.StatCase" },
+                                },
+                            },
+                        },
+                    },
+                },
+            })
+        end)
+    end)
+
     it("can parse do-while blocks", function()
         assert_statements_ast([[
             do
@@ -1434,6 +1725,12 @@ end
                 { name = "repeat", exp = { value = 1 } },
             } },
         })
+        assert_expression_ast([[ f{ when = 2 } ]], {
+            _tag = "Ast.ExpCall",
+            args = { _tag = "Ast.ArgsNamedFunc", fields = {
+                { name = "when", exp = { value = 2 } },
+            } },
+        })
 
         assert_program_syntax_error([[
             function repeat(): nil end
@@ -1692,6 +1989,156 @@ end
         })
     end)
 
+    it("parses unions and synthesizes adjacent positional constructors",
+    function()
+        local source = [[
+            union Message
+                quit;
+                move: Message
+                local nil_payload: nil;
+            end
+        ]]
+        assert_program_ast(source, {
+            {
+                _tag = "Ast.TopLevelUnion",
+                islocal = false,
+                name = "Message",
+                variants = {
+                    {
+                        _tag = "Ast.UnionVariant",
+                        name = "quit",
+                        payload = false,
+                    },
+                    {
+                        _tag = "Ast.UnionVariant",
+                        name = "move",
+                        payload = {
+                            _tag = "Ast.TypeName",
+                            name = "Message",
+                        },
+                    },
+                    {
+                        _tag = "Ast.UnionVariant",
+                        islocal = true,
+                        name = "nil_payload",
+                        payload = { _tag = "Ast.TypeNil" },
+                    },
+                },
+            },
+            {
+                _tag = "Ast.TopLevelStatic",
+                class = "Message",
+                name = "quit",
+                params = {},
+                islocal = false,
+                _union_constructor = true,
+                block = {
+                    stats = {
+                        {
+                            _tag = "Ast.StatReturn",
+                            exps = {
+                                {
+                                    _tag = "Ast.ExpUnionInit",
+                                    owner = "Message",
+                                    value = false,
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                _tag = "Ast.TopLevelStatic",
+                class = "Message",
+                name = "move",
+                params = {
+                    {
+                        _tag = "Ast.Decl",
+                        name = "__union_payload",
+                        type = {
+                            _tag = "Ast.TypeName",
+                            name = "Message",
+                        },
+                    },
+                },
+                islocal = false,
+                _union_constructor = true,
+                block = {
+                    stats = {
+                        {
+                            exps = {
+                                {
+                                    _tag = "Ast.ExpUnionInit",
+                                    owner = "Message",
+                                    value = {
+                                        _tag = "Ast.ExpVar",
+                                        var = {
+                                            _tag = "Ast.VarName",
+                                            name = "__union_payload",
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                _tag = "Ast.TopLevelStatic",
+                class = "Message",
+                name = "nil_payload",
+                params = {
+                    {
+                        _tag = "Ast.Decl",
+                        type = { _tag = "Ast.TypeNil" },
+                    },
+                },
+                islocal = true,
+                _union_constructor = true,
+            },
+        })
+
+        local parsed = assert_parses_successfuly(source)
+        assert.are.equal(4, #parsed)
+        for i = 1, 3 do
+            local constructor = parsed[i + 1]
+            assert.is_true(constructor._union_constructor)
+            assert.are.equal(parsed[1].variants[i], constructor._union_variant)
+        end
+    end)
+
+    it("makes every constructor of a local union local", function()
+        local ast = assert_parses_successfuly([[
+            local union Hidden
+                empty
+                payload: integer
+            end
+        ]])
+        assert.are.equal(3, #ast)
+        assert.is_true(ast[1].islocal)
+        assert.is_true(ast[2].islocal)
+        assert.is_true(ast[3].islocal)
+    end)
+
+    it("keeps union declarations top-level and case statements block-local",
+    function()
+        local nested_union = parser.parse("(parser_spec)", [[
+            function f(): nil
+                union Nested
+                    item
+                end
+            end
+        ]])
+        assert.falsy(nested_union)
+
+        local top_case = parser.parse("(parser_spec)", [[
+            case item_value
+            when item then
+            end
+        ]])
+        assert.falsy(top_case)
+    end)
+
     it("can parse public and local type aliases", function()
         assert_program_ast([[
             type Count = integer
@@ -1809,6 +2256,34 @@ end
                     exp = { _tag = "Ast.ExpDots" } },
                 target = { _tag = "Ast.TypeValue" } })
 
+        -- A local two-component variant-looking target remains syntactically a
+        -- qualified type so the checker can issue the semantic diagnostic.
+        assert_expression_ast([[ x as Message.move ]], {
+            _tag = "Ast.ExpCast",
+            target = {
+                _tag = "Ast.TypeQualName",
+                module = "Message",
+                name = "move",
+            },
+        })
+        assert_expression_ast([[ x is Message.move ]], {
+            _tag = "Ast.ExpIs",
+            target = {
+                _tag = "Ast.TypeQualName",
+                module = "Message",
+                name = "move",
+            },
+        })
+
+        -- Type syntax has only one qualifier. Imported variants require three
+        -- components and therefore never become a type target.
+        for _, op in ipairs({ "as", "is" }) do
+            local program = expression_test_program(
+                "x " .. op .. " m.Message.move")
+            local ast = parser.parse("(parser_spec)", program)
+            assert.falsy(ast)
+        end
+
         assert_expression_ast([[ foo is integer ]],
             { _tag = "Ast.ExpIs", exp = { _tag = "Ast.ExpVar" },
                 target = { _tag = "Ast.TypeInteger" } })
@@ -1876,6 +2351,31 @@ end
 
     it("doesn't allow using a primitive type as a record", function()
         assert_expression_syntax_error("integer.new(10)", "ExpAssign")
+    end)
+
+    it("reports source locations for union and case labels", function()
+        local _, union_err = parser.parse("new-errors.titan", [[
+union U
+end]])
+        assert.are.equal("VariantUnion", union_err.label)
+        assert.are.same({
+            filename = "new-errors.titan",
+            line = 2,
+            col = 1,
+        }, union_err.loc)
+
+        local _, case_err = parser.parse("new-errors.titan", [[
+function f(): nil
+case msg
+when item: then
+end
+end]])
+        assert.are.equal("NameCaseBinding", case_err.label)
+        assert.are.same({
+            filename = "new-errors.titan",
+            line = 3,
+            col = 12,
+        }, case_err.loc)
     end)
 
     it("uses specific error labels for some errors", function()
@@ -1947,6 +2447,32 @@ end
         ]], "EndRecord")
 
         assert_program_syntax_error([[
+            union
+        ]], "NameUnion")
+
+        assert_program_syntax_error([[
+            union Empty
+            end
+        ]], "VariantUnion")
+
+        assert_program_syntax_error([[
+            union U
+                local : integer
+            end
+        ]], "NameUnionVariant")
+
+        assert_program_syntax_error([[
+            union U
+                payload:
+            end
+        ]], "TypeUnionVariant")
+
+        assert_program_syntax_error([[
+            union U
+                item
+        ]], "EndUnion")
+
+        assert_program_syntax_error([[
             local = import "bola"
         ]], "NameImport")
 
@@ -2008,6 +2534,40 @@ end
                 x = x - 1
             end
         ]], "ExpWhile")
+
+        assert_statements_syntax_error([[
+            case
+        ]], "ExpCase")
+
+        assert_statements_syntax_error([[
+            case msg
+            end
+        ]], "WhenCase")
+
+        assert_statements_syntax_error([[
+            case msg
+            when then
+            end
+        ]], "NameCaseVariant")
+
+        assert_statements_syntax_error([[
+            case msg
+            when payload:
+            then
+            end
+        ]], "NameCaseBinding")
+
+        assert_statements_syntax_error([[
+            case msg
+            when payload
+            end
+        ]], "ThenCase")
+
+        assert_program_syntax_error([[
+            function f(): nil
+                case msg
+                when payload then
+        ]], "EndCase")
 
         assert_statements_syntax_error([[
             while x > 3

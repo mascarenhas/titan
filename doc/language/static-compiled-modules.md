@@ -40,7 +40,7 @@ Lua-loader rules.
 
 Each logical module remains independent inside the two physical providers. It
 keeps its own module state, initializer, ABI entry, type entry, Lua entry, and
-nominal record identities. A folder module still produces one logical object
+nominal record/union identities. A folder module still produces one logical object
 and therefore one metadata entry; contributor filenames are not modules.
 
 When exactly one requested source root declares
@@ -115,7 +115,7 @@ module key:
 ```lua
 return {
     ["geometry.shape"] = {
-        abi = "0.18",
+        abi = "0.19",
         types = "Module(...)",
     },
 }
@@ -128,10 +128,12 @@ containers, duplicate logical keys, incompatible ABIs, invalid type
 interfaces, or disagreement between the embedded and callable forms before
 publishing or consuming an artifact.
 
-ABI 0.18 is required because generated standard-library archives can directly
-reference callback trampolines in the matching runtime and no longer reference
-retired libuv/coroutine helpers. A 0.18 provider and runtime must be built and
-distributed together. ABI 0.17 previously introduced the current Array
+ABI 0.19 adds serialized union/variant schemas and the reconstructible public
+module prefix for first-class record/union statics. Its generated userdata/tag
+contract cannot be mixed with a 0.18 interface. ABI 0.18 previously required
+generated standard-library archives and the matching runtime to agree on
+promoted callback trampolines and retired libuv/coroutine helpers. ABI 0.17
+introduced the current Array
 backing/proxy contract even though `Array(...)` serialization and exact native
 pointer widths stayed unchanged. A separately installed 0.17 archive remains
 in its versioned directory but is rejected as a dependency.
@@ -153,7 +155,7 @@ directly. Code generated against a DSO loads the selected shared provider and
 resolves entries through its checked handle.
 
 There is one important transitive case. A compiled interface may expose a
-record owned by another logical module. If the selected archive physically
+record or union owned by another logical module. If the selected archive physically
 carries that owner, the owner's methods and bound-method entries are direct
 too. If it does not, the archive's producer already chose a dynamic owner:
 the consumer recovers the owner's type without silently selecting a visible
@@ -202,8 +204,8 @@ behavior, not a hidden dependency manifest.
 The canonical installed ABI directory contains:
 
 ```text
-$ROCKS_TREE/lib/titan/0.18/titan.so
-$ROCKS_TREE/lib/titan/0.18/titan.a
+$ROCKS_TREE/lib/titan/0.19/titan.so
+$ROCKS_TREE/lib/titan/0.19/titan.a
 ```
 
 Both contain the nine `titan.*` logical standard modules. The DSO also

@@ -94,11 +94,14 @@ not add epicycles around what may be a misunderstood simpler design.
   Linux compiler group, the canonical bundled provider packed before those
   tests, its bundled production smoke, and the complete macOS run (including
   both libuv modes) remain optimized. The
-  regular producer retains one historical ABI-0.17-to-0.18 cutover smoke: it
-  first configures its disposable prefix for 0.17, then runs that cutover's
-  `make lua`/`make luarocks` path and proves bare `require "titan"` after the
-  first 0.18 rock install. This is regression coverage for that specific
-  transition, not a general migration promise for future ABI bumps. The
+  regular producer now prepares a clean ABI-0.19 prefix directly. Its
+  dependency cache key includes the active Titan ABI; after restore it runs
+  `make lua` and `make luarocks`, removes or replaces only known active-0.19
+  Titan-owned rock/direct-shim state, and proves the interpreter's
+  `package.cpath` contains `lib/titan/0.19/?.so` but not the 0.18 template.
+  The historical ABI-0.17-to-0.18 cutover smoke is retired rather than carried
+  forward as migration machinery. This does not waive the ordinary manually
+  dispatched complete macOS pre-merge gate. The
   sanitizer job keeps its build and focused native-memory gate on one warm
   standard `ubuntu-24.04` runner with an explicit 30-minute timeout:
   representative timer/fs suites, core owner/callback proofs, and production
@@ -185,7 +188,7 @@ not add epicycles around what may be a misunderstood simpler design.
   not a runtime-SDK archive: neither it nor its private headers are installed.
 
   SDK staging atomically places the bootstrap at
-  `$ROCKS_TREE/lib/titan/0.18/titan.so` only when the path is absent. It
+  `$ROCKS_TREE/lib/titan/0.19/titan.so` only when the path is absent. It
   validates and preserves an existing usable bootstrap or full image, and
   refuses to clobber an incompatible file; a repeated build must never shrink
   a full image back to bootstrap form. After LuaRocks deploys the compiler, the
@@ -212,18 +215,18 @@ not add epicycles around what may be a misunderstood simpler design.
   `scripts/stdlib_installer.lua` under the same effective `CC`, `AR`, `RANLIB`,
   `TITAN_EXTRA_*`, `TITAN_ROCKS_ROOT`, and runtime-prebuilt environment for
   recoverable publication. The script is not part of the installed compiler
-  modules. It recognizes bootstrap-only, legacy complete ABI-0.18
+  modules. It recognizes bootstrap-only, legacy complete ABI-0.19
   DSO/shims-without-archive, and complete-pair predecessor states; backs up the
   exact current DSO/archive/dSYM/shims and stale active-layout copies; commits
   shims and dSYM, then `titan.a`, and renames `titan.so` last. Caught errors and
   injected archive/DSO failpoints restore the exact predecessor, including
   leaving `titan.a` absent for a legacy installation. This is not crash-,
   power-loss-, or asynchronous-signal-atomic publication. The canonical
-  artifacts are `$ROCKS_TREE/lib/titan/0.18/{titan.so,titan.a}`, the DSO's
+  artifacts are `$ROCKS_TREE/lib/titan/0.19/{titan.so,titan.a}`, the DSO's
   macOS dSYM, and generated
   `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os,peg,string}.lua`.
   No symbolic links, hard links, child DSOs, or `lib/lua` compatibility copies
-  are used, and a separately versioned 0.17 tree is not purged. These direct
+  are used, and separately versioned 0.17/0.18 trees are not purged. These direct
   SDK/stdlib files remain outside the rock manifest and are not removed by
   `luarocks remove`; binary-rock ownership is deferred until Titan has a
   library/application packaging story. The
@@ -316,6 +319,15 @@ because it typechecks or compiles Titan source. If it reveals missing compiler
 coverage, add a small compiler-focused case for that path instead. A sizable
 compiler feature gets its own topical `<feature>_spec.lua` in the relevant
 layer rather than bloating `checker_spec` or `coder_spec`.
+Union syntax/token coverage remains in `spec/parser_spec.lua` and
+`spec/lexer_spec.lua`; checker/frontier/type-rejection coverage lives in
+`spec/checker/unions_spec.lua`; generated representation, dispatch,
+catch/finally/defer, Lua, first-class, and GC behavior lives in
+`spec/coder/unions_spec.lua`; and hostile serialized-schema validation lives
+in `spec/union_interface_spec.lua`. Source/DSO/archive/prefix-container union
+coverage extends the existing compiled-module specs rather than duplicating
+their provider scaffolding. The regex-AST dogfood remains standard-library
+behavior under `spec/stdlib/string_regex_spec.lua`, outside LuaCov.
 Folder-source resolution, blocking, composition, and cross-file diagnostics
 belong in filesystem cases in `spec/driver_spec.lua`; public compilation,
 artifact, external-`--tree`, and mixed-source traceback behavior belongs in
@@ -416,8 +428,8 @@ genuine deeper folder child remains legal. It recovers the Titan
 SDK/rocks-tree root from the first `package.cpath` template ending in
 `/lib/lua/5.5/?.so`; that works because the supported install currently sets
 `ROCKS_TREE == PREFIX`, not because the two owners are inherently identical.
-Compiled-module lookup defaults to `.;<root>/lib/titan/0.18`, with
-`TITAN_PATH_0_18`/`TITAN_PATH` overriding it and `;;` inserting that ordinary
+Compiled-module lookup defaults to `.;<root>/lib/titan/0.19`, with
+`TITAN_PATH_0_19`/`TITAN_PATH` overriding it and `;;` inserting that ordinary
 default at compile time and run time. For logical `a.b.c`, each compiled-format
 pass checks `a.<ext>`, `a/b.<ext>`, and exact `a/b/c.<ext>` path-root-major and
 shallow-to-exact. Default lookup completes the `.so` pass across every path
@@ -440,6 +452,16 @@ Universal Mach-O providers must expose identical key/value sets in every
 slice, and the driver selects the slice matching the authoritative generated
 object target. There is no `.tmm` sidecar and lookup must not shell out to
 `ar`, `nm`, `objcopy`, `lipo`, or a linker.
+
+Recovered ABI-0.19 interfaces use one closed validator for DSO and archive
+metadata. Value-facing graphs reject descriptor wrappers (including
+`Type.Variant` outside its owning union list); callable `paramnames` must be
+dense, unique, and match fixed arity; and union schemas must prove canonical
+owner/count/tag ordering, constructor projection, and variant/function/method
+namespace separation. Before serialization drops locality, the source
+producer validates the exact `types.public_union_projection`, including that
+each private/public variant and its synthesized constructor are omitted or
+published together.
 
 The selected DSO's relative provider is stored transiently in
 `Type.Module.file` and omitted from serialization; generated handle imports
@@ -465,7 +487,7 @@ public declarations with their semantic contributors; `titan.peg` and
 `titan.string` instead collect their complete public APIs in the canonical
 main and require every contributor top-level declaration to be module-local.
 Production invokes all nine roots in one compiler process, publishes
-`<root>/lib/titan/0.18/{titan.so,titan.a}`, and installs nine generated shims
+`<root>/lib/titan/0.19/{titan.so,titan.a}`, and installs nine generated shims
 below `<root>/share/lua/5.5/titan/`. The archive advertises exactly nine
 logical metadata keys; its metadata-free payload begins with `titanlib.o` and
 the private five-member LPegLabel archive, followed in bundled mode by the
@@ -479,15 +501,33 @@ Dependencies resolve binaries before sources; modules explicitly named on the
 
 The checker never reorders that combined AST. It premarks ordinary duplicate
 winners and annotates `_toplevel_order`, precollects aliases, reserves names,
-then visits all imports in AST order, resolves aliases, builds records and
-synthesized constructors, collects ordinary callable/initializer signatures
-and explicit methods/record functions, and finally checks module variables in
-AST order before bodies. Records, aliases, callables, and imports used
+then visits all imports in AST order, resolves aliases, builds records/unions
+and synthesized constructors, collects ordinary callable/initializer
+signatures and explicit methods/nominal functions, and finally checks module
+variables in AST order before bodies. Nominal owners, aliases, callables, and imports used
 outside module-variable declarations are therefore placement-independent. A
 module-variable declaration/initializer sees only earlier imports and earlier
 module variables, while seeing every other declaration kind. Combined source
 order remains authoritative for duplicate precedence, serialized member/slot
 order, module-variable initialization, and code generation.
+
+Unions are nominal v1 sum types. `union`, `case`, and `when` are keywords;
+every arm starts with `when`. Variant constructors are positional-only,
+first-class fixed Titan functions (`paramnames = false`) and use ordinary
+nil-fill/surplus adjustment. Imported union visibility exactly follows record
+frontiers. Each case arm/else is a full ordinary block with its own
+`catch`/`finally`, and the normal recursive `defer` transformation remains
+clause-bounded. A `Union?` scrutinee is auto-forced before dispatch; cases are
+non-exhaustive, unmatched/no-else is a no-op, and the always-return rule is the
+same as `if`/`elseif`/`else` (explicit else plus every arm/else returning).
+Record fields and union payloads share `types.has_tvalue_representation`:
+ordinary boxed Titan values including functions are legal; direct C
+aggregates/arrays/functions/function pointers are not, and only Option recurses.
+Titan unions cast only by nominal GC identity to C `void *`, never
+structurally to C unions/structs. `Type.Variant` is owner metadata, not a source
+type and not valid in annotations, aliases, `as`, or `is`. Contextual
+`lexer.CNAME` keeps C selectors/type names spelled with Titan keywords
+source-nameable without weakening ordinary `NAME`.
 
 The canonical main controls generated C/object placement, while logical `M`
 controls native symbols, metadata, and the generated shim. Thus folder
@@ -518,11 +558,18 @@ Filesystem source cache entries carry `program_output` (`P` flat,
 `driver.compile_program`. Keep the optional argument's old dotted-name default
 for `tableloader` and external callers.
 
-The compiled-module ABI version is `0.18`. ABI 0.18 promotes the libuv callback
-trampolines used directly by generated standard-library objects into the
-runtime's external native symbol contract and removes references to the
-replaced libuv and coroutine helpers. A provider and runtime must therefore
-both be 0.18; either direction of a 0.17/0.18 static pairing is incompatible.
+The compiled-module ABI version is `0.19`. It adds serialized union/variant
+schemas and userdata/tag dispatch, and extends the importer-reconstructible
+public module-slot prefix with exported statics of each public record/union.
+This preserves canonical first-class imported constructors and nominal
+functions. `TITAN_VER`, `_0_19`, `TITAN_PATH_0_19`, `lib/titan/0.19`, and
+`stdlib_0_19` advance together; a 0.18 provider is rejected before its type
+metadata is decoded. There is no 0.18-to-0.19 in-place migration: use a clean
+prefix and preserve any separately versioned 0.18 tree.
+`0.18` itself was bumped from `0.17` when libuv callback trampolines used
+directly by generated standard-library objects entered the runtime's external
+native symbol contract and references to replaced libuv/coroutine helpers
+left it; either direction of a 0.17/0.18 static pairing is incompatible.
 `0.17` itself was bumped from `0.16` while exact Array signatures remained
 `Table *`/`Table **` and serialized Array type text stayed unchanged: key `0`
 became reserved for the canonical proxy, `lenhint` became authoritative,
@@ -645,11 +692,11 @@ AST nodes (`ast.lua`) and types (`types.lua`) are plain tables created by `typed
 
 ### Frontend (`lexer.lua`, `parser.lua`, `syntax_errors.lua`)
 
-Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` exports raw LPeg patterns referenced as `%TOKEN` terminals (no token stream). Every AST constructor is auto-injected into the grammar's defs table, so grammar actions like `-> TopLevelFunc` call constructors directly. Every error label used in the grammar (`^Label`, `%{Label}`) or lexer (`lpeg.T`) **must** have an entry in `syntax_errors.errors` or error formatting breaks. The parser is not reentrant (module-global `THIS_FILENAME`, asserted nil on entry). `record` declarations are desugared at parse time into a `TopLevelRecord` plus an adjacent synthesized `new` static function marked `_record_constructor`; explicit record functions do not carry that marker. `[local] type Name = T` produces a compile-time-only `TopLevelTypeAlias`. Short standard-library imports are also parser sugar: `coroutine`, `uv`, `async`, `timer`, `fs`, `net`, `os`, `peg`, and `string` become the ordinary qualified module names under `titan.*` before module resolution.
+Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` exports raw LPeg patterns referenced as `%TOKEN` terminals (no token stream). Every AST constructor is auto-injected into the grammar's defs table, so grammar actions like `-> TopLevelFunc` call constructors directly. Every error label used in the grammar (`^Label`, `%{Label}`) or lexer (`lpeg.T`) **must** have an entry in `syntax_errors.errors` or error formatting breaks. The parser is not reentrant (module-global `THIS_FILENAME`, asserted nil on entry). `record` declarations are desugared at parse time into a `TopLevelRecord` plus an adjacent synthesized `new` static marked `_record_constructor`. `union` declarations emit `TopLevelUnion` plus one adjacent synthesized static per variant, marked `_union_constructor`/`_union_variant`; explicit nominal functions carry neither marker. `case`/`when` arms consume the ordinary full block production. `[local] type Name = T` produces a compile-time-only `TopLevelTypeAlias`. Short standard-library imports are also parser sugar: `coroutine`, `uv`, `async`, `timer`, `fs`, `net`, `os`, `peg`, and `string` become the ordinary qualified module names under `titan.*` before module resolution.
 
 ### Checker (`checker.lua`, `types.lua`, `symtab.lua`)
 
-`checker.check(modname, ast, subject, filename, loader) -> moduletype, errors`; callers test `#errors == 0`. Without reordering the AST, it marks ordinary duplicate winners and `_toplevel_order`, precollects aliases, then stages name reservation; imports in AST order; alias resolution; records; parser-marked synthesized constructors; ordinary callable/module-initializer signatures; methods and record functions; module variables in AST order; and finally bodies. It annotates `_ignore` on rejected duplicates. The checker also annotates (`_type`, `_types` for multi-return calls, `_decl` on variable uses, `_used`/`_assigned`) and **mutates** the AST:
+`checker.check(modname, ast, subject, filename, loader) -> moduletype, errors`; callers test `#errors == 0`. Without reordering the AST, it marks ordinary duplicate winners and `_toplevel_order`, precollects aliases, then stages name reservation; imports in AST order; alias resolution; records and unions; parser-marked synthesized constructors; ordinary callable/module-initializer signatures; methods and nominal functions; module variables in AST order; and finally bodies. It annotates `_ignore` on rejected duplicates. The checker also annotates (`_type`, `_types` for multi-return calls, `_decl` on variable uses, `_used`/`_assigned`, and union case/variant metadata) and **mutates** the AST:
 
 For a folder source the driver calls the checker exactly once with the
 combined AST, logical module name, and canonical main filename/source
@@ -662,7 +709,7 @@ module variables and later Titan/foreign imports; foreign type/name histories
 recover the last C declaration visible at that frontier, while
 `foreign_definition_visible` uses a canonical struct/union owner's
 `_definition_order` to hide completion performed by a later header. Every other
-declaration kind sees all imports, records, aliases, and callables regardless
+declaration kind sees all imports, nominal owners, aliases, and callables regardless
 of relative placement. Body checking and the coder still traverse the unchanged
 AST order, as does `makemoduletype`.
 
@@ -693,7 +740,7 @@ using a later import alias.
 bootstrap or dependency classifier.
 
 **Process-global mutable state** — tests and tools must reset these:
-`types.registry` (FQTN → `Type.Record`; `Type.Nominal` carries only the FQTN
+`types.registry` (FQTN → `Type.Record`/`Type.Union`; `Type.Nominal` carries only the FQTN
 string and resolves through the registry at every use), `driver.imported`
 (import cache with a `CIRCULAR_MARK` sentinel for cycle detection). Tests must
 save and restore both together.
@@ -705,8 +752,8 @@ unit as a string — no C AST, just `util.render` templates (`$VAR`
 substitution, recursive; error on missing keys). Key facts:
 
 - Whole-root AST passes use `ipairs` to preserve main/contributor declaration
-  order. Keyed interface maps use `util.bytewise_less`; ordered module members
-  and record fields retain source/slot order. `emitline(node)` remains per-node
+  order. Keyed interface maps use `util.bytewise_less`; ordered module members,
+  record fields, and union variants retain source/slot/tag order. `emitline(node)` remains per-node
   at safe function/statement/call/raise sites, so one folder C unit switches
   `#line` filenames between contributors. Do not add a unit-global directive.
 - Folder modules change only source discovery and compilation-unit assembly:
@@ -721,9 +768,10 @@ substitution, recursive; error on missing keys). Key facts:
   serialized public interface nor native signatures. ABI 0.16 is the later
   physical-provider/layout boundary, not a folder-source schema change.
   ABI 0.17 is the dense-Array invariant/boundary transition; exact pointer
-  descriptors and serialized Array type text did not change. ABI 0.18 is the
+  descriptors and serialized Array type text did not change. ABI 0.18 was the
   runtime/provider native-symbol boundary for promoted libuv callbacks and
-  removed libuv/coroutine helpers.
+  removed libuv/coroutine helpers. ABI 0.19 adds union/variant schemas,
+  union userdata/tag dispatch, and the public nominal-static slot prefix.
 - Each generated logical module object contains the canonical serialized
   interface twice: callable `<mangled>_types`/`_abi` entries and one
   relocation-free, byte-aligned metadata section rendered by
@@ -840,7 +888,7 @@ substitution, recursive; error on missing keys). Key facts:
   cleanup, or compatibility machinery unless a task explicitly requires that
   particular transition. This does not weaken same-ABI validation and
   recoverable publication of the current canonical artifacts.
-- Each Titan function becomes **two** C functions: a raw native-convention one (`RETTYPE f(lua_State *L, Udata *_mod, CClosure *_fn, params..., input-vararg pair, out-params for returns 2..n, flexible-output pair)`; the input and output pairs appear only when declared, and the **caller** owns flexible-output storage and anchors GC-able values on the Lua stack) and a Lua-stack entry wrapper that coerces arguments and installs the error handler. `_fn` is the function value's own closure (still a `CClosure`): `NULL` on fully-static top-level calls, and the callee itself on first-class/closure/value calls; for anonymous functions it carries the captured variables (this uniform parameter is what bumped the module ABI to `0.6`). `_mod` becoming `Udata*` and record instances becoming a single `Udata` (so every record-typed param/return changes C type and `<mangled>_init` returns `Udata*`) is what bumped it to `0.7`; the ABI then bumped to `0.8` when a record's type tag became its metatable pointer (no `getudatamem` payload), to `0.9` when a variadic function's native signature gained the trailing `TitanVargX *_varargs, int _start` pair (after the declared params and before the out-params) and `<mangled>_types` began encoding the `varargtype` element type, to `0.10` when the `TitanVargX` structs changed from inline flexible arrays to descriptor structs with an `args` pointer, to `0.11` when local records/members changed record interface serialization, to `0.12` when public type aliases added the serialized `type_members` namespace, to `0.13` when named arguments added serialized declaration-only `paramnames` metadata without changing native function signatures, to `0.14` when flexible returns added serialized `flexrettype` metadata and the conditional trailing `TitanVargX *_flexout, int _flexwant` native pair, to `0.15` when the `titan.uv` folder split reordered public slots, to `0.16` for selected prefix-container providers and the canonical combined stdlib layout, to `0.17` for dense-Array semantic and boundary invariants without changing `Table *`/`Table **` descriptors, and to `0.18` when generated standard-library archive objects began referring directly to promoted libuv callback symbols while obsolete libuv/coroutine helper symbols left the runtime contract.
+- Each Titan function becomes **two** C functions: a raw native-convention one (`RETTYPE f(lua_State *L, Udata *_mod, CClosure *_fn, params..., input-vararg pair, out-params for returns 2..n, flexible-output pair)`; the input and output pairs appear only when declared, and the **caller** owns flexible-output storage and anchors GC-able values on the Lua stack) and a Lua-stack entry wrapper that coerces arguments and installs the error handler. `_fn` is the function value's own closure (still a `CClosure`): `NULL` on fully-static top-level calls, and the callee itself on first-class/closure/value calls; for anonymous functions it carries the captured variables (this uniform parameter is what bumped the module ABI to `0.6`). `_mod` becoming `Udata*` and record instances becoming a single `Udata` (so every record-typed param/return changes C type and `<mangled>_init` returns `Udata*`) is what bumped it to `0.7`; the ABI then bumped to `0.8` when a record's type tag became its metatable pointer (no `getudatamem` payload), to `0.9` when a variadic function's native signature gained the trailing `TitanVargX *_varargs, int _start` pair (after the declared params and before the out-params) and `<mangled>_types` began encoding the `varargtype` element type, to `0.10` when the `TitanVargX` structs changed from inline flexible arrays to descriptor structs with an `args` pointer, to `0.11` when local records/members changed record interface serialization, to `0.12` when public type aliases added the serialized `type_members` namespace, to `0.13` when named arguments added serialized declaration-only `paramnames` metadata without changing native function signatures, to `0.14` when flexible returns added serialized `flexrettype` metadata and the conditional trailing `TitanVargX *_flexout, int _flexwant` native pair, to `0.15` when the `titan.uv` folder split reordered public slots, to `0.16` for selected prefix-container providers and the canonical combined stdlib layout, to `0.17` for dense-Array semantic and boundary invariants without changing `Table *`/`Table **` descriptors, to `0.18` when generated standard-library archive objects began referring directly to promoted libuv callback symbols while obsolete libuv/coroutine helper symbols left the runtime contract, and to `0.19` for union/variant schemas and the reconstructible public nominal-static closure prefix.
 - A dynamically imported module is loaded from its transient
   `Type.Module.file` with `RTLD_LAZY | RTLD_GLOBAL` before it is initialized.
   `file` defaults to the exact logical path, is overwritten by prefix-container
@@ -849,7 +897,7 @@ substitution, recursive; error on missing keys). Key facts:
   publishes the owner's method entry points. The importer then resolves those
   transitive symbols through `RTLD_DEFAULT`; it does not open the owner DSO a
   second time.
-- Module state is a `Udata` (`_mod`), allocated with `luaS_newudata(L, 0, NUPVALS)`. Its 0-based user values hold module globals, exported-function canonical closures, imported-module `Udata`s, record metatables, per-record static-namespace tables, and one unconditional private per-state Array-metatable cache slot allocated after the importer-reconstructed public prefix; there is no distinguished `uv[0]` header. There is **no** Lua-facing module table — `require` returns the module `Udata` itself (so `type(require "m")` is `"userdata"`), and all member access (functions, variables, record namespaces `m.Rec`) flows through a metatable `__index`/`__newindex` over a unified name→slot member map; functions and record namespaces are served read-only (assigning errors), variables coerce in/out, and the "not found" message is "member '%s' does not exist". A record instance is likewise a single `Udata` (fields in `uv[0..N-1]`, type identity is its metatable pointer (no raw payload), metatable on the udata).
+- Module state is a `Udata` (`_mod`), allocated with `luaS_newudata(L, 0, NUPVALS)`. Its ABI-visible prefix is exported variables, exported top-level function closures, then exported static closures of public record/union owners in module-member and bytewise-static order. Private user values hold imported modules, record/union metatables, per-nominal static-namespace tables, and one unconditional per-state Array-metatable cache immediately after that reconstructed prefix; there is no distinguished `uv[0]` header. There is **no** Lua-facing module table — `require` returns the module `Udata` itself (so `type(require "m")` is `"userdata"`), and all member access (functions, variables, nominal namespaces such as `m.Rec`/`m.Union`) flows through a metatable `__index`/`__newindex` over a unified name→slot member map; functions and nominal namespaces are served read-only (assigning errors), variables coerce in/out, and the "not found" message is "member '%s' does not exist". A record instance is likewise a single `Udata` (fields in `uv[0..N-1]`, type identity is its metatable pointer, no raw payload). A union instance is a single zero-byte `Udata` with the union metatable identity, integer tag in `uv[0]`, and optional payload in `uv[1]`; empty variants allocate no payload slot and instance Lua access exposes methods only.
 - Typedef-resolved pointers to Lua's internal `Udata` are GC-bearing FFI
   values, not ordinary C pointers: boxing a non-NULL `Udata *` emits a full
   userdata `TValue` for that same object, NULL boxes as nil, and unboxing
@@ -1039,7 +1087,7 @@ result is borrowed: retaining the C pointer does not keep the Titan object
 alive. Do not add `lua_pushtvalue`/`lua_togco` helpers or parallel storage just
 to recover an identity already represented by this cast.
 
-The 0.18 `titan.uv` sources import `UV_E*` enumerators directly and call public
+The current `titan.uv` sources import `UV_E*` enumerators directly and call public
 libuv operations directly, including process, stat, DNS traversal/release,
 bind, and connect submission. The retained native boundary is deliberately
 narrow: the fixed owner-slot dispatcher, the twelve plain-C callback
@@ -1050,8 +1098,9 @@ storage. The conditional inherited-`SIGPIPE` policy is implemented in
 `uv_translate_sys_error`. Operational
 libuv wrappers, including the old DNS/address helpers, must not return.
 Archive-backed generated modules now have direct undefined references to those
-external callbacks and no references to the retired helpers, which is why this
-boundary requires compiled-module ABI 0.18 rather than 0.17.
+external callbacks and no references to the retired helpers, which established
+the compiled-module ABI-0.18 boundary rather than 0.17. ABI 0.19 preserves that
+native callback contract while adding union/interface and public-slot changes.
 Ordinary libuv handles, requests, buffers, and copied byte arrays are owned
 directly by source-level `owned *T`/`owned T[]` fields. The native dispatcher
 therefore uses exactly five userdata owner slots: owner, main thread,

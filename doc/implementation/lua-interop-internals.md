@@ -159,7 +159,7 @@ Walking through it:
   function (extra returns come back through out-parameters), restores the
   slot pointer from the offset in case the native callee relocated the
   Lua stack with `lua_checkstack`, and writes each result into its slot with
-  `setboxed` — records remain their Udata, while Arrays become their canonical
+  `setboxed` — records and unions remain their Udata, while Arrays become their canonical
   proxy Udata. `return NRET;` makes multiple Titan returns multiple
   Lua returns (`local x, y = titan_test.f(2)` works).
   For a flexible result shape it reads the caller's requested count through
@@ -174,7 +174,7 @@ Walking through it:
 
 `checkandget(ctx, typ, cvar, exp, loc)` renders *the* check every Lua
 value passes to enter typed Titan code. Besides wrapper arguments and
-`self`, the same template guards the receivers of record
+`self`, the same template guards the receivers of nominal
 `__index`/`__newindex` (below), `value`→`T` casts inside Titan, and
 every Array/Map element read — container interiors are never trusted
 ([code generator: constructs](codegen-constructs.md)). Per type, with
@@ -193,18 +193,18 @@ raised as run-time errors via `luaL_error`:
 | `{K:V}` | **any table** (`ttistable`); elements are *not* checked here | `type error, expected table but found %s` |
 | `value` | anything, copied with `setobj2t` | never fails |
 | `T?` | nil (stores nil), else delegates to `checkandset` on the base — an `integer?` accepts an integral float just like a plain `integer`, but `boolean?` is stricter than a bare `boolean` parameter (a real boolean required) | the base type's message |
-| record | a full userdata whose metatable equals the record's metatable | three-way message, below |
+| record or union | a full userdata whose metatable equals the nominal owner's metatable | three-way message, below |
 
-The record case compares the userdata's metatable against the record's
+The nominal case compares the userdata's metatable against the owner's
 metatable (read per-Lua-state from the `_mod` user value caching it) and,
 on match, uses the userdata directly as the record value (there is no
 wrapper to unwrap) — full excerpt and identity mechanism in
 [values and the GC](values-and-gc.md#wrap-and-unwrap-at-the-boundary).
 The failure message is always `type error, expected %s but found %s`,
-with three arms for the found part: another Titan record reports its
+with three arms for the found part: another Titan record or union reports its
 FQTN, found through the registry's reverse metatable→name entry
 (`expected test.Rec but found test.Point`); a full userdata with an
-unknown metatable (a non-record userdata) is *meant* to report
+unknown metatable (a non-Titan userdata) is *meant* to report
 `luaL_tolstring` of the userdata, but
 the generated code writes the userdata to `s2v(L->top.p)` without
 raising the top, so `luaL_tolstring(L, -1, …)` formats the nil the
@@ -391,6 +391,23 @@ Local records are not entered in the module member map. Public records with a
 local `new` still allocate their namespace table for Titan-internal use, but
 local record functions are not inserted into the Lua-visible table.
 
+## Unions from Lua
+
+Each exported union name is served by the module metatable as the same kind of
+read-only static-namespace table. It contains public positional variant
+constructors and public user-declared union functions. Generated constructors
+are canonical `CClosure`s from the ABI-visible public prefix; their hidden
+payload parameter is not named-call metadata.
+
+The value returned by a constructor is the union's `Udata` itself. Its
+metatable is protected as `"Titan union <fqtn>"`; `__index` exposes only
+public methods, and `__newindex` rejects every write. Variant names, the
+integer tag, and the optional payload user value are deliberately absent from
+the instance map. Both metamethods re-check the exact union metatable before
+dispatch, so a method extracted with `debug` cannot be borrowed onto another
+record or union. Plain Lua can construct and pass union values but cannot
+inspect or mutate their representation.
+
 ### Identity and tag security
 
 From Lua, a record is a full userdata with stable identity: the same
@@ -421,9 +438,9 @@ read, but it is not a sandbox boundary against privileged Lua/C code.
 `require` of a Titan module returns the module `Udata` itself —
 `luaopen_<mangled>` calls `_init` and pushes it; there is **no separate
 module table**. Every member access — exported functions, exported
-variables, and per-record static-namespace tables — flows through a
+variables, and per-nominal static-namespace tables — flows through a
 metatable installed on the `Udata`, driven by a single **member map**
-(name→slot) shared by `__index`/`__newindex`. Functions and record
+(name→slot) shared by `__index`/`__newindex`. Functions and nominal
 namespaces live in their own `_mod` user-value slots and are served
 read-only; exported variables also live in `_mod` slots (so Titan reads
 them as direct slot accesses) but are coerced in and out. The generated
@@ -446,7 +463,7 @@ static int __index(lua_State *L) {
             setobj2t(L, s2v(L->top.p - 1), &_mod->uv[1].uv);
             break;
         }
-        /* exported functions / record namespaces: push the value from
+        /* exported functions / nominal namespaces: push the value from
            their uv slot read-only */
     }
     return 1;
@@ -455,20 +472,20 @@ static int __index(lua_State *L) {
 
 Both metamethods are C closures closed over the module `Udata` and a
 *member map* table mapping each exported name to its slot (variables,
-functions and public record namespaces; `local` variables and local records are
-not entered). A
+functions, and public nominal namespaces; local variables and owners are not
+entered). A
 name miss raises `member '%s' does not exist in Titan module '%s'` —
 generalized from the old "global variable ..." message now that
-functions and records route through the same metamethods. A hit switches
+functions and nominal owners route through the same metamethods. A hit switches
 on the slot index: variable reads go through `copyboxed` (a record-typed
 variable remains its Udata; an Array backing becomes its canonical proxy),
 while
-functions and record namespaces are pushed read-only from their slots.
+functions and nominal namespaces are pushed read-only from their slots.
 `__newindex` allows only variable writes, through `checkandset` plus the
 **back** barrier `luaC_barrierback(L, obj2gco(_mod), slot)` for GC-able
 types (a userdata owner) — so module-variable writes from Lua are
 type-checked, located at the variable's declaration; assigning to a
-function or record namespace errors. The metatable (registry name
+function or nominal namespace errors. The metatable (registry name
 `"Titan module interop metatable"`, `__metatable` protected with the
 string `"Titan module interop"`) is created whenever the module exports
 **any** member — functions now route through it too, so essentially every
@@ -490,6 +507,7 @@ inventory:
 | `"Titan module <modname>"` | the module `Udata` (`_init`'s idempotency check) |
 | `"Titan module <modname> metatable"` | the module `Udata`'s member metatable (only if the module exports anything) |
 | `"Titan record <fqtn> metatable"` | the record metatable (`luaL_newmetatable`) — also the record's type identity (a type check compares `uvalue(v)->metatable`) |
+| `"Titan union <fqtn> metatable"` | the union metatable and exact nominal identity; its `__index` exposes only methods and its `__newindex` rejects writes |
 | the metatable pointer itself (via `lua_rawsetp`) | the FQTN string — the reverse map, metatable → name, used only in error messages |
 | `TITAN_ROOT_KEY` (`"9efb91a8-4a1b-4bdb-aa6b-b84d9ed1dd77"`) | the normalized Titan SDK/rocks-tree root cached by `titan_init_paths`/`pushroot`; current supported installs discover it through the equal Lua `PREFIX` |
 | `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path (cached by `pushpath`) |
@@ -510,7 +528,7 @@ The UUID-string constants are defined in `titan-runtime/titan.h`.
 
 ## Four shared-library loading paths
 
-The 0.18 layout has four deliberately separate paths. They share the ordinary
+The 0.19 layout has four deliberately separate paths. They share the ordinary
 per-logical-module symbols but differ in selection, flags, cache, and whether
 module initialization runs.
 
@@ -546,8 +564,8 @@ Udata* (*some_dep_init)(lua_State *L) =
         loadsym(L, some_dep_handle, "some_dep_init"));
 ```
 
-`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_18`,
-`TITAN_PATH`, or `".;<root>/lib/titan/0.18"`, with `;;` splicing the
+`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_19`,
+`TITAN_PATH`, or `".;<root>/lib/titan/0.19"`, with `;;` splicing the
 ordinary default. It maps `dir/file` with `RTLD_LAZY | RTLD_GLOBAL`, caches
 the handle by relative provider for the state, invalidates native backtrace
 state, and never calls `dlclose`. Two logical modules in one image reuse the
@@ -584,7 +602,7 @@ eager load. A second Lua state repeats its own cache insertion and promotion
 request while the operating-system loader may reuse the mapped image.
 
 The installed standard layout has paired providers at
-`<root>/lib/titan/0.18/{titan.so,titan.a}` and nine generated shims below
+`<root>/lib/titan/0.19/{titan.so,titan.a}` and nine generated shims below
 `<root>/share/lua/5.5/titan/`; the shims use the DSO form. A direct-libuv
 extension explicitly imports
 `uv` and foreign-imports `uv.h`; Titan runtime initialization loads the
@@ -692,7 +710,7 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
   `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
   Titan module-path default from that root, and ensures
-  `<root>/lib/titan/0.18/?.so` is present in `package.cpath`. The
+  `<root>/lib/titan/0.19/?.so` is present in `package.cpath`. The
   prefix-configured Titan-owned Lua already places that template before its
   `lib/lua` entries. It then
   registers the module's `luaopen_` function in
@@ -742,14 +760,14 @@ The model is **checked at entry, unchecked inside**. Every value
 entering typed Titan code from Lua passes `checkandget`/`checkandset` at
 exactly these places: function/method/static arguments including `self`
 (`genluaentry`); module-variable writes from Lua (module `__newindex`);
-record-field writes from Lua (record `__newindex`); record metamethod
-receivers (record `__index`/`__newindex`); `value`→`T` conversions
+record-field writes from Lua (record `__newindex`); record and union
+metamethod receivers; `value`→`T` conversions
 inside Titan; and every Array/Map element read inside Titan — container
 interiors are never trusted, so each read re-checks the element type.
 
 On the way **out**, every value has one canonical Lua representation:
 numbers, strings, booleans and nil as-is; Maps as their ordinary Tables;
-Arrays as their proxy Udata; and records as their stable `Udata`. Identity is
+Arrays as their proxy Udata; and records/unions as their stable `Udata`. Identity is
 preserved and no container is copied. Between
 those edges, Titan code runs with no checks at all — Titan→Titan calls
 through an exactly tagged Titan closure use the native convention and trust

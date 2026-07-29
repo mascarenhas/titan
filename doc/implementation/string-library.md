@@ -283,6 +283,15 @@ patterns from `peg.define` with tightly typed AST and match-time callbacks from
 `peg.define_value`; a grammar construction error is therefore an initialization
 regression and is not caught or translated into a source diagnostic.
 
+The private regex AST is a local `RegexNode` union rather than a record with
+an integer kind field. Its variants are `empty`, `literal`, `any`, `class`,
+`sequence`, `choice`, `group`, `repetition`, `backreference`, `word_start`,
+and `word_end`. Scalar alternatives carry their source position directly;
+the others carry the existing private payload records
+(`RegexTextNode`, `RegexChildrenNode`, `RegexGroupNode`,
+`RegexRepeatNode`, or `RegexBackreferenceNode`). Constructors are called
+positionally, including record payloads in parentheses.
+
 The grammar recognizes complete atoms, escapes, classes, quantifiers, group
 delimiters, alternation, and anchors. Syntax punctuation is written as
 characters in the grammar or in named byte-set patterns rather than compared
@@ -317,12 +326,24 @@ Compilation is continuation-based. Each AST node is converted with the
 pattern that must follow it, which gives greedy repetition its required
 backtracking behavior. Ordered choice preserves left bias. Whole-expression
 anchors wrap the completed alternation instead of attaching to one branch.
+Position lookup, nullability, backreference validation, projected-size
+accounting, and continuation lowering dispatch through `case`/`when`. Each
+arm is an ordinary block and may bind the payload record; the defensive
+compiler passes retain `else` errors because `case` is intentionally
+non-exhaustive rather than acquiring an exhaustiveness proof.
 The translated construction follows `pegex.lua` from ta-regex commit
 `857e48682791ba55c98a7dd99c5fc7d71c02597d` and the algorithm in Marcelo
 Oikawa, Roberto Ierusalimschy, and Ana Lucia de Moura, [“Converting regexes to
 Parsing Expression
 Grammars”](https://www.inf.puc-rio.br/~roberto/docs/ry10-01.pdf), PUC-Rio,
 2010.
+
+`RegexNode` is local to the combined `titan.string` folder module, but its
+constructors and `case` uses span `regex_parser.titan` and
+`regex_compile.titan` through the ordinary shared module namespace. The
+conversion changes no public `Regex`, `RegexMatch`, function signature,
+logical provider key, or Lua API; it is production dogfooding of private
+unions, Array payloads, and cross-contributor nominal visibility.
 
 Before construction, the compiler:
 

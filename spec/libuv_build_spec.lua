@@ -157,13 +157,13 @@ end
 local function installed_stdlib_container()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.18/" .. STDLIB_CONTAINER
+    return prefix .. "/lib/titan/0.19/" .. STDLIB_CONTAINER
 end
 
 local function installed_stdlib_archive()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.18/" .. STDLIB_STATIC_ARCHIVE
+    return prefix .. "/lib/titan/0.19/" .. STDLIB_STATIC_ARCHIVE
 end
 
 local function quote(word)
@@ -234,7 +234,9 @@ local function public_declarations(path)
         if not node.islocal then
             local tag = node._tag
             local name
-            if tag == "Ast.TopLevelRecord" or tag == "Ast.TopLevelFunc" then
+            if tag == "Ast.TopLevelRecord" or
+                tag == "Ast.TopLevelUnion" or
+                tag == "Ast.TopLevelFunc" then
                 name = node.name
             elseif tag == "Ast.TopLevelVar" then
                 name = node.decl.name
@@ -259,6 +261,16 @@ local function local_record_declarations(path)
         end
     end
     return records
+end
+
+local function local_union_declarations(path)
+    local unions = {}
+    for _, node in ipairs(parsed_source(path)) do
+        if node._tag == "Ast.TopLevelUnion" and node.islocal then
+            unions[#unions + 1] = node.name
+        end
+    end
+    return unions
 end
 
 local function makefile_words(name)
@@ -1066,6 +1078,25 @@ describe("libuv Makefile configuration", function()
             end
         end)
 
+    it("keeps the regex AST union and its payload records private",
+        function()
+            assert.same({
+                "RegexCompileState",
+            }, local_record_declarations(
+                "titan/string/regex_compile.titan"))
+            assert.same({
+                "RegexTextNode", "RegexChildrenNode", "RegexGroupNode",
+                "RegexRepeatNode", "RegexBackreferenceNode", "ParsedRegex",
+                "RegexQuantifier", "RegexClassItem", "RegexParseFrame",
+                "RegexParseState",
+            }, local_record_declarations(
+                "titan/string/regex_parser.titan"))
+            assert.same({
+                "RegexNode",
+            }, local_union_declarations(
+                "titan/string/regex_parser.titan"))
+        end)
+
     it("keeps every private uv record with its semantic contributor",
         function()
             assert.same({}, local_record_declarations(UV_MAIN_SOURCE))
@@ -1615,7 +1646,7 @@ exit 64
             local build_log = root .. "/build.log"
 
             local payload = assert(staticmetadata.render(
-                "fixture.module", "0.18", "{}"))
+                "fixture.module", "0.19", "{}"))
             local initializer = assert(staticmetadata.c_initializer(payload))
             write_file(source, string.format([[
 #if defined(__APPLE__)
@@ -1722,7 +1753,7 @@ printf 'build\n' >> %s
                     tostring(code) .. ")")
                 assert.equal("build\nbuild\nbuild\n", read_file(build_log))
                 assert.truthy(staticmetadata.scan_archive(static_archive, {
-                    expected_abi = "0.18",
+                    expected_abi = "0.19",
                 }))
 
                 assert.truthy(os.remove(provider))

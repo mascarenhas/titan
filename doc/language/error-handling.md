@@ -35,7 +35,7 @@ marks a run-time type error.
 ## Raising errors
 
 `raise <exp>` raises a new run-time error. The expression may have any
-Titan type; it is coerced to `value`, so strings, numbers, records,
+Titan type; it is coerced to `value`, so strings, numbers, records, unions,
 arrays, maps, `nil`, and arbitrary Lua values can all be raised:
 
 ```lua
@@ -88,7 +88,8 @@ end
 
 The same trailers may appear on any construct whose body is a block:
 function bodies, `while` bodies, `repeat` bodies, numeric `for` bodies,
-`if`/`elseif`/`else` arms, anonymous function bodies, and nested
+`if`/`elseif`/`else` arms, union `when` arms and their `else`, anonymous
+function bodies, and nested
 `do ... end` blocks. Either clause may appear by itself; if both appear,
 `catch` comes before `finally`.
 
@@ -107,6 +108,11 @@ finally
     close_socket()
 end
 ```
+
+A union case binding is established outside its arm's protected block, so it
+is visible in that arm's body, catch, and finally. Locals declared inside the
+body remain hidden from those sibling clauses. Each arm is an independent
+error-handling boundary.
 
 The `catch` block has two implicit locals:
 
@@ -266,11 +272,12 @@ semantic rule:
 | option unwrap of `nil` | `FILE:LINE:COL: type error, expected T but found nil` |
 | array/map element read with wrong Lua value | `FILE:LINE:COL: type error, expected T but found U` |
 | unknown record field from Lua | `FILE:LINE:COL: field 'NAME' not found in record 'FQTN'` |
+| unknown union member from Lua | `FILE:LINE:COL: member 'NAME' not found in union 'FQTN'` |
 | unknown module member from Lua | `member 'NAME' does not exist in Titan module 'MOD'` |
 
 For details of each source, see the chapters that define the construct:
 [types](types.md), [option types](option-types.md),
-[arrays and maps](arrays-maps.md), [records](records.md),
+[arrays and maps](arrays-maps.md), [records](records.md), [unions](unions.md),
 [functions](functions.md), and [Lua interoperability](lua-interop.md).
 
 ## Recoverable failures: prefer options

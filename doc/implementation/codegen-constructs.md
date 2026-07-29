@@ -448,6 +448,45 @@ Records cross the Lua boundary unchanged — the value Titan computes with
 verifies the record metatable/type identity and uses the udata directly
 ([Lua interop internals](lua-interop-internals.md)).
 
+## Unions and `case`
+
+`coder._codeunioninit` allocates a zero-byte `Udata` whose metatable is the
+union identity. It requests one user value for an empty variant and two for a
+payload variant:
+
+```c
+Udata *_u = luaS_newudata(L, 0, 2);
+setuvalue(L, _slot, _u);              /* root before payload evaluation */
+_u->metatable = hvalue(&_mod->uv[META].uv);
+setivalue(&_u->uv[0].uv, TAG);        /* absolute zero-based variant tag */
+/* setslot(payload_type, &_u->uv[1].uv, payload), then a back barrier
+   when the payload may be collectable */
+```
+
+An Array payload stores its internal `Table *` backing in `uv[1]`; it is not
+boxed to the Lua proxy at this internal boundary. Empty variants do not
+allocate a dummy payload user value. Union/value boxing and exact metatable
+checks otherwise use the same nominal-identity path as records.
+
+`coder._codecase` evaluates and roots the scrutinee exactly once, reads
+`ivalue(&u->uv[0].uv)`, and emits a switch containing only
+`case TAG: goto ARM;` entries. Arm bodies and the optional/default body are
+labeled blocks outside that switch, each ending at a shared case-end label.
+There is therefore no fallthrough, and a Titan `break` inside an arm still
+targets its enclosing Titan loop rather than the implementation switch.
+Payload bindings extract `uv[1]` through the ordinary internal `getslot`
+conversion before the full arm block runs. Since those blocks use existing
+statement lowering, their `catch`, `finally`, and `defer` behavior is
+unchanged.
+
+Statement-list generation stops after `break` or the first statement whose
+checker decoration has `_always_returns = true`. The coder therefore consumes
+one shared reachability result for direct `return`/`raise` and for compound
+blocks, `if`, `try`, and `case`; it does not try to rediscover termination from
+only the immediate AST tag. This boundary is necessary because the checker
+does not visit a dead tail after an always-returning compound, so those nodes
+have no type/declaration decorations to generate safely.
+
 ## Strings
 
 **Literals** compile to `luaS_new(L, "<escaped>")` (`makestring`,
@@ -629,8 +668,8 @@ complete inventory of conversions:
    name for primitives, the registry-mapped record name for foreign
    records), and for integer targets fed a fractional float,
    `%s:%d:%d: type error, number '%f' has no integer representation`.
-3. **T → `value`**: `setboxed` into a `TValue` temp — records remain their
-   Udata and Arrays become their canonical proxy. No new slot: the source
+3. **T → `value`**: `setboxed` into a `TValue` temp — records and unions
+   remain their Udata and Arrays become their canonical proxy. No new slot: the source
    stays anchored where it was.
 4. **integer → float**: `((lua_Number)<exp>)`.
 5. **anything → boolean**: `toboolean(type, exp)`.
@@ -673,7 +712,7 @@ aggregate.
 * A boxed `value` target mirrors `checkandget`: integer tests accept an integer
   tag or an exact integral float that passes `lua_numbertointeger`; float tests
   accept either numeric tag; primitive/Map tests use `ttis*`; Array, nominal
-  record, and owned-C tests compare the same exact metatable; C pointer targets
+  record/union, and owned-C tests compare the same exact metatable; C pointer targets
   distinguish ordinary lightuserdata from the Lua-internal `Udata *`
   full-userdata case.
 * A target `Option(T)` first accepts nil, then mirrors `checkandset(T, ...)`.

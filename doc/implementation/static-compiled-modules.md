@@ -1,9 +1,9 @@
 # Static compiled modules
 
 Static compiled modules extend the compiled-module loader and native-output
-pipeline without changing Titan's AST, type tags, serialized `Type.Module`,
-or native calling convention. The static-provider feature shipped within ABI
-0.16; current artifacts carry ABI 0.18. One checked interface can now come
+pipeline without giving archives a different logical interface or native
+calling convention from DSOs. The static-provider feature shipped within ABI
+0.16; current artifacts carry ABI 0.19. One checked interface can now come
 from a DSO's callable metadata or from a canonical section embedded in an
 archive member.
 
@@ -68,7 +68,7 @@ feed the callable `_types` entry and:
 -- Titan archive module metadata v1
 return {
     ["pkg.left"] = {
-        abi = "0.18",
+        abi = "0.19",
         types = "Module('pkg.left', ...)",
     },
 }
@@ -88,7 +88,10 @@ payload equality.
 The driver checks the ABI before evaluating the serialized type expression,
 evaluates that expression with `types` as the constructor environment, and
 applies the same recursive `Type.Module` schema validation used for DSO
-metadata. The decoded module name and canonical logical `.so` filename must
+metadata. That closed validation includes union/variant owner, tag,
+constructor, namespace, callable-name, and value-facing-wrapper invariants;
+`Type.Variant` is legal only in its owning union's variant list. The decoded
+module name and canonical logical `.so` filename must
 match the key. An archive path is never stored in `Type.Module.file`.
 
 The empty environment is a declarative-artifact contract, not a hostile-code
@@ -336,22 +339,28 @@ removal. Titan never scans a directory and never removes an unrecognized Lua
 file.
 
 The canonical standard installation places `titan.so` and `titan.a` together
-under `lib/titan/0.18`. Bootstrap remains DSO-only; post-install recognizes
-bootstrap, a complete active-0.18 DSO/shim set without an archive, and
-complete-pair predecessor states. A separately versioned 0.17 installation is
-preserved, not treated as an active-layout predecessor.
+under `lib/titan/0.19`. Bootstrap remains DSO-only; post-install recognizes
+bootstrap, a complete active-0.19 DSO/shim set without an archive, and
+complete-pair predecessor states. Separately versioned 0.17 and 0.18
+installations are preserved, not treated as active-layout predecessors.
 
 ABI 0.17 keeps the serialized `Array(...)` text and exact `Table *` /
 `Table **` native shapes but changes the represented Array protocol, so
 embedded and callable metadata must reject 0.16 providers before linking them.
 See [Dense Arrays](dense-arrays.md#abi-017-boundary).
 
-ABI 0.18 preserves that Array protocol but changes the standard-library static
+ABI 0.18 preserved that Array protocol but changed the standard-library static
 runtime contract. Its logical archive objects directly reference promoted
 libuv callback trampolines and no longer reference the replaced
 libuv/coroutine helpers. Static validation must therefore reject a 0.17
-provider before native linking; a 0.18 provider and runtime are distributed
-together.
+provider before native linking; a 0.18 provider and runtime had to be
+distributed together.
+
+ABI 0.19 keeps the metadata section/container format, but its serialized
+payload language gains `Union` and `Variant`, and its module-state contract
+gains the public nominal-static slot prefix. The marker is checked before
+either schema decoding or native linking, so a 0.18 archive cannot be
+misinterpreted as a 0.19 owner/closure layout.
 
 Bundled libuv enters as shared `-X` provider payload and is present in both
 native forms. System libuv remains a repeated final-link setting and never

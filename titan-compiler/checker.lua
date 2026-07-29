@@ -1217,23 +1217,24 @@ local function module_udata_pointer_type(st)
         {})
 end
 
-local function record_module(fqtn)
+local function nominal_module(fqtn)
     return fqtn:match("^(.*)%.[^.]+$")
 end
 
-local function is_record_visible_from(st, fqtn)
-    local record = types.registry[fqtn]
-    return record and (not record.islocal or record_module(fqtn) == st.modname)
+local function is_nominal_visible_from(st, fqtn)
+    local nominal = types.registry[fqtn]
+    return nominal
+        and (not nominal.islocal or nominal_module(fqtn) == st.modname)
 end
 
-local function is_record_member_visible_from(st, member)
-    return not member.islocal or record_module(member.fqtn) == st.modname
+local function is_nominal_member_visible_from(st, member)
+    return not member.islocal or nominal_module(member.fqtn) == st.modname
 end
 
 local function visible_record_fields(record, st)
     local out = {}
     for _, field in ipairs(record.fields) do
-        if is_record_member_visible_from(st, field) then
+        if is_nominal_member_visible_from(st, field) then
             table.insert(out, field)
         end
     end
@@ -1279,6 +1280,12 @@ typefromnode = util.make_visitor({
 
     ["Ast.TypeQualName"] = function(node, st, errors)
         local mod = st:find_symbol(node.module)
+        if node._contextual_c_name and mod and mod._type
+           and mod._type._tag ~= "Type.CModule" then
+            return invalid(errors, node.loc,
+                "Titan keyword '%s' is only contextual for a C type",
+                node.name)
+        end
         if mod and mod._type and mod._type._tag == "Type.Module" then
             local alias = mod._type.type_members
                 and mod._type.type_members[node.name]
@@ -1291,13 +1298,15 @@ typefromnode = util.make_visitor({
                 return invalid(errors, node.loc,
                     "type '%s' not found inside module '%s'",
                     node.name, mod._type.name)
-            elseif member.type._tag ~= "Type.Record" then
+            elseif member.type._tag ~= "Type.Record"
+               and member.type._tag ~= "Type.Union" then
                 return invalid(errors, node.loc,
-                    "member '%s' inside module '%s' is not a record type",
+                    "member '%s' inside module '%s' is not a nominal type",
                     node.name, mod._type.name)
-            elseif not is_record_visible_from(st, fqtn) then
+            elseif not is_nominal_visible_from(st, fqtn) then
                 return invalid(errors, node.loc,
-                    "record type '%s' is local to module '%s'",
+                    "%s type '%s' is local to module '%s'",
+                    member.type._tag == "Type.Record" and "record" or "union",
                     node.name, mod._type.name)
             end
             return types.Nominal(fqtn)
@@ -1309,6 +1318,16 @@ typefromnode = util.make_visitor({
             return invalid(errors, node.loc,
                 "C type '%s' not found inside foreign module '%s'",
                 node.name, mod._type.name)
+        elseif mod and mod._type and mod._type._tag == "Type.Union" then
+            local member = mod._type.variants[node.name]
+                or mod._type.functions[node.name]
+                or mod._type.methods[node.name]
+            if member then
+                return invalid(errors, node.loc,
+                    "union member '%s.%s' is not a type; use union type '%s' "
+                    .. "or a case statement",
+                    node.module, node.name, node.module)
+            end
         end
         return invalid(errors, node.loc, "module '%s' referenced by type not found", node.module)
     end,
@@ -2818,7 +2837,7 @@ end
 --   st: symbol table
 --   errors: list of compile-time errors
 --   returns whether statement always returns from its function (always false for repeat/until)
-checkstat = util.make_visitor({
+local checkstat_visitor = util.make_visitor({
     ["Ast.StatDecl"] = function(node, st, errors)
         -- The parser reserves an empty RHS for the one-declaration automatic
         -- C-object form. It is not an arity-adjusted expression list: the
@@ -3191,6 +3210,92 @@ checkstat = util.make_visitor({
         return true
     end,
 
+    ["Ast.StatCase"] = function(node, st, errors)
+        checkexp(node.exp, st, errors)
+        node.exp = tryforce(node.exp)
+
+        local union
+        local scrutinee_type = node.exp._type
+        if scrutinee_type._tag ~= "Type.Nominal" then
+            checker.typeerror(errors, node.exp.loc,
+                "case expression must have a union type, but found '%s'",
+                types.tostring(scrutinee_type))
+        else
+            local owner = types.registry[scrutinee_type.fqtn]
+            if not owner then
+                checker.typeerror(errors, node.exp.loc,
+                    "union type '%s' in case expression does not exist",
+                    scrutinee_type.fqtn)
+            elseif owner._tag ~= "Type.Union" then
+                checker.typeerror(errors, node.exp.loc,
+                    "case expression must have a union type, but found '%s'",
+                    types.tostring(scrutinee_type))
+            elseif not is_nominal_visible_from(st, scrutinee_type.fqtn) then
+                checker.typeerror(errors, node.exp.loc,
+                    "union type '%s' is local to module '%s'",
+                    scrutinee_type.fqtn,
+                    nominal_module(scrutinee_type.fqtn))
+            else
+                union = owner
+                node._union = owner
+            end
+        end
+
+        local seen_variants = {}
+        local all_return = true
+        for _, arm in ipairs(node.arms) do
+            st:open_block()
+            local variant = union and union.variants[arm.name] or nil
+            if variant
+               and not is_nominal_member_visible_from(st, variant) then
+                variant = nil
+            end
+            if not variant then
+                checker.typeerror(errors, arm.loc,
+                    "variant '%s' not found in union '%s'",
+                    arm.name,
+                    union and union.name or types.tostring(scrutinee_type))
+            else
+                local previous = seen_variants[variant]
+                if previous then
+                    checker.typeerror(errors, arm.loc,
+                        "duplicate case arm for variant '%s', previous one at %s",
+                        arm.name, location.format(previous.loc))
+                else
+                    seen_variants[variant] = arm
+                end
+                arm._variant = variant
+                arm._variant_index = variant.index
+            end
+
+            if arm.binding then
+                if not variant then
+                    arm.binding._type = types.Invalid()
+                elseif variant.payload == false then
+                    arm.binding._type = types.Invalid()
+                    checker.typeerror(errors, arm.binding.loc,
+                        "empty variant '%s.%s' has no payload to bind",
+                        union.name, variant.name)
+                else
+                    arm.binding._type = variant.payload
+                end
+                declare(arm.binding, st, errors)
+            end
+
+            local arm_returns = checkstat(arm.block, st, errors)
+            if not arm_returns then all_return = false end
+            st:close_block()
+        end
+
+        if node.elseblock then
+            local else_returns = checkstat(node.elseblock, st, errors)
+            if not else_returns then all_return = false end
+        else
+            all_return = false
+        end
+        return all_return
+    end,
+
     ["Ast.StatIf"] = function(node, st, errors)
         local ret = true
         for _, thn in ipairs(node.thens) do
@@ -3205,6 +3310,15 @@ checkstat = util.make_visitor({
         return ret
     end,
 })
+
+-- Preserve the existing reachability result on every checked statement.
+-- Compound coders need the same fact even when checkblock short-circuits after
+-- an earlier always-returning child.
+checkstat = function(node, st, errors)
+    local ret = checkstat_visitor(node, st, errors)
+    node._always_returns = ret and true or false
+    return ret
+end
 
 --
 -- Var
@@ -3270,6 +3384,15 @@ checkvar = util.make_visitor({
         end
         node.exp = tryforce(node.exp)
         local ltype = node.exp._type
+        if node._contextual_c_name
+           and ltype._tag ~= "Type.CModule"
+           and not types.is_direct_c(ltype)
+           and not is_c_type_namespace(node.exp) then
+            node._type = invalid(errors, node.loc,
+                "Titan keyword '%s' is only contextual for a C member",
+                node.name)
+            return
+        end
         if ltype._tag == "Type.Module" or ltype._tag == "Type.CModule" then
             local mod = ltype
             if mod.members[node.name] then
@@ -3293,38 +3416,66 @@ checkvar = util.make_visitor({
                     "member '%s' not found inside module '%s'",
                     node.name, mod.name)
             end
-        elseif ltype._tag == "Type.Record" then
+        elseif ltype._tag == "Type.Record"
+           or ltype._tag == "Type.Union" then
             local decl = ltype.functions[node.name]
             if decl then
-                if not is_record_member_visible_from(st, decl) then
+                if not is_nominal_member_visible_from(st, decl) then
+                    local kind = ltype._tag == "Type.Record"
+                        and "record" or "union"
                     node._type = invalid(errors, node.loc,
-                        "record function '%s.%s' is local to module '%s'",
-                        ltype.name, node.name, record_module(ltype.name))
+                        "%s function '%s.%s' is local to module '%s'",
+                        kind, ltype.name, node.name,
+                        nominal_module(ltype.name))
                 else
                     node._decl = decl
                     node._type = types.Function(decl.params, decl.rettypes, false,
                         decl.varargtype, decl.flexrettype)
+                    -- Preserve the physical imported-module userdata that owns
+                    -- a qualified namespace (`m.Rec.static` / `m.U.variant`).
+                    -- Direct calls already recover this through the nested
+                    -- VarDot shape; first-class selector reads need an explicit
+                    -- stable decoration once checking has resolved the static.
+                    local namespace = node.exp._tag == "Ast.ExpVar"
+                        and node.exp.var or nil
+                    local import_var = namespace
+                        and namespace._tag == "Ast.VarDot"
+                        and namespace.exp
+                        and namespace.exp._tag == "Ast.ExpVar"
+                        and namespace.exp.var or nil
+                    if import_var and import_var._decl
+                       and import_var._decl._tag == "Ast.TopLevelImport" then
+                        node._import_decl = import_var._decl
+                    end
                 end
             else
+                local kind = ltype._tag == "Type.Record"
+                    and "record" or "union"
                 node._type = invalid(errors, node.loc,
-                    "trying to access invalid record function '%s'", node.name)
+                    "trying to access invalid %s function '%s'",
+                    kind, node.name)
             end
         elseif ltype._tag == "Type.Nominal" then
             local type = types.registry[ltype.fqtn]
             if not type then
                 node._type = invalid(errors, node.loc,
                     "type '%s' not found", ltype.fqtn)
-            elseif not is_record_visible_from(st, ltype.fqtn) then
+            elseif not is_nominal_visible_from(st, ltype.fqtn) then
                 node._type = invalid(errors, node.loc,
                     "record type '%s' is local to module '%s'",
-                    ltype.fqtn, record_module(ltype.fqtn))
+                    ltype.fqtn, nominal_module(ltype.fqtn))
+            elseif type._tag == "Type.Union" then
+                node._type = invalid(errors, node.loc,
+                    "union value of type '%s' has no fields; use a case statement",
+                    ltype.fqtn)
             elseif type._tag ~= "Type.Record" then
                 node._type = invalid(errors, node.loc,
                     "trying to access field '%s' of type '%s' that is not a record but '%s'",
                     node.name, ltype.fqtn, type._tag)
             else
                 for _, field in ipairs(type.fields) do
-                    if field.name == node.name and is_record_member_visible_from(st, field) then
+                    if field.name == node.name
+                       and is_nominal_member_visible_from(st, field) then
                         node._decl = field
                         node._type = field.type
                         break
@@ -4126,6 +4277,49 @@ checkexp = util.make_visitor({
         node._type = types.String()
     end,
 
+    ["Ast.ExpUnionInit"] = function(node, st, errors, _)
+        local owner_node = st:find_symbol(node.owner)
+        local union = owner_node and owner_node._type
+        local variant = node.variant and node.variant._type
+        if not owner_node or owner_node._tag ~= "Ast.TopLevelUnion"
+           or not union or union._tag ~= "Type.Union" then
+            node._type = invalid(errors, node.loc,
+                "invalid synthesized union constructor owner '%s'",
+                tostring(node.owner))
+            if node.value then checkexp(node.value, st, errors) end
+            return
+        elseif not variant or variant._tag ~= "Type.Variant"
+           or variant.fqtn ~= union.name
+           or union.variants[variant.name] ~= variant then
+            node._type = invalid(errors, node.loc,
+                "invalid synthesized variant constructor for union '%s'",
+                union.name)
+            if node.value then checkexp(node.value, st, errors) end
+            return
+        end
+
+        node._union = union
+        node._variant = variant
+        if variant.payload == false then
+            if node.value then
+                checkexp(node.value, st, errors)
+                checker.typeerror(errors, node.loc,
+                    "empty variant '%s.%s' cannot receive a payload",
+                    union.name, variant.name)
+            end
+        elseif not node.value then
+            checker.typeerror(errors, node.loc,
+                "payload variant '%s.%s' is missing its synthesized value",
+                union.name, variant.name)
+        else
+            checkexp(node.value, st, errors, variant.payload)
+            node.value = trycoerce(node.value, variant.payload, errors)
+            checkmatch("payload of variant " .. variant.name,
+                variant.payload, node.value._type, errors, node.loc)
+        end
+        node._type = types.Nominal(union.name)
+    end,
+
     ["Ast.ExpInitList"] = function(node, st, errors, context)
         context = context and deoptionize(context)
         local shape, kinds, dots_field, invalid_dots =
@@ -4227,10 +4421,29 @@ checkexp = util.make_visitor({
                 end
             else
                 local record = types.registry[context.fqtn]
-                if record.islocal and record_module(context.fqtn) ~= st.modname then
+                if record._tag == "Type.Union" then
+                    node._type = invalid(errors, node.loc,
+                        "union type '%s' cannot be constructed with a record "
+                        .. "initializer; call one of its variant constructors",
+                        context.fqtn)
+                    for _, field in ipairs(node.fields) do
+                        checkexp(field.exp, st, errors)
+                    end
+                    return
+                elseif record._tag ~= "Type.Record" then
+                    node._type = invalid(errors, node.loc,
+                        "nominal type '%s' is not a record type",
+                        context.fqtn)
+                    for _, field in ipairs(node.fields) do
+                        checkexp(field.exp, st, errors)
+                    end
+                    return
+                end
+                if record.islocal
+                   and nominal_module(context.fqtn) ~= st.modname then
                     node._type = invalid(errors, node.loc,
                         "record type '%s' is local to module '%s'",
-                        context.fqtn, record_module(context.fqtn))
+                        context.fqtn, nominal_module(context.fqtn))
                     for _, field in ipairs(node.fields) do
                         checkexp(field.exp, st, errors)
                     end
@@ -4240,7 +4453,7 @@ checkexp = util.make_visitor({
                 if (record.nfields or #record.fields) > #visible_fields then
                     node._type = invalid(errors, node.loc,
                         "cannot construct record type '%s' outside module '%s' because it has local fields",
-                        context.fqtn, record_module(context.fqtn))
+                        context.fqtn, nominal_module(context.fqtn))
                     for _, field in ipairs(node.fields) do
                         checkexp(field.exp, st, errors)
                     end
@@ -4334,10 +4547,11 @@ checkexp = util.make_visitor({
                     decl._valref = true
                 end
             end
-        elseif texp._tag == "Type.Record" then
+        elseif texp._tag == "Type.Record" or texp._tag == "Type.Union" then
+            local kind = texp._tag == "Type.Record" and "record" or "union"
             node._type = invalid(errors, node.loc,
-                "trying to access record type '%s' as a first-class value",
-                texp.name)
+                "trying to access %s type '%s' as a first-class value",
+                kind, texp.name)
         else
             node._type = texp
         end
@@ -4804,27 +5018,30 @@ checkexp = util.make_visitor({
             end
             if otype._tag == "Type.Nominal" and
                types.registry[otype.fqtn] and
-               types.registry[otype.fqtn]._tag == "Type.Record" then
+               (types.registry[otype.fqtn]._tag == "Type.Record"
+                or types.registry[otype.fqtn]._tag == "Type.Union") then
                 local class = types.registry[otype.fqtn]
+                local owner_kind = class._tag == "Type.Record"
+                    and "record" or "union"
                 local method_name_text = node.args.method
-                if not is_record_visible_from(st, otype.fqtn) then
+                if not is_nominal_visible_from(st, otype.fqtn) then
                     node._type = invalid(errors, node.loc,
-                        "record type '%s' is local to module '%s'",
-                        otype.fqtn, record_module(otype.fqtn))
+                        "%s type '%s' is local to module '%s'",
+                        owner_kind, otype.fqtn, nominal_module(otype.fqtn))
                     check_call_argument_expressions(node.args, st, errors)
                     return
                 elseif not class.methods[method_name_text] then
                     node._type = invalid(errors, node.loc,
-                        "method '%s' not found in record '%s'",
-                        method_name_text, types.tostring(otype))
+                        "method '%s' not found in %s '%s'",
+                        method_name_text, owner_kind, types.tostring(otype))
                     check_call_argument_expressions(node.args, st, errors)
                     return
                 end
                 local ftype = class.methods[method_name_text]
-                if not is_record_member_visible_from(st, ftype) then
+                if not is_nominal_member_visible_from(st, ftype) then
                     node._type = invalid(errors, node.loc,
                         "method '%s:%s' is local to module '%s'",
-                        class.name, method_name_text, record_module(class.name))
+                        class.name, method_name_text, nominal_module(class.name))
                     check_call_argument_expressions(node.args, st, errors)
                     return
                 end
@@ -5037,21 +5254,24 @@ checkexp = util.make_visitor({
                 "a foreign (C) method cannot be used as a first-class value")
         elseif otype._tag == "Type.Nominal" and
            types.registry[otype.fqtn] and
-           types.registry[otype.fqtn]._tag == "Type.Record" then
+           (types.registry[otype.fqtn]._tag == "Type.Record"
+            or types.registry[otype.fqtn]._tag == "Type.Union") then
             local class = types.registry[otype.fqtn]
+            local owner_kind = class._tag == "Type.Record"
+                and "record" or "union"
             local mtype = class.methods[node.name]
-            if not is_record_visible_from(st, otype.fqtn) then
+            if not is_nominal_visible_from(st, otype.fqtn) then
                 node._type = invalid(errors, node.loc,
-                    "record type '%s' is local to module '%s'",
-                    otype.fqtn, record_module(otype.fqtn))
+                    "%s type '%s' is local to module '%s'",
+                    owner_kind, otype.fqtn, nominal_module(otype.fqtn))
             elseif not mtype then
                 node._type = invalid(errors, node.loc,
-                    "method '%s' not found in record '%s'",
-                    node.name, types.tostring(otype))
-            elseif not is_record_member_visible_from(st, mtype) then
+                    "method '%s' not found in %s '%s'",
+                    node.name, owner_kind, types.tostring(otype))
+            elseif not is_nominal_member_visible_from(st, mtype) then
                 node._type = invalid(errors, node.loc,
                     "method '%s:%s' is local to module '%s'",
-                    class.name, node.name, record_module(class.name))
+                    class.name, node.name, nominal_module(class.name))
             else
                 node._method = mtype
                 node._type = types.Function(mtype.params, mtype.rettypes, false,
@@ -5268,12 +5488,24 @@ end
 --   st: symbol table
 --   errors: list of compile-time errors
 local function checkmethod(node, st, errors)
-    local self = ast.Decl(node.loc, "self", ast.TypeName(node.loc, node._record.name), false)
+    local self = ast.Decl(node.loc, "self",
+        ast.TypeName(node.loc, node._nominal_owner.name), false)
     node._self = self
     self._type = typefromnode(self.type, st, errors)
     -- `self` is declared into this method's own frame (inside checkfuncbody), so
     -- a lambda nested in the method body captures it like any parameter.
     checkfuncbody(node, st, errors, { self_decl = self })
+end
+
+local function check_user_value_slot_type(
+        owner_kind, owner_name, member_kind, member_name, typ, loc, errors)
+    checktype(typ, loc, errors)
+    if not types.has_tvalue_representation(typ) then
+        checker.typeerror(errors, loc,
+            "%s %s '%s' in %s '%s' cannot have type '%s' because it has no TValue representation",
+            owner_kind, member_kind, member_name, owner_kind, owner_name,
+            types.tostring(typ))
+    end
 end
 
 -- Checks function bodies
@@ -5293,13 +5525,38 @@ local function checkbodies(ast, st, errors)
                    node._tag == "Ast.StatBlock" then
                 checkinitializer(node, st, errors)
             elseif node._tag == "Ast.TopLevelRecord" then
-                local fields = node._type.fields
-                for i, field in ipairs(fields) do
-                    local ftype = field.type
-                    checktype(ftype, node.fields[i].loc, errors)
+                for _, field in ipairs(node.fields) do
+                    if field._type then
+                        check_user_value_slot_type(
+                            "record", node.name, "field", field.name,
+                            field._type, field.loc, errors)
+                    end
+                end
+            elseif node._tag == "Ast.TopLevelUnion" then
+                for _, variant in ipairs(node.variants) do
+                    if variant._type and variant._type.payload ~= false then
+                        check_user_value_slot_type(
+                            "union", node.name, "variant", variant.name,
+                            variant._type.payload,
+                            variant.payload.loc or variant.loc, errors)
+                    end
                 end
             elseif node._tag == "Ast.TopLevelTypeAlias" then
                 checktype(node._type, node.type.loc or node.loc, errors)
+            end
+        end
+    end
+end
+
+local function validate_union_source_projections(ast, errors)
+    for _, node in ipairs(ast) do
+        if node._tag == "Ast.TopLevelUnion" and not node._ignore then
+            local projection, err =
+                types.validate_union_source_projection(node._type)
+            if not projection then
+                checker.typeerror(errors, node.loc,
+                    "invalid public projection for union '%s': %s",
+                    node.name, err)
             end
         end
     end
@@ -5313,11 +5570,37 @@ local function isconstructor(node)
     if decl._tag == "Type.CPseudoNew" then
         return true
     end
-    return decl._tag == "Type.StaticMethod"
-        and #decl.rettypes == 1
-        and not decl.flexrettype
-        and decl.rettypes[1]._tag == "Type.Nominal"
-        and decl.rettypes[1].fqtn == decl.fqtn
+    if decl._tag ~= "Type.StaticMethod"
+       or decl.varargtype or decl.flexrettype
+       or #decl.rettypes ~= 1
+       or decl.rettypes[1]._tag ~= "Type.Nominal"
+       or decl.rettypes[1].fqtn ~= decl.fqtn then
+        return false
+    end
+
+    local owner = types.registry[decl.fqtn]
+    if not owner or owner.functions[decl.name] ~= decl then
+        return false
+    elseif owner._tag == "Type.Record" then
+        if decl.name ~= "new" or #decl.params ~= #owner.fields then
+            return false
+        end
+        for index, field in ipairs(owner.fields) do
+            if not types.equals(decl.params[index], field.type) then
+                return false
+            end
+        end
+        return true
+    elseif owner._tag == "Type.Union" then
+        local variant = owner.variants[decl.name]
+        if not variant or decl.paramnames ~= false then return false end
+        if variant.payload == false then
+            return #decl.params == 0
+        end
+        return #decl.params == 1
+            and types.equals(decl.params[1], variant.payload)
+    end
+    return false
 end
 
 -- Verify if an expression is constant
@@ -5416,7 +5699,8 @@ local function toplevel_name(node)
         -- from the ordinary top-level duplicate/value-symbol machinery.
         return nil
     elseif tag == "Ast.TopLevelFunc" or
-           tag == "Ast.TopLevelRecord" then
+           tag == "Ast.TopLevelRecord" or
+           tag == "Ast.TopLevelUnion" then
         return node.name
     elseif tag == "Ast.TopLevelMethod" or tag == "Ast.TopLevelStatic" then
         return nil
@@ -5656,6 +5940,7 @@ local toplevel_visitor = util.make_visitor({
                 nameset[field.name] = true
                 local ftype = typefromnode(field.type, st, errors)
                 table.insert(ftypes, ftype)
+                field._type = ftype
                 -- 0-based field index: a record instance is a Udata whose
                 -- user values hold the fields directly (uv[0..N-1]); Lua never
                 -- sees these indices, so there is no reserved uv[0].
@@ -5669,133 +5954,200 @@ local toplevel_visitor = util.make_visitor({
         types.registry[fqtn] = node._type
     end,
 
+    ["Ast.TopLevelUnion"] = function(node, st, errors)
+        local variants = {}
+        local nameset = {}
+        local fqtn = st.modname .. "." .. node.name
+        if #node.variants == 0 then
+            checker.typeerror(errors, node.loc,
+                "union '%s' must declare at least one variant", node.name)
+        end
+        for index, variant in ipairs(node.variants) do
+            if nameset[variant.name] then
+                checker.typeerror(errors, variant.loc,
+                    "redeclaration of variant '%s' in union '%s'",
+                    variant.name, node.name)
+                variant._ignore = true
+            else
+                nameset[variant.name] = variant
+                local payload = variant.payload
+                    and typefromnode(variant.payload, st, errors)
+                    or false
+                local tvariant = types.Variant(
+                    fqtn, variant.name, payload, index - 1)
+                tvariant.islocal =
+                    (node.islocal or variant.islocal) and true or false
+                variant._type = tvariant
+                table.insert(variants, tvariant)
+            end
+        end
+        node._type = types.Union(
+            fqtn, variants, {}, {}, #node.variants)
+        node._type.islocal = node.islocal and true or false
+        types.registry[fqtn] = node._type
+    end,
+
     ["Ast.TopLevelStatic"] = function(node, st, errors)
-        local record = st:find_symbol(node.class)
-        if not record then
+        local owner = st:find_symbol(node.class)
+        if not owner then
             node._ignore = true
             checker.typeerror(errors, node.loc,
                 "record referenced by record function declaration '%s.%s' does not exist",
                 node.class, node.name)
             return
         end
-        if record._tag ~= "Ast.TopLevelRecord" then
+        if owner._tag ~= "Ast.TopLevelRecord"
+           and owner._tag ~= "Ast.TopLevelUnion" then
             node._ignore = true
             checker.typeerror(errors, node.loc,
                 "member referenced by record function declaration '%s.%s' is not a record",
                 node.class, node.name)
             return
         end
-        local rectype = record._type
-        for _, field in ipairs(rectype.fields) do
-            if field.name == node.name then
+        local ownertype = owner._type
+        local owner_kind = ownertype._tag == "Type.Record"
+            and "record" or "union"
+        if ownertype._tag == "Type.Record" then
+            for _, field in ipairs(ownertype.fields) do
+                if field.name == node.name then
+                    node._ignore = true
+                    checker.typeerror(errors, node.loc,
+                    "cannot declare record function '%s.%s' as field '%s' exists in record '%s'",
+                        node.class, node.name, field.name, node.class)
+                    return
+                end
+            end
+        end
+        if ownertype.methods[node.name] then
+            node._ignore = true
+            checker.typeerror(errors, node.loc,
+                "cannot declare %s function '%s.%s' as method '%s:%s' exists in %s '%s'",
+                    owner_kind, node.class, node.name, node.class, node.name,
+                    owner_kind, node.class)
+            return
+        end
+        if ownertype.functions[node.name] then
+            node._ignore = true
+            checker.typeerror(errors, node.loc,
+                "redeclaration of %s function '%s.%s'",
+                owner_kind, node.class, node.name)
+            return
+        end
+        if node._union_constructor then
+            local variant = node._union_variant
+            if not variant or variant._ignore or not variant._type
+               or ownertype._tag ~= "Type.Union"
+               or ownertype.variants[node.name] ~= variant._type then
                 node._ignore = true
-                checker.typeerror(errors, node.loc,
-                "cannot declare record function '%s.%s' as field '%s' exists in record '%s'",
-                    node.class, node.name, field.name, node.class)
                 return
             end
         end
-        if rectype.methods[node.name] then
-            node._ignore = true
-            checker.typeerror(errors, node.loc,
-                "cannot declare record function '%s.%s' as method '%s:%s' exists in record '%s'",
-                    node.class, node.name, node.class, node.name, node.class)
-            return
-        end
-        if rectype.functions[node.name] then
-            node._ignore = true
-            checker.typeerror(errors, node.loc,
-                "redeclaration of record function '%s.%s'", node.class, node.name)
-            return
-        end
-        node._record = record
+        if owner.islocal then node.islocal = true end
+        node._nominal_owner = owner
         local ptypes, varargtype, paramnames = param_types(node.params, st, errors)
         local rettypes = {}
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
         local flexrettype = flexible_return_type(node, st, errors)
-        node._type = types.StaticMethod(rectype.name, node.name, ptypes, rettypes,
-            varargtype, flexrettype, paramnames)
+        local published_paramnames = paramnames
+        if node._union_constructor then
+            published_paramnames = false
+        end
+        node._type = types.StaticMethod(
+            ownertype.name, node.name, ptypes, rettypes,
+            varargtype, flexrettype,
+            published_paramnames)
         node._type.islocal = node.islocal and true or false
-        rectype.functions[node.name] = node._type
+        ownertype.functions[node.name] = node._type
     end,
 
     ["Ast.TopLevelMethod"] = function(node, st, errors)
-        local record = st:find_symbol(node.class)
-        if not record then
+        local owner = st:find_symbol(node.class)
+        if not owner then
             node._ignore = true
             checker.typeerror(errors, node.loc,
                 "record referenced by method declaration '%s:%s' does not exist",
                 node.class, node.name)
             return
         end
-        if record._tag ~= "Ast.TopLevelRecord" then
+        if owner._tag ~= "Ast.TopLevelRecord"
+           and owner._tag ~= "Ast.TopLevelUnion" then
             node._ignore = true
             checker.typeerror(errors, node.loc,
                 "member referenced by method declaration '%s:%s' is not a record",
                 node.class, node.name)
             return
         end
-        local rectype = record._type
-        for _, field in ipairs(rectype.fields) do
-            if field.name == node.name then
-                node._ignore = true
-                checker.typeerror(errors, node.loc,
-                "cannot declare method '%s:%s' as field '%s' exists in record '%s'",
-                    node.class, node.name, field.name, node.class)
-                return
+        local ownertype = owner._type
+        local owner_kind = ownertype._tag == "Type.Record"
+            and "record" or "union"
+        if ownertype._tag == "Type.Record" then
+            for _, field in ipairs(ownertype.fields) do
+                if field.name == node.name then
+                    node._ignore = true
+                    checker.typeerror(errors, node.loc,
+                    "cannot declare method '%s:%s' as field '%s' exists in record '%s'",
+                        node.class, node.name, field.name, node.class)
+                    return
+                end
             end
         end
-        if rectype.functions[node.name] then
+        if ownertype.functions[node.name] then
             node._ignore = true
             checker.typeerror(errors, node.loc,
-                "cannot declare method '%s:%s' as record function '%s.%s' exists in record '%s'",
-                    node.class, node.name, node.class, node.name, node.class)
+                "cannot declare method '%s:%s' as %s function '%s.%s' exists in %s '%s'",
+                    node.class, node.name, owner_kind, node.class, node.name,
+                    owner_kind, node.class)
             return
         end
-        if rectype.methods[node.name] then
+        if ownertype.methods[node.name] then
             node._ignore = true
             checker.typeerror(errors, node.loc,
                 "redeclaration of method '%s:%s'", node.class, node.name)
             return
         end
-        node._record = record
+        if owner.islocal then node.islocal = true end
+        node._nominal_owner = owner
         local ptypes, varargtype, paramnames = param_types(node.params, st, errors)
         local rettypes = {}
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
         local flexrettype = flexible_return_type(node, st, errors)
-        node._type = types.Method(rectype.name, node.name, ptypes, rettypes,
+        node._type = types.Method(ownertype.name, node.name, ptypes, rettypes,
             varargtype, flexrettype, paramnames)
         node._type.islocal = node.islocal and true or false
-        rectype.methods[node.name] = node._type
+        ownertype.methods[node.name] = node._type
     end,
 })
 
 -- Collect aliases before the signature pass so aliases may be used by earlier
--- functions, variables, records, and other aliases. Record declarations share
--- the type namespace, so an alias with a record's name is rejected; the record
--- remains authoritative because it also owns a run-time namespace and a
--- synthesized constructor.
+-- functions, variables, nominals, and other aliases. Record and union
+-- declarations share the type namespace, so an alias with a nominal's name is
+-- rejected; the nominal remains authoritative because it also owns a run-time
+-- namespace and synthesized constructor(s).
 local function collect_type_aliases(ast, st, errors)
-    local records = {}
+    local nominals = {}
     for _, node in ipairs(ast) do
-        if not node._ignore and node._tag == "Ast.TopLevelRecord"
-           and not records[node.name] then
-            records[node.name] = node
+        if not node._ignore
+           and (node._tag == "Ast.TopLevelRecord"
+                or node._tag == "Ast.TopLevelUnion")
+           and not nominals[node.name] then
+            nominals[node.name] = node
         end
     end
 
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelTypeAlias" then
-            local record = records[node.name]
+            local nominal = nominals[node.name]
             local previous = st:find_type_alias(node.name)
-            if record then
+            if nominal then
+                local kind = nominal._tag == "Ast.TopLevelRecord"
+                    and "record" or "union"
                 checker.typeerror(errors, node.loc,
-                    "type alias '%s' conflicts with record declared at %s",
-                    node.name, location.format(record.loc))
+                    "type alias '%s' conflicts with %s declared at %s",
+                    node.name, kind, location.format(nominal.loc))
                 node._ignore = true
             elseif previous then
                 checker.typeerror(errors, node.loc,
@@ -5840,11 +6192,11 @@ local function reserve_toplevel_names(ast, st)
     end
 end
 
--- The parser emits each record's marked, synthesized `new` immediately after
--- its record. Treat that constructor as part of the record declaration pass:
--- an earlier module variable or explicit record member can then use the
--- complete record namespace even when the written `record` appears later.
-local function collect_record_constructors(ast)
+-- The parser emits each nominal's marked synthesized constructor(s)
+-- immediately after its declaration. Treat them as part of the nominal
+-- declaration pass: an earlier module variable or explicit member can then use
+-- the complete namespace even when the written declaration appears later.
+local function collect_nominal_constructors(ast)
     local constructors = {}
     for index, node in ipairs(ast) do
         if node._tag == "Ast.TopLevelRecord" then
@@ -5855,6 +6207,21 @@ local function collect_record_constructors(ast)
                        constructor.name == "new")
                 if node._ignore then constructor._ignore = true end
                 constructors[#constructors + 1] = constructor
+            end
+        elseif node._tag == "Ast.TopLevelUnion" then
+            local offset = 1
+            while true do
+                local constructor = ast[index + offset]
+                if not constructor
+                   or constructor._tag ~= "Ast.TopLevelStatic"
+                   or not constructor._union_constructor
+                   or not constructor._union_variant then
+                    break
+                end
+                assert(constructor.class == node.name)
+                if node._ignore then constructor._ignore = true end
+                constructors[#constructors + 1] = constructor
+                offset = offset + 1
             end
         end
     end
@@ -5875,7 +6242,7 @@ end
 -- later module variables, preserving the only sequential declaration boundary.
 local function checktoplevel(ast, st, errors, loader)
     reserve_toplevel_names(ast, st)
-    local constructors = collect_record_constructors(ast)
+    local constructors = collect_nominal_constructors(ast)
 
     for _, node in ipairs(ast) do
         if not node._ignore and
@@ -5893,7 +6260,9 @@ local function checktoplevel(ast, st, errors, loader)
     end
 
     for _, node in ipairs(ast) do
-        if not node._ignore and node._tag == "Ast.TopLevelRecord" then
+        if not node._ignore
+           and (node._tag == "Ast.TopLevelRecord"
+                or node._tag == "Ast.TopLevelUnion") then
             visit_toplevel(node, st, errors, loader)
         end
     end
@@ -5917,7 +6286,8 @@ local function checktoplevel(ast, st, errors, loader)
             local tag = node._tag
             if (tag == "Ast.TopLevelMethod" or
                 tag == "Ast.TopLevelStatic") and
-               not node._record_constructor then
+               not node._record_constructor
+               and not node._union_constructor then
                 visit_toplevel(node, st, errors, loader)
             end
         end
@@ -5950,16 +6320,16 @@ function checker.has_main(ast)
     return false
 end
 
--- Walk a recovered interface type and, for every Nominal that names a record of
--- *another* module, recover that module so its record definition and its own
--- referenced records register too. This makes record types resolve
+-- Walk a recovered interface type and, for every Nominal that names a nominal
+-- of *another* module, recover that module so its definition and its own
+-- referenced nominals register too. This makes nominal types resolve
 -- transitively across compiled-only imports (a module's interface may
 -- return/accept a record defined in a module it imported but that this
 -- importer does not import directly). `seen` guards one interface's type
 -- graph; `interface_seen` guards the recursive module graph while preserving
 -- the original physical exposer. Load failures are ignored — the nominal
 -- simply stays unresolved, exactly as before this pass existed.
-local function register_referenced_records(
+local function register_referenced_nominals(
         t, loader, seen, exposing_module, interface_seen)
     if type(t) ~= "table" or not t._tag or seen[t] then return end
     seen[t] = true
@@ -5987,60 +6357,80 @@ local function register_referenced_records(
             end
         end
     elseif tag == "Type.Array" then
-        register_referenced_records(
+        register_referenced_nominals(
             t.elem, loader, seen, exposing_module, interface_seen)
     elseif tag == "Type.Map" then
-        register_referenced_records(
+        register_referenced_nominals(
             t.keys, loader, seen, exposing_module, interface_seen)
-        register_referenced_records(
+        register_referenced_nominals(
             t.values, loader, seen, exposing_module, interface_seen)
     elseif tag == "Type.Option" then
-        register_referenced_records(
+        register_referenced_nominals(
             t.base, loader, seen, exposing_module, interface_seen)
     elseif tag == "Type.ModuleMember" or tag == "Type.ModuleVariable" then
-        register_referenced_records(
+        register_referenced_nominals(
             t.type, loader, seen, exposing_module, interface_seen)
     elseif tag == "Type.Function" or tag == "Type.Method"
            or tag == "Type.StaticMethod" then
         for _, p in ipairs(t.params or {}) do
-            register_referenced_records(
+            register_referenced_nominals(
                 p, loader, seen, exposing_module, interface_seen)
         end
         for _, r in ipairs(t.rettypes or {}) do
-            register_referenced_records(
+            register_referenced_nominals(
                 r, loader, seen, exposing_module, interface_seen)
         end
         if t.varargtype then
-            register_referenced_records(
+            register_referenced_nominals(
                 t.varargtype, loader, seen, exposing_module, interface_seen)
         end
         if t.flexrettype then
-            register_referenced_records(
+            register_referenced_nominals(
                 t.flexrettype, loader, seen, exposing_module, interface_seen)
         end
     elseif tag == "Type.Record" then
         for _, f in ipairs(t.fields or {}) do
             if not f.islocal then
-                register_referenced_records(
+                register_referenced_nominals(
                     f.type, loader, seen, exposing_module, interface_seen)
             end
         end
         for _, fn in pairs(t.functions or {}) do
             if not fn.islocal then
-                register_referenced_records(
+                register_referenced_nominals(
                     fn, loader, seen, exposing_module, interface_seen)
             end
         end
         for _, method in pairs(t.methods or {}) do
             if not method.islocal then
-                register_referenced_records(
+                register_referenced_nominals(
+                    method, loader, seen, exposing_module, interface_seen)
+            end
+        end
+    elseif tag == "Type.Union" then
+        for _, variant in ipairs(t.variants or {}) do
+            if not variant.islocal and variant.payload ~= false then
+                register_referenced_nominals(
+                    variant.payload, loader, seen,
+                    exposing_module, interface_seen)
+            end
+        end
+        for _, fn in pairs(t.functions or {}) do
+            if not fn.islocal then
+                register_referenced_nominals(
+                    fn, loader, seen, exposing_module, interface_seen)
+            end
+        end
+        for _, method in pairs(t.methods or {}) do
+            if not method.islocal then
+                register_referenced_nominals(
                     method, loader, seen, exposing_module, interface_seen)
             end
         end
     end
 end
 
-local function first_local_record_type(typ, seen)
+local function first_local_nominal_type(typ, seen)
     if type(typ) ~= "table" or not typ._tag then return nil end
     seen = seen or {}
     if seen[typ] then return nil end
@@ -6048,56 +6438,77 @@ local function first_local_record_type(typ, seen)
 
     local tag = typ._tag
     if tag == "Type.Nominal" then
-        local record = types.registry[typ.fqtn]
-        if record and record.islocal then
+        local nominal = types.registry[typ.fqtn]
+        if nominal and nominal.islocal then
             return typ
         end
     elseif tag == "Type.Record" then
         if typ.islocal then return typ end
         for _, field in ipairs(typ.fields or {}) do
             if not field.islocal then
-                local found = first_local_record_type(field.type, seen)
+                local found = first_local_nominal_type(field.type, seen)
                 if found then return found end
             end
         end
         for _, func in pairs(typ.functions or {}) do
             if not func.islocal then
-                local found = first_local_record_type(func, seen)
+                local found = first_local_nominal_type(func, seen)
                 if found then return found end
             end
         end
         for _, method in pairs(typ.methods or {}) do
             if not method.islocal then
-                local found = first_local_record_type(method, seen)
+                local found = first_local_nominal_type(method, seen)
+                if found then return found end
+            end
+        end
+    elseif tag == "Type.Union" then
+        if typ.islocal then return typ end
+        for _, variant in ipairs(typ.variants or {}) do
+            if not variant.islocal and variant.payload ~= false then
+                local found =
+                    first_local_nominal_type(variant.payload, seen)
+                if found then return found end
+            end
+        end
+        for _, func in pairs(typ.functions or {}) do
+            if not func.islocal then
+                local found = first_local_nominal_type(func, seen)
+                if found then return found end
+            end
+        end
+        for _, method in pairs(typ.methods or {}) do
+            if not method.islocal then
+                local found = first_local_nominal_type(method, seen)
                 if found then return found end
             end
         end
     elseif tag == "Type.Array" then
-        return first_local_record_type(typ.elem, seen)
+        return first_local_nominal_type(typ.elem, seen)
     elseif tag == "Type.Map" then
-        return first_local_record_type(typ.keys, seen)
-            or first_local_record_type(typ.values, seen)
+        return first_local_nominal_type(typ.keys, seen)
+            or first_local_nominal_type(typ.values, seen)
     elseif tag == "Type.Option" then
-        return first_local_record_type(typ.base, seen)
+        return first_local_nominal_type(typ.base, seen)
     elseif tag == "Type.ModuleMember" or tag == "Type.ModuleVariable"
            or tag == "Type.Field" then
-        return first_local_record_type(typ.type, seen)
+        return first_local_nominal_type(typ.type, seen)
     elseif tag == "Type.Function" or tag == "Type.Method"
            or tag == "Type.StaticMethod" then
         for _, p in ipairs(typ.params or {}) do
-            local found = first_local_record_type(p, seen)
+            local found = first_local_nominal_type(p, seen)
             if found then return found end
         end
         for _, r in ipairs(typ.rettypes or {}) do
-            local found = first_local_record_type(r, seen)
+            local found = first_local_nominal_type(r, seen)
             if found then return found end
         end
         if typ.varargtype then
-            local found = first_local_record_type(typ.varargtype, seen)
+            local found = first_local_nominal_type(typ.varargtype, seen)
             if found then return found end
         end
         if typ.flexrettype then
-            return first_local_record_type(typ.flexrettype, seen)
+            return first_local_nominal_type(typ.flexrettype, seen)
         end
     end
 end
@@ -6118,21 +6529,22 @@ function checker.register_module_interface(
     interface_seen[interface_key] = true
 
     for _, member in ipairs(type_or_error.members) do
-        -- Exported records arrive wrapped in a Type.ModuleMember; unwrap so
-        -- the record's nominal type is registered for `.so`-only imports too
+        -- Exported nominals arrive wrapped in a Type.ModuleMember; unwrap so
+        -- the nominal type is registered for `.so`-only imports too
         -- (the source-import path registers it as a side effect of checking).
         local t = member.type or member
-        if t and (t._tag == "Type.Record" or t._tag == "Type.Interface") then
+        if t and (t._tag == "Type.Record" or t._tag == "Type.Union"
+                  or t._tag == "Type.Interface") then
             types.registry[t.name] = t
         end
     end
     local seen = {}
     for _, member in ipairs(type_or_error.members) do
-        register_referenced_records(
+        register_referenced_nominals(
             member.type or member, loader, seen, exposer, interface_seen)
     end
     for _, member in pairs(type_or_error.type_members or {}) do
-        register_referenced_records(
+        register_referenced_nominals(
             member, loader, seen, exposer, interface_seen)
     end
 end
@@ -6160,7 +6572,8 @@ local function makemoduletype(modname, modast)
             elseif tag == "Ast.TopLevelFunc" then
                 table.insert(members, types.ModuleMember(modname, tlnode.name,
                     tlnode._type, tlnode._paramnames))
-            elseif tag == "Ast.TopLevelRecord" then
+            elseif tag == "Ast.TopLevelRecord"
+               or tag == "Ast.TopLevelUnion" then
                 table.insert(members, types.ModuleMember(modname, tlnode.name,
                     tlnode._type, false))
             elseif tag == "Ast.TopLevelTypeAlias" then
@@ -6199,6 +6612,16 @@ local function reject_exported_c_ffi_types(modname, modast, errors)
                         reject_exported_c_ffi_type(modname, errors, loc, field.type)
                     end
                 end
+            elseif tag == "Ast.TopLevelUnion" and not node.islocal then
+                for _, variant in ipairs(node.variants) do
+                    if variant._type and not variant._type.islocal
+                       and variant._type.payload ~= false then
+                        reject_exported_c_ffi_type(
+                            modname, errors,
+                            variant.payload.loc or variant.loc,
+                            variant._type.payload)
+                    end
+                end
             elseif (tag == "Ast.TopLevelMethod" or tag == "Ast.TopLevelStatic")
                    and not node.islocal then
                 reject_exported_c_ffi_type(modname, errors, node.loc, node._type)
@@ -6207,37 +6630,54 @@ local function reject_exported_c_ffi_types(modname, modast, errors)
     end
 end
 
-local function reject_exported_local_record_type(modname, errors, loc, typ)
-    local local_record = first_local_record_type(typ)
-    if local_record then
-        local name = local_record.fqtn or local_record.name
+local function reject_exported_local_nominal_type(modname, errors, loc, typ)
+    local local_nominal = first_local_nominal_type(typ)
+    if local_nominal then
+        local name = local_nominal.fqtn or local_nominal.name
+        local owner = types.registry[name]
+        local kind = owner and owner._tag == "Type.Union"
+            and "union" or "record"
         checker.typeerror(errors, loc,
-            "cannot export local record type '%s' from Titan module '%s'",
-            name, modname)
+            "cannot export local %s type '%s' from Titan module '%s'",
+            kind, name, modname)
     end
 end
 
-local function reject_exported_local_record_types(modname, modast, errors)
+local function reject_exported_local_nominal_types(modname, modast, errors)
     for _, node in ipairs(modast) do
         if not node._ignore then
             local tag = node._tag
             if tag == "Ast.TopLevelVar" and not node.islocal then
-                reject_exported_local_record_type(modname, errors, node.loc, node._type)
+                reject_exported_local_nominal_type(
+                    modname, errors, node.loc, node._type)
             elseif tag == "Ast.TopLevelFunc" and not node.islocal then
-                reject_exported_local_record_type(modname, errors, node.loc, node._type)
+                reject_exported_local_nominal_type(
+                    modname, errors, node.loc, node._type)
             elseif tag == "Ast.TopLevelTypeAlias" and not node.islocal then
-                reject_exported_local_record_type(modname, errors,
+                reject_exported_local_nominal_type(modname, errors,
                     node.type.loc or node.loc, node._type)
             elseif tag == "Ast.TopLevelRecord" and not node.islocal then
                 for i, field in ipairs(node._type.fields) do
                     if not field.islocal then
                         local loc = node.fields[i] and node.fields[i].loc or node.loc
-                        reject_exported_local_record_type(modname, errors, loc, field.type)
+                        reject_exported_local_nominal_type(
+                            modname, errors, loc, field.type)
+                    end
+                end
+            elseif tag == "Ast.TopLevelUnion" and not node.islocal then
+                for _, variant in ipairs(node.variants) do
+                    if variant._type and not variant._type.islocal
+                       and variant._type.payload ~= false then
+                        reject_exported_local_nominal_type(
+                            modname, errors,
+                            variant.payload.loc or variant.loc,
+                            variant._type.payload)
                     end
                 end
             elseif (tag == "Ast.TopLevelMethod" or tag == "Ast.TopLevelStatic")
                    and not node.islocal then
-                reject_exported_local_record_type(modname, errors, node.loc, node._type)
+                reject_exported_local_nominal_type(
+                    modname, errors, node.loc, node._type)
             end
         end
     end
@@ -6284,8 +6724,11 @@ function checker.check(modname, ast, subject, filename, loader, options)
         collect_type_aliases(ast, st, errors)
         checktoplevel(ast, st, errors, loader)
         checkbodies(ast, st, errors)
+        if #errors == 0 then
+            validate_union_source_projections(ast, errors)
+        end
         reject_exported_c_ffi_types(modname, ast, errors)
-        reject_exported_local_record_types(modname, ast, errors)
+        reject_exported_local_nominal_types(modname, ast, errors)
         ast._type = makemoduletype(modname, ast)
         return ast._type, errors
     end

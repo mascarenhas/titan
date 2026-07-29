@@ -2,8 +2,9 @@
 
 Functions are the unit of Titan code. They come in two syntactic forms
 declared at the top level of a module: plain module functions (this
-chapter), and the methods of records (declared with `:` after a record
-name; see [Records](records.md)). The record's written declaration may appear
+chapter), and the methods of records or unions (declared with `:` after a
+nominal type name; see [Records](records.md) and [Unions](unions.md)). The
+owner's written declaration may appear
 on either side of a method declaration. Functions are also **first-class
 values** — a function name can be used as a value (see
 [Functions as values](#functions-as-values)) — and there are **anonymous
@@ -11,7 +12,8 @@ function expressions** that close over the enclosing function's locals,
 which have their own chapter
 ([anonymous functions and closures](closures.md)). Everything this chapter
 says about parameters, return values and arity applies to every form, and
-to the compiler-synthesized `new` static function of each record.
+to the compiler-synthesized `new` static of each record and the positional
+constructor synthesized for each union variant.
 
 ## Declaring functions
 
@@ -57,6 +59,8 @@ The pieces:
   a flexible return tail may also fall off, producing an empty run. A `return`
   statement can only appear as the last statement of a block — see
   [Statements](statements.md).
+  A `case` counts exactly like `if`/`elseif`/`else`: it needs an explicit
+  `else` and every arm must terminate to establish this fact.
 * Declaring two top-level functions (or a function and a variable) with
   the same name is a compile-time error (`duplicate declaration for f,
   previous one at path/to/source.titan:N:C`). Folder modules use the same
@@ -112,7 +116,7 @@ run instead.
 This is why omitted parameters are "optional" only when their declared
 type can accept the synthesized `nil` (for example `T?`, `value`,
 `boolean`, or a nullable pointer type). Omitting a non-optional
-`integer`, `float`, `string`, array, map, record, or function parameter
+`integer`, `float`, `string`, array, map, record, union, or function parameter
 is a type error at the call site:
 
 ```lua
@@ -129,8 +133,8 @@ end
 test.titan:6:15: type error: types in argument 3 of call to function 'fma' do not match, expected float but found nil
 ```
 
-The same adjustment applies to methods, record static functions
-(including the compiler-synthesized `Rec.new` constructor), imported
+The same adjustment applies to methods, record/union static functions
+(including `Rec.new` and generated union-variant constructors), imported
 Titan functions, anonymous functions, and calls through function-typed
 values. Foreign C functions keep C-style arity: Titan does not invent
 missing C arguments in a parenthesized positional call. A supported named
@@ -196,14 +200,17 @@ An omitted formal receives the same synthesized `nil` and type check described
 above. Explicit expressions are nevertheless evaluated left to right as
 written, and each named item contributes exactly one value.
 
-Named syntax is available for direct Titan functions, record functions, and
-methods, plus direct fixed-arity C functions whose prototypes publish complete
+Named syntax is available for direct Titan functions, user-declared
+record/union functions, and methods, plus direct fixed-arity C functions whose
+prototypes publish complete
 parameter names. It is not available through a function value, anonymous
 function, bound-method value, or C function pointer, and it is rejected for
 variadic functions. Bare braces always select this form; write
 `consume({ x = 1 })` to pass one constructor positionally. See
 [Named arguments](named-arguments.md) for the full syntax, eligibility table,
 evaluation order, FFI metadata rules, and Lua boundary.
+Generated union-variant constructors publish no parameter names and are
+always positional-only.
 
 ## Multiple return values
 
@@ -310,8 +317,8 @@ calling `divmod` receives two values, as from any Lua function (see
 Titan functions are first-class values. A **function name** used where a
 value is expected yields a function value you can store, pass, return, and
 call indirectly. The name can be a top-level function, a `local` function,
-an imported module's function (`mod.f`), or a record function (`Rec.new` or
-`Rec.make`):
+an imported module's function (`mod.f`), a record function (`Rec.new` or
+`Rec.make`), or a union constructor/function (`Message.write`):
 
 ```lua
 function double(x: integer): integer
@@ -398,11 +405,12 @@ stored as a Titan function value (see [the FFI chapter](ffi.md)). Assigning
 
 Before checking function bodies, the compiler has collected the declarations
 of the whole module. A function body therefore sees *all* top-level
-declarations of its module — functions, methods, record functions, records,
+declarations of its module — functions, methods, record/union functions,
+records, unions,
 aliases, variables, and imports — regardless of their written order. Callable
-signatures are also order-independent: they may use a later record, alias, or
-import, and a method or record function may be written before the record it
-belongs to. Recursion needs no forward declarations, and mutual recursion just
+signatures are also order-independent: they may use a later nominal type,
+alias, or import, and a method or nominal function may be written before its
+owner. Recursion needs no forward declarations, and mutual recursion just
 works:
 
 ```lua
@@ -417,26 +425,27 @@ end
 
 The one visibility frontier is a top-level *module-variable declaration*: it
 sees only imports and other module variables written earlier, while seeing all
-records, aliases, and callable declarations wherever they appear. Its
+record/union owners, aliases, and callable declarations wherever they appear. Its
 initializer must also be a compile-time constant and therefore cannot call an
 ordinary function even though that function's name is visible. See
 [Declaration order and visibility](modules.md#declaration-order-and-visibility).
 
-## Methods and record functions
+## Methods and nominal functions
 
-Records may declare methods (`function Point:move(dx: float, dy: float)`), and
-methods may be `local` to the defining module. Records may also declare record
-functions (`function Point.polar(r: float, t: float): Point`), likewise with
-optional `local` visibility. Record functions are called as `Point.polar(...)`
-and have no implicit `self`; the automatically provided `Point.new` is a
-record function synthesized by the parser.
+Records and unions may declare methods
+(`function Point:move(dx: float, dy: float)`), and methods may be `local` to
+the defining module. They may also declare owner functions
+(`function Point.polar(r: float, t: float): Point` or
+`function Message.default(): Message`), likewise with optional `local`
+visibility. These functions have no implicit `self`; `Point.new` and each
+union-variant constructor are synthesized by the parser.
 
-Methods and record functions are top-level declarations like the functions in
+Methods and nominal functions are top-level declarations like the functions in
 this chapter and follow the same rules for parameters, return values, adjustment
 (method diagnostics read `method 'test.Point:move' called with ...`) and
-multiple returns. Either kind may precede the written record declaration. What
-differs — implicit `self` for methods, name resolution against the record, and
-record-member visibility — is described in [Records](records.md).
+multiple returns. Either kind may precede the written owner declaration. What
+differs — implicit `self`, nominal name resolution, and member visibility — is
+described in [Records](records.md) and [Unions](unions.md).
 
 ## Standalone programs: `main`
 

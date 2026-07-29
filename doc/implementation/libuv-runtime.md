@@ -30,8 +30,8 @@ native archive is installed in the SDK. System mode keeps the
 pkg-config-selected libuv dependency as a final-link setting and does not copy
 it into `titan.a`.
 
-Installation publishes `<root>/lib/titan/0.18/titan.so` and
-`<root>/lib/titan/0.18/titan.a`, plus nine generated shims below
+Installation publishes `<root>/lib/titan/0.19/titan.so` and
+`<root>/lib/titan/0.19/titan.a`, plus nine generated shims below
 `<root>/share/lua/5.5/titan/`. Titan prefix lookup
 claims `titan.uv` through the image's `titan_uv_abi`/`titan_uv_types`; Lua
 `require "titan.uv"` reaches `titan/uv.lua`, which selects provider `titan`,
@@ -121,16 +121,18 @@ Tables. Native exact Array paths and `TitanVargArrayOrMap` retain backing
 or boxed domain their typed slot specifies. See
 [Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
 
-ABI 0.18 preserves the Array contract while changing the archive-backed native
+ABI 0.18 preserved the Array contract while changing the archive-backed native
 boundary. Generated standard-library objects now refer directly to callback
 trampolines promoted from `titan_uv.o`'s private implementation into the
 runtime's external symbol contract, and retired libuv/coroutine helper symbols
 are no longer part of that contract. The current prototype also retires the
 transient public `_bytes_find` and `_bytes_slice` helpers after `titan.net` and
 `titan.os` move to `titan.string`; the exact interface fixture records this
-intentional logical API change. No migration is provided: a 0.18 provider and
-runtime must be built and distributed together, and users of a changed
-prototype image must clean and rebuild from source.
+intentional logical API change. A 0.18 provider and runtime had to be built
+and distributed together. ABI 0.19 preserves that callback boundary while
+adding union/variant schemas and the public nominal-static slot prefix. No
+cross-ABI migration is provided: use a clean 0.19 prefix and leave a
+separately versioned 0.18 installation untouched.
 
 The Makefile's explicit `UV_TITAN_SOURCES` list names all seven files inside
 the reviewed `STDLIB_TITAN_SOURCES` prerequisite set. It intentionally does

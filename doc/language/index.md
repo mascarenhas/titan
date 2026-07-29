@@ -30,7 +30,7 @@ local m = require "sum"
 print(m.sum_list(m.sample())) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.18
+This is the reference for the language as implemented by the Titan 0.19
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -57,6 +57,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Variadic parameters](variadic-parameters.md) | The trailing `...: t` parameter, `#...`, the raising `...[e]` index, spreading `...` into calls, returns, and positional Array/integer-Map constructors, slot-driven adjust-up, variadic functions as values, and the limits and bans. |
 | [Flexible returns](flexible-returns.md) | Runtime-sized homogeneous result tails, finite option projection, open sinks, contextual calls through `value`, surplus adjustment, and directional function compatibility. |
 | [Records](records.md) | Nominal record types, constructors, fields, methods, record functions, and records as seen from Lua. |
+| [Unions](unions.md) | Nominal tagged unions, positional variant constructors, full-block `when` arms, non-exhaustive `case`, payload binding, and Lua visibility. |
 | [Arrays and maps](arrays-maps.md) | Distinct structural containers: positive-only, holed Arrays with deterministic highest-present length and canonical Lua userdata proxies; ordinary Maps, positional integer-Map construction, integer-Map border length, conversions, and performance. |
 | [Modules](modules.md) | Logical modules, `import`, visibility, module variables, initialization, and the compilation model (shared libraries, executables, search paths). |
 | [Multi-module libraries](multi-module-libraries.md) | Separating logical modules from physical providers: common-prefix library output, prefix lookup, generated Lua loaders, and the combined standard library. |
@@ -78,7 +79,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.18. The language documented here is
+Titan is a working prototype, version 0.19. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
@@ -126,6 +127,10 @@ with a clean error; each links to the chapter that documents it in full.
   but still have no statement form, so using them is a syntax error.
   `break` *is* supported (and a loop can also be exited with `return`)
   ([statements](statements.md#break-no-goto)).
+* **Union v1 is deliberately small.** A variant carries at most one payload,
+  variants are not first-class types, constructors are positional-only, and
+  `case` is non-exhaustive even when every current variant is listed
+  ([unions](unions.md#version-one-boundaries)).
 
 ### The C FFI
 

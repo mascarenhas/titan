@@ -172,7 +172,7 @@ local keywords = {
     "function", "goto", "if", "in", "local", "nil", "not", "or",
     "repeat", "return", "then", "true", "until", "while", "import",
     "record", "type", "as", "is", "foreign", "catch", "finally", "raise", "const",
-    "owned",
+    "owned", "union", "case", "when",
 
     "boolean", "integer", "float", "string", "value"
 }
@@ -186,16 +186,11 @@ for _, keyword in ipairs(keywords) do
     is_keyword[keyword] = true
 end
 
-lexer.NAME = Cmt(P(true), function(s, pos)
-    local startpos, endpos = s:find("^[_A-Za-z][_A-Za-z0-9]*", pos)
-    if not startpos then
-        return false
-    end
-    local name = s:sub(startpos, endpos)
+lexer.NAME = Cmt(C(identifier), function(_, pos, name)
     if is_keyword[name] then
         return false
     end
-    return endpos + 1, name
+    return pos, name
 end)
 
 -- Named-call labels are source API spellings and may come from C prototypes,
@@ -203,6 +198,11 @@ end)
 -- this raw identifier primitive separate from NAME so keywords remain illegal
 -- in every ordinary Titan name position.
 lexer.NAMEDLABEL = C(identifier)
+
+-- C identifiers are source API spellings too. The parser reaches this raw
+-- capture only in contextual member/type positions after `.`, keeping Titan
+-- keywords illegal in every ordinary name position.
+lexer.CNAME = C(identifier)
 
 --
 -- Symbolic tokens

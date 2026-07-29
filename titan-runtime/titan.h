@@ -90,9 +90,14 @@
    trampolines promoted into the runtime's external native symbol contract,
    and no longer reference the replaced libuv and coroutine helper symbols.
    A 0.18 provider and runtime must therefore be built and distributed
-   together; either direction of a 0.17/0.18 static pairing is incompatible. */
-#define TITAN_VER "0.18"
-#define TITAN_VER_SUFFIX "_0_18"
+   together; either direction of a 0.17/0.18 static pairing is incompatible.
+   0.18 -> 0.19: serialized interfaces add Union and Variant schemas, generated
+   unions add a nominal namespace/metatable/tag/payload contract, and the
+   public module-userdata prefix gains canonical closure slots for exported
+   record and union statics. Older compilers cannot decode those interfaces or
+   safely reconstruct imported first-class static selectors. */
+#define TITAN_VER "0.19"
+#define TITAN_VER_SUFFIX "_0_19"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"

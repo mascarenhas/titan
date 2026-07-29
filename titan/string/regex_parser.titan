@@ -13,18 +13,6 @@
 -- on LPegLabel's mutable backtrack-stack setting. There is no recursive
 -- descent pass after the PEG match.
 
-local REGEX_EMPTY = 1
-local REGEX_LITERAL = 2
-local REGEX_ANY = 3
-local REGEX_CLASS = 4
-local REGEX_SEQUENCE = 5
-local REGEX_CHOICE = 6
-local REGEX_GROUP = 7
-local REGEX_REPEAT = 8
-local REGEX_BACKREFERENCE = 9
-local REGEX_WORD_START = 10
-local REGEX_WORD_END = 11
-
 local REGEX_MAX_CAPTURES = 200
 local REGEX_MAX_NESTING = 512
 
@@ -36,14 +24,47 @@ local REGEX_BELL_BYTE = "\7"
 local REGEX_ESCAPE_BYTE = "\27"
 local REGEX_WORD_BYTE_FLAGS: {integer: boolean} = {}
 
-local record RegexNode
-  local kind: integer
-  local position: integer
-  local text: string
-  local number: integer
-  local minimum: integer
-  local maximum: integer
-  local children: {RegexNode}
+local record RegexTextNode
+  position: integer
+  text: string
+end
+
+local record RegexChildrenNode
+  position: integer
+  children: {RegexNode}
+end
+
+local record RegexGroupNode
+  position: integer
+  number: integer
+  child: RegexNode
+end
+
+local record RegexRepeatNode
+  position: integer
+  minimum: integer
+  maximum: integer
+  child: RegexNode
+end
+
+local record RegexBackreferenceNode
+  position: integer
+  number: integer
+  nullable: boolean
+end
+
+local union RegexNode
+  empty: integer
+  literal: RegexTextNode
+  any: integer
+  class: RegexTextNode
+  sequence: RegexChildrenNode
+  choice: RegexChildrenNode
+  group: RegexGroupNode
+  repetition: RegexRepeatNode
+  backreference: RegexBackreferenceNode
+  word_start: integer
+  word_end: integer
 end
 
 local record ParsedRegex
@@ -87,69 +108,93 @@ local record RegexParseState
   local anchored_end: boolean
 end
 
-local function regex_node(kind: integer, position: integer): RegexNode
-  local children: {RegexNode} = {}
-  return RegexNode.new(kind, position, "", 0, 0, 0, children)
+local function RegexNode:position(): integer
+  case self
+  when empty: position then
+    return position
+  when literal: node then
+    return node.position
+  when any: position then
+    return position
+  when class: node then
+    return node.position
+  when sequence: node then
+    return node.position
+  when choice: node then
+    return node.position
+  when group: node then
+    return node.position
+  when repetition: node then
+    return node.position
+  when backreference: node then
+    return node.position
+  when word_start: position then
+    return position
+  when word_end: position then
+    return position
+  else
+    raise "internal regular-expression AST node is invalid"
+  end
 end
 
 local function regex_empty(position: integer): RegexNode
-  return regex_node(REGEX_EMPTY, position)
+  return RegexNode.empty(position)
 end
 
 local function regex_literal(position: integer, text: string): RegexNode
-  local node = regex_node(REGEX_LITERAL, position)
-  node.text = text
-  return node
+  return RegexNode.literal(RegexTextNode.new(position, text))
 end
 
 local function regex_sequence(position: integer,
                               children: {RegexNode}): RegexNode
   if #children == 0 then return regex_empty(position) end
   if #children == 1 then return children[1] end
-  local node = regex_node(REGEX_SEQUENCE, position)
-  node.children = children
-  return node
+  return RegexNode.sequence(RegexChildrenNode.new(position, children))
 end
 
 local function regex_choice(position: integer,
                             children: {RegexNode}): RegexNode
   if #children == 1 then return children[1] end
-  local node = regex_node(REGEX_CHOICE, position)
-  node.children = children
-  return node
+  return RegexNode.choice(RegexChildrenNode.new(position, children))
 end
 
 local function regex_nullable(node: RegexNode): boolean
-  if node.kind == REGEX_EMPTY then
+  case node
+  when empty then
     return true
-  elseif node.kind == REGEX_LITERAL or node.kind == REGEX_ANY or
-         node.kind == REGEX_CLASS then
+  when literal then
     return false
-  elseif node.kind == REGEX_WORD_START or
-         node.kind == REGEX_WORD_END then
-    return true
-  elseif node.kind == REGEX_BACKREFERENCE then
-    return node.minimum ~= 0
-  elseif node.kind == REGEX_SEQUENCE then
+  when any then
+    return false
+  when class then
+    return false
+  when sequence: sequence then
     local index = 1
-    while index <= #node.children do
-      if not regex_nullable(node.children[index]) then return false end
+    while index <= #sequence.children do
+      if not regex_nullable(sequence.children[index]) then return false end
       index = index + 1
     end
     return true
-  elseif node.kind == REGEX_CHOICE then
+  when choice: choice then
     local index = 1
-    while index <= #node.children do
-      if regex_nullable(node.children[index]) then return true end
+    while index <= #choice.children do
+      if regex_nullable(choice.children[index]) then return true end
       index = index + 1
     end
     return false
-  elseif node.kind == REGEX_GROUP then
-    return regex_nullable(node.children[1])
-  elseif node.kind == REGEX_REPEAT then
-    return node.minimum == 0 or regex_nullable(node.children[1])
+  when group: group then
+    return regex_nullable(group.child)
+  when repetition: repetition then
+    return repetition.minimum == 0 or regex_nullable(repetition.child)
+  when backreference: backreference then
+    return backreference.nullable
+  when word_start then
+    return true
+  when word_end then
+    return true
+  else
+    raise "internal regular-expression AST node is invalid"
   end
-  return false
 end
 
 local function regex_character(source: string,
@@ -413,28 +458,25 @@ local function regex_class_node(
     if admitted then bytes = bytes .. candidate end
     all_position = all_position + 1
   end
-  local node = regex_node(REGEX_CLASS, position)
-  node.text = bytes
-  return node
+  return RegexNode.class(RegexTextNode.new(position, bytes))
 end
 
 local function regex_any_node(position: integer): RegexNode
-  return regex_node(REGEX_ANY, position)
+  return RegexNode.any(position)
 end
 
 local function regex_builtin_node(position: integer,
                                   code: string): RegexNode
-  local node = regex_node(REGEX_CLASS, position)
-  node.text = regex_builtin_bytes(code)
-  return node
+  return RegexNode.class(
+    RegexTextNode.new(position, regex_builtin_bytes(code)))
 end
 
 local function regex_boundary_node(position: integer,
                                    code: string): RegexNode
   if code == "<" then
-    return regex_node(REGEX_WORD_START, position)
+    return RegexNode.word_start(position)
   end
-  return regex_node(REGEX_WORD_END, position)
+  return RegexNode.word_end(position)
 end
 
 local function regex_control_node(position: integer,
@@ -446,9 +488,8 @@ local function regex_backreference_node(position: integer,
                                         digit: string): RegexNode
   local digit_position: integer? =
     find(REGEX_DIGIT_BYTES, digit, 1)
-  local node = regex_node(REGEX_BACKREFERENCE, position)
-  node.number = (digit_position as integer) - 1
-  return node
+  return RegexNode.backreference(RegexBackreferenceNode.new(
+    position, (digit_position as integer) - 1, false))
 end
 
 local function regex_decimal(source: string, expression: string,
@@ -522,11 +563,8 @@ local function regex_apply_quantifier(
       "unbounded repetition operand may match the empty string",
       state.source, quantifier.position)
   end
-  local repeated = regex_node(REGEX_REPEAT, quantifier.position)
-  repeated.minimum = quantifier.minimum
-  repeated.maximum = quantifier.maximum
-  repeated.children[1] = node
-  return repeated
+  return RegexNode.repetition(RegexRepeatNode.new(
+    quantifier.position, quantifier.minimum, quantifier.maximum, node))
 end
 
 local function regex_current_frame(
@@ -608,14 +646,18 @@ end
 
 local function regex_validate_backreference(
     node: RegexNode, state: RegexParseState)
-  if node.kind ~= REGEX_BACKREFERENCE then return end
-  if not state.closed_groups[node.number] then
-    raise_regex_diagnostic(
-      "invalid_backreference",
-      "backreference must name a previously closed group",
-      state.source, node.position)
+  case node
+  when backreference: backreference then
+    if not state.closed_groups[backreference.number] then
+      raise_regex_diagnostic(
+        "invalid_backreference",
+        "backreference must name a previously closed group",
+        state.source, backreference.position)
+    end
+    if state.nullable_groups[backreference.number] then
+      backreference.nullable = true
+    end
   end
-  if state.nullable_groups[node.number] then node.minimum = 1 end
 end
 
 local function regex_parse_atom_marker(
@@ -659,9 +701,8 @@ local function regex_parse_close_group(
     state.closed_groups[frame.group_index] = true
     state.nullable_groups[frame.group_index] =
       regex_nullable(child)
-    node = regex_node(REGEX_GROUP, frame.group_position)
-    node.number = frame.group_index
-    node.children[1] = child
+    node = RegexNode.group(RegexGroupNode.new(
+      frame.group_position, frame.group_index, child))
   end
   regex_append_node(
     state, regex_apply_quantifier(node, quantifier, state))

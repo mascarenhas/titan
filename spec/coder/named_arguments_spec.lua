@@ -272,7 +272,12 @@ describe("named arguments (code generation)", function()
     function()
         with_header([[
             struct ffi_node;
+            typedef int type;
+            typedef struct ffi_keyword_holder {
+                type when;
+            } ffi_keyword_holder;
             static int ffi_trace_value = 0;
+            static type repeat = 7;
 
             static void ffi_reset(void) {
                 ffi_trace_value = 0;
@@ -297,6 +302,14 @@ describe("named arguments (code generation)", function()
 
             static int ffi_zero(void) {
                 return 7;
+            }
+
+            static int ffi_when(int when) {
+                return when + 1;
+            }
+
+            static type when(type when) {
+                return when;
             }
 
             static int ffi_nullable(struct ffi_node *optional, int required) {
@@ -324,12 +337,21 @@ describe("named arguments (code generation)", function()
                 function ffi_defaults(): integer
                     local zero: integer = c.ffi_zero {}
                     local nullable: integer = c.ffi_nullable { required = 9 }
-                    return zero + nullable
+                    local keyword: integer = c.ffi_when { when = 5 }
+                    return zero + nullable + keyword
+                end
+
+                function ffi_contextual_keywords(): integer
+                    local holder: c.ffi_keyword_holder
+                    holder.when = 5
+                    local result: c.type = c.when { when = holder.when }
+                    return result + c.repeat
                 end
             ]], [[
                 assert(test.ffi_order() == 123231)
                 assert(test.ffi_conversion() == 302.0)
-                assert(test.ffi_defaults() == 16)
+                assert(test.ffi_defaults() == 22)
+                assert(test.ffi_contextual_keywords() == 12)
             ]])
         end)
     end)

@@ -61,7 +61,7 @@ a/b/c.so
 ```
 
 The exact historical location is therefore the final candidate. The compiler
-first expands the selected `TITAN_PATH_0_18`/`TITAN_PATH` with the runtime's
+first expands the selected `TITAN_PATH_0_19`/`TITAN_PATH` with the runtime's
 `;;` default-insertion semantics. It then searches **root-major**: all
 shallow-to-exact candidates in the first path root, then all candidates in the
 second root, and so on.
@@ -97,7 +97,7 @@ The states are deliberately strict:
 * an exact candidate with neither symbol retains the markerless-binary error
   instead of falling through to source.
 
-The ABI marker must return exactly one string equal to `0.18`. The types entry
+The ABI marker must return exactly one string equal to `0.19`. The types entry
 must return exactly one serialized `Type.Module` for the requested logical
 name, with a canonical public schema. The loader does not scan later images
 after a claim; visible duplicate providers are resolved by ordinary first
@@ -170,7 +170,8 @@ Distinct logical names that both map to one coder prefix (for example through
 dot/dash replacement) are rejected by name. It also catches a boundary that a
 prefix-only check would miss: module `a` function `b_c` and module `a.b`
 function `c` both produce `a_b_c_titan`. The same inventory covers public
-methods, their bound trampolines, record functions, and each module protocol,
+methods, their bound trampolines, record/union functions and constructors,
+and each module protocol,
 so every collision is reported before code generation instead of as an opaque
 duplicate-symbol linker error.
 
@@ -181,7 +182,7 @@ protocol:
 * `<mangled>_init` and `luaopen_<mangled>`;
 * a file-local `_initialized` wiring flag;
 * a distinct registry-owned module `Udata`, variables, canonical closures,
-  record metatables, initializer, and nominal owners.
+  record/union metatables, initializer, and nominal owners.
 
 There is no provider initializer and a container need not provide a logical
 module having the provider's own name. Requiring one logical child from the
@@ -298,7 +299,7 @@ are not installed in the compiler/runtime SDK.
 
 `make titan` builds a distinct private bootstrap at
 `titan-runtime/bootstrap/titan.so`, linked only from `titanlib.o`. During a
-source-rock install it is staged at `<root>/lib/titan/0.18/titan.so` only when
+source-rock install it is staged at `<root>/lib/titan/0.19/titan.so` only when
 that pathname is absent. A usable existing bootstrap or full image is
 preserved, so a repeated build never replaces a full library with the smaller
 bootstrap. An incompatible existing image is an error and is not overwritten.
@@ -313,19 +314,19 @@ the exact nine-key set, compares embedded metadata with the staged DSO and a
 fresh-process archive-backed validation image, validates bare
 `luaopen_titan`, the nine exact shims, and the macOS dSYM, then publishes the
 paired bundle with the DSO last. It recognizes bootstrap-only, legacy complete
-ABI-0.18 DSO/shims-without-archive, and complete-pair predecessors. Injected
+ABI-0.19 DSO/shims-without-archive, and complete-pair predecessors. Injected
 failures restore the exact predecessor, including leaving `titan.a` absent
 when rolling back a legacy installation. After the DSO commit, backup cleanup
 is best effort and cannot turn the coherent install into a reported hook
-failure. Separately versioned 0.17 artifacts are not purged.
+failure. Separately versioned 0.17 and 0.18 artifacts are not purged.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
 dSYM) and nine Lua shims:
 
 ```text
-<root>/lib/titan/0.18/titan.so
-<root>/lib/titan/0.18/titan.a
-<root>/lib/titan/0.18/titan.so.dSYM          # macOS only
+<root>/lib/titan/0.19/titan.so
+<root>/lib/titan/0.19/titan.a
+<root>/lib/titan/0.19/titan.so.dSYM          # macOS only
 <root>/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os,peg,string}.lua
 ```
 
@@ -345,7 +346,7 @@ compiler groups; its system-libuv smoke replaces the whole paired generation
 rather than one logical child, while the prepared artifact retains the
 bundled generation.
 
-## ABI 0.16, 0.17, 0.18, and test-only exact providers
+## ABI 0.16 through 0.19 and test-only exact providers
 
 ABI 0.16 changed neither per-module serialized type shapes nor Titan's native
 calling convention. It is nevertheless a mandatory compatibility boundary:
@@ -364,16 +365,22 @@ those pointers now denote private backing Tables paired one-to-one with
 canonical Lua proxy Udata. Every generated module also caches the per-state
 Array metatable. Since 0.16 code could expose or mutate a backing as an
 ordinary table, 0.16 and 0.17 providers must never be mixed. Current lookup
-uses `TITAN_PATH_0_18` and `lib/titan/0.18`; the installed 0.17 tree is
-preserved only as a separately versioned predecessor. See
+uses `TITAN_PATH_0_19` and `lib/titan/0.19`; installed 0.17/0.18 trees are
+preserved only as separately versioned predecessors. See
 [Dense Arrays](dense-arrays.md#abi-017-boundary).
 
-ABI 0.18 preserves the provider model and Array protocol, but the generated
+ABI 0.18 preserved the provider model and Array protocol, but the generated
 standard-library archive objects now reference callback trampolines promoted
 into the runtime's external native contract and no longer reference replaced
 libuv/coroutine helpers. Either direction of a 0.17/0.18 static pairing is
-incompatible, so the current marker, path variable, and installed namespace
-advance together.
+incompatible, so its marker, path variable, and installed namespace advanced
+together.
+
+ABI 0.19 preserves both provider formats and the metadata container, but adds
+union/variant interface schemas and the public nominal-static slot prefix.
+The marker must reject 0.18 before decoding these constructors or reconstructing
+closure slots. The transition deliberately uses a fresh/clean 0.19 prefix;
+there is no in-place 0.18 migration or retained 0.17-to-0.18 CI canary.
 
 Production and installed tests use the combined image. The delayed-filesystem
 callback variant is deliberately different: in an isolated root with no

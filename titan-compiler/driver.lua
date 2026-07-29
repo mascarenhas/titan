@@ -16,8 +16,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.18"
-driver.TITAN_VER_SUFFIX = "_0_18"
+driver.TITAN_VER = "0.19"
+driver.TITAN_VER_SUFFIX = "_0_19"
 driver.LUA_VERSION = "5.5"
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
@@ -685,8 +685,324 @@ local function one_metadata_result(fn, label)
     return results[2]
 end
 
+local function dense_array_length(value)
+    if type(value) ~= "table" then return nil end
+    local count, maximum = 0, 0
+    for key in pairs(value) do
+        if type(key) == "number" then
+            if key < 1 or key % 1 ~= 0 then return nil end
+            count = count + 1
+            maximum = math.max(maximum, key)
+        end
+    end
+    if count ~= maximum then return nil end
+    return maximum
+end
+
+local validate_interface_type
+
+local function validate_name_list(names, expected_length)
+    if names == false then return true end
+    local length = dense_array_length(names)
+    if not length or length ~= expected_length then return nil end
+    local seen = {}
+    for index = 1, length do
+        local name = names[index]
+        if type(name) ~= "string" or name == "" or seen[name] then
+            return nil
+        end
+        seen[name] = true
+    end
+    return true
+end
+
+local function validate_callable_descriptor(callable, owner, kind, seen)
+    if type(callable) ~= "table"
+       or callable._tag ~= kind
+       or callable.fqtn ~= owner.name
+       or type(callable.name) ~= "string"
+       or callable.name == ""
+       or callable.islocal
+       or not dense_array_length(callable.params)
+       or not dense_array_length(callable.rettypes)
+       or not validate_name_list(
+           callable.paramnames, #callable.params) then
+        return nil, "callable member has an invalid schema"
+    end
+    if callable.varargtype ~= false then
+        local ok, err = validate_interface_type(
+            callable.varargtype, { kind = "value" }, seen)
+        if not ok then return nil, err end
+    end
+    if callable.flexrettype ~= false then
+        local ok, err = validate_interface_type(
+            callable.flexrettype, { kind = "value" }, seen)
+        if not ok then return nil, err end
+    end
+    for _, param in ipairs(callable.params) do
+        local ok, err =
+            validate_interface_type(param, { kind = "value" }, seen)
+        if not ok then return nil, err end
+    end
+    for _, rettype in ipairs(callable.rettypes) do
+        local ok, err =
+            validate_interface_type(rettype, { kind = "value" }, seen)
+        if not ok then return nil, err end
+    end
+    return true
+end
+
+local function validate_nominal_member_maps(owner, seen)
+    if type(owner.functions) ~= "table"
+       or type(owner.methods) ~= "table" then
+        return nil, "nominal member maps have an invalid schema"
+    end
+    for name, fn in pairs(owner.functions) do
+        if type(name) ~= "string" or name == ""
+           or type(fn) ~= "table" or fn.name ~= name then
+            return nil, "nominal function map has an invalid entry"
+        end
+        local ok, err = validate_callable_descriptor(
+            fn, owner, "Type.StaticMethod", seen)
+        if not ok then return nil, err end
+    end
+    for name, method in pairs(owner.methods) do
+        if type(name) ~= "string" or name == ""
+           or type(method) ~= "table" or method.name ~= name then
+            return nil, "nominal method map has an invalid entry"
+        elseif owner.functions[name] then
+            return nil, "nominal function and method maps collide at '" ..
+                name .. "'"
+        end
+        local ok, err = validate_callable_descriptor(
+            method, owner, "Type.Method", seen)
+        if not ok then return nil, err end
+    end
+    return true
+end
+
+local function validate_record_interface(record, context, seen)
+    if not context or context.kind ~= "module-member"
+       or record.name ~= context.modname .. "." .. context.name
+       or record.islocal
+       or type(record.nfields) ~= "number"
+       or math.type(record.nfields) ~= "integer"
+       or record.nfields < 0 then
+        return nil, "record has a noncanonical owner or field count"
+    end
+    local nfields = dense_array_length(record.fields)
+    if not nfields then return nil, "record field list is not dense" end
+    local names, indexes = {}, {}
+    local previous_index = -1
+    for _, field in ipairs(record.fields) do
+        if type(field) ~= "table" or field._tag ~= "Type.Field"
+           or field.fqtn ~= record.name
+           or type(field.name) ~= "string" or field.name == ""
+           or field.islocal
+           or type(field.index) ~= "number"
+           or math.type(field.index) ~= "integer"
+           or field.index < 0 or field.index >= record.nfields
+           or field.index <= previous_index
+           or names[field.name] or indexes[field.index] then
+            return nil, "record field has an invalid schema"
+        end
+        names[field.name], indexes[field.index] = true, true
+        previous_index = field.index
+        local ok, err =
+            validate_interface_type(field.type, { kind = "value" }, seen)
+        if not ok then return nil, err end
+    end
+    local ok, err = validate_nominal_member_maps(record, seen)
+    if not ok then return nil, err end
+
+    local constructor = record.functions.new
+    if not constructor and record.nfields == nfields then
+        return nil, "all-public record is missing its constructor"
+    end
+    if constructor then
+        if record.nfields ~= nfields
+           or constructor.varargtype ~= false
+           or constructor.flexrettype ~= false
+           or type(constructor.paramnames) ~= "table"
+           or #constructor.paramnames ~= nfields
+           or #constructor.params ~= nfields
+           or #constructor.rettypes ~= 1
+           or constructor.rettypes[1]._tag ~= "Type.Nominal"
+           or constructor.rettypes[1].fqtn ~= record.name then
+            return nil, "record constructor does not match its owner"
+        end
+        for index, field in ipairs(record.fields) do
+            if constructor.paramnames[index] ~= field.name
+               or not types.equals(
+                   constructor.params[index], field.type) then
+                return nil, "record constructor does not match its fields"
+            end
+        end
+    end
+    return true
+end
+
+local function validate_union_interface(union, context, seen)
+    if not context or context.kind ~= "module-member"
+       or union.name ~= context.modname .. "." .. context.name
+       or union.islocal
+       or type(union.nvariants) ~= "number"
+       or math.type(union.nvariants) ~= "integer"
+       or union.nvariants <= 0 then
+        return nil, "union has a noncanonical owner or variant count"
+    end
+    local npublic = dense_array_length(union.variants)
+    if not npublic then return nil, "union variant list is not dense" end
+
+    local names, indexes = {}, {}
+    local previous_index = -1
+    for index = 1, npublic do
+        local variant = union.variants[index]
+        if type(variant) ~= "table"
+           or variant._tag ~= "Type.Variant"
+           or variant.fqtn ~= union.name
+           or type(variant.name) ~= "string" or variant.name == ""
+           or variant.islocal
+           or type(variant.index) ~= "number"
+           or math.type(variant.index) ~= "integer"
+           or variant.index < 0 or variant.index >= union.nvariants
+           or variant.index <= previous_index
+           or names[variant.name] or indexes[variant.index]
+           or union.variants[variant.name] ~= variant then
+            return nil, "union variant has an invalid schema"
+        end
+        names[variant.name], indexes[variant.index] = variant, true
+        previous_index = variant.index
+        local ok, err = validate_interface_type(variant, {
+            kind = "union-variant",
+            owner = union,
+        }, seen)
+        if not ok then return nil, err end
+    end
+    for key, variant in pairs(union.variants) do
+        if type(key) == "string" and names[key] ~= variant then
+            return nil, "union variant map has an invalid entry"
+        elseif type(key) ~= "string" and type(key) ~= "number" then
+            return nil, "union variant table has an invalid key"
+        end
+    end
+
+    local ok, err = validate_nominal_member_maps(union, seen)
+    if not ok then return nil, err end
+    for _, variant in ipairs(union.variants) do
+        if union.methods[variant.name] then
+            return nil, "union variant and method maps collide at '" ..
+                variant.name .. "'"
+        end
+        local constructor = union.functions[variant.name]
+        local payload_params = variant.payload == false and 0 or 1
+        if not constructor
+           or constructor.varargtype ~= false
+           or constructor.flexrettype ~= false
+           or constructor.paramnames ~= false
+           or #constructor.params ~= payload_params
+           or #constructor.rettypes ~= 1
+           or constructor.rettypes[1]._tag ~= "Type.Nominal"
+           or constructor.rettypes[1].fqtn ~= union.name
+           or (variant.payload ~= false
+               and not types.equals(
+                   constructor.params[1], variant.payload)) then
+            return nil, "union constructor '" .. variant.name ..
+                "' does not match its variant"
+        end
+    end
+    return true
+end
+
+validate_interface_type = function(typ, context, seen)
+    if type(typ) ~= "table" or type(typ._tag) ~= "string" then
+        return nil, "type graph contains an invalid descriptor"
+    end
+    if typ._tag == "Type.Variant"
+       and (not context or context.kind ~= "union-variant"
+            or context.owner.name ~= typ.fqtn) then
+        return nil, "Type.Variant is only valid inside its owning union"
+    end
+    if seen[typ] then return true end
+    seen[typ] = true
+    local tag = typ._tag
+    if tag == "Type.Invalid" or tag == "Type.Nil"
+       or tag == "Type.Void" or tag == "Type.Boolean"
+       or tag == "Type.Integer" or tag == "Type.Float"
+       or tag == "Type.String" or tag == "Type.Value" then
+        return true
+    elseif tag == "Type.Nominal" then
+        return type(typ.fqtn) == "string" and typ.fqtn ~= ""
+            or nil, "nominal type has an invalid name"
+    elseif tag == "Type.Array" then
+        return validate_interface_type(typ.elem, { kind = "value" }, seen)
+    elseif tag == "Type.Map" then
+        local ok, err =
+            validate_interface_type(typ.keys, { kind = "value" }, seen)
+        if not ok then return nil, err end
+        return validate_interface_type(
+            typ.values, { kind = "value" }, seen)
+    elseif tag == "Type.Option" then
+        return validate_interface_type(typ.base, { kind = "value" }, seen)
+    elseif tag == "Type.Function" then
+        local nparams = dense_array_length(typ.params)
+        local nreturns = dense_array_length(typ.rettypes)
+        if not nparams or not nreturns
+           or type(typ.vararg) ~= "boolean" then
+            return nil, "function type has an invalid schema"
+        end
+        for _, param in ipairs(typ.params) do
+            local ok, err =
+                validate_interface_type(param, { kind = "value" }, seen)
+            if not ok then return nil, err end
+        end
+        for _, rettype in ipairs(typ.rettypes) do
+            local ok, err =
+                validate_interface_type(rettype, { kind = "value" }, seen)
+            if not ok then return nil, err end
+        end
+        if typ.varargtype ~= false then
+            local ok, err = validate_interface_type(
+                typ.varargtype, { kind = "value" }, seen)
+            if not ok then return nil, err end
+        end
+        if typ.flexrettype ~= false then
+            return validate_interface_type(
+                typ.flexrettype, { kind = "value" }, seen)
+        end
+        return true
+    elseif tag == "Type.Record" then
+        return validate_record_interface(typ, context, seen)
+    elseif tag == "Type.Union" then
+        return validate_union_interface(typ, context, seen)
+    elseif tag == "Type.Variant" then
+        if typ.payload ~= false then
+            return validate_interface_type(
+                typ.payload, { kind = "value" }, seen)
+        end
+        return true
+    elseif tag == "Type.Field" or tag == "Type.Method"
+           or tag == "Type.StaticMethod"
+           or tag == "Type.ModuleMember"
+           or tag == "Type.ModuleVariable" then
+        -- These are schema wrappers owned by a record, nominal member map, or
+        -- module. They are never value-facing types of their own. Rejecting
+        -- them here also prevents a serializable wrapper from hiding a
+        -- Type.Variant outside its one legal union-owned position.
+        return nil, tag .. " is not valid in a value-facing type graph"
+    end
+    -- Preserve the existing serializer as the compatibility gate for every
+    -- descriptor outside the schemas above. In particular, legacy malformed
+    -- metadata tests expect an unknown tag to reach the established
+    -- "module interface is not serializable" diagnostic. Union/Variant have
+    -- explicit structural validation here because their list/map ownership
+    -- and absolute-index invariants cannot be checked by serialization alone.
+    return true
+end
+
 function driver.validate_module_interface(modtype, modname)
-    if type(modtype) ~= "table" or modtype._tag ~= "Type.Module" then
+    if type(modtype) ~= "table" or modtype._tag ~= "Type.Module"
+       or modtype.islocal then
         return nil, "metadata did not deserialize to a Type.Module"
     end
     if modtype.name ~= modname then
@@ -725,7 +1041,8 @@ function driver.validate_module_interface(modtype, modname)
            (member._tag ~= "Type.ModuleMember" and
             member._tag ~= "Type.ModuleVariable") or
            member.modname ~= modname or type(member.name) ~= "string" or
-           member.name == "" or type(member.type) ~= "table" or
+           member.name == "" or member.islocal
+           or type(member.type) ~= "table" or
            type(member.type._tag) ~= "string" then
             return nil, "module member " .. index .. " has an invalid schema"
         end
@@ -733,10 +1050,31 @@ function driver.validate_module_interface(modtype, modname)
             return nil, "module interface contains duplicate member '" ..
                 member.name .. "'"
         end
+        if member._tag == "Type.ModuleMember" then
+            if member.type._tag == "Type.Function" then
+                if not validate_name_list(
+                        member.paramnames, #member.type.params) then
+                    return nil, "module function '" .. member.name ..
+                        "' has invalid parameter-name metadata"
+                end
+            elseif member.paramnames ~= false then
+                return nil, "non-function module member '" .. member.name ..
+                    "' has parameter-name metadata"
+            end
+        end
         names[member.name] = member
         if modtype.members[member.name] ~= member then
             return nil, "module member map does not match member '" ..
                 member.name .. "'"
+        end
+        local valid_type, type_err = validate_interface_type(member.type, {
+            kind = "module-member",
+            modname = modname,
+            name = member.name,
+        }, {})
+        if not valid_type then
+            return nil, "module member '" .. member.name ..
+                "' has an invalid type graph: " .. type_err
         end
     end
     for key, member in pairs(modtype.members) do
@@ -749,6 +1087,12 @@ function driver.validate_module_interface(modtype, modname)
         if type(name) ~= "string" or name == "" or type(member) ~= "table" or
            type(member._tag) ~= "string" then
             return nil, "module type-member table has an invalid schema"
+        end
+        local valid_type, type_err =
+            validate_interface_type(member, { kind = "value" }, {})
+        if not valid_type then
+            return nil, "module type member '" .. name ..
+                "' has an invalid type graph: " .. type_err
         end
     end
 

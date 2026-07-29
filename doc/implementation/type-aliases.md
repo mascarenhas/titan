@@ -16,8 +16,8 @@ blocks and from the C-FFI type namespace. The checker predeclares alias names,
 then resolves targets lazily. Resolution has unresolved, resolving, and resolved
 states: this supports forward aliases and aliases used by earlier signatures,
 while a second visit to a resolving alias reports a cycle and substitutes
-`Type.Invalid` for recovery. Recursive records remain valid because the cycle
-is through the nominal record declaration rather than through alias expansion.
+`Type.Invalid` for recovery. Recursive records and unions remain valid because
+the cycle is through a nominal declaration rather than alias expansion.
 
 Top-level collection visits every Titan and foreign import in AST order before
 the alias-resolution stage. A qualified alias target may consequently name an
@@ -29,33 +29,37 @@ masked under `st.initializer_order` even though alias resolution and other
 non-variable declarations see the complete import environment.
 
 An unqualified `Ast.TypeName` checks the alias table before falling back to a
-nominal record name. For `m.Name`, `Ast.TypeQualName` checks the imported Titan
-module's `type_members` before its exported record members. Expression lookup
+nominal record or union name. For `m.Name`, `Ast.TypeQualName` checks the
+imported Titan module's `type_members` before its exported nominal members.
+Expression lookup
 continues to consult only value members, which is what makes aliases type-only.
+`Type.Variant` entries inside a union schema are not type members: aliasing or
+annotating with `Message.move` is rejected, while aliases to `Message` are
+ordinary transparent nominal aliases.
 
 Export validation walks resolved alias targets recursively. Public aliases that
-contain C-FFI types or local record types are rejected by the same rules as
-function signatures, variables, and public record members.
+contain C-FFI types or local nominal types are rejected by the same rules as
+function signatures, variables, and public nominal members.
 
 ## Module interfaces
 
 `Type.Module` has two namespaces:
 
-* `members` contains run-time variables, functions, and record namespaces;
+* `members` contains run-time variables, functions, and record/union namespaces;
 * `type_members` maps exported alias names directly to their resolved targets.
 
 The two maps are serialized independently and deterministically by
 `types.serialize`. A compiled-interface importer therefore rehydrates a
-transparent alias with the same nominal record name and structural component
+transparent alias with the same nominal owner name and structural component
 types, whether the interface came from DSO callables or an archive metadata
 section, without inventing a run-time member. Adding this third serialized
 `Module` component was an interface ABI change, so this feature advanced
 `TITAN_VER` to 0.12.
 
-`checker.checkimport` recursively registers records reachable through both
+`checker.checkimport` recursively registers records and unions reachable through both
 namespaces. This matters when the alias is the only exported reference to a
-record whose source is unavailable: nominal lookup still has to recover the
-owning record declaration from the serialized interface.
+owner whose source is unavailable: nominal lookup still has to recover the
+owning declaration from the serialized interface.
 
 ## Transitive record methods across DSOs
 

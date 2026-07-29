@@ -147,13 +147,18 @@ end
 ```
 
 They cannot be exported from a Titan module. A public function parameter or
-return type, a public variable, or a public record member that mentions a C FFI
+return type, a public variable, or a public record field/union payload that
+mentions a C FFI
 type is rejected. This version deliberately does not serialize C types into
 compiled Titan module interfaces, because another Titan module would also need
-the right C header included in its generated C. A local record field may mention
-a C type because it remains private to the defining module. Source-written
+the right C header included in its generated C. A local record field or union
+payload may mention only a C type with a real `TValue` representation: a
+boxable scalar/object pointer, exact `TValue`/`Udata *`, or owned form. Direct
+C aggregates, arrays, functions, and function pointers remain ineligible even
+when private. Source-written
 owned types have the same boundary: they may be used in local aliases,
-variables, local record fields, local callable parameters and results, options,
+variables, eligible local record fields/union payloads, local callable
+parameters and results, options,
 Arrays, and Maps, but any public type containing one is rejected.
 
 An option stores its present value in a Lua `TValue`. A direct C type may
@@ -238,7 +243,7 @@ Allowed conversions include:
 * C arrays and counted owned C arrays to compatible C pointers;
 * any non-function C pointer to `void *`;
 * a C function pointer to C `void *` with a written cast;
-* a Titan Array, Map, record, or function value to C `void *` with a written
+* a Titan Array, Map, record, union, or function value to C `void *` with a written
   identity cast;
 * non-pointer by-value C object expressions to compatible `const *T` pointers,
   materialized as the address of the C expression for the duration of the
@@ -269,6 +274,7 @@ The explicit GC-identity cast exposes the native object address:
 
 * Arrays and Maps expose their backing `Table *`;
 * records expose their full-userdata `Udata *`;
+* unions expose their full-userdata `Udata *`;
 * a function exposes the GC object carried by its boxed function value.
 
 The function case has a dynamic precondition because function-typed values
@@ -290,7 +296,7 @@ Every pointer produced by these conversions is borrowed. Titan keeps the
 source GC object rooted while the cast is evaluated and while later arguments
 for the same call are prepared, but storing or returning the C pointer does
 not extend the object's lifetime. Keep the original Titan value reachable for
-as long as C retains the pointer. The Array, Map, record, and function
+as long as C retains the pointer. The Array, Map, record, union, and function
 addresses are Lua/Titan runtime representations, not public payload layouts;
 code must not dereference, mutate, free, or reallocate them unless it is
 deliberately using the matching internal runtime contract.
@@ -365,6 +371,11 @@ Old-style `f()`, unnamed or partially named parameter lists, duplicate names,
 and conflicting complete names across compatible redeclarations do not publish
 named-call metadata. Named syntax then gets a specific unavailable-prototype
 diagnostic, while the positional call remains available.
+
+C member and qualified-type positions use the same contextual raw-identifier
+principle. A C field, symbol, or tag named `when`, `type`, `repeat`, or another
+Titan keyword may be written after the foreign namespace or a C receiver.
+Those spellings remain illegal for ordinary Titan identifiers.
 
 Parenthesized direct C calls retain strict C arity. A trailing Titan call with
 several statically visible results may be truncated to fill exactly the
@@ -528,6 +539,11 @@ Named file-scope tag-only aggregates are available as `c.Tag` without a C
 typedef. A function may also declare a complete aggregate without an
 initializer to request C `{0}` initialization. See
 [C FFI declarations and expressions](c-ffi-expressions.md).
+
+A Titan [union](unions.md) is unrelated to a C `union`: it is nominal tagged
+userdata, not an overlay of C fields. There is no structural cast in either
+direction between Titan unions and C unions or structs. The only identity
+escape is the explicit Titan-union-to-C-`void *` cast described above.
 
 ### C Assignment Receivers And Order
 

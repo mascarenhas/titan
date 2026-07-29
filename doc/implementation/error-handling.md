@@ -137,6 +137,11 @@ The catch/finally clause bodies are plain statement lists, not full
 trailer-consuming blocks. That prevents an inner catch body from greedily
 swallowing an outer `finally`.
 
+Every `case` arm and its optional `else` consume the ordinary full `block`
+production. An arm can therefore carry its own `catch` and/or `finally`, and
+the parser produces the same `Ast.StatTry` wrapper used anywhere else. There
+is no case-specific error-handling form.
+
 ## Checker rules
 
 `StatTry` checks its body, catch, and finally in sibling scopes.
@@ -150,6 +155,11 @@ locals and rejects assignment to either name.
 
 Body locals are deliberately invisible in catch/finally, because a body
 error may happen before a given local declaration has executed.
+
+A `case` payload binding is established in the arm scope outside a possible
+`StatTry`, so it is visible in that arm's protected body, `catch`, and
+`finally`. Locals declared by the protected body remain invisible to the
+sibling clauses.
 
 Bare `raise` is legal only while checking a catch block. The checker uses
 a `catch_depth` counter for that rule and resets it across nested function
@@ -176,6 +186,11 @@ The always-returns rule for a try is:
 or
 (body always-returns and (no catch or catch always-returns))
 ```
+
+As with `StatBlock`, `StatIf`, and `StatCase`, `checkstat` records that result
+on the node as `_always_returns`. Statement-list code generation consumes this
+decoration when stopping at a dead tail; it does not recognize only direct
+`return`, `break`, or `raise` tags.
 
 ## Code generator overview
 
@@ -336,7 +351,7 @@ therefore not itself a stack-relocation hazard.
 
 ## ABI and search path
 
-The current compiled-module ABI is `0.18`. The error-handling control-flow
+The current compiled-module ABI is `0.19`. The error-handling control-flow
 machinery did not by itself require an ABI bump, but this branch also
 changed the `TitanVargX` structs from inline flexible-array backing
 objects to descriptor structs with an `args` pointer. That layout change
@@ -373,18 +388,23 @@ must keep backing, proxy, RHS, and pending flexible values rooted across any
 allocation or `luaL_error`. A 0.16 module cannot safely participate in that
 protocol. See [Dense Arrays](dense-arrays.md#failure-and-performance-boundaries).
 
-ABI 0.18 also leaves this error and nonlocal-control-flow machinery unchanged.
+ABI 0.18 also left this error and nonlocal-control-flow machinery unchanged.
 It advances the compiled-module boundary because standard-library archive
 objects now directly reference promoted libuv callback trampolines and no
 longer reference replaced libuv/coroutine helper symbols. A 0.18 provider and
-runtime must be distributed together.
+runtime had to be distributed together.
+
+ABI 0.19 likewise keeps the pending-action and longjmp machinery unchanged.
+It advances the boundary for serialized union/variant schemas, union userdata
+dispatch, and the reconstructible public nominal-static slot prefix. A case
+arm still runs through the ordinary `StatTry` cleanup path.
 
 The compiler and runtime therefore agree on:
 
-* `TITAN_VER "0.18"`
-* `TITAN_VER_SUFFIX "_0_18"`
-* versioned binary path variable `TITAN_PATH_0_18`
-* default binary path `.;<root>/lib/titan/0.18`, with `<root>` recovered from
+* `TITAN_VER "0.19"`
+* `TITAN_VER_SUFFIX "_0_19"`
+* versioned binary path variable `TITAN_PATH_0_19`
+* default binary path `.;<root>/lib/titan/0.19`, with `<root>` recovered from
   the Lua `PREFIX`'s `package.cpath` in the currently supported layout where
   that path also names the equal Titan `ROCKS_TREE`
 

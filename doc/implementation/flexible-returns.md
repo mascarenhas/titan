@@ -22,7 +22,7 @@ of native ABI truth.
 
 This chapter describes the completed implementation, including the generic
 open-consumer and pending-`finally` lifetime paths. Flexible returns introduced
-compiled-module ABI 0.14; current installed-module paths use ABI 0.18.
+compiled-module ABI 0.14; current installed-module paths use ABI 0.19.
 
 ## Representation in the AST and type graph
 
