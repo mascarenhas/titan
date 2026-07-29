@@ -87,15 +87,16 @@ plain initializer is an `Ast.StatBlock` while one with `catch` or `finally`
 trailers is an `Ast.StatTry`. The driver uses the role annotation, rather than
 guessing from the statement tag, to extract the main initializer and reject an
 initializer from a contributor at its `do` location. Nested block statements
-are ordinary descendants and remain legal. Parser desugarings such as a
-record's synthesized `new` static function stay in their original per-file
-order; that static carries `_record_constructor = true` so later checker
-staging can recognize it without relying only on its spelling.
+are ordinary descendants and remain legal. Parser desugarings stay in their
+original per-file order: a record keeps its `_record_constructor` static
+adjacent, and a union keeps all `_union_constructor` statics adjacent in
+variant order. Later checker staging recognizes those markers rather than
+relying on spellings.
 
 The numeric-byte comparator compares `string.byte` values and shorter
 prefixes, not locale collation. It is also used for keyed interface maps whose
 serialization must be reproducible. Ordered interface data remains ordered:
-module-member arrays and record-field arrays are never alphabetized.
+module-member, record-field, and union-variant arrays are never alphabetized.
 
 ## One checker invocation and one identity
 
@@ -107,7 +108,7 @@ logical name `M` and calls `checker.check` exactly once with:
 - the main source text and filename;
 - the ordinary recursive loader.
 
-This produces one symbol table, module scope, module type, nominal-record
+This produces one symbol table, module scope, module type, nominal-owner
 owner, dependency closure, and `has_main` decision. A top-level `local`
 declaration is consequently module-private across all contributors, never
 file-private. An import in any contributor enters the one direct-dependency
@@ -137,10 +138,10 @@ diagnostics use those locations for both the later declaration and the full
 The checker annotates this unchanged list with `_toplevel_order` and premarks
 ordinary duplicate winners in combined order. It then precollects aliases
 before reserving surviving ordinary names and visiting imports, alias targets,
-records and their synthesized constructors, callable signatures, and record
-members in dependency order. Module variables and bodies follow. This
-visitation schedule makes records, aliases, functions, methods, and record
-functions visible across file boundaries regardless of placement. For each
+records/unions and their synthesized constructors, callable signatures, and
+nominal members in dependency order. Module variables and bodies follow. This
+visitation schedule makes nominal owners, aliases, functions, methods, and
+nominal functions visible across file boundaries regardless of placement. For each
 module variable, `initializer_order` temporarily masks imports and module
 variables at or beyond the applicable combined-order frontier. Thus folder
 composition supplies the order but does not create a new visibility mechanism.
@@ -216,11 +217,11 @@ native function parameter, module-state slot category, or runtime DSO lookup
 rule. The representation mechanism does not itself require an ABI change.
 
 One adjacent determinism fix makes interfaces reproducible: keyed module type
-aliases and record method/static-function maps are serialized in
+aliases and nominal method/static-function maps are serialized in
 `util.bytewise_less` name order. This changes only the textual order chosen for
-maps whose Lua insertion order was never a contract. Ordered module members
-and record fields retain source order because they define module and field
-slots.
+maps whose Lua insertion order was never a contract. Ordered module members,
+record fields, and union variants retain source order because they define
+module slots, field slots, and absolute tags.
 
 The `titan.uv` dogfood intentionally uses that rule rather than hiding public
 declarations in the main source. Its exported records and functions live in
@@ -250,9 +251,14 @@ public prefix. That private slot and the new Array boxing protocol require the
 ABI transition, but contributor boundaries still have no runtime identity.
 See [Dense Arrays](dense-arrays.md#canonical-proxy-and-module-cache).
 
-ABI 0.18 preserves folder composition, contributor ordering, and the logical
+ABI 0.18 preserved folder composition, contributor ordering, and the logical
 interface again. Its compatibility boundary is instead the external callback
 symbol contract between standard-library archive objects and the runtime.
+
+ABI 0.19 still gives contributors no runtime identity. It adds union schemas
+and absolute variant tags, plus the reconstructible public nominal-static slot
+prefix. Folder order therefore remains authoritative for public owner/member
+order and for variant tags, while keyed static maps use bytewise ordering.
 
 ## `titan.uv` dogfooding
 

@@ -34,7 +34,8 @@ end
 ## What Counts As The Current Block
 
 The current block is the statement list being parsed: a function body, a
-`do ... end` body, a loop body, or an `if`/`elseif`/`else` arm. In a loop,
+`do ... end` body, a loop body, an `if`/`elseif`/`else` arm, or a union
+`when`/`else` arm. In a loop,
 the deferred statement runs before that iteration leaves the loop body:
 
 ```lua
@@ -43,6 +44,13 @@ while more() do
     process_current_item()
 end
 ```
+
+Case arms are ordinary full blocks. A defer in one arm wraps only the
+remainder of that arm; it cannot run in, capture declarations from, or
+fall through to another arm. If the arm also has `catch` or `finally`, the
+ordinary nested-finally transformation and cleanup order apply. A payload
+binding is already in scope when the arm is transformed, so deferred cleanup
+may use it.
 
 ## Ordering
 

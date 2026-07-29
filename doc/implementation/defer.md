@@ -85,6 +85,13 @@ Because the optional final `returnstat` is captured in the same list,
 `defer cleanup(); return x` naturally becomes a pending return through a
 `finally`, not a special return case.
 
+`case` does not add another lowering path. Every `when` arm and the optional
+`else` use the ordinary full `block`/`simpleblock` productions, so
+`lower_defers` runs recursively inside each one. The generated nested
+`StatTry` stays within that arm; it cannot cross into a sibling arm, and
+arm-local `catch`/`finally` trailers continue to compose through the existing
+pending-action machinery.
+
 The parser marks the synthetic `StatTry` and its body block as
 `_defer_tail`. That marker is intentionally private to the compiler. It
 lets the checker and coder preserve the surrounding statement-list scope

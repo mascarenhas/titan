@@ -274,6 +274,81 @@ describe("typechecker rehydration of .so-only imports", function()
             table.concat(constructor, "\n"))
     end)
 
+    it("rehydrates unions with hidden tag holes and transitive payload owners",
+    function()
+        local deps = {
+            { name = "rhunionpoint", src = [[
+                record Delta
+                    x: float
+                    y: float
+                end
+
+                function make_delta(x: float, y: float): Delta
+                    return { x = x, y = y }
+                end
+            ]] },
+            { name = "rhunionapi", src = [[
+                local point = import "rhunionpoint"
+
+                union Message
+                    quit
+                    local hidden: integer
+                    move: point.Delta
+                end
+
+                function hidden_message(): Message
+                    return Message.hidden(17)
+                end
+
+                function delta(x: float, y: float): point.Delta
+                    return point.make_delta(x, y)
+                end
+            ]] },
+        }
+        local good = so_check(deps, "rhunionconsumer", [[
+            local api = import "rhunionapi"
+
+            function total(): float
+                local make = api.Message.move
+                local message = make(api.delta(1.0, 2.0))
+                case message
+                when move: delta then
+                    return delta.x + delta.y
+                when quit then
+                    return 0.0
+                else
+                    return -1.0
+                end
+            end
+
+            function hidden_falls_through(): integer
+                case api.hidden_message()
+                when quit then
+                    return 0
+                when move: delta then
+                    return 1
+                else
+                    return 17
+                end
+            end
+        ]])
+        assert.equal(0, #good, table.concat(good, "\n"))
+
+        local union = assert(types.registry["rhunionapi.Message"])
+        assert.equal("Type.Union", union._tag)
+        assert.equal(3, union.nvariants)
+        assert.equal(2, #union.variants)
+        assert.equal(0, union.variants.quit.index)
+        assert.equal(2, union.variants.move.index)
+        assert.is_nil(union.variants.hidden)
+        assert.is_nil(union.functions.hidden)
+        assert.is_false(union.functions.move.paramnames)
+        assert.equal("rhunionpoint.Delta",
+            union.variants.move.payload.fqtn)
+        assert.truthy(types.registry["rhunionpoint.Delta"],
+            "variant payload owner should be recovered through the DSO chain")
+    end)
+
     it("rehydrates a module variable's type", function ()
         local dep = { name = "varfoo", src = [[ count: integer = 0 ]] }
         local good = so_check({ dep }, "varbar", [[

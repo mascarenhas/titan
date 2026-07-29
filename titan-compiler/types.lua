@@ -15,6 +15,8 @@ local types = typedecl("Type", {
         Array       = {"elem"},
         Map         = {"keys", "values"},
         Record      = {"name", "fields", "functions", "methods", "nfields"},
+        Union       = {"name", "variants", "functions", "methods", "nvariants"},
+        Variant     = {"fqtn", "name", "payload", "index"},
         Nominal     = {"fqtn"},
         Field       = {"fqtn", "name", "type", "index"},
         Method      = {"fqtn", "name", "params", "rettypes", "varargtype", "flexrettype", "paramnames"},
@@ -49,6 +51,17 @@ end
 local raw_CTypedef = types.CTypedef
 function types.CTypedef(name, target, quals)
     return raw_CTypedef(name, target, quals or {})
+end
+
+-- A union's variants retain source order for their stable integer tags while
+-- also supporting namespace lookup by name.  Keep both views on the same
+-- descriptor objects, like Type.Module's member list/map.
+local raw_Union = types.Union
+function types.Union(name, variants, functions, methods, nvariants)
+    for _, variant in ipairs(variants) do
+        variants[variant.name] = variant
+    end
+    return raw_Union(name, variants, functions, methods, nvariants)
 end
 
 -- Registry for nominal types
@@ -168,6 +181,9 @@ local function find_c_type(t, include_legacy, descend_function_values)
         elseif tag == "Type.Field" then
             if typ.islocal then return nil end
             return visit_type(typ.type, seen)
+        elseif tag == "Type.Variant" then
+            if typ.islocal or typ.payload == false then return nil end
+            return visit_type(typ.payload, seen)
         elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
             if typ.islocal then return nil end
             for _, param in ipairs(typ.params) do
@@ -183,6 +199,20 @@ local function find_c_type(t, include_legacy, descend_function_values)
         elseif tag == "Type.Record" then
             for _, field in ipairs(typ.fields) do
                 local ctyp = not field.islocal and visit_type(field, seen)
+                if ctyp then return ctyp end
+            end
+            for _, func in pairs(typ.functions) do
+                local ctyp = not func.islocal and visit_type(func, seen)
+                if ctyp then return ctyp end
+            end
+            for _, method in pairs(typ.methods) do
+                local ctyp = not method.islocal and visit_type(method, seen)
+                if ctyp then return ctyp end
+            end
+        elseif tag == "Type.Union" then
+            for _, variant in ipairs(typ.variants) do
+                local ctyp = not variant.islocal
+                    and visit_type(variant, seen)
                 if ctyp then return ctyp end
             end
             for _, func in pairs(typ.functions) do
@@ -758,6 +788,10 @@ function types.is_falsy(typ)
 end
 
 function types.explicitly_coerceable(source, target)
+    if source._tag == "Type.Variant"
+       or target._tag == "Type.Variant" then
+        return false
+    end
     return (is_void_pointer(source) and target._tag == "Type.String")
         or (is_c_void_pointer(source) and target._tag == "Type.String")
         or (is_c_char_pointer(source) and target._tag == "Type.String")
@@ -773,7 +807,10 @@ function types.explicitly_coerceable(source, target)
 end
 
 function types.coerceable(source, target)
-    if types.equals(source, target) then
+    if source._tag == "Type.Variant"
+       or target._tag == "Type.Variant" then
+        return false
+    elseif types.equals(source, target) then
         return false
     elseif is_c_integer(source) and target._tag == "Type.Integer" then
         return true
@@ -971,7 +1008,9 @@ end
 -- The type consistency relation, a-la gradual typing. Its argument order is
 -- directional: `t1` is expected and `t2` is found.
 function types.compatible(t1, t2)
-    if types.equals(t1, t2) then
+    if t1._tag == "Type.Variant" or t2._tag == "Type.Variant" then
+        return false
+    elseif types.equals(t1, t2) then
         return true
     elseif t1._tag == "Type.CTypedef" then
         return types.compatible(types.resolve_c_typedef(t1), t2)
@@ -1390,6 +1429,19 @@ type_equals = function(t1, t2, seen)
         -- differing tail element types must therefore fall back from the
         -- first-class native path.
         return callable_shape_equals(t1, t2, seen, true)
+    elseif tag1 == "Type.Variant" then
+        return t1.fqtn == t2.fqtn
+           and t1.name == t2.name
+           and t1.index == t2.index
+           and ((t1.payload == false and t2.payload == false)
+                or (t1.payload ~= false and t2.payload ~= false
+                    and type_equals(t1.payload, t2.payload, seen)))
+    elseif tag1 == "Type.Union" then
+        return t1.name == t2.name
+           and t1.nvariants == t2.nvariants
+           and same_value(t1.variants, t2.variants, seen)
+           and same_value(t1.functions, t2.functions, seen)
+           and same_value(t1.methods, t2.methods, seen)
     elseif tag1 == "Type.Method" or tag1 == "Type.StaticMethod" then
         return t1.fqtn == t2.fqtn
            and t1.name == t2.name
@@ -1540,8 +1592,10 @@ function types.tostring(t)
             table.insert(out, ")")
         end
         return table.concat(out)
-    elseif tag == "Type.Record" then
+    elseif tag == "Type.Record" or tag == "Type.Union" then
         return t.name
+    elseif tag == "Type.Variant" then
+        return t.fqtn .. "." .. t.name
     elseif tag == "Type.Nominal" then
         return t.fqtn
     elseif tag == "Type.Option" then
@@ -1600,6 +1654,97 @@ function types.tostring(t)
     else
         error("impossible: " .. tostring(tag))
     end
+end
+
+-- Build the public view serialized for a source union. Keeping this projection
+-- in one helper lets the checker prove the variant/constructor locality pairs
+-- against the exact view that serialization emits.
+function types.public_union_projection(union)
+    assert(union and union._tag == "Type.Union")
+    local variants, functions, methods = {}, {}, {}
+    for _, variant in ipairs(union.variants) do
+        if not variant.islocal then
+            variants[#variants + 1] = variant
+            variants[variant.name] = variant
+        end
+    end
+    for name, fn in pairs(union.functions) do
+        if not fn.islocal then functions[name] = fn end
+    end
+    for name, method in pairs(union.methods) do
+        if not method.islocal then methods[name] = method end
+    end
+    return {
+        variants = variants,
+        functions = functions,
+        methods = methods,
+    }
+end
+
+-- Validate the full source descriptor before it loses locality metadata. A
+-- decoder cannot reconstruct hidden variants, so this proof belongs on the
+-- producer side rather than in recovered-interface validation.
+function types.validate_union_source_projection(union)
+    if not union or union._tag ~= "Type.Union" then
+        return nil, "descriptor is not a union"
+    end
+    local projection = types.public_union_projection(union)
+    for _, variant in ipairs(union.variants) do
+        local constructor = union.functions[variant.name]
+        if not constructor
+           or constructor._tag ~= "Type.StaticMethod"
+           or constructor.fqtn ~= union.name
+           or constructor.name ~= variant.name
+           or constructor.varargtype ~= false
+           or constructor.flexrettype ~= false
+           or constructor.paramnames ~= false
+           or #constructor.rettypes ~= 1
+           or constructor.rettypes[1]._tag ~= "Type.Nominal"
+           or constructor.rettypes[1].fqtn ~= union.name then
+            return nil, "variant '" .. variant.name ..
+                "' has no matching constructor"
+        end
+        if variant.payload == false then
+            if #constructor.params ~= 0 then
+                return nil, "empty variant '" .. variant.name ..
+                    "' has a payload constructor"
+            end
+        elseif #constructor.params ~= 1
+               or not types.equals(
+                   constructor.params[1], variant.payload) then
+            return nil, "payload variant '" .. variant.name ..
+                "' has a mismatched constructor"
+        end
+
+        local expected_local =
+            (union.islocal or variant.islocal) and true or false
+        if (constructor.islocal and true or false) ~= expected_local then
+            return nil, "variant '" .. variant.name ..
+                "' and its constructor disagree on locality"
+        end
+        local projected_variant =
+            projection.variants[variant.name] == variant
+        local projected_constructor =
+            projection.functions[variant.name] == constructor
+        if projected_variant ~= not expected_local
+           or projected_constructor ~= not expected_local then
+            return nil, "variant '" .. variant.name ..
+                "' was not projected with its constructor"
+        end
+    end
+    if union.islocal then
+        for name, fn in pairs(union.functions) do
+            if not fn.islocal then
+                return nil, "local union publishes function '" .. name .. "'"
+            end
+        end
+        for name, method in pairs(union.methods) do
+            if not method.islocal then
+                return nil, "local union publishes method '" .. name .. "'"
+            end
+        end
+    end
+    return projection
 end
 
 function types.serialize(t)
@@ -1662,6 +1807,11 @@ function types.serialize(t)
         return "Field('" .. t.fqtn .. "', '" ..
              t.name .. "', " .. types.serialize(t.type) ..
              ", " .. tostring(t.index) .. ")"
+    elseif tag == "Type.Variant" then
+        return "Variant('" .. t.fqtn .. "', '" .. t.name .. "', " ..
+            (t.payload == false and "false"
+                or types.serialize(t.payload)) .. ", " ..
+            tostring(t.index) .. ")"
     elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
         local ptypes = {}
         for _, pt in ipairs(t.params) do
@@ -1712,6 +1862,40 @@ function types.serialize(t)
             "},{" ..table.concat(functions, ",") .. "}" .. "," ..
             "{" .. table.concat(methods, ",") .. "}" .. "," ..
             tostring(t.nfields or #t.fields) ..
+            ")"
+    elseif tag == "Type.Union" then
+        local functions, variants, methods = {}, {}, {}
+        local public = types.public_union_projection(t)
+        for _, variant in ipairs(public.variants) do
+            table.insert(variants, types.serialize(variant))
+        end
+        local method_names = {}
+        for name in pairs(public.methods) do
+            table.insert(method_names, name)
+        end
+        table.sort(method_names, util.bytewise_less)
+        for _, name in ipairs(method_names) do
+            local method = public.methods[name]
+            table.insert(methods,
+                "[" .. string.format("%q", name) .. "] = " ..
+                types.serialize(method))
+        end
+        local function_names = {}
+        for name in pairs(public.functions) do
+            table.insert(function_names, name)
+        end
+        table.sort(function_names, util.bytewise_less)
+        for _, name in ipairs(function_names) do
+            local func = public.functions[name]
+            table.insert(functions,
+                "[" .. string.format("%q", name) .. "] = " ..
+                types.serialize(func))
+        end
+        return "Union(" .. string.format("%q", t.name) ..
+            ",{" .. table.concat(variants, ",") ..
+            "},{" .. table.concat(functions, ",") .. "}" .. "," ..
+            "{" .. table.concat(methods, ",") .. "}" .. "," ..
+            tostring(t.nvariants or #t.variants) ..
             ")"
     elseif tag == "Type.Option" then
         return "Option(" .. types.serialize(t.base) .. ")"

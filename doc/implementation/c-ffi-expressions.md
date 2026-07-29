@@ -53,6 +53,17 @@ Anonymous aggregates and enum tags receive no source alias in this iteration.
 An incomplete file-scope tag does receive an alias for pointer-only use; layout
 sinks consult visibility/completeness separately.
 
+Source-nameable C selectors use the raw contextual `lexer.CNAME`, not
+ordinary Titan `NAME`. It accepts the C identifier shape without rejecting a
+Titan keyword and is referenced only by C member/type grammar positions.
+Consequently headers may expose `when`, `repeat`, `type`, or another
+Titan-only keyword without reserving an escape syntax or making that spelling
+legal in ordinary Titan declarations. Named C prototype arguments retain the
+separate contextual `NAMEDLABEL` path. The parser marks the corresponding
+`Ast.VarDot`/`Ast.TypeQualName` with `_contextual_c_name`; the checker accepts
+that marker only after proving the qualifier is a C namespace/receiver, while
+the coder simply emits the stored spelling unchanged.
+
 ### One tag namespace per C scope
 
 C shares one tag namespace among `struct`, `union`, and `enum` within a scope.
@@ -313,6 +324,13 @@ The same adjustment path is used for locals, assignment, returns, direct/named
 C calls, C function-pointer calls, fixed and typed C-vararg arguments, fields,
 and explicit casts. A successful use-site conversion does not alter structural
 function compatibility.
+
+Titan records and unions are nominal GC objects, not C aggregate layouts. The
+explicit GC-identity path may expose either one's rooted `Udata *` as C
+`void *`, and `is` uses the corresponding non-raising identity predicate.
+There is no conversion between a Titan union and `Type.CUnion` (nor between a
+Titan record and `Type.CStruct`); C aggregate casts remain governed solely by
+the C-type rules in this chapter.
 
 Mutable-address call analysis unwraps the recorded cast while retaining whether
 it formed an address or array decay. The direct source declaration is added to

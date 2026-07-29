@@ -38,9 +38,22 @@ local function remove_tree(path)
     end
 end
 
+local function public_record(fqtn, fields)
+    local params, paramnames = {}, {}
+    for _, field in ipairs(fields) do
+        params[#params + 1] = field.type
+        paramnames[#paramnames + 1] = field.name
+    end
+    local constructor = types.StaticMethod(
+        fqtn, "new", params, { types.Nominal(fqtn) },
+        false, false, paramnames)
+    return types.Record(
+        fqtn, fields, { new = constructor }, {}, #fields)
+end
+
 local function owner_interface(modname, record_name)
     local fqtn = modname .. "." .. record_name
-    local record = types.Record(fqtn, {}, {}, {}, 0)
+    local record = public_record(fqtn, {})
     local member = types.ModuleMember(
         modname, record_name, record, false)
     return types.Module(modname, { member }), record
@@ -198,6 +211,12 @@ record Box
     n: integer
 end
 
+union Result
+    none
+    local hidden: integer
+    box: Box
+end
+
 function Box.make(n: integer): Box
     return Box.new(n)
 end
@@ -222,6 +241,10 @@ end
 
 function labels(): (...: string)
     return "left", "right"
+end
+
+function hidden_result(): Result
+    return Result.hidden(99)
 end
 ]]
         local provider_filename = source .. "/rich/api.titan"
@@ -250,9 +273,18 @@ function use_everything(): integer
     api.counter = before + 1
     local encoded = api.combine { right = 2, left = 4 }
     local box: api.Alias = api.Box.make { n = encoded }
+    local wrap: (api.Box) -> api.Result = api.Result.box
+    local result = wrap(box)
     local first: string?, second: string? = api.labels()
     local count = api.sum(1, 2, 3)
-    return box:add { delta = count }
+    case result
+    when box: selected then
+        return selected:add { delta = count }
+    when none then
+        return 0
+    else
+        return -1
+    end
 end
 ]]
         local consumer_filename = source .. "/rich/consumer.titan"
@@ -268,6 +300,15 @@ end
         assert.equal(provider.archive,
             driver.imported["rich.api"].static_archive)
         assert.truthy(types.registry["rich.api.Box"])
+        local union = assert(types.registry["rich.api.Result"])
+        assert.equal(3, union.nvariants)
+        assert.equal(2, #union.variants)
+        assert.equal(0, union.variants.none.index)
+        assert.equal(2, union.variants.box.index)
+        assert.is_nil(union.variants.hidden)
+        assert.is_nil(union.functions.hidden)
+        assert.is_false(union.functions.box.paramnames)
+        assert.equal("rich.api.Box", union.variants.box.payload.fqtn)
         assert.equal(
             types.serialize(provider_type),
             types.serialize(driver.imported["rich.api"].type))
@@ -276,10 +317,10 @@ end
     it("preserves the exposing provider through recursive nominal recovery",
        function()
         local owner = owner_interface("right.owner", "Box")
-        local bridge_record = types.Record("middle.bridge.Link", {
+        local bridge_record = public_record("middle.bridge.Link", {
             types.Field("middle.bridge.Link", "box",
                 types.Nominal("right.owner.Box"), 0),
-        }, {}, {}, 1)
+        })
         local bridge = types.Module("middle.bridge", {
             types.ModuleMember(
                 "middle.bridge", "Link", bridge_record, false),
@@ -329,18 +370,18 @@ end
 
     it("replays nested contextual DSO edges through finalization cycles",
        function()
-        local leaf_record = types.Record("chain.leaf.Box", {
+        local leaf_record = public_record("chain.leaf.Box", {
             types.Field("chain.leaf.Box", "back",
                 types.Nominal("chain.mid.Link"), 0),
-        }, {}, {}, 1)
+        })
         local leaf = types.Module("chain.leaf", {
             types.ModuleMember(
                 "chain.leaf", "Box", leaf_record, false),
         })
-        local mid_record = types.Record("chain.mid.Link", {
+        local mid_record = public_record("chain.mid.Link", {
             types.Field("chain.mid.Link", "box",
                 types.Nominal("chain.leaf.Box"), 0),
-        }, {}, {}, 1)
+        })
         local mid = types.Module("chain.mid", {
             types.ModuleMember("chain.mid", "Link", mid_record, false),
         })

@@ -244,7 +244,7 @@ Titan boundary conversions:
 * any non-function C pointer -> `void *`;
 * a written C function pointer -> `void *` cast, outside ordinary
   object-pointer compatibility;
-* a written Titan Array, Map, nominal record, or function -> C `void *`
+* a written Titan Array, Map, nominal record/union, or function -> C `void *`
   identity cast;
 * non-pointer by-value C object expressions -> compatible `const *T` pointers
   by address;
@@ -330,6 +330,14 @@ The checker has FFI-specific handling in a few narrow places:
   types could only be inferred. A non-module-variable declaration may use a
   later `foreign import`; while checking a module variable,
   `symtab.find_symbol` masks a later C-module alias by `initializer_order`.
+  The parser uses contextual `lexer.CNAME` for this selector and for C member
+  access, so a header spelling that is a Titan keyword (`when`, `repeat`,
+  `type`, and so on) remains source-nameable. Ordinary Titan names still use
+  keyword-rejecting `NAME`; C prototype labels continue to use
+  `NAMEDLABEL`. The parser stamps accepted `Ast.VarDot` and
+  `Ast.TypeQualName` nodes with `_contextual_c_name`; the checker admits that
+  marker only when the qualifier resolves to a `Type.CModule`, and the coder
+  emits the stored C spelling unchanged.
 * `Ast.TypeCPointer` accepts `*c.T` and `const *c.T`, producing `CPointer`
   values over direct imported C pointees and rejecting non-C pointees and
   `COwned` wrappers.
@@ -342,6 +350,10 @@ The checker has FFI-specific handling in a few narrow places:
   `types.has_tvalue_representation`. This admits `COwned` and other boxable C
   scalars while rejecting by-value C aggregates/arrays, direct C functions,
   and C function pointers before `getslot`/`setslot` code generation.
+  Record fields and union payloads use the same predicate because they occupy
+  the same kind of user-value slot. It treats Arrays, Maps, and Titan function
+  values as already boxed and recurses only through `Option`; it does not
+  recursively reject their component/signature types.
 * `Ast.VarDot` on a `CModule` consults ordinary `members` first. If no value
   has that name, a `type_members` entry yields a `Type.CTypeNamespace`
   pseudo-declaration so `.new`, `.new_array`, `.sizeof`, and `.alignof` can be
@@ -424,9 +436,10 @@ The checker has FFI-specific handling in a few narrow places:
   declaration from a later foreign import.
 
 Export checks use `types.contains_c_ffi_type`: any public function signature,
-public variable, or public record member that mentions a C type is rejected.
-Local record fields, methods and record functions are skipped before this check, so a
-private C-typed record slot can remain module-internal. `CModule` itself is
+public variable, or public nominal member that mentions a C type is rejected.
+Local fields/variants, methods, and nominal functions are skipped before this
+check, so a private C-typed record slot or union variant can remain
+module-internal. `CModule` itself is
 rejected as a first-class value in the same `ExpVar` path as ordinary Titan
 modules.
 
@@ -555,7 +568,7 @@ decides quote-vs-angle based on actual resolution.
 `nativetoforeignexp` recognizes explicit GC-identity casts before its ordinary
 direct-C pass-through. It materializes the source exactly once and anchors it
 in a scanned temporary. Array and Map values then expose that temporary's
-native `Table *`; a nominal record exposes its `Udata *`. Function values are
+native `Table *`; a nominal record or union exposes its `Udata *`. Function values are
 native `TValue`s, so the lowering first tests `iscollectable(&temporary)`,
 raises for an immediate value, and otherwise converts
 `gcvalue(&temporary)` to the requested C `void *` spelling. `_codeis` uses the
@@ -577,6 +590,11 @@ Once the containing generated frame stops anchoring the source, only another
 reachable reference keeps it alive. The `Table *`, `Udata *`, and general
 `GCObject *` identities are internal runtime addresses, not stable public
 layouts or independently managed allocations.
+
+This is the only Titan-union/C boundary added by unions v1. A Titan union may
+be explicitly erased to C `void *` as a GC identity, just like a Titan record;
+it is never structurally converted to a C `union` or `struct`, and no reverse
+aggregate cast is defined.
 
 `foreigntonativeexp` handles C-to-Titan conversion for call results and foreign
 variables. C `TValue` results become Titan `value`s directly. C

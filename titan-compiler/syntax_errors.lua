@@ -68,6 +68,16 @@ local errors = {
 
    FieldRecord = "Expected a field in record declaration.",
 
+   NameUnion = "Expected a union name after 'union'.",
+
+   VariantUnion = "Expected at least one variant in union declaration.",
+
+   NameUnionVariant = "Expected a variant name after 'local'.",
+
+   TypeUnionVariant = "Expected a payload type after ':'.",
+
+   EndUnion = "Expected 'end' to close the union.",
+
    NameImport = "Expected a name after 'local'.",
 
     --this label is not thrown in rule 'import' because rule 'toplevelvar'
@@ -140,6 +150,18 @@ local errors = {
     ThenIf = "Expected 'then' in if statement.",
 
     EndIf = "Expected 'end' to close the if statement.",
+
+    ExpCase = "Expected an expression after 'case'.",
+
+    WhenCase = "Expected at least one 'when' arm in case statement.",
+
+    NameCaseVariant = "Expected a variant name after 'when'.",
+
+    NameCaseBinding = "Expected a binding name after ':'.",
+
+    ThenCase = "Expected 'then' in case arm.",
+
+    EndCase = "Expected 'end' to close the case statement.",
 
     DeclFor = "Expected variable declaration in for statement.",
 

@@ -585,11 +585,19 @@ misinterpret Array values even when a serialized interface happens not to
 mention one, so the semantic/runtime boundary requires a full rebuild. See
 [Dense Arrays](dense-arrays.md#abi-017-boundary).
 
-The current ABI is **0.18**. It preserves those generated Array shapes and the
-ordinary module protocol, but standard-library archive objects now directly
-reference promoted libuv callback trampolines and no longer reference replaced
-libuv/coroutine helper symbols. A 0.18 provider and runtime must be built and
-distributed together.
+ABI **0.18** preserved those generated Array shapes and the ordinary module
+protocol, but made standard-library archive objects directly reference
+promoted libuv callback trampolines while removing replaced libuv/coroutine
+helper symbols. A 0.18 provider and runtime therefore had to be distributed
+together.
+
+The current ABI is **0.19**. It adds serialized union/variant schemas, the
+union userdata/tag protocol, and a reconstructible public module-slot prefix
+that includes exported nominal statics. An importer and producer must agree on
+that prefix before an imported record or union constructor can be used as the
+same canonical first-class closure. The active suffix and provider namespace
+advance with the marker (`_0_19`, `TITAN_PATH_0_19`,
+`lib/titan/0.19`); 0.18 providers are rejected before interface rehydration.
 
 ## The module protocol
 
@@ -597,9 +605,9 @@ All semantic module state lives in the Lua registry or GC-traced Lua objects,
 never in shared C globals. In particular, per-Lua-state module state lives in
 one `Udata` (`_mod`) created by `_init`: the module table's slot is gone
 entirely, and member slots are 0-based with no reserved user value. The user values hold module
-variables, imported modules' `Udata`s, exported-function canonical
-closures, the unconditional Array-metatable cache, cached record metatables,
-and per-record static-namespace tables
+variables, imported modules' `Udata`s, exported-function and
+exported-nominal-static canonical closures, the unconditional Array-metatable
+cache, cached record/union metatables, and per-nominal static-namespace tables
 (allocation order below). Every generated function receives this `Udata` as its
 `_mod` parameter; the Lua wrappers recover it from their closure's
 upvalue 0. Around `_mod`, each module exports three protocol symbols:
@@ -616,8 +624,8 @@ Udata *counter_init(lua_State *L) {
         /* create and register _mod (luaS_newudata(L, 0, NUPVALS));
            $LOADMODULES1 (dlopen dynamic deps), $INITMODULES (dep inits),
            $LOADGLOBALS (symbols published by transitive RTLD_GLOBAL deps),
-           $INITRECORDS (record metatables), $INITVARS (variable
-           initializers); install functions and public record namespaces into
+           $INITRECORDS (record and union metatables), $INITVARS (variable
+           initializers); install functions and public nominal namespaces into
            their uv slots; $CREATEMETA (member metatable on the udata) */
         return _mod;
     } else {
@@ -674,7 +682,8 @@ defining `luaopen_os` or replacing Lua's own `os` library. The Lua entry calls
 the module `Udata` itself — so **`require` returns a userdata**, not a table,
 with **no separate module table at all**. Its members —
 exported functions, exported variables, and one static-namespace table
-per record (carrying its public record functions) — are all served by a metatable on the
+per public record or union (carrying its public nominal functions and union
+constructors) — are all served by a metatable on the
 `Udata` ([Lua interop internals](lua-interop-internals.md)).
 `<prefix>_abi` is a tiny marker function that returns the current
 `TITAN_VER`; both the compile-time DSO loader and generated dynamic imports
@@ -699,10 +708,10 @@ The literal is `types.serialize(ast._type)`: a Lua *expression* that
 rebuilds the module's type when evaluated with `types.lua`'s constructors
 as its environment. A `Type.Module` serializes runtime `members` and public
 alias `type_members` separately; aliases therefore create no module slot or
-Lua-visible member. Keyed alias, record-method, and record-static maps are
+Lua-visible member. Keyed alias, nominal-method, and nominal-static maps are
 serialized in locale-independent numeric-byte name order so equivalent
-interfaces have reproducible text; ordered module members and record fields
-retain their established source/slot order. Callable declaration descriptors also serialize formal
+interfaces have reproducible text; ordered module members, record fields, and
+union variants retain their established source/slot order. Callable declaration descriptors also serialize formal
 `paramnames`, while structural `Type.Function` values do not. Callable shapes
 also carry their optional `flexrettype`; accepting that new constructor shape
 from compiled interfaces is gated on the coordinated ABI transition described
@@ -737,8 +746,10 @@ contributors after that boundary changes private initialization layout but
 does not alter the serialized interface. ABI 0.16 changes how the physical
 provider is found and recorded transiently; ABI 0.17 then changes Array
 representation and adds the module-local metatable cache without changing the
-serialized `Type.Array` constructor. ABI 0.18 preserves that logical protocol
+serialized `Type.Array` constructor. ABI 0.18 preserved that logical protocol
 while advancing the standard-library archive/runtime native-symbol boundary.
+ABI 0.19 adds union/variant schemas and the public nominal-static slot prefix;
+it does not change the metadata container itself.
 
 ## Static vs dynamic dependency wiring
 
@@ -808,33 +819,39 @@ producer-chosen native identity. See
 `allocate_upvalues` assigns `_mod` user-value slots before any code is
 generated. `nextupvalue` hands out slots 0-based with no reserved slot
 (the now-removed module table no longer takes slot 0), so `NUPVALS`
-equals the number of slots. First come **exported (non-`local`) module
-variables, in declaration order** (slots 0..n-1), followed by a canonical
-closure slot for every exported ordinary function, also in declaration order.
-Those are the two importer-visible groups. The unconditional per-module Array
-metatable cache is the first private slot, followed by local module variables
-and imports. A final AST-order allocation pass assigns slots to referenced
-local ordinary-function closures, every record-function closure, and every
-record's static-namespace table. Record metatables (`type2metatable`), owned-C
+equals the number of slots. `_public_prefix_layout` derives the ABI-visible
+prefix entirely from the serialized interface:
+
+1. exported module variables in module-member order;
+2. exported ordinary-function canonical closures in module-member order; then
+3. exported static closures for each public record or union, with owners in
+   module-member order and statics in bytewise name order.
+
+The producer stamps the corresponding AST declarations and an importer walks
+the same layout, so an imported constructor or nominal function is the exact
+canonical first-class closure. The unconditional per-module Array metatable
+cache is the first private slot, followed by local module variables and
+imports. A final AST-order allocation pass assigns slots to referenced local
+ordinary-function closures, every static not already in the public prefix,
+and every nominal owner's private static-namespace table. Record and union
+metatables (`type2metatable`), owned-C
 metatables, and the transitive module `Udata` caches needed by cross-module
 method calls (`ctx.modules`) are then allocated on first use during codegen and
 filled in by `init_data_from_other_modules` or the module initializer. Thus all
 private groups, beginning with the Array cache, come *after* the
-importer-visible variable and exported-function slots, so moving or adding
+importer-visible public prefix, so moving or adding
 them does not perturb the importer slot math.
 
-Exported variables come first because their slot numbers are part of the
-module's ABI: an importing module never sees this module's AST — in
-`import_module` it recomputes the variables' slot indices on its own, by
-numbering the `Type.ModuleVariable` members of the *serialized interface*
-1..n in order. Cross-module variable access then compiles to a direct
+An importing module never sees this module's AST: it recomputes the complete
+prefix from the `Type.Module` interface. Cross-module variable access then
+compiles to a direct
 slot read, `uvalue(&_mod->uv[MOD].uv)->uv[VAR].uv`, with no name lookup;
 if local variables or imports could claim earlier slots, the importer's
 numbering would diverge from reality. (The module metatable's name→slot
 member map, serving the same variables to Lua, bakes in the same
-indices.) A record's type identity is its per-Lua-state metatable pointer, so
-record metatables must live in module user values and are recovered through the
-Lua registry for imported records. Function-type tags use a separate
+indices.) A nominal owner's type identity is its per-Lua-state metatable
+pointer, so record and union metatables must live in module user values and are
+recovered through the Lua registry for imported owners. Function-type tags use a separate
 registry-published C-static mechanism.
 
 ## Per-function code-generation contexts

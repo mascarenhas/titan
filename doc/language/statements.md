@@ -3,7 +3,7 @@
 Titan's statements are a subset of Lua's, with the same surface syntax,
 plus static checking. This chapter covers blocks and scoping, local
 declarations, assignment (including multiple assignment), the control-flow
-statements (`if`, `while`, `repeat`, numeric `for`, and generic
+statements (`if`, union `case`, `while`, `repeat`, numeric `for`, and generic
 `for ... in`), function calls in statement position, `defer`, `raise`, and
 `return`. For the expressions that appear inside statements see
 [Expressions](expressions.md); for the typing rules they trigger see
@@ -14,7 +14,7 @@ statements (`if`, `while`, `repeat`, numeric `for`, and generic
 
 A *block* is a sequence of statements optionally ended by a single
 `return` statement. Function bodies are blocks, as are the bodies of
-`while`, `repeat`, `for`, and each arm of an `if`. A free-standing block
+`while`, `repeat`, `for`, and each arm of an `if` or `case`. A free-standing block
 can be written with `do ... end`:
 
 ```lua
@@ -231,6 +231,32 @@ of `and`/`or` inside them is described in [Expressions](expressions.md).
 
 Each arm's block is its own scope. The same any-type, Lua-truthiness rule
 applies to `while` and `repeat`/`until` conditions.
+
+## `case`
+
+`case` dispatches on the variant tag of a [union](unions.md):
+
+```titan
+case message
+when write: text then
+    consume(text)
+when quit then
+    stop()
+else
+    ignore()
+end
+```
+
+At least one `when` arm is required; `else` is optional. There is no
+fallthrough and coverage is not required. A payload arm may bind its one
+payload after `:`; binding an empty variant and repeating a variant are
+errors. A `Union?` scrutinee uses the normal automatic option unwrap, so nil
+raises before dispatch rather than selecting `else`.
+
+Every arm and the else clause is a complete block with its own scope and may
+have its own `catch` and `finally`. `defer` therefore transforms and runs
+inside its containing arm exactly as it does in any other block. The payload
+binding is visible in that arm's protected body, catch, and finally.
 
 ## `while`
 
@@ -610,8 +636,10 @@ A function whose first fixed return exists and is not `nil` must provably
 return on every control path; otherwise the compiler rejects it. A
 nil-returning function, a zero-return function, and a function with only a
 flexible tail may instead fall off the end; the last case produces an empty
-run. The analysis understands `if`/`elseif`/`else` chains where every arm
-returns, but it does not credit loops — a `return` inside a `while` body
+run. The analysis understands `if`/`elseif`/`else` chains and `case`
+statements where an explicit `else` and every arm return. Merely listing all
+current variants is not exhaustive proof. It does not credit loops — a
+`return` inside a `while` body
 does not count as "always returns".
 
 ## `break` (no `goto`)
@@ -634,6 +662,9 @@ end
 
 A `break` that is not inside any loop is the compile-time error
 `'break' outside a loop`.
+
+A `case` statement is not a loop and does not capture `break`; a break in an
+arm targets the same enclosing loop as a break in an `if` arm.
 
 `goto` and `::label::` syntax are recognized by the lexer but have no
 statement form, so using them is a syntax error.

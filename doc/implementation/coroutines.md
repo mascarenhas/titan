@@ -19,7 +19,7 @@ The source compiles under the qualified Titan identity `titan.coroutine`.
 Titan code uses `import "coroutine"`, which the parser desugars to that name;
 Lua uses the ordinary `luaopen_titan_coroutine` entry through
 `require "titan.coroutine"`. Titan prefix lookup claims that logical module
-from `<root>/lib/titan/0.18/titan.so`; Lua finds the generated
+from `<root>/lib/titan/0.19/titan.so`; Lua finds the generated
 `<root>/share/lua/5.5/titan/coroutine.lua` shim, promotes/maps the same provider
 through `titan._loadlibglobal`, and invokes `luaopen_titan_coroutine`. The
 module keeps its own state and initializer beside the other logical standard
@@ -31,7 +31,7 @@ Coroutine payloads use `value`, so an Array crossing `resume`, `yield`, or
 `error` remains its canonical proxy Udata; the private backing Table never
 leaks through the coroutine boundary. Exact typed Array paths elsewhere still
 use backing `Table *`. This internal/boxed distinction was introduced by ABI
-0.17 and remains part of ABI 0.18; see
+0.17 and remains part of ABI 0.19; see
 [Dense Arrays](dense-arrays.md#exact-and-generic-call-paths).
 
 ## Public Wrapper

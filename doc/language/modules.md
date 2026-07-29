@@ -28,8 +28,10 @@ A declaration is one of:
   [Type aliases](type-aliases.md));
 * a **record** declaration: `record Name ... end` (see
   [Records](records.md));
+* a **union** declaration: `union Name ... end` (see
+  [Unions](unions.md));
 * a **method** declaration: `function Name:method(...) ... end`, also
-  covered in [Records](records.md).
+  covered in [Records](records.md) and [Unions](unions.md).
 
 ```lua
 -- Titan: a small but complete module (shapes.titan)
@@ -54,7 +56,7 @@ name twice at the top level is not an assignment but a duplicate
 declaration — a compile-time error — and the rule holds across kinds: a
 function may not share a name with a module variable or an import. Type aliases
 use a separate type-only namespace: they may share a spelling with those value
-declarations, but not with another alias or a record.
+declarations, but not with another alias, record, or union.
 
 ```lua
 -- Titan
@@ -71,17 +73,19 @@ main initializer
 ([Folder modules](folder-modules.md#declaration-order)). Visibility is broader
 than that sequence, with one deliberate frontier for module variables:
 
-* **Records, type aliases, and callable declarations are order-independent.**
-  A record, ordinary function, method, or record function may be declared
-  before or after any of the others. Signatures, record fields, and alias
-  targets may use records, aliases, and imports declared later in the logical
-  order. The synthesized `Rec.new` record function is likewise available
-  throughout the module, so a record constructor or constructor expression
-  may precede the written `record` declaration.
+* **Records, unions, type aliases, and callable declarations are
+  order-independent.**
+  A nominal type, ordinary function, method, or nominal function may be declared
+  before or after any of the others. Signatures, record fields, union
+  payloads, and alias targets may use nominal types, aliases, and imports
+  declared later in the logical
+  order. Synthesized record and union constructors are likewise available
+  throughout the module, so construction may precede the written owner
+  declaration.
 
 * **Function and method bodies are order-independent.** A body may refer to
-  any import, module variable, record type, ordinary function, method, or
-  record function in the module, including ones declared later or in another
+  any import, module variable, nominal type, ordinary function, method, or
+  nominal function in the module, including ones declared later or in another
   contributor.
 
   ```lua
@@ -102,8 +106,9 @@ than that sequence, with one deliberate frontier for module variables:
   their aliases are available regardless of placement to every declaration
   other than a module variable. At each module-variable declaration, its type
   annotation and initializer see only import aliases and module variables that
-  occur earlier in the logical order. They still see every record, type alias,
-  ordinary function, method, record function, and synthesized `new`, wherever
+  occur earlier in the logical order. They still see every record, union, type
+  alias, ordinary function, method, nominal function, and synthesized
+  constructor, wherever
   those declarations occur. This visibility does not make a non-constant
   initializer legal; the separate [constant-expression
   rule](#initializers-must-be-constant) still applies.
@@ -121,6 +126,11 @@ than that sequence, with one deliberate frontier for module variables:
   local geometry = import "geometry"
   ```
 
+  The same earlier-import frontier applies to a qualified record/union
+  constructor use nested in a lambda evaluated by the initializer. A type
+  alias may still bridge to a later import because aliases are resolved in the
+  placement-independent type frontier.
+
 * **Visibility does not reorder the module.** The logical order still decides
   which declaration is earlier in a duplicate diagnostic, orders serialized
   interface members and run-time module slots, fixes the relative
@@ -130,7 +140,8 @@ than that sequence, with one deliberate frontier for module variables:
 * **Initialization order is fixed.** When a module is loaded into a Lua
   state (the first `require` from Lua, or transitively as a dependency
   of another module), its imported modules are initialized first, then
-  its record types, then its module variables in declaration order, and
+  its record and union identities, then its module variables in declaration
+  order, and
   finally its exported functions are published and its optional initialization
   block runs. A module initializes at most once per Lua state; subsequent loads
   return the same module.
@@ -191,6 +202,8 @@ expression. The allowed forms are:
 * array, map, and record [constructor expressions](expressions.md)
   whose elements, keys, values, and fields are themselves constant;
 * calls to a record's `new` constructor with constant arguments;
+* calls to a compiler-synthesized union-variant constructor with a constant
+  payload, or no payload for an empty variant;
 * calls to an imported C type's `.new()` or `.new_array(count)` pseudo-
   constructor, with a constant `count`;
 * concatenations, unary operators, binary operators, `as` casts, and `is`
@@ -220,6 +233,9 @@ instance initializes; the resulting objects are rooted in its GC-traced state.
 a function works the same way — `p = { x = 30.0, y = 40.0 }` as a
 statement is equivalent to the initializer form. See
 [Records in module variables](records.md#records-in-module-variables).
+Genuine generated union constructors are accepted for the same reason.
+A user-written union function that happens to return a variant is still an
+ordinary function call and is not constant.
 
 ## Importing other modules
 
@@ -280,12 +296,13 @@ end
 Exported variables of the imported module can be both read and
 assigned (`geom.origin.x = 0.0` above); writes from Titan are
 statically checked and compile to direct stores, with no run-time type
-check. Exported record declarations serve two roles: their types are referenced
-as `alias.Name` in annotations, and their run-time record functions as
-`alias.Name.new(...)` or `alias.Name.make(...)`. An exported type alias is only
+check. Exported record and union declarations serve two roles: their types are
+referenced as `alias.Name` in annotations, and their run-time nominal
+functions as `alias.Name.new(...)`, `alias.Name.make(...)`, or a union variant
+constructor. An exported type alias is only
 the first of these: `alias.Name` is valid as a type but creates no run-time
-record-function namespace. Construct a re-exported record through the module
-that owns its record declaration.
+nominal-function namespace. Construct a re-exported nominal value through the
+module that owns its declaration.
 
 An exported function is itself a **first-class value**: besides calling it
 as `geom.norm(p)`, the importer can reference `geom.norm` as a value — pass
@@ -295,6 +312,12 @@ is first-class; the module alias itself is not, as described next.)
 Its imported static type preserves both input-variadic and flexible-result
 tails, so calls through a source or compiled-module interface use the same
 finite projection and open-run rules as local calls.
+
+Imported public record and union statics are first-class with the same stable
+identity. ABI 0.19 makes their canonical closures part of the reconstructible
+public module-state prefix: exported variables, exported top-level function
+closures, then public nominal static closures in module-member and bytewise
+static-name order. Variants remain metadata and are not first-class types.
 
 Modules are not first-class values: the alias can only be used as a
 prefix. Reading it as a value (`local m2 = geom`) is the compile-time
@@ -433,8 +456,8 @@ the structure of the generated C is in
   directory, as described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of plain directories taken from
-  `TITAN_PATH_0_18`, or `TITAN_PATH` if that is unset. Otherwise the default
-  is `.;<root>/lib/titan/0.18`. An installed `titanc` recovers `<root>` from
+  `TITAN_PATH_0_19`, or `TITAN_PATH` if that is unset. Otherwise the default
+  is `.;<root>/lib/titan/0.19`. An installed `titanc` recovers `<root>` from
   the first literal `package.cpath` entry ending in
   `/lib/lua/5.5/?.so`. For logical `a.b.c`, the default performs a complete
   pass over `a.so`, `a/b.so`, and exact `a/b/c.so`, then a complete pass over
@@ -474,10 +497,10 @@ Lua's `require`, for its part, finds a generated logical loader through
 `package.cpath`, loads it globally, and invokes the module's exact
 `luaopen_*` entry (see [Requiring a Titan
 module](lua-interop.md#requiring-a-titan-module)). Titan's installed Lua
-default includes `<root>/lib/titan/0.18/?.so` and the standard loader root.
+default includes `<root>/lib/titan/0.19/?.so` and the standard loader root.
 A qualified standard name such as `titan.os` therefore runs
 `<root>/share/lua/5.5/titan/os.lua`, which opens the canonical DSO
-`<root>/lib/titan/0.18/titan.so`. Default Titan imports select that same
+`<root>/lib/titan/0.19/titan.so`. Default Titan imports select that same
 physical file by validating the `titan.os` callable metadata; `--static`
 prefers the paired self-describing `titan.a`. Installation creates no child
 DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
@@ -547,8 +570,8 @@ contract.
 A statically linked dependency is still a module of its own from Lua's point
 of view. Its generated logical loader points at the enclosing provider, so if
 `main.so` embeds `geom.point` and a Lua script also `require`s `geom.point`,
-both refer to the same module instance in that Lua state, with the same record
-types and the same module variables.
+both refer to the same module instance in that Lua state, with the same
+record/union identities and the same module variables.
 
 ## Standalone executables
 
@@ -572,7 +595,7 @@ dynamic. Qualified standard-library dependencies therefore use the installed
 `titan.so` by default, while `--static` prefers `titan.a`.
 After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
-`<root>/lib/titan/0.18/?.so` if it is absent, and initializes the Titan module
+`<root>/lib/titan/0.19/?.so` if it is absent, and initializes the Titan module
 path from that same root. Deploy the standard provider and loaders as described
 under [where modules are found](#where-modules-are-found). `args[1]` onward
 contain only the user-supplied arguments; index 0 is absent and the executable
@@ -639,11 +662,11 @@ Titan's configured search paths with:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.18/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.19/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
 The ordinary `/lib/lua/5.5/?.so` template is Titan's root-discovery anchor. If
 it is omitted, also set
-`TITAN_PATH_0_18="$ROCKS_TREE/lib/titan/0.18"`. Titan still targets the exact
+`TITAN_PATH_0_19="$ROCKS_TREE/lib/titan/0.19"`. Titan still targets the exact
 Lua 5.5 runtime ABI and internals; using the stock loader does not make a module
 compatible with another Lua version or configuration.

@@ -89,17 +89,19 @@ while IFS= read -r test_file; do
             compiler_tests+=("$test_file")
             compiler_heavy_tests+=("$test_file")
             ;;
+        spec/union_interface_spec.lua | \
         spec/checker/static_compiled_modules_spec.lua | \
         spec/coder/multi_module_libraries_spec.lua | \
         spec/coder/static_compiled_modules_spec.lua | \
         spec/coder/static_dynamic_facade_spec.lua | \
         spec/coder/static_protocol_mismatch_spec.lua | \
         spec/staticmetadata_spec.lua)
+            # The hostile-interface validator and static-provider specs need
+            # coverage from their own directly exercised compiler prototypes.
             # Busted's file insulation reloads compiler modules between specs,
             # while LuaCov keeps only the last loaded prototype's line table
-            # inside one process. Preserve direct feature coverage by running
-            # these files one process at a time on the heavy worker after its
-            # shard.
+            # inside one process. Run these files one process at a time on the
+            # heavy worker after its shard.
             compiler_isolated_coverage_tests+=("$test_file")
             ;;
         *)

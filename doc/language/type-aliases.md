@@ -12,8 +12,9 @@ local type Scratch = {string}
 ```
 
 The syntax is `type Name = T`, with optional `local` visibility. The right-hand
-side can be any Titan type: a basic type, array, map, option, function type, or
-record type. Alias chains and forward references are allowed. An alias cycle,
+side can be any Titan type: a basic type, array, map, option, function type,
+record type, or union type. A union variant is not a type and therefore cannot
+appear here. Alias chains and forward references are allowed. An alias cycle,
 including a cycle through a compound type, is a compile-time error.
 
 ## Transparent identity
@@ -35,7 +36,7 @@ function total(xs: Counts): Count
 end
 ```
 
-A record alias preserves the original record's nominal identity and methods:
+A record or union alias preserves the original nominal identity and methods:
 
 ```titan
 local geometry = import "geometry"
@@ -50,12 +51,17 @@ end
 `Point` above is still `geometry.Point`; it is not a second record with the
 same fields.
 
+Likewise `type Event = messages.Message` denotes that exact union. It does not
+create new variants or constructor namespace, and
+`type Write = messages.Message.write` is invalid because a variant is not a
+first-class type.
+
 ## Type names are not values
 
 Aliases occupy a type-only namespace. They may share a spelling with a
-variable or function, but not with another alias or record type. An alias can
+variable or function, but not with another alias, record type, or union type. An alias can
 appear in annotations and casts; it cannot be evaluated, assigned, called, or
-used as a record namespace:
+used as a record/union namespace:
 
 ```titan
 type Point = geometry.Point
@@ -93,14 +99,15 @@ end
 ```
 
 Only `shapes` is an explicit import of `draw`; the alias still resolves to the
-record owned by `geometry`. When these modules are separate shared libraries,
+nominal type owned by `geometry`. When these modules are separate shared libraries,
 initializing `shapes` loads `geometry` globally before `draw` resolves the
-record's method entry points. `draw` therefore does not separately open
+nominal method entry points. `draw` therefore does not separately open
 `geometry`.
 
 A `local type` alias is visible only inside its defining module and is omitted
 from the compiled interface. As with other exported declarations, the target
 of a public alias must itself be exportable: it cannot contain a local record
+or union
 or a C-FFI type. A local alias may name either.
 
 Aliases and their targets are order-independent within a module. In
@@ -111,7 +118,8 @@ type Point = geometry.Point
 local geometry = import "geometry"
 ```
 
-The alias may itself be used by earlier record fields and callable signatures.
+The alias may itself be used by earlier record fields, union payloads, and
+callable signatures.
 The ordinary module-variable frontier still applies: a module-variable
 declaration can use any alias in the module, but it cannot directly use a
 qualified import alias that occurs later in the logical source order. See

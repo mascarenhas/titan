@@ -69,7 +69,8 @@ local function compiler_argv(output_root, source_root, titan_path, ...)
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "CCACHE_DISABLE=1",
-        "TITAN_PATH_0_18=" .. titan_path,
+        "TITAN_PATH_0_18=/obsolete/titan-0.18",
+        "TITAN_PATH_0_19=" .. titan_path,
         "TITAN_PATH=",
     }
     if PREFIX then
@@ -117,14 +118,15 @@ local function run_lua(cwd, titan_path, package_path, cpath_roots, code)
     for _, root in ipairs(cpath_roots) do
         table.insert(cpath, root .. "/?.so")
     end
-    table.insert(cpath, PREFIX .. "/lib/titan/0.18/?.so")
+    table.insert(cpath, PREFIX .. "/lib/titan/0.19/?.so")
     table.insert(cpath, PREFIX .. "/lib/lua/5.5/?.so")
 
     return run({
         "env",
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
-        "TITAN_PATH_0_18=" .. titan_path,
+        "TITAN_PATH_0_18=/obsolete/titan-0.18",
+        "TITAN_PATH_0_19=" .. titan_path,
         "TITAN_PATH=",
         LUA, "-e", string.format([[
 package.path = %q
@@ -341,6 +343,100 @@ assert(type(xs) == "userdata")
 assert(#xs == 5)
 assert(xs[1] == 10 and xs[2] == nil and xs[3] == 30)
 assert(xs[4] == nil and xs[5] == 50)
+]])
+        assert.truthy(ok, output)
+    end)
+
+    it("keeps union closure slots symmetric through a prefix archive",
+       function()
+        write_file(source_one .. "/prefix/messages.titan", [[
+record Delta
+    x: float
+    y: float
+end
+
+union Message
+    quit
+    local hidden: integer
+    move: Delta
+end
+
+function Message:total(): float
+    case self
+    when move: delta then
+        return delta.x + delta.y
+    when quit then
+        return 0.0
+    else
+        return -1.0
+    end
+end
+
+function hidden_message(): Message
+    return Message.hidden(77)
+end
+]])
+        write_file(source_one .. "/prefix/peer.titan", [[
+function marker(): integer
+    return 19
+end
+]])
+        assert_compiles(root_one, source_one, root_one,
+            "prefix.messages", "prefix.peer")
+        assert.equal("file", lfs.attributes(root_one .. "/prefix.a", "mode"))
+        assert.equal("file", lfs.attributes(root_one .. "/prefix.so", "mode"))
+        assert.is_nil(lfs.attributes(
+            root_one .. "/prefix/messages.a", "mode"))
+
+        write_file(consumer_source .. "/prefix_union_consumer.titan", [[
+local m = import "prefix.messages"
+local moved = m.Message.move({ x = 1.0, y = 2.0 })
+
+function total(): float
+    local make: (m.Delta) -> m.Message = m.Message.move
+    local another = make({ x = 20.0, y = 22.0 })
+    return moved:total() + another:total()
+end
+
+function same(): boolean
+    return m.Message.move == m.Message.move
+end
+
+function bound(): float
+    local read: () -> float = moved:total
+    return read()
+end
+
+function hidden_else(): integer
+    case m.hidden_message()
+    when quit then
+        return 0
+    when move: delta then
+        return 1
+    else
+        return 77
+    end
+end
+]])
+        assert_compiles(consumer_root, consumer_source, root_one,
+            "--static", "prefix_union_consumer")
+
+        local generated = read_file(
+            consumer_source .. "/prefix_union_consumer.c")
+        assert.falsy(generated:find(
+            'loadlib(L, "prefix.so")', 1, true), generated)
+        assert.truthy(generated:find(
+            "extern Udata *prefix_messages_init", 1, true), generated)
+        assert.truthy(generated:find(
+            "case 2: goto _case_", 1, true), generated)
+
+        local ok, output = run_lua(
+            consumer_root, root_one, consumer_root, { consumer_root }, [[
+local consumer = require "prefix_union_consumer"
+assert(consumer.total() == 45.0)
+assert(consumer.same())
+assert(consumer.bound() == 3.0)
+assert(consumer.hidden_else() == 77)
 ]])
         assert.truthy(ok, output)
     end)

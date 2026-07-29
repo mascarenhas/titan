@@ -155,14 +155,15 @@ omitted from the field lists for brevity.
 | --- | --- | --- |
 | `TopLevelFunc` | `islocal`, `name`, `params`, `rettypes`, `flexrettype`, `block` | fixed result list plus a separate optional output tail |
 | `TopLevelMethod` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block` | `function Class:name(...)`; parser decorates `islocal` |
-| `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block` | `function Class.name(...)`, plus synthesized fixed-result `Class.new`; parser decorates `islocal` and marks only the synthesized form with `_record_constructor` |
+| `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block` | `function Class.name(...)`, synthesized record `Class.new`, and synthesized union variant constructors; parser decorates `islocal` and marks synthesized forms |
 | `TopLevelVar` | `islocal`, `decl`, `value` | module variable |
 | `TopLevelTypeAlias` | `islocal`, `name`, `type` | compile-time-only `[local] type Name = T` |
 | `TopLevelRecord` | `name`, `fields` | `fields` is a list of `Decl`; parser decorates `islocal` |
+| `TopLevelUnion` | `name`, `variants` | `variants` is a source-order list of `UnionVariant`; parser decorates `islocal` |
 | `TopLevelImport` | `localname`, `modname` | `local m = import "x.y"` |
 | `TopLevelForeignImport` | `localname`, `headername` | `local c = foreign import "x.h"` |
 
-`TopLevelStatic` covers record functions. The parser creates one directly for
+`TopLevelStatic` covers record and union functions. The parser creates one directly for
 `function Class.name(...)`, and also creates one from the `record` desugaring
 (`defs.recorddecl` in `parser.lua`), which turns each record into *two*
 top-level nodes — the `TopLevelRecord` plus a synthesized `new` record function
@@ -182,6 +183,15 @@ end
 --     return { x = x, y = y }
 -- end
 ```
+
+`defs.uniondecl` similarly emits a `TopLevelUnion` followed by one
+`TopLevelStatic` per variant. `UnionVariant {name, payload}` stores an optional
+type-annotation node in `payload`; a local variant carries `islocal = true`.
+Each synthesized static is marked `_union_constructor` and points back to its
+variant through `_union_variant`. Its body returns
+`ExpUnionInit {owner, variant, value}`, and its hidden single payload parameter
+is never published as named-call metadata. Unlike `Rec.new`, variant
+constructors are positional-only.
 
 ### Declarations and the `option` flag
 
@@ -216,6 +226,7 @@ without an annotation is not accepted. A record field `Decl` may carry
 | `StatWhile` | `condition`, `block` | |
 | `StatRepeat` | `block`, `condition` | note the field order: block first |
 | `StatIf` | `thens`, `elsestat` | `thens` is a flat list of `Then {condition, block}` (one per `if`/`elseif`); `elsestat` is a `StatBlock` or `false` |
+| `StatCase` | `exp`, `arms`, `elseblock` | `arms` is a list of `CaseArm {name, binding, block}`; `binding` and `elseblock` are `false` when absent |
 | `StatFor` | `decl`, `start`, `finish`, `inc`, `block` | `inc` is `false` when the step is omitted; the checker fills in a literal `1`/`1.0` |
 | `StatForIn` | `decls`, `exps`, `block` | generic `for decllist in explist`; the checker pads/elaborates `exps` as the iterator tuple |
 | `StatAssign` | `vars`, `exps` | multiple assignment lists |
@@ -246,6 +257,7 @@ to use it as an expression.
 | `ExpAdjust` | `exp` | synthesized by the parser only: a parenthesized *call*, truncated to its first value |
 | `ExpExtra` | `exp`, `index`, `_type` | synthesized by the checker only: the index-th (> 1) value of a multi-return call |
 | `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; an absent return annotation may copy both result components from context |
+| `ExpUnionInit` | `owner`, `variant`, `value` | parser-synthesized variant-constructor result; `value` is `false` for an empty variant |
 
 Two of these never come from the programmer directly:
 
@@ -330,11 +342,16 @@ of these are declared anywhere; this table is the inventory.
 | `_used` | `Decl`, top-level nodes (via `_decl`) | checker, on every read: `ExpVar`, `VarDot` receivers, call callees | coder | "this variable is read somewhere"; unused locals get no C variable — their initializer is evaluated and cast to `(void)` |
 | `_assigned` | `Decl` (via `_decl`) | checker, in `StatAssign` on `VarName` targets | coder | "this variable is reassigned"; GC-able parameters and `self` get their own Lua stack slot only when set (otherwise the caller's anchoring suffices — see [values and the GC](values-and-gc.md)) |
 | `_record_constructor` | synthesized `TopLevelStatic` | parser record desugaring | checker | identifies the adjacent synthesized `Rec.new`; explicit record functions, including an explicit `Rec.new`, do not carry it |
+| `_union_constructor`, `_union_variant` | synthesized `TopLevelStatic` | parser union desugaring | checker | identify an adjacent positional-only variant constructor and its `UnionVariant`; explicit union functions do not carry the markers |
+| `_contextual_c_name` | `VarDot`, `TypeQualName` | parser, when the selector came from `CNAME` | checker | admits the raw keyword spelling only when the qualifier resolves to a C module/owner; coder emits the stored `name` unchanged |
 | `_toplevel_order` | every AST root node | checker duplicate prepass | checker, symbol table | 1-based position in the unchanged flat/combined AST; drives duplicate winners and the module-variable import/variable visibility frontier |
 | `_ignore` | top-level nodes | checker declaration stages: duplicate declarations, a duplicate record's synthesized constructor, and record functions/methods whose declaration fails (missing record, name clash, redeclaration) | body checker, `makemoduletype`, coder (`generate`, `allocate_upvalues`) | "pretend this node does not exist"; every later traversal must skip it |
 | `_alias_state` | `TopLevelTypeAlias` | checker alias resolver | checker | `resolving`/`resolved` state used for lazy forward resolution and cycle detection; `_type` is the resolved RHS type itself |
 | `_self` | `TopLevelMethod` | checker (`checkmethod`) | checker, coder | a synthesized `Ast.Decl` for `self`, typed as the record's nominal type; becomes the C parameter `__self__` |
-| `_record` | `TopLevelStatic`, `TopLevelMethod` | checker record-member declaration stages | checker (`checkmethod`, for `self`'s type) | the `Ast.TopLevelRecord` node the member belongs to |
+| `_record` | `TopLevelStatic`, `TopLevelMethod` | checker nominal-member declaration stages | checker (`checkmethod`, for `self`'s type) | the `Ast.TopLevelRecord` or `Ast.TopLevelUnion` node the member belongs to; the historical field name is retained |
+| `_union` | `StatCase` | checker | coder | the resolved `Type.Union` owner of the case scrutinee |
+| `_variant`, `_variant_index` | `CaseArm` | checker | coder | the resolved `Type.Variant` and its absolute zero-based dispatch tag |
+| `_always_returns` | every statement | checker | checker, coder | cached result of statement return-path analysis; a case is true only with an explicit else and every arm/else true, and statement-list generation stops after any direct or compound true result |
 | `_method` | `ExpCall` (method calls) | checker | coder | the resolved `Type.Method` |
 | `_paramnames` | `TopLevelFunc` | checker callable-signature stage | checker, module-interface builder | dense names of fixed declared parameters; kept on the declaration rather than `Type.Function` |
 | `_named_arg_order`, `_named_call_kind` | checked named `ExpCall` | checker | coder | formal indexes of explicit expressions in lexical order, plus `"titan"` or `"foreign"`; the `Args*` payload itself has already been normalized to formal order |
@@ -367,6 +384,15 @@ Two practical consequences of this scheme:
   plain field assignment after construction, so nothing validates them:
   a misspelled decoration name (`node._typ` for `node._type`) fails only
   when read.
+
+At the semantic layer, both records and unions use `Type.Nominal(fqtn)` as
+their source-level value type. A union's registry entry is
+`Type.Union(name, variants, functions, methods, nvariants)`, whose hybrid
+dense/name map contains
+`Type.Variant(fqtn, name, payload, index)` descriptors. A variant descriptor
+is declaration and serialized-interface metadata only: `typefromnode` never
+returns it as a source type, so annotations, aliases, `as`, and `is` may name
+the union but not `Union.variant`.
 
 ## The cost of adding a node or type
 

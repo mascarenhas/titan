@@ -22,6 +22,7 @@ which raise ordinary Lua errors when they fail (see
 | arrays | `{ t }` | [Arrays and maps](arrays-maps.md) |
 | maps | `{ k : v }` | [Arrays and maps](arrays-maps.md) |
 | records | `Point`, `mod.Point` | [Records](records.md) |
+| unions | `Message`, `mod.Message` | [Unions](unions.md) |
 | aliases | `type Name = t` | [Type aliases](type-aliases.md) |
 | option types | `t?` | [Option types](option-types.md) |
 | function types | `(t1, t2) -> t3` | below |
@@ -85,11 +86,11 @@ The typing facts that belong in this chapter:
   error `type of map key cannot be nil`; an option key type,
   `type of map key cannot be option type`.
 
-### Records
+### Records and unions
 
-Record types are declared at the top level of a module and are the only
-*nominal* types in Titan — see [Type equality](#type-equality) below and
-the [Records](records.md) chapter. A record type's full name is qualified
+Record and union types are declared at the top level of a module and are the
+*nominal* types in Titan — see [Type equality](#type-equality) below,
+[Records](records.md), and [Unions](unions.md). A nominal type's full name is qualified
 by its module: the `Point` declared in module `geom` is the type
 `geom.Point`, written `Point` inside its own module and `geom.Point`
 elsewhere (for an `import "geom"` bound to `geom`).
@@ -103,7 +104,10 @@ end
 
 An existing type can be given a transparent compile-time name with a
 [type alias](type-aliases.md). In particular, `type P = Point` still denotes
-this exact nominal record; it does not declare a second record type.
+this exact nominal record; it does not declare a second record type. The same
+is true for a union alias. A union variant is not itself a type:
+`Message.write` is illegal in an annotation, alias, `as`, or `is`; use
+`Message` and inspect it with `case`.
 
 ### Option types
 
@@ -165,7 +169,8 @@ exported Titan interfaces; the details live in [The C FFI](ffi.md).
 
 ## Type equality
 
-Titan's types are *structural* except for records, which are *nominal*:
+Titan's types are *structural* except for records and unions, which are
+*nominal*:
 
 * Two basic types are equal only if they are the same type.
 * `{t1}` equals `{t2}` exactly when `t1` equals `t2`; likewise maps
@@ -173,7 +178,7 @@ Titan's types are *structural* except for records, which are *nominal*:
   fixed parameter and return lists pointwise, including the presence and
   element type of any input-variadic or flexible-result tail.
 * `t1?` equals `t2?` exactly when the base types are equal.
-* Two record types are equal only if they are *the same declaration* —
+* Two record or union types are equal only if they are *the same declaration* —
   their fully-qualified names match. Field structure is irrelevant:
 
 ```lua
@@ -219,8 +224,8 @@ comparisons, and as the precondition of explicit `as` casts. The rules:
    expected type. Additional nil-accepting actual parameters may be filled by
    adjustment, but an actual function may not require a non-nil input or omit a
    fixed result that callers of the expected type rely on.
-4. Record types are compatible only with themselves. The recursion of
-   rule 3 does **not** look inside records: `PointV` above, whose fields
+4. Record and union types are compatible only with themselves. The recursion of
+   rule 3 does **not** look inside nominal values: `PointV` above, whose fields
    are `value`, is still incompatible with `PointF`. Nominal means
    nominal.
 5. C FFI compatibility is exact except for the boundary conversions documented
@@ -298,6 +303,7 @@ the value does not conform.
 | `nil` | C pointer | no — becomes `NULL` |
 | C array or counted owned C array | compatible C pointer | no |
 | non-function C pointer | `void *` | no |
+| Array, Map, record, union, or function value | C `void *` | no — exposes the native identity pointer; the function case can fail when its value is non-collectable |
 | non-pointer C object expression | compatible `const *T` or `const void *` | no (FFI calls; materializes the address for the call) |
 | mutable non-pointer C local or formal | compatible `*T` or `void *` | no (FFI calls; C may write through the pointer) |
 | `string` | C `char *` or `void *` | no (FFI only) |
@@ -456,8 +462,8 @@ end
 
 What you **can** do with a `value`, beyond converting it:
 
-* **Store it and pass it along** — in variables, arrays, maps, record
-  fields of type `value`, arguments, returns.
+* **Store it and pass it along** — in variables, arrays, maps, record fields,
+  union payloads of type `value`, arguments, and returns.
 * **Compare it with `==` and `~=`.** If either operand of an equality
   test is a `value`, the other side is boxed and the comparison is Lua's
   *raw* equality — `__eq` metamethods are not consulted. (An earlier
@@ -499,7 +505,7 @@ anything, `{string: value}` a string-keyed map of anything, and the
 [compatibility rules](#compatibility-how-value-flows-through-compound-types)
 let such containers stand in for their fully-typed counterparts (and vice
 versa) with element checks deferred to the point of use — except inside
-records, which are nominal and admit no such substitution.
+records or unions, which are nominal and admit no such substitution.
 
 ## Explicit casts
 
@@ -521,7 +527,7 @@ can cross through `value`, C `TValue` can cross to/from Titan `value`, and C
 and raising if the pointer is `NULL`). Lua-internal `Udata *` crosses the
 `value` boundary as full userdata rather than an ordinary lightuserdata
 pointer. A written cast can also erase a C function pointer to C `void *`, or
-expose the native GC identity of an Array, Map, record, or function value as C
+expose the native GC identity of an Array, Map, record, union, or function value as C
 `void *`. The function identity cast raises when its boxed value is not
 collectable; the other GC-identity cases are total. These are borrowed
 internal addresses, not ownership transfers. There is no separate FFI cast

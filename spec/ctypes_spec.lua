@@ -259,6 +259,7 @@ describe("C FFI ctype registration", function()
             extern int (ffi_parenthesized_named)(int value);
             static inline int ffi_static_named(int input) { return input; }
             extern int ffi_keyword(int repeat);
+            extern int ffi_when(int when);
             extern int ffi_variadic(const char *format, ...);
         ]])
 
@@ -268,6 +269,7 @@ describe("C FFI ctype registration", function()
             ftypes.ffi_parenthesized_named.paramnames)
         assert.same({ "input" }, ftypes.ffi_static_named.paramnames)
         assert.same({ "repeat" }, ftypes.ffi_keyword.paramnames)
+        assert.same({ "when" }, ftypes.ffi_when.paramnames)
         assert.same({ "format" }, ftypes.ffi_variadic.paramnames)
         assert.is_true(ftypes.ffi_variadic.vararg)
     end)

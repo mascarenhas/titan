@@ -52,7 +52,8 @@ Type.StaticMethod(..., varargtype, flexrettype, paramnames)
 ```
 
 `TopLevelFunc` keeps its dense fixed-parameter name list in `_paramnames`.
-Methods and record statics store the list in their descriptor; the implicit
+Methods and user-declared record/union statics store the list in their
+descriptor; the implicit
 method receiver and the trailing variadic marker are excluded.
 
 `Type.Function` and `Type.CFunction` have not gained a names field. Their
@@ -124,6 +125,14 @@ direct foreign `Type.ModuleMember` copies the raw C function declaration's
   may provide a complete C list;
 * a record method uses `Type.Method.paramnames`, with `self` already excluded.
 
+Generated union variant constructors are the deliberate nominal-static
+exception. Their parser-synthesized parameter is an implementation detail, so
+the checker publishes `paramnames = false` even for a payload variant. They
+remain first-class fixed Titan functions and use ordinary positional
+adjustment, but a brace-delimited call is rejected as unavailable named
+metadata. User-declared union functions follow the same named-call rules as
+record functions.
+
 All structural function-value paths, C function-pointer calls, C pseudo
 constructors, input-variadic Titan declarations, and C variadic declarations
 are rejected before lowering. A declaration with a flexible *result* tail is
@@ -194,6 +203,12 @@ each explicit entry in source order, so the final store wins. The record-level
 visibility check still rejects every `{...}` construction outside the defining
 module when the record has any local field, before omission can make private
 slots appear fillable.
+
+This record initializer path does not apply to union construction. A record
+payload is one positional expression—`Message.move({ x = 1.0, y = 2.0 })`—so
+the parentheses distinguish the variant call from the brace-delimited
+named-call syntax. Union constructors do not synthesize named omissions; their
+fixed positional call path supplies the ordinary nil-fill/surplus adjustment.
 
 ## The Lua entry boundary is unchanged
 

@@ -368,10 +368,35 @@ function defs.suffix_bracket(pos, index)
     end
 end
 
-function defs.suffix_dot(pos, name)
-    return function(exp)
-        return ast.ExpVar(pos, ast.VarDot(pos, exp, name))
+local function unpack_membername(member)
+    if type(member) == "table" then
+        return member.name, true
     end
+    return member, false
+end
+
+function defs.contextual_c_name(name)
+    return { name = name }
+end
+
+function defs.suffix_dot(pos, member)
+    return function(exp)
+        local name, contextual = unpack_membername(member)
+        local var = ast.VarDot(pos, exp, name)
+        if contextual then
+            var._contextual_c_name = true
+        end
+        return ast.ExpVar(pos, var)
+    end
+end
+
+function defs.qualifiedtype(pos, module, member)
+    local name, contextual = unpack_membername(member)
+    local node = ast.TypeQualName(pos, module, name)
+    if contextual then
+        node._contextual_c_name = true
+    end
+    return node
 end
 
 function defs.fold_suffixes(exp, suffixes)
@@ -446,6 +471,55 @@ function defs.recorddecl(pos, islocal, name, fields)
     return record, new
 end
 
+function defs.unionvariantdecl(pos, name, payload)
+    return ast.UnionVariant(pos, name, payload)
+end
+
+function defs.localunionvariantdecl(pos, name, payload)
+    local variant = ast.UnionVariant(pos, name, payload)
+    variant.islocal = true
+    return variant
+end
+
+function defs.uniondecl(pos, islocal, name, variants)
+    local union = ast.TopLevelUnion(pos, name, variants)
+    union.islocal = islocal
+
+    local nodes = { union }
+    for _, variant in ipairs(variants) do
+        local params = {}
+        local value = false
+        if variant.payload then
+            local param = ast.Decl(
+                variant.loc, "__union_payload", variant.payload, false)
+            params[1] = param
+            value = ast.ExpVar(
+                variant.loc,
+                ast.VarName(variant.loc, param.name))
+        end
+
+        local init = ast.ExpUnionInit(
+            variant.loc, name, variant, value)
+        local body = ast.StatBlock(variant.loc, {
+            ast.StatReturn(variant.loc, { init }),
+        })
+        local constructor = ast.TopLevelStatic(
+            variant.loc,
+            name,
+            variant.name,
+            params,
+            { ast.TypeName(pos, name) },
+            false,
+            body)
+        constructor.islocal = islocal or variant.islocal or false
+        constructor._union_constructor = true
+        constructor._union_variant = variant
+        nodes[#nodes + 1] = constructor
+    end
+
+    return table.unpack(nodes)
+end
+
 function defs.recordfielddecl(pos, name, type)
     local decl = ast.Decl(pos, name, type, false)
     return decl
@@ -480,6 +554,10 @@ function defs.optiondecl(pos, name, type)
 end
 
 function defs.inferreddecl(pos, name)
+    return ast.Decl(pos, name, false, false)
+end
+
+function defs.casebinding(pos, name)
     return ast.Decl(pos, name, false, false)
 end
 
@@ -585,6 +663,7 @@ local grammar = re.compile([[
                               / topleveltype
                               / toplevelvar
                               / toplevelrecord
+                              / toplevelunion
                               / import
                               / foreign ) => appendprogram)*
                            ((moduleinit)? -> opt) !.) -> makeprogram
@@ -612,6 +691,10 @@ local grammar = re.compile([[
     toplevelrecord  <- (P  localopt RECORD NAME^NameRecord
                            recordfields^FieldRecord
                            END^EndRecord)                        -> recorddecl
+
+    toplevelunion   <- (P  localopt UNION NAME^NameUnion
+                           unionvariants^VariantUnion
+                           END^EndUnion)                         -> uniondecl
 
     localopt        <- (LOCAL)?                                  -> boolopt
 
@@ -677,7 +760,10 @@ local grammar = re.compile([[
     -- automatic-local statement below. Its signed integer token is retained as
     -- an ExpInteger so the checker receives both the value and its source
     -- location when enforcing the positive-extent rule.
-    qualifiedtype   <- (P  NAME DOT NAME^QualName)               -> TypeQualName
+    membername      <- NAME
+                     / (CNAME -> contextual_c_name)
+
+    qualifiedtype   <- (P  NAME DOT membername^QualName)         -> qualifiedtype
 
     carraylength    <- (((P  SUB NUMBER) => negativecarraylength)
                        / ((P  NUMBER) => carraylength)
@@ -803,6 +889,14 @@ local grammar = re.compile([[
                      / (P  NAME COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> recordfielddecl
 
+    unionvariants   <- {| unionvariant^VariantUnion unionvariant* |}
+
+    unionvariant    <- (P  LOCAL NAME^NameUnionVariant
+                           unionpayloadopt SEMICOLON?)           -> localunionvariantdecl
+                     / (P  NAME unionpayloadopt SEMICOLON?)      -> unionvariantdecl
+
+    unionpayloadopt <- ((COLON type^TypeUnionVariant)?)          -> opt
+
     -- A `block` may optionally absorb `(catch <block>)? (finally <block>)?`
     -- trailers. When either is present `trywrap` builds a `StatTry` wrapper;
     -- otherwise it returns the plain `StatBlock`. Since every construct (function
@@ -827,6 +921,7 @@ local grammar = re.compile([[
                                       exp^ExpRepeat)             -> StatRepeat
                      / (P  IF exp^ExpIf THEN^ThenIf block
                            elseifstats elseopt END^EndIf)        -> ifstat
+                     / casestat
                      / forstat
                      / (P  LOCAL automaticlocaldecl
                                 !ASSIGN !COMMA
@@ -865,6 +960,19 @@ local grammar = re.compile([[
                            THEN^ThenElseIf block)                -> Then
 
     elseopt         <- (ELSE block)?                             -> opt
+
+    casestat        <- (P  CASE exp^ExpCase
+                           casearms^WhenCase
+                           elseopt END^EndCase)                  -> StatCase
+
+    casearms        <- {| casearm^WhenCase casearm* |}
+
+    casearm         <- (P  WHEN NAME^NameCaseVariant
+                           casebindingopt
+                           THEN^ThenCase block)                  -> CaseArm
+
+    casebindingopt  <- (((COLON P NAME^NameCaseBinding)
+                                                        -> casebinding)?) -> opt
 
     returnstat      <- (P  RETURN (explist? -> listopt) SEMICOLON?)      -> StatReturn
 
@@ -914,7 +1022,7 @@ local grammar = re.compile([[
                      / (P  COLON NAME^NameColonExpSuf)           -> suffix_methodref
                      / (P  LBRACKET exp^ExpExpSuf
                                 RBRACKET^RBracketExpSuf)         -> suffix_bracket
-                     / (P  DOT NAME^NameDotExpSuf)               -> suffix_dot
+                     / (P  DOT membername^NameDotExpSuf)         -> suffix_dot
 
     prefixexp       <- (P  NAME)                                 -> name_exp
                      / (P  LPAREN exp^ExpSimpleExp
@@ -1012,6 +1120,7 @@ local grammar = re.compile([[
 
     AND             <- %AND SKIP*
     BREAK           <- %BREAK SKIP*
+    CASE            <- %CASE SKIP*
     DEFER           <- %DEFER SKIP*
     DO              <- %DO SKIP*
     ELSE            <- %ELSE SKIP*
@@ -1044,6 +1153,8 @@ local grammar = re.compile([[
     RAISE           <- %RAISE SKIP*
     CONST           <- %CONST SKIP*
     OWNED           <- %OWNED SKIP*
+    UNION           <- %UNION SKIP*
+    WHEN            <- %WHEN SKIP*
 
     BOOLEAN         <- %BOOLEAN SKIP*
     INTEGER         <- %INTEGER SKIP*
@@ -1090,6 +1201,7 @@ local grammar = re.compile([[
     NUMBER          <- %NUMBER SKIP*
     STRINGLIT       <- %STRINGLIT SKIP*
     NAME            <- %NAME SKIP*
+    CNAME           <- %CNAME SKIP*
     NAMEDLABEL      <- %NAMEDLABEL SKIP*
 
     -- Synonyms

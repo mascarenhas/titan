@@ -47,7 +47,7 @@ tail such as `: (...: R)` or `: (R1, ...: R)`. See
 
 It is an expression, so it appears wherever an expression may: as a
 declaration or assignment right-hand side, a call argument, a `return`
-value, a record-constructor or array/map element, and so on.
+value, a record/union-constructor or array/map element, and so on.
 
 ```lua
 local g = function (x: integer): integer return x + 1 end   -- in a local
@@ -208,14 +208,14 @@ A few details worth knowing:
 * **Shadowing works as expected.** A local declared *inside* the lambda
   with the same name as an outer one shadows it and is not a capture.
 * **Module-level names are not captures.** Module variables, imported
-  modules' members, top-level functions and record functions are reached
+  modules' members, top-level functions, and record/union functions are reached
   directly, exactly as they are from any function body; they are not part
   of the lambda's capture.
 * **Capture is transitive.** A lambda nested two or three levels deep can
   use a variable from an outer function it is not directly inside; the
   variable is threaded down through the intervening lambdas. Mutable
   captures stay shared all the way down; immutable ones are copied down.
-* **Captured strings, arrays, records and other heap values** are captured
+* **Captured strings, arrays, records, unions and other heap values** are captured
   and kept alive correctly across garbage collection, whether by value or
   shared-and-mutable.
 
@@ -273,7 +273,7 @@ not a special case.
 A method *named but not called* is a function value with the receiver
 bound in. Writing `obj:method` with **no argument list** yields a value
 whose type is the method's type with the implicit `self` removed, and
-calling that value runs the method on the receiver `obj` was when the
+calling that value runs the method on the nominal receiver `obj` was when the
 reference was taken:
 
 ```lua
@@ -318,12 +318,15 @@ end
 
 Two restrictions, both clean compile-time errors:
 
-* the receiver must be a record — `n:bump` on a non-record is
-  `expected record in receiver of method reference`;
-* the method must exist — `a:nope` is `method 'nope' not found in record`;
+* the receiver must be a record or union — `n:bump` on another type is a
+  receiver-type error;
+* the method must exist on that nominal owner;
 * a **foreign (C) method** cannot be bound:
   `a foreign (C) method cannot be used as a first[-class value]`.
 
 Bound method references work across modules, including against a dependency
 available only through a compiled `.so` or `.a` provider. See
 [Records](records.md#methods) for method declaration rules.
+Union methods use the same bound-reference path; unlike a record method they
+cannot access fields and must inspect `self` with `case`. See
+[Unions](unions.md).

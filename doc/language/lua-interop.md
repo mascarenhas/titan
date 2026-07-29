@@ -26,16 +26,17 @@ value — whose members you access exactly like table fields (`m.f`, `m.v`,
 
 * **one function per exported Titan function** (and nothing for functions
   declared `local` — they are invisible to Lua), returned read-only;
-* **one namespace per exported record type**, a small table holding the
-  record's public record functions — in particular the automatically generated
+* **one namespace per exported record or union type**, a small table holding
+  public nominal functions — in particular the automatically generated
   constructor when it is public, so `mod.Point.new(2, 3)` works from Lua for a
-  public `new` (see [Records](records.md));
+  public `new` or union-variant constructors (see [Records](records.md) and
+  [Unions](unions.md));
 * **exported module variables**, read and written through the metatable
   so that reads always see the current value and writes are type-checked
   (see [Module variables from Lua](#module-variables-from-lua) below).
 
 Because the module value is a userdata, `type(require "m")` is
-`"userdata"`, not `"table"`; functions and record namespaces are
+`"userdata"`, not `"table"`; functions and nominal namespaces are
 read-only (assigning to them errors).
 
 ```lua
@@ -97,9 +98,9 @@ The same rule applies to `titan.coroutine`, `titan.async`, `titan.timer`,
 `titan.fs`, `titan.net`, `titan.os`, `titan.peg`, and `titan.string`. The
 private `titan.uv` plumbing module uses the same canonical identity. Requiring
 `titan.string` does not mutate Lua's `string` table or string metatable. In an
-installed Titan 0.18 tree, generated
+installed Titan 0.19 tree, generated
 loaders under `<root>/share/lua/5.5/titan/` all open the DSO form
-`<root>/lib/titan/0.18/titan.so` and invoke their own exact Lua entries. Titan
+`<root>/lib/titan/0.19/titan.so` and invoke their own exact Lua entries. Titan
 imports may instead select the paired self-describing `titan.a`; both forms
 expose the same logical-module ABI/types. The installation does not create
 child DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
@@ -121,6 +122,7 @@ converted) against the declared type:
 | `{T}` (array) | a canonical Titan Array proxy from the same Lua state; elements are **not** checked here | the *same* userdata proxy — aliased, not copied |
 | `{K:V}` (map) | any table; the contents are **not** checked here | the *same* table — aliased, not copied |
 | record type | a userdata created by that same record type (from any module instance) | a userdata carrying the record's metatable |
+| union type | a userdata created by that exact union type | the same opaque union userdata |
 | `T?` (option) | `nil`, or a value of type `T` — stricter than plain `T`, see below | `nil`, or whatever `T` produces |
 | `value` | anything | the value, unchanged |
 
@@ -169,6 +171,8 @@ Notes on the entries that deserve them:
   [Sharing arrays and maps](#sharing-arrays-and-maps-with-lua).
 * **Records are userdata, not tables** — see
   [Records from Lua](#records-from-lua).
+* **Unions are opaque userdata** — see
+  [Unions from Lua](#unions-from-lua).
 * **`nil` and options.** A `T?` parameter accepts `nil` or a value of
   type `T`, but is *stricter* than a plain `T` parameter: the
   argument-only coercions above do not apply, so `integer?` rejects an
@@ -189,7 +193,7 @@ Notes on the entries that deserve them:
 The boundary checks run at exactly these places:
 
 1. **Function entry, once per argument** — including the receiver of a
-   method call (`self` is checked like any other record-typed argument).
+   method call (`self` is checked like any other nominal argument).
 2. **Writes to exported module variables from Lua** (`mod.x = v`).
 3. **Writes to record fields from Lua** (`rec.x = v`).
 4. **Inside Titan**, whenever a `value` is converted to a concrete type
@@ -405,6 +409,32 @@ is expected is a run-time error naming both types:
 `type error, expected test.Rec but found test.Point`, or
 `... but found number`.
 
+## Unions from Lua
+
+An exported union name is a read-only namespace table on the module userdata.
+It holds public variant constructors and public user-declared union functions;
+private variants and statics are absent. Each entry is the canonical
+first-class closure, so repeated reads have stable identity.
+
+A constructed union value is userdata. Its tag and payload are intentionally
+opaque to Lua: there is no `.tag`, `.payload`, or variant field. Public
+methods are available through normal `:` calls, arbitrary reads report that
+the member is not found in the union, and every write fails. The protected
+metatable string is `"Titan union <qualified-name>"`.
+
+```lua
+local messages = require "messages"
+local value = messages.Message.write("hello")
+assert(type(value) == "userdata")
+assert(messages.Message.write == messages.Message.write)
+print(getmetatable(value)) -- Titan union messages.Message
+```
+
+Passing a union back into Titan checks the exact nominal metatable identity.
+Two separately constructed values compare by userdata identity even when they
+use the same variant and equal payloads. Payload access is available only to
+Titan code through `case`.
+
 ## Module variables from Lua
 
 Exported (non-`local`) module variables are readable and writable from
@@ -536,8 +566,8 @@ option-type idiom for recoverable failures.
 ## Multiple Lua states
 
 A Titan module keeps no instance state in C globals: everything a module
-instance owns (its variables, its module userdata, its record and Array
-metatables)
+instance owns (its variables, its module userdata, its record, union, and
+Array metatables)
 lives inside one Lua state. Consequently:
 
 * The same compiled module can be loaded into **several Lua states in the
@@ -547,7 +577,7 @@ lives inside one Lua state. Consequently:
   no matter how it is reached: requiring it again, or loading two Titan
   modules that both import it, always yields the same instance with its
   state preserved.
-* Record types keep their identity across all of this: a record created
+* Record and union types keep their identity across all of this: a nominal value created
   by one module instance is accepted by any other code in the same state
   that knows the same record type, even when the modules were loaded
   separately.

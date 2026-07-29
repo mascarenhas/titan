@@ -55,7 +55,7 @@ local function count_visible(c: Camera): integer
 end
 ```
 
-Records, aliases, module variables, functions, methods, imports, and foreign
+Records, unions, aliases, module variables, functions, methods, imports, and foreign
 imports follow the logical module's ordinary
 [visibility rules](modules.md#declaration-order-and-visibility) across files.
 Public declarations from any contributor belong to `graphics.scene`; there is
@@ -85,26 +85,29 @@ independent of the process locale. Thus ASCII `A.titan` sorts before
 bytes. The main source always comes first even if its basename would sort
 elsewhere.
 
-This combined order is not a general visibility order. Records, aliases,
-ordinary functions, methods, and record functions may refer across files
+This combined order is not a general visibility order. Records, unions,
+aliases, ordinary functions, methods, and nominal functions may refer across files
 regardless of relative placement. An import in a later contributor is
-available to a function signature, function body, record, or alias in the main
+available to a function signature, function body, record, union payload, or
+alias in the main
 source. Records and their members are likewise order-independent: a method,
-record function, `Rec.new(...)` call, or context-typed record constructor may
-precede the written record declaration, even across contributors.
+nominal function, `Rec.new(...)` call, union-variant constructor, or
+context-typed record constructor may precede the written owner declaration,
+even across contributors.
 
 Module-variable declarations retain the one order-sensitive frontier. For
 each such declaration, the combined order decides which imports and earlier
-module variables are visible; records, aliases, and callable declarations are
+module variables are visible; records, unions, aliases, and callable declarations are
 visible module-wide. Thus an import in a later contributor is *not* available
 to a module variable in the main source.
 
 The combined order also decides which declaration is earlier for duplicate
 diagnostics, orders serialized interface members and run-time module slots,
 fixes module-variable initialization order, and remains the code-generation
-order. A record declaration's synthesized `new` record function remains
-beside that declaration in this sequence even though it is visible throughout
-the module.
+order. A record's synthesized `new` and a union's synthesized variant
+constructors remain beside their owner declaration in this sequence even
+though they are visible throughout the module. Local variants retain their
+absolute tags across contributor boundaries.
 
 ## Module initializer
 
@@ -238,7 +241,7 @@ semantic contributor implementations; contributor exports are ordinary
 `titan.uv` members. These files are one logical module and therefore produce
 one object and one `titan/uv.lua` loader, never one artifact per contributor.
 The production standard-library invocation links that object with the other
-six `titan.*` roots into the canonical `titan.so`/`titan.a` provider pair.
+eight `titan.*` roots into the canonical `titan.so`/`titan.a` provider pair.
 Titan imports select the preferred compiled form, while Lua
 `require "titan.uv"` selects the independent `titan.uv` logical module inside
 the DSO; no contributor is a separately loadable module.

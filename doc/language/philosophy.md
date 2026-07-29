@@ -90,7 +90,10 @@ valid Array proxies. The static types let the compiler use their storage
 directly, skipping generic VM access paths. Records are also userdata:
 nominal, fixed-shape values with their fields at fixed slots, the moral
 equivalent of structs, designed so that `p.x` compiles to an indexed load
-rather than a hash lookup. The FFI extends the same idea outward: C
+rather than a hash lookup. Nominal [unions](unions.md) apply the same idea to
+alternatives: one absolute integer tag and at most one fixed payload slot
+permit direct construction and switch dispatch while `case` keeps the
+representation opaque. The FFI extends the same idea outward: C
 functions and C pointers get Titan types, so binding a C library is a
 declaration, not a hand-written adapter. (History note: in the 2017
 slides records were spelled `struct` and the FFI was an inline
@@ -152,6 +155,12 @@ static-when-source, dynamic-otherwise linking policy (#237); option types
 story (#257). The [implementation documentation](../implementation/index.md)
 describes where each of these lives today.
 
+The 0.19 prototype adds nominal tagged unions and non-exhaustive `case`.
+Variants are deliberately not first-class types, constructors are positional,
+and every arm is an ordinary full block. The first version therefore reuses
+the existing nominal, function, option, and error-handling models instead of
+creating parallel ones.
+
 ## Principles, distilled
 
 When a design question comes up, the project has historically resolved it
@@ -176,7 +185,7 @@ by these lights, roughly in order:
    semantics demand branches (shift amounts, division signs), they are
    written so constant operands let the C compiler delete them.
 5. **Restrictions are features when they buy the above.** Nominal
-   records, no metatables on Titan data — each is a smaller
+   records and unions, no user-defined metatables on Titan data — each is a smaller
    language in exchange for a faster and more predictable one, and each can
    be revisited as the design matures (see the roadmap in the
    [README](../../README.md)). First-class functions began as one of these

@@ -296,6 +296,7 @@ describe("named arguments (typechecker)", function()
                 struct ffi_node;
                 extern int ffi_reordered(int left, int right);
                 extern int ffi_keyword(int repeat);
+                extern int ffi_when(int when);
                 extern int ffi_zero(void);
                 extern int ffi_nullable(struct ffi_node *pointer, int required);
             ]], function(header)
@@ -305,9 +306,10 @@ describe("named arguments (typechecker)", function()
                     function run(): integer
                         local a: integer = c.ffi_reordered { right = 2, left = 1 }
                         local b: integer = c.ffi_keyword { repeat = 3 }
+                        local w: integer = c.ffi_when { when = 5 }
                         local z: integer = c.ffi_zero {}
                         local n: integer = c.ffi_nullable { required = 4 }
-                        return a + b + z + n
+                        return a + b + w + z + n
                     end
                 ]])
                 assert.truthy(ok, err)

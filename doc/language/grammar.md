@@ -1,13 +1,13 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.18 prototype compiler: lexical conventions, the complete syntactic
+0.19 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
 The notation is extended BNF, as in the Lua manual: `{A}` means zero or
 more As, `[A]` an optional A, and `|` separates alternatives. Keywords
-and quoted symbols (`'('`) are terminals; **Name**, **NamedLabel**,
+and quoted symbols (`'('`) are terminals; **Name**, **NamedLabel**, **CName**,
 **Numeral**, and **LiteralString** are the lexical categories defined below.
 Whitespace and comments may appear between any two tokens. A source file must parse
 as one complete `program`; trailing text is a compile-time (syntax)
@@ -26,11 +26,11 @@ is not a reserved word. Tokenization is longest-match, so `andy`,
 `return17`, and `_end` are names. The reserved words are:
 
 ```
-and     as      boolean  break     catch   const   defer  do      else
+and     as      boolean  break     case    catch   const   defer  do      else
 elseif  end     false    finally   float   for     foreign function
 goto    if      import   in        integer is      local   nil     not
 or      owned   raise    record    repeat   return  string  then    true
-type    until   value   while
+type    union   until   value      when    while
 ```
 
 `in` is used by the generic `for ... in` statement. `goto` is still
@@ -45,6 +45,12 @@ A **NamedLabel** has the same raw ASCII spelling as a Name but does not exclude
 reserved words. It is used only immediately before `=` in a named call's brace
 list, so `f { repeat = 1 }` is legal without making `repeat` a legal variable,
 declaration, or record-field name.
+
+A **CName** has the same raw spelling and is accepted only in a contextual
+qualified member/type position that the checker resolves through a C
+`foreign import`. This permits C symbols named `when`, `type`, `repeat`, or
+another Titan keyword without making those spellings legal ordinary Titan
+identifiers.
 
 ### Other tokens
 
@@ -144,15 +150,17 @@ for a folder module only its main source may contain that initializer. Its
 
 ```
 program  ::= {tldecl} [moduleinit]
-tldecl   ::= tlmethod | tlrecfunc | tlfunc | tlvar | tlrecord | tltype
+tldecl   ::= tlmethod | tlrecfunc | tlfunc | tlvar | tlrecord | tlunion | tltype
            | tlimport | tlforeignimport
 tlmethod ::= [local] function Name ':' Name '(' [parlist] ')' [':' rettype] block end
 tlrecfunc ::= [local] function Name '.' Name '(' [parlist] ')' [':' rettype] block end
 tlfunc   ::= [local] function Name '(' [parlist] ')' [':' rettype] block end
 tlvar    ::= [local] decl '=' exp
 tlrecord ::= [local] record Name {recordfield} end
+tlunion  ::= [local] union Name unionvariant {unionvariant} end
 tltype   ::= [local] type Name '=' type
 recordfield     ::= [local] Name ['?'] ':' type [';']
+unionvariant    ::= [local] Name [':' type] [';']
 tlimport        ::= local Name '=' import importname
 tlforeignimport ::= local Name '=' foreign import importname
 moduleinit     ::= do block end
@@ -198,6 +206,9 @@ Notes on the top level:
   the fields as positional parameters in declaration order. `Name.new` is
   local when the record is local or any field is local. See
   [Records](records.md).
+* A `union` must contain at least one variant and synthesizes one
+  positional-only static constructor per variant. An empty variant takes no
+  parameter; a payload variant takes one. See [Unions](unions.md).
 * A module variable's initializer is a full expression; after `=`, the
   keywords `import` and `foreign import` mark an import instead.
 * The optional `moduleinit` is the sole executable root construct. It runs
@@ -259,7 +270,7 @@ visible variable of a generic `for`
 write `p: T?`. Record fields admit the annotated shorthand `x?: T`, which is
 equivalent to `x: T?`.
 
-In types: `Name` is a record type and `mod.Name` one from an imported
+In types: `Name` is a record or union type and `mod.Name` one from an imported
 module; `{T}` is an array, `{K: V}` a map, `T?` an option type, and
 `t -> t` a function type. A function type may end its argument list with
 `...: T` to describe a variadic function value, and a parenthesized result
@@ -321,6 +332,7 @@ statement  ::= ';'
             |  while exp do block end
             |  repeat block until exp
             |  if exp then block {elseif exp then block} [else block] end
+            |  case exp casearm {casearm} [else block] end
             |  for decl '=' exp ',' exp [',' exp] do block end
             |  for decllist in explist do block end
             |  local automaticlocaldecl
@@ -331,6 +343,7 @@ statement  ::= ';'
             |  raise [exp]
             |  defer statement
 returnstat ::= return [explist] [';']
+casearm    ::= when Name [':' Name] then block
 varlist    ::= var {',' var}
 explist    ::= exp {',' exp} [',' '...']
             |  '...'
@@ -338,6 +351,13 @@ var        ::= Name
             |  prefixexp {suffix} '[' exp ']'
             |  prefixexp {suffix} '.' Name
 ```
+
+A `case` must contain at least one `when` arm. Every arm and its optional
+`else` consumes a full `block`, so each may have its own `catch` and
+`finally`; a `defer` inside that block is transformed normally. The checker
+requires a union scrutinee, rejects duplicate arms and binding an empty
+variant, but does not require exhaustive coverage. See
+[Unions](unions.md#case-statements).
 
 An lvalue (`var`) is a plain name or a suffixed expression whose *last*
 suffix is an index or a field selection — `f()[1] = v`, `m[k][1] = v`,

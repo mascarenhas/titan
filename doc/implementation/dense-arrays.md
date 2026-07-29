@@ -209,6 +209,7 @@ The compiler distinguishes storage domains by semantic Titan type:
 | --- | --- |
 | native local, exact argument/result | backing `Table *` |
 | typed module/record/capture/spill slot | backing Table TValue |
+| typed union payload slot | backing Table TValue |
 | compiler-written nested Array element | backing Table TValue |
 | Lua stack or generic callable boundary | proxy Udata TValue |
 | `value` containing an Array | proxy Udata TValue |
@@ -226,7 +227,9 @@ Consequences:
 - `value` never carries a raw backing Table;
 - Map storage boxes Array keys and values; and
 - record/module accessors box on get and unbox on set while their internal
-  slots stay raw.
+  slots stay raw; and
+- union construction/extraction likewise keeps the backing Table in `uv[1]`
+  rather than passing through the Lua proxy.
 
 Array and Map share the C type `Table *`, while `Option(Array)`, `value`, and
 Function can all use `TValue`. Representation selection therefore cannot
@@ -423,11 +426,12 @@ it is not a `Table *` → `Udata *` migration.
 
 ABI-0.17 providers lived under `lib/titan/0.17`, used
 `TITAN_PATH_0_17`, and rejected 0.16 dependencies through the existing
-provider ABI protocol. Current ABI-0.18 providers preserve the same Array
-contract under `lib/titan/0.18` and `TITAN_PATH_0_18`, while advancing the
-standard-library archive/runtime native-symbol boundary. A separately
-installed 0.17 tree is preserved for migration and rollback rather than
-treated as compatible.
+provider ABI protocol. ABI 0.18 preserved the same Array contract while
+advancing the standard-library archive/runtime native-symbol boundary.
+Current ABI 0.19 still preserves it under `lib/titan/0.19` and
+`TITAN_PATH_0_19`; the union payload path explicitly stores the internal
+backing rather than a proxy. Separately installed 0.17 and 0.18 trees remain
+versioned predecessors and are not treated as compatible.
 
 ## Failure and performance boundaries
 
@@ -440,7 +444,7 @@ treated as compatible.
 - Every Array pays for one Udata, one user value, and one live hash entry in
   addition to its Table array storage.
 - Oversized construction/growth fails before narrowing or Table overflow.
-- The Array contract introduced in ABI 0.17 and retained in ABI 0.18 has no
+- The Array contract introduced in ABI 0.17 and retained in ABI 0.19 has no
   shrinking resize.
 
 ### Raw and stock table-library boundary

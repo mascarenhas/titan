@@ -63,7 +63,8 @@ field as a plain `List`, which [unwraps](#records-and-nil) the option
 with a run-time nil check.
 
 A field type may also mention a record declared *later* in the module,
-and mutually recursive records work as well:
+or a [union](unions.md) declared later, and mutually recursive nominal
+definitions work as well:
 
 ```lua
 record Tree
@@ -100,6 +101,14 @@ end
 This module-wide visibility is independent of field order: the parameters of
 the synthesized `new` function and the record's fixed field slots still follow
 the order written inside the `record` declaration.
+
+Record fields and union payloads share one representation rule: the declared
+type must fit a Lua-traced value slot. Ordinary Titan values, including Titan
+function values, and the supported boxable C scalar/object-pointer, exact
+`TValue`/`Udata *`, and owned forms are allowed. Direct C aggregates, C
+arrays, direct C functions, and C function pointers are not. This is the same
+rule on both constructs because neither
+stores an untraced C object inline.
 
 ## Records are nominal
 
@@ -499,6 +508,12 @@ functions, but they cannot construct it directly with `Rec.new` or `{ ... }`;
 the defining module should export a factory record function or module function
 when outside code needs instances.
 
+Imported unions follow this exact visibility frontier. Their types,
+constructors, methods, and union functions are available to signatures and
+bodies independent of import placement; direct qualified uses in a
+module-variable initializer, including inside an evaluated lambda, still see
+only earlier imports. See [Unions](unions.md#visibility-and-declaration-order).
+
 Record identity is global per type, not per loaded copy: records of the
 same type created by different modules — or by the same module loaded
 both statically and as a shared library — share one metatable and pass
@@ -600,6 +615,9 @@ nil` error if the value is `nil` at run time. See
   *is* a first-class value, like any top-level function, and an instance
   method can be taken as a value through a
   [bound reference](#methods) (`obj:method`).
+* **Not a tagged union.** Records always have their declared field set. Use a
+  [union](unions.md) when a value has one of several named alternatives and
+  inspect it with `case`.
 
 ## Performance notes
 

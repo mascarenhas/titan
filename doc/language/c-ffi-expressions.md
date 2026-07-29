@@ -98,6 +98,16 @@ specifically. Fields named `new`, `new_array`, or `alignof` on an actual
 aggregate value are ordinary C fields and remain usable (`sizeof` itself is a
 C keyword and cannot name a field).
 
+### Titan keywords as C names
+
+Member and qualified-type lookup after a foreign namespace or C receiver uses
+a contextual raw C identifier. A legal C spelling such as `when`, `type`, or
+`repeat` is therefore available as `c.when`, `c.type`, or `object.repeat`
+when the imported declarations provide it. This does not unreserve the word
+for an ordinary Titan variable, declaration, record field, union variant, or
+member. Named C parameter labels use the analogous contextual rule before
+`=` in a named call.
+
 ## Contextual object-pointer conversions
 
 C libraries often expose related opaque structures as different pointer types
@@ -177,8 +187,9 @@ the two operations: `owned *T?` does not implicitly become `*T?`.
 One separate written conversion erases stable native identities to C
 `void *`. Every non-function C pointer keeps the ordinary C object-pointer
 conversion, while a C function pointer uses Titan's toolchain portability
-cast. A Titan Array or Map exposes its backing `Table *`, a record exposes its
-full-userdata `Udata *`, and a function exposes the collectable GC object
+cast. A Titan Array or Map exposes its backing `Table *`; a record or Titan
+union exposes its full-userdata `Udata *`; and a function exposes the
+collectable GC object
 carried by its boxed `TValue`. A noncollectable function-typed value makes
 `is C-void-pointer` false and makes `as C-void-pointer` raise. Strings remain
 byte pointers and owned C objects remain payload pointers; neither switches to
@@ -192,6 +203,10 @@ Code that lets C keep such a pointer must keep the original Titan value
 reachable. `Table *`, `Udata *`, and function GC-object addresses are internal
 runtime representations, so ordinary FFI code must not dereference, mutate,
 free, or reallocate them.
+
+This identity conversion is the only Titan-union/C-aggregate relation. A
+Titan union is nominal tagged userdata, not a C `union`; neither it nor a
+Titan record can be structurally cast to a C `union` or `struct`.
 
 An existing address coercion still handles a by-value C object passed to a
 pointer parameter. A mutable local or parameter may supply a mutable out

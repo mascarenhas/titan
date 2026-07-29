@@ -123,6 +123,118 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("keeps Titan keyword spellings usable as contextual C names",
+    function()
+        with_header([[
+            typedef int type;
+            typedef struct ffi_keyword_holder {
+                int when;
+            } ffi_keyword_holder;
+
+            static int repeat = 3;
+            static int when(int repeat, type value) {
+                return repeat + value;
+            }
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                local function read(h: c.ffi_keyword_holder): c.type
+                    return h.when + c.when(c.repeat, 1)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("rejects contextual C selectors on Titan values and modules",
+    function()
+        local ok, err = run_checker([[
+            record R
+                x: integer
+            end
+
+            union U
+                item
+            end
+
+            local function record_keyword(r: R): integer
+                return r.when
+            end
+
+            local function union_keyword(u: U): integer
+                return u.when
+            end
+        ]])
+        assert.falsy(ok)
+        local _, selector_errors = err:gsub(
+            "Titan keyword 'when' is only contextual for a C member", "")
+        assert.equal(2, selector_errors)
+
+        ok, err = run_checker_modules({
+            provider = [[
+                function ordinary(): integer
+                    return 1
+                end
+            ]],
+            consumer = [[
+                local m = import "provider"
+
+                local function invalid(): integer
+                    return m.when
+                end
+            ]],
+        }, "consumer")
+        assert.falsy(ok)
+        assert.match(
+            "Titan keyword 'when' is only contextual for a C member", err)
+    end)
+
+    it("rejects contextual C type spellings on Titan namespaces",
+    function()
+        local ok, err = run_checker([[
+            record R
+                x: integer
+            end
+
+            union U
+                item
+            end
+
+            local function record_type(x: R.when)
+            end
+
+            local function union_type(x: U.when)
+            end
+        ]])
+        assert.falsy(ok)
+        local _, type_errors = err:gsub(
+            "Titan keyword 'when' is only contextual for a C type", "")
+        assert.equal(2, type_errors)
+
+        ok, err = run_checker_modules({
+            provider = [[
+                record Item
+                    x: integer
+                end
+            ]],
+            consumer = [[
+                local m = import "provider"
+
+                local function invalid(x: m.when)
+                end
+
+                local function invalid_cast(x: value): value
+                    return x as m.when
+                end
+            ]],
+        }, "consumer")
+        assert.falsy(ok)
+        local _, type_errors = err:gsub(
+            "Titan keyword 'when' is only contextual for a C type", "")
+        assert.equal(2, type_errors)
+    end)
+
     it("imports the compiler-provided C primitive header", function()
         local ok, err = run_checker([[
             local ffi = foreign import "titan/ffi.h"
@@ -1655,6 +1767,105 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.truthy(ok, err)
+        end)
+    end)
+
+    it("uses one TValue-slot representation rule for records and unions",
+    function()
+        with_header([[
+            typedef struct ffi_struct { int value; } ffi_struct;
+            typedef union ffi_union {
+                int integer_value;
+                double number;
+            } ffi_union;
+            typedef int ffi_values[2];
+            typedef int (*ffi_callback)(int);
+        ]], function(header)
+            -- Bare C function typedefs are deliberately omitted by the C
+            -- parser; the direct Type.CFunction predicate branch is covered
+            -- in types_spec.lua.
+            local errs = check_errs([[
+                local c = foreign import "]] .. header .. [["
+
+                local record RecordSlots
+                    structure: c.ffi_struct
+                    aggregate: c.ffi_union
+                    values: c.ffi_values
+                    callback: c.ffi_callback
+                end
+
+                local union UnionSlots
+                    structure: c.ffi_struct
+                    aggregate: c.ffi_union
+                    values: c.ffi_values
+                    callback: c.ffi_callback
+                end
+            ]])
+            assert.same(8, #errs)
+            local all = table.concat(errs, "\n")
+            for _, member in ipairs({
+                "structure", "aggregate", "values", "callback",
+            }) do
+                assert.match(
+                    "record field '" .. member ..
+                        "'.-has no TValue representation", all)
+                assert.match(
+                    "union variant '" .. member ..
+                        "'.-has no TValue representation", all)
+            end
+        end)
+    end)
+
+    it("accepts boxable C payloads and hides local C union variants",
+    function()
+        with_header([[
+            typedef int ffi_count;
+            typedef struct ffi_handle { int value; } ffi_handle;
+            typedef struct TValue TValue;
+            typedef struct Udata Udata;
+        ]], function(header)
+            local ok, err, _, modtype = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                record Slots
+                    local count: c.ffi_count
+                    local handle: *c.ffi_handle
+                    local raw: c.TValue
+                    local userdata: *c.Udata
+                    local owner: owned *c.ffi_handle
+                end
+
+                union Message
+                    visible: integer
+                    local count: c.ffi_count
+                    local handle: *c.ffi_handle
+                    local raw: c.TValue
+                    local userdata: *c.Udata
+                    local owner: owned *c.ffi_handle
+                end
+            ]])
+            assert.truthy(ok, err)
+            local union = modtype.members.Message.type
+            assert.equal(6, union.nvariants)
+            for _, name in ipairs({
+                "count", "handle", "raw", "userdata", "owner",
+            }) do
+                assert.truthy(union.variants[name].islocal)
+            end
+        end)
+    end)
+
+    it("rejects C FFI types exposed by public union variants", function()
+        with_header("typedef int ffi_count;\n", function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                union Message
+                    count: c.ffi_count
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("cannot export C FFI type 'ffi_count'", err)
         end)
     end)
 

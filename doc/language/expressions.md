@@ -199,7 +199,7 @@ type pairs:
   any comparison with NaN is false, so `x ~= x` is true when `x` is NaN.
 * **Strings** compare by content (lexicographically for the relational
   operators), exactly as in Lua.
-* **Arrays, maps and records** compare by identity. Arrays and records use
+* **Arrays, maps, records and unions** compare by identity. Arrays and nominal values use
   canonical userdata identities; maps use ordinary table identities.
   Metamethods are never involved.
 * **Two `value`s** (or a `value` and anything else, which is promoted to
@@ -226,7 +226,7 @@ end
 The relational operators accept two numbers (a mixed `integer`/`float`
 comparison compares mathematical values exactly, with *no* promotion of
 the integer to float — matching Lua) or two strings. Everything else — booleans,
-`value`, arrays, maps, records, mixed types — is a compile-time error
+`value`, arrays, maps, records, unions, mixed types — is a compile-time error
 (`left/right hand side of relational expression is a ... instead of a
 number`, or `trying to use relational expression with ...`).
 
@@ -255,7 +255,7 @@ and the static type of the result depends on what the checker knows:
   `boolean`-annotated variable), both operands are implicitly converted
   to `boolean` and the result is `boolean`, whatever the operand types.
 * **Statically truthy/falsy left operand.** Integers, floats, strings,
-  arrays, maps and records can never be falsy, so for these `a and b`
+  arrays, maps, records and unions can never be falsy, so for these `a and b`
   has the type of `b`, and `a or b` the type of `a` (the right side is
   dead); a `nil` left operand flips both rules. At run time this is
   Lua's behavior: with two integers, `a and b` returns `b` and
@@ -314,7 +314,7 @@ A chain of `..` is flattened into a single n-ary concatenation, so
 `a .. b .. c .. d` allocates one result string, not three; when all
 operands are literals the compiler folds them into a single string
 constant at parse time. Concatenating anything else — booleans, `nil`,
-arrays, maps, records — is a compile-time error
+arrays, maps, records, unions — is a compile-time error
 (`cannot concatenate with boolean value`, etc.), as is concatenating a
 `value` directly (`cannot concatenate with value of type 'value'` —
 cast it to `string` first). Option operands are implicitly unwrapped,
@@ -367,7 +367,7 @@ checker accepts are deliberately few:
 | `string` | C `char *` or `void *` (FFI) | no |
 | non-function C pointer | C `void *` | no |
 | C function pointer | C `void *` | no — requires a written cast |
-| Array, Map, or record | C `void *` | no — exposes the native GC identity |
+| Array, Map, record, or union | C `void *` | no — exposes the native GC identity |
 | function | C `void *` | yes — raises if its boxed value is not collectable |
 | C integer, C float, ordinary C pointer, or owned C userdata | `value` | never — ordinary pointers become lightuserdata; owned objects stay full userdata |
 | `value` | C integer, C float, ordinary C pointer, or owned C userdata | yes — checked |
@@ -403,7 +403,7 @@ For the admitted casts that can fail, the test uses the same checks as `as`:
 
 * `value is integer` accepts Lua integers and exact integral floats within
   Lua's integer range; `value is float` accepts either numeric representation.
-* Checked primitive targets, Maps, Arrays, records, and owned-C targets use
+* Checked primitive targets, Maps, Arrays, records, unions, and owned-C targets use
   the same Lua tag or exact metatable identity as their casts. In particular,
   an ordinary Lua table is a Map, not an Array proxy, and distinct record
   types do not match.
@@ -425,7 +425,7 @@ when it is invoked. The same always-true rule applies to `value is value` and
 
 GC-identity pointers are borrowed internal addresses. The cast roots its
 operand during evaluation and later argument setup, but retaining the pointer
-does not retain the Array, Map, record, or function. See
+does not retain the Array, Map, record, union, or function. See
 [the FFI lifetime rules](ffi.md#casts-and-coercions).
 
 ```lua
@@ -519,12 +519,20 @@ See
 [arrays and maps](arrays-maps.md) and [records](records.md) for the full
 story on each constructor, including what `nil` elements mean.
 
+Union values do not use brace constructor expressions. Each variant has a
+generated positional function such as `Message.quit()` or
+`Message.write("hello")`. If the one payload is itself a record constructor,
+write `Message.move({ x = 1.0, y = 2.0 })`; the parentheses keep the record as
+one positional argument. A bare-brace call would select named syntax, which
+variant constructors reject.
+
 ## Function values
 
 Functions are first-class values in Titan. **Referencing a function name
 is an expression** that yields a function value of the corresponding
 [function type](types.md#function-types): a top-level or `local`
-function name, an imported `mod.f`, and a record function like `Rec.new`
+function name, an imported `mod.f`, a record function like `Rec.new`, and a
+union constructor/function like `Message.write`
 all denote values you can store in a variable, pass as an argument,
 return, and call. The conversion between a function value and `value` is
 implicit: a function flows into a `value` for free, and a `value` flows
@@ -551,9 +559,9 @@ called directly — `arr[i](x)` works, raising cleanly if the slot is nil
 
 ## Calls in expressions
 
-Function calls, method calls and record-function calls are expressions, and
+Function calls, method calls and record/union-function calls are expressions, and
 so is calling a function value. The callable things are module-level
-functions (local or imported), record methods (`r:move(...)`), record
+functions (local or imported), record/union methods (`r:move(...)`), nominal
 functions (`Point.new(...)`, `Point.origin(...)`), and any function value held in a
 variable, parameter, field, or container slot.
 For Titan functions, too few positional arguments are padded with `nil` and
