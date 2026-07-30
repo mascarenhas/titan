@@ -126,6 +126,11 @@ diagnostic. This avoids parent-sensitive guessing and keeps real fields named
 `new`, `new_array`, or `alignof` ordinary fields. `sizeof` itself is a C
 keyword and cannot name a field.
 
+The checker records the target profile's authoritative `size_t` type on each
+`sizeof`/`alignof` pseudo-declaration. Code generation preserves that C result
+and uses the shared checked numeric conversion before producing Titan
+`integer`; it never emits an unchecked `size_t`-to-`lua_Integer` cast.
+
 None of these C type aliases are serialized into compiled Titan module
 interfaces.
 
@@ -172,8 +177,10 @@ that profile. It records:
 
 * `CHAR_BIT`, primitive storage widths, signedness, rank, precision, minima,
   and maxima;
-* `float`, `double`, and `long double` precedence;
-* the actual `lua_Integer` and `lua_Number` spellings/types;
+* `FLT_RADIX` plus the mantissa precision, maximum exponent/range, and
+  precedence of `float`, `double`, and `long double`;
+* the actual `lua_Integer` and `lua_Number` spellings/types and their
+  corresponding numeric traits;
 * a stable identity used in probe cache keys.
 
 The same effective compiler prefix and target-selecting flags used for
@@ -184,8 +191,12 @@ used by the profile.
 `csemantics` supplies typedef/qualification-aware classification, integer
 promotion, usual arithmetic conversion, bounded integer object-macro
 expression evaluation, array decay, complete-object checks, and symmetric
-pointer common-type rules. Unknown extension ranks/precision are rejected
-where a result type cannot be proven.
+pointer common-type rules. `numeric_trait` and the integer-range containment
+query expose the same target facts to checked numeric lowering. Canonical C
+scalar descriptors retain those traits as checker-local metadata; they do not
+participate in structural type identity or serialized module metadata.
+Unknown extension ranks/precision are rejected where a result type cannot be
+proven.
 
 ## Session-scoped compile probes
 
@@ -284,9 +295,11 @@ prints the full command, source, cache result, status, and captured diagnostic.
 
 ## Contextual object-pointer conversion
 
-The pure `types.compatible` relation is deliberately unchanged. Pointer
-conversion is an expression adjustment owned by the checker because it needs a
-destination, source node, use-site diagnostic, header context, and service.
+Pointer conversion is an expression adjustment owned by the checker because
+it needs a destination, source node, use-site diagnostic, header context, and
+service. It returns a concrete coercion or written-cast plan; it is not part of
+the symmetric `types.consistent` relation and cannot be lifted through a
+container or callable shape.
 
 The adjustment ladder is:
 
@@ -320,10 +333,18 @@ node._c_conversion = {
 }
 ```
 
+For a written cast, the same table is also the
+`WrittenCastPlan.conversion`; the two fields refer to the identical
+probe-bearing object. The coder validates every named safe pointer operation
+against its exact endpoint predicate and accepts an unrelated object-pointer
+conversion only under this checked annotation. A type-only candidate or an
+unsafe endpoint pair mislabeled as a safe pointer operation is an internal
+plan error, not lowering authority.
+
 The same adjustment path is used for locals, assignment, returns, direct/named
 C calls, C function-pointer calls, fixed and typed C-vararg arguments, fields,
 and explicit casts. A successful use-site conversion does not alter structural
-function compatibility.
+gradual consistency and does not become a callable-component adjustment.
 
 Titan records and unions are nominal GC objects, not C aggregate layouts. The
 explicit GC-identity path may expose either one's rooted `Udata *` as C
@@ -414,6 +435,13 @@ operator (`~=` becomes `!=`; binary Titan `~` becomes `^`). This branch runs
 before `intop`, Lua floor division/modulo, normalized shifts, `pow`, numeric
 comparison helpers, and divide-by-zero guards.
 
+“C behavior” here includes ordinary integer promotion and usual-arithmetic
+integer conversion: signed/unsigned integer results retain C semantics rather
+than becoming Titan boundary checks. A trait that converts an integer operand
+to a floating type is different because an out-of-range C cast would not be a
+sound boundary. The coder uses the shared target-profile numeric predicate
+and performs that cast only after containment is proved or checked.
+
 Unsupported C combinations stop with C-specific diagnostics rather than
 falling into Titan lowering. Bit-field operands are rejected before promotion;
 an explicit cast to an ordinary integer removes the width-dependent bit-field
@@ -423,7 +451,9 @@ Pointer subtraction converts the C result to Titan `integer`. Unrelated object
 pointers share a qualification-union `void *` common type for equality only;
 ordering requires qualification-compatible object-pointer types, while
 subtraction and pointer arithmetic additionally require complete non-void
-pointees.
+pointees. The checker records the target profile's authoritative `ptrdiff_t`
+type on the subtraction trait, and the coder feeds that exact source through
+the shared checked numeric conversion to `lua_Integer`.
 
 ## Preprocessor raw arguments
 

@@ -5,12 +5,16 @@ you `require` it, call its functions, read and write its exported
 variables, and pass values back and forth. There is no marshalling layer
 and no container copying — Titan operates on Lua-GC values, selecting an
 Array's canonical proxy when its private backing crosses a Lua-visible edge.
-What the boundary adds is *checking*: every value that enters typed Titan code
-is validated once, at the edge, and a mismatch is a run-time error with a
-descriptive message rather than silent corruption. This chapter describes the boundary
+What a genuine Lua-to-Titan boundary adds is the target-directed
+**dynamic coercion** defined by the type system: function arguments,
+module/record writes, non-nil Array writes, and results from non-Titan Lua
+callables all use one conversion policy. Containers are checked only at their
+outer representation there; later typed Array and Map reads use a different,
+strict gradual guard. A mismatch raises a normal run-time error rather than
+producing a wrongly typed native value. This chapter describes the boundary
 from the Lua programmer's side: what `require` returns, what each Titan
-type looks like in Lua, exactly where the run-time checks happen, and what
-does and does not work in each direction.
+type looks like in Lua, exactly where dynamic conversions and strict guards
+run, and what does and does not work in each direction.
 
 ## Requiring a Titan module
 
@@ -32,7 +36,7 @@ value — whose members you access exactly like table fields (`m.f`, `m.v`,
   public `new` or union-variant constructors (see [Records](records.md) and
   [Unions](unions.md));
 * **exported module variables**, read and written through the metatable
-  so that reads always see the current value and writes are type-checked
+  so that reads always see the current value and writes are dynamically converted
   (see [Module variables from Lua](#module-variables-from-lua) below).
 
 Because the module value is a userdata, `type(require "m")` is
@@ -98,19 +102,22 @@ The same rule applies to `titan.coroutine`, `titan.async`, `titan.timer`,
 `titan.fs`, `titan.net`, `titan.os`, `titan.peg`, and `titan.string`. The
 private `titan.uv` plumbing module uses the same canonical identity. Requiring
 `titan.string` does not mutate Lua's `string` table or string metatable. In an
-installed Titan 0.19 tree, generated
+installed Titan 0.20 tree, generated
 loaders under `<root>/share/lua/5.5/titan/` all open the DSO form
-`<root>/lib/titan/0.19/titan.so` and invoke their own exact Lua entries. Titan
+`<root>/lib/titan/0.20/titan.so` and invoke their own exact Lua entries. Titan
 imports may instead select the paired self-describing `titan.a`; both forms
 expose the same logical-module ABI/types. The installation does not create
 child DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
 
 ## How values map between the two languages
 
-Every Titan value has a canonical Lua representation. Most values are handed
-out directly; an Array backing is represented by its one-to-one proxy rather
-than copied. Entering Titan, each value is checked (and, for numbers, possibly
-converted) against the declared type:
+Every Lua-representable Titan value has a canonical Lua representation. Most
+values are handed out directly; an Array backing is represented by its
+one-to-one proxy rather than copied. A C scalar is representable only after
+its exact value passes the configured Lua numeric-carrier check, while C
+aggregates and C function pointers have no Lua representation. Entering Titan,
+each value is checked (and, for numbers, possibly converted) against the
+declared type:
 
 | Titan type | A Lua caller may pass | Lua receives back |
 | --- | --- | --- |
@@ -123,7 +130,8 @@ converted) against the declared type:
 | `{K:V}` (map) | any table; the contents are **not** checked here | the *same* table — aliased, not copied |
 | record type | a userdata created by that same record type (from any module instance) | a userdata carrying the record's metatable |
 | union type | a userdata created by that exact union type | the same opaque union userdata |
-| `T?` (option) | `nil`, or a value of type `T` — stricter than plain `T`, see below | `nil`, or whatever `T` produces |
+| function type | any boxed value; callability/signature is deferred to invocation | the same boxed value; a Titan-defined function is its canonical closure |
+| `T?` (option) | `nil`, or a value accepted by the same dynamic rule as `T` | `nil`, or whatever `T` produces |
 | `value` | anything | the value, unchanged |
 
 Notes on the entries that deserve them:
@@ -132,13 +140,11 @@ Notes on the entries that deserve them:
   `integer` is expected works; passing `2.5` raises a run-time error of
   the shape `file:line:col: type error, number '2.5' has no integer
   representation`. Passing an integer where a `float` is expected converts
-  it silently, just as Lua arithmetic would. The integer-to-float
-  direction works everywhere, but the float-to-integer conversion is for
-  *function arguments only*: writing an integral float to an `integer`
-  module variable or record field from Lua is a run-time error
-  (`type error, expected integer but found number`).
-* **Boolean parameters accept anything, by truthiness.** A Titan
-  `boolean` parameter never raises a type error: the argument is converted
+  it silently, just as Lua arithmetic would. The exact same rules apply to
+  function arguments, exported module and record writes, non-nil Array
+  writes, and non-Titan Lua results entering Titan.
+* **Boolean targets accept anything, by truthiness.** A Titan
+  `boolean` at any genuine Lua boundary never raises a type error: the value is converted
   the way a Lua `if` would treat it — `false` and `nil` become `false`,
   *everything else* (including `0` and the empty string, as in Lua)
   becomes `true`:
@@ -157,11 +163,10 @@ Notes on the entries that deserve them:
   test.pick(42, 1, 2)    --> 1   (any other value silently counts as true)
   ```
 
-  This is the one place where the boundary coerces rather than checks.
-  Asymmetrically, *writing* a non-boolean to a `boolean` module variable
-  or record field from Lua is a run-time error
-  (`type error, expected boolean but found ...`) — only function
-  arguments get the truthiness treatment.
+  The same truthiness rule applies to a `boolean` module/record field, Array
+  writer, or non-Titan Lua result. A strict implicit `value -> boolean`
+  projection or typed container read is different and requires an actual
+  boolean tag.
 * **Strings are not coerced from numbers.** Where Lua's standard library
   often accepts a number and converts it, a Titan `string` parameter
   raises `type error, expected string but found number`.
@@ -173,49 +178,71 @@ Notes on the entries that deserve them:
   [Records from Lua](#records-from-lua).
 * **Unions are opaque userdata** — see
   [Unions from Lua](#unions-from-lua).
-* **`nil` and options.** A `T?` parameter accepts `nil` or a value of
-  type `T`, but is *stricter* than a plain `T` parameter: the
-  argument-only coercions above do not apply, so `integer?` rejects an
-  integral float (`type error, expected integer but found number`) and
-  `boolean?` rejects non-boolean values instead of converting by
-  truthiness. (`float?` still accepts an integer — that conversion works
-  everywhere.) A `T?` result reaches Lua as `nil` or a plain `T` value.
+* **`nil` and options.** A `T?` target accepts nil first and otherwise
+  recursively applies the same dynamic rule as plain `T`. Thus `integer?`
+  converts an integral float and `boolean?` truthiness-converts every present
+  value while preserving nil. A `T?` result reaches Lua as nil or a plain `T` value.
   Since reading a missing array or map element in Titan produces an
   option (see [Option types](option-types.md)), `nil` flows across the
   boundary exactly as a Lua programmer would expect.
 * **`value` is the deliberate escape hatch**: it accepts any Lua value
-  and hands it back unchanged. Checking is deferred to the point where
-  Titan code converts the `value` to a concrete type (see
-  [the type system](types.md)).
+  and hands it back unchanged. A later implicit Titan projection is strict;
+  a written `value as/is T` deliberately requests this chapter's broad
+  dynamic conversion instead.
 
-## Where the run-time checks happen
+This target table is an application of the single
+[normative boundary matrix](types.md#normative-boundary-matrix), which is
+authoritative when another chapter discusses the same edge.
 
-The boundary checks run at exactly these places:
+Interfaces are not available as source syntax in this release. The reserved
+boundary rule for their future introduction is nevertheless exact: Lua may
+supply an already-constructed wrapper of the requested nominal Interface type,
+but a bare record or union is never inspected and dynamically wrapped merely
+because it would satisfy that Interface structurally.
 
-1. **Function entry, once per argument** — including the receiver of a
+A raw C pointer has no corresponding dynamic target rule: lightuserdata proves
+only that an address was boxed, not its pointee type. Titan therefore rejects
+implicit Lua-result/container/callable paths that would need to establish one.
+Only a written FFI cast may make that explicitly unsafe assertion.
+
+## Where dynamic conversions and strict guards run
+
+The shared dynamic conversion runs at exactly these places:
+
+1. **The coercive Lua entry of a Titan function, once per argument** —
+   including the receiver of a
    method call (`self` is checked like any other nominal argument).
 2. **Writes to exported module variables from Lua** (`mod.x = v`).
 3. **Writes to record fields from Lua** (`rec.x = v`).
-4. **Inside Titan**, whenever a `value` is converted to a concrete type
-   and whenever an array or map element is read (see below).
+4. **Non-nil writes through an Array proxy's `__newindex`**, using the
+   construction-time writer carried by that Array.
+5. **Results entering Titan from a non-Titan Lua callable.**
+6. **A written `value as/is T`**, which explicitly requests the same dynamic
+   operation even though the syntax appears in Titan.
+
+Separate **strict** guards run for an implicit `value -> T` projection, every
+typed Array element read, every typed Map value read, and every argument/result
+observed through a non-exact branded Titan function view.
 
 And, just as importantly, where they do *not* happen:
 
-* **Never recursively inside containers.** A `{string:integer}` Map parameter
+* **Never recursively while a container crosses.** A `{string:integer}` Map parameter
   requires a table, while an `{integer}` Array parameter requires a valid
   canonical Titan Array proxy. Neither check walks the contents. Instead,
-  every element read inside
-  Titan re-checks the element type, so a wrongly-typed element produces a
+  every typed read inside Titan strictly checks the requested element type, so
+  a wrongly-typed element produces a
   run-time error *later*, deterministically, at the Titan code that reads
-  it — never silent misbehavior. The same applies in reverse: Lua can
-  freely (and type-incorrectly) mutate a Map or an Array proxy obtained from
-  Titan, and the error surfaces at the next Titan read.
+  it — never silent misbehavior. Raw Lua can freely mutate a Map. An Array
+  instead intercepts every ordinary Lua write and dynamically converts a
+  non-nil element before committing it; a later read still performs its
+  independent strict guard for the current static view.
 * **Not on exact native Titan calls.** A direct Titan-to-Titan call, including
   across modules, needs no boundary checks because the compiler has already
   proven the types match. The same is true for a function value whose exact
-  run-time type tag matches its static type. A merely compatible Titan
-  function, a Lua callable, or a contextual call through `value` uses the
-  generic Lua-stack path and checks arguments and requested results there.
+  run-time type tag matches its static type. A non-exact but branded Titan
+  closure uses the strict generic entry in its trailer. Only a genuine Lua
+  call of Titan uses the closure's coercive entry; a non-Titan Lua callable
+  uses an ordinary Lua call followed by dynamic result conversion.
 
 When an argument check fails, the error message is prefixed with a source
 location of the shape `file:line:col:` — note that this is the location of
@@ -236,9 +263,10 @@ Titan function calls adjust missing arguments upward with `nil`. A
 fixed-parameter Titan function ignores surplus arguments; an input-variadic
 one collects them (see [Functions](functions.md)). When *Lua* calls a Titan
 function, the generated Lua entry wrapper performs the same adjustment before
-it checks the arguments the callee observes. If a synthesized `nil` does not
-fit the parameter type, the call raises the usual boundary type error. Every
-collected variadic argument is checked against its declared element type.
+it dynamically converts the arguments the callee observes. If a synthesized
+`nil` does not fit the parameter type, the call raises the usual boundary type
+error. Every collected variadic argument uses the same target-directed
+conversion for its declared element type.
 
 Lua calls remain positional-only. In Lua, `test.f { x = 1 }` is exactly
 `test.f({ x = 1 })`: one ordinary table argument. It does not carry the syntax
@@ -299,7 +327,9 @@ assert(m.foo == 30)
 
 Because the contents are not checked at the boundary, Lua can put a
 wrongly-typed value into a shared table; the error is raised later, when
-Titan reads that element:
+Titan reads that element. The read uses the strict target guard regardless of
+origin: Titan does not remember that the slot came from Lua and does not apply
+the broader dynamic conversion at that later point:
 
 ```lua
 -- Lua (continuing)
@@ -334,6 +364,16 @@ Likewise, a forged or structurally invalid userdata is rejected; Lua obtains a
 valid Array only from Titan code. Nested Array elements cross as their
 canonical proxies, while nested Maps remain tables.
 
+A non-nil Lua write through the Array proxy is dynamically converted by the
+writer closure installed when that Array was constructed. A `{integer}`
+construction therefore converts `2.0` to an integer, while an inadmissible
+value raises before capacity, length, or contents change. Nil deletes before
+conversion and never invokes the writer. Passing the Array through `value`,
+another static view, an import, or a nested container preserves the same
+canonical proxy and writer; the new view does not replace the construction
+policy. A later typed Titan read remains strict and does not consult that
+writer.
+
 An Array is table-like, but it is not a Lua table. Stock Lua 5.5's `table.*`
 functions operate on the Array proxy through its `__index`, `__newindex`, and
 `__len` callbacks, so operations such as insertion, removal, movement,
@@ -344,7 +384,8 @@ library, not a second Array representation.
 
 For both container kinds, checking every element on each crossing would make
 the boundary cost proportional to container size. Titan instead validates the
-container representation at the edge and checks each element when typed code
+container representation at the edge, converts intercepted non-nil Lua Array
+writes one element at a time, and strictly checks each element when typed code
 reads it. A bad element therefore cannot be used at the wrong type. See
 [Arrays and maps](arrays-maps.md) for the complete container semantics.
 
@@ -358,8 +399,8 @@ like an object:
 
 * **Field reads** (`p.x`) return a public field's value; record-typed fields
   arrive as their own userdata.
-* **Field writes** (`p.x = v`) are type-checked against the declared
-  field type, with the standard
+* **Field writes** (`p.x = v`) use the same target-directed dynamic
+  conversion as a function formal, module variable, or Array writer, with the standard
   `file:line:col: type error, expected X but found Y` message on
   mismatch.
 * **Methods** are called with the usual colon syntax (`p:move(2, 3)`) when
@@ -392,7 +433,7 @@ local p = test.Point.new(2, 3)
 assert(type(p) == "userdata")     -- not a table!
 p:move(2, 3)
 assert(p.x == 4.0 and p.y == 6.0)
-p.x = 10                          -- type-checked write (10 converts to float)
+p.x = 10                          -- dynamically converted write
 print(pcall(function () p.z = 1 end))
 --> false   test.titan:...: field 'z' not found in record 'test.Point'
 ```
@@ -441,8 +482,8 @@ Exported (non-`local`) module variables are readable and writable from
 Lua as members of the module value, as in the `counter` example above.
 Reads always observe the current value — including changes made by Titan
 code — and writes made from Lua are immediately visible to Titan, because
-both sides share one storage location. Writes are type-checked at run
-time:
+both sides share one storage location. Writes use the target-directed dynamic
+conversion at run time:
 
 ```lua
 -- counter.titan          -- Titan
@@ -459,6 +500,10 @@ counter.count = 2.5
 counter.count = "lots"
 --> error: counter.titan:...: type error, expected integer but found string
 ```
+
+The integral-float conversion above is not a special module-field rule. The
+same `integer` target accepts and converts it at a Lua function entry, public
+record-field write, non-nil Array write, or non-Titan Lua result.
 
 Accessing a module member that does not exist raises
 `member 'name' does not exist in Titan module 'counter'` rather than
@@ -490,26 +535,29 @@ local m = require "apply"
 print(m.apply(function(n) return n * 10 end, 5))   --> 50
 ```
 
-The value passed for `f` may be any callable: a plain Lua function, a C
-function, a table with a `__call` metamethod, or another Titan function.
-The call is checked the way every Titan call is — the arguments are
-coerced to the parameter types and the results are checked against the
-return types — and calling a value that turns out **not** to be callable
-raises an ordinary Lua error at the point of the call. (A Titan function
-value of the *exact* expected type skips the Lua stack entirely and calls
-the native entry directly; everything else goes through a normal Lua
-call.) A Lua function may still also travel through Titan opaquely as a
-`value` inside a shared table and be handed back intact.
+The value passed for `f` may be any boxed Lua value; acceptance into a
+Function slot deliberately defers callability. Plain Lua functions, C
+functions, tables with a `__call` metamethod, and Titan functions are
+callable. Calling a value that turns out **not** to be callable raises an
+ordinary Lua error at the point of the call. A Titan function value of the
+exact expected type skips the Lua stack and calls its native entry directly.
+A non-exact Titan-branded closure instead uses its strict trailer: aligned
+arguments and observed results must pass gradual guards, with no ordinary
+scalar/Option coercion lifted through the function type. A non-Titan callable
+uses an ordinary Lua call, and each result entering Titan uses the broad
+dynamic conversion for its requested target type. A Lua function may still
+also travel through Titan opaquely as a `value` inside a shared table and be
+handed back intact.
 
 For a positional call whose static callee type is `value`, Titan derives a
 temporary function type from the written arguments and from the surrounding
 result demand. A finite annotated result supplies its expected type, an
 unannotated finite result becomes `value`, and an open variadic, flexible
-return, or positional Array/integer-Map sink derives a flexible result tail. Named-call syntax is not
-available through `value`, because the run-time callable carries no Titan
-declaration names.
+return, or positional Array/integer-Map sink derives a flexible result tail.
+Named-call syntax is not available through `value`, because the run-time
+callable carries no Titan declaration names.
 
-For storing, passing, returning and the two call paths in general, see
+For storing, passing, returning, and the three call paths in general, see
 [Functions as values](functions.md#functions-as-values).
 
 ## Unannotated functions return nothing

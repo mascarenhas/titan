@@ -60,23 +60,34 @@ describe("optional function parameters", function()
         assert.truthy(ok, err)
     end)
 
-    it("adjusts hidden parameters of compatible function values", function()
+    it("adjusts hidden nullable parameters of compatible function values", function()
         local ok, err = run_checker([[
             function fixed(a: integer?, b: value): integer
                 return 1
             end
 
+            function run(): integer
+                local noargs: () -> integer = fixed
+                return noargs()
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("does not lift scalar Option coercion through a variadic function view",
+    function()
+        local ok, err = run_checker([[
             function tailed(a: integer?, b: value): integer
                 return 2
             end
 
             function run(): integer
-                local noargs: () -> integer = fixed
                 local integers: (...: integer) -> integer = tailed
-                return noargs() + integers(10, 20)
+                return integers(10, 20)
             end
         ]])
-        assert.truthy(ok, err)
+        assert.falsy(ok)
+        assert.match("integers", err)
     end)
 
     it("rejects hidden parameters that adjustment cannot populate", function()

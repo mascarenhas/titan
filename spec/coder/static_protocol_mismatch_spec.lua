@@ -74,7 +74,7 @@ local function compiler_argv(workspace, source_root, ...)
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "CCACHE_DISABLE=1",
-        "TITAN_PATH_0_19=" .. workspace,
+        "TITAN_PATH_0_20=" .. workspace,
         "TITAN_PATH=",
         "PATH=" .. PREFIX .. "/bin:/usr/bin:/bin",
     }
@@ -146,10 +146,17 @@ local function metadata_initializer(csource, modname)
     local _, header_end = csource:find(header, 1, true)
     assert.truthy(header_end, "missing generated metadata array " .. symbol)
     local value_start = header_end + 1
-    local terminator = csource:find("\n};", value_start, true)
-    assert.truthy(terminator,
+    assert.equal("{", csource:sub(value_start, value_start),
+        "malformed generated metadata initializer for " .. symbol)
+    local declaration_end = csource:find(";", value_start, true)
+    assert.truthy(declaration_end,
         "missing generated metadata terminator for " .. symbol)
-    local value_end = terminator + 1
+    local value_end = declaration_end - 1
+    while csource:sub(value_end, value_end):match("%s") do
+        value_end = value_end - 1
+    end
+    assert.equal("}", csource:sub(value_end, value_end),
+        "malformed generated metadata terminator for " .. symbol)
     return csource:sub(value_start, value_end), value_start, value_end
 end
 

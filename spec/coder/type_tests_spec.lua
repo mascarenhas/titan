@@ -82,6 +82,9 @@ describe("type-test expressions (code generator)", function()
             function is_optional_boolean(v: value): boolean
                 return v is boolean?
             end
+            function as_optional_boolean(v: value): boolean?
+                return v as boolean?
+            end
             function is_optional_function(v: value): boolean
                 return v is IntFunction?
             end
@@ -153,12 +156,16 @@ describe("type-test expressions (code generator)", function()
             assert(test.is_optional_integer(42.0))
             assert(not test.is_optional_integer(42.5))
 
-            -- Option conversion uses the slot checker: unlike direct
-            -- value->boolean truthiness, boolean? requires nil or a boolean.
+            -- Option delegates its present arm to the same target-directed
+            -- dynamic conversion as the non-optional target.
             assert(test.is_optional_boolean(nil))
             assert(test.is_optional_boolean(false))
-            assert(not test.is_optional_boolean(1))
-            assert(not test.is_optional_boolean("truthy"))
+            assert(test.is_optional_boolean(1))
+            assert(test.is_optional_boolean("truthy"))
+            assert(test.as_optional_boolean(nil) == nil)
+            assert(test.as_optional_boolean(false) == false)
+            assert(test.as_optional_boolean(1) == true)
+            assert(test.as_optional_boolean("truthy") == true)
             -- Function slots remain deliberately unchecked.
             assert(test.is_optional_function(nil))
             assert(test.is_optional_function("not callable"))
@@ -187,11 +194,6 @@ describe("type-test expressions (code generator)", function()
             typedef struct TValue TValue;
             typedef struct Udata Udata;
 
-            static test_pointer test_pointer_value(void) {
-                static int cell;
-                return &cell;
-            }
-
             static char *test_maybe_string(int present) {
                 return present ? (char *)"present" : (char *)0;
             }
@@ -208,14 +210,15 @@ describe("type-test expressions (code generator)", function()
                 function is_c_pointer(v: value): boolean
                     return v is c.test_pointer
                 end
+                function as_c_pointer(v: value): boolean
+                    local pointer = v as c.test_pointer
+                    return pointer ~= nil
+                end
                 function is_c_userdata(v: value): boolean
                     return v is *c.Udata
                 end
                 function is_c_tvalue(v: value): boolean
                     return v is c.TValue
-                end
-                function pointer_value(): value
-                    return c.test_pointer_value()
                 end
                 function has_string(present: integer): boolean
                     return c.test_maybe_string(present as c.test_integer)
@@ -231,9 +234,14 @@ describe("type-test expressions (code generator)", function()
                 assert(test.is_c_float(42.5))
                 assert(not test.is_c_float("42"))
 
+                local captured = 1
+                local function capture() return captured end
+                local pointer_value = debug.upvalueid(capture, 1)
                 assert(test.is_c_pointer(nil))
-                assert(test.is_c_pointer(test.pointer_value()))
+                assert(test.is_c_pointer(pointer_value))
                 assert(not test.is_c_pointer("pointer"))
+                assert(not test.as_c_pointer(nil))
+                assert(test.as_c_pointer(pointer_value))
 
                 assert(test.is_c_userdata(nil))
                 assert(test.is_c_userdata(test))

@@ -108,12 +108,49 @@ Three helper families in `coder.lua` mediate between C variables and
   `setwrapped`/`copyslotwrapped` model; see
   [Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
 
+C numeric slots are not handled by unchecked casts hidden inside these
+helpers. The exact C scalar remains raw until a checker-owned plan requests a
+Titan carrier or boxed slot. C-numeric `getslot`/strict-get paths use the
+shared boxed predicate, native conversions use the checked numeric cast, and
+`setslot` validates `lua_Integer`/`lua_Number` representability before
+`setivalue`/`setfltvalue`. The cast and its non-raising `is` twin consume the
+same target-profile predicate.
+
+These representation helpers do not decide whether a conversion is legal.
+The checker attaches an `AdjustmentPlan`, `GuardPlan`,
+`DynamicCoercionPlan`, or `WrittenCastPlan`; the coder first validates that
+plan and then renders it into native-local, `TValue`-destination, or mixed
+forms. Strict `value` projections, Array/Map reads, and branded generic
+function calls therefore share one tag-check family, while genuine-Lua
+entries/writes and written casts share the separate dynamic family. See
+[Type relations and boundary plans](type-relations-and-boundaries.md).
+
 `types.is_gc` in `types.lua` decides which types the collector cares
 about, and therefore which values need anchoring: string, value,
 function, array, map, record/union nominal, C `TValue`, Lua-internal `Udata *`,
-and `T?` when `T` is itself GC-able (the list also tests a
-`Type.Interface` tag for which no constructor exists). Integers, floats,
-booleans, nil and ordinary foreign pointers need none.
+owned C userdata, the reserved Interfaces-v1 wrapper representation, and `T?`
+when `T` is itself GC-able.
+Integers, floats, booleans, nil and ordinary foreign pointers need none.
+
+### Array proxies and function closures
+
+An Array has two simultaneously live objects. Titan's native `Table *` points
+at the backing Table; the backing key 0 points to the canonical proxy Udata.
+The proxy has exactly two traced user values: `uv[0]` points back to the
+backing Table and `uv[1]` holds the module-cached genuine-Lua writer closure.
+The closure in turn traces its owning module Udata. `titan_array_new` roots
+the writer, backing, and proxy independently while it allocates and links
+them, installs the two user values through Lua's API, and applies the backing
+Table's back barrier after the key-0 reverse link. No user-value edge is
+untraced.
+
+A first-class Titan function remains a `CClosure`. Its header is `_mod`,
+canonical function-type tag, and native-entry pointer; captures begin at
+upvalue 3; the final upvalue is the strict light C function. The last slot
+does not move capture indices. Canonical tag publication also inserts the tag
+into a per-state reverse set, so generic dispatch proves Titan ownership before
+reading this private layout. With four structural upvalues, at most 251
+captures fit under Lua's 255-upvalue limit.
 
 ## Records: a single tagged Udata
 
@@ -299,12 +336,17 @@ Udata *_mod = luaS_newudata(L, 0, $NUPVALS);
 
 There is **no reserved user value**: the module table was removed
 entirely, so member slots are 0-based. The user values hold, in
-allocation order: exported module variables (slots 0..n-1 — their
-indices are part of the module's ABI), then local module
-variables, imported modules' `Udata`s and exported-function canonical
-closures, then lazily allocated slots for record metatables,
-per-record static-namespace tables, and modules needed only by
-cross-module method calls. Reading a module variable is `getslot` on
+allocation order: the importer-reconstructible public prefix (exported module
+variables, ordinary-function canonical closures, then public nominal statics),
+then the shared Array-metatable cache and fixed AST-order private slots for
+locals/imports, remaining canonical closures, and nominal namespace tables.
+The remaining Array-writer, nominal/owned-C metatable, and transitive-owner
+module slots are allocated in inventory/first-use order and may interleave.
+That private order is a coder detail and is not serialized. Array writers are
+initialized before module variable initializers. Callable tags
+are published even earlier, before either writers or any initializer-created
+lambda/bound-method closure can copy them; canonical top-level/static closures
+are initialized later but still before module exposure. Reading a module variable is `getslot` on
 `&_mod->uv[i].uv`; writing a GC-able one is `setslot` plus the **back**
 barrier `luaC_barrierback(L, obj2gco(_mod), slot)` (a userdata owner,
 not a closure). All member access from Lua — functions, variables and
@@ -336,7 +378,8 @@ luaC_checkGC(L);
 if (L->stack_last.p - L->top.p > $NSLOTS) {
     if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
 } else {
-    lua_checkstack(L, $NSLOTS);
+    if (TITAN_UNLIKELY(!lua_checkstack(L, $NSLOTS)))
+        luaD_throw(L, LUA_ERRMEM);
 }
 StkId _base = L->top.p;
 L->top.p += $NSLOTS;
@@ -347,7 +390,8 @@ for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
 
 The fast path bumps `L->ci->top.p` (the current call's allowed stack
 ceiling) only when needed, skipping the `lua_checkstack` call when room
-already exists; the slow path may reallocate the stack. Slots are
+already exists; the slow path may reallocate the stack and propagates
+`LUA_ERRMEM` if it cannot reserve the slots. Slots are
 nil-initialized so a collection arriving before a slot's first real
 store sees nil rather than stack garbage. Anchor slots are addressed as
 `s2v(_base + k)`: `newslot` hands out indices, `pushd`/`popd` save and
@@ -356,8 +400,14 @@ slots, and `nslots` records the high-water mark that sizes the
 preamble. Every `return` (and the implicit return of a nil-returning
 function) first restores `L->top.p = _base;` (`codereturn`). The module
 `_init`'s variable-initializer section reserves and nil-initializes
-slots the same way, though with an unconditional `lua_checkstack` and
-no entry GC poll.
+slots the same way, though with an unconditional `titan_ensure_stack`
+and no entry GC poll.
+
+Every other generated path that reserves capacity before raw `L->top.p`
+writes calls the translation-unit-local `titan_ensure_stack`. The helper
+checks `lua_checkstack` and raises a normal Lua error if capacity cannot be
+reserved; generated code never continues to a raw push or slot write after a
+false result.
 
 ### 2. Shadow slots: the dual representation
 
@@ -462,7 +512,11 @@ a `Udata` or a `Table`; used for:
 * Array backing-slot stores, Map stores, and container-literal fills, each
   gated on `types.is_gc` of the stored element or value type. Array stores
   barrier the backing Table, never its proxy; the cycle edges use the barrier
-  appropriate to their actual Table/Udata owners.
+  appropriate to their actual Table/Udata owners. Array construction installs
+  the backing and writer in the proxy's two traced user values through the Lua
+  userdata API and barriers the backing's key-0 proxy link.
+* mutation of a GC-bearing captured-variable box, whose one traced user value
+  is owned by a `Udata`.
 
 (The argument shape differs from the forward barrier: back takes the
 *value* and an `obj2gco`-wrapped container; forward takes the *slot
@@ -476,9 +530,10 @@ pointer — not its barriers.)
 owners that are still `CClosure`s — every store of a captured value into
 a function value's upvalue array ([closures and captured
 variables](codegen-overview.md#closures-and-captured-variables)).
-(A capture *box* cell is itself a one-uservalue `Udata`, so its own
-mutation uses the back barrier — for the same genlink reason records and
-modules now do.)
+The strict-entry trailer is installed at closure construction like the header
+and captures. A capture *box* is a `Udata`: GC-bearing boxes have one traced
+user value and use the back barrier, while non-GC values use an untraced raw
+payload and need no barrier.
 
 The division of labor with Lua's table internals is spelled out in a
 comment in `coder.lua`: raw stores go through `luaH_set`/`luaH_setint`
@@ -528,12 +583,14 @@ setsvalue(L, _tmp_1_slot, _tmp_1);
   and its `args` array never count as roots on their own. A generic
   `luaD_callnoyield(..., LUA_MULTRET)` obtains the same run from live Lua stack
   values, converts it while those values are rooted, then hands it to the same
-  consumers.
+  consumers. Branded non-exact Titan closures use strict guards in this stack
+  path; non-Titan callables use dynamic boundary conversion.
 
 The string out-parameter is live in `_tmp_1` the moment the callee
 returns and is in a stack slot before any subsequent allocation can run.
-When a Lua program is the caller, the Lua entry wrapper plays this role:
-it reserves stack space for the fixed prefix and requested flexible capacity
+When a Lua program or the strict Titan adapter is the caller, the generated
+Lua-stack entry plays this role: it reserves stack space for the fixed prefix
+and requested flexible capacity
 before invoking the native function, then writes each actual result back with
 `setboxed` — for a record that is just the record's own userdata, while an
 Array becomes its canonical proxy

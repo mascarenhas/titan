@@ -149,6 +149,32 @@ local function replace_once(source, old, new)
     return source:sub(1, first - 1) .. new .. source:sub(last + 1)
 end
 
+local function matching_c_brace(source, opening)
+    assert.equal("{", source:sub(opening, opening))
+    local depth = 0
+    for position = opening, #source do
+        local byte = source:sub(position, position)
+        if byte == "{" then
+            depth = depth + 1
+        elseif byte == "}" then
+            depth = depth - 1
+            if depth == 0 then return position end
+        end
+    end
+    error("unmatched generated-C brace at byte " .. opening, 0)
+end
+
+local function generated_function_body(generated, signature)
+    -- Checked numeric conversions can close an inner guard at column zero, so
+    -- a textual "\n}\n" is not a reliable end-of-function delimiter.
+    local prototype = assert(generated:find(signature, 1, true))
+    local function_start = assert(generated:find(
+        signature, prototype + #signature, true))
+    local opening = assert(generated:find("{", function_start, true))
+    local closing = matching_c_brace(generated, opening)
+    return generated:sub(function_start, closing)
+end
+
 local function compile_coroutine_variant(root, source_root, source_path,
                                          so_path, source, env)
     assert.truthy(exec_ok("rm -rf " .. quote(root)))
@@ -687,12 +713,16 @@ describe("coroutine standard module", function()
         assert.not_match("Titan coroutine runtime 0.11", generated, 1, true)
         assert.not_match("lua_getupvalue", generated, 1, true)
 
-        local owner_create = assert(generated:find(
-            "lua_newuserdatauv(", 1, true))
-        local owner_create_end = assert(generated:find(
-            ");", owner_create, true))
-        assert.match("ivalue%(&_mod%->uv%[%d+%]%.uv%)",
-            generated:sub(owner_create, owner_create_end))
+        local create = generated_function_body(
+            generated, "Udata* titan_coroutine_create_titan(")
+        local owner_count = assert(create:find(
+            "ivalue%(&_mod%->uv%[%d+%]%.uv%)"))
+        local count_check = assert(create:find(
+            "numeric value is outside the range of %s", owner_count, true))
+        local owner_create = assert(create:find(
+            "lua_newuserdatauv(", count_check, true))
+        assert.is_true(owner_count < count_check)
+        assert.is_true(count_check < owner_create)
 
         local native = read_file("titan-runtime/titan_coro.c")
         assert.not_match("titan_coro_runtime", native, 1, true)
@@ -721,20 +751,17 @@ describe("coroutine standard module", function()
         local generated = read_file(COROUTINE_VARIANT_C)
         local signature = "static void " ..
             "titan_coroutine_root_transfer_titan("
-        local prototype = assert(generated:find(signature, 1, true))
-        local function_start = assert(generated:find(
-            signature, prototype + #signature, true))
-        local function_end = assert(generated:find(
-            "\n}\n", function_start, true))
-        local body = generated:sub(function_start, function_end)
+        local body = generated_function_body(generated, signature)
 
         local recover = assert(body:find("mco_get_user_data", 1, true))
         local owner = assert(body:find("Udata *_local_owner", recover, true))
         local anchor = assert(body:find(
             "setuvalue(L, s2v((restorestack", owner, true))
         local saved_top = assert(body:find("lua_gettop(L)", anchor, true))
+        local count_check = assert(body:find(
+            "numeric value is outside the range of %s", saved_top, true))
         local checkstack = assert(body:find(
-            "lua_checkstack(L, ((int)(2)))", saved_top, true))
+            "lua_checkstack(L, ((int)(", count_check, true))
         local owner_push = assert(body:find(
             "lua_pushtvalue(L", checkstack, true))
         local payload_push = assert(body:find(
@@ -746,7 +773,8 @@ describe("coroutine standard module", function()
         assert.is_true(recover < owner)
         assert.is_true(owner < anchor)
         assert.is_true(anchor < saved_top)
-        assert.is_true(saved_top < checkstack)
+        assert.is_true(saved_top < count_check)
+        assert.is_true(count_check < checkstack)
         assert.is_true(checkstack < owner_push)
         assert.is_true(owner_push < payload_push)
         assert.is_true(payload_push < setter)
@@ -845,12 +873,7 @@ describe("coroutine standard module", function()
         local generated = read_file(COROUTINE_VARIANT_C)
         local signature = "static TValue " ..
             "titan_coroutine_pop_transfer_or_raise_titan("
-        local prototype = assert(generated:find(signature, 1, true))
-        local function_start = assert(generated:find(signature,
-            prototype + #signature, true))
-        local function_end = assert(generated:find("\n}\n", function_start,
-            true))
-        local body = generated:sub(function_start, function_end)
+        local body = generated_function_body(generated, signature)
         local payload_pop = assert(body:find("mco_pop(_param_co", 1, true))
         payload_pop = assert(body:find("mco_pop(_param_co", payload_pop + 1,
             true))

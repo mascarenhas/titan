@@ -16,8 +16,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.19"
-driver.TITAN_VER_SUFFIX = "_0_19"
+driver.TITAN_VER = "0.20"
+driver.TITAN_VER_SUFFIX = "_0_20"
 driver.LUA_VERSION = "5.5"
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
@@ -2255,6 +2255,16 @@ static void report_titan_error(const char *message, const char *trace) {
     exit(EXIT_FAILURE);
 }
 
+static char titan_main_array_writer_key;
+
+static int titan_main_string_array_writer(lua_State *L) {
+    if (lua_type(L, 1) != LUA_TSTRING)
+        return luaL_error(L,
+            "type error, expected string for standalone arguments");
+    lua_settop(L, 1);
+    return 1;
+}
+
 /* main script launcher, based on srlua */
 static int pmain(lua_State *L) {
     int argc = lua_tointeger(L, 1);
@@ -2292,8 +2302,14 @@ static int pmain(lua_State *L) {
     {
         lua_Unsigned nargs = argc > 0 ? (lua_Unsigned)(argc - 1) : 0u;
         Table *array_metatable = titan_array_metatable(L);
-        Table *arguments =
-            titan_array_new(L, array_metatable, nargs);
+        TValue writer;
+        Table *arguments;
+        lua_pushlightuserdata(L, &titan_main_array_writer_key);
+        lua_pushcclosure(L, titan_main_string_array_writer, 1);
+        writer = lua_totvalue(L, -1);
+        arguments = titan_array_new(
+            L, array_metatable, nargs, &writer);
+        lua_pop(L, 1);
         Udata *proxy =
             titan_array_require_proxy(L, arguments, array_metatable);
         TValue proxy_value;

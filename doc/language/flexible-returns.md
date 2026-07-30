@@ -171,6 +171,12 @@ still expand their statically declared results in an open sink; only a
 statically flexible producer can add a run whose length is not known until
 run time.
 
+The checker records one element adjustment for every accepted open edge, and
+the complete run uses that plan. An open sink does not silently broaden
+gradual consistency or discover a new conversion while code is generated:
+identity, a consistent gradual view/guard, and an explicitly authorized direct
+element coercion retain their distinct behavior for every produced value.
+
 The last-position rule still applies. Scalar expressions before the final
 producer each contribute one element, while only that final producer may
 expand. Computed Map entries, record fields, named arguments, conditions, and
@@ -249,10 +255,13 @@ Lua-boundary type errors.
 
 If a `value` contains a Titan function whose exact type matches the type
 derived for the call, Titan preserves the same native call path used by a
-statically typed function value. A merely compatible Titan function, a Lua
-function, a Lua C function, or a value with `__call` uses the generic callable
-path. This distinction does not change the result-list rules above: the
-derived static type still determines which results are visible.
+statically typed function value. A non-exact Titan-branded function uses its
+strict generic trailer and the checker-recorded callable adjustment. A Lua
+function, Lua C function, or value with `__call` uses the ordinary Lua path,
+and each requested result entering Titan uses the shared dynamic coercion.
+This distinction does not change the result-list rules above: the derived
+static type still determines which results are visible. See the
+[normative boundary matrix](types.md#normative-boundary-matrix).
 
 Lua 5.5 can encode at most 250 results in a finite VM call request. Titan
 therefore rejects a generic callable call when its finite visible result demand
@@ -320,13 +329,14 @@ weaken other call forms:
 See [Named arguments](named-arguments.md) and [The C FFI](ffi.md) for those
 boundaries.
 
-## Function compatibility is directional
+## Callable adjustment is directional
 
 Function types remain exactly equal only when all their fixed parameter and
 result types, input-tail presence and type, and flexible-result presence and
-type are equal. Assignment compatibility is broader and directional: an
-actual function is being placed in an expected slot, and future callers obey
-the expected slot's type.
+type are equal. Assignment may use a broader but directional **callable
+adjustment**: an actual function is being placed in an expected slot, and
+future callers obey the expected slot's type. This operation is not subtyping
+and is distinct from symmetric gradual consistency.
 
 For inputs:
 
@@ -343,8 +353,10 @@ For inputs:
 * An expected input-variadic tail may flow to a non-variadic actual function,
   which ignores it. If the actual function has an input tail, every expected
   argument that reaches it must be accepted by its element type.
-* Shared parameter positions are checked in the input direction: the actual
-  function must accept every value permitted by the expected type.
+* Shared parameter positions are checked in the input direction. Equal or
+  gradually consistent components can be guarded; a nested Function uses its
+  own callable adjustment. Ordinary numeric, Option, C, or future Interface
+  coercions are rejected rather than lifted through the function type.
 
 ```lua
 function first(n: integer): integer
@@ -370,13 +382,14 @@ For results:
 * When expected fixed positions extend into an actual flexible tail, each is
   projected as the corresponding option type. A non-option expected result
   uses the ordinary run-time nil unwrap.
-* An expected flexible tail consumes all compatible actual fixed results
+* An expected flexible tail consumes all consistently typed actual fixed results
   beyond its own prefix, followed by the actual flexible tail when present.
   A fixed-only actual function may simply end; a flexible tail is always
   allowed to contain zero values.
-* Shared result positions are checked in the result direction: every value
-  produced by the actual function must be acceptable to consumers of the
-  expected type.
+* Shared result positions are checked in the result direction. Equal or
+  gradually consistent components can be guarded; ordinary coercions are
+  rejected. Option projection from an actual flexible tail is a named
+  shape action and does not make a fixed `T` result adjustable to fixed `T?`.
 
 ```lua
 function pair(): (integer, integer)
@@ -393,16 +406,25 @@ local maybe_one: () -> integer? = numbers          -- safe finite projection
 local required_one: () -> integer = numbers        -- raises if the run is empty
 ```
 
-In conventional type-system terms, parameters are contravariant and results
-are covariant. Titan's gradual `value` compatibility still applies at each
-individual position, but it does not make whole function compatibility
-symmetric.
+The familiar contravariant/covariant vocabulary approximates the alignment,
+but Titan does not define a subtyping relation around it. Gradual consistency
+applies only to the directly aligned components, and the complete callable
+adjustment remains directional.
 
-Compatibility is not exact identity. A compatible assignment may use the
-generic callable path and its boundary checks. It also cannot expose results
-outside the expected static type: storing `numbers` in `() -> integer` makes
-calls through that slot finite one-result calls, including inside an open
-sink. See [The type system](types.md#function-types) and
+```lua
+function n(): integer
+    return 1
+end
+
+local bad_float: () -> float = n       -- rejected: no result coercion lifting
+local bad_option: () -> integer? = n   -- rejected: fixed T -> fixed T? does not lift
+```
+
+Callable adjustment is not exact identity. An adjusted assignment uses the
+strict Titan-generic path when its runtime value is a Titan closure. It also
+cannot expose results outside the expected static type: storing `numbers` in
+`() -> integer` makes calls through that slot finite one-result calls,
+including inside an open sink. See [The type system](types.md#function-types) and
 [Functions as values](functions.md#functions-as-values).
 
 ## The 200-value bound
@@ -419,17 +441,17 @@ positions it requested and ignores the rest. The bound is shared with
 variadic input runs and keeps these homogeneous runs small. Code that needs an
 unbounded collection should return an explicit array `{T}` instead.
 
-A statically open generic flexible forwarding call crosses the Lua boundary in
-open-result mode, even when a later outer consumer will retain only a finite
-prefix. Titan measures the raw results and that outer consumer copies only its
-requested prefix, so discarded surplus Lua results do not by themselves
-trigger the 200-value bound. If the run-time target is a
-compatible-but-non-exact Titan closure, however, that closure first enters
-through its own Lua wrapper with an open request. The wrapper materializes and
-caps its own open flexible tail before the later finite outer consumer can trim
-the run. No inherited finite flexible-result budget is passed through that
-statically open generic Lua-call boundary; ordinary statically finite generic
-calls still request their concrete result count.
+A statically open generic flexible forwarding call uses Lua-stack open-result
+mode, even when a later outer consumer will retain only a finite prefix. Titan
+measures the raw results and that outer consumer copies only its requested
+prefix, so discarded surplus Lua results do not by themselves trigger the
+200-value bound. If the run-time target is a non-exact Titan-branded closure,
+however, that closure first enters through its strict generic stack entry with
+an open request. The entry materializes and caps its own open flexible tail
+before the later finite outer consumer can trim the run. No inherited finite
+flexible-result budget is passed through that statically open stack-call
+boundary; ordinary statically finite generic calls still request their
+concrete result count.
 
 Flexible returns cross the [Lua boundary](lua-interop.md) as ordinary Lua
 multiple results. Lua's requested result count determines whether it receives

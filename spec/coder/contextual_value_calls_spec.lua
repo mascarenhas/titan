@@ -149,12 +149,13 @@ describe("contextual calls through value (code generation)", function()
         ]]
 
         -- All three consumers are open sinks, but their producer is statically
-        -- fixed-only. The generic branch must ask the VM for exactly that one
-        -- visible result; LUA_MULTRET would leak a wider runtime callable.
+        -- fixed-only. Both non-exact branches (strict Titan and genuine Lua)
+        -- must ask the VM for exactly that one visible result; LUA_MULTRET
+        -- would leak a wider runtime callable.
         local csrc = generate(source)
         local _, finite_calls = csrc:gsub(
             "luaD_callnoyield%(L, restorestack%(L, _vc_func%), 1%);", "")
-        assert.equal(3, finite_calls)
+        assert.equal(6, finite_calls)
         assert.not_match(
             "luaD_callnoyield%(L, restorestack%(L, _vc_func%), LUA_MULTRET%)",
             csrc)

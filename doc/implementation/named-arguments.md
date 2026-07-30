@@ -57,11 +57,11 @@ descriptor; the implicit
 method receiver and the trailing variadic marker are excluded.
 
 `Type.Function` and `Type.CFunction` have not gained a names field. Their
-equality, compatibility, string rendering, serialization, and first-class
-function tags therefore remain structural. This enforces the feature boundary:
-a direct declaration can publish names while a function value, anonymous
-closure, bound-method value, or C function pointer cannot acquire named-call
-eligibility merely from its function type.
+equality, callable adjustment, string rendering, serialization, and
+first-class function tags therefore remain structural. This enforces the
+feature boundary: a direct declaration can publish names while a function
+value, anonymous closure, bound-method value, or C function pointer cannot
+acquire named-call eligibility merely from its function type.
 
 ### Compiled Titan interfaces
 

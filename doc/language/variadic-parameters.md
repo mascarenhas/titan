@@ -228,12 +228,13 @@ Without a Map context, `{...}` (and `{e1, e2, ...}`) builds an Array whose
 element type is the variadic element type `t` — `{...}` from a
 `...: string` function has type `{string}`, and `{}` when the run is empty.
 An exact `{integer: V}` context instead builds an ordinary positional Map.
-The element/value type can be overridden by context, as long as `t` coerces
-to it: `{...}` of a
-`...: integer` run typed as `{float}` converts each element to a float, and
-typed as `{value}` boxes each element. A type that `t` cannot coerce to is
-the compile-time error `'...' element type integer is not coerceable to
-array element type string`.
+The element/value type can be overridden by context when the checker can
+record an assignment adjustment for each element. For `{...}` of a
+`...: integer` run, a `{float}` context uses the direct numeric coercion,
+whereas a `{value}` context uses a gradual injection that boxes each element;
+the latter is not a structural or direct coercion. A target with no assignment
+adjustment is a compile-time error, such as
+`'...' element type integer is not coerceable to array element type string`.
 
 ```lua
 function as_floats(...: integer): {float}
@@ -278,8 +279,8 @@ function maybe(...: integer): integer?
 end
 ```
 
-Each filled position is coerced to its slot's type the usual way, so the
-adjust-up is type-checked: an `...: integer` run filling a `float?` slot
+Each filled position receives the ordinary assignment adjustment to its
+slot's type, so the adjust-up is type-checked: an `...: integer` run filling a `float?` slot
 converts each element to float, while an `...: integer` run filling a
 `string?` slot is the compile-time error `expected string? but found
 integer?` — a representation mismatch is caught, never silently
@@ -300,7 +301,8 @@ end
 not a run-time-sized spread — `function pair(...: integer): (integer, integer)
 return ... end` returns `...[1], ...[2]` (and raises if fewer than two were
 supplied). A `return ...` from a function that returns no values (`: ()`) is
-legal and requests no elements. If the function instead declares a compatible
+legal and requests no elements. If the function instead declares a consistently
+shaped
 flexible result tail, `return ...` is open and forwards the complete run-time
 input run into that output tail.
 
@@ -316,7 +318,8 @@ call arguments: fixed parameters whose types accept `nil` receive `nil`
 when the run is too short; fixed parameters that cannot accept `nil` raise
 on an under-supplied run. Whatever remains after the fixed parameters
 becomes the callee's variadic run. The two variadic element types must be
-**compatible**:
+equal or **gradually consistent**, and the checker records the element
+adjustment consumed by the open run:
 
 ```lua
 function forward(...: integer): integer
@@ -326,14 +329,16 @@ end
 
 A trailing call with a flexible result tail is another open producer for this
 same sink. `sink(produce())` forwards every result actually produced after
-filling `sink`'s fixed parameters; the result element type must be compatible
-with the callee's variadic element type.
+filling `sink`'s fixed parameters; the result element type must be consistent
+with the callee's variadic element type under the same gradual rule.
 
-`integer` and `value` forward both ways (the gradual `value` relationship),
+`integer` and `value` forward both ways (the gradual-consistency relationship),
 so an `...: integer` run forwards into a `...: value` callee and vice versa. A
 representation mismatch such as `...: integer` into a `...: float` callee is the
 compile-time error `'...' element type integer is not compatible with the
-'...' element type float of function 'sink'` (naming the callee).
+'...' element type float of function 'sink'` (naming the callee). The
+ordinary scalar `integer -> float` coercion does not lift through a variadic
+run.
 
 ## Variadic functions are first-class values
 
@@ -360,24 +365,27 @@ A function type with a fixed prefix and a variadic tail is written the
 obvious way, `(integer, ...: integer) -> integer`. Calling a variadic value
 works exactly like calling any [function value](functions.md#functions-as-values):
 when the value's run-time type matches the call's static type, the call takes
-the zero-overhead native path; a merely *compatible* type (for example a
-`(...: value) -> integer` slot holding a `(...: integer) -> integer` function, or
-a plain Lua function), goes through the generic Lua-stack path, which checks
-and converts each variadic argument at the boundary.
+the zero-overhead native path. A non-exact Titan-branded value accepted by
+callable adjustment (for example a `(...: value) -> integer` slot holding a
+`(...: integer) -> integer` function) uses the strict generic trailer. A
+plain Lua function instead uses the ordinary Lua call path and dynamic result
+conversion.
 
 `(...: integer) -> integer` and `(...: value) -> integer` are mutually
-**compatible** (gradually, through `value`). Compatibility with fixed-only
-function types is directional. A fixed actual function may inhabit a slot
-whose type has a variadic tail and ignore that tail. A variadic actual may
-inhabit a compatible fixed-only slot and simply receives whatever fixed
-arguments the slot promises. An actual function may also have additional
-fixed parameters when each accepts nil from an omitted expected tail; if the
-expected type is variadic, those parameters must additionally accept its tail
-element. The reverse direction is rejected whenever adjustment would force nil
-into a non-nilable parameter or feed an incompatible value to an observed
-tail.
-See [Flexible returns](flexible-returns.md#function-compatibility-is-directional)
-for the combined input/output compatibility rules.
+**consistent** at their aligned components (gradually, through `value`).
+Callable adjustment with fixed-only function types is directional. A fixed
+actual function may inhabit a slot whose type has a variadic tail and ignore
+that tail. A variadic actual may inhabit an admissible fixed-only slot and
+simply receives whatever fixed arguments the slot promises. An actual
+function may also have additional fixed parameters when each accepts nil from
+an omitted expected tail; if the expected type is variadic, those parameters
+must additionally accept its tail element. The reverse direction is rejected
+whenever adjustment would force nil into a non-nilable parameter or feed an
+incompatible value to an observed tail.
+See [Flexible returns](flexible-returns.md#callable-adjustment-is-directional)
+for the combined input/output adjustment rules, and the
+[normative boundary matrix](types.md#normative-boundary-matrix) for strict
+Titan-generic versus coercive Lua entry.
 
 ## Using a variadic function from Lua
 
@@ -386,7 +394,7 @@ fixed arguments, then as many trailing values as you like. Missing fixed
 arguments are [padded with `nil`](functions.md#argument-adjustment), just
 as they are for non-variadic Titan functions; everything beyond the fixed
 parameters becomes the variadic run. The trailing values are checked and
-converted to the element type `t` at the boundary, exactly as a fixed
+converted by the shared dynamic rule for element type `t`, exactly as a fixed
 parameter of type `t` would be, and a wrong-typed one raises the usual
 boundary error.
 

@@ -61,6 +61,7 @@ end
 local HARNESS = [=[
 #include <assert.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +79,48 @@ local HARNESS = [=[
 static char backing_root_key;
 static char proxy_root_key;
 static char weak_root_key;
+static char first_function_tag_candidate;
+static char second_function_tag_candidate;
+static int coercing_writer_calls;
+
+static int identity_writer(lua_State *L) {
+    lua_settop(L, 1);
+    return 1;
+}
+
+static void push_identity_writer(lua_State *L) {
+    TValue value;
+    /*
+    ** One full-userdata upvalue both forces a real CClosure (rather than an
+    ** LCF) and models the generated writer's captured module root.
+    */
+    lua_newuserdatauv(L, 0, 0);
+    lua_pushcclosure(L, identity_writer, 1);
+    value = lua_totvalue(L, -1);
+    assert(ttisCclosure(&value));
+}
+
+static int coercing_integer_writer(lua_State *L) {
+    int isinteger;
+    lua_Integer value;
+    assert(lua_type(L, lua_upvalueindex(1)) == LUA_TUSERDATA);
+    coercing_writer_calls++;
+    if (lua_type(L, 1) != LUA_TNUMBER)
+        return luaL_error(L, "writer rejected value");
+    value = lua_tointegerx(L, 1, &isinteger);
+    if (!isinteger)
+        return luaL_error(L, "writer rejected value");
+    lua_pushinteger(L, value);
+    return 1;
+}
+
+static void push_coercing_integer_writer(lua_State *L) {
+    TValue value;
+    lua_newuserdatauv(L, 0, 0);
+    lua_pushcclosure(L, coercing_integer_writer, 1);
+    value = lua_totvalue(L, -1);
+    assert(ttisCclosure(&value));
+}
 
 static void push_backing(lua_State *L, Table *backing) {
     TValue value;
@@ -116,10 +159,11 @@ static void assert_shape(Table *backing, Udata *proxy, Table *metatable,
     assert(ttisfulluserdata(&cycle));
     assert(uvalue(&cycle) == proxy);
     assert(proxy->len == 0);
-    assert(proxy->nuvalue == 1);
+    assert(proxy->nuvalue == 2);
     assert(proxy->metatable == metatable);
     assert(ttistable(&proxy->uv[0].uv));
     assert(hvalue(&proxy->uv[0].uv) == backing);
+    assert(ttisCclosure(&proxy->uv[1].uv));
     assert(titan_array_length(backing) == length);
     assert(titan_array_try_proxy(backing, metatable) == proxy);
     assert(titan_array_try_backing(&cycle, metatable) == backing);
@@ -127,9 +171,21 @@ static void assert_shape(Table *backing, Udata *proxy, Table *metatable,
 
 static Table *new_rooted_array(lua_State *L, Table *metatable,
                                unsigned capacity, Udata **proxy) {
-    Table *backing = titan_array_new(L, metatable, capacity);
+    int base = lua_gettop(L);
+    TValue writer;
+    Table *backing;
+
+    push_identity_writer(L);
+    writer = lua_totvalue(L, -1);
+    backing = titan_array_new(L, metatable, capacity, &writer);
     push_backing(L, backing);
     *proxy = titan_array_require_proxy(L, backing, metatable);
+    /*
+    ** Leave only the backing root requested by this helper. The writer and its
+    ** captured owner must now survive exclusively through proxy uv[1].
+    */
+    lua_remove(L, base + 1);
+    assert(lua_gettop(L) == base + 1);
     return backing;
 }
 
@@ -167,8 +223,12 @@ static int growth_at_limit(lua_State *L) {
 
 static int constructor_one_past(lua_State *L) {
     Table *metatable = titan_array_metatable(L);
+    TValue writer;
+    push_identity_writer(L);
+    writer = lua_totvalue(L, -1);
     (void)titan_array_new(
-        L, metatable, (lua_Unsigned)TITAN_ARRAY_MAX_CAPACITY + 1u);
+        L, metatable, (lua_Unsigned)TITAN_ARRAY_MAX_CAPACITY + 1u,
+        &writer);
     return 0;
 }
 
@@ -453,6 +513,124 @@ static void collect(lua_State *L) {
     lua_gc(L, LUA_GCCOLLECT);
 }
 
+static void test_lua_writer_dispatch(void) {
+    lua_State *L = luaL_newstate();
+    Table *metatable;
+    Table *backing;
+    Udata *proxy;
+    TValue writer;
+    TValue owner;
+    TValue observed;
+    TValue proxy_value;
+
+    assert(L != NULL);
+    luaL_openlibs(L);
+    metatable = titan_array_metatable(L);
+    make_weak_values(L);
+
+    /*
+    ** Keep the writer rooted only on the stack during construction. After the
+    ** stack is cleared, the global proxy's uv[1] must retain both the closure
+    ** and its captured module-like userdata.
+    */
+    push_coercing_integer_writer(L);
+    writer = lua_totvalue(L, -1);
+    owner = clCvalue(&writer)->upvalue[0];
+    assert(ttisfulluserdata(&owner));
+    weak_store(L, 1, &writer);
+    weak_store(L, 2, &owner);
+
+    backing = titan_array_new(L, metatable, 0, &writer);
+    push_backing(L, backing);
+    proxy = titan_array_require_proxy(L, backing, metatable);
+    assert(ttisCclosure(&proxy->uv[1].uv));
+    assert(clCvalue(&proxy->uv[1].uv) == clCvalue(&writer));
+    push_proxy(L, proxy);
+    lua_setglobal(L, "coercing");
+    lua_settop(L, 0);
+
+    collect(L);
+    observed = weak_get(L, 1);
+    assert(ttisCclosure(&observed));
+    assert(clCvalue(&observed) == clCvalue(&proxy->uv[1].uv));
+    observed = weak_get(L, 2);
+    assert(ttisfulluserdata(&observed));
+
+    coercing_writer_calls = 0;
+    run_chunk(L,
+        "local function fails_with(f, text)\n"
+        "  local ok, err = pcall(f)\n"
+        "  assert(not ok)\n"
+        "  assert(tostring(err):find(text, 1, true), tostring(err))\n"
+        "end\n"
+        "assert(#coercing == 0)\n"
+        "coercing[1] = 2.0\n"
+        "assert(coercing[1] == 2)\n"
+        "assert(math.type(coercing[1]) == 'integer')\n"
+        "fails_with(function() coercing[100] = 'bad' end,\n"
+        "           'writer rejected value')\n"
+        "assert(#coercing == 1 and coercing[1] == 2)\n"
+        "for _, key in ipairs({0, -1, math.mininteger}) do\n"
+        "  fails_with(function() coercing[key] = 3 end,\n"
+        "             'Titan array index must be positive')\n"
+        "end\n"
+        "fails_with(function() coercing[1.5] = 3 end,\n"
+        "           'Titan array index must be an integer')\n"
+        "fails_with(function() coercing[math.maxinteger] = 3 end,\n"
+        "           'array index too large')\n");
+    assert(coercing_writer_calls == 2);
+    assert_shape(backing, proxy, metatable, 2, 1);
+    assert_integer(backing, 1, 2);
+    assert_nil(backing, 100);
+
+    /*
+    ** Break only the backing->proxy half of the cycle. The shared callback
+    ** must reject the receiver before loading/invoking its writer.
+    */
+    setnilvalue(&observed);
+    luaH_setint(L, backing, 0, &observed);
+    run_chunk(L,
+        "local ok, err = pcall(function() coercing[1] = 3 end)\n"
+        "assert(not ok)\n"
+        "assert(tostring(err):find('expected Titan array', 1, true), err)\n");
+    assert(coercing_writer_calls == 2);
+    assert_integer(backing, 1, 2);
+
+    push_proxy(L, proxy);
+    proxy_value = lua_totvalue(L, -1);
+    luaH_setint(L, backing, 0, &proxy_value);
+    proxy_value = lua_totvalue(L, -1);
+    luaC_barrierback(L, obj2gco(backing), &proxy_value);
+    lua_pop(L, 1);
+    assert(titan_array_try_backing(&proxy_value, metatable) == backing);
+
+    /*
+    ** Nil deletion bypasses the writer. A nil far beyond capacity remains an
+    ** allocation-free no-op.
+    */
+    run_chunk(L,
+        "coercing[1] = nil\n"
+        "coercing[math.maxinteger] = nil\n"
+        "assert(#coercing == 0 and coercing[1] == nil)\n");
+    assert(coercing_writer_calls == 2);
+    assert_shape(backing, proxy, metatable, 2, 0);
+
+    /*
+    ** Once the proxy root is gone, the backing/proxy/writer/owner graph is an
+    ** ordinary unreachable cycle and must collect.
+    */
+    lua_pushnil(L);
+    lua_setglobal(L, "coercing");
+    lua_settop(L, 0);
+    collect(L);
+    observed = weak_get(L, 1);
+    assert(ttisnil(&observed));
+    observed = weak_get(L, 2);
+    assert(ttisnil(&observed));
+    registry_clear(L, &weak_root_key);
+    lua_close(L);
+}
+
 static size_t memory_bytes(lua_State *L) {
     return ((size_t)lua_gc(L, LUA_GCCOUNT) << 10) +
            (size_t)lua_gc(L, LUA_GCCOUNTB);
@@ -477,6 +655,8 @@ static void test_gc_mode(int mode) {
     Table *metatable;
     TValue backing_value;
     TValue proxy_value;
+    TValue writer_value;
+    TValue owner_value;
     TValue observed;
     Table *backing;
     Udata *proxy;
@@ -511,7 +691,12 @@ static void test_gc_mode(int mode) {
     backing = new_rooted_array(L, metatable, 0, &proxy);
     sethvalue(L, &backing_value, backing);
     setuvalue(L, &proxy_value, proxy);
+    writer_value = proxy->uv[1].uv;
+    owner_value = clCvalue(&writer_value)->upvalue[0];
+    assert(ttisfulluserdata(&owner_value));
     weak_store(L, 1, &backing_value);
+    weak_store(L, 2, &writer_value);
+    weak_store(L, 3, &owner_value);
     registry_store(L, &proxy_root_key, &proxy_value);
     lua_settop(L, 0);
     collect(L);
@@ -519,9 +704,19 @@ static void test_gc_mode(int mode) {
     assert(ttistable(&observed));
     assert(hvalue(&observed) == backing);
     assert(titan_array_try_proxy(hvalue(&observed), metatable) == proxy);
+    observed = weak_get(L, 2);
+    assert(ttisCclosure(&observed));
+    assert(clCvalue(&observed) == clCvalue(&writer_value));
+    observed = weak_get(L, 3);
+    assert(ttisfulluserdata(&observed));
+    assert(uvalue(&observed) == uvalue(&owner_value));
     registry_clear(L, &proxy_root_key);
     collect(L);
     observed = weak_get(L, 1);
+    assert(ttisnil(&observed));
+    observed = weak_get(L, 2);
+    assert(ttisnil(&observed));
+    observed = weak_get(L, 3);
     assert(ttisnil(&observed));
 
     /* An otherwise-unreachable two-object cycle is collected normally. */
@@ -529,13 +724,21 @@ static void test_gc_mode(int mode) {
     backing = new_rooted_array(L, metatable, 0, &proxy);
     sethvalue(L, &backing_value, backing);
     setuvalue(L, &proxy_value, proxy);
+    writer_value = proxy->uv[1].uv;
+    owner_value = clCvalue(&writer_value)->upvalue[0];
     weak_store(L, 1, &backing_value);
     weak_store(L, 2, &proxy_value);
+    weak_store(L, 3, &writer_value);
+    weak_store(L, 4, &owner_value);
     lua_settop(L, 0);
     collect(L);
     observed = weak_get(L, 1);
     assert(ttisnil(&observed));
     observed = weak_get(L, 2);
+    assert(ttisnil(&observed));
+    observed = weak_get(L, 3);
+    assert(ttisnil(&observed));
+    observed = weak_get(L, 4);
     assert(ttisnil(&observed));
 
     /*
@@ -612,13 +815,78 @@ static void test_per_state_metatables(void) {
     lua_close(second);
 }
 
+static void test_function_type_tag_branding(void) {
+    static const char *first_key = "Titan function type unit.first tag";
+    static const char *second_key = "Titan function type unit.second tag";
+    lua_State *first = luaL_newstate();
+    lua_State *second = luaL_newstate();
+    const void *first_tag;
+    const void *recovered_tag;
+    const void *other_tag;
+    const void *opaque_non_tag = (const void *)(uintptr_t)1u;
+    int top;
+
+    assert(first != NULL && second != NULL);
+
+    top = lua_gettop(first);
+    assert(!titan_is_function_type_tag(first, NULL));
+    assert(!titan_is_function_type_tag(first, opaque_non_tag));
+    assert(lua_gettop(first) == top);
+
+    first_tag = titan_publish_function_type_tag(
+        first, first_key, &first_function_tag_candidate);
+    assert(first_tag == &first_function_tag_candidate);
+    assert(titan_is_function_type_tag(first, first_tag));
+    assert(!titan_is_function_type_tag(
+        first, &second_function_tag_candidate));
+    assert(lua_gettop(first) == top);
+
+    /*
+    ** A second provider for the same structural function type recovers the
+    ** first provider's canonical pointer. Its unused local candidate is not
+    ** accidentally branded.
+    */
+    recovered_tag = titan_publish_function_type_tag(
+        first, first_key, &second_function_tag_candidate);
+    assert(recovered_tag == first_tag);
+    assert(titan_is_function_type_tag(first, recovered_tag));
+    assert(!titan_is_function_type_tag(
+        first, &second_function_tag_candidate));
+    assert(lua_gettop(first) == top);
+
+    other_tag = titan_publish_function_type_tag(
+        first, second_key, &second_function_tag_candidate);
+    assert(other_tag == &second_function_tag_candidate);
+    assert(titan_is_function_type_tag(first, other_tag));
+    assert(lua_gettop(first) == top);
+
+    /*
+    ** Registry ownership is per Lua state. The same key elects this state's
+    ** first candidate and does not inherit brands from another state.
+    */
+    top = lua_gettop(second);
+    assert(!titan_is_function_type_tag(second, first_tag));
+    recovered_tag = titan_publish_function_type_tag(
+        second, first_key, &second_function_tag_candidate);
+    assert(recovered_tag == &second_function_tag_candidate);
+    assert(titan_is_function_type_tag(second, recovered_tag));
+    assert(!titan_is_function_type_tag(
+        second, &first_function_tag_candidate));
+    assert(lua_gettop(second) == top);
+
+    lua_close(first);
+    lua_close(second);
+}
+
 int main(void) {
     test_capacity_length_and_hash();
     test_lua_callbacks_and_boxing();
 #ifndef TITAN_ARRAY_HARDMEM_PROBE
+    test_lua_writer_dispatch();
     test_gc_mode(LUA_GCINC);
     test_gc_mode(LUA_GCGEN);
     test_per_state_metatables();
+    test_function_type_tag_branding();
 #endif
     puts("dense array runtime ok");
     return 0;

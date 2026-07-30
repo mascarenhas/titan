@@ -320,7 +320,7 @@ At the semantic-type layer every Titan function shape carries a separate
 model instead. `Type.ModuleMember`, `Type.Method`, and `Type.StaticMethod` also
 carry declaration-only `paramnames`. Structural `Type.Function` and
 `Type.CFunction` deliberately do not carry parameter spellings: names must not
-affect equality, compatible function values, or native tags.
+affect equality, callable adjustment, or native tags.
 
 ## Decorations: who writes what, who reads it
 
@@ -429,9 +429,11 @@ change. This is the checklist.
 
 ### Adding a `Type.*` type
 
-1. **`types.lua`** — the constructor entry, plus *every relation, by
-   hand*: `types.equals`, `types.compatible` (and `types.coerceable`
-   if the type coerces implicitly), `types.tostring` (the name users
+1. **`types.lua`** — the constructor entry, plus every relevant operation:
+   `types.equals`, `types.normalize`, `types.consistent` and
+   `types.gradual_guard`, `types.coercion`,
+   `types.dynamic_coercion`, `types.written_cast`, callable/assignment
+   adjustment where applicable, `types.tostring` (the name users
    see in errors), and `types.serialize`, which raises
    `error("invalid tag ...")` for unknown tags — a non-serializable
    type breaks module interfaces (`<mangled>_types`) the moment it

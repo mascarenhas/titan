@@ -239,11 +239,11 @@ describe("source-written owned C types", function()
 
             local item = ast[2]._type
             local items = ast[3]._type
-            assert.is_true(types.coerceable(item, types.Boolean()))
-            assert.is_true(types.coerceable(items, types.Boolean()))
-            assert.is_true(types.coerceable(
+            assert.truthy(types.coercion(item, types.Boolean()))
+            assert.truthy(types.coercion(items, types.Boolean()))
+            assert.truthy(types.coercion(
                 types.Option(item), types.Boolean()))
-            assert.is_true(types.coerceable(
+            assert.truthy(types.coercion(
                 types.Option(items), types.Boolean()))
         end)
     end)

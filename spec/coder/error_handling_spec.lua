@@ -1234,8 +1234,11 @@ describe("catch", function()
             "native_callback_titan", 1, true))
         local definition = assert(csrc:find(
             "native_callback_titan", prototype + 1, true))
-        local next_function = assert(csrc:find("\nstatic ", definition, true))
-        local body = csrc:sub(definition, next_function - 1)
+        -- Later declarations may be exported or indented rather than beginning
+        -- with one exact `static ` spelling. Both anchors below are the first
+        -- such operations after this definition, so the suffix is the stable
+        -- contract and avoids depending on the next declaration's linkage.
+        local body = csrc:sub(definition)
         local setjmp = assert(body:find("TITAN_SETJMP", 1, true))
         local first_gc = assert(body:find("luaC_checkGC", 1, true))
         assert.is_true(setjmp < first_gc)

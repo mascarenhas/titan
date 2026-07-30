@@ -7,6 +7,23 @@ local run_checker = h.run_checker
 local assert_type_check = h.assert_type_check
 local assert_type_error = h.assert_type_error
 
+local function captured_lambda_source(count)
+    local declarations, terms = {}, {}
+    for i = 1, count do
+        declarations[#declarations + 1] =
+            string.format("local capture_%03d: integer = %d", i, i)
+        terms[#terms + 1] = string.format("capture_%03d", i)
+    end
+    return string.format([[
+        function make(): (() -> integer)
+            %s
+            return function(): integer
+                return %s
+            end
+        end
+    ]], table.concat(declarations, "\n"), table.concat(terms, " + "))
+end
+
 -- Walk the (post-checker) AST to the n-th top-level function's body statements.
 local function tlfunc_stats(ast, n)
     return ast[n or 1].block.stats
@@ -154,6 +171,17 @@ describe("closures (capture analysis)", function()
         assert.equal("Ast.StatFor", forstat._tag)
         assert.is_true(forstat.decl._captured)
         assert.is_nil(forstat.decl._assigned)
+    end)
+
+    it("accepts 251 captures and rejects the first unrepresentable closure",
+    function()
+        local ok, err = run_checker(captured_lambda_source(251))
+        assert.truthy(ok, err)
+
+        ok, err = run_checker(captured_lambda_source(252))
+        assert.falsy(ok)
+        assert.match(
+            "function captures too many variables %(252, max 251%)", err)
     end)
 end)
 

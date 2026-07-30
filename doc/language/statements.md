@@ -87,9 +87,10 @@ local b? = xs[1]   -- b: integer? (nil is fine)
 ```
 
 `local b?: integer = e` is also accepted and means the same as
-`local b: integer? = e`. The full inference and coercion rules are in
-[The type system](types.md); the initializer is implicitly coerced to the
-annotated type wherever the types allow it (so
+`local b: integer? = e`. The full inference and assignment-adjustment rules
+are in [The type system](types.md); the initializer receives the admitted
+identity, direct coercion, gradual view, or callable adjustment for the
+annotated type (so
 `local n: float = 1` works), and otherwise the declaration is a
 compile-time error of the shape
 `test.titan:1:1: type error: types in declaration of local variable n do
@@ -138,10 +139,12 @@ xs[i] = v
 p.x = 2.0
 ```
 
-Assignments are type-checked: the right-hand side is implicitly coerced to
-the target's type where the [coercion rules](types.md) allow, and
-otherwise the assignment is a compile-time error (`types in assignment do
-not match, expected T but found U`). Assigning to an undeclared name is a
+Assignments are type-checked: the right-hand side must have an
+[assignment adjustment](types.md#relations-and-boundaries-no-subtyping) to the
+target type. That adjustment may be identity, one direct coercion, a gradual
+view/projection, or a callable adjustment; otherwise the assignment is a
+compile-time error (`types in assignment do not match, expected T but found
+U`). Assigning to an undeclared name is a
 compile-time error (`variable 'y' not declared`) — Titan has no global
 variables; module-level variables must be declared at the top level (see
 [Modules](modules.md)). Functions and modules are not assignable: `f = 2`
@@ -386,9 +389,9 @@ may return `(next, state, init, close)` directly. Finite positions projected
 from a flexible result are optional; the required iterator slot is forced
 before it is resolved as callable.
 
-The iterator slot may be a function, a `value` that is coerced to a
-synthesized function type, or a compatible C function pointer/foreign
-function. The iterator cannot be variadic and may take zero, one, or two
+The iterator slot may be a function, a `value` accepted through a gradual
+projection to a synthesized function type, or an admissible C function
+pointer/foreign function. The iterator cannot be variadic and may take zero, one, or two
 fixed parameters. A two-parameter iterator is called as
 `next(state, control)`: first with the initial control value, then after
 each body execution with the previous first result. A one-parameter
@@ -424,10 +427,11 @@ the first value, while `for x, y in step do` cannot infer `y`'s type.
 Generic `for` variables are scoped to the body, fresh per iteration, and
 read-only, like numeric `for` variables.
 
-The close slot is `nil`, a function, a `value` that is coerced to a
-synthesized close function type, or a compatible C function pointer/foreign
+The close slot is `nil`, a function, a `value` accepted through a gradual
+projection to a synthesized close function type, or an admissible C function pointer/foreign
 function. A close function may accept zero or one fixed parameter; when it
-accepts one, the state value must be coercible to that parameter type. Close
+accepts one, the state value must have an assignment adjustment to that
+parameter type. Close
 return values are discarded. When a `value` supplies the close slot, a run-time
 `nil` means that the optional close function is absent and no call is made.
 Every non-`nil` value follows the ordinary callable rules: callable values,
@@ -597,13 +601,13 @@ function.
 
 Every fixed declared return position must be filled, or the checker reports
 `returned N value(s) but function expected M`. Each delivered value is
-implicitly coerced to the corresponding declared type where the coercion rules
-allow; mismatches are reported per position (`types in return do not match,
+accepted through the ordinary assignment adjustment to the corresponding
+declared type; mismatches are reported per position (`types in return do not match,
 expected integer but found string`). Surplus expressions are still evaluated
 but their values are discarded. A trailing call expands only as far as the
 finite return prefix requires, unless the function declares a flexible tail,
-which consumes the complete compatible run. `return (f())` always requests one
-value. See [Functions](functions.md) and
+which consumes the complete checker-adjusted run. `return (f())` always
+requests one value. See [Functions](functions.md) and
 [Flexible returns](flexible-returns.md).
 
 A function declared without a return annotation returns **zero** values

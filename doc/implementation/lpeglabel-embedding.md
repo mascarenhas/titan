@@ -170,15 +170,16 @@ only where the engine consumes a run, and callback types use variadic inputs
 or flexible outputs only where the native callback protocol is genuinely
 open. Parser- and regex-specific callbacks whose construction guarantees a
 fixed number of capture slots keep fixed parameter lists; directional callable
-compatibility admits those extra `value` slots because adjustment can nil-fill
-them and they accept the generic capture tail. LPegLabel always stores the
+adjustment admits those extra `value` slots because its named shape rules can
+nil-fill them and they accept the generic capture tail. LPegLabel always stores the
 internal exact adapter closure required by its raw callback protocol. The
 adapter captures the user-supplied function-typed value and invokes it through
 Titan's ordinary callable machinery: exact Titan functions can use the exact
-fast path, while Lua functions, C functions, and `__call` objects use the
-generic path. There is no `_raw_type` probe or eager raw-function validation
-of that captured value; a noncallable value fails only if the engine actually
-invokes the adapter. The relabel adapters for dynamic definition values remain
+fast path, branded non-exact Titan functions use the strict generic entry,
+and Lua functions, C functions, and `__call` objects use the ordinary Lua
+path. There is no `_raw_type` probe or eager raw-function validation of that
+captured value; a noncallable value fails only if the engine actually invokes
+the adapter. The relabel adapters for dynamic definition values remain
 genuinely variadic/flexible because their capture arity and result count are
 open.
 

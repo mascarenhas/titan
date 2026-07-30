@@ -115,7 +115,7 @@ module key:
 ```lua
 return {
     ["geometry.shape"] = {
-        abi = "0.19",
+        abi = "0.20",
         types = "Module(...)",
     },
 }
@@ -128,15 +128,26 @@ containers, duplicate logical keys, incompatible ABIs, invalid type
 interfaces, or disagreement between the embedded and callable forms before
 publishing or consuming an artifact.
 
-ABI 0.19 adds serialized union/variant schemas and the reconstructible public
-module prefix for first-class record/union statics. Its generated userdata/tag
-contract cannot be mixed with a 0.18 interface. ABI 0.18 previously required
+ABI 0.20 adds the two-user-value Array proxy and the strict-trailer/reverse-tag
+function-closure protocol. Its generated layout cannot be mixed with a 0.19
+provider, so archive metadata is rejected before native composition rather
+than adapted. ABI 0.19 added serialized union/variant schemas and the
+reconstructible public module prefix for first-class record/union statics; its
+generated userdata/tag contract could not be mixed with a 0.18 interface.
+ABI 0.18 previously required
 generated standard-library archives and the matching runtime to agree on
 promoted callback trampolines and retired libuv/coroutine helpers. ABI 0.17
 introduced the current Array
 backing/proxy contract even though `Array(...)` serialization and exact native
 pointer widths stayed unchanged. A separately installed 0.17 archive remains
 in its versioned directory but is rejected as a dependency.
+
+The 0.20 marker is shared with the forthcoming Interface cutover; Interfaces
+are not implemented by this relation/Array/function change. A relation-only
+review head rebuilds the existing nine-module standard provider for
+non-published validation, while final 0.20 publication waits for the Interface
+half under the same version. See
+[Compiled compatibility](multi-module-libraries.md#compiled-compatibility).
 
 Selecting one logical key makes that archive a native link input. It does not
 make every other key in the archive an ordinary lookup result. A later import
@@ -204,11 +215,13 @@ behavior, not a hidden dependency manifest.
 The canonical installed ABI directory contains:
 
 ```text
-$ROCKS_TREE/lib/titan/0.19/titan.so
-$ROCKS_TREE/lib/titan/0.19/titan.a
+$ROCKS_TREE/lib/titan/0.20/titan.so
+$ROCKS_TREE/lib/titan/0.20/titan.a
 ```
 
-Both contain the nine `titan.*` logical standard modules. The DSO also
+On the relation-only review head both contain the nine existing `titan.*`
+logical standard modules for non-published validation. The final coordinated
+ABI-0.20 image adds `titan.io` as the tenth logical module/key. The DSO also
 contains bare native `require "titan"` support, and the archive carries that
 support object without inventing a logical module named `titan`.
 

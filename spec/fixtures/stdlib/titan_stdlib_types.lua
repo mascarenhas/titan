@@ -1,7 +1,7 @@
 -- Exact current serialized interfaces for the seven standard-library modules
 -- that predate peg/string. Six remain the interfaces captured from the
 -- separate ABI 0.15 DSOs; the byte-counted uv fixture records its intentional
--- ABI 0.19 prototype refresh.
+-- ABI 0.20 prototype refresh.
 local uv = assert(loadfile("spec/fixtures/libuv/titan_uv_types.lua"))()
 
 return {

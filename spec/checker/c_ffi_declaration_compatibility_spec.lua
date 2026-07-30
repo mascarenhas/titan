@@ -843,7 +843,7 @@ describe("compatible C declarations across foreign imports", function()
                 end
             ]])
             assert.falsy(ok)
-            assert.is_false(types.compatible(
+            assert.is_false(types.consistent(
                 ast[1]._type.type_members
                     .ffi_const_callback_pointer,
                 ast[1]._type.type_members

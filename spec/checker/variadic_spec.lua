@@ -291,7 +291,7 @@ describe("variadic parameters (typechecker)", function()
 
         -- A scalar representation MISMATCH between the caller's `...` element and
         -- the callee's `...` element (integer<->float) is NOT a legal forward:
-        -- `types.compatible` rejects it, so the forwarding codegen never has to
+        -- assignment adjustment rejects it, so forwarding codegen never has to
         -- bit-reinterpret one scalar slot as the other. (Only `value` widen/narrow
         -- is gradual; the int/float pair is not.)
         it("rejects forwarding `...: integer` to a `...: float` callee", function()

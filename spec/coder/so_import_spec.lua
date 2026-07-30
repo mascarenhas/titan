@@ -39,8 +39,8 @@ describe(".so-only cross-module imports", function()
     it("shares dense arrays through a .so-only module", function ()
         local ok, err = build_so_chain({
             { name = "arraysofoo", src = [[
-                function make(): {value}
-                    return {10, nil, 30}
+                function make(): {integer}
+                    return {10, 20, 30}
                 end
                 function set(xs: {value}, i: integer, v: value)
                     xs[i] = v
@@ -65,9 +65,96 @@ describe(".so-only cross-module imports", function()
             local xs = arraysobar.roundtrip()
             assert(type(xs) == "userdata")
             assert(#xs == 5)
-            assert(xs[1] == 10 and xs[2] == nil and xs[3] == 30)
+            assert(xs[1] == 10 and xs[2] == 20 and xs[3] == 30)
             assert(xs[4] == nil and xs[5] == 50)
             assert(foo.echo(xs) == xs)
+
+            -- The construction-selected integer writer survives the complete
+            -- foo -> bar -> Lua passage even though bar exposes a {value} view.
+            xs[6] = 60.0
+            assert(math.type(xs[6]) == "integer" and xs[6] == 60,
+                ("type=%s value=%s"):format(
+                    tostring(math.type(xs[6])), tostring(xs[6])))
+            local write_ok, write_err =
+                pcall(function() xs[7] = "wrong" end)
+            assert(not write_ok, "invalid string write unexpectedly succeeded")
+            assert(tostring(write_err):find(
+                "expected integer", 1, true), tostring(write_err))
+            assert(#xs == 6 and xs[7] == nil)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
+    it("keeps imported-nominal Array writers module-local across .so files",
+    function()
+        local ok, err = build_so_chain({
+            { name = "arraywriterowner", src = [[
+                record Item
+                    number: integer
+                end
+
+                function Item.make(number: integer): Item
+                    return Item.new(number)
+                end
+            ]] },
+            { name = "arraywritera", src = [[
+                local owner = import "arraywriterowner"
+
+                function make(): {owner.Item}
+                    return {owner.Item.make(1)}
+                end
+
+                function read(items: {owner.Item}): integer
+                    return items[1].number
+                end
+            ]] },
+            { name = "arraywriterb", src = [[
+                local owner = import "arraywriterowner"
+
+                function make(): {owner.Item}
+                    return {owner.Item.make(2)}
+                end
+
+                function read(items: {owner.Item}): integer
+                    return items[1].number
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+
+        local rok, out = call("arraywriterb", [[
+            local owner = require "arraywriterowner"
+            local module_a = require "arraywritera"
+            local module_b = require "arraywriterb"
+            local items_a = module_a.make()
+            local items_b = module_b.make()
+
+            local writer_a = debug.getuservalue(items_a, 2)
+            local writer_b = debug.getuservalue(items_b, 2)
+            assert(type(writer_a) == "function")
+            assert(type(writer_b) == "function")
+            assert(writer_a ~= writer_b)
+
+            local _, captured_a = debug.getupvalue(writer_a, 1)
+            local _, captured_b = debug.getupvalue(writer_b, 1)
+            assert(captured_a == module_a)
+            assert(captured_b == module_b)
+
+            writer_a, writer_b, captured_a, captured_b = nil, nil, nil, nil
+            collectgarbage("collect")
+
+            local write_ok, write_err =
+                pcall(function() items_a[2] = "wrong" end)
+            assert(not write_ok)
+            assert(tostring(write_err):find(
+                "expected arraywriterowner.Item", 1, true),
+                tostring(write_err))
+            assert(#items_a == 1 and items_a[2] == nil)
+
+            items_a[1] = owner.Item.make(21)
+            items_b[1] = owner.Item.make(22)
+            assert(module_a.read(items_a) == 21)
+            assert(module_b.read(items_b) == 22)
         ]])
         assert.truthy(rok, out)
     end)
@@ -386,10 +473,10 @@ describe(".so-only cross-module imports", function()
         -- The dependency is reachable ONLY as a compiled `.so`: the closure-slot
         -- index is rebuilt from the recovered interface and the function-type tag
         -- is recovered from the registry the dependency's `.so` published when it
-        -- was dlopened. `run_fast` calls a's `inner` as a value; if the tags agree
-        -- the call uses the fast path (no extra Lua frame) and the stack is one
-        -- frame shallower than the slow path. If either disagrees the call falls
-        -- back to the slow path and the depth assertion fails.
+        -- was dlopened. `run_direct` is the native-call baseline and `run_fast`
+        -- calls a's `inner` as an exact value; if the tags agree the value call
+        -- also uses the native entry (no extra Lua frame). If either disagrees it
+        -- falls back to a stack entry and the depth assertion fails.
         local ok, err = build_so_chain({
             { name = "fpa", src = [[
                 function inner(p: () -> integer): integer return p() end
@@ -399,6 +486,7 @@ describe(".so-only cross-module imports", function()
                 function outer(g: (() -> integer) -> integer, p: () -> integer): integer
                     return g(p)
                 end
+                function run_direct(p: () -> integer): integer return a.inner(p) end
                 function run_fast(p: () -> integer): integer return outer(a.inner, p) end
                 function run_slow(p: () -> integer,
                                   g: (() -> integer) -> integer): integer
@@ -408,9 +496,72 @@ describe(".so-only cross-module imports", function()
         })
         assert.truthy(ok, err)
         local rok, out = call("fpb", h.DEPTH_PROBE .. [[
+            local directd = fpb.run_direct(depth)
             local fastd = fpb.run_fast(depth)
             local slowd = fpb.run_slow(depth, slow_g)
+            assert(directd == fastd,
+                ('direct=')..directd..(' exact=')..fastd)
             assert(slowd > fastd, ('fast=')..fastd..(' slow=')..slowd)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
+    it("keeps non-exact provider values strict while Lua uses their coercive entry",
+    function()
+        local ok, err = build_so_chain({
+            { name = "entrysoa", src = [[
+                function boundary(x: integer): value
+                    if x == 3 then
+                        return 2.0
+                    end
+                    return x
+                end
+            ]] },
+            { name = "entrysob", src = [[
+                local provider = import "entrysoa"
+
+                function strict_result(): integer
+                    local f: (integer) -> integer = provider.boundary
+                    return f(3)
+                end
+
+                function strict_argument(x: value): value
+                    local f: (value) -> value = provider.boundary
+                    return f(x)
+                end
+
+                function boundary_function(): (integer) -> value
+                    return provider.boundary
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+
+        local rok, out = call("entrysob", [[
+            local provider = require "entrysoa"
+
+            -- The accessor returns the canonical closure owned by the DSO.
+            -- Lua invokes that same closure through CClosure.f: its 2.0 input
+            -- is converted for the integer formal, which is visible in the
+            -- provider's value result.
+            local boundary = entrysob.boundary_function()
+            assert(boundary == provider.boundary)
+            assert(math.type(boundary(2.0)) == "integer")
+            assert(boundary(2.0) == 2)
+
+            -- The same closure viewed non-exactly by Titan is a branded Titan
+            -- value, so its strict trailer rejects rather than applying the
+            -- genuine-Lua numeric coercion.
+            local result_ok, result_err = pcall(entrysob.strict_result)
+            assert(not result_ok, tostring(result_err))
+            assert(tostring(result_err):find(
+                "expected integer", 1, true), tostring(result_err))
+
+            local argument_ok, argument_err =
+                pcall(entrysob.strict_argument, 2.0)
+            assert(not argument_ok, tostring(argument_err))
+            assert(tostring(argument_err):find(
+                "expected integer", 1, true), tostring(argument_err))
         ]])
         assert.truthy(rok, out)
     end)

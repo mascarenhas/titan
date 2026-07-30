@@ -1697,7 +1697,19 @@ describe("Titan type checker", function()
         end)
     end
 
-    for _, t in ipairs({"{integer}", "boolean", "integer", "nil", "string", "Record"}) do
+    it("can explicitly cast between the scalar numeric types", function()
+        assert_type_check([[
+            function widen(a: integer): float
+                return a as float
+            end
+
+            function narrow(a: float): integer
+                return a as integer
+            end
+        ]])
+    end)
+
+    for _, t in ipairs({"{integer}", "boolean", "nil", "string", "Record"}) do
         it("cannot explicitly cast from " .. t .. " to float", function()
             assert_type_error("cannot cast", [[
                 record Record end

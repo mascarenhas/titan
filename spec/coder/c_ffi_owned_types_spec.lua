@@ -202,7 +202,8 @@ describe("source-written owned C type code generation", function()
             function signed_bytes(): string
                 local bytes: SignedChars =
                     ffi.titan_ffi_signed_char.new_array(2)
-                bytes[0] = 255 as ffi.titan_ffi_signed_char
+                bytes[0] = (255 as ffi.titan_ffi_int)
+                    as ffi.titan_ffi_signed_char
                 bytes[1] = 0 as ffi.titan_ffi_signed_char
                 return bytes as string
             end

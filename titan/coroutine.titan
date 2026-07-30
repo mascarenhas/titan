@@ -66,7 +66,8 @@ end
 local function push_transfer(source: *mco.mco_coro,
                              ok: ffi.titan_ffi_int, payload: value)
   root_transfer(source, payload)
-  local result = mco.mco_push(source, payload, ffi.TValue.sizeof)
+  local result = mco.mco_push(
+    source, payload as ffi.TValue, ffi.TValue.sizeof)
   if result ~= mco.MCO_SUCCESS then
     clear_transfer(source)
     check_mco_result(result)

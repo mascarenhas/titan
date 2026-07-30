@@ -311,6 +311,26 @@ local function primitive_typedef_spelling(ffi_types, name)
     return table.concat(tokens, " ")
 end
 
+local signed_minimum_macros = {
+    ["signed char"] = "SCHAR_MIN",
+    ["short"] = "SHRT_MIN",
+    ["int"] = "INT_MIN",
+    ["long"] = "LONG_MIN",
+    ["long long"] = "LLONG_MIN",
+}
+
+local function collect_signed_minima(ffi_types)
+    local minima = {}
+    for spelling, name in pairs(signed_minimum_macros) do
+        local item = ffi_types[name]
+        if not item or not item.macro_expression then
+            return nil
+        end
+        minima[spelling] = item.macro_expression
+    end
+    return minima
+end
+
 -- Acquire the pure target-profile inputs under the same compiler argv,
 -- target-selecting flags, and installed luaconf.h used for generated code.
 -- csemantics owns interpretation; this layer only exposes parser facts.
@@ -333,10 +353,50 @@ function cdriver.target_profile_inputs(options)
     lua_number, err = primitive_typedef_spelling(ffi_types, "lua_Number")
     if not lua_number then return nil, err end
 
+    -- `sizeof`/`_Alignof` and pointer subtraction enter Titan through size_t
+    -- and ptrdiff_t respectively. Resolve their actual typedef spellings from
+    -- the configured target headers rather than assuming the compiler host's
+    -- data model. lua.h normally includes <stddef.h>; retain an explicit
+    -- fallback for deliberately minimal alternate Lua-header fixtures.
+    local standard_types = ffi_types
+    local size_t = primitive_typedef_spelling(standard_types, "size_t")
+    local ptrdiff_t = primitive_typedef_spelling(standard_types, "ptrdiff_t")
+    if not size_t or not ptrdiff_t then
+        standard_types, err = cdriver.process_file("stddef.h", options)
+        if not standard_types then
+            return nil, "failed acquiring configured C carrier types: " .. err
+        end
+        size_t, err = primitive_typedef_spelling(standard_types, "size_t")
+        if not size_t then return nil, err end
+        ptrdiff_t, err =
+            primitive_typedef_spelling(standard_types, "ptrdiff_t")
+        if not ptrdiff_t then return nil, err end
+    end
+
+    -- Exact signed minima are needed to prove the supported two's-complement
+    -- target invariant. The Lua headers normally expose <limits.h>; as above,
+    -- parse the standard header explicitly when an alternate lua.h does not.
+    local signed_minima = collect_signed_minima(ffi_types)
+    if not signed_minima then
+        local limits_types
+        limits_types, err = cdriver.process_file("limits.h", options)
+        if not limits_types then
+            return nil, "failed acquiring configured C signed minima: " .. err
+        end
+        signed_minima = collect_signed_minima(limits_types)
+        if not signed_minima then
+            return nil, "configured <limits.h> does not expose the signed "
+                .. "integer minima required by Titan"
+        end
+    end
+
     return {
         macros = ctx.defines,
         lua_integer = lua_integer,
         lua_number = lua_number,
+        size_t = size_t,
+        ptrdiff_t = ptrdiff_t,
+        signed_minima = signed_minima,
         lua_header = include,
         fixed_include_dirs = fixed_include_dirs,
     }

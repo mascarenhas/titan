@@ -180,154 +180,111 @@ Because it examines the one combined list, a valid `main` may be declared in
 the folder main or any contributor and still belongs to the same logical
 module.
 
-## The relations in `types.lua`
+## The relations and plans in `types.lua`
 
-Three relations drive everything. All are plain Lua functions dispatching on
-`_tag`.
+The checker no longer asks one boolean relation to stand for consistency,
+automatic conversion, callable assignment, written casts, and equality.
+The normative definitions and boundary matrix are in
+[Type relations and boundary plans](type-relations-and-boundaries.md).
+The checker-facing summary is:
 
-### `types.equals(t1, t2)`
+- `types.normalize` cycle-safely removes transparent aliases/typedef wrappers;
+- `types.consistent` is symmetric gradual consistency and never calls a
+  conversion classifier;
+- `types.coercion(source, target)` returns one direct automatic
+  `CoercionPlan`, including named Option operations;
+- `types.callable_adjustment(source_actual, target_expected)` returns a
+  directional shape/component plan;
+- `types.assignment_adjustment(source, target)` selects identity, direct
+  coercion, gradual view, callable adjustment, or rejection;
+- `types.dynamic_coercion(target)` describes the broader conversion authorized
+  by written `value as/is T` and genuine Lua boundaries;
+- `types.written_cast` and `types.comparable` own written-cast and symmetric
+  equality policy; and
+- `types.gradual_guard`/`types.has_sound_gradual_guard` keep boxability
+  separate from a type that can actually be re-established later.
 
-Structural where the type is structural, nominal where it is not: Array/Array
-compares element types; Map/Map compares keys and values; Function/Function
-requires pointwise-equal fixed parameters/results and equal presence/element
-types for both the input-vararg and flexible-result tails;
-Option/Option compares bases; Nominal/Nominal compares **fqtn strings only**
-(record and union contents never participate); Pointer/Pointer compares pointed-to
-types and Typedef/Typedef compares names (FFI types); any other same-tag pair
-is equal; everything else is not.
+`types.equals` remains the exact structural/nominal identity test used inside
+these classifiers. It does not answer whether an operation is permitted.
+The retired `types.compatible`, `types.coerceable`, and
+`types.explicitly_coerceable` APIs have no checker callers.
 
-### `types.coerceable(source, target)` — every implicit coercion
+Conversion edges are deliberately not consistency leaves. Integer-to-float,
+`T`-to-`T?`, C numeric/address conversions, truthiness, and future
+record/union-to-Interface wrapper construction can be direct coercions without
+making the corresponding Arrays, Maps, or callable components consistent.
+Conversely, an `integer`/`value` pair is consistent but still needs an
+injection or strict projection plan because their representations differ.
 
-One big disjunction. True iff any of:
+### `checkmatch` — consuming the original decision
 
-1. `target` is a Pointer and `can_coerce_pointer(source, target)` — which
-   requires `target` to be a *void* pointer and `source` to be String or
-   another Pointer. (The clause meant to allow `nil → void*` tests
-   `source.tag` instead of `source._tag` — a latent typo, so it never fires;
-   nil-to-pointer survives only via `compatible`'s nullable-pointer rule.)
-2. Integer → Float.
-3. Float → Integer (a run-time-checked narrowing).
-4. anything-but-Boolean → Boolean (truthiness).
-5. anything-but-Value → Value (boxing).
-6. Value → anything-but-Value (run-time-checked unboxing).
-7. `t → t?` when `equals(source, target.base)`.
-8. `t? → t` when `equals(target, source.base)` — forcing, run-time nil check.
-9. Nil → any `t?`.
-10. `s? → t?` when `coerceable(s, t)` (option-to-option lifting).
-11. non-option `s → t?` when `coerceable(s, t)` (coerce, then wrap).
-12. option `s?` → non-option `t` when `coerceable(source.base, target)` — the
-    base must itself coerce to the target. This is what admits, e.g.,
-    `float? → integer` (force, then narrow — initializing an `integer` local
-    from a `{float}` element compiles and runs). It is correctly directional:
-    `boolean? → integer` is rejected, since `coerceable(boolean, integer)` is
-    false (truthiness only goes *to* Boolean), so `local i: integer = b` with
-    `b: boolean?` is a clean type error rather than a coercion the coder
-    cannot honor.
+`trycoerce` returns both the adjusted expression and the exact
+`assignment_adjustment` object obtained from the original source/target pair.
+`checkmatch(term, expected, adjusted, ..., decision)` consumes that object and
+never asks the relation again. Rejection emits the ordinary contextual
+mismatch; a checked C conversion that already emitted a qualifier/category/probe
+diagnostic carries an explicit marker that suppresses only the duplicate
+generic mismatch.
 
-Note that `coerceable` is **irreflexive**: no clause matches two equal
-non-Value types. That matters for `as` casts and `checkmatch`, both below.
-
-### `types.compatible(t1, t2)` — gradual-typing consistency
-
-Checked in order: `equals` → true; Typedefs unwrap and recurse;
-Pointer-vs-Nil in either order → true (nullable pointers);
-`explicitly_coerceable` → true; **`Type.Value` on either side → true** (the
-gradual "value is consistent with everything" rule); Array/Array and Map/Map
-recurse with `compatible` (so `{value}` is compatible with `{float}` —
-Value-consistency reaches through containers); Nominal/Nominal compares fqtns
-(no recursion into record or union bodies). Function/Function is deliberately
-**directional**: the first argument is the expected slot and the second the
-actual callable. Parameters are checked in the input direction, results in the
-output direction, shorter actual fixed-input lists may ignore an expected
-suffix, and additional actual fixed inputs are allowed only when adjustment
-can nil-fill them (and they accept the expected tail element, when present).
-Finite expected results may hide actual surplus. Input and output tails
-participate in those same rules; an actual flexible result supplies optionized
-finite projections. The full matrix is in
-[Flexible returns](flexible-returns.md#strict-identity-and-directional-compatibility).
-Outside function types the relation retains its earlier symmetric behavior
-except for one-way `explicitly_coerceable` pointer/string handling.
-
-### `types.explicitly_coerceable(source, target)`
-
-Exactly one rule: a *void pointer* may become a `string`, and only with an
-explicit `as` cast. It also appears inside `compatible`, which is why `as`
-between those types passes the compatibility half of the cast check.
-
-Where each relation is consulted — `coerceable`: `checkmatch`, `trycoerce`,
-the `as`-cast check. `compatible`: `checkmatch`, `==`/`~=`, the `as`-cast
-check. `equals`: inside `coerceable`/`compatible`/`can_coerce_pointer`,
-relational operators, `or` option-defaulting, and three assertions in
-`coder.lua`. `explicitly_coerceable`: inside `compatible` and the `as`-cast
-check.
-
-### `checkmatch` — the gatekeeper
-
-```lua
-local function checkmatch(term, expected, found, errors, loc)
-    if types.coerceable(found, expected) or not types.compatible(expected, found) then
-        local msg = "types in %s do not match, expected %s but found %s"
-```
-
-Read the condition twice: it errors when the types are *incompatible*, **or
-when they are still `coerceable`**. The second arm encodes the central
-invariant: by the time `checkmatch` runs, every coercion *allowed* in this
-context has already been materialized as a cast node (so `found` already
-equals `expected`, and irreflexivity makes the first arm false). A
-still-coerceable pair reaching `checkmatch` means the context deliberately
-did not coerce — numeric `for` bounds are the canonical example — and that
-is an error. The `term` string names the context in the message
-(`assignment`, `return`, `array indexing`, `argument 2 of call to function
-'f'`, `'for' start expression`, …).
-
-A pair that is compatible but *not* coerceable — say `{value}` where
-`{float}` is expected — passes `checkmatch` with **no cast node at all**; the
-run-time checks for such gradually-typed values are emitted by the coder at
-access sites (see [Code generator: constructs](codegen-constructs.md)).
+Identity, gradual structural views, and directional callable plans may reach
+`checkmatch` without changing the producer's representation. The checker
+retains the complete plan on the expression/sink so later code can select a
+strict observation without reconstructing the relation from two types. The
+`term` string still names the diagnostic context (`assignment`, `return`,
+`array indexing`, call argument, and so on). Numeric `for` bounds are not
+assignment sinks: after Option forcing they use a dedicated exact-type check,
+so neither numeric conversion nor a gradual `value` view can reach the C
+control representation.
 
 ## Rewriting the AST
 
 This is the load-bearing design. **Invariant:** after `checker.check`
-succeeds, every implicit conversion is an explicit `Ast.ExpCast` node, every
-finite consumed call result beyond the first is an explicit `Ast.ExpExtra`
-node, each shared list consumer carries its finite/open adjustment, every
-numeric `for` loop has an explicit step expression, and every
-generic `for` loop has hidden iterator tuple/call declarations. The coder
-generates conversions *only* from `ExpCast` nodes and never consults
-`coerceable`; if the checker fails to materialize a cast, the coder silently
-emits code for the wrong type.
+succeeds, every accepted nonidentity semantic edge has a plan. A
+representation-changing fixed conversion is an annotated `Ast.ExpCast`;
+same-representation gradual/callable views retain
+`_assignment_adjustment`; every finite consumed call result beyond the first
+is an explicit `Ast.ExpExtra`; and each shared list consumer carries its
+finite/open element adjustment. Numeric `for` loops have explicit steps and
+generic `for` loops have hidden iterator tuple/call declarations. The coder
+consumes these decisions and does not call a semantic relation.
 
 ### `trycoerce`, `tryforce`, `trytostr`
 
-`trycoerce(source, target, errors)` is the workhorse: if
-`types.coerceable(source._type, target)`, it wraps the node in a synthesized
-`ast.ExpCast(loc, exp, target)` with `_type = target` and
-`_implicit_coercion = true`; otherwise it returns the node unchanged. The
-marker distinguishes demanded sink conversions from written `as` casts when
+`trycoerce(source, target, errors)` is the workhorse. It calls
+`assignment_adjustment(source._type, target)` once:
+
+- identity returns the original expression;
+- a callable or same-representation structural gradual view leaves the source
+  carrier intact and stores `_assignment_adjustment`;
+- a `value` injection/projection becomes `Ast.ExpCast` with `_adjustment =
+  gradual_view`;
+- a direct conversion becomes `Ast.ExpCast` with `_adjustment =
+  direct_coercion(CoercionPlan)`; and
+- rejection returns the original node so `checkmatch` emits the contextual
+  error (with the separate checked C-address path retaining its precise
+  diagnostic).
+
+Every synthesized semantic cast also has `_implicit_coercion = true`. The
+marker distinguishes a demanded sink conversion from a written `as` cast when
 a finite flexible-return budget discards a tail result after evaluating its
-source carrier. Option types make the synthesis recursive:
+source carrier.
 
-* An Option-to-Option conversion is one cast that propagates nil and converts
-  a present value between the base types.
-* If the source is an Option and the non-option target is neither Boolean nor
-  Value, it first synthesizes an inner cast from `t?` to `t` (the runtime
-  nil-check, or "force"), then recursively coerces that to the target. With
-  `of: float?`:
+Option types retain their explicit lowering shapes, but the relation result
+names what happens: `option_map` propagates nil while converting a present
+base, `option_force` checks nil before its inner plan, `option_wrap` converts a
+present source then boxes it, `option_nil` supplies nil, and
+`to_c_tvalue` copies a whole slot without forcing an option first. The checker
+emits one outer `Ast.ExpCast` carrying that complete decision. Code generation
+consumes its recorded inner identity/conversion plan when lowering the
+present-value branch; it does not ask the relation again or infer Option
+behavior from source and target tags.
 
-  ```lua
-  local i: integer = of
-  -- initializer becomes Cast(Cast(of, float), integer)
-  ```
-
-  Boolean and Value targets skip the force on purpose — an option's nil-ness
-  *is* its falsiness, and boxing to `value` needs no unwrapping.
-* If the target is an Option, a Nil or Value source becomes one direct cast to
-  that option. This preserves nil and, for Value, checks a present value
-  against the option's base. Other sources coerce to the base first and then
-  wrap: `ExpCast(loc, trycoerce(source, target.base), target)`. So
-  `local x: float? = 1` becomes `Cast(Cast(1, float), float?)`, while returning
-  a `value` from a `string?` function becomes `Cast(value, string?)` rather
-  than `Cast(Cast(value, string), string?)`.
+The coder also consumes a same-representation Option view at its sink.
+Unlike an Array or Map, an Option has no mutable backing whose element
+observations can remain deferred: nil passes, while a present payload is
+strictly guarded as the target base before the source base view is forgotten.
+Array, Map, and callable structural views keep their ordinary deferred
+component behavior.
 
 `tryforce(node)` wraps any Option-typed node in a cast to its base — the
 implicit "must not be nil here" check. It is applied at: `for` bounds;
@@ -344,8 +301,8 @@ RHS, returns, call arguments, index expressions, initializer-list entries,
 record fields, top-level variable initializers, generic-`for` tuple slots
 and visible variables, plus the operator-specific promotions (catalogued in
 the [type system chapter](../language/types.md)). A contributor adding a
-context must call `trycoerce` *before* `checkmatch`, or legal programs will
-be rejected by the still-coerceable arm.
+context must preserve the selected plan through `checkmatch` and code
+generation.
 
 ### `ExpExtra` — materializing finite call results
 
@@ -366,7 +323,8 @@ For a declared fixed result the coder reads the corresponding out-parameter.
 For a position reached through `flexrettype`, `_result_sources` marks the
 projection as possibly absent and its type is `optionize(T)` (`value` remains
 `value`). Open consumers do not synthesize an unbounded `ExpExtra` list: the
-call instead receives `_open_results = {source_type, target_type, start}`.
+call instead receives
+`_open_results = {source_type, target_type, start, adjustment}`.
 Computed Map/record fields and named arguments are scalar finite consumers.
 The `?`
 inference marker still applies per finite declaration slot.
@@ -381,7 +339,7 @@ generic-for tuple. `fixed` is dense
 or `INFER_OPEN`. The result retains every written expression in lexical order,
 records delivered `fixed` and `tail_scalars`, marks effect-only `discards`, and
 identifies at most one runtime-sized final `open_source` with source/target
-types and start index.
+types, start index, and the checker-selected element adjustment.
 
 The demand options also carry the deliberately narrow `dots_nilfill` policy.
 Generic-for tuple setup sets it so missing state/control positions borrowed
@@ -396,8 +354,16 @@ ordinary arity error. A declared flexible producer projects `T?` into finite
 slots, while an open sink preserves the actual `T` run. The three open sinks
 are an input-vararg call tail, a flexible return tail, and the final positional
 field of an Array or exact integer-keyed Map. Such a constructor stores the
-shared result as `_positional_adjustment`; computed Maps remain scalar and do
-not use it. See
+shared result as `_positional_adjustment`; its open call/`...` producer also
+receives the same `.adjustment`. Constructor open-element checking is
+deliberately deferred until inference/context has selected the final element
+type: the checker then classifies that edge once and shares the one plan,
+rather than creating and overwriting a provisional plan. Computed Maps remain
+scalar and do not use it.
+An Array constructor additionally records its final context-adjusted element
+type and `DynamicCoercionPlan` for the construction-selected Lua writer. A
+raw-pointer element, or compound element containing an unguardable
+raw-pointer leaf, has no such plan and is rejected at construction. See
 [Flexible returns](flexible-returns.md#one-finiteopen-result-demand).
 
 Named-call fields are the exception among call arguments: each field owns
@@ -570,16 +536,24 @@ local x = arr[1]   -- x : integer  (forced)
 local y? = arr[1]  -- y : integer?
 ```
 
-Equality keeps options rather than forcing them. In `==`/`~=`: if either
-side is Value, both are boxed to Value; **else if either side is an Option,
-each side is lifted to the option of its own type** (`s? == s` lifts the
-right side to `string?` and compares equal types) — this lift is PR #250's
-fix; before it the coerced nodes were assigned to nonexistent fields and
-never landed. Numbers are then **not** promoted: a mixed Integer/Float pair
-(either order, and likewise two options over Integer/Float) is allowed through
-without coercion — codegen compares them by mathematical value, exactly as Lua
-does — and any remaining incomparable pair errors. The result
-is always Boolean.
+Equality keeps options rather than forcing them. In `==`/`~=`, if either side
+is an Option, each side is first lifted to the option of its own type (`s? ==
+s` lifts the right side to `string?`). The checker then calls the symmetric
+`types.comparable` classifier on that pair. A successful ComparisonPlan may
+carry a gradual injection when exactly one comparable operand is Value; only
+then is the other operand boxed for raw equality. The checker never uses a
+directional assignment or coercion to make an incomparable original pair
+comparable. Numbers are **not** promoted: a mixed Integer/Float pair (either
+order, and likewise two options over Integer/Float) is compared by
+mathematical value, exactly as Lua does. Any remaining incomparable pair
+errors, and the result is always Boolean.
+
+Every Array/Map `Ast.VarBracket` read also carries `_read_guard` for its
+optionized result type. Function declarations, methods, bound-method
+trampolines, and lambdas carry parallel strict GuardPlan arrays for fixed and
+variadic parameters; generic call nodes carry strict fixed/open result guards.
+These annotations are distinct from the dynamic plans used by genuine Lua
+entries and non-Titan callable results.
 
 `or` implements option defaulting: when the left side is `t?` and the right
 side's type equals `t`, the whole expression has type `t` (`of or 1.0` with
@@ -645,6 +619,12 @@ it; a "strictly between" interval would drop the innermost frame and miss
 the actual user. The pass is a single in-order traversal, so by the end of
 `checkbodies` every flag and capture list is final, before codegen.
 
+Lua caps a C closure at 255 upvalues. Titan reserves three header slots and
+the final strict Titan-generic entry trailer, so the checker accepts at most
+251 source-level captures. The first larger closure receives
+`function captures too many variables (252, max 251)` during checking rather
+than reaching `lua_pushcclosure`.
+
 ### Lambda type inference: checking vs synthesis mode
 
 The `Ast.ExpFunction` handler reads the 4th `context` argument every
@@ -694,7 +674,9 @@ with `_type = node._type`, the surrounding context applies its usual
   empty `{}` defaults to `{integer}`). A nonempty positional Map requires an
   exact integer key type from context. Mixed field categories are rejected
   before elaboration; an all-positional Array or integer Map then runs
-  `adjust_explist` exactly once and records `_positional_adjustment`.
+  `adjust_explist` exactly once, classifies its deferred open edge exactly
+  once after selecting the final element type, and records
+  `_positional_adjustment`.
   A Boolean context also switches
   `and`/`or` into plain boolean mode.
 * **Length classification.** `Ast.ExpUnop` accepts `#` for an Array, a String,
@@ -757,15 +739,29 @@ with `_type = node._type`, the surrounding context applies its usual
   owner is not accepted as a module constant.
 * **Written `as` casts and `is` tests.** Both visitors call
   `check_explicit_cast_relation`: it resolves the target, checks the operand
-  under that target context, accepts identity and exact option unwraps, and
-  otherwise applies the same explicit-C or `coerceable`-plus-`compatible`
-  relation. It records the same unsafe C-pointer conversion annotation for
-  either node. `ExpCast._type` is the target; `ExpIs._type` is always
+  under that target context, and stores a complete `_written_cast`.
+  `types.written_cast(source, target)` supplies every type-only case.
+  Expression-dependent C operations are completed here instead: mutable
+  address-taking requires a local/formal operand, while an unrelated
+  object-pointer cast embeds the successful toolchain probe annotation itself.
+  A candidate without its probe is never a complete written plan. Identity,
+  direct coercion, gradual/callable view, and explicit C conversions remain
+  distinct plan operations. A `value` source embeds the target's canonical
+  `DynamicCoercionPlan`; `as` lowers its converting form and `is` lowers the
+  same plan's non-raising predicate. Other gradual/callable written views
+  retain their view/adjustment plan, and direct coercions retain the complete
+  recursive `CoercionPlan`; `is` therefore mirrors failing
+  float-to-integer/Option compositions instead of treating every admitted
+  cast as total. Option targets recurse through the selected plan, including
+  truthiness for a present `boolean?`. The separately annotated
+  `value`-to-raw-C-pointer operation is written/unsafe and is unavailable to
+  implicit adjustment. `ExpCast._type` is the target; `ExpIs._type` is always
   `Type.Boolean`. `is` does not alter the operand or symbol-table type, so
-  there is no flow narrowing. A rejected test deliberately uses the existing
-  `cannot cast '%s' to '%s'` diagnostic. A `Type.Variant` descriptor is never
-  a source-resolvable type, so annotations, aliases, `as`, and `is` may name
-  `Message` but not `Message.move`; `case` is the only v1 variant test.
+  there is no flow narrowing. A rejected test ordinarily uses
+  `cannot cast '%s' to '%s'`; a mutable-address attempt on a C rvalue reports
+  that the expression is not addressable. A `Type.Variant` descriptor is
+  never a source-resolvable type, so annotations, aliases, `as`, and `is` may
+  name `Message` but not `Message.move`; `case` is the only v1 variant test.
 
 ## The "always returns" analysis
 
@@ -901,8 +897,8 @@ The checker also receives the resolver's session-scoped `cprobe.Service`.
 After all foreign imports establish a module's ordered header context,
 contextual object-pointer conversions and C operators ask that service to
 compile their exact `cdeclarator` spelling. The checker records complete
-conversion/operator traits on the AST; `types.compatible` remains pure and the
-coder consumes the traits without repeating target-C reasoning. See
+conversion/operator traits and coercion plans on the AST; the coder consumes
+them without repeating target-C reasoning. See
 [C FFI declarations and expressions](c-ffi-expressions.md).
 The checker derives its C include `source_dir` from the canonical main
 filename. Folder contributors are immediate siblings of that main, so quoted

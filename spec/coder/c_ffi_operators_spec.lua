@@ -1,4 +1,10 @@
 local h = require "spec.support.helpers"
+local checker = require "titan-compiler.checker"
+local coder = require "titan-compiler.coder"
+local cdriver = require "c-parser.cdriver"
+local cprobe = require "titan-compiler.cprobe"
+local csemantics = require "titan-compiler.csemantics"
+local driver = require "titan-compiler.driver"
 
 local MODULE = "ffi_operators"
 
@@ -88,6 +94,56 @@ local declarations = [[
     }
     static int ffi_get_log(void) { return ffi_evaluation_log; }
 ]]
+
+local function narrow_lua_integer_profile()
+    return assert(csemantics.build_profile({
+        macros = {
+            __CHAR_BIT__ = "8",
+            __SIZEOF_BOOL__ = "1",
+            __SIZEOF_SHORT__ = "2",
+            __SIZEOF_INT__ = "4",
+            __SIZEOF_LONG__ = "8",
+            __SIZEOF_LONG_LONG__ = "8",
+            __SIZEOF_FLOAT__ = "4",
+            __SIZEOF_DOUBLE__ = "8",
+            __SIZEOF_LONG_DOUBLE__ = "16",
+            __SCHAR_MAX__ = "127",
+            __SHRT_MAX__ = "32767",
+            __INT_MAX__ = "2147483647",
+            __LONG_MAX__ = "9223372036854775807L",
+            __LONG_LONG_MAX__ = "9223372036854775807LL",
+        },
+        lua_integer = "int",
+        lua_number = "double",
+        size_t = "unsigned long",
+        ptrdiff_t = "long",
+        signed_minima = {
+            ["signed char"] = "-128",
+            short = "-32768",
+            int = "-2147483648",
+            long = "-9223372036854775808",
+            ["long long"] = "-9223372036854775808",
+        },
+    }))
+end
+
+local function generate_with_profile(source, profile)
+    local service = assert(cprobe.new_service({
+        profile = profile,
+        include_dirs = assert(cdriver.resolve_compiler_include_dirs()),
+    }))
+    h.reset(true)
+    local ast, parse_error = h.parse(source)
+    assert(ast, parse_error)
+    local _, errors = checker.check(
+        MODULE, ast, source, MODULE .. ".titan", nil, {
+            probe_service_provider = function() return service end,
+        })
+    local close_ok, close_error = service:close()
+    assert.truthy(close_ok, close_error)
+    assert.equal(0, #errors, table.concat(errors, "\n"))
+    return coder.generate(MODULE, ast, {}, driver.TITAN_VER)
+end
 
 describe("C FFI operator code generation", function()
     after_each(function()
@@ -238,6 +294,8 @@ describe("C FFI operator code generation", function()
             local xor_body = native_body(csrc, "xor_value")
             local shift_body = native_body(csrc, "shifted")
             local shift_right_body = native_body(csrc, "shifted_right")
+            local floating_body = native_body(csrc, "floating_half")
+            local exceeds_body = native_body(csrc, "exceeds_uint")
             assert.not_match("intop", div_body)
             assert.not_match("divide by zero", div_body, 1, true)
             assert.not_match("intop", unary_minus_body)
@@ -257,11 +315,59 @@ describe("C FFI operator code generation", function()
             assert.match("%(_tmp_%d+ << _tmp_%d+%)", csrc)
             assert.match("%(_tmp_%d+ >> _tmp_%d+%)", csrc)
             assert.match("%(_tmp_%d+ != _tmp_%d+%)", csrc)
-            assert.match("%(%(double%)%(2%.0%)%)", csrc)
+            assert.match("%(%(double%)_tmp_%d+%)", floating_body)
             assert.not_match("((lua_Integer)FFI_UINT_MAX)",
                 csrc, 1, true)
-            assert.match("((long long)(FFI_UINT_MAX))",
-                csrc, 1, true)
+            assert.match("FFI_UINT_MAX", exceeds_body, 1, true)
+            assert.match("%(%(long long%)_tmp_%d+%)", exceeds_body)
+        end)
+    end)
+
+    it("checks size_t and ptrdiff_t before a narrow Titan integer carrier",
+    function()
+        with_header(declarations, function(header)
+            local source = [[
+                local c = foreign import "]] .. header .. [["
+
+                function checked_sizeof(): integer
+                    return c.ffi_item.sizeof
+                end
+
+                function checked_alignof(): integer
+                    return c.ffi_item.alignof
+                end
+
+                function checked_difference(): integer
+                    return c.ffi_end() - c.ffi_begin()
+                end
+            ]]
+            local csrc = generate_with_profile(
+                source, narrow_lua_integer_profile())
+            local size_body = native_body(csrc, "checked_sizeof")
+            local align_body = native_body(csrc, "checked_alignof")
+            local difference_body =
+                native_body(csrc, "checked_difference")
+
+            assert.not_match("%(%(lua_Integer%)sizeof", size_body)
+            assert.not_match("%(%(lua_Integer%)_Alignof", align_body)
+            assert.not_match("%(%(lua_Integer%)%([^)]*%-[^)]*%)%)",
+                difference_body)
+            assert.match("sizeof%(", size_body)
+            assert.match("_Alignof%(", align_body)
+            assert.match("unsigned long%s+_tmp_%d+", size_body)
+            assert.match("unsigned long%s+_tmp_%d+", align_body)
+            assert.match("long%s+_tmp_%d+", difference_body)
+            assert.match("numeric value is outside the range of %s",
+                size_body, 1, true)
+            assert.match('"integer"', size_body, 1, true)
+            assert.match("numeric value is outside the range of %s",
+                align_body, 1, true)
+            assert.match('"integer"', align_body, 1, true)
+            assert.match("numeric value is outside the range of %s",
+                difference_body, 1, true)
+            assert.match('"integer"', difference_body, 1, true)
+            assert.match(">=", difference_body, 1, true)
+            assert.match("<=", difference_body, 1, true)
         end)
     end)
 end)

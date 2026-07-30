@@ -1,6 +1,7 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
+local DEPTH_PROBE = require("spec.support.helpers").DEPTH_PROBE
 
 local REPO = lfs.currentdir()
 local PREFIX = require("spec.support.installed_prefix").active()
@@ -70,7 +71,7 @@ local function compiler_argv(output_root, source_root, titan_path, ...)
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "CCACHE_DISABLE=1",
         "TITAN_PATH_0_18=/obsolete/titan-0.18",
-        "TITAN_PATH_0_19=" .. titan_path,
+        "TITAN_PATH_0_20=" .. titan_path,
         "TITAN_PATH=",
     }
     if PREFIX then
@@ -118,7 +119,7 @@ local function run_lua(cwd, titan_path, package_path, cpath_roots, code)
     for _, root in ipairs(cpath_roots) do
         table.insert(cpath, root .. "/?.so")
     end
-    table.insert(cpath, PREFIX .. "/lib/titan/0.19/?.so")
+    table.insert(cpath, PREFIX .. "/lib/titan/0.20/?.so")
     table.insert(cpath, PREFIX .. "/lib/lua/5.5/?.so")
 
     return run({
@@ -126,7 +127,7 @@ local function run_lua(cwd, titan_path, package_path, cpath_roots, code)
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "TITAN_PATH_0_18=/obsolete/titan-0.18",
-        "TITAN_PATH_0_19=" .. titan_path,
+        "TITAN_PATH_0_20=" .. titan_path,
         "TITAN_PATH=",
         LUA, "-e", string.format([[
 package.path = %q
@@ -300,8 +301,8 @@ assert(consumer.answer() == 303)
 
     it("shares dense arrays through a selected static provider", function()
         write_file(source_one .. "/staticarray/api.titan", [[
-function make(): {value}
-    return {10, nil, 30}
+function make(): {integer}
+    return {10, 20, 30}
 end
 
 function set(xs: {value}, i: integer, v: value)
@@ -341,8 +342,110 @@ local consumer = require "static_array_consumer"
 local xs = consumer.roundtrip()
 assert(type(xs) == "userdata")
 assert(#xs == 5)
-assert(xs[1] == 10 and xs[2] == nil and xs[3] == 30)
+assert(xs[1] == 10 and xs[2] == 20 and xs[3] == 30)
 assert(xs[4] == nil and xs[5] == 50)
+
+-- The integer writer constructed inside the selected archive survives the
+-- provider/consumer boundary and the consumer's {value} return view.
+xs[6] = 60.0
+assert(math.type(xs[6]) == "integer" and xs[6] == 60,
+    ("type=%s value=%s"):format(
+        tostring(math.type(xs[6])), tostring(xs[6])))
+local write_ok, write_err = pcall(function() xs[7] = "wrong" end)
+assert(not write_ok, "invalid string write unexpectedly succeeded")
+assert(tostring(write_err):find(
+    "expected integer", 1, true), tostring(write_err))
+assert(#xs == 6 and xs[7] == nil)
+]])
+        assert.truthy(ok, output)
+    end)
+
+    it("uses native and strict entries from a selected static provider",
+       function()
+        write_file(source_one .. "/staticentry/api.titan", [[
+function probe(p: () -> integer): integer
+    return p()
+end
+
+function boundary(x: integer): value
+    if x == 3 then
+        return 2.0
+    end
+    return x
+end
+]])
+        assert_compiles(root_one, source_one, root_one, "staticentry.api")
+        assert.equal("file", lfs.attributes(
+            root_one .. "/staticentry/api.a", "mode"))
+
+        write_file(consumer_source .. "/static_entry_consumer.titan", [[
+local provider = import "staticentry.api"
+
+function direct_depth(p: () -> integer): integer
+    return provider.probe(p)
+end
+
+function exact_depth(p: () -> integer): integer
+    local f: (() -> integer) -> integer = provider.probe
+    return f(p)
+end
+
+function strict_result(): integer
+    local f: (integer) -> integer = provider.boundary
+    return f(3)
+end
+
+function strict_argument(x: value): value
+    local f: (value) -> value = provider.boundary
+    return f(x)
+end
+
+function boundary_function(): (integer) -> value
+    return provider.boundary
+end
+]])
+        assert_compiles(consumer_root, consumer_source, root_one,
+            "--static", "static_entry_consumer")
+
+        local generated = read_file(
+            consumer_source .. "/static_entry_consumer.c")
+        assert.falsy(generated:find(
+            'loadlib(L, "staticentry/api.so")', 1, true), generated)
+        assert.truthy(generated:find(
+            "extern Udata *staticentry_api_init", 1, true), generated)
+
+        local ok, output = run_lua(
+            consumer_root, root_one, consumer_root, { consumer_root },
+            DEPTH_PROBE .. [[
+local consumer = require "static_entry_consumer"
+
+-- A direct static call and an exact-tag first-class call both use the
+-- provider's native entry, so neither adds a Lua stack-entry frame.
+local direct_depth = consumer.direct_depth(depth)
+local exact_depth = consumer.exact_depth(depth)
+assert(direct_depth == exact_depth,
+    ("direct=%s exact=%s"):format(direct_depth, exact_depth))
+
+-- Repeated access returns the same canonical provider closure. From Lua its
+-- ordinary CClosure.f entry converts 2.0 for the integer formal, which is
+-- visible in the declared value result.
+local boundary = consumer.boundary_function()
+assert(boundary == consumer.boundary_function())
+assert(math.type(boundary(2.0)) == "integer")
+assert(boundary(2.0) == 2)
+
+-- Titan's non-exact views of those same branded closures take the strict
+-- trailer and reject the float tag instead of coercing it.
+local result_ok, result_err = pcall(consumer.strict_result)
+assert(not result_ok, tostring(result_err))
+assert(tostring(result_err):find(
+    "expected integer", 1, true), tostring(result_err))
+
+local argument_ok, argument_err =
+    pcall(consumer.strict_argument, 2.0)
+assert(not argument_ok, tostring(argument_err))
+assert(tostring(argument_err):find(
+    "expected integer", 1, true), tostring(argument_err))
 ]])
         assert.truthy(ok, output)
     end)

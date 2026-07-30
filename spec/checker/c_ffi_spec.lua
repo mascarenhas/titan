@@ -129,9 +129,11 @@ describe("C FFI type checking", function()
             typedef int type;
             typedef struct ffi_keyword_holder {
                 int when;
+                int interface;
             } ffi_keyword_holder;
 
             static int repeat = 3;
+            static int interface = 4;
             static int when(int repeat, type value) {
                 return repeat + value;
             }
@@ -140,7 +142,8 @@ describe("C FFI type checking", function()
                 local c = foreign import "]] .. header .. [["
 
                 local function read(h: c.ffi_keyword_holder): c.type
-                    return h.when + c.when(c.repeat, 1)
+                    return h.when + h.interface
+                        + c.when(c.repeat, c.interface)
                 end
             ]])
             assert.truthy(ok, err)
@@ -400,8 +403,7 @@ describe("C FFI type checking", function()
                 local function has_pointer(v: value): integer
                     local raw: c.TValue = v
                     local p: const *c.TValue = raw
-                    return (c.ffi_value_pointer(v) as integer)
-                        + (c.ffi_value_pointer(raw) as integer)
+                    return (c.ffi_value_pointer(raw) as integer)
                         + (c.ffi_value_pointer(p) as integer)
                 end
 
@@ -410,6 +412,15 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.truthy(ok, err)
+
+            ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                local function bad(v: value): integer
+                    return c.ffi_value_pointer(v)
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("do not match", err)
         end)
 
         with_header([[
@@ -420,8 +431,8 @@ describe("C FFI type checking", function()
             local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
-                local function has_pointer(v: value): integer
-                    return c.ffi_struct_value_pointer(v)
+                local function has_pointer(p: const *c.TValue): integer
+                    return c.ffi_struct_value_pointer(p)
                 end
 
                 function array_entry(): value
@@ -429,6 +440,15 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.truthy(ok, err)
+
+            ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                local function bad(v: value): integer
+                    return c.ffi_struct_value_pointer(v)
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("do not match", err)
         end)
     end)
 
@@ -1141,7 +1161,7 @@ describe("C FFI type checking", function()
     end)
 
     it("offers sizeof and alignof pseudo-members on C types", function()
-        local ok, err = run_checker([[
+        local ok, err, ast = run_checker([[
             local ffi = foreign import "titan/ffi.h"
 
             function f(): integer
@@ -1150,6 +1170,25 @@ describe("C FFI type checking", function()
             end
         ]])
         assert.truthy(ok, err)
+
+        local seen = {}
+        local count = 0
+        local function visit(node)
+            if type(node) ~= "table" or seen[node] then return end
+            seen[node] = true
+            if node._decl and node._decl._tag == "Type.CPseudoSize" then
+                count = count + 1
+                local source = node._decl.result_source
+                assert.equal("Type.CInteger", source._tag)
+                assert.is_false(source.signed)
+                assert.equal(
+                    source._c_numeric_carriers.size_t.spelling,
+                    source.spelling)
+            end
+            for _, child in pairs(node) do visit(child) end
+        end
+        visit(ast)
+        assert.equal(4, count)
     end)
 
     it("allows source-level pointer types over imported C types", function()
@@ -1172,7 +1211,7 @@ describe("C FFI type checking", function()
         assert.match("C pointer type can only point to a C FFI type", err)
     end)
 
-    it("coerces by-value C expressions and values to const C pointers", function()
+    it("coerces by-value C expressions but not values to const C pointers", function()
         with_header([[
             typedef int ffi_int;
             extern int ffi_read_const_int(const int *p);
@@ -1186,10 +1225,18 @@ describe("C FFI type checking", function()
                     local p: const *c.ffi_int = x
                     return (c.ffi_read_const_int(x) as integer)
                         + (c.ffi_read_const_int(p) as integer)
-                        + (c.ffi_has_const_ptr(v) as integer)
                 end
             ]])
             assert.truthy(ok, err)
+
+            ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                local function bad(v: value): integer
+                    return c.ffi_has_const_ptr(v)
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("do not match", err)
         end)
     end)
 

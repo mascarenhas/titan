@@ -72,8 +72,6 @@ describe("type-test expressions (typechecker)", function()
     it("rejects the same statically inadmissible relations as 'as'", function()
         for _, case in ipairs({
             { source = "boolean", target = "integer" },
-            { source = "float", target = "integer" },
-            { source = "float?", target = "integer?" },
         }) do
             h.assert_type_error("cannot cast", [[
                 function test(v: ]] .. case.source .. [[): boolean
@@ -81,6 +79,18 @@ describe("type-test expressions (typechecker)", function()
                 end
             ]])
         end
+    end)
+
+    it("admits the same written numeric coercions as 'as'", function()
+        h.assert_type_check([[
+            function scalar(v: float): boolean
+                return v is integer
+            end
+
+            function optional(v: float?): boolean
+                return v is integer?
+            end
+        ]])
     end)
 
     it("mirrors the admitted value-to-C scalar and pointer targets", function()

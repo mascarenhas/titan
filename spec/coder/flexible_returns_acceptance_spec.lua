@@ -206,7 +206,8 @@ describe("flexible-return runtime acceptance", function()
 
             local ok, err = pcall(test.required_projection, false)
             assert(not ok)
-            assert(tostring(err):find("expected integer but found nil", 1, true), err)
+            assert(tostring(err):find(
+                "expected integer tag but found nil", 1, true), err)
 
             local a, b, c = test.consume_fixed_suffix()
             assert(select("#", test.consume_fixed_suffix()) == 3)

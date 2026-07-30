@@ -257,21 +257,43 @@ end
 -- Checks if two types are the same, and logs an error message otherwise
 --   term: string describing what is being compared
 --   expected: type that is expected
---   found: type that was actually present
+--   exp: expression that was actually present
 --   errors: list of compile-time errors
 --   loc: location of the term that is being compared
-local function checkmatch(term, expected, found, errors, loc)
-    local ok
-    if types.is_direct_c(expected) or types.is_direct_c(found) then
-        ok = types.equals(types.resolve_c_typedef(expected),
-            types.resolve_c_typedef(found))
-    else
-        ok = types.compatible(expected, found)
-    end
-    if types.coerceable(found, expected) or not ok then
+--   adjustment: result already obtained by `trycoerce`
+--   precise_error: a target-specific diagnostic was already emitted
+local function checkmatch(term, expected, exp, errors, loc, adjustment,
+                          precise_error)
+    assert(adjustment ~= nil,
+        "checkmatch requires the checker decision for this sink")
+    local found = exp._type
+
+    -- Identity and every representation-changing adjustment must already have
+    -- left the expression at the target type. Callable and structural gradual
+    -- views deliberately retain the producer type and carry their plan on the
+    -- same expression.
+    local same_representation = adjustment
+        and (adjustment.kind == "identity"
+            or adjustment.kind == "callable"
+            or (adjustment.kind == "gradual_view"
+                and adjustment.op == "structural"))
+    if adjustment == false then
+        if precise_error then return end
         local msg = "types in %s do not match, expected %s but found %s"
         msg = string.format(msg, term, types.tostring(expected), types.tostring(found))
         checker.typeerror(errors, loc, msg)
+    elseif not types.equals(found, expected) and not same_representation then
+        error("checker adjustment was not elaborated to its target type")
+    elseif same_representation then
+        exp._assignment_adjustment = adjustment
+    end
+end
+
+local function check_exact_match(term, expected, exp, errors, loc)
+    if not types.equals(exp._type, expected) then
+        checker.typeerror(errors, loc,
+            "types in %s do not match, expected %s but found %s",
+            term, types.tostring(expected), types.tostring(exp._type))
     end
 end
 
@@ -913,11 +935,20 @@ local function c_pseudo_member(typ, name, st)
         local err = incomplete_c_object_error(typ, st,
             "C pseudo-member '." .. name .. "'")
         if err then return nil, err end
+        local size_entry = st.c_profile
+            and st.c_profile.integers
+            and st.c_profile.integers[st.c_profile.size_t]
+        if not size_entry or not size_entry.type then
+            return nil, "cannot determine C pseudo-member '." .. name
+                .. "' result because the configured target profile has no "
+                .. "authoritative size_t type"
+        end
         return {
             _tag = "Type.CPseudoSize",
             ctype = typ,
             name = name,
             type = types.Integer(),
+            result_source = size_entry.type,
         }
     end
 end
@@ -1588,51 +1619,95 @@ local function adjust_unsafe_c_pointer(source, target, errors, use)
     return n
 end
 
-local function trycoerce(source, target, errors, use)
+local function trycoerce(source, target, errors, use,
+                         precomputed_adjustment)
     if is_mutable_c_address_source(source)
        and types.c_mutable_address_coerceable(source._type, target)
        and not types.c_address_coerceable(source._type, target) then
         mark_mutable_c_address_source(source)
         local n = ast.ExpCast(source.loc, source, target)
         n._implicit_coercion = true
+        n._adjustment = {
+            kind = "direct_coercion",
+            source = source._type,
+            target = target,
+            coercion = {
+                kind = "coercion",
+                op = "mutable_c_address",
+                source = source._type,
+                target = target,
+            },
+        }
         n._type = target
-        return n
-    elseif types.coerceable(source._type, target) then
-        local n
-        if source._type._tag == "Type.Option" and target._tag == "Type.Option" then
-            -- t1? -> t2?: a single cast that propagates nil and converts a
-            -- present value (the coder emits the nil-check + base conversion);
-            -- do NOT unwrap, which would raise on nil.
-            n = ast.ExpCast(source.loc, source, target)
-        elseif source._type._tag == "Type.Option" and
-           target._tag ~= "Type.Boolean" and
-           target._tag ~= "Type.Value" then
-            local inner = ast.ExpCast(source.loc, source, source._type.base)
-            inner._implicit_coercion = true
-            inner._type = source._type.base
-            n = trycoerce(inner, target, errors, use)
-        elseif target._tag == "Type.Option" then
-            if source._type._tag == "Type.Nil"
-               or source._type._tag == "Type.Value" then
-                -- nil/value -> T?: emit the cast directly so nil remains nil.
-                -- Recursing through target.base would first coerce nil (or a
-                -- value holding nil) to the non-option base, either changing
-                -- its meaning (nil -> boolean = false) or raising before the
-                -- option has a chance to preserve it.
-                n = ast.ExpCast(source.loc, source, target)
-            else
-                n = ast.ExpCast(source.loc,
-                    trycoerce(source, target.base, errors, use), target)
-            end
-        else
-            n = ast.ExpCast(source.loc, source, target)
-        end
-        n._implicit_coercion = true
-        n._type = target
-        return n
-    else
-        return adjust_unsafe_c_pointer(source, target, errors, use)
+        return n, n._adjustment
     end
+
+    local adjustment = precomputed_adjustment
+    if adjustment == nil then
+        adjustment = types.assignment_adjustment(source._type, target)
+    end
+    if not adjustment then
+        -- A raw `value` cannot implicitly establish a C pointee type. Keep the
+        -- old unsafe C-object probe for actual C address expressions only.
+        if source._type._tag == "Type.Value" then
+            return source, false, false
+        end
+        local adjusted =
+            adjust_unsafe_c_pointer(source, target, errors, use)
+        if adjusted._c_conversion then
+            return adjusted, adjusted._c_conversion, false
+        elseif adjusted._c_conversion_failed then
+            return adjusted, false, true
+        else
+            return adjusted, false, false
+        end
+    elseif adjustment.kind == "identity" then
+        return source, adjustment
+    elseif adjustment.kind == "callable"
+        or (adjustment.kind == "gradual_view"
+            and adjustment.op == "structural") then
+        -- These are same-representation views. Preserve the producer's actual
+        -- type for lowering, but retain the complete checker decision on the
+        -- expression delivered to the sink.
+        source._assignment_adjustment = adjustment
+        return source, adjustment
+    elseif adjustment.kind == "gradual_view" then
+        assert(adjustment.op == "inject" or adjustment.op == "project",
+            "unknown gradual assignment view")
+        local n = ast.ExpCast(source.loc, source, target)
+        n._implicit_coercion = true
+        n._adjustment = adjustment
+        n._type = target
+        return n, adjustment
+    elseif adjustment.kind == "direct_coercion" then
+        -- Keep one node for the one checker decision. Option force/wrap/map
+        -- plans already carry their inner operation; the coder lowers that
+        -- recorded plan without asking the relation again.
+        local n = ast.ExpCast(source.loc, source, target)
+        n._implicit_coercion = true
+        n._adjustment = adjustment
+        n._type = target
+        return n, adjustment
+    else
+        error("unknown assignment adjustment kind " ..
+            tostring(adjustment.kind))
+    end
+end
+
+local function coerce_and_check(source, target, term, errors, loc,
+                                precomputed_adjustment)
+    local exp, adjustment, precise_error = trycoerce(
+        source, target, errors, term, precomputed_adjustment)
+    if adjustment and adjustment.kind ~= "identity" then
+        local stored = exp._adjustment
+            or exp._assignment_adjustment
+            or exp._c_conversion
+        assert(stored == adjustment,
+            "accepted nonidentity sink lost its checker decision")
+    end
+    checkmatch(term, target, exp, errors, loc or exp.loc, adjustment,
+        precise_error)
+    return exp
 end
 
 -- force option if present
@@ -1641,6 +1716,10 @@ end
 local function tryforce(node)
     if node._type._tag == "Type.Option" then
         local n = ast.ExpCast(node.loc, node, node._type.base)
+        n._implicit_coercion = true
+        n._adjustment = assert(types.assignment_adjustment(
+            node._type, node._type.base),
+            "automatic Option projection lacks an assignment plan")
         n._type = node._type.base
         return n
     else
@@ -1653,6 +1732,13 @@ local function trytostr(node)
     if source._tag == "Type.Integer" or
        source._tag == "Type.Float" then
         local n = ast.ExpCast(node.loc, node, types.String())
+        n._implicit_coercion = true
+        n._operator_conversion = {
+            kind = "operator_conversion",
+            op = "number_to_string",
+            source = source,
+            target = types.String(),
+        }
         n._type = types.String()
         return n
     else
@@ -1661,8 +1747,7 @@ local function trytostr(node)
 end
 
 local function nil_can_adjust_to(typ)
-    return typ and (types.coerceable(types.Nil(), typ)
-        or types.compatible(typ, types.Nil()))
+    return typ and types.assignment_adjustment(types.Nil(), typ) ~= false
 end
 
 -- Expression-list demand.  `fixed` is always dense: UNKNOWN_SLOT represents a
@@ -1750,9 +1835,8 @@ local function coerce_demanded_value(exp, target, term, errors)
     target = expected_type(target)
     if not target then return exp end
     local source = exp
-    exp = trycoerce(exp, target, errors, term)
+    exp = coerce_and_check(exp, target, term, errors, exp.loc)
     if source._missing_value then exp._missing_value = true end
-    checkmatch(term, target, exp._type, errors, exp.loc)
     return exp
 end
 
@@ -1826,6 +1910,7 @@ local function adjust_explist(exps, demand, st, errors)
         open_type = false,
         open_target = false,
         open_start = false,
+        open_adjustment = false,
     }
     local next_fixed = 1
 
@@ -2011,21 +2096,35 @@ local function adjust_explist(exps, demand, st, errors)
     end
 
 
-    local open_compatible = adjusted.open_source
-        and (types.equals(adjusted.open_type, adjusted.open_target)
-             or types.compatible(adjusted.open_target, adjusted.open_type)
-             -- Flexible call results are converted element-wise by their sink.
-             -- Preserve the older input-`...` contract: forwarding a whole
-             -- vararg descriptor requires compatibility, not merely a scalar
-             -- coercion such as integer -> float.
-             or ((adjusted.open_source._tag ~= "Ast.ExpDots"
-                  or demand.open_coerce)
-                 and types.coerceable(adjusted.open_type,
-                                      adjusted.open_target)))
+    -- A deferred open consumer has not selected its final element type yet.
+    -- In particular, inferred positional constructors deoptionize the
+    -- producer type below. Do not classify a provisional edge and then
+    -- overwrite its plan: the eventual sink must own exactly one
+    -- assignment_adjustment call and one stored plan.
+    local allow_open_coercion = adjusted.open_source
+        and not demand.defer_open_check
+        and (adjusted.open_source._tag ~= "Ast.ExpDots"
+             or demand.open_coerce)
+    local open_adjustment = adjusted.open_source
+        and not demand.defer_open_check
+        and types.assignment_adjustment(
+            adjusted.open_type, adjusted.open_target, {
+                -- Flexible call results are converted element-wise by their
+                -- sink. Preserve the input-`...` contract: forwarding a whole
+                -- descriptor does not silently lift a scalar coercion.
+                allow_coercion = allow_open_coercion and true or false,
+            })
+    adjusted.open_adjustment = open_adjustment or false
+    if adjusted.open_source and not demand.defer_open_check then
+        local open = adjusted.open_source._tag == "Ast.ExpDots"
+            and adjusted.open_source._open_dots
+            or adjusted.open_source._open_results
+        if open then open.adjustment = adjusted.open_adjustment end
+    end
     if adjusted.open_source and not demand.defer_open_check
        and adjusted.open_type._tag ~= "Type.Invalid"
        and adjusted.open_target._tag ~= "Type.Invalid"
-       and not open_compatible then
+       and not open_adjustment then
         if adjusted.open_source._tag == "Ast.ExpDots" then
             checker.typeerror(errors, adjusted.open_source.loc,
                 "'...' element type %s is not compatible with the '...' element type %s of %s",
@@ -2145,6 +2244,30 @@ local function positional_initializer_term(container_tag)
     end
 end
 
+-- Freeze the construction-time Lua writer policy after contextual element
+-- adjustment has selected the Array's final type.  The coder consumes these
+-- annotations verbatim; it must not re-run a semantic relation from the
+-- emitted Array type.  Raw C pointers (and compound types containing one)
+-- deliberately have no DynamicCoercionPlan, so an Array that would need such
+-- a writer is rejected at its construction site.
+local function annotate_array_writer(node, elem, errors)
+    local normalized = types.normalize(elem)
+    if not normalized then
+        node._array_element_type = types.Invalid()
+        node._array_writer_plan = false
+        return
+    end
+    node._array_element_type = normalized
+    node._array_writer_plan = types.dynamic_coercion(normalized) or false
+    if node._array_writer_plan == false
+       and normalized._tag ~= "Type.Invalid" then
+        checker.typeerror(errors, node.loc,
+            "cannot construct an array with element type %s because genuine "
+            .. "Lua writes have no sound dynamic coercion for that type",
+            types.tostring(normalized))
+    end
+end
+
 -- Arrays and positional integer-keyed Maps are the same kind of open
 -- expression-list consumer. The checker elaboration is intentionally
 -- representation-neutral; code generation decides whether the sink is a
@@ -2177,6 +2300,7 @@ local function check_positional_constructor(node, st, errors, container_tag,
 
     if container_tag == "Type.Array" then
         node._type = types.Array(etype)
+        annotate_array_writer(node, etype, errors)
     else
         node._type = types.Map(assert(keytype), etype)
     end
@@ -2187,9 +2311,8 @@ local function check_positional_constructor(node, st, errors, container_tag,
     if not elem_context then
         for i, exp in ipairs(adjusted.tail_scalars) do
             local old = exp
-            exp = trycoerce(exp, etype, errors)
-            checkmatch(term .. " at position " .. i, etype,
-                exp._type, errors, exp.loc)
+            exp = coerce_and_check(exp, etype,
+                term .. " at position " .. i, errors, exp.loc)
             replace_adjusted_value(adjusted, old, exp)
         end
     end
@@ -2198,10 +2321,9 @@ local function check_positional_constructor(node, st, errors, container_tag,
         local source = adjusted.open_type
         local container_name = container_tag == "Type.Array"
             and "array" or "positional map"
+        local open_adjustment = types.assignment_adjustment(source, etype)
         if source._tag ~= "Type.Invalid"
-           and not types.equals(source, etype)
-           and not types.compatible(etype, source)
-           and not types.coerceable(source, etype) then
+           and not open_adjustment then
             if adjusted.open_source._tag == "Ast.ExpDots" then
                 checker.typeerror(errors, adjusted.open_source.loc,
                     "'...' element type %s is not coerceable to %s element type %s",
@@ -2215,12 +2337,17 @@ local function check_positional_constructor(node, st, errors, container_tag,
             end
         end
         adjusted.open_target = etype
+        adjusted.open_adjustment = open_adjustment or false
         if adjusted.open_source._tag == "Ast.ExpCall"
            and adjusted.open_source._open_results then
             adjusted.open_source._open_results.target_type = etype
+            adjusted.open_source._open_results.adjustment =
+                adjusted.open_adjustment
         elseif adjusted.open_source._tag == "Ast.ExpDots"
                and adjusted.open_source._open_dots then
             adjusted.open_source._open_dots.target_type = etype
+            adjusted.open_source._open_dots.adjustment =
+                adjusted.open_adjustment
         end
     end
 
@@ -2255,13 +2382,13 @@ local function check_computed_map_constructor(node, st, errors, context)
     node._type = types.Map(ktype, vtype)
 
     for i, field in ipairs(node.fields) do
-        field.name = trycoerce(field.name, ktype, errors)
-        checkmatch("map key initializer at position " .. i, ktype,
-            field.name._type, errors, field.name.loc)
+        field.name = coerce_and_check(field.name, ktype,
+            "map key initializer at position " .. i,
+            errors, field.name.loc)
 
-        field.exp = trycoerce(field.exp, vtype, errors)
-        checkmatch("map value initializer at position " .. i, vtype,
-            field.exp._type, errors, field.exp.loc)
+        field.exp = coerce_and_check(field.exp, vtype,
+            "map value initializer at position " .. i,
+            errors, field.exp.loc)
     end
 end
 
@@ -2354,12 +2481,15 @@ local function checkfor(node, st, errors)
     end
 
     if loop_type_is_valid then
-        checkmatch("'for' start expression",
-            node.decl._type, node.start._type, errors, node.start.loc)
-        checkmatch("'for' finish expression",
-            node.decl._type, node.finish._type, errors, node.finish.loc)
-        checkmatch("'for' step expression",
-            node.decl._type, node.inc._type, errors, node.inc.loc)
+        -- Numeric-for bounds share the exact control representation. They do
+        -- not form assignment sinks and therefore neither coerce nor create a
+        -- gradual view of the control type.
+        check_exact_match("'for' start expression",
+            node.decl._type, node.start, errors, node.start.loc)
+        check_exact_match("'for' finish expression",
+            node.decl._type, node.finish, errors, node.finish.loc)
+        check_exact_match("'for' step expression",
+            node.decl._type, node.inc, errors, node.inc.loc)
     end
 
     checkstat(node.block, st, errors)
@@ -2411,20 +2541,21 @@ local function forin_dots_limit(exps)
 end
 
 local function check_forin_decl_init(decl, exp, st, errors)
+    local term = "generic for variable " .. decl.name
     if decl.type then
         checkdecl(decl, st, errors)
-        exp = trycoerce(exp, decl._type, errors)
+        exp = coerce_and_check(
+            exp, decl._type, term, errors, decl.loc)
     elseif decl.option then
         decl._type = optionize(exp._type)
         checkdecl(decl, st, errors)
-        exp = trycoerce(exp, decl._type, errors)
+        exp = coerce_and_check(
+            exp, decl._type, term, errors, decl.loc)
     else
         exp = tryforce(exp)
         decl._type = exp._type
         checkdecl(decl, st, errors)
     end
-    checkmatch("generic for variable " .. decl.name,
-        decl._type, exp._type, errors, decl.loc)
     return exp
 end
 
@@ -2672,17 +2803,15 @@ local function checkforin(node, st, errors)
 
     if ftype.params[1] then
         local old = exps[2]
-        exps[2] = trycoerce(exps[2], ftype.params[1], errors)
+        exps[2] = coerce_and_check(exps[2], ftype.params[1],
+            "generic for iterator state", errors, exps[2].loc)
         replace_adjusted_value(tuple_adjustment, old, exps[2])
-        checkmatch("generic for iterator state",
-            ftype.params[1], exps[2]._type, errors, exps[2].loc)
     end
     if ftype.params[2] then
         local old = exps[3]
-        exps[3] = trycoerce(exps[3], ftype.params[2], errors)
+        exps[3] = coerce_and_check(exps[3], ftype.params[2],
+            "generic for iterator initial control", errors, exps[3].loc)
         replace_adjusted_value(tuple_adjustment, old, exps[3])
-        checkmatch("generic for iterator initial control",
-            ftype.params[2], exps[3]._type, errors, exps[3].loc)
     end
 
     local close_type = exps[4]._type
@@ -2713,9 +2842,9 @@ local function checkforin(node, st, errors)
             close_ok = false
         elseif close_ftype.params[1] then
             local state_for_close = exps[2]
-            state_for_close = trycoerce(state_for_close, close_ftype.params[1], errors)
-            checkmatch("generic for close argument",
-                close_ftype.params[1], state_for_close._type, errors, exps[2].loc)
+            state_for_close = coerce_and_check(
+                state_for_close, close_ftype.params[1],
+                "generic for close argument", errors, exps[2].loc)
         end
         node._has_close = close_ok
     elseif close_type._tag ~= "Type.Nil" and close_type._tag ~= "Type.Invalid" then
@@ -2756,9 +2885,8 @@ local function checkforin(node, st, errors)
     if ftype.params[2] then
         local ctrlarg = hidden_exp(node.loc, node._result_decls[1])
         ctrlarg = tryforce(ctrlarg)
-        ctrlarg = trycoerce(ctrlarg, ftype.params[2], errors)
-        checkmatch("generic for iterator control argument",
-            ftype.params[2], ctrlarg._type, errors, node.loc)
+        ctrlarg = coerce_and_check(ctrlarg, ftype.params[2],
+            "generic for iterator control argument", errors, node.loc)
         table.insert(next_args, ctrlarg)
     end
     node._next_call = make_forin_call(node.loc, node._tuple_decls[1],
@@ -2788,9 +2916,9 @@ local function checkforin(node, st, errors)
         else
             if decl.type then
                 checkdecl(decl, st, errors)
-                exp = trycoerce(nil_exp(node.loc), decl._type, errors)
-                checkmatch("generic for variable " .. decl.name,
-                    decl._type, exp._type, errors, decl.loc)
+                exp = coerce_and_check(nil_exp(node.loc), decl._type,
+                    "generic for variable " .. decl.name,
+                    errors, decl.loc)
             else
                 checker.typeerror(errors, decl.loc,
                     "cannot infer type of generic for variable '%s' from a missing iterator result",
@@ -2923,9 +3051,9 @@ local checkstat_visitor = util.make_visitor({
                     checker.typeerror(errors, decl.loc,
                         "cannot initialize a local by copying a whole C array")
                 end
-                exp = trycoerce(exp, decl._type, errors)
-                checkmatch("declaration of local variable " .. decl.name,
-                    decl._type, exp._type, errors, decl.loc)
+                exp = coerce_and_check(exp, decl._type,
+                    "declaration of local variable " .. decl.name,
+                    errors, decl.loc)
                 replace_adjusted_value(adjusted, old, exp)
             end
             if not decl._type then
@@ -3003,8 +3131,8 @@ local checkstat_visitor = util.make_visitor({
             -- operand with `value` as the expected type (every value coerces to
             -- `value`) and materialize the coercion so the coder boxes it.
             checkexp(node.exp, st, errors, types.Value())
-            node.exp = trycoerce(node.exp, types.Value(), errors)
-            checkmatch("raise", types.Value(), node.exp._type, errors, node.loc)
+            node.exp = coerce_and_check(
+                node.exp, types.Value(), "raise", errors, node.loc)
         end
         -- `raise` is a terminator: control never falls through it.
         return true
@@ -3088,7 +3216,12 @@ local checkstat_visitor = util.make_visitor({
 
     ["Ast.StatAssign"] = function(node, st, errors)
         for _, var in ipairs(node.vars) do
-            checkvar(var, st, errors)
+            -- The outer lvalue is not an observation. In particular, a typed
+            -- Array/Map write may store a raw C pointer even though reading
+            -- that same slot type cannot establish its pointee identity.
+            -- Nested receivers (as in a[i][j]) are still checked normally
+            -- when the outer VarBracket checks its exp1.
+            checkvar(var, st, errors, nil, "write")
             check_c_assignment_storage(var, errors)
             if var._type and types.is_c_array(var._type) then
                 checker.typeerror(errors, var.loc,
@@ -3159,9 +3292,9 @@ local checkstat_visitor = util.make_visitor({
                         var._decl._assigned = true
                     end
                     local old = exp
-                    exp = trycoerce(exp, var._type, errors)
+                    exp = coerce_and_check(
+                        exp, var._type, "assignment", errors, var.loc)
                     replace_adjusted_value(adjusted, old, exp)
-                    checkmatch("assignment", var._type, exp._type, errors, var.loc)
                 end
             end
         end
@@ -3329,6 +3462,7 @@ end
 --   st: symbol table
 --   errors: list of compile-time errors
 --   context: expected type for this expression, if applicable
+--   mode: "write" only for the outer variable of an assignment target
 --   annotates the node with its type in a "_type" field
 checkvar = util.make_visitor({
     ["Ast.VarName"] = function(node, st, errors, _)
@@ -3546,17 +3680,31 @@ checkvar = util.make_visitor({
         end
     end,
 
-    ["Ast.VarBracket"] = function(node, st, errors, _)
+    ["Ast.VarBracket"] = function(node, st, errors, _, mode)
         checkexp(node.exp1, st, errors)
         node.exp1 = tryforce(node.exp1)
         local keystype, term
         local celem, cterm, cerr = c_index_elem_type(node.exp1._type)
         if node.exp1._type._tag == "Type.Array" then
-            node._type = optionize(node.exp1._type.elem)
+            local elem = node.exp1._type.elem
+            node._type = optionize(elem)
+            node._read_guard = types.gradual_guard(node._type) or false
+            if mode ~= "write" and not node._read_guard then
+                checker.typeerror(errors, node.loc,
+                    "cannot read array elements of type '%s' because the type has no sound runtime guard",
+                    types.tostring(elem))
+            end
             keystype = types.Integer()
             term = "array indexing"
         elseif node.exp1._type._tag == "Type.Map" then
-            node._type = optionize(node.exp1._type.values)
+            local values = node.exp1._type.values
+            node._type = optionize(values)
+            node._read_guard = types.gradual_guard(node._type) or false
+            if mode ~= "write" and not node._read_guard then
+                checker.typeerror(errors, node.loc,
+                    "cannot read map values of type '%s' because the type has no sound runtime guard",
+                    types.tostring(values))
+            end
             keystype = node.exp1._type.keys
             term = "map indexing"
         elseif celem then
@@ -3574,8 +3722,8 @@ checkvar = util.make_visitor({
 
         checkexp(node.exp2, st, errors, keystype)
         -- always try to coerce index key to key type
-        node.exp2 = trycoerce(node.exp2, keystype, errors)
-        checkmatch(term, keystype, node.exp2._type, errors, node.exp2.loc)
+        node.exp2 = coerce_and_check(
+            node.exp2, keystype, term, errors, node.exp2.loc)
     end,
 })
 
@@ -3687,6 +3835,7 @@ local function annotate_call_arguments(node, adjusted)
         source_type = adjusted.open_type,
         target_type = adjusted.open_target,
         start = adjusted.open_start,
+        adjustment = adjusted.open_adjustment,
     } or false
 end
 
@@ -3727,9 +3876,15 @@ local function mutable_c_call_argument_decl(exp, target)
     end
 
     local source = types.resolve_c_typedef(exp._type)
+    local planned_conversion = adjusted._adjustment
+        or adjusted._assignment_adjustment
+        or adjusted._written_cast
+        or adjusted._c_conversion
     if source and source._tag == "Type.CArray"
-       and (unsafe_array_decay or types.coerceable(exp._type, target)
-            or (adjusted._type and types.equals(adjusted._type, target))) then
+       and (unsafe_array_decay
+            or (planned_conversion
+                and adjusted._type
+                and types.equals(adjusted._type, target))) then
         return exp.var._decl, exp
     end
     return nil
@@ -3860,6 +4015,14 @@ annotate_call_results = function(node, ftype, demand, errors)
     node._flexrettype = ftype.flexrettype or false
     node._visible_types = {}
     node._result_sources = {}
+    -- A function value may turn out to be an ordinary Lua callable at run
+    -- time.  Record the target-directed conversion for every result that such
+    -- a callable can place into a Titan result slot.  `false` is deliberate:
+    -- it means this result type has no sound dynamic conversion (notably a raw
+    -- C pointer), so the generated Lua-callable branch must reject rather than
+    -- rediscovering a permissive category check.
+    node._lua_result_dynamic_plans = {}
+    node._strict_result_guard_plans = {}
     node._open_results = false
     node._finite_flex_prefix = 0
 
@@ -3868,6 +4031,10 @@ annotate_call_results = function(node, ftype, demand, errors)
     local function add(typ, source)
         table.insert(node._visible_types, typ)
         table.insert(node._result_sources, source)
+        table.insert(node._lua_result_dynamic_plans,
+            types.dynamic_coercion(typ) or false)
+        table.insert(node._strict_result_guard_plans,
+            types.gradual_guard(typ) or false)
     end
 
     for i = 1, math.min(ndemand, nfixed) do
@@ -3901,6 +4068,10 @@ annotate_call_results = function(node, ftype, demand, errors)
                 target_type = target,
                 start = start,
             }
+            node._lua_open_result_dynamic_plan =
+                types.dynamic_coercion(ftype.flexrettype) or false
+            node._strict_open_result_guard_plan =
+                types.gradual_guard(ftype.flexrettype) or false
             node._flex_result_demand = "open"
         end
     elseif ftype.flexrettype then
@@ -3993,9 +4164,8 @@ local function check_named_args(ftype, paramnames, fields, loc, fname, st, error
             checkexp(field.exp, st, errors, ptype)
             local term =
                 "named argument '" .. field.name .. "' of " .. fname
-            local exp = trycoerce(field.exp, ptype, errors, term)
-            checkmatch(term,
-                ptype, exp._type, errors, field.loc)
+            local exp = coerce_and_check(
+                field.exp, ptype, term, errors, field.loc)
             if supplied[index] then
                 checker.typeerror(errors, field.loc,
                     "named argument '%s' is supplied more than once", field.name)
@@ -4012,10 +4182,12 @@ local function check_named_args(ftype, paramnames, fields, loc, fname, st, error
             local ptype = ftype.params[i]
             local exp = ast.ExpNil(loc)
             exp._type = types.Nil()
-            if nil_can_adjust_to(ptype) then
-                exp = trycoerce(exp, ptype, errors)
-                checkmatch("omitted named argument '" .. name .. "' of " .. fname,
-                    ptype, exp._type, errors, loc)
+            local adjustment =
+                types.assignment_adjustment(exp._type, ptype)
+            if adjustment then
+                exp = coerce_and_check(exp, ptype,
+                    "omitted named argument '" .. name .. "' of " .. fname,
+                    errors, loc, adjustment)
             else
                 checker.typeerror(errors, loc,
                     "parameter '%s' of type %s cannot be omitted because it does not accept nil",
@@ -4209,41 +4381,58 @@ local function check_explicit_cast_relation(node, st, errors)
     checkexp(node.exp, st, errors, node.target)
     local source = node.exp._type
     local target = node.target
-    local ok
-    if types.equals(source, target) then
-        ok = true
-    elseif source._tag == "Type.Option"
-       and types.equals(source.base, target) then
-        -- Explicit unwrap of an option to its base type. `as` raises on nil;
-        -- `is` observes the same check and returns false.
-        ok = true
-    elseif is_mutable_c_address_source(node.exp)
+    local cast_plan = types.written_cast(source, target)
+
+    if is_mutable_c_address_source(node.exp)
        and types.c_mutable_address_coerceable(source, target)
        and not types.c_address_coerceable(source, target) then
         mark_mutable_c_address_source(node.exp)
-        ok = true
-    elseif types.is_c_function_pointer_void_cast(source, target) then
-        -- This one written conversion deliberately crosses C's function- and
-        -- object-pointer categories. Code generation uses titan_cast_func;
-        -- keep the contextual/implicit category rejection unchanged.
-        ok = true
-    else
+        assert(not cast_plan,
+            "mutable C-address cast unexpectedly has a type-only plan")
+        cast_plan = {
+            kind = "written_cast",
+            op = "coercion",
+            source = source,
+            target = target,
+            coercion = {
+                kind = "coercion",
+                op = "mutable_c_address",
+                source = source,
+                target = target,
+            },
+        }
+    elseif types.c_mutable_address_coerceable(source, target) then
+        checker.typeerror(errors, node.exp.loc,
+            "cannot take a mutable C address of non-addressable "
+            .. "expression of type '%s'",
+            types.tostring(source))
+        node._written_cast_failed = true
+        return target
+    elseif not cast_plan then
+        -- Unsafe object-pointer reinterpretation and mutable local address
+        -- taking depend on expression shape and, for the former, the active C
+        -- toolchain. They are deliberately absent from the type-only written
+        -- relation and become complete plans only here.
         local conversion = checker._unsafe_c_pointer_conversion(
             node.exp, target, errors, "explicit C cast")
         if conversion then
             node._c_conversion = conversion
-            ok = true
+            cast_plan = {
+                kind = "written_cast",
+                op = "explicit",
+                source = source,
+                target = target,
+                conversion = conversion,
+            }
         elseif conversion == false then
             -- The conversion helper already emitted the more precise
             -- category/qualifier/probe diagnostic.
-            ok = true
-        else
-            ok = types.explicitly_coerceable(source, target) or
-                 (types.coerceable(source, target) and
-                  types.compatible(source, target))
+            node._written_cast_failed = true
+            return target
         end
     end
-    if not ok then
+    node._written_cast = cast_plan or false
+    if not cast_plan then
         checker.typeerror(errors, node.loc, "cannot cast '%s' to '%s'",
             types.tostring(source), types.tostring(target))
     end
@@ -4313,9 +4502,10 @@ checkexp = util.make_visitor({
                 union.name, variant.name)
         else
             checkexp(node.value, st, errors, variant.payload)
-            node.value = trycoerce(node.value, variant.payload, errors)
-            checkmatch("payload of variant " .. variant.name,
-                variant.payload, node.value._type, errors, node.loc)
+            node.value = coerce_and_check(
+                node.value, variant.payload,
+                "payload of variant " .. variant.name,
+                errors, node.loc)
         end
         node._type = types.Nominal(union.name)
     end,
@@ -4480,21 +4670,25 @@ checkexp = util.make_visitor({
                         checkexp(cfield.exp, st, errors)
                     else
                         checkexp(cfield.exp, st, errors, found.type)
-                        cfield.exp = trycoerce(cfield.exp, found.type, errors)
-                        checkmatch("field " .. cfield.name,
-                            found.type, cfield.exp._type, errors, cfield.loc)
+                        cfield.exp = coerce_and_check(
+                            cfield.exp, found.type,
+                            "field " .. cfield.name,
+                            errors, cfield.loc)
                         cfield._field = found
                         supplied[found.name] = true
                     end
                 end
                 for _, rfield in ipairs(visible_fields) do
                     if not supplied[rfield.name] then
-                        if nil_can_adjust_to(rfield.type) then
-                            local exp = ast.ExpNil(node.loc)
-                            exp._type = types.Nil()
-                            exp = trycoerce(exp, rfield.type, errors)
-                            checkmatch("omitted field " .. rfield.name,
-                                rfield.type, exp._type, errors, node.loc)
+                        local exp = ast.ExpNil(node.loc)
+                        exp._type = types.Nil()
+                        local adjustment = types.assignment_adjustment(
+                            exp._type, rfield.type)
+                        if adjustment then
+                            exp = coerce_and_check(
+                                exp, rfield.type,
+                                "omitted field " .. rfield.name,
+                                errors, node.loc, adjustment)
                             exp._named_omitted = true
                             local cfield = ast.Field(node.loc, rfield.name, exp)
                             cfield._field = rfield
@@ -4653,27 +4847,29 @@ checkexp = util.make_visitor({
         end
         local loc = node.loc
         if op == "==" or op == "~=" then
-            -- tries to coerce to value if either side is value
-            if tlhs._tag == "Type.Value" or trhs._tag == "Type.Value" then
-                node.lhs = trycoerce(node.lhs, types.Value(), errors)
-                tlhs = node.lhs._type
-                node.rhs = trycoerce(node.rhs, types.Value(), errors)
-                trhs = node.rhs._type
-            end
             if tlhs._tag == "Type.Option" or trhs._tag == "Type.Option" then
                 node.lhs = trycoerce(node.lhs, optionize(tlhs), errors)
                 tlhs = node.lhs._type
                 node.rhs = trycoerce(node.rhs, optionize(trhs), errors)
                 trhs = node.rhs._type
             end
-            local mixed_numeric =
-                (tlhs._tag == "Type.Integer" and trhs._tag == "Type.Float") or
-                (tlhs._tag == "Type.Float"   and trhs._tag == "Type.Integer")
-            if not mixed_numeric and
-               (tlhs._tag ~= "Type.Option" or trhs._tag ~= "Type.Option" or
-                ((tlhs.base._tag ~= "Type.Integer" or trhs.base._tag ~= "Type.Float") and
-                 (tlhs.base._tag ~= "Type.Float" or trhs.base._tag ~= "Type.Integer"))) and
-               not types.compatible(tlhs, trhs) then
+            local comparison = types.comparable(tlhs, trhs)
+            node._comparison = comparison or false
+            if comparison then
+                local function apply_comparison_adjustment(exp, adjustment)
+                    if not adjustment then return exp end
+                    local adjusted, consumed = trycoerce(
+                        exp, adjustment.target, errors,
+                        "equality operand", adjustment)
+                    assert(consumed == adjustment,
+                        "equality operand lost its ComparisonPlan adjustment")
+                    return adjusted
+                end
+                node.lhs = apply_comparison_adjustment(
+                    node.lhs, comparison.left_adjustment)
+                node.rhs = apply_comparison_adjustment(
+                    node.rhs, comparison.right_adjustment)
+            else
                 checker.typeerror(errors, loc,
                     "trying to compare values of incomparable types: %s and %s",
                     types.tostring(tlhs), types.tostring(trhs))
@@ -4901,8 +5097,19 @@ checkexp = util.make_visitor({
                     node, demand, st, errors)
                 local original = node.exp
                 node.exp = trycoerce(original, synthesized, errors)
-                assert(node.exp ~= original
-                    and node.exp._tag == "Ast.ExpCast")
+                if node.exp == original then
+                    -- Error recovery: an invalid synthesized component (or an
+                    -- unreifiable raw-pointer tail) has already been diagnosed.
+                    -- Retain the contextual call shape without claiming that
+                    -- an assignment plan exists, so later checker passes can
+                    -- continue and report each source error exactly once.
+                    node.exp = ast.ExpCast(
+                        original.loc, original, synthesized)
+                    node.exp._type = synthesized
+                    node.exp._implicit_coercion = true
+                    node.exp._adjustment_failed = true
+                end
+                assert(node.exp._tag == "Ast.ExpCast")
                 -- This cast target is already a resolved Type.Function. It is
                 -- deliberately not redispatched through the ExpCast visitor:
                 -- the callee and every argument were checked exactly once.
@@ -4916,9 +5123,7 @@ checkexp = util.make_visitor({
             -- type. Named syntax remains unavailable because the callee is a
             -- structural value, not a direct declaration.
             if ftype._tag == "Type.Option" and ftype.base._tag == "Type.Function" then
-                local cast = ast.ExpCast(node.exp.loc, node.exp, ftype.base)
-                cast._type = ftype.base
-                node.exp = cast
+                node.exp = tryforce(node.exp)
                 ftype = ftype.base
             end
             if ftype._tag ~= "Type.Function" then
@@ -5011,9 +5216,7 @@ checkexp = util.make_visitor({
             -- Auto-unwrap an option receiver before resolving the method. The
             -- receiver is still generated once, before any named expressions.
             if otype._tag == "Type.Option" and otype.base._tag == "Type.Nominal" then
-                local cast = ast.ExpCast(node.exp.loc, node.exp, otype.base)
-                cast._type = otype.base
-                node.exp = cast
+                node.exp = tryforce(node.exp)
                 otype = otype.base
             end
             if otype._tag == "Type.Nominal" and
@@ -5231,6 +5434,14 @@ checkexp = util.make_visitor({
         -- Save the ordered list of enclosing decls this lambda captures, for
         -- codegen (closure-creation pushes + lambda-body upvalue indexing).
         node._captures = frame.captures
+        -- Lua closures allow at most 255 upvalues. Titan reserves the first
+        -- three for module/tag/native and the final one for the strict stack
+        -- entry, leaving 251 source-level captures.
+        if #node._captures > 251 then
+            checker.typeerror(errors, node.loc,
+                "function captures too many variables (%d, max 251)",
+                #node._captures)
+        end
 
         return node._type
     end,
@@ -5244,9 +5455,7 @@ checkexp = util.make_visitor({
         -- auto-unwrap an option receiver, like a method call does, so `p:m` on a
         -- Point? unwraps to the underlying record (the cast codegen nil-checks).
         if otype._tag == "Type.Option" and otype.base._tag == "Type.Nominal" then
-            local cast = ast.ExpCast(node.exp.loc, node.exp, otype.base)
-            cast._type = otype.base
-            node.exp = cast
+            node.exp = tryforce(node.exp)
             otype = otype.base
         end
         if otype._tag == "Type.CModule" then
@@ -5324,9 +5533,8 @@ checkexp = util.make_visitor({
     ["Ast.ExpDotsIndex"] = function(node, st, errors, _)
         local elem = resolve_vararg(st, node.loc, errors)
         checkexp(node.exp, st, errors, types.Integer())
-        node.exp = trycoerce(node.exp, types.Integer(), errors)
-        checkmatch("variadic index", types.Integer(), node.exp._type,
-            errors, node.exp.loc)
+        node.exp = coerce_and_check(node.exp, types.Integer(),
+            "variadic index", errors, node.exp.loc)
         if node._nilfill == nil then node._nilfill = false end
         node._type = node._type or elem
     end
@@ -5346,6 +5554,49 @@ checkexp = util.make_visitor({
 --         be `false`/a list; `node._type.rettypes` is authoritative here.
 --   opts (optional): { self_decl = Decl }. Returns (ret, frame): `ret` is
 --         whether the body always returns; `frame` carries `captures`.
+local function annotate_lua_function_boundary(node)
+    local targets = {}
+    if node._type._tag == "Type.Method" then
+        targets[1] = types.Nominal(node._type.fqtn)
+    end
+    for _, typ in ipairs(node._type.params) do
+        targets[#targets + 1] = typ
+    end
+
+    node._lua_dynamic_plans = {}
+    node._strict_guard_plans = {}
+    for index, typ in ipairs(targets) do
+        -- `false` is a checked policy decision, not a missing annotation.  A
+        -- raw-pointer parameter remains usable by exact Titan native calls,
+        -- while invocation through the genuine Lua entry rejects it.
+        node._lua_dynamic_plans[index] =
+            types.dynamic_coercion(typ) or false
+        node._strict_guard_plans[index] =
+            types.gradual_guard(typ) or false
+    end
+    if node._type.varargtype then
+        node._lua_vararg_dynamic_plan =
+            types.dynamic_coercion(node._type.varargtype) or false
+        node._strict_vararg_guard_plan =
+            types.gradual_guard(node._type.varargtype) or false
+    else
+        node._lua_vararg_dynamic_plan = false
+        node._strict_vararg_guard_plan = false
+    end
+
+    if node._type._tag == "Type.Method" then
+        node._bound_strict_guard_plans = {}
+        for index, typ in ipairs(node._type.params) do
+            node._bound_strict_guard_plans[index] =
+                types.gradual_guard(typ) or false
+        end
+        node._bound_strict_vararg_guard_plan =
+            node._type.varargtype
+                and (types.gradual_guard(node._type.varargtype) or false)
+                or false
+    end
+end
+
 function checkfuncbody(node, st, errors, opts)
     opts = opts or {}
     st:add_symbol("$function", node) -- for return type
@@ -5436,6 +5687,7 @@ function checkfuncbody(node, st, errors, opts)
             end
         end
     end
+    annotate_lua_function_boundary(node)
     -- The error-handling context counters do not cross a function boundary: a
     -- lambda body starts fresh (a bare `raise`/`return`/`break` inside it is the
     -- lambda's own, not the enclosing catch/finally's). Save and reset to 0
@@ -5883,9 +6135,10 @@ local toplevel_visitor = util.make_visitor({
                 "declaration of module variable '" .. node.decl.name .. "'",
                 node.decl.type.loc or node.loc, errors)
             checkexp(node.value, st, errors, node._type)
-            node.value = trycoerce(node.value, node._type, errors)
-            checkmatch("declaration of module variable " .. node.decl.name,
-                       node._type, node.value._type, errors, node.loc)
+            node.value = coerce_and_check(
+                node.value, node._type,
+                "declaration of module variable " .. node.decl.name,
+                errors, node.loc)
         elseif node.decl.option then
             checkexp(node.value, st, errors)
             node._type = optionize(node.value._type)
@@ -5895,6 +6148,11 @@ local toplevel_visitor = util.make_visitor({
             node.value = tryforce(node.value)
             node._type = node.value._type
         end
+        -- The public module `__newindex` path is a genuine Lua boundary.  Keep
+        -- an explicit unavailable marker for non-reifiable targets so its
+        -- generated setter rejects every attempted Lua write.
+        node._lua_write_dynamic_plan =
+            types.dynamic_coercion(node._type) or false
         if not isconst(node.value) then
             checker.typeerror(errors, node.value.loc,
                 "top level variable initialization must be constant")
@@ -5946,11 +6204,22 @@ local toplevel_visitor = util.make_visitor({
                 -- sees these indices, so there is no reserved uv[0].
                 local tfield = types.Field(fqtn, field.name, ftype, i - 1)
                 tfield.islocal = field.islocal and true or false
+                -- Public record writes are genuine Lua-to-Titan boundaries.
+                -- Preserve an explicit false for targets whose dynamic
+                -- conversion is unavailable so code generation emits a
+                -- rejecting setter instead of accepting a representation
+                -- category on its own.
+                tfield.dynamic_plan =
+                    types.dynamic_coercion(ftype) or false
+                field._dynamic_plan = tfield.dynamic_plan
                 table.insert(fields, tfield)
             end
         end
         node._type = types.Record(fqtn, fields, {}, {}, #fields)
         node._type.islocal = node.islocal and true or false
+        node._dynamic_receiver_plan =
+            assert(types.dynamic_coercion(types.Nominal(fqtn)),
+                "record nominal lacks its dynamic receiver plan")
         types.registry[fqtn] = node._type
     end,
 
@@ -5984,6 +6253,9 @@ local toplevel_visitor = util.make_visitor({
         node._type = types.Union(
             fqtn, variants, {}, {}, #node.variants)
         node._type.islocal = node.islocal and true or false
+        node._dynamic_receiver_plan =
+            assert(types.dynamic_coercion(types.Nominal(fqtn)),
+                "union nominal lacks its dynamic receiver plan")
         types.registry[fqtn] = node._type
     end,
 

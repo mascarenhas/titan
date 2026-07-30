@@ -122,8 +122,8 @@ a/b.so
 a/b/c.so
 ```
 
-The binary path comes from `TITAN_PATH_0_19` when set, otherwise `TITAN_PATH`,
-otherwise the default `.;<root>/lib/titan/0.19`. In an override, `;;` inserts
+The binary path comes from `TITAN_PATH_0_20` when set, otherwise `TITAN_PATH`,
+otherwise the default `.;<root>/lib/titan/0.20`. In an override, `;;` inserts
 that default at the same position. Search is **path-root first**: Titan walks
 all candidates in the first path root before moving to the second root. Once
 an earlier root contains a file at a relative candidate such as `a/b.so`, that
@@ -133,7 +133,7 @@ still advance to a deeper candidate such as `a/b/c.so`.
 
 A candidate claims `a.b.c` when it exports either member of the requested
 metadata pair, `a_b_c_abi` and `a_b_c_types`. Once claimed, validation is
-terminal: both entries must exist, the ABI marker must be `0.19`, and the type
+terminal: both entries must exist, the ABI marker must be `0.20`, and the type
 metadata must describe `a.b.c`. Broken, half-present, mismatched, or malformed
 metadata is an error rather than permission to skip to another file. An
 ancestor with neither entry is an unrelated nonclaim; an exact `a/b/c.so`
@@ -218,13 +218,21 @@ The standard library is the canonical provider with this name.
 
 ## Compiled compatibility
 
-The current provider contract is compiled-module ABI 0.19. Serialized
-interfaces now carry union/variant schemas, generated code shares their
-userdata/tag protocol, and the module-state public prefix now includes public
-record and union static closures after exported variables and top-level
-function closures. This preserves first-class imported constructor/static
-identity. A 0.18 consumer cannot reconstruct that prefix or union metadata, so
-the marker, `TITAN_PATH_0_19`, and `lib/titan/0.19` namespace advance together.
+The current provider contract is compiled-module ABI 0.20. Every Array proxy
+now has two private user values—backing and construction-time Lua writer—and
+every Titan function closure now has a final strict generic-entry trailer plus
+reverse per-state function-tag branding. An ABI-0.19 consumer or provider
+would misread either representation, so the marker, `TITAN_PATH_0_20`, and
+`lib/titan/0.20` namespace advance together. Ordinary DSO/archive metadata
+validation rejects 0.19 before either side can exchange an Array or function
+value; there is no compatibility adapter.
+
+ABI 0.19 introduced serialized union/variant schemas and made the module-state
+public prefix reconstruct public record and union static closures after
+exported variables and top-level function closures. That preserved
+first-class imported constructor/static identity, but its Arrays still had
+one proxy user value and its non-exact Titan calls reused the coercive Lua
+entry.
 
 ABI 0.18 changed the standard-library archive/runtime contract: logical
 objects began referring directly to callback trampolines promoted into the
@@ -232,17 +240,26 @@ runtime's external symbol contract and stopped referring to the retired
 libuv/coroutine helpers. A provider and runtime therefore both had to be 0.18;
 either direction of a 0.17/0.18 static pairing was incompatible.
 
-ABI 0.17 introduced the current Array meaning and representation: `{T}` is a
-canonical proxy over private dense-capacity backing storage, not an ordinary
-table. That semantic break changed what the existing native Array pointer slots
-mean, along with generated container code and Lua boundary checks, so 0.16 and
-0.17 providers could not be mixed. ABI 0.18 and 0.19 preserve that Array
-contract.
+ABI 0.17 introduced the canonical-proxy Array meaning: `{T}` is a proxy over
+private dense-capacity backing storage, not an ordinary table. That semantic
+break changed what the existing native Array pointer slots mean, along with
+generated container code and Lua boundary checks, so 0.16 and 0.17 providers
+could not be mixed. ABI 0.18 and 0.19 preserved its one-user-value proxy;
+ABI 0.20 retains the canonical identity while adding the writer user value.
 
 Historically, ABI 0.16 introduced prefix-container discovery: a 0.15 consumer
 recorded only an imported module's exact child-DSO pathname and could not
 discover a shallower 0.16 container. The installation creates no compatibility
 child copies for either transition.
+
+ABI 0.20 is a coordinated cutover with the forthcoming Interface feature.
+Interfaces are not source syntax in this relation/Array/function change: a
+relation-only validation image still contains the existing nine standard
+logical modules. Final ABI-0.20 release publication is gated on the Interface
+half, which completes the standard provider at ten logical metadata
+keys/loaders and eleven `luaopen_*` entries (native support plus those ten)
+under the same version rather than advancing it again. Artifacts from the two
+review heads must be rebuilt, not mixed.
 
 ## Standalone programs
 
@@ -254,12 +271,12 @@ legal in one program.
 
 ## The standard-library provider
 
-Titan's complete installed standard library is the production example of this
-model. One paired provider:
+On the relation-only review head, Titan's standard library remains the
+non-published nine-root validation example of this model. One paired provider:
 
 ```text
-$ROCKS_TREE/lib/titan/0.19/titan.so
-$ROCKS_TREE/lib/titan/0.19/titan.a
+$ROCKS_TREE/lib/titan/0.20/titan.so
+$ROCKS_TREE/lib/titan/0.20/titan.a
 ```
 
 contains the native support entry plus the independent logical modules
@@ -287,3 +304,9 @@ library. There are
 no production child DSOs, aliases, symbolic links, hard links, or Lua-facing
 copies. `require "titan.async"` and `import "async"` still select the same
 logical module and state; only their physical provider has been combined.
+
+The final coordinated ABI-0.20 publication adds `titan.io` as the tenth
+logical module and publishes its tenth loader/key in this same pair, as
+described under [Compiled compatibility](#compiled-compatibility). The
+nine-root intermediate image is validation evidence for this change, not a
+separately released ABI layout.

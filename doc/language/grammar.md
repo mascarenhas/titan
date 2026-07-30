@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.19 prototype compiler: lexical conventions, the complete syntactic
+0.20 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
@@ -546,8 +546,9 @@ confused rule is not syntax at all:
    error; their operand is an `unopexp`, so chaining grammatically
    requires parentheses (`(x as integer) is value`). Which casts/tests are
    then *accepted* is a typing matter ([Expressions](expressions.md)) —
-   the checker rejects `(x as integer) as float`, for instance, with
-   `cannot cast 'integer' to 'float'`.
+   each parenthesized edge is checked independently. For example,
+   `(x as integer) as float` is accepted because the second edge is a written
+   numeric conversion, while `(x as integer) as string` is rejected.
 6. **Lvalues cannot be parenthesized.** `(x) = 1` is a syntax error
    (`Expected a valid lvalue in the left side of assignment but found
    a regular expression.`).

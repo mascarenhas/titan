@@ -7,9 +7,11 @@ Titan has two structural container types:
 - a **Map**, written `{K: V}`, is an ordinary Lua-style key/value dictionary.
 
 They use different run-time protocols and are never interchangeable merely
-because both contain indexed values. Compatibility recurses only between the
-same container kind: `{value}` is compatible with `{integer}`, but neither is
-compatible with `{integer: value}`.
+because both contain indexed values. Gradual consistency descends only between
+the same container kind: `{value}` is consistent with `{integer}`, but neither
+is consistent with `{integer: value}`. This does not lift ordinary
+conversions: `{integer}` cannot be used as `{float}` merely because one
+integer can be converted to one float.
 
 The distinction is visible at the Lua boundary. A Map is an ordinary Lua
 table. An Array has a private Lua table backing its fast native operations and
@@ -46,6 +48,38 @@ end
 ```
 
 See [Option types](option-types.md) for the general nil-flow rules.
+
+Every present element is also checked with the **strict gradual guard** for
+`T` before typed Titan code uses it. This remains true after an Array has
+passed through `{value}`, `value`, Lua, an import, or a nested container.
+Strict means that an integer slot requires an actual Lua integer, a float slot
+an actual Lua float, and a boolean slot an actual boolean; a typed read does
+not narrow an integral float, promote an integer, apply truthiness, introduce
+or force an Option, or assert a raw C pointer. It either produces `T` or raises
+before native code sees a value of the wrong representation.
+
+The checker must be able to build that guard. If `T?` is not guardable, the
+indexing expression is rejected at compile time rather than compiled as an
+operation that can only fail. Raw C pointers are the current important case:
+an Array type containing one can be written as a type, but reading an element
+through that view is rejected. Constructing such an Array is also rejected
+because every Array construction must install a sound writer for future
+genuine-Lua writes.
+
+```titan
+function replace(a: {value})
+    a[1] = 2.0
+end
+
+function checked(): integer
+    local a: {integer} = {1}
+    replace(a)             -- a gradual view, not an element conversion
+    return a[1]            -- raises: the stored value is a float
+end
+```
+
+The same strict-observation rule applies to Maps and is defined centrally in
+the [normative boundary matrix](types.md#normative-boundary-matrix).
 
 ### Positional constructors
 
@@ -257,8 +291,10 @@ not by a keyed Map or record constructor.
 
 ### Reads, writes, and deletion
 
-Map indexing converts the key to `K` and returns `V?`. Writing converts both
-the key and value; writing nil deletes the entry:
+Map indexing converts the query key to `K` and returns `V?`. Every present
+value is checked with the same strict target guard as an Array element before
+Titan uses it. Writing from typed Titan code adjusts both the key and value;
+writing nil deletes the entry:
 
 ```titan
 function bump(m: {string: integer}, key: string): integer
@@ -273,6 +309,21 @@ end
 
 Maps use raw Lua table operations. A metatable attached by Lua does not make
 Titan Map indexing dispatch `__index` or `__newindex`.
+
+Because the Map is the ordinary table, raw Lua code can mutate it without an
+intercepting writer. Titan does not add an origin bit, a proxy, or provenance
+tracking. A later typed read is therefore strict regardless of whether the
+slot came from exact Titan code, a Titan `{value}` view, or Lua. For example,
+a Lua float `2.0` stored into a `{string: integer}` Map raises when Titan reads
+it as `integer`; the read does not apply the integral-float dynamic coercion.
+This asymmetry is deliberate: genuine-Lua function arguments and intercepted
+Array writes are dynamic boundaries, while raw Map mutation is followed only
+by a strict typed observation.
+
+As with Arrays, an unguardable value type makes the indexing expression a
+compile-time error. A `{string: *c.T}` Map may be constructed or written from
+statically typed Titan code, but `m[key]` through that raw-pointer value view is
+rejected because lightuserdata cannot prove the pointee type.
 
 ### Integer-Map length
 
@@ -303,11 +354,14 @@ At a Lua-visible boundary the two container kinds are deliberately distinct:
 | `T?` containing an Array | nil or the canonical proxy |
 | `value` containing an Array | canonical proxy |
 
-Every Array backing/proxy pair is one-to-one. Passing an Array repeatedly
-through module fields, record fields, union payloads, functions, `value`, or
-Lua returns the same
-proxy identity. Map keys and values are Lua-visible storage, so an Array
-stored in a Map is stored as that proxy, never as its private table.
+Every Array backing/proxy pair is one-to-one. All Arrays in one Lua state use
+one shared protected proxy metatable, so checking the outer Array kind remains
+a direct metatable-identity test rather than a per-element type lookup.
+Passing an Array repeatedly through module fields, record fields, union
+payloads, functions, `value`, imports, nested boxes, or Lua returns preserves
+the same proxy identity and construction policy. Map keys and values are
+Lua-visible storage, so an Array stored in a Map is stored as that proxy,
+never as its private table.
 
 The boundary conversion rules are:
 
@@ -329,9 +383,37 @@ exported Array—and pass that proxy back.
 
 Lua indexing the proxy requires an integral numeric key. Numeric strings and
 fractional numbers raise. Reads below 1 return nil; writes below 1 raise.
-`__newindex` stores the incoming Lua value without an element-type check.
-Titan performs the declared check later when typed code reads that position,
-keeping boundary work constant-time.
+
+Every Array proxy carries the dynamic conversion policy chosen by the
+Array's construction-time, context-adjusted element type. A genuine-Lua
+non-nil write runs that policy before mutation. Thus an Array constructed as
+`{integer}` accepts `2.0` from Lua and stores the converted integer, applies
+truthiness for a `boolean` element, and rejects values that the canonical
+dynamic conversion cannot produce. Function arguments, exported
+module-variable writes, public record-field writes, and non-Titan Lua callable
+results use the exact same target rules; see the
+[normative boundary matrix](types.md#normative-boundary-matrix).
+
+Writing nil is deletion and bypasses the writer entirely. If a non-nil
+conversion fails, capacity, deterministic length, and existing contents are
+unchanged. Titan-origin writes do not invoke this Lua writer: their
+checker-selected static adjustment applies at the Titan store, and any later
+typed view still pays its strict read guard. The writer is therefore a policy
+for future genuine-Lua writes, not evidence that every current element has one
+particular type.
+
+The representation that carries this policy is fixed:
+
+* the private backing table's reserved key 0 points to the canonical proxy;
+* proxy user value 1 points back to the backing table; and
+* proxy user value 2 holds the constructing module's writer closure.
+
+Each module generates and caches the closures needed by the Array types it
+actually constructs. There is no global writer registry, no writer interning,
+no “first one wins” rule, and no writer-identity comparison when a static view
+changes. The closure retains its constructing module when nominal or foreign
+conversion data is needed. Standalone programs similarly construct their
+`main(args: {string})` Array with a fixed string writer.
 
 ### Raw and stock table-library behavior
 
@@ -348,23 +430,29 @@ operations a function needs. Because an Array proxy necessarily supplies
 `table.insert`, `table.remove`, `table.move`, `table.sort`, `table.concat`, and
 `table.unpack` operate through those callbacks rather than rejecting the
 proxy. Their effects therefore use the same positive-index and deterministic
-length transitions; values written by Lua remain subject to a later typed
-read check. This differs from the raw functions above, which do reject.
+length transitions and the construction-time dynamic writer. A later typed
+read still performs its independent strict target guard. This differs from
+the raw functions above, which do reject.
 
 The Lua debug library can bypass metatable protection and expose or replace
-the proxy's private user value. A C module can inspect or mutate Lua's
-internal Table directly. Doing either explicitly leaves Titan's safety
-contract: reading or changing the private backing table, key 0, user value,
-metatable, or stored length is undefined behavior. Titan does not patch Lua or
-attempt to recover from such corruption.
+either private user value. A C module can inspect or mutate Lua's internal
+Table directly. Doing either deliberately leaves Titan's safety contract:
+reading or changing the private backing table, key 0, either user value,
+metatable, writer, or stored length is programmer-responsible and may violate
+Titan invariants. The debug library is not available to untrusted code under
+Titan's contract, and Titan does not add defensive checks for corruption
+performed through it.
 
 ## Performance summary
 
 Array positive reads and in-capacity writes are direct array-slot operations.
 They do not perform a hash lookup, metatable dispatch, registry lookup, or
-length scan. `#array` is O(1). Growth is amortized; a tail deletion may scan
-backward over holes. The Array's one private hash entry and proxy add a fixed
-per-Array ownership cost.
+length scan. In particular, a typed read never loads or compares the writer;
+the shared proxy metatable remains the fast outer tag even for nested Arrays.
+`#array` is O(1). Growth is amortized; a tail deletion may scan backward over
+holes. The Array's one private hash entry, proxy, second user-value slot, and
+GC edge to the writer (and through it, when needed, the constructing module)
+add a fixed per-Array ownership cost.
 
 Map operations use Lua's specialized raw table paths selected from the static
 key type. Positional integer-Map construction preallocates the ordinary table
@@ -377,3 +465,8 @@ canonical proxy; case extraction does not manufacture a second proxy.
 Lua, `value`, Map storage, and other generic boundaries pay a constant-time
 proxy validation or lookup. See [Dense Arrays](../implementation/dense-arrays.md)
 for the backing/proxy protocol, GC barriers, and lowering details.
+
+The second proxy user value is an ABI change in Titan 0.20. Providers from ABI
+0.17 through 0.19 use the earlier one-user-value Array layout and must be
+rejected by the ordinary compiled-provider ABI check before either side
+exchanges an Array; Titan does not attempt an in-place compatibility shim.

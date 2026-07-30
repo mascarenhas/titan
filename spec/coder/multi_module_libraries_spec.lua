@@ -106,7 +106,7 @@ local function compiler_argv(workspace, source_root, ...)
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "CCACHE_DISABLE=1",
-        "TITAN_PATH_0_19=" .. workspace,
+        "TITAN_PATH_0_20=" .. workspace,
         "TITAN_PATH=",
     }
     if PREFIX then
@@ -1070,7 +1070,7 @@ function exact(x: integer): integer
     return provider.twice(provider.inc, x)
 end
 
-function generic(x: integer): integer
+function roundtrip_exact(x: integer): integer
     local dynamic: value = provider.inc
     local f: (integer) -> integer = dynamic
     return f(x)
@@ -1107,7 +1107,8 @@ local facade = import "shape.facade"
 function run(): integer
     local foo: facade.Foo = facade.make(40)
     local plus: (integer) -> integer = foo:plus
-    return foo:plus(1) + plus(2) + facade.exact(1) + facade.generic(5)
+    return foo:plus(1) + plus(2) + facade.exact(1)
+        + facade.roundtrip_exact(5)
 end
 ]])
         ok, output, why, code = compile(workspace, source_root, "consumer")

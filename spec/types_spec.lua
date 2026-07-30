@@ -219,150 +219,723 @@ describe("Titan types", function()
             types.StaticMethod("sample.Box", "items", {i}, {s}, i, b, {})))
     end)
 
-    describe("directional function compatibility", function()
+    it("keeps exact function equality strict across arity and tails",
+    function()
+        local i = types.Integer()
+        local function fn(params, results, varargtype, flexrettype)
+            return types.Function(params or {}, results or {}, false,
+                varargtype or false, flexrettype or false)
+        end
+        local base = fn({i}, {i})
+        assert.falsy(types.equals(base, fn({}, {i})))
+        assert.falsy(types.equals(base, fn({i}, {i, i})))
+        assert.falsy(types.equals(base, fn({i}, {i}, i)))
+        assert.falsy(types.equals(base, fn({i}, {i}, false, i)))
+        assert.falsy(types.equals(
+            types.Function({i}, {i}, true, false, false), base))
+    end)
+
+    describe("separated type relations", function()
         local function fn(params, results, varargtype, flexrettype)
             return types.Function(params or {}, results or {}, false,
                 varargtype or false, flexrettype or false)
         end
 
-        it("uses expected-found order for fixed input and result arity",
-        function()
-            local i, s = types.Integer(), types.String()
-            local input_wide = fn({i, s})
-            local input_short = fn({i})
-            assert.truthy(types.compatible(input_wide, input_short))
-            assert.falsy(types.compatible(input_short, input_wide))
-
-            local result_short = fn({}, {i})
-            local result_wide = fn({}, {i, s})
-            assert.truthy(types.compatible(result_short, result_wide))
-            assert.falsy(types.compatible(result_wide, result_short))
+        it("does not expose the retired aggregate relation APIs", function()
+            assert.is_nil(types.compatible)
+            assert.is_nil(types.coerceable)
+            assert.is_nil(types.explicitly_coerceable)
         end)
 
-        it("checks moved fixed inputs and variadic tails contravariantly",
+        it("normalizes transparent aliases without following cycles",
         function()
-            local i, s = types.Integer(), types.String()
-            local cases = {
-                { "short actual ignores fixed suffix", fn({i, s}), fn({i}), true },
-                { "actual integer tail accepts moved integer", fn({i, i}), fn({i}, {}, i), true },
-                { "actual string tail rejects moved integer", fn({i, i}), fn({i}, {}, s), false },
-                { "fixed actual ignores expected tail", fn({i}, {}, i), fn({i}), true },
-                { "matching tails", fn({i}, {}, i), fn({i}, {}, i), true },
-                { "incompatible observed tails", fn({i}, {}, i), fn({i}, {}, s), false },
-                { "nilable hidden actual fixed parameter", fn({i}), fn({i, types.Option(i)}), true },
-                { "value hidden actual fixed parameter", fn({i}), fn({i, types.Value()}), true },
-                { "non-nilable hidden actual fixed parameter", fn({i}), fn({i, i}), false },
-                { "expected tail reaches hidden actual fixed parameter", fn({i}, {}, i), fn({i, types.Option(i)}), true },
-                { "expected tail incompatible with hidden actual fixed parameter", fn({i}, {}, i), fn({i, types.Option(s)}), false },
-                { "all hidden actual fixed parameters are checked", fn({i}), fn({i, types.Option(i), s}), false },
+            local cint = types.CInteger("int", true, 3, 32)
+            local aliases = types.CTypedef("first",
+                types.CTypedef("second",
+                    types.CTypedef("third", cint)))
+            assert.is_true(types.normalize(aliases) == cint)
+
+            local legacy = {
+                _tag = "Type.Typedef",
+                name = "legacy",
+                _type = {
+                    _tag = "Type.Typedef",
+                    name = "older",
+                    _type = types.Integer(),
+                },
             }
-            for _, case in ipairs(cases) do
-                assert.same(case[4], types.compatible(case[2], case[3]),
-                    case[1])
+            assert.equal("Type.Integer", types.normalize(legacy)._tag)
+
+            local cycle = {
+                _tag = "Type.Typedef",
+                name = "cycle",
+            }
+            cycle._type = cycle
+            assert.is_nil(types.normalize(cycle))
+
+            local qualified =
+                types.CTypedef("const_int", cint, {"const"})
+            assert.is_true(types.normalize(qualified) == cint)
+        end)
+
+        it("keeps relation classifications invariant under long aliases",
+        function()
+            local function legacy_chain(base)
+                local result = base
+                for index = 1, 64 do
+                    result = {
+                        _tag = "Type.Typedef",
+                        name = "legacy_" .. index,
+                        _type = result,
+                    }
+                end
+                return result
+            end
+
+            local function c_chain(base)
+                local result = base
+                for index = 1, 64 do
+                    result = types.CTypedef(
+                        "c_alias_" .. index, result)
+                end
+                return result
+            end
+
+            local function classification(result)
+                if not result then return false end
+                return (result.kind or "") .. ":" .. (result.op or "")
+            end
+
+            local i, f, v =
+                types.Integer(), types.Float(), types.Value()
+            local alias_i = legacy_chain(i)
+            assert.is_true(types.normalize(alias_i) == i)
+            assert.equal(types.has_tvalue_representation(i),
+                types.has_tvalue_representation(alias_i))
+            assert.equal(types.has_sound_gradual_guard(i),
+                types.has_sound_gradual_guard(alias_i))
+            assert.equal(types.consistent(i, v),
+                types.consistent(alias_i, v))
+            assert.equal(classification(types.gradual_guard(i)),
+                classification(types.gradual_guard(alias_i)))
+            assert.equal(classification(types.dynamic_coercion(i)),
+                classification(types.dynamic_coercion(alias_i)))
+            assert.equal(classification(types.coercion(i, f)),
+                classification(types.coercion(alias_i, f)))
+            assert.equal(classification(types.written_cast(v, i)),
+                classification(types.written_cast(v, alias_i)))
+            assert.equal(classification(types.comparable(i, v)),
+                classification(types.comparable(alias_i, v)))
+            assert.equal(classification(
+                types.assignment_adjustment(i, v)),
+                classification(
+                    types.assignment_adjustment(alias_i, v)))
+            assert.equal(classification(types.callable_adjustment(
+                    fn({i}), fn({v}))),
+                classification(types.callable_adjustment(
+                    fn({alias_i}), fn({v}))))
+
+            local ci = types.CInteger("int", true, 3, 32)
+            local alias_ci = c_chain(ci)
+            assert.is_true(types.normalize(alias_ci) == ci)
+            assert.equal(types.consistent(ci, v),
+                types.consistent(alias_ci, v))
+            assert.equal(classification(types.dynamic_coercion(ci)),
+                classification(types.dynamic_coercion(alias_ci)))
+            assert.equal(classification(types.coercion(ci, i)),
+                classification(types.coercion(alias_ci, i)))
+            assert.equal(classification(types.written_cast(v, ci)),
+                classification(types.written_cast(v, alias_ci)))
+
+            local raw_pointer = types.CPointer(ci, {})
+            local alias_pointer = c_chain(raw_pointer)
+            assert.equal("explicit",
+                assert(types.written_cast(v, alias_pointer)).op)
+            assert.is_false(types.dynamic_coercion(alias_pointer))
+        end)
+
+        it("rejects cyclic alias graphs in every new relation", function()
+            local legacy_a = {
+                _tag = "Type.Typedef",
+                name = "legacy_a",
+            }
+            local legacy_b = {
+                _tag = "Type.Typedef",
+                name = "legacy_b",
+            }
+            legacy_a._type, legacy_b._type = legacy_b, legacy_a
+
+            local c_a = types.CTypedef("c_a", false)
+            local c_b = types.CTypedef("c_b", c_a)
+            c_a.target = c_b
+
+            local i, v = types.Integer(), types.Value()
+            for _, cycle in ipairs({legacy_a, legacy_b, c_a, c_b}) do
+                assert.is_nil(types.normalize(cycle))
+                assert.is_false(
+                    types.has_tvalue_representation(cycle))
+                assert.is_false(types.has_sound_gradual_guard(cycle))
+                assert.is_false(types.gradual_guard(cycle))
+                assert.is_false(types.dynamic_coercion(cycle))
+                assert.is_false(types.consistent(cycle, cycle))
+                assert.is_false(types.consistent(cycle, v))
+                assert.is_false(types.consistent(v, cycle))
+                assert.is_false(types.coercion(cycle, cycle))
+                assert.is_false(types.coercion(cycle, i))
+                assert.is_false(types.coercion(i, cycle))
+                assert.is_false(types.written_cast(cycle, cycle))
+                assert.is_false(types.written_cast(v, cycle))
+                assert.is_false(types.written_cast(cycle, v))
+                assert.is_false(types.comparable(cycle, v))
+                assert.is_false(
+                    types.assignment_adjustment(cycle, i))
+                assert.is_false(
+                    types.assignment_adjustment(cycle, cycle))
+                assert.is_false(types.callable_adjustment(
+                    fn({cycle}), fn({i})))
+                assert.is_false(types.consistent(
+                    fn({}, {cycle}), fn({}, {i})))
             end
         end)
 
-        it("uses ordinary component coercions in the directional slots",
+        it("defines a reflexive symmetric non-transitive consistency",
         function()
-            local i, f, b = types.Integer(), types.Float(), types.Boolean()
-            -- The actual accepts float, so an integer sent through the expected
-            -- type can use the ordinary integer-to-float input conversion.
-            assert.truthy(types.compatible(fn({i}), fn({f})))
-            assert.truthy(types.compatible(fn({i}), fn({b})))
-            -- The actual produces integer, so a float consumer can use the
-            -- ordinary result conversion at the generic boundary.
-            assert.truthy(types.compatible(fn({}, {f}), fn({}, {i})))
-            assert.truthy(types.compatible(fn({}, {b}), fn({}, {i})))
+            local i, s, v = types.Integer(), types.String(), types.Value()
+            local oi = types.Option(i)
+            local samples = {
+                i, s, v, oi,
+                types.Array(i),
+                types.Map(s, i),
+                fn({i}, {s}),
+                types.Nominal("sample.Box"),
+            }
+            for _, typ in ipairs(samples) do
+                assert.is_true(types.consistent(typ, typ),
+                    types.tostring(typ))
+            end
+
+            local pairs = {
+                {i, v},
+                {types.Array(i), types.Array(v)},
+                {types.Map(s, i), types.Map(v, v)},
+                {types.Option(i), types.Option(v)},
+                {fn({i}, {v}), fn({v}, {i})},
+            }
+            for _, pair in ipairs(pairs) do
+                assert.equal(
+                    types.consistent(pair[1], pair[2]),
+                    types.consistent(pair[2], pair[1]))
+                assert.is_true(types.consistent(pair[1], pair[2]))
+            end
+            for _, left in ipairs(samples) do
+                for _, right in ipairs(samples) do
+                    assert.equal(
+                        types.consistent(left, right),
+                        types.consistent(right, left),
+                        types.tostring(left) .. " ~ "
+                            .. types.tostring(right))
+                end
+            end
+
+            assert.is_true(types.consistent(i, v))
+            assert.is_true(types.consistent(v, s))
+            assert.is_false(types.consistent(i, s))
+            assert.is_true(types.consistent(
+                types.Array(i), types.Array(v)))
+            assert.is_true(types.consistent(
+                types.Array(v), types.Array(s)))
+            assert.is_false(types.consistent(
+                types.Array(i), types.Array(s)))
+            assert.is_true(types.consistent(
+                types.Map(i, i), types.Map(v, v)))
+            assert.is_true(types.consistent(
+                types.Map(v, v), types.Map(s, s)))
+            assert.is_false(types.consistent(
+                types.Map(i, i), types.Map(s, s)))
         end)
 
-        it("checks fixed and flexible results covariantly", function()
-            local i, s = types.Integer(), types.String()
+        it("does not let recursive callable cycles prove consistency",
+        function()
+            local i = types.Integer()
+            local short, wide = fn({i}), fn({i, i})
+            local a, b, x, y = fn(), fn(), fn(), fn()
+            a.params, b.params = {y, short}, {x, wide}
+            a.rettypes, b.rettypes = {y}, {x}
+            x.rettypes, y.rettypes = {a}, {b}
+
+            assert.is_false(types.callable_adjustment(a, b))
+            assert.is_false(types.callable_adjustment(b, a))
+            assert.is_false(types.consistent(a, b))
+            assert.is_false(types.consistent(b, a))
+
+            -- A pure non-exact X = X cycle has no finite derivation. The
+            -- optional suffix makes one direction nil-fillable and the other
+            -- ignorable, so only the pending aligned component could
+            -- incorrectly serve as its own proof.
+            local p, q = fn(), fn()
+            p.params = {p, types.Option(p)}
+            q.params = {q}
+            assert.is_false(types.equals(p, q))
+            assert.is_false(types.callable_adjustment(p, q))
+            assert.is_false(types.callable_adjustment(q, p))
+            assert.is_false(types.consistent(p, q))
+            assert.is_false(types.consistent(q, p))
+        end)
+
+        it("keeps automatic conversions out of consistency", function()
+            local i, f = types.Integer(), types.Float()
+            local ci = types.CInteger("int", true, 3, 32)
+            local cf = types.CFloat("double")
+            local oi = types.Option(i)
+
+            local rejected = {
+                {i, f},
+                {i, oi},
+                {types.Array(i), types.Array(f)},
+                {types.Array(f), types.Array(cf)},
+                {types.Map(i, i), types.Map(i, f)},
+                {fn({}, {i}), fn({}, {oi})},
+                {fn({}, {i}), fn({}, {f})},
+                {fn({i}), fn({f})},
+                {ci, i},
+                {cf, f},
+            }
+            for _, pair in ipairs(rejected) do
+                assert.is_false(types.consistent(pair[1], pair[2]),
+                    types.tostring(pair[1]) .. " ~ "
+                        .. types.tostring(pair[2]))
+                assert.is_false(types.consistent(pair[2], pair[1]),
+                    "symmetry for rejected conversion pair")
+            end
+
+            local raw_pointer = types.CPointer(ci, {})
+            assert.is_false(types.consistent(raw_pointer, types.Value()))
+            assert.is_false(types.consistent(types.Value(), raw_pointer))
+        end)
+
+        it("keeps future Interface wrapping as a direct nominal policy",
+        function()
+            local concrete = types.Nominal("sample.Concrete")
+            local interface = types.Nominal("sample.Interface")
+            local methods = { marker = "resolved at cast site" }
+            local calls = 0
+            local policy = {
+                visibility = "sample",
+                interface_coercion = function(source, target, received)
+                    calls = calls + 1
+                    assert.is_true(source == concrete)
+                    assert.is_true(target == interface)
+                    assert.is_true(received.visibility == "sample")
+                    return methods
+                end,
+            }
+
+            assert.is_false(types.consistent(concrete, interface))
+            assert.is_false(types.coercion(concrete, interface))
+            local coercion =
+                assert(types.coercion(concrete, interface, policy))
+            assert.equal("interface_wrapper", coercion.op)
+            assert.is_true(coercion.source == concrete)
+            assert.is_true(coercion.target == interface)
+            assert.is_true(coercion.methods == methods)
+            assert.equal(1, calls)
+
+            assert.is_false(types.coercion(
+                types.Array(concrete), types.Array(interface), policy))
+            assert.is_false(types.callable_adjustment(
+                fn({}, {concrete}), fn({}, {interface})))
+            assert.equal(1, calls)
+        end)
+
+        it("does not consult operational relations from consistency",
+        function()
+            local saved = {
+                coercion = types.coercion,
+                dynamic = types.dynamic_coercion,
+                written = types.written_cast,
+            }
+            local function forbidden()
+                error("operational relation reached from consistency")
+            end
+            types.coercion = forbidden
+            types.dynamic_coercion = forbidden
+            types.written_cast = forbidden
+            local ok, result = pcall(types.consistent,
+                types.Array(types.Integer()),
+                types.Array(types.Value()))
+            types.coercion = saved.coercion
+            types.dynamic_coercion = saved.dynamic
+            types.written_cast = saved.written
+            assert.is_true(ok)
+            assert.is_true(result)
+        end)
+
+        it("returns named direct coercion plans without structural lifting",
+        function()
+            local i, f = types.Integer(), types.Float()
+            local oi, of = types.Option(i), types.Option(f)
+            local ci = types.CInteger("int", true, 3, 32)
+
+            local numeric = assert(types.coercion(i, f))
+            assert.equal("coercion", numeric.kind)
+            assert.equal("integer_to_float", numeric.op)
+
+            local wrap = assert(types.coercion(i, oi))
+            assert.equal("option_wrap", wrap.op)
+            assert.equal("identity", wrap.inner.kind)
+
+            local force = assert(types.coercion(oi, i))
+            assert.equal("option_force", force.op)
+            assert.equal("identity", force.inner.kind)
+
+            local mapped = assert(types.coercion(oi, of))
+            assert.equal("option_map", mapped.op)
+            assert.equal("integer_to_float", mapped.inner.op)
+
+            assert.equal("c_integer_to_integer",
+                assert(types.coercion(ci, i)).op)
+            local raw_pointer = types.CPointer(ci, {})
+            assert.equal("c_value_to_value",
+                assert(types.coercion(raw_pointer, types.Value())).op)
+            assert.equal("direct_coercion",
+                assert(types.assignment_adjustment(
+                    raw_pointer, types.Value())).kind)
+            assert.is_false(
+                types.coercion(types.Value(), raw_pointer))
+            assert.is_false(types.coercion(i, i))
+            assert.is_false(types.coercion(
+                types.Array(i), types.Array(f)))
+            assert.is_false(types.coercion(
+                fn({}, {i}), fn({}, {f})))
+        end)
+
+        it("separates strict guards from dynamic coercions", function()
+            local integer_guard =
+                assert(types.gradual_guard(types.Integer()))
+            assert.equal("gradual_guard", integer_guard.kind)
+            assert.equal("integer", integer_guard.op)
+
+            local option_guard =
+                assert(types.gradual_guard(
+                    types.Option(types.Boolean())))
+            assert.equal("option", option_guard.op)
+            assert.equal("boolean", option_guard.inner.op)
+
+            local dynamic_integer =
+                assert(types.dynamic_coercion(types.Integer()))
+            assert.equal("dynamic_coercion", dynamic_integer.kind)
+            assert.equal("integer", dynamic_integer.op)
+            assert.equal("truthiness",
+                assert(types.dynamic_coercion(types.Boolean())).op)
+
+            local dynamic_option =
+                assert(types.dynamic_coercion(
+                    types.Option(types.Boolean())))
+            assert.equal("option", dynamic_option.op)
+            assert.equal("truthiness", dynamic_option.inner.op)
+
+            local raw_pointer = types.CPointer(
+                types.CInteger("int", true, 3, 32), {})
+            assert.is_false(types.has_sound_gradual_guard(raw_pointer))
+            assert.is_false(types.gradual_guard(raw_pointer))
+            assert.is_false(types.dynamic_coercion(raw_pointer))
+            assert.is_true(types.has_sound_gradual_guard(
+                types.Option(types.Integer())))
+
+            assert.equal("array", assert(types.dynamic_coercion(
+                types.Array(types.Integer()))).op)
+            assert.equal("map", assert(types.dynamic_coercion(
+                types.Map(types.String(), types.Integer()))).op)
+            assert.equal("callable", assert(types.dynamic_coercion(
+                fn({types.Integer()}, {types.String()}))).op)
+
+            local blocked = {
+                types.Option(raw_pointer),
+                types.Array(raw_pointer),
+                types.Array(types.Array(raw_pointer)),
+                types.Map(raw_pointer, types.String()),
+                types.Map(types.String(), raw_pointer),
+                types.Map(types.String(),
+                    types.Array(raw_pointer)),
+                fn({raw_pointer}, {types.Integer()}),
+                fn({types.Integer()}, {raw_pointer}),
+                fn({}, {}, raw_pointer),
+                fn({}, {}, false, raw_pointer),
+            }
+            for _, target in ipairs(blocked) do
+                assert.is_false(
+                    types.has_sound_gradual_guard(target))
+                assert.is_false(types.gradual_guard(target))
+                assert.is_false(types.dynamic_coercion(target))
+                -- The unsafe written exception is deliberately limited to a
+                -- direct raw-pointer target; it must not tunnel through a
+                -- gradual container or callable plan.
+                assert.is_false(
+                    types.written_cast(types.Value(), target))
+            end
+        end)
+
+        it("classifies written casts independently", function()
+            local i, f, v = types.Integer(), types.Float(), types.Value()
+            local dynamic = assert(types.written_cast(v, i))
+            assert.equal("written_cast", dynamic.kind)
+            assert.equal("dynamic", dynamic.op)
+            assert.equal("integer", dynamic.dynamic.op)
+
+            local numeric = assert(types.written_cast(i, f))
+            assert.equal("coercion", numeric.op)
+            assert.equal("integer_to_float", numeric.coercion.op)
+
+            local gradual = assert(types.written_cast(
+                types.Array(i), types.Array(v)))
+            assert.equal("gradual", gradual.op)
+            assert.equal("array", gradual.guard.op)
+
+            local raw_pointer = types.CPointer(
+                types.CInteger("int", true, 3, 32), {})
+            local pointer = assert(types.written_cast(v, raw_pointer))
+            assert.equal("explicit", pointer.op)
+            assert.equal("unsafe_dynamic_c_pointer",
+                pointer.conversion.op)
+        end)
+
+        it("returns directional callable shape actions", function()
+            local i, s, v = types.Integer(), types.String(), types.Value()
+
+            local ignored = assert(types.callable_adjustment(
+                fn({i}), fn({i, s})))
+            assert.equal("callable", ignored.kind)
+            assert.equal("argument", ignored.arguments[1].kind)
+            assert.equal("ignore_argument", ignored.arguments[2].kind)
+
+            local nil_fill = assert(types.callable_adjustment(
+                fn({i, types.Option(i)}), fn({i})))
+            assert.equal("nil_fill", nil_fill.arguments[2].kind)
+            assert.is_false(types.callable_adjustment(
+                fn({i, i}), fn({i})))
+
+            local tail = assert(types.callable_adjustment(
+                fn({i}, {}, i), fn({i, i}, {}, i)))
+            assert.equal("argument_to_tail", tail.arguments[2].kind)
+            assert.equal("tail_to_tail", tail.arguments[3].kind)
+
+            local projected = assert(types.callable_adjustment(
+                fn({}, {}, false, i),
+                fn({}, {types.Option(i)})))
+            assert.equal(
+                "flex_to_optional_result", projected.results[1].kind)
+            assert.is_true(projected.results[1].wrap_present)
+            assert.equal("hide_flex", projected.results[2].kind)
+
+            local dynamic_projected = assert(types.callable_adjustment(
+                fn({}, {}, false, v),
+                fn({}, {types.Option(i)})))
+            assert.falsy(
+                dynamic_projected.results[1].wrap_present)
+            assert.equal("gradual_view",
+                dynamic_projected.results[1].adjustment.kind)
+
+            local gradual = assert(types.callable_adjustment(
+                fn({}, {i}), fn({}, {v})))
+            assert.equal("gradual_view",
+                gradual.results[1].adjustment.kind)
+
+            assert.is_false(types.callable_adjustment(
+                fn({}, {i}), fn({}, {types.Option(i)})))
+            assert.is_false(types.callable_adjustment(
+                fn({}, {i}), fn({}, {types.Float()})))
+            assert.is_false(types.callable_adjustment(
+                fn({types.Float()}), fn({i})))
+        end)
+
+        it("covers directional callable arity and tail adjustment",
+        function()
+            local i, s, v =
+                types.Integer(), types.String(), types.Value()
             local oi = types.Option(i)
             local cases = {
-                { "actual fixed surplus is hidden", fn({}, {i}), fn({}, {i, s}), true },
-                { "actual fixed deficit", fn({}, {i, i}), fn({}, {i}), false },
-                { "safe optional flex projection", fn({}, {oi}), fn({}, {}, false, i), true },
-                { "forced flex projection", fn({}, {i}), fn({}, {}, false, i), true },
-                { "incompatible flex projection", fn({}, {s}), fn({}, {}, false, i), false },
-                { "finite type ignores actual tail", fn({}, {i}), fn({}, {i}, false, s), true },
-                { "open expected consumes fixed suffix", fn({}, {i}, false, i), fn({}, {i, i}), true },
-                { "open expected rejects fixed suffix", fn({}, {i}, false, i), fn({}, {i, s}), false },
-                { "open expected accepts empty fixed actual", fn({}, {}, false, i), fn(), true },
-                { "matching result tails", fn({}, {}, false, i), fn({}, {}, false, i), true },
-                { "incompatible result tails", fn({}, {}, false, i), fn({}, {}, false, s), false },
-                { "finite zero-result hides actual tail", fn(), fn({}, {}, false, s), true },
+                {
+                    "short actual ignores expected fixed suffix",
+                    fn({i}), fn({i, s}), true,
+                },
+                {
+                    "long actual cannot nil-fill a required suffix",
+                    fn({i, i}), fn({i}), false,
+                },
+                {
+                    "actual integer tail accepts moved fixed integer",
+                    fn({i}, {}, i), fn({i, i}), true,
+                },
+                {
+                    "actual string tail rejects moved fixed integer",
+                    fn({i}, {}, s), fn({i, i}), false,
+                },
+                {
+                    "fixed actual ignores expected tail",
+                    fn({i}), fn({i}, {}, i), true,
+                },
+                {
+                    "matching input tails",
+                    fn({i}, {}, i), fn({i}, {}, i), true,
+                },
+                {
+                    "incompatible observed input tails",
+                    fn({i}, {}, s), fn({i}, {}, i), false,
+                },
+                {
+                    "nilable hidden actual fixed parameter",
+                    fn({i, oi}), fn({i}), true,
+                },
+                {
+                    "value hidden actual fixed parameter",
+                    fn({i, v}), fn({i}), true,
+                },
+                {
+                    "all hidden actual fixed parameters are checked",
+                    fn({i, oi, s}), fn({i}), false,
+                },
+                {
+                    "option coercion is not lifted into a tail transfer",
+                    fn({i, oi}), fn({i}, {}, i), false,
+                },
+                {
+                    "gradual tail transfer reaches a hidden option",
+                    fn({i, oi}), fn({i}, {}, v), true,
+                },
+                {
+                    "actual fixed result surplus is hidden",
+                    fn({}, {i, s}), fn({}, {i}), true,
+                },
+                {
+                    "actual fixed result deficit is rejected",
+                    fn({}, {i}), fn({}, {i, i}), false,
+                },
+                {
+                    "flex result projects into an optional fixed slot",
+                    fn({}, {}, false, i), fn({}, {oi}), true,
+                },
+                {
+                    "partial flex result reaches a required fixed slot",
+                    fn({}, {}, false, i), fn({}, {i}), true,
+                },
+                {
+                    "incompatible flex projection is rejected",
+                    fn({}, {}, false, i), fn({}, {s}), false,
+                },
+                {
+                    "finite expected results hide the actual tail",
+                    fn({}, {i}, false, s), fn({}, {i}), true,
+                },
+                {
+                    "expected result tail consumes a fixed suffix",
+                    fn({}, {i, i}), fn({}, {i}, false, i), true,
+                },
+                {
+                    "expected result tail rejects a fixed suffix",
+                    fn({}, {i, s}), fn({}, {i}, false, i), false,
+                },
+                {
+                    "open expected results accept an empty fixed actual",
+                    fn(), fn({}, {}, false, i), true,
+                },
+                {
+                    "matching result tails",
+                    fn({}, {}, false, i),
+                    fn({}, {}, false, i), true,
+                },
+                {
+                    "incompatible result tails",
+                    fn({}, {}, false, s),
+                    fn({}, {}, false, i), false,
+                },
+                {
+                    "finite zero-result type hides the actual tail",
+                    fn({}, {}, false, s), fn(), true,
+                },
             }
             for _, case in ipairs(cases) do
-                assert.same(case[4], types.compatible(case[2], case[3]),
+                assert.equal(case[4],
+                    types.callable_adjustment(
+                        case[2], case[3]) ~= false,
                     case[1])
             end
         end)
 
-        it("reverses recursive compatibility only for parameter positions",
-        function()
+        it("keeps nested callable adjustment directional", function()
             local i = types.Integer()
-            local callback_wide = fn({i, i})
-            local callback_short = fn({i})
-            local expects_short_callback = fn({callback_short})
-            local accepts_wide_callback = fn({callback_wide})
+            local short = fn({i})
+            local wide = fn({i, i})
 
-            assert.truthy(types.compatible(
-                expects_short_callback, accepts_wide_callback))
-            assert.falsy(types.compatible(
-                accepts_wide_callback, expects_short_callback))
+            local accepted = types.callable_adjustment(
+                fn({wide}), fn({short}))
+            local rejected = types.callable_adjustment(
+                fn({short}), fn({wide}))
+            assert.truthy(accepted)
+            assert.falsy(rejected)
+            assert.equal("callable",
+                accepted.arguments[1].adjustment.kind)
         end)
 
-        it("keeps nested tails and gradual components in expected-found roles",
+        it("classifies assignment without lifting direct coercions",
         function()
-            local i = types.Integer()
-            local oi = types.Option(i)
-            local v = types.Value()
-            local a = types.Nominal("sample.A")
-            local b = types.Nominal("sample.B")
-            local callback_short = fn({i})
-            local callback_wide = fn({i, i})
+            local i, f, v = types.Integer(), types.Float(), types.Value()
+            assert.equal("identity",
+                assert(types.assignment_adjustment(i, i)).kind)
 
-            -- Input tails are parameter positions, so recursive function
-            -- compatibility is reversed. Flexible-result tails are result
-            -- positions and preserve the expected/found order.
-            assert.truthy(types.compatible(
-                fn({}, {}, callback_short), fn({}, {}, callback_wide)))
-            assert.falsy(types.compatible(
-                fn({}, {}, callback_wide), fn({}, {}, callback_short)))
-            assert.falsy(types.compatible(
-                fn({}, {}, false, callback_short),
-                fn({}, {}, false, callback_wide)))
-            assert.truthy(types.compatible(
-                fn({}, {}, false, callback_wide),
-                fn({}, {}, false, callback_short)))
+            local numeric =
+                assert(types.assignment_adjustment(i, f))
+            assert.equal("direct_coercion", numeric.kind)
+            assert.equal("integer_to_float", numeric.coercion.op)
 
-            -- Ordinary option adjustment and the deliberate two-way `value`
-            -- rule remain available inside result positions. Nominal identity
-            -- remains exact rather than becoming symmetric by fallback.
-            local component_cases = {
-                { "wrap optional result", fn({}, {oi}), fn({}, {i}), true },
-                { "unwrap optional result", fn({}, {i}), fn({}, {oi}), true },
-                { "value expected", fn({}, {v}), fn({}, {i}), true },
-                { "value found", fn({}, {i}), fn({}, {v}), true },
-                { "same nominal", fn({}, {a}), fn({}, {a}), true },
-                { "different nominal", fn({}, {a}), fn({}, {b}), false },
-            }
-            for _, case in ipairs(component_cases) do
-                assert.same(case[4], types.compatible(case[2], case[3]),
-                    case[1])
-            end
+            local inject =
+                assert(types.assignment_adjustment(i, v))
+            assert.equal("gradual_view", inject.kind)
+            assert.equal("inject", inject.op)
+
+            local project =
+                assert(types.assignment_adjustment(v, i))
+            assert.equal("project", project.op)
+            assert.equal("integer", project.guard.op)
+
+            assert.equal("direct_coercion",
+                assert(types.assignment_adjustment(
+                    i, types.Option(i))).kind)
+            assert.equal("gradual_view",
+                assert(types.assignment_adjustment(
+                    types.Array(i), types.Array(v))).kind)
+            assert.is_false(types.assignment_adjustment(
+                types.Array(i), types.Array(f)))
+            assert.is_false(types.assignment_adjustment(
+                fn({}, {i}), fn({}, {types.Option(i)})))
+            assert.equal("callable",
+                assert(types.assignment_adjustment(
+                    fn({}, {i}), fn({}, {v}))).kind)
         end)
 
-        it("keeps exact equality strict across all arity and tail fields",
-        function()
-            local i = types.Integer()
-            local base = fn({i}, {i})
-            assert.falsy(types.equals(base, fn({}, {i})))
-            assert.falsy(types.equals(base, fn({i}, {i, i})))
-            assert.falsy(types.equals(base, fn({i}, {i}, i)))
-            assert.falsy(types.equals(base, fn({i}, {i}, false, i)))
-            assert.falsy(types.equals(
-                types.Function({i}, {i}, true, false, false), base))
+        it("makes equality comparability symmetric", function()
+            local i, f, v = types.Integer(), types.Float(), types.Value()
+            assert.equal("numeric", assert(types.comparable(i, f)).op)
+            assert.equal("numeric", assert(types.comparable(f, i)).op)
+            local iv = assert(types.comparable(i, v))
+            local vi = assert(types.comparable(v, i))
+            assert.equal("consistent", iv.op)
+            assert.equal("inject", iv.left_adjustment.op)
+            assert.equal("consistent", vi.op)
+            assert.equal("inject", vi.right_adjustment.op)
+            assert.is_false(types.comparable(i, types.String()))
+            local pointer = types.CPointer(
+                types.CInteger("int", true, 3, 32), {})
+            assert.is_false(types.comparable(pointer, v))
+            assert.is_false(types.comparable(v, pointer))
+
+            local short = fn({i}, {i})
+            local wide = fn({i, i}, {i})
+            assert.is_truthy(types.callable_adjustment(short, wide))
+            assert.is_false(types.callable_adjustment(wide, short))
+            local short_wide = assert(types.comparable(short, wide))
+            local wide_short = assert(types.comparable(wide, short))
+            assert.equal("consistent", short_wide.op)
+            assert.equal("consistent", wide_short.op)
         end)
     end)
 
@@ -416,12 +989,11 @@ describe("Titan types", function()
             types.tostring(types.Function({int}, {intfn}, false, false, false)))
     end)
 
-    it("treats compatible-but-not-equal function types distinctly", function()
+    it("treats consistent-but-not-equal function types distinctly", function()
         local exact = types.Function({types.Integer()}, {types.Integer()}, false, false, false)
         local valued = types.Function({types.Value()}, {types.Integer()}, false, false, false)
-        -- value is compatible with integer, so the function types are compatible
-        assert.truthy(types.compatible(exact, valued))
-        assert.truthy(types.compatible(valued, exact))
+        assert.truthy(types.consistent(exact, valued))
+        assert.truthy(types.consistent(valued, exact))
         -- but they are not equal (so a fast-path tag match must not be assumed)
         assert.falsy(types.equals(exact, valued))
     end)
@@ -587,13 +1159,15 @@ describe("Titan types", function()
 
         assert.truthy(types.equals(first, second),
             "metadata comparison still needs structural equality")
-        assert.falsy(types.compatible(first, second))
-        assert.falsy(types.compatible(first, value))
-        assert.falsy(types.compatible(value, first))
-        assert.falsy(types.coerceable(first, value))
-        assert.falsy(types.coerceable(value, first))
-        assert.falsy(types.explicitly_coerceable(first, value))
-        assert.falsy(types.explicitly_coerceable(value, first))
+        assert.falsy(types.consistent(first, second))
+        assert.falsy(types.consistent(first, value))
+        assert.falsy(types.consistent(value, first))
+        assert.falsy(types.coercion(first, value))
+        assert.falsy(types.coercion(value, first))
+        assert.falsy(types.written_cast(first, value))
+        assert.falsy(types.written_cast(value, first))
+        assert.falsy(types.assignment_adjustment(first, value))
+        assert.falsy(types.dynamic_coercion(first))
         assert.falsy(types.has_tvalue_representation(first))
     end)
 
@@ -775,8 +1349,9 @@ describe("Titan types", function()
                 types.CFunction({int}, types.CVoid(), false, "cdecl"),
                 types.CFunction({cint()}, types.CVoid(), false, "cdecl")))
             assert.falsy(types.equals(int, types.Integer()))
-            assert.truthy(types.compatible(int, types.Integer()))
-            assert.truthy(types.coerceable(int, types.Integer()))
+            assert.falsy(types.consistent(int, types.Integer()))
+            assert.equal("c_integer_to_integer",
+                assert(types.coercion(int, types.Integer())).op)
         end)
 
         it("compares C function signatures through aliases and qualifiers",
@@ -913,7 +1488,8 @@ describe("Titan types", function()
             local size_t = types.CTypedef("size_t", int)
             local alias = types.CTypedef("alias_size_t", size_t)
             assert.same(int, types.resolve_c_typedef(alias))
-            assert.truthy(types.compatible(alias, int))
+            assert.same(int, types.normalize(alias))
+            assert.truthy(types.consistent(alias, int))
             assert.truthy(types.equals(
                 types.CTypedef("size_t", int),
                 types.CTypedef("size_t", alias)))
@@ -923,10 +1499,13 @@ describe("Titan types", function()
             local ptr = types.CPointer(cint(), {})
             local owned = types.COwned(cint(), 1)
 
-            assert.truthy(types.compatible(ptr, types.Nil()))
-            assert.truthy(types.compatible(types.Nil(), ptr))
-            assert.falsy(types.compatible(owned, types.Nil()))
-            assert.falsy(types.compatible(types.Nil(), owned))
+            assert.falsy(types.consistent(ptr, types.Nil()))
+            assert.falsy(types.consistent(types.Nil(), ptr))
+            assert.equal("nil_to_c_pointer",
+                assert(types.coercion(types.Nil(), ptr)).op)
+            assert.falsy(types.coercion(ptr, types.Nil()))
+            assert.falsy(types.consistent(owned, types.Nil()))
+            assert.falsy(types.consistent(types.Nil(), owned))
         end)
 
         it("uses ordinary option wrapping and unwrapping for owned C values",
@@ -934,9 +1513,12 @@ describe("Titan types", function()
             local owner = types.COwned(cint(), false)
             local optional = types.Option(owner)
 
-            assert.truthy(types.coerceable(owner, optional))
-            assert.truthy(types.coerceable(optional, owner))
-            assert.truthy(types.coerceable(types.Nil(), optional))
+            assert.equal("option_wrap",
+                assert(types.coercion(owner, optional)).op)
+            assert.equal("option_force",
+                assert(types.coercion(optional, owner)).op)
+            assert.equal("option_nil",
+                assert(types.coercion(types.Nil(), optional)).op)
         end)
 
         it("distinguishes structural C provenance from direct C values",
@@ -956,10 +1538,14 @@ describe("Titan types", function()
             assert.falsy(types.is_direct_c(callback))
 
             for _, boxed in ipairs({ owners, by_name, callback }) do
-                assert.truthy(types.coerceable(boxed, types.Value()))
-                assert.truthy(types.coerceable(types.Value(), boxed))
-                assert.truthy(types.compatible(boxed, types.Value()))
-                assert.truthy(types.compatible(types.Value(), boxed))
+                assert.truthy(types.consistent(boxed, types.Value()))
+                assert.truthy(types.consistent(types.Value(), boxed))
+                assert.equal("inject", assert(
+                    types.assignment_adjustment(
+                        boxed, types.Value())).op)
+                assert.equal("project", assert(
+                    types.assignment_adjustment(
+                        types.Value(), boxed)).op)
             end
         end)
 
@@ -994,29 +1580,31 @@ describe("Titan types", function()
             local optional_pointer =
                 types.Option(types.CPointer(int, {}))
 
-            assert.falsy(types.coerceable(
+            assert.falsy(types.coercion(
                 optional_owner, optional_pointer))
-            assert.falsy(types.compatible(
+            assert.falsy(types.consistent(
                 optional_pointer, optional_owner))
         end)
 
-        it("allows only boxable C representations to cross through value", function()
+        it("allows only soundly guardable C values through value", function()
             local int = cint()
             local ptr = types.CPointer(int, {})
             local arr = types.CArray(int, 4)
             local owned = types.COwned(int, true)
             local aggregate = types.CStruct("struct point", "point", false, {}, true, false)
 
-            assert.truthy(types.compatible(int, types.Value()))
-            assert.truthy(types.compatible(types.Value(), int))
-            assert.truthy(types.compatible(ptr, types.Value()))
-            assert.truthy(types.compatible(types.Value(), ptr))
-            assert.falsy(types.compatible(arr, types.Value()))
-            assert.falsy(types.compatible(types.Value(), arr))
-            assert.truthy(types.compatible(owned, types.Value()))
-            assert.truthy(types.compatible(types.Value(), owned))
-            assert.falsy(types.compatible(aggregate, types.Value()))
-            assert.falsy(types.compatible(types.Value(), aggregate))
+            assert.truthy(types.consistent(int, types.Value()))
+            assert.truthy(types.consistent(types.Value(), int))
+            assert.falsy(types.consistent(ptr, types.Value()))
+            assert.falsy(types.consistent(types.Value(), ptr))
+            assert.falsy(types.consistent(arr, types.Value()))
+            assert.falsy(types.consistent(types.Value(), arr))
+            assert.truthy(types.consistent(owned, types.Value()))
+            assert.truthy(types.consistent(types.Value(), owned))
+            assert.falsy(types.consistent(aggregate, types.Value()))
+            assert.falsy(types.consistent(types.Value(), aggregate))
+            assert.equal("explicit", assert(types.written_cast(
+                types.Value(), ptr)).op)
         end)
 
         it("recognizes only counted owned character arrays as binary strings",
@@ -1061,36 +1649,56 @@ describe("Titan types", function()
             local owner = types.COwned(alias, false)
             local const_owner = types.COwned(const_alias, false)
 
-            assert.truthy(types.compatible(vptr, iptr))
-            assert.truthy(types.coerceable(iptr, vptr))
-            assert.truthy(types.coerceable(iptr, const_vptr))
-            assert.falsy(types.coerceable(const_iptr, vptr))
-            assert.truthy(types.coerceable(const_iptr, const_vptr))
+            assert.equal("c_void_to_object_pointer",
+                assert(types.coercion(vptr, iptr)).op)
+            assert.truthy(types.coercion(iptr, vptr))
+            assert.truthy(types.coercion(iptr, const_vptr))
+            assert.falsy(types.coercion(const_iptr, vptr))
+            assert.truthy(types.coercion(const_iptr, const_vptr))
             assert.falsy(types.c_address_coerceable(iptr, const_vptr))
             assert.falsy(types.c_mutable_address_coerceable(iptr, vptr))
-            assert.truthy(types.compatible(alias_array, iptr))
-            assert.truthy(types.coerceable(alias_array, iptr))
-            assert.falsy(types.coerceable(const_array, iptr))
-            assert.truthy(types.coerceable(const_array, const_iptr))
-            assert.falsy(types.coerceable(volatile_array, iptr))
-            assert.truthy(types.coerceable(
+            assert.truthy(types.coercion(alias_array, iptr))
+            assert.falsy(types.coercion(const_array, iptr))
+            assert.truthy(types.coercion(const_array, const_iptr))
+            assert.falsy(types.coercion(volatile_array, iptr))
+            assert.truthy(types.coercion(
                 volatile_array, volatile_iptr))
-            assert.falsy(types.coerceable(
+            assert.falsy(types.coercion(
                 const_alias_array, iptr))
-            assert.truthy(types.coerceable(
+            assert.truthy(types.coercion(
                 const_alias_array, const_iptr))
-            assert.falsy(types.coerceable(
+            assert.falsy(types.coercion(
                 types.CPointer(const_alias, {}), iptr))
-            assert.truthy(types.coerceable(owner, iptr))
-            assert.truthy(types.coerceable(owner, const_iptr))
-            assert.truthy(types.coerceable(owner, vptr))
-            assert.truthy(types.coerceable(owner, const_vptr))
-            assert.falsy(types.coerceable(const_owner, iptr))
-            assert.falsy(types.coerceable(const_owner, vptr))
-            assert.truthy(types.coerceable(const_owner, const_iptr))
-            assert.truthy(types.coerceable(const_owner, const_vptr))
+            assert.truthy(types.coercion(owner, iptr))
+            assert.truthy(types.coercion(owner, const_iptr))
+            assert.truthy(types.coercion(owner, vptr))
+            assert.truthy(types.coercion(owner, const_vptr))
+            assert.falsy(types.coercion(const_owner, iptr))
+            assert.falsy(types.coercion(const_owner, vptr))
+            assert.truthy(types.coercion(const_owner, const_iptr))
+            assert.truthy(types.coercion(const_owner, const_vptr))
             assert.same({"const"},
                 types.c_local_address_pointer(const_array).quals)
+        end)
+
+        it("leaves addressable-local and checked pointer casts to the checker",
+        function()
+            local integer = types.CInteger("int", true, 3, 32)
+            local floating = types.CFloat("double")
+            local aggregate = types.CStruct(
+                "struct ffi_item", "ffi_item", false, {}, true, false)
+            local aggregate_pointer = types.CPointer(aggregate, {})
+            local integer_pointer = types.CPointer(integer, {})
+            local floating_pointer = types.CPointer(floating, {})
+
+            assert.truthy(types.c_mutable_address_coerceable(
+                aggregate, aggregate_pointer))
+            assert.falsy(types.written_cast(
+                aggregate, aggregate_pointer))
+            assert.truthy(types.c_unsafe_object_pointer_candidate(
+                integer_pointer, floating_pointer))
+            assert.falsy(types.written_cast(
+                integer_pointer, floating_pointer))
         end)
 
         it("allows explicit stable GC identities and pointer kinds as C void pointers",
@@ -1117,32 +1725,41 @@ describe("Titan types", function()
                 map,
                 callback,
             }) do
-                assert.truthy(types.explicitly_coerceable(
+                local cast = assert(types.written_cast(
                     gc_type, void_pointer))
-                assert.falsy(types.coerceable(gc_type, void_pointer))
-                assert.falsy(types.explicitly_coerceable(
+                assert.equal("explicit", cast.op)
+                assert.equal("gc_identity_to_void_pointer",
+                    cast.conversion.op)
+                assert.truthy(types.is_gc_identity_void_pointer_cast(
+                    gc_type, void_pointer))
+                assert.falsy(types.coercion(gc_type, void_pointer))
+                assert.falsy(types.written_cast(
                     gc_type, object_pointer))
             end
 
-            assert.truthy(types.explicitly_coerceable(
+            assert.equal("c_function_pointer_to_void",
+                assert(types.written_cast(
+                    function_pointer, void_pointer)).conversion.op)
+            assert.falsy(types.coercion(
                 function_pointer, void_pointer))
-            assert.falsy(types.coerceable(
-                function_pointer, void_pointer))
-            assert.truthy(types.explicitly_coerceable(
-                legacy_pointer, void_pointer))
-            assert.falsy(types.coerceable(
+            assert.equal("legacy_pointer_to_c_void",
+                assert(types.written_cast(
+                    legacy_pointer, void_pointer)).conversion.op)
+            assert.falsy(types.coercion(
                 legacy_pointer, void_pointer))
 
             -- String keeps its established implicit byte-buffer conversion,
             -- rather than participating in the GC-identity conversion.
-            assert.truthy(types.coerceable(
-                types.String(), void_pointer))
+            assert.equal("string_to_c_pointer",
+                assert(types.coercion(
+                    types.String(), void_pointer)).op)
             assert.falsy(types.is_gc_identity_void_pointer_cast(
                 types.String(), void_pointer))
 
-            assert.falsy(types.explicitly_coerceable(
-                types.Value(), void_pointer))
-            assert.falsy(types.explicitly_coerceable(
+            assert.equal("unsafe_dynamic_c_pointer",
+                assert(types.written_cast(
+                    types.Value(), void_pointer)).conversion.op)
+            assert.falsy(types.written_cast(
                 types.Option(record), void_pointer))
         end)
 
