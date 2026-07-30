@@ -114,8 +114,10 @@ describe("generated Lua-stack capacity", function()
             1, true))
         assert.truthy(csrc:find(
             "titan_ensure_stack(L, 10);", 1, true))
-        assert.truthy(csrc:find(
-            "titan_ensure_stack(L, 5);", 1, true))
+        local _, closure_reservations = csrc:gsub(
+            "titan_ensure_stack%(L, 6%);", "")
+        assert.is_true(closure_reservations >= 2,
+            "lambda and bound-method construction must both reserve six slots")
         assert.truthy(csrc:find(
             "titan_ensure_stack(L, 1);", 1, true))
         assert.truthy(csrc:find(

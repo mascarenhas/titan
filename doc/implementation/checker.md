@@ -619,10 +619,10 @@ it; a "strictly between" interval would drop the innermost frame and miss
 the actual user. The pass is a single in-order traversal, so by the end of
 `checkbodies` every flag and capture list is final, before codegen.
 
-Lua caps a C closure at 255 upvalues. Titan reserves three header slots and
-the final strict Titan-generic entry trailer, so the checker accepts at most
-251 source-level captures. The first larger closure receives
-`function captures too many variables (252, max 251)` during checking rather
+Lua caps a C closure at 255 upvalues. Titan reserves four header slots and the
+final strict Titan-generic entry trailer, so the checker accepts at most
+250 source-level captures. The first larger closure receives
+`function captures too many variables (251, max 250)` during checking rather
 than reaching `lua_pushcclosure`.
 
 ### Lambda type inference: checking vs synthesis mode

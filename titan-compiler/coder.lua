@@ -6553,7 +6553,8 @@ end
 
 -- Generate a call through a first-class function *value* (a boxed TValue of
 -- type Type.Function). The value may be a Titan closure, a Lua closure, a C
--- function, or a `__call` object, so the call goes through the Lua stack with
+-- function, or a `__call` object. An exact Titan tag takes the direct native
+-- path; generic Titan and Lua-callable cases go through the Lua stack with
 -- `luaD_callnoyield`, which raises cleanly if the value is not callable.
 --
 -- luaD_callnoyield can grow (and relocate) the Lua stack for the callee's
@@ -6711,7 +6712,7 @@ local function codevaluecall(ctx, node)
     ctx.valuecall_count = (ctx.valuecall_count or 0) + 1
     local fptype = "_vc_fp_t_" .. ctx.valuecall_count
     -- _fn on the fast path is the callee closure itself, so its native entry can
-    -- reach any captured upvalues (slots 3+).
+    -- reach any captured upvalues (slots 4+).
     local fastargs = { "L", "_vc_mod", "_vc_callee" }
     for _, aname in ipairs(argnames) do table.insert(fastargs, aname) end
     -- A variadic callee: `vargca` holds the trailing native args at the pinned ABI
@@ -7006,25 +7007,12 @@ local function codevaluecall(ctx, node)
     end
     table.insert(stats, render([[
         {
-        int _vc_is_titan = 0;
-        const void *_vc_tag = NULL;
-        CClosure *_vc_callee = NULL;
-        if (ttisCclosure(&$FNAME)) {
-            CClosure *_vc_shape = clCvalue(&$FNAME);
-            if (_vc_shape->nupvalues >= 4
-                    && ttisfulluserdata(&_vc_shape->upvalue[0])
-                    && ttislightuserdata(&_vc_shape->upvalue[1])
-                    && ttislightuserdata(&_vc_shape->upvalue[2])
-                    && ttislcf(
-                        &_vc_shape->upvalue[_vc_shape->nupvalues - 1])) {
-                _vc_tag = pvalue(&_vc_shape->upvalue[1]);
-                _vc_is_titan =
-                    titan_is_function_type_tag(L, _vc_tag);
-                _base = restorestack(L, _base_off);
-                _vc_callee = clCvalue(&$FNAME);
-            }
-        }
-        if (_vc_is_titan && _vc_tag == $FUNCTAG) {
+        CClosure *_vc_callee =
+            ttisCclosure(&$FNAME) ? clCvalue(&$FNAME) : NULL;
+        if (TITAN_LIKELY(_vc_callee != NULL
+                && _vc_callee->nupvalues >= 5
+                && pvalueraw(valraw(&_vc_callee->upvalue[1]))
+                    == $FUNCTAG)) {
             /* fast path: exact function-type match, unboxed native call */
             Udata *_vc_mod = uvalue(&_vc_callee->upvalue[0]);
             $FPTYPEDEF;
@@ -7034,32 +7022,40 @@ local function codevaluecall(ctx, node)
             $LINEDIR
             $FASTCALL
             $FASTPROJECTIONS
-        } else if (_vc_is_titan) {
-            /* Branded non-exact Titan closure: call its trailing strict entry.
-               The original closure is the hidden first VM argument so the
-               strict entry retains the owning module and captures. */
-            titan_ensure_stack(L, $NPUSH);
-            ptrdiff_t _vc_func = savestack(L, L->top.p);
-            $STRICTPUSHES
-            $LINEDIR
-            $SLOWCALL
-            $SLOWPRE
-            $STRICTSLOWREADS
-            $STRICTSLOWOPEN
-            L->top.p = restorestack(L, _vc_func);
         } else {
-            /* Genuine Lua/dynamic callable: dispatch through Lua with the same
-               already checker-adjusted arguments; only results crossing back
-               into typed Titan slots use the dynamic boundary plan. */
-            titan_ensure_stack(L, $NPUSH);
-            ptrdiff_t _vc_func = savestack(L, L->top.p);
-            $LUAPUSHES
-            $LINEDIR
-            $SLOWCALL
-            $SLOWPRE
-            $LUASLOWREADS
-            $LUASLOWOPEN
-            L->top.p = restorestack(L, _vc_func);
+            int _vc_is_titan =
+                _vc_callee != NULL
+                && _vc_callee->nupvalues >= 5
+                && pvalueraw(valraw(&_vc_callee->upvalue[3]))
+                    == TITAN_FUNCTION_CLOSURE_BRAND;
+            if (_vc_is_titan) {
+                /* Branded non-exact Titan closure: call its trailing strict
+                   entry. The original closure is the hidden first VM argument
+                   so the strict entry retains the owning module and captures. */
+                titan_ensure_stack(L, $NPUSH);
+                ptrdiff_t _vc_func = savestack(L, L->top.p);
+                $STRICTPUSHES
+                $LINEDIR
+                $SLOWCALL
+                $SLOWPRE
+                $STRICTSLOWREADS
+                $STRICTSLOWOPEN
+                L->top.p = restorestack(L, _vc_func);
+            } else {
+                /* Genuine Lua/dynamic callable: dispatch through Lua with the
+                   same already checker-adjusted arguments; only results
+                   crossing back into typed Titan slots use the dynamic
+                   boundary plan. */
+                titan_ensure_stack(L, $NPUSH);
+                ptrdiff_t _vc_func = savestack(L, L->top.p);
+                $LUAPUSHES
+                $LINEDIR
+                $SLOWCALL
+                $SLOWPRE
+                $LUASLOWREADS
+                $LUASLOWOPEN
+                L->top.p = restorestack(L, _vc_func);
+            }
         }
         _base = restorestack(L, _base_off);
         $ANCHORS
@@ -11626,7 +11622,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             return luaL_error(L, "invalid Titan strict-call carrier");
         }
         CClosure *_fn = clCvalue(s2v(func + 1));
-        if (TITAN_UNLIKELY(_fn->nupvalues < 4
+        if (TITAN_UNLIKELY(_fn->nupvalues < 5
                 || _fn->f != $LUAENTRY
                 || !ttisfulluserdata(&_fn->upvalue[0])
                 || !ttislightuserdata(&_fn->upvalue[1])
@@ -11636,17 +11632,14 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
                     != $STRICTENTRY)) {
             return luaL_error(L, "invalid Titan strict-call closure");
         }
-        const void *_strict_tag = pvalue(&_fn->upvalue[1]);
-        ptrdiff_t _strict_func_off = savestack(L, func);
         if (TITAN_UNLIKELY(
-                !titan_is_function_type_tag(L, _strict_tag))) {
-            return luaL_error(L, "unbranded Titan strict-call closure");
+                pvalue(&_fn->upvalue[1]) != $FUNCTAG)) {
+            return luaL_error(L, "mistagged Titan strict-call closure");
         }
-        func = restorestack(L, _strict_func_off);
-        _fn = clCvalue(s2v(func + 1));
         ]], {
             LUAENTRY = options.lua_entry,
             STRICTENTRY = options.strict_name,
+            FUNCTAG = function_type_tag(tlcontext, typ),
         })
     else
         carrier = [[
@@ -11975,7 +11968,7 @@ end
 -- Emit the two bound-method trampolines for a TopLevelMethod, delegating to the
 -- method's own native/Lua entries. They turn `obj:m` into a first-class function
 -- value of the self-removed type `(params) -> rettypes`, with `self` captured in
--- the closure's `upvalue[3]`. Public methods export these trampolines so a bind
+-- the closure's `upvalue[4]`. Public methods export these trampolines so a bind
 -- site in a module that only has this module's `.so` can still reach them; local
 -- methods keep them file-local.
 -- Produces node._boundsig / node._boundbody.
@@ -12002,7 +11995,7 @@ local function codemethodtrampoline(tlcontext, node)
     -- `_outparam_N` for out-params), independent of the method's own _cvar names.
     local cparams = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
     local callargs = { "L", "_mod", "NULL",
-        "uvalue(&_fn->upvalue[3])" }
+        "uvalue(&_fn->upvalue[4])" }
     for i, ptype in ipairs(mtype.params) do
         local pname = "_bp_" .. i
         table.insert(cparams, cvardecl(tlcontext, ptype, pname))
@@ -12066,14 +12059,14 @@ local function codemethodtrampoline(tlcontext, node)
     $STORAGE int $LUANAME(lua_State *L) {
         /* insert the captured receiver (self) as the first stack argument, then
            delegate to the method's Lua entry (which reuses all the boundary
-           checks/coercions). upvalue[3] holds the record udata directly (the
+           checks/coercions). upvalue[4] holds the record udata directly (the
            record value IS the udata), which is exactly the Lua-facing value the
            method Lua entry expects. The bound closure's upvalue[0] is the
            method's module, so the method Lua entry recovers _mod correctly from
            it. */
         CClosure *_bound = clCvalue(s2v(L->ci->func.p));
         titan_ensure_stack(L, 1);
-        setobj2s(L, L->top.p, &(_bound->upvalue[3]));
+        setobj2s(L, L->top.p, &(_bound->upvalue[4]));
         L->top.p++;
         lua_insert(L, 1);
         return $MLUA(L);
@@ -12151,8 +12144,9 @@ local function read_capture(ctx, decl)
 end
 
 -- Use-site code for an anonymous function: build a fresh CClosure with
--- upvalue[0]=_mod, [1]=type tag, [2]=native ptr, [3+i]=captured variable i,
--- and the strict LCF in the final upvalue, then return the closure value
+-- upvalue[0]=_mod, [1]=type tag, [2]=native ptr, [3]=closure brand,
+-- [4+i]=captured variable i, and the strict LCF in the final upvalue, then
+-- return the closure value
 -- (anchored in a gc temp). The capture pushes are transient raw stack pushes
 -- (guarded by lua_checkstack, consumed by lua_pushcclosure), not
 -- nslots-accounted.
@@ -12169,8 +12163,9 @@ function codelambda(ctx, node)
         titan_pushmodule(L, _mod);
         lua_pushlightuserdata(L, (void*)$FUNCTAG);
         lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+        lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
     ]], {
-        NPUSH = c_integer_literal(4 + ncap),
+        NPUSH = c_integer_literal(5 + ncap),
         FUNCTAG = function_type_tag(tlcontext, node._type),
         NATIVE = node._lambda_native,
     }))
@@ -12208,7 +12203,7 @@ function codelambda(ctx, node)
         L->top.p--;
     ]], {
         LUANAME = node._lambda_lua,
-        NUP = c_integer_literal(4 + ncap),
+        NUP = c_integer_literal(5 + ncap),
         CDECL = cdecl,
         TMPSLOT = tmpslot,
         GETSLOT = getslot(node._type, tmpname, "s2v(L->top.p - 1)"),
@@ -12217,13 +12212,14 @@ function codelambda(ctx, node)
 end
 
 -- Use-site code for a bound method reference `obj:m`: evaluate the receiver once
--- into an anchored gc temp, then build a 5-upvalue CClosure exactly like a
+-- into an anchored gc temp, then build a 6-upvalue CClosure exactly like a
 -- 1-capture lambda whose capture is `self`:
 --   upvalue[0] = the method's module closure
 --   upvalue[1] = the self-removed function-type tag (light userdata)
 --   upvalue[2] = the bound native trampoline pointer (light userdata)
---   upvalue[3] = self (the captured receiver)
---   upvalue[4] = the bound strict entry (light C function)
+--   upvalue[3] = the Titan function-closure brand (light userdata)
+--   upvalue[4] = self (the captured receiver)
+--   upvalue[5] = the bound strict entry (light C function)
 -- The closure's lua_CFunction is the bound Lua trampoline. The result is an
 -- ordinary Type.Function value, callable through both paths and Lua-crossable.
 function codemethodref(ctx, node)
@@ -12273,12 +12269,13 @@ function codemethodref(ctx, node)
     table.insert(stats, rname .. " = " .. rexp .. ";")
     table.insert(stats, setslot(rtype, rslot, rname))
 
-    -- 2. push the five upvalues and build the closure
+    -- 2. push the six upvalues and build the closure
     table.insert(stats, render([[
-        titan_ensure_stack(L, 5);
+        titan_ensure_stack(L, 6);
         titan_pushmodule(L, $MODEXPR);
         lua_pushlightuserdata(L, (void*)$FUNCTAG);
         lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+        lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
         $PUSHSELF L->top.p++;
         lua_pushcfunction(L, $STRICTNAME);
     ]], {
@@ -12292,7 +12289,7 @@ function codemethodref(ctx, node)
     -- 3. consume the closure into an anchored gc temp
     local cdecl, tmpname, tmpslot = newtmp(ctx, ftype, true)
     table.insert(stats, render([[
-        lua_pushcclosure(L, $LUANAME, 5);
+        lua_pushcclosure(L, $LUANAME, 6);
         _base = restorestack(L, _base_off);
         $CDECL
         setobj2t(L, $TMPSLOT, s2v(L->top.p - 1));
@@ -12309,7 +12306,7 @@ end
 
 -- File-scope emission of a lambda: its native entry (signature via function_sig,
 -- so the uniform (L,_mod,_fn,params...,outparams) ABI) and Lua entry. The body
--- reads captures from _fn->upvalue[3+i]; the ctx.captures map (decl -> {index,
+-- reads captures from _fn->upvalue[4+i]; the ctx.captures map (decl -> {index,
 -- boxed, boxvar}) is consulted by codevar/codeassignment before the local/box
 -- logic. Produces node._sig / node._body / node._luabody.
 function codelambdadec(tlcontext, node)
@@ -12333,7 +12330,7 @@ function codelambdadec(tlcontext, node)
     ctx.captures = {}
     local capbinds = {}
     for i, decl in ipairs(node._captures) do
-        local index = 3 + (i - 1)
+        local index = 4 + (i - 1)
         local boxed = decl._boxed and true or false
         local entry = { index = index, boxed = boxed }
         if boxed then
@@ -13306,14 +13303,16 @@ function coder.generate(modname, ast, static_deps, abi)
                         -- `m.f` is served from that same slot via the module
                         -- metatable, so internal references and `m.f` denote one
                         -- identity. The closure carries its function-type tag
-                        -- (upvalue[1]), native entry pointer (upvalue[2]), and
-                        -- trailing strict entry (upvalue[3]).
+                        -- (upvalue[1]), native entry pointer (upvalue[2]),
+                        -- fixed closure brand (upvalue[3]), and trailing strict
+                        -- entry (upvalue[4]).
                         table.insert(funcs, render([[
                             titan_pushmodule(L, _mod);
                             lua_pushlightuserdata(L, (void*)$FUNCTAG);
                             lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+                            lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
                             lua_pushcfunction(L, $STRICTNAME);
-                            lua_pushcclosure(L, $LUANAME, 4);
+                            lua_pushcclosure(L, $LUANAME, 5);
                             setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
                             luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                             lua_pop(L, 1);
@@ -13341,8 +13340,9 @@ function coder.generate(modname, ast, static_deps, abi)
                         titan_pushmodule(L, _mod);
                         lua_pushlightuserdata(L, (void*)$FUNCTAG);
                         lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+                        lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
                         lua_pushcfunction(L, $STRICTNAME);
-                        lua_pushcclosure(L, $LUANAME, 4);
+                        lua_pushcclosure(L, $LUANAME, 5);
                         setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
                         luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                         lua_pop(L, 1);
@@ -13365,7 +13365,7 @@ function coder.generate(modname, ast, static_deps, abi)
                 elseif tag == "Ast.TopLevelStatic" then
                     table.insert(code, node._luabody)
                     table.insert(code, node._strictbody)
-                    -- Build the static's canonical 4-upvalue closure once into
+                    -- Build the static's canonical 5-upvalue closure once into
                     -- its shadow slot. Public statics are also installed into
                     -- the record's static-namespace table; local record functions remain
                     -- reachable to Titan code through direct/static-slot paths.
@@ -13375,8 +13375,9 @@ function coder.generate(modname, ast, static_deps, abi)
                             titan_pushmodule(L, _mod);
                             lua_pushlightuserdata(L, (void*)$FUNCTAG);
                             lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+                            lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
                             lua_pushcfunction(L, $STRICTNAME);
-                            lua_pushcclosure(L, $LUANAME, 4);
+                            lua_pushcclosure(L, $LUANAME, 5);
                             setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
                             luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                             lua_pop(L, 1);
@@ -13388,8 +13389,9 @@ function coder.generate(modname, ast, static_deps, abi)
                             titan_pushmodule(L, _mod);
                             lua_pushlightuserdata(L, (void*)$FUNCTAG);
                             lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+                            lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
                             lua_pushcfunction(L, $STRICTNAME);
-                            lua_pushcclosure(L, $LUANAME, 4);
+                            lua_pushcclosure(L, $LUANAME, 5);
                             setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
                             luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                             lua_setfield(L, -2, $NAMESTR);

@@ -220,8 +220,8 @@ The standard library is the canonical provider with this name.
 
 The current provider contract is compiled-module ABI 0.20. Every Array proxy
 now has two private user values—backing and construction-time Lua writer—and
-every Titan function closure now has a final strict generic-entry trailer plus
-reverse per-state function-tag branding. An ABI-0.19 consumer or provider
+every Titan function closure now has a fixed opaque brand upvalue plus a final
+strict generic-entry trailer. An ABI-0.19 consumer or provider
 would misread either representation, so the marker, `TITAN_PATH_0_20`, and
 `lib/titan/0.20` namespace advance together. Ordinary DSO/archive metadata
 validation rejects 0.19 before either side can exchange an Array or function

@@ -202,7 +202,7 @@ userdata/tag protocol, and the public module-slot prefix for exported nominal
 statics.
 
 ABI 0.20 adds the second traced Array-proxy user value carrying its
-genuine-Lua writer closure, and the strict-entry trailer/reverse-brand protocol
+genuine-Lua writer closure, and the fixed-brand/strict-entry-trailer protocol
 for first-class Titan functions. The current marker, `TITAN_PATH_0_20`, and
 `lib/titan/0.20` namespace advance together. A 0.19 candidate is rejected
 before type metadata is decoded or native linking begins.
@@ -840,8 +840,6 @@ be tested before reinstalling.
   `TITAN_BT_STATE_KEY` (registry-owned libbacktrace state cache),
   `TITAN_BACKTRACE_KEY` (last raw error backtrace),
   `TITAN_NAMES_KEY` (native-symbol display-name table),
-  `TITAN_FUNCTION_TYPE_TAGS_KEY` (reverse set of canonical Titan
-  function-type tags), and
   `TITAN_TRACE_PINNED` (re-raise traceback pin), and
   `TITAN_TRACE_APPEND_KEY` (temporary coroutine traceback append slot).
   `TITAN_LUAINTEGER_NBITS` is used by shift code generation.
@@ -1019,7 +1017,7 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | checkout link set | `driver.source_link_inputs` / `append_runtime_libraries` | local `libtitan.a` + separate local `libbacktrace.a` + local `liblua.a` + `-ldl -lm` | Preserves the writable source-development path while using the same archive contract; it never links `titan.o` directly. |
 | `TITAN_ROOT_DEFAULT` / `TITAN_LUA_CPATH_SUFFIX` | `titan.h`/`titan.c` | `/usr/local` / `/lib/lua/5.5/?.so` | Legacy run-time root fallback and exact template suffix used for root discovery. |
 | `titan_init_paths` | generated standalone entrypoint / `titan.c` | root parsed from inherited `package.cpath` | Caches the root and Titan module path and ensures `<root>/lib/titan/0.20/?.so` is in `package.cpath`; prefix-configured Titan-owned Lua has it first by default. |
-| registry keys | `titan.h` | `TITAN_ROOT_KEY`, `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_MAIN_BOOTSTRAP_KEY`, `TITAN_MAIN_ARGC_KEY`, `TITAN_MAIN_ARGV_KEY`, `TITAN_BT_STATE_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_FUNCTION_TYPE_TAGS_KEY`, `TITAN_TRACE_PINNED`, `TITAN_TRACE_APPEND_KEY` (UUID strings) | Per-state caches and hooks: Titan SDK/rocks-tree root, module path, dlopen handles, optional standalone bootstrap, original process arguments and libuv's possibly replaced `argv`, registry-owned libbacktrace state, last raw backtrace, native-frame display names, reverse Titan-function brand set, re-raise traceback pin, and coroutine traceback append handoff. |
+| registry keys | `titan.h` | `TITAN_ROOT_KEY`, `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_MAIN_BOOTSTRAP_KEY`, `TITAN_MAIN_ARGC_KEY`, `TITAN_MAIN_ARGV_KEY`, `TITAN_BT_STATE_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED`, `TITAN_TRACE_APPEND_KEY` (UUID strings) | Per-state caches and hooks: Titan SDK/rocks-tree root, module path, dlopen handles, optional standalone bootstrap, original process arguments and libuv's possibly replaced `argv`, registry-owned libbacktrace state, last raw backtrace, native-frame display names, re-raise traceback pin, and coroutine traceback append handoff. |
 | generated ABI symbol | `coder.lua` | `<mangled>_abi` returning `TITAN_VER` | Checked before DSO type rehydration and before run-time dynamic-import `dlsym`; the same value is embedded in static metadata and compared during paired validation. Markerless compiled modules are incompatible. |
 
 The pieces upstream of the driver are described in

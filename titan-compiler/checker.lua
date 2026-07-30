@@ -5435,11 +5435,11 @@ checkexp = util.make_visitor({
         -- codegen (closure-creation pushes + lambda-body upvalue indexing).
         node._captures = frame.captures
         -- Lua closures allow at most 255 upvalues. Titan reserves the first
-        -- three for module/tag/native and the final one for the strict stack
-        -- entry, leaving 251 source-level captures.
-        if #node._captures > 251 then
+        -- four for module/tag/native/brand and the final one for the strict
+        -- stack entry, leaving 250 source-level captures.
+        if #node._captures > 250 then
             checker.typeerror(errors, node.loc,
-                "function captures too many variables (%d, max 251)",
+                "function captures too many variables (%d, max 250)",
                 #node._captures)
         end
 

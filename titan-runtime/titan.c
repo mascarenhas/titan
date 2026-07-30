@@ -38,7 +38,7 @@ const void *titan_publish_function_type_tag(lua_State *L,
         luaL_error(L, "invalid Titan function-type registry key");
     if (candidate == NULL)
         luaL_error(L, "invalid Titan function-type tag candidate");
-    if (!lua_checkstack(L, 3))
+    if (!lua_checkstack(L, 1))
         luaL_error(L, "stack overflow publishing Titan function-type tag");
     base = lua_gettop(L);
 
@@ -61,53 +61,8 @@ const void *titan_publish_function_type_tag(lua_State *L,
         lua_pop(L, 1);
     }
 
-    /*
-    ** Brand the elected pointer in one reverse set shared by every titan.o
-    ** image loaded into this Lua state. Lightuserdata keys are compared by
-    ** identity; neither publication nor membership dereferences a tag.
-    */
-    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_FUNCTION_TYPE_TAGS_KEY);
-    if (lua_isnil(L, -1)) {
-        lua_pop(L, 1);
-        lua_newtable(L);
-        lua_pushvalue(L, -1);
-        lua_setfield(L, LUA_REGISTRYINDEX,
-                     TITAN_FUNCTION_TYPE_TAGS_KEY);
-    }
-    else if (!lua_istable(L, -1)) {
-        luaL_error(L, "invalid Titan function-type tag reverse registry");
-    }
-    lua_pushlightuserdata(L, (void *)canonical);
-    lua_pushboolean(L, 1);
-    lua_rawset(L, -3);
     lua_settop(L, base);
     return canonical;
-}
-
-int titan_is_function_type_tag(lua_State *L, const void *candidate) {
-    int base;
-    int branded;
-
-    if (candidate == NULL)
-        return 0;
-    if (!lua_checkstack(L, 2))
-        luaL_error(L, "stack overflow checking Titan function-type tag");
-    base = lua_gettop(L);
-
-    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_FUNCTION_TYPE_TAGS_KEY);
-    if (lua_isnil(L, -1)) {
-        lua_settop(L, base);
-        return 0;
-    }
-    if (!lua_istable(L, -1))
-        luaL_error(L, "invalid Titan function-type tag reverse registry");
-
-    /* `candidate` is an opaque identity key. Never read through it. */
-    lua_pushlightuserdata(L, (void *)candidate);
-    lua_rawget(L, -2);
-    branded = lua_toboolean(L, -1);
-    lua_settop(L, base);
-    return branded;
 }
 
 static Table *titan_array_callback_metatable(lua_State *L) {

@@ -265,7 +265,7 @@ vararg pair, when present, precedes fixed result out-pointers. The flexible
 output pair, when present, comes last. `_mod` is
 the callee's **own** module `Udata`; a cross-module caller passes it from
 one of its user values. `_fn` is the **callee's own closure** — the
-`CClosure` of the function value being invoked, whose `upvalue[3..]` hold
+`CClosure` of the function value being invoked, whose `upvalue[4..]` hold
 its captured variables; it is what a closure body reads its captures
 through (see [closures and captured variables](#closures-and-captured-variables)).
 It comes **immediately after `_mod` and before the method `self`**, and
@@ -360,18 +360,13 @@ is a boxed `TValue`: it may be a Titan `CClosure`, a Lua closure, a Lua C
 function, or an object with a `__call` metamethod. `codevaluecall`
 therefore emits three branches.
 
-The coder first classifies a candidate as Titan only when it is a `CClosure`
-with the private header/trailer shapes **and** its tag pointer is present in
-the per-state reverse brand set populated by
-`titan_publish_function_type_tag`. The candidate pointer is an opaque registry
-key and is never dereferenced. This prevents a foreign C closure with a
-similar upvalue count from being read as a Titan closure.
-
-The **exact fast path** then requires that branded tag to equal the tag for the
-callee expression's static type:
+The **exact fast path** is tested first and marked `TITAN_LIKELY`. It requires
+a `CClosure` with at least the five minimum Titan upvalues and raw pointer-bit
+equality between upvalue 1 and the tag for the callee expression's static
+type:
 
 ```c
-if (branded_titan && runtime_tag == <function-type tag>) {
+if (TITAN_LIKELY(runtime_tag == <function-type tag>)) {
     ...
 }
 ```
@@ -379,8 +374,14 @@ if (branded_titan && runtime_tag == <function-type tag>) {
 Those tags are the `static const void *` identities allocated by
 `function_type_tag`, keyed by `types.tostring(ftype)` and
 publish-or-recovered through the Lua registry so source-linked and
-`.so`-loaded modules agree on the pointer for the same canonical type. Every
-elected canonical pointer is also inserted into the reverse brand set.
+`.so`-loaded modules agree on the pointer for the same canonical type. Exact
+pointer equality is sufficient evidence for the private Titan layout under
+the same trusted-debug/C-API invariant as the closure upvalues themselves; the
+hot branch neither queries the Lua registry nor rechecks the module, native
+pointer, brand, and strict-trailer slots. It first requires the five-upvalue
+minimum and reads the tag's raw pointer bits, so no `ttis*` discriminator is
+needed on this trusted private slot.
+
 Matching the tag is stricter than gradual consistency or callable adjustment:
 a Titan
 `(value) -> integer` viewed as `(integer) -> integer` through a gradual
@@ -397,15 +398,27 @@ anonymous closures and bound-method trampolines read their captured
 upvalues while still using the same fast branch as top-level function
 values.
 
-The **branded non-exact path** pushes the trailing strict light C function as
-the VM callee, then the original canonical closure as one hidden first
-argument, followed by the already evaluated ordinary arguments. The strict
-entry validates that hidden carrier, recovers `_mod`, applies the
-declaration-specific strict guards for its already-known callee type, and
-invokes the native entry with the original closure as `_fn`. Results are boxed
-under that declared type and then strictly guarded for the caller's static
-view. This path never enters the coercive `CClosure.f`, so integral-float or
-truthiness conveniences cannot leak into gradual callable adjustment.
+Only after the exact comparison fails does the coder test the type-independent
+closure brand in fixed `upvalue[3]`. The brand is the opaque, ABI-owned
+64-bit pointer sentinel `TITAN_FUNCTION_CLOSURE_BRAND`; it is never
+dereferenced. A C closure must have at least five upvalues before the coder
+reads that slot. Raw equality is then enough to trust the rest of the private
+layout: no registry access or other `ttis*` shape checks occur. An unrelated C
+closure would need both the required upvalue count and the exact random
+sentinel in the exact slot, making accidental classification astronomically
+unlikely.
+
+The branded non-exact path pushes the trailing strict light C function as the
+VM callee, then the original canonical closure as one hidden first argument,
+followed by the already evaluated ordinary arguments. The
+declaration-specific strict entry validates that hidden carrier's header,
+trailer, coercive entry, and exact static function tag; it does not repeat the
+brand check. It then recovers `_mod`, applies the strict guards for its
+already-known callee type, and invokes the native entry with the original
+closure as `_fn`. Results are boxed under that declared type and then strictly
+guarded for the caller's static view. This path never enters the coercive
+`CClosure.f`, so integral-float or truthiness conveniences cannot leak into
+gradual callable adjustment.
 
 The **non-Titan path** is used for Lua closures, Lua light C functions,
 foreign C closures, and `__call` objects. It pushes the boxed callee followed
@@ -460,10 +473,11 @@ and this entry use the same target matrix.
 The **strict Titan-generic entry** is a light C function stored in the
 canonical closure's final upvalue. `codevaluecall` pushes it as the callee and
 passes the original closure as a hidden argument. The entry excludes that
-argument from arity math, validates the closure/header/trailer and reverse
-brand, recovers `_fn` from the hidden carrier, and applies strict gradual
-guards rather than dynamic coercions. It calls the same native body with the
-original closure, preserving captures and bound receivers.
+argument from arity math, validates the closure/header/trailer and its
+declaration's exact static tag, recovers `_fn` from the hidden carrier, and
+applies strict gradual guards rather than dynamic coercions. It calls the same
+native body with the original closure, preserving captures and bound
+receivers.
 
 Both policies share fixed/variadic arguments, finite/flexible result request,
 stack relocation, and error-handler structure. The full generated anatomy and
@@ -475,7 +489,7 @@ boundary matrix are in
 
 An anonymous function ([closures](../language/closures.md)) is a function
 value just like a top-level reference — a `CClosure` whose `f` is the
-coercive genuine-Lua entry, with a three-slot header, one upvalue per captured
+coercive genuine-Lua entry, with a four-slot header, one upvalue per captured
 variable, and the strict Titan-generic light C function in a final trailer
 slot:
 
@@ -483,14 +497,15 @@ slot:
 upvalue[0]     = _mod                  (the module Udata, captured lexically)
 upvalue[1]     = function-type tag     (light userdata)
 upvalue[2]     = native entry ptr      (light userdata)
-upvalue[3 + i] = captured variable i   (a box, or a copied value)
-upvalue[3 + ncaptures] = strict entry  (light C function)
+upvalue[3]     = closure brand         (light userdata)
+upvalue[4 + i] = captured variable i   (a box, or a copied value)
+upvalue[4 + ncaptures] = strict entry  (light C function)
 ```
 
 The trailer is found from the closure's actual upvalue count; capture
-indices therefore remain stable. The constant `3` separates the header from
+indices therefore remain stable. The constant `4` separates the header from
 the captures, and a closure body reaches capture *i* as
-`_fn->upvalue[3 + i]`. The `_fn`
+`_fn->upvalue[4 + i]`. The `_fn`
 parameter (above) is exactly what makes this work: a top-level call passes
 `NULL`, but a closure is always entered with `_fn` pointing at itself.
 
@@ -519,20 +534,20 @@ representation; only the conjunction is boxed.
 The checker computes, for each `ExpFunction`, the ordered de-duplicated
 list of enclosing-function declarations it captures (see
 [the type checker](checker.md#closures-capture-analysis-and-lambda-inference)); the coder
-turns that list into the `upvalue[3 + i]` slots in agreed order. At the
-use site the closure is built by pushing the three header upvalues then,
+turns that list into the `upvalue[4 + i]` slots in agreed order. At the
+use site the closure is built by pushing the four header upvalues then,
 in capture-list order, each capture — the box `Udata*` for a boxed
 capture, or the copied value for a by-value capture — followed by the strict
 entry trailer, and calling
 `lua_pushcclosure` (preceded by
-`titan_ensure_stack(L, 4 + ncaptured)`, which raises if
+`titan_ensure_stack(L, 5 + ncaptured)`, which raises if
 `lua_checkstack` cannot reserve the capacity, since the capture pushes are raw
 transient stack pushes, not
 slot-reserved). `lua_pushcclosure` moves the pushed upvalues into the new
 white closure, so no barrier is needed at construction.
 
-Lua permits at most 255 C-closure upvalues. Four structural slots leave
-**251 captures**; the checker rejects the first larger capture list so code
+Lua permits at most 255 C-closure upvalues. Five structural slots leave
+**250 captures**; the checker rejects the first larger capture list so code
 generation never depends on a Lua API failure.
 
 Each lambda's native, coercive-Lua, and strict-generic entries are **hoisted
@@ -563,7 +578,7 @@ self-removed type, so a bind site in another module — which may have only the
 file-local and are not serialized into `.so` interfaces. The **native
 trampoline** matches the
 self-removed function type's ABI, extracts `self` from its closure's
-`upvalue[3]`, and tail-calls the method's native entry with that `self`;
+`upvalue[4]`, and tail-calls the method's native entry with that `self`;
 the trailing flexible-output descriptor and budget, when present, pass through
 unchanged. The **Lua trampoline** inserts `self` as the first stack argument and
 delegates to the method's existing Lua entry, reusing its boundary checks.
@@ -657,8 +672,8 @@ same canonical first-class closure.
 
 The current ABI is **0.20**. Array proxies now have two traced user values,
 with the per-construction-type Lua writer closure in the second; function
-closures add a strict-entry trailer and their per-state reverse brand
-registration. The active suffix and provider namespace advance with the
+closures add a fixed opaque brand upvalue and a strict-entry trailer. The
+active suffix and provider namespace advance with the
 marker (`_0_20`, `TITAN_PATH_0_20`, `lib/titan/0.20`); 0.19 providers are
 rejected before interface rehydration.
 
@@ -929,10 +944,11 @@ member map, serving the same variables to Lua, bakes in the same
 indices.) A nominal owner's type identity is its per-Lua-state metatable
 pointer, so record and union metatables must live in module user values and are
 recovered through the Lua registry for imported owners. Function-type tags use
-a separate registry-published C-static mechanism and are also entered into the
-per-state reverse brand set before any variable initializer can construct a
-closure. Canonical top-level/static closures are populated after variable
-initializers and before module exposure.
+a separate registry-published C-static mechanism before any variable
+initializer can construct a closure. The type-independent closure brand is a
+compile-time ABI sentinel and needs no initialization or registry state.
+Canonical top-level/static closures are populated after variable initializers
+and before module exposure.
 
 ## Per-function code-generation contexts
 

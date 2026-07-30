@@ -1690,33 +1690,34 @@ symbol mangling plus the owner fqtn, method name, and bound-entry role. Do not
 append `_0_20`; ABI rejection and provider selection, not per-symbol version
 spelling, gate these symbols.
 
-At a bind site, create a five-upvalue closure using the repaired ordinary
-function-value convention. The strict entry is the final trailer, so the
-captured wrapper retains the existing bound-receiver index:
+At a bind site, create a six-upvalue closure using the repaired ordinary
+function-value convention. The fixed brand occupies the fourth header slot
+and the strict entry is the final trailer:
 
 ```text
 upvalue[0] = interface owner module
 upvalue[1] = self-removed function-type tag
 upvalue[2] = bound-interface native trampoline pointer
-upvalue[3] = captured interface wrapper
-upvalue[4] = bound-interface strict Titan-generic entry as an LCF TValue
+upvalue[3] = fixed opaque Titan-function brand
+upvalue[4] = captured interface wrapper
+upvalue[5] = bound-interface strict Titan-generic entry as an LCF TValue
 ```
 
-The canonical self-removed function-type tag stored in upvalue 1 must also be
-published in the runtime's per-state reverse Titan-tag membership set. Do this
-for both locally initialized tags and tags recovered through a compiled
-provider; provider order and the first Lua state must not determine whether
-the closure is recognized. The strict branch checks that membership before
-reading the private native/trailer slots.
+The canonical self-removed function-type tag stored in upvalue 1 remains the
+exact native-call identity. Non-exact dispatch instead requires at least five
+upvalues and compares the raw pointer bits in upvalue 3 with
+`TITAN_FUNCTION_CLOSURE_BRAND`. The brand is the same fixed ABI sentinel for
+source and compiled providers; it requires no reverse registry publication or
+provider-order protocol.
 
-The native trampoline's function-value ABI reads upvalue 3 and dispatches the
+The native trampoline's function-value ABI reads upvalue 4 and dispatches the
 indexed vtable method with explicit concrete `self`. Its incoming `_fn` is the
 bound closure used only to read that upvalue; it passes `_fn = NULL` to the
 payload entry. The Lua trampoline
-inserts upvalue 3 as argument 1 and calls the interface generic entry. Export
+inserts upvalue 4 as argument 1 and calls the interface generic entry. Export
 and recover these owner artifacts plus the strict entry across DSOs/archives
 just like existing bound method trampolines. A non-exact Titan call pushes
-upvalue 4 as the VM callee and the original bound closure as its hidden first
+upvalue 5 as the VM callee and the original bound closure as its hidden first
 argument; after strict argument conversion, the entry passes that original as
 `_fn` to the upvalue-2 bound-native trampoline, which reads the wrapper. It
 must not delegate through the coercive Lua trampoline.
@@ -1724,10 +1725,10 @@ must not delegate through the coercive Lua trampoline.
 Tests must prove:
 
 - exact function-type calls hit the upvalue-2 native fast path;
-- consistently related non-exact calls use the upvalue-4 strict path and reject
+- consistently related non-exact calls use the upvalue-5 strict path and reject
   values that only the dynamic boundary would coerce;
-- source, DSO, and archive tags are published into the reverse set in two
-  independent Lua states and cannot be mistaken for foreign C-closure tags;
+- source, DSO, and archive closures carry the fixed brand in upvalue 3 and
+  foreign C closures lacking that sentinel remain on the Lua path;
 - receiver lifetime is retained;
 - an imported-interface-only bind site works; and
 - wrong Lua receiver manipulation cannot bypass metatable checks.
@@ -2152,8 +2153,8 @@ Add `doc/implementation/interfaces.md` and link it from
 - Udata layout, allocation order, barriers, and vtable copying;
 - exact and adjusted entry ABIs;
 - direct, coercive-Lua, strict Titan-generic, and bound-method dispatch,
-  including the final strict LCF trailer while the captured wrapper remains at
-  upvalue 3;
+  including the fixed brand in upvalue 3, captured wrapper in upvalue 4, and
+  final strict LCF trailer;
 - the central `DynamicCoercionPlan(I)` shared by written `value as/is I` and
   Lua-facing Interface sinks, distinct from strict Array/Map/callable
   observations;
@@ -2745,8 +2746,8 @@ boundary and never lifts the Interface coercion.
    downcasts, equality, and GC.
 3. Parameterize Lua-entry generation for payload dispatch.
 4. Add bound native/coercive-Lua/strict-Titan trampolines and cross-module
-   symbol recovery; append the strict LCF after the captured wrapper and
-   publish/recover its self-removed tag in the reverse membership set.
+   symbol recovery; store the fixed brand before the captured wrapper and
+   append the strict LCF after it.
 5. Move function-tag initialization before module variables and add the
    existing-feature regression.
 6. Add exact coder/Lua/bound/GC/backtrace tests.
@@ -2943,10 +2944,9 @@ The feature is done only when all of these are true:
 - exact bound method values retain the native fast path, including top-level
   initializers;
 - non-exact bound method values use the strict trailing entry while preserving
-  the captured Interface wrapper at upvalue 3;
-- bound Interface function tags are published/recovered in the per-state
-  reverse membership set across source, DSO, archive, and independent Lua
-  states;
+  the captured Interface wrapper at upvalue 4;
+- bound Interface closures carry the same fixed ABI brand at upvalue 3 across
+  source, DSO, and archive providers;
 - written `value as/is I`, Lua function formals, record/module writes, Array
   writers, and non-Titan Lua callable results consume the same
   `DynamicCoercionPlan(I)`, accepting an existing exact wrapper (or nil for

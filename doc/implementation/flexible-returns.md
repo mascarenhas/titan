@@ -476,15 +476,17 @@ and calls it directly. The flexible tail is part of the tag, so a consistent
 but differently shaped closure cannot enter that branch.
 
 The generic Lua-stack path then splits by brand. A non-exact Titan closure has
-a tag in the per-state reverse set: `codevaluecall` pushes the closure's final
-strict light C function, passes the original closure as a hidden argument, and
-uses the checker-attached strict argument guards in that entry. After it
-returns, `codevaluecall` applies the checker-attached strict result guards. A
-Lua closure, Lua C function, or `__call` value is unbranded; its arguments are
-the already adjusted and boxed values from the static call, while its results
-entering Titan use the canonical dynamic boundary conversions. A contextual
-`value` call reaches the same three-way split after synthesis; exact recovery
-is therefore possible without a separate dynamic-call implementation.
+the opaque ABI sentinel in fixed `upvalue[3]`: `codevaluecall` pushes the
+closure's final strict light C function, passes the original closure as a
+hidden argument, and uses the checker-attached strict argument guards in that
+entry. The count-plus-raw-brand predicate needs no registry lookup. After the
+entry returns, `codevaluecall` applies the checker-attached strict result
+guards. A Lua closure, Lua C function, or `__call` value is unbranded; its
+arguments are the already adjusted and boxed values from the static call,
+while its results entering Titan use the canonical dynamic boundary
+conversions. A contextual `value` call reaches the same three-way split after
+synthesis; exact recovery is therefore possible without a separate
+dynamic-call implementation.
 
 ### Choosing the Lua VM result request
 

@@ -301,11 +301,43 @@ local function divide_decimals(left, right)
         decimal_from_parts(left_sign, remainder)
 end
 
+-- Profile validation and integer-expression evaluation ask for the same small
+-- set of exact powers repeatedly. Cache this pure decimal result by exponent,
+-- rather than caching validation of a profile table: externally assembled
+-- profiles are still fully revalidated on every public macro-evaluation call.
+-- A bounded FIFO retains only modest decimal strings, so synthetic wide
+-- profiles and many distinct shift counts cannot grow module-lifetime memory
+-- without bound. Larger powers remain exact; they are simply not retained.
+local POWER_CACHE_ENTRIES = 64
+local POWER_CACHE_MAX_DIGITS = 4096
+local powers_of_two = {}
+local power_cache_order = {}
+local power_cache_count = 0
+local power_cache_oldest = 1
+
+local function cache_power_of_two(exponent, value)
+    if #value > POWER_CACHE_MAX_DIGITS then return end
+    if power_cache_count < POWER_CACHE_ENTRIES then
+        power_cache_count = power_cache_count + 1
+        power_cache_order[power_cache_count] = exponent
+    else
+        local evicted = power_cache_order[power_cache_oldest]
+        powers_of_two[evicted] = nil
+        power_cache_order[power_cache_oldest] = exponent
+        power_cache_oldest =
+            power_cache_oldest % POWER_CACHE_ENTRIES + 1
+    end
+    powers_of_two[exponent] = value
+end
+
 local function power_of_two(exponent)
+    local cached = powers_of_two[exponent]
+    if cached then return cached end
     local value = "1"
     for _ = 1, exponent do
         value = multiply_magnitude_small(value, 2)
     end
+    cache_power_of_two(exponent, value)
     return value
 end
 

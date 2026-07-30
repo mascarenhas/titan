@@ -173,15 +173,15 @@ describe("closures (capture analysis)", function()
         assert.is_nil(forstat.decl._assigned)
     end)
 
-    it("accepts 251 captures and rejects the first unrepresentable closure",
+    it("accepts 250 captures and rejects the first unrepresentable closure",
     function()
-        local ok, err = run_checker(captured_lambda_source(251))
+        local ok, err = run_checker(captured_lambda_source(250))
         assert.truthy(ok, err)
 
-        ok, err = run_checker(captured_lambda_source(252))
+        ok, err = run_checker(captured_lambda_source(251))
         assert.falsy(ok)
         assert.match(
-            "function captures too many variables %(252, max 251%)", err)
+            "function captures too many variables %(251, max 250%)", err)
     end)
 end)
 

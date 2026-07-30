@@ -454,7 +454,7 @@ describe("Titan types", function()
                 types.Map(i, i), types.Map(s, s)))
         end)
 
-        it("does not let recursive callable cycles prove consistency",
+        it("does not let malformed cycles prove non-identity consistency",
         function()
             local i = types.Integer()
             local short, wide = fn({i}), fn({i, i})
@@ -468,18 +468,44 @@ describe("Titan types", function()
             assert.is_false(types.consistent(a, b))
             assert.is_false(types.consistent(b, a))
 
-            -- A pure non-exact X = X cycle has no finite derivation. The
-            -- optional suffix makes one direction nil-fillable and the other
-            -- ignorable, so only the pending aligned component could
-            -- incorrectly serve as its own proof.
+            -- Titan syntax cannot construct this graph: recursive source
+            -- declarations reach a Type.Nominal leaf, and alias resolution
+            -- rejects structural cycles. Keep the internal relation defensive
+            -- when handed one directly.
             local p, q = fn(), fn()
             p.params = {p, types.Option(p)}
             q.params = {q}
             assert.is_false(types.equals(p, q))
+            assert.is_false(types.has_sound_gradual_guard(p))
+            assert.is_false(types.consistent(p, types.Value()))
             assert.is_false(types.callable_adjustment(p, q))
             assert.is_false(types.callable_adjustment(q, p))
             assert.is_false(types.consistent(p, q))
             assert.is_false(types.consistent(q, p))
+        end)
+
+        it("memoizes completed pairs in shared acyclic type DAGs",
+        function()
+            local left, right = types.Integer(), types.Value()
+            local depth = 16
+            for _ = 1, depth do
+                left = types.Map(left, left)
+                right = types.Map(right, right)
+            end
+
+            local normalize = types.normalize
+            local calls = 0
+            types.normalize = function(typ)
+                calls = calls + 1
+                return normalize(typ)
+            end
+            local ok, result = pcall(types.consistent, left, right)
+            types.normalize = normalize
+
+            assert.is_true(ok)
+            assert.is_true(result)
+            assert.is_true(calls < depth * 20,
+                "completed pairs should be visited linearly")
         end)
 
         it("keeps automatic conversions out of consistency", function()

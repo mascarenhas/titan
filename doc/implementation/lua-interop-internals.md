@@ -158,7 +158,8 @@ Walking through it:
   → `luaL_error`. It is leftover groundwork from that experiment.
 * **Module recovery.** The canonical first-class closure is built with the
   module `Udata` in upvalue 0, followed by its type tag, native entry pointer,
-  any captures, and the strict-entry trailer. The ordinary Lua entry therefore
+  fixed closure brand, any captures, and the strict-entry trailer. The ordinary
+  Lua entry therefore
   recovers `_mod` from `_fn->upvalue[0]` with `uvalue`; it does not rely on the
   obsolete one-upvalue wrapper shape.
 * **Arguments.** Each parameter is a C local of its native
@@ -185,23 +186,28 @@ Walking through it:
 The strict entry shares all of that arity, error-frame, tail, result-request,
 and stack-relocation machinery, but has one hidden first argument: the
 original canonical Titan closure. The adapter verifies that the hidden value
-is a C closure, that its tag is in `TITAN_FUNCTION_TYPE_TAGS_KEY`, and that
-its header and final strict-entry trailer are coherent. It roots and passes
-that original closure as `_fn`, excluding the hidden argument from every
-   user-visible arity calculation. The declaration-specific adapter consumes
-   strict `GuardPlan`s for formals and variadic elements, then boxes the native
-   result under the callee's declared result types. After it returns,
-   `codevaluecall` consumes the caller-attached strict result guards. Numeric
-   conversion and Lua truthiness are therefore unavailable on either half of
-   this path.
+is a C closure and that its coercive entry, private header, final strict-entry
+trailer, and function tag match this declaration exactly. The dispatch site
+has already established the fixed brand for a non-exact closure, so the strict
+adapter does not repeat that comparison. It roots and passes that original
+closure as `_fn`, excluding the hidden argument from every
+user-visible arity calculation. The declaration-specific adapter consumes
+strict `GuardPlan`s for formals and variadic elements, then boxes the native
+result under the callee's declared result types. After it returns,
+`codevaluecall` consumes the caller-attached strict result guards. Numeric
+conversion and Lua truthiness are therefore unavailable on either half of
+this path.
 
 The canonical closure's `f` remains the coercive entry. Its final upvalue is
-the strict light C function. `codevaluecall` uses the reverse brand set before
-reading either private slot: exact branded calls use the native pointer;
-non-exact branded calls push the strict entry plus the original closure;
-non-Titan callable values use Lua's ordinary call machinery, receive the
-already adjusted and boxed static arguments, and dynamically coerce their
-results as those values enter Titan.
+the strict light C function. `codevaluecall` first performs the likely exact
+static-tag comparison; an exact match uses the native pointer without any Lua
+registry access. Only after a mismatch does it compare fixed `upvalue[3]`
+against the opaque 64-bit `TITAN_FUNCTION_CLOSURE_BRAND` sentinel. Both
+predicates require the five-upvalue minimum and otherwise compare raw pointer
+bits without `ttis*` shape checks. A branded non-exact call pushes the strict
+entry plus the original closure; non-Titan callable values use Lua's ordinary
+call machinery, receive the already adjusted and boxed static arguments, and
+dynamically coerce their results as those values enter Titan.
 
 ## Dynamic boundary conversion
 
@@ -603,7 +609,6 @@ inventory:
 | `TITAN_LAZY_LIBS_KEY` (private to `titanlib.c`) | compiler `_loadlib`'s per-state lazy/local handle cache |
 | `TITAN_LAZY_GLOBAL_LIBS_KEY` (private to `titanlib.c`) | generated-shim `_loadlibglobal`'s per-state canonical-path lazy/global handle cache |
 | `"Titan function type <serialized type> tag"` | a shared light-userdata identity tag for each first-class function type |
-| `TITAN_FUNCTION_TYPE_TAGS_KEY` (`"29c58e5c-54d9-42c7-a7c1-eeeb87d17c00"`) | reverse set of every canonical function-type tag published in this state; generic dispatch checks membership before reading Titan-private closure slots |
 
 The UUID-string constants are defined in `titan-runtime/titan.h`.
 

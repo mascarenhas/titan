@@ -4,8 +4,17 @@ Status: **second audit and implementation complete; separated relation APIs,
 ABI-0.20 Array/function runtime layouts, focused regressions, both manuals,
 repository instructions, independent reviews, the final requirement audit,
 isolated full-suite/coverage/library validation, and the local commit are
-complete. Publication and exact-head Linux CI remain. Interface-specific
-final-release gates stay with Interfaces v1.**
+complete. Draft PR #42 is published. Its first exact-head Linux run exposed
+two covered-path performance regressions: exact function-value calls consulted
+the reverse tag registry, and repeated C profile validation rebuilt exact
+decimal powers. The local follow-up restores the static-tag likely fast path,
+uses one fixed opaque closure brand for non-exact Titan calls, memoizes only a
+bounded set of modest pure powers while retaining full profile validation, and
+simplifies consistency to direct structural recursion with completed-pair
+memoization. Both local covered shards, their combined 89.74% report, focused
+closure/stack regressions, and independent follow-up reviews are green. The
+follow-up commit/push and a green exact-head Linux/Codecov rerun remain.
+Interface-specific final-release gates stay with Interfaces v1.**
 
 This replaces the first audit of the same name. The first pass found several
 real compiler failures, but its model was still too close to the current
@@ -59,8 +68,11 @@ driver/installer/CI fixtures. Focused relation, boundary-parity, compiled-DSO,
 and selected-archive regressions pass. Separate language-manual,
 implementation-manual, repository-instruction, code, and completion reviews
 are clean. Isolated full, coverage, and library validation is green and the
-reviewed tree is committed locally; only publication and exact-head Linux CI
-remain.
+reviewed base tree is committed and published as draft PR #42. The first
+exact-head Linux run passed the producer, sanitizer, and library consumer but
+the heavy covered consumer timed out before its upload. The focused follow-up
+above restores both hot paths; the exact local heavy and core coverage shards
+are green, and an exact-head Linux/Codecov rerun remains.
 
 ## 1. Correctness target
 
@@ -462,7 +474,8 @@ CClosure.f    = coercive genuine-Lua entry
 upvalue[0]    = owning module Udata
 upvalue[1]    = canonical function-type tag
 upvalue[2]    = native entry pointer
-upvalue[3+i]  = captured value i
+upvalue[3]    = fixed opaque Titan-function brand
+upvalue[4+i]  = captured value i
 upvalue[last] = strict Titan-generic lua_CFunction as an LCF TValue
 ```
 
@@ -478,17 +491,22 @@ runtime callee's declared types; the caller then applies strict guards for its
 static result view.
 
 The strict LCF is deliberately a trailer rather than another fixed header
-slot. Lambda captures and bound receivers keep their existing indices; a
-top-level closure has four upvalues, a lambda has its existing three header
-slots plus captures plus the trailer, and a bound method keeps its receiver at
-upvalue 3 and adds the trailer after it.
+slot. The brand intentionally expands the fixed header and shifts lambda
+captures and bound receivers by one slot: a top-level closure has five
+upvalues, a lambda has four header slots plus captures plus the trailer, and a
+bound method keeps its receiver at upvalue 4 and adds the trailer after it.
 
-Do not classify an arbitrary C closure as Titan from only `nupvalues` and
-`ttislcf(upvalue[last])`. Extend the existing published function-type-tag
-registry with a per-state reverse set keyed by every canonical Titan tag
-pointer, and require membership plus safe header/trailer tag checks before
-selecting the strict entry. A Lua closure, Lua light C function, foreign C
-closure, or `__call` object that lacks membership stays on the ordinary
+An exact static tag match is the likely native fast path and trusts the private
+Titan header without a registry lookup, under the same debug/C-API contract as
+the upvalues themselves. Both the exact and non-exact predicates first require
+the five-upvalue minimum. The exact branch compares the raw pointer bits in
+upvalue 1 with the canonical static tag. After that comparison fails, the
+non-exact branch compares only the raw pointer bits in fixed upvalue 3 with
+the random 64-bit ABI sentinel `TITAN_FUNCTION_CLOSURE_BRAND`; there is no
+registry lookup or other `ttis*` shape check. Requiring the correct count,
+slot, and sentinel makes accidental recognition by a foreign C closure
+astronomically unlikely. A Lua closure, Lua light C function, foreign C
+closure, or `__call` object without the sentinel stays on the ordinary
 generic Lua-call path. Its results cross a genuine Lua-to-Titan boundary and
 therefore use the target result's `DynamicCoercionPlan`; only a branded
 non-exact Titan closure's results use strict gradual guards.
@@ -1507,9 +1525,12 @@ In particular:
 - each deferred constructor/open-run sink classifies its final element edge
   exactly once, after inference/context selection, and stores that one plan
   on both the sink and producer annotation; and
-- pending non-exact recursive callable adjustment is false, not a provisional
-  success. Exact/bisimilar cycles stop at identity; a cycle without a finite
-  derivation cannot prove itself.
+- malformed recursive structural `Type` tables cannot use a pending pair as
+  evidence for non-identity consistency. Titan aliases cannot construct such
+  graphs, and recursive records, unions, and Interfaces stop at nominal
+  leaves, so this is not a fixed-point rule in the language relation.
+  Completed-pair memoization may reuse results for shared acyclic alias DAGs,
+  but it never turns a pending pair into evidence.
 
 Add negative unit tests for missing, rejected, unknown, mismatched, and
 recursively mismatched `GuardPlan`, `DynamicCoercionPlan`, `CoercionPlan`, and
@@ -1691,9 +1712,9 @@ Interface method—the coder emits:
 - a coercive genuine-Lua stack entry;
 - a strict Titan-generic stack entry; and
 - one canonical closure whose `f` is the coercive entry and whose header
-  retains module, type tag, and native pointer in slots 0 through 2, whose
-  existing captures/receiver begin at slot 3, and whose final slot is the
-  strict-entry LCF.
+  retains module, type tag, and native pointer in slots 0 through 2 plus the
+  opaque Titan-function brand in slot 3, whose existing captures/receiver
+  begin at slot 4, and whose final slot is the strict-entry LCF.
 
 The checker records the callable adjustment and strict argument/result guard
 plans. The coder must not infer them by calling a semantic relation.
@@ -1711,17 +1732,15 @@ parallel with the existing bound native and Lua trampolines, including symbol
 collision checks, DSO lookup, static linking, direct-module accounting, and
 standalone protocol probes.
 
-Extend function-type-tag publication with a reverse membership set for generic
-dispatch. Membership lookup may be slower than the exact pointer test because
-it occurs only on the Lua-stack path, but it must be per-state, cross-module,
-and independent of provider load order. It must not turn function-type tags
-into a compatibility relation. Treat the candidate lightuserdata only as an
-opaque registry key—never dereference it to look for a magic field. If the
-lookup uses stack-based Lua APIs, reserve/save/rebase exactly like the
-subsequent generic call before reading any saved stack pointer.
+Use the same ABI-owned random 64-bit lightuserdata sentinel in fixed upvalue 3
+of every Titan function closure. Generic dispatch first proves that the C
+closure has at least five upvalues and then compares that slot's raw pointer
+bits. It does not query the registry or inspect any other `ttis*` shape. The
+sentinel is never dereferenced and is not a compatibility token; exact
+function-type identity remains the separate canonical tag in upvalue 1.
 
 Lua's `MAXUPVAL` remains a hard representation limit. The checker must account
-for the three fixed header upvalues plus the strict trailer before code
+for the four fixed header upvalues plus the strict trailer before code
 generation, diagnose a lambda whose captures would exceed the remaining
 budget, and add boundary tests for the largest accepted and first rejected
 capture counts.
@@ -1768,13 +1787,13 @@ Line numbers are from this audit's checkout.
 | `titan-runtime/titan.h:338-361` Array ABI | accept/install the writer and document the two-user-value proxy |
 | `driver.lua:2294-2303` standalone argv Array | attach the fixed `{string}` writer |
 | `types.lua:917-1005` callable helper | `callable_adjustment`, consistency-only components |
-| `coder.lua:4650-5081` `codevaluecall` | exact branded tag uses native entry; non-exact branded Titan closure pushes strict LCF + hidden original closure and strictly guards results; non-Titan callable keeps ordinary Lua path and dynamically coerces Lua-produced results |
+| `coder.lua:4650-5081` `codevaluecall` | exact static tag uses native entry; non-exact closure with the fixed ABI brand pushes strict LCF + hidden original closure and strictly guards results; non-Titan callable keeps ordinary Lua path and dynamically coerces Lua-produced results |
 | `coder.lua:9066-9340` `genluaentry` | refactor one stack-entry shell into coercive genuine-Lua and strict Titan-generic policies |
-| `coder.lua:9718-10048`, `10856-10942` function-value construction | append the strict-entry LCF after existing captures/bound receivers and enforce `MAXUPVAL` without renumbering those existing slots |
-| `coder.lua:11126-11151` function-tag initialization | publish reverse Titan-tag membership/brand for safe non-exact dispatch |
+| `coder.lua:9718-10048`, `10856-10942` function-value construction | insert the fixed brand at upvalue 3, shift captures/bound receivers to begin at 4, append the strict-entry LCF, and enforce `MAXUPVAL` |
+| `titan-runtime/titan.h` function closure brand | define one opaque random 64-bit pointer sentinel; compare it only as raw bits and never dereference it |
 | `titan-runtime/titan_uv.c`, `titan-runtime/titan_coro.c` native callback dispatch | audit the branded header/trailer while retaining native pointer in upvalue 2 |
 | Interface method matching | `callable_adjustment(concrete, required)` |
-| Interface bound-method generation | retain the Interface wrapper at upvalue 3 and append the same strict generic trailer |
+| Interface bound-method generation | retain the Interface wrapper at upvalue 4 and append the same strict generic trailer |
 
 After migration:
 
@@ -2031,10 +2050,10 @@ Exercise all three Titan-function entry roles explicitly:
   shape on strict and coercive stack entries while using different element
   policies;
 - lambdas retain every capture, ordinary bound methods retain `self` at
-  upvalue 3, and the original closure passed as `_fn` survives relocation and
+  upvalue 4, and the original closure passed as `_fn` survives relocation and
   GC;
 - source, DSO, static-provider, prefix-container, and standalone calls
-  recognize the same per-state Titan function-tag brand;
+  recognize the same fixed ABI Titan function-closure brand;
 - the largest closure fitting `MAXUPVAL` with the strict trailer compiles, and
   the next capture count is rejected by the checker rather than failing in
   `lua_pushcclosure`; and
@@ -2196,13 +2215,15 @@ The Array chapters must document:
 The function chapters must document:
 
 - one canonical `CClosure` identity with `f` as the coercive Lua entry;
-- module, exact type tag, and native pointer in upvalues 0 through 2;
-- unchanged capture/bound-receiver slots beginning at upvalue 3;
+- module, exact type tag, native pointer, and fixed closure brand in upvalues
+  0 through 3;
+- capture/bound-receiver slots beginning at upvalue 4;
 - the strict Titan-generic LCF as the final upvalue;
 - exact native dispatch, branded non-exact strict dispatch, and non-Titan
   ordinary Lua dispatch;
 - the hidden original-closure argument and strict entry's use of it as `_fn`;
-- reverse function-tag membership/branding across modules/providers;
+- count-plus-raw-sentinel closure branding across modules/providers without
+  registry access;
 - strict result guards for branded non-exact Titan closures and dynamic result
   coercion for non-Titan Lua callables;
 - the reduced-by-one capture budget and checked `MAXUPVAL` diagnostic;
@@ -2268,8 +2289,8 @@ Treat this as a clean ABI cutover, not compatibility machinery:
   workflow/cache ABI variables;
 - regenerate/update DSO, archive, serialized-metadata, and ABI-mismatch
   fixtures across driver/static-provider/multi-module specs;
-- rebuild every generated function closure with the strict trailing LCF and
-  reverse tag membership, while preserving capture/bound-receiver indices;
+- rebuild every generated function closure with the fixed brand at upvalue 3,
+  shifted capture/bound-receiver indices, and strict trailing LCF;
 - prove an ABI-0.20 compiler/runtime rejects ABI-0.19 DSOs and archives before
   exchanging an Array or function value;
 - update the clean-prefix CI proof to require `lib/titan/0.20/?.so` and reject
@@ -2315,8 +2336,9 @@ assignment nor a concrete method result `R` for a required Interface result
    debug-library scope.
 5. Freeze the function entry split: native exact, strict branded
    Titan-generic with a trailing LCF and hidden original closure, and coercive
-   genuine-Lua; retain existing capture/receiver indices and exclude private
-   debug/C header mutation.
+   genuine-Lua; freeze the four-slot header with the opaque brand in slot 3,
+   shift captures/receiver to slot 4, and exclude private debug/C header
+   mutation.
 6. Record that an Interface `DynamicCoercionPlan` accepts only an existing exact
    wrapper, never a bare implementing record/union.
 7. Record that the Array writer design does not imply coercive raw-Map writes
@@ -2402,12 +2424,12 @@ Gate:
 5. Make shared Array `__newindex` validate the index, handle nil deletion, and
    invoke the carried writer before any mutation; keep every Titan read/proxy
    guard independent of the writer slot.
-6. Refactor stack-entry generation into coercive and strict policies; append
-   the strict LCF to every Titan function closure, publish reverse tag
-   membership, and route non-exact branded calls through the LCF with the
-   original closure hidden on the stack.
-7. Preserve existing lambda capture and bound-receiver indices, enforce the
-   reduced `MAXUPVAL` capture budget in the checker, and extend
+6. Refactor stack-entry generation into coercive and strict policies; insert
+   the fixed brand at upvalue 3, append the strict LCF to every Titan function
+   closure, and route non-exact branded calls through the LCF with the original
+   closure hidden on the stack.
+7. Shift lambda capture and bound-receiver indices to begin at upvalue 4,
+   enforce the reduced `MAXUPVAL` capture budget in the checker, and extend
    bound/coroutine/uv/Interface call paths.
 8. Complete C scalar/pointer/raw-`TValue` Option-present guards and Array
    writer lowerings.
@@ -2572,15 +2594,15 @@ The repair is complete only when:
 - a dynamic Interface target accepts nil where optional or an existing exact
   wrapper, but never constructs one from a bare implementing record/union;
 - every Titan function closure retains its native pointer at upvalue 2,
-  existing captures/bound receiver at their old indices, and a strict
-  Titan-generic LCF in the final upvalue;
+  fixed brand at upvalue 3, captures/bound receiver beginning at upvalue 4,
+  and a strict Titan-generic LCF in the final upvalue;
 - static/exact Titan calls use the native entry, non-exact branded Titan calls
   use strict argument/result guards through the trailer, and genuine Lua calls
   alone use the coercive `CClosure.f` entry; non-Titan Lua callable results use
   dynamic result coercion;
-- reverse function-tag membership prevents foreign C closures from being
-  classified as Titan by shape, and the strict adapter retains the hidden
-  original closure as `_fn`;
+- after an exact-tag mismatch, the five-upvalue guard and raw fixed-brand
+  comparison distinguish Titan closures without registry access, and the
+  strict adapter retains the hidden original closure as `_fn`;
 - fixed, variadic, flexible, bound, lambda, DSO/archive, and maximum-capture
   cases preserve their calling/result/GC contracts under the three entries;
 - the ABI bump prevents one-user-value and two-user-value Array
@@ -2652,9 +2674,11 @@ The repair is complete only when:
 20. **Using the Lua entry for Titan-generic calls.** Reusing `CClosure.f`
     silently restores numeric/truthiness coercions inside gradual callable
     consistency.
-21. **Recognizing closures by shape.** Upvalue count and an LCF trailer do not
-    distinguish a foreign C closure; require canonical per-state tag
-    membership before reading Titan-private slots.
+21. **Recognizing non-exact closures by shape.** After the likely exact
+    static-tag comparison fails, require at least five upvalues and compare
+    raw upvalue 3 with the fixed opaque Titan-function sentinel before reading
+    non-exact Titan-private slots. Do not restore the reverse-tag registry or
+    add other slot-shape checks to this classifier.
 22. **Losing the original closure.** The strict adapter must receive, root, and
     pass the original closure as `_fn`, or lambdas and bound methods read the
     wrong captures.

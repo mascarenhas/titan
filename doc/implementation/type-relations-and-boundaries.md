@@ -103,8 +103,22 @@ Array, Map, and Option descend to corresponding immediate components.
 Function consistency accepts either direction of the callable shape helper,
 but each aligned component is compared directly. The helper does not search
 for an intermediate type and does not call `coercion`, `dynamic_coercion`, or
-`written_cast`. Its pair graph is solved from the least fixed point so a
-recursive callable cycle cannot prove itself merely because it was visited.
+`written_cast`.
+
+Titan's structural type grammar is finite. Alias declarations are collected
+early to support forward references, but the resolver's pending state rejects
+direct, mutual, and container-mediated cycles before a structural type can
+escape. Recursive records, unions, and Interfaces instead reach a nominal
+leaf. Consistency can therefore recurse directly over the syntax tree. A
+completed-pair memo prevents repeated work on shared acyclic alias DAGs, while
+a separate active-pair check prevents a malformed non-identity cycle
+manufactured by an internal caller from serving as its own proof; neither is a
+fixed-point rule of the language relation.
+
+The C FFI separately builds recursive `Type.C*` graphs for self-referential
+aggregates and callbacks. Those graphs do not make Titan structural types
+recursive: consistency treats a concrete C component as an exact leaf after
+typedef normalization, and cycle-safe C equality owns its internal graph.
 
 ## Direct coercion and assignment
 

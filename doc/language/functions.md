@@ -387,21 +387,22 @@ module-table entry seen from Lua.
 That canonical value is one Lua `CClosure`; Titan does not manufacture a
 companion adapter closure or an entry-descriptor indirection for another
 static view. Its ordinary callable entry is the coercive genuine-Lua entry.
-Private upvalues 0 through 2 retain, respectively, the owning module, exact
-function-type tag, and native entry pointer. Existing lambda captures or a
-bound receiver still begin at upvalue 3. The final upvalue is a light C
-function for the strict Titan-generic entry.
+Private upvalues 0 through 3 retain, respectively, the owning module, exact
+function-type tag, native entry pointer, and an opaque Titan-closure brand.
+Lambda captures or a bound receiver begin at upvalue 4. The final upvalue is a
+light C function for the strict Titan-generic entry.
 When that strict entry runs, the caller also supplies the hidden original
 canonical closure, and the native body uses it as `_fn`, preserving all
 captures and bound receivers.
 
-Function-type tags are exact identities, not compatibility tokens. Titan also
-publishes reverse per-state membership so a generic caller can distinguish a
-Titan tag created by any loaded module/provider from an arbitrary foreign
-lightuserdata. That brand selects the strict trailer only; it never turns one
-function type tag into another. Debug/C extraction or mutation of the closure's
-private upvalues is programmer-responsible and outside Titan's untrusted-code
-contract.
+Function-type tags are exact identities, not compatibility tokens. After an
+exact-tag mismatch, a generic caller recognizes a Titan closure by the fixed
+opaque 64-bit brand in upvalue 3. An unrelated C closure would need both the
+minimum Titan upvalue count and that exact sentinel in that exact slot, so
+accidental recognition is astronomically unlikely. The brand selects the
+strict trailer only; it never turns one function type tag into another.
+Debug/C extraction or mutation of the closure's private upvalues is
+programmer-responsible and outside Titan's untrusted-code contract.
 
 **`value` and function types convert both ways.** A function value flows
 into a `value` implicitly, and a `value` flows into a function type
@@ -439,11 +440,11 @@ be called by name or converted to a compatible C function pointer, but not
 stored as a Titan function value (see [the FFI chapter](ffi.md)). Assigning
 *to* a function name (`double = bad`) also remains an error.
 
-Lua 5.5 permits at most 255 upvalues in a C closure. The three fixed header
-slots and the strict-entry trailer leave 251 slots for captures or a bound
+Lua 5.5 permits at most 255 upvalues in a C closure. The four fixed header
+slots and the strict-entry trailer leave 250 slots for captures or a bound
 receiver. Titan diagnoses the first closure that would exceed that budget
-instead of emitting an invalid C closure. ABI 0.20 adds the strict trailer and
-reverse brand; a 0.19 provider has the old closure layout and is rejected
+instead of emitting an invalid C closure. ABI 0.20 adds the fixed brand and
+strict trailer; a 0.19 provider has the old closure layout and is rejected
 before an old and new function value can be exchanged.
 
 ## Recursion and declaration order

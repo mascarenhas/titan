@@ -248,7 +248,8 @@ describe("flexible-return runtime acceptance", function()
         local csrc = generate(source)
         assert.match("TitanVargInteger %*_varargs, int _start, TitanVargInteger %*_flexout, int _flexwant",
             csrc)
-        assert.match("if %(ttisCclosure%(", csrc)
+        assert.truthy(csrc:find(
+            "if (TITAN_LIKELY(_vc_callee != NULL", 1, true))
         assert.match("luaD_callnoyield%(L, restorestack%(L, _vc_func%), LUA_MULTRET%)",
             csrc)
 

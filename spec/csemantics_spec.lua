@@ -246,6 +246,21 @@ describe("pure C expression semantics", function()
                 err)
         end)
 
+        it("revalidates a mutated profile after warming exact powers",
+        function()
+            local profile = lp64_profile()
+            local expression = registered_expression("1")
+            assert(csemantics.evaluate_macro_expression(
+                profile, expression))
+
+            profile.integers.int.minimum = "-2147483647"
+            local result, err =
+                csemantics.evaluate_macro_expression(profile, expression)
+            assert.is_nil(result)
+            assert.matches(
+                "Titan requires two's%-complement signed integers", err)
+        end)
+
         it("builds an exact canonical LP64 profile from injected traits",
         function()
             local profile = assert(build_lp64())

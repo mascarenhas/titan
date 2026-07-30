@@ -145,12 +145,14 @@ Table's back barrier after the key-0 reverse link. No user-value edge is
 untraced.
 
 A first-class Titan function remains a `CClosure`. Its header is `_mod`,
-canonical function-type tag, and native-entry pointer; captures begin at
-upvalue 3; the final upvalue is the strict light C function. The last slot
-does not move capture indices. Canonical tag publication also inserts the tag
-into a per-state reverse set, so generic dispatch proves Titan ownership before
-reading this private layout. With four structural upvalues, at most 251
-captures fit under Lua's 255-upvalue limit.
+canonical function-type tag, native-entry pointer, and opaque closure brand;
+captures begin at upvalue 4; the final upvalue is the strict light C function.
+The last slot does not move capture indices. Exact dispatch first compares the
+canonical static tag and then trusts this private layout without a registry
+lookup. After an exact-tag mismatch, generic dispatch compares the fixed
+64-bit brand sentinel in upvalue 3. Both require at least five upvalues and
+otherwise read raw pointer bits without `ttis*` checks. With five structural
+upvalues, at most 250 captures fit under Lua's 255-upvalue limit.
 
 ## Records: a single tagged Udata
 

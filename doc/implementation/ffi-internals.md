@@ -653,7 +653,12 @@ retain the profile's `size_t`, and pointer subtraction retains its
 `ptrdiff_t`, until a checked conversion produces Titan `integer`. The profile
 names both carriers explicitly and is rejected unless its signed integer
 ranges are two's-complement, which is the representation assumed by emitted
-minimum-bound expressions.
+minimum-bound expressions. Public macro-expression evaluation still validates
+the complete supplied profile on every call; `csemantics` retains only a
+bounded set of modest pure exact decimal powers of two used by those range
+proofs, so macro-heavy headers do not rebuild the same constants hundreds of
+times, larger powers remain exact without being retained, and profile-table
+mutation cannot bypass validation.
 C pointers/arrays/aggregates remain C values; C `char *` / `void *` to
 `string` is implemented by an explicit cast arm with a NULL guard and
 `luaS_new` copy.

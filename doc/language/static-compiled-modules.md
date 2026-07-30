@@ -128,7 +128,7 @@ containers, duplicate logical keys, incompatible ABIs, invalid type
 interfaces, or disagreement between the embedded and callable forms before
 publishing or consuming an artifact.
 
-ABI 0.20 adds the two-user-value Array proxy and the strict-trailer/reverse-tag
+ABI 0.20 adds the two-user-value Array proxy and the fixed-brand/strict-trailer
 function-closure protocol. Its generated layout cannot be mixed with a 0.19
 provider, so archive metadata is rejected before native composition rather
 than adapted. ABI 0.19 added serialized union/variant schemas and the

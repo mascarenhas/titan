@@ -815,7 +815,7 @@ static void test_per_state_metatables(void) {
     lua_close(second);
 }
 
-static void test_function_type_tag_branding(void) {
+static void test_function_type_tag_publication(void) {
     static const char *first_key = "Titan function type unit.first tag";
     static const char *second_key = "Titan function type unit.second tag";
     lua_State *first = luaL_newstate();
@@ -823,55 +823,38 @@ static void test_function_type_tag_branding(void) {
     const void *first_tag;
     const void *recovered_tag;
     const void *other_tag;
-    const void *opaque_non_tag = (const void *)(uintptr_t)1u;
     int top;
 
     assert(first != NULL && second != NULL);
 
     top = lua_gettop(first);
-    assert(!titan_is_function_type_tag(first, NULL));
-    assert(!titan_is_function_type_tag(first, opaque_non_tag));
-    assert(lua_gettop(first) == top);
-
     first_tag = titan_publish_function_type_tag(
         first, first_key, &first_function_tag_candidate);
     assert(first_tag == &first_function_tag_candidate);
-    assert(titan_is_function_type_tag(first, first_tag));
-    assert(!titan_is_function_type_tag(
-        first, &second_function_tag_candidate));
     assert(lua_gettop(first) == top);
 
     /*
     ** A second provider for the same structural function type recovers the
-    ** first provider's canonical pointer. Its unused local candidate is not
-    ** accidentally branded.
+    ** first provider's canonical pointer.
     */
     recovered_tag = titan_publish_function_type_tag(
         first, first_key, &second_function_tag_candidate);
     assert(recovered_tag == first_tag);
-    assert(titan_is_function_type_tag(first, recovered_tag));
-    assert(!titan_is_function_type_tag(
-        first, &second_function_tag_candidate));
     assert(lua_gettop(first) == top);
 
     other_tag = titan_publish_function_type_tag(
         first, second_key, &second_function_tag_candidate);
     assert(other_tag == &second_function_tag_candidate);
-    assert(titan_is_function_type_tag(first, other_tag));
     assert(lua_gettop(first) == top);
 
     /*
     ** Registry ownership is per Lua state. The same key elects this state's
-    ** first candidate and does not inherit brands from another state.
+    ** first candidate independently.
     */
     top = lua_gettop(second);
-    assert(!titan_is_function_type_tag(second, first_tag));
     recovered_tag = titan_publish_function_type_tag(
         second, first_key, &second_function_tag_candidate);
     assert(recovered_tag == &second_function_tag_candidate);
-    assert(titan_is_function_type_tag(second, recovered_tag));
-    assert(!titan_is_function_type_tag(
-        second, &first_function_tag_candidate));
     assert(lua_gettop(second) == top);
 
     lua_close(first);
@@ -886,7 +869,7 @@ int main(void) {
     test_gc_mode(LUA_GCINC);
     test_gc_mode(LUA_GCGEN);
     test_per_state_metatables();
-    test_function_type_tag_branding();
+    test_function_type_tag_publication();
 #endif
     puts("dense array runtime ok");
     return 0;

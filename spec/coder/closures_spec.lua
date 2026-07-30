@@ -52,9 +52,9 @@ describe("closures (end-to-end)", function()
 
     it("constructs and calls the largest representable captured closure",
     function()
-        run_coder(captured_lambda_source(251), [[
+        run_coder(captured_lambda_source(250), [[
             local f = test.make()
-            assert(f() == 31626)
+            assert(f() == 31375)
         ]])
     end)
 

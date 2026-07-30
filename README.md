@@ -400,8 +400,8 @@ closures.
 
 The active compiled-module ABI is 0.20. Array proxies now carry a traced,
 construction-selected per-element-type Lua-write policy in a second user
-value, and Titan function closures carry a trailing strict generic entry plus
-reverse type-brand membership in addition to their native exact and coercive
+value, and Titan function closures carry a fixed opaque brand upvalue plus a
+trailing strict generic entry in addition to their native exact and coercive
 Lua entries. Current lookup and publication use `TITAN_PATH_0_20` and
 `lib/titan/0.20`; 0.19 metadata is rejected before decoding. This relation
 review owns the single mechanical 0.19-to-0.20 path advance, while ABI-0.20

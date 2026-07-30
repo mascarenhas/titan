@@ -1282,8 +1282,11 @@ local function sound_guardable(typ, seen)
 
     seen = seen or {}
     if seen[typ] ~= nil then return seen[typ] end
-    -- Recursive callable/container graphs are interpreted coinductively.
-    seen[typ] = true
+    -- Titan's structural type grammar is finite. Recursion through a record,
+    -- union, or interface stops at its nominal descriptor; revisiting an
+    -- Array/Map/Option/Function table can therefore only be a malformed
+    -- internal graph, not evidence that the graph is guardable.
+    seen[typ] = false
 
     local tag = typ._tag
     local ok
@@ -1677,188 +1680,173 @@ callable_adjustment_impl = function(source, target, context)
     return result
 end
 
-relation_consistent = function(left, right)
-    -- Consistency is an inductively generated relation. Recursive callable
-    -- graphs therefore need the least fixed point: an unsupported cycle may
-    -- not serve as its own proof. Build the finite equation graph first, then
-    -- grow the solution monotonically from false. This also keeps a failed
-    -- directional callable alternative from leaving stale memoized answers
-    -- for the reverse alternative.
-    local nodes = {}
-    local pairs = {}
-    local pair_formula
+local consistent_impl
 
-    local function constant(value)
-        return function() return value end
+local function callable_shape_consistent(source, target, context)
+    local exact = relation_identity(source, target)
+    if (source.vararg or target.vararg) and not exact then
+        return false
     end
 
-    local function all(formulas)
-        return function()
-            for _, formula in ipairs(formulas) do
-                if not formula() then return false end
-            end
-            return true
-        end
-    end
-
-    local function any(formulas)
-        return function()
-            for _, formula in ipairs(formulas) do
-                if formula() then return true end
-            end
+    local nargs = math.min(#source.params, #target.params)
+    for index = 1, nargs do
+        -- A call through `target` supplies a target parameter to the actual
+        -- `source` callable.
+        if not consistent_impl(
+                target.params[index], source.params[index], context) then
             return false
         end
     end
 
-    local function shape_formula(source, target)
-        local exact = relation_identity(source, target)
-        if (source.vararg or target.vararg) and not exact then
-            return constant(false)
+    for index = #target.params + 1, #source.params do
+        if not accepts_missing_nil(source.params[index]) then
+            return false
+        elseif target.varargtype
+           and not consistent_impl(
+               target.varargtype, source.params[index], context) then
+            return false
         end
-
-        local components = {}
-        local nargs = math.min(#source.params, #target.params)
-        for index = 1, nargs do
-            -- A call through `target` supplies a target parameter to the
-            -- actual `source` callable.
-            components[#components + 1] =
-                pair_formula(target.params[index], source.params[index])
-        end
-
-        for index = #target.params + 1, #source.params do
-            if not accepts_missing_nil(source.params[index]) then
-                return constant(false)
-            elseif target.varargtype then
-                components[#components + 1] =
-                    pair_formula(target.varargtype, source.params[index])
-            end
-        end
-
-        for index = #source.params + 1, #target.params do
-            if source.varargtype then
-                components[#components + 1] =
-                    pair_formula(target.params[index], source.varargtype)
-            end
-        end
-
-        if source.varargtype and target.varargtype then
-            components[#components + 1] =
-                pair_formula(target.varargtype, source.varargtype)
-        end
-
-        for index, expected_unresolved in ipairs(target.rettypes) do
-            local actual = source.rettypes[index]
-            if actual then
-                components[#components + 1] =
-                    pair_formula(actual, expected_unresolved)
-            elseif source.flexrettype then
-                local expected = types.normalize(expected_unresolved)
-                if expected and expected._tag == "Type.Option" then
-                    components[#components + 1] = any({
-                        pair_formula(source.flexrettype, expected),
-                        pair_formula(source.flexrettype, expected.base),
-                    })
-                else
-                    components[#components + 1] =
-                        pair_formula(source.flexrettype, expected_unresolved)
-                end
-            else
-                return constant(false)
-            end
-        end
-
-        for index = #target.rettypes + 1, #source.rettypes do
-            if target.flexrettype then
-                components[#components + 1] =
-                    pair_formula(
-                        source.rettypes[index], target.flexrettype)
-            end
-        end
-
-        if source.flexrettype and target.flexrettype then
-            components[#components + 1] =
-                pair_formula(source.flexrettype, target.flexrettype)
-        end
-
-        return all(components)
     end
 
-    pair_formula = function(pair_left, pair_right)
-        pair_left, pair_right =
-            normalized_pair(pair_left, pair_right)
-        if not pair_left or not pair_right
-           or pair_left._tag == "Type.Variant"
-           or pair_right._tag == "Type.Variant" then
-            return constant(false)
-        elseif relation_identity(pair_left, pair_right) then
-            return constant(true)
+    for index = #source.params + 1, #target.params do
+        if source.varargtype
+           and not consistent_impl(
+               target.params[index], source.varargtype, context) then
+            return false
         end
+    end
 
-        local matches = pairs[pair_left]
-        local node = matches and matches[pair_right]
-        if node then
-            return function() return node.value end
-        end
+    if source.varargtype and target.varargtype
+       and not consistent_impl(
+           target.varargtype, source.varargtype, context) then
+        return false
+    end
 
-        node = { value = false }
-        nodes[#nodes + 1] = node
-        if not matches then
-            matches = {}
-            pairs[pair_left] = matches
-        end
-        matches[pair_right] = node
-        local reverse = pairs[pair_right]
-        if not reverse then
-            reverse = {}
-            pairs[pair_right] = reverse
-        end
-        reverse[pair_left] = node
-
-        if pair_left._tag == "Type.Value"
-           or pair_right._tag == "Type.Value" then
-            local other = pair_left._tag == "Type.Value"
-                and pair_right or pair_left
-            node.formula = constant(
-                sound_guardable(other, {})
-                and types.has_tvalue_representation(other))
-        elseif pair_left._tag == "Type.Array"
-           and pair_right._tag == "Type.Array" then
-            node.formula =
-                pair_formula(pair_left.elem, pair_right.elem)
-        elseif pair_left._tag == "Type.Map"
-           and pair_right._tag == "Type.Map" then
-            node.formula = all({
-                pair_formula(pair_left.keys, pair_right.keys),
-                pair_formula(pair_left.values, pair_right.values),
-            })
-        elseif pair_left._tag == "Type.Option"
-           and pair_right._tag == "Type.Option" then
-            node.formula =
-                pair_formula(pair_left.base, pair_right.base)
-        elseif pair_left._tag == "Type.Function"
-           and pair_right._tag == "Type.Function" then
-            node.formula = any({
-                shape_formula(pair_left, pair_right),
-                shape_formula(pair_right, pair_left),
-            })
+    for index, expected_unresolved in ipairs(target.rettypes) do
+        local actual = source.rettypes[index]
+        if actual then
+            if not consistent_impl(actual, expected_unresolved, context) then
+                return false
+            end
+        elseif source.flexrettype then
+            local expected = types.normalize(expected_unresolved)
+            local compatible =
+                consistent_impl(
+                    source.flexrettype, expected_unresolved, context)
+            if not compatible
+               and expected and expected._tag == "Type.Option" then
+                compatible =
+                    consistent_impl(
+                        source.flexrettype, expected.base, context)
+            end
+            if not compatible then return false end
         else
-            node.formula = constant(false)
+            return false
         end
-        return function() return node.value end
     end
 
-    local root = pair_formula(left, right)
-    local changed
-    repeat
-        changed = false
-        for _, node in ipairs(nodes) do
-            if not node.value and node.formula() then
-                node.value = true
-                changed = true
-            end
+    for index = #target.rettypes + 1, #source.rettypes do
+        if target.flexrettype
+           and not consistent_impl(
+               source.rettypes[index], target.flexrettype, context) then
+            return false
         end
-    until not changed
-    return root()
+    end
+
+    if source.flexrettype and target.flexrettype
+       and not consistent_impl(
+           source.flexrettype, target.flexrettype, context) then
+        return false
+    end
+
+    return true
+end
+
+consistent_impl = function(left, right, context)
+    left, right = normalized_pair(left, right)
+    if not left or not right
+       or left._tag == "Type.Variant"
+       or right._tag == "Type.Variant" then
+        return false
+    elseif relation_identity(left, right) then
+        return true
+    end
+
+    local completed_left = context.completed[left]
+    if completed_left and completed_left[right] ~= nil then
+        return completed_left[right]
+    end
+
+    -- Titan's grammar does not admit recursive structural types. Alias
+    -- resolution rejects cycles, while recursion in records, unions, and
+    -- interfaces reaches a nominal leaf. Keep this pending-pair check only as
+    -- a defense against a malformed cycle supplied by an internal caller
+    -- serving as its own non-identity proof; it is not a fixed-point rule in
+    -- the language relation.
+    local active = context.active
+    local left_active = active[left]
+    local right_active = active[right]
+    if (left_active and left_active[right])
+       or (right_active and right_active[left]) then
+        return false
+    end
+    if not left_active then
+        left_active = {}
+        active[left] = left_active
+    end
+    if not right_active then
+        right_active = {}
+        active[right] = right_active
+    end
+    left_active[right] = true
+    right_active[left] = true
+
+    local result
+    if left._tag == "Type.Value"
+       or right._tag == "Type.Value" then
+        local other = left._tag == "Type.Value" and right or left
+        result = sound_guardable(other, {})
+            and types.has_tvalue_representation(other)
+    elseif left._tag == "Type.Array"
+       and right._tag == "Type.Array" then
+        result = consistent_impl(left.elem, right.elem, context)
+    elseif left._tag == "Type.Map"
+       and right._tag == "Type.Map" then
+        result = consistent_impl(left.keys, right.keys, context)
+            and consistent_impl(left.values, right.values, context)
+    elseif left._tag == "Type.Option"
+       and right._tag == "Type.Option" then
+        result = consistent_impl(left.base, right.base, context)
+    elseif left._tag == "Type.Function"
+       and right._tag == "Type.Function" then
+        result = callable_shape_consistent(left, right, context)
+            or callable_shape_consistent(right, left, context)
+    else
+        result = false
+    end
+
+    left_active[right] = nil
+    right_active[left] = nil
+    completed_left = context.completed[left]
+    if not completed_left then
+        completed_left = {}
+        context.completed[left] = completed_left
+    end
+    local completed_right = context.completed[right]
+    if not completed_right then
+        completed_right = {}
+        context.completed[right] = completed_right
+    end
+    completed_left[right] = result and true or false
+    completed_right[left] = result and true or false
+    return result
+end
+
+relation_consistent = function(left, right)
+    return consistent_impl(left, right, {
+        active = {},
+        completed = {},
+    })
 end
 
 function types.consistent(left, right)

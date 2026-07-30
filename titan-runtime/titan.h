@@ -3,6 +3,7 @@
 
 #include <float.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "llimits.h"
@@ -98,7 +99,7 @@
    safely reconstruct imported first-class static selectors.
    0.19 -> 0.20: Array proxies gain a second traced user value for their
    construction-selected Lua writer, and Titan function closures gain the
-   strict generic-entry trailer and reverse-brand protocol. This version is
+   strict generic-entry trailer and fixed closure-brand upvalue. This version is
    also the coordinated Interface representation cutover; relation-only and
    Interface-only intermediate layouts are not separately publishable ABIs. */
 #define TITAN_VER "0.20"
@@ -129,11 +130,13 @@
 ** module ABI. */
 #define TITAN_NAMES_KEY "a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"
 
-/* Per-Lua-state reverse set of every canonical Titan function-type tag
-** published by generated module initialization. The string key, rather than a
-** runtime-local address, makes independently loaded titan.o copies share the
-** same set. */
-#define TITAN_FUNCTION_TYPE_TAGS_KEY "29c58e5c-54d9-42c7-a7c1-eeeb87d17c00"
+/* Opaque ABI-owned brand stored as light userdata in every Titan function
+** closure. It is compared only as raw pointer bits and must never be
+** dereferenced. Together with the fixed upvalue slot/count, this
+** astronomically unlikely sentinel distinguishes Titan closures without a
+** Lua-registry lookup on generic calls. */
+#define TITAN_FUNCTION_CLOSURE_BRAND                                      \
+  ((void *)(uintptr_t)UINT64_C(0x649b61b49f68a8b2))
 
 /* When set (boolean true) in the registry, errorhandler() KEEPS the existing
 ** TITAN_BACKTRACE_KEY slot instead of regenerating it, and clears the pin. A
@@ -344,13 +347,11 @@ LUAI_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
                                const char *file);
 LUAI_FUNC void titan_invalidate_backtrace_state(lua_State *L);
 LUAI_FUNC void titan_init_paths(lua_State *L);
-/* Publish/recover one type-specific canonical pointer and brand it in this
-** Lua state's reverse set. Membership treats its candidate only as an opaque
-** identity key; both helpers preserve the Lua stack on success. */
+/* Publish/recover one type-specific canonical pointer. The candidate is an
+** opaque identity key and is never dereferenced. The helper preserves the Lua
+** stack on success. */
 LUAI_FUNC const void *titan_publish_function_type_tag(
     lua_State *L, const char *registry_key, const void *candidate);
-LUAI_FUNC int titan_is_function_type_tag(lua_State *L,
-                                         const void *candidate);
 
 /*
 ** Dense Array runtime. A backing Table has no metatable, uses only its array

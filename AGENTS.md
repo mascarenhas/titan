@@ -574,8 +574,8 @@ for `tableloader` and external callers.
 
 The compiled-module ABI version is `0.20`. It gives every Array proxy a second
 traced user value carrying its construction-selected Lua-write policy and
-gives every Titan function closure a trailing strict generic entry plus
-reverse type-brand membership. `TITAN_VER`, `_0_20`, `TITAN_PATH_0_20`,
+gives every Titan function closure a fixed opaque brand upvalue plus a trailing
+strict generic entry. `TITAN_VER`, `_0_20`, `TITAN_PATH_0_20`,
 `lib/titan/0.20`, and `stdlib_0_20` advance together; a 0.19 provider is
 rejected before its type metadata is decoded. There is no 0.19-to-0.20
 in-place migration: use a clean prefix and preserve any separately versioned
@@ -867,7 +867,7 @@ substitution, recursive; error on missing keys). Key facts:
   removed libuv/coroutine helpers. ABI 0.19 adds union/variant schemas,
   union userdata/tag dispatch, and the public nominal-static slot prefix. ABI
   0.20 adds the Array proxy's traced writer user value and the strict
-  Titan-generic function entry/reverse-brand closure protocol.
+  Titan-generic function entry/fixed-brand closure protocol.
 - Each generated logical module object contains the canonical serialized
   interface twice: callable `<mangled>_types`/`_abi` entries and one
   relocation-free, byte-aligned metadata section rendered by
@@ -996,19 +996,20 @@ substitution, recursive; error on missing keys). Key facts:
   coercive Lua-stack entry used by genuine Lua callers, and a strict
   Lua-stack-convention LCF used by branded non-exact Titan calls. One canonical
   `CClosure` remains the function value: its `f` is the coercive Lua entry,
-  upvalues 0 through 2 are the owning module, exact function-type tag, and
-  native pointer, captures or a bound receiver begin at upvalue 3, and the
-  strict LCF is the final upvalue. A strict call passes that original closure
-  as a hidden first stack argument so the strict entry can use it as `_fn`
-  without creating an adapter identity. Exact Titan calls use the native
-  entry; branded non-exact calls guard arguments and results without automatic
-  coercion. Non-Titan Lua callables use ordinary Lua dispatch; their results
-  entering typed Titan slots use the canonical dynamic coercion. Reverse
-  type-brand membership is registered per Lua state so cross-module/provider
-  non-exact calls can select the strict entry safely. `_fn` is `NULL` on
+  upvalues 0 through 3 are the owning module, exact function-type tag, native
+  pointer, and fixed opaque brand; captures or a bound receiver begin at
+  upvalue 4, and the strict LCF is the final upvalue. A strict call passes that
+  original closure as a hidden first stack argument so the strict entry can use
+  it as `_fn` without creating an adapter identity. Exact Titan calls use the
+  native entry; branded non-exact calls guard arguments and results without
+  automatic coercion. Non-Titan Lua callables use ordinary Lua dispatch; their
+  results entering typed Titan slots use the canonical dynamic coercion. The
+  non-exact classifier requires at least five upvalues and compares only the
+  raw fixed-brand slot, with no registry lookup or `ttis*` shape checks. `_fn`
+  is `NULL` on
   fully-static top-level native calls and the callee itself on
-  first-class/closure/value calls. The strict trailer reduces the
-  anonymous-function capture budget to 251, enforced by the checker before
+  first-class/closure/value calls. The brand plus strict trailer reduce the
+  anonymous-function capture budget to 250, enforced by the checker before
   Lua's `MAXUPVAL` limit. Debug/C mutation or extraction of the private closure
   upvalues opts out of Titan's invariants.
 
@@ -1101,8 +1102,8 @@ substitution, recursive; error on missing keys). Key facts:
   Titan module; native caches belong in registry-owned userdata rather than
   mutable per-DSO globals.
 - First-class function values use the canonical ABI-0.20 `CClosure` layout
-  described above: `_mod`, exact tag, native pointer, captures or a bound
-  receiver from slot 3, and the strict LCF last. Anonymous
+  described above: `_mod`, exact tag, native pointer, opaque brand in slot 3,
+  captures or a bound receiver from slot 4, and the strict LCF last. Anonymous
   functions/closures and `obj:method` **bound methods** are supported as
   values. A captured-and-mutated local is stored in a **box** so all sharers
   mutate one cell. A box is a Lua *userdata* (not a CClosure): a userdata's GC

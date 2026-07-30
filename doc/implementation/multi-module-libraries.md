@@ -383,8 +383,8 @@ closure slots.
 
 ABI 0.20 retains both provider formats and the metadata container, but changes
 two runtime layouts: every Array proxy carries a second traced user value for
-its genuine-Lua writer, and every Titan function closure carries a final
-strict-entry light C function plus a per-state reverse brand. Its marker must
+its genuine-Lua writer, and every Titan function closure carries a fixed
+opaque brand upvalue plus a final strict-entry light C function. Its marker must
 reject 0.19 before any native value crosses that boundary. The transition
 uses a fresh/clean 0.20 prefix; there is no in-place 0.19 migration or retained
 historical cutover canary.
