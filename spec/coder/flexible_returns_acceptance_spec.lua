@@ -206,7 +206,8 @@ describe("flexible-return runtime acceptance", function()
 
             local ok, err = pcall(test.required_projection, false)
             assert(not ok)
-            assert(tostring(err):find("expected integer but found nil", 1, true), err)
+            assert(tostring(err):find(
+                "expected integer tag but found nil", 1, true), err)
 
             local a, b, c = test.consume_fixed_suffix()
             assert(select("#", test.consume_fixed_suffix()) == 3)
@@ -247,7 +248,8 @@ describe("flexible-return runtime acceptance", function()
         local csrc = generate(source)
         assert.match("TitanVargInteger %*_varargs, int _start, TitanVargInteger %*_flexout, int _flexwant",
             csrc)
-        assert.match("if %(ttisCclosure%(", csrc)
+        assert.truthy(csrc:find(
+            "if (TITAN_LIKELY(_vc_callee != NULL", 1, true))
         assert.match("luaD_callnoyield%(L, restorestack%(L, _vc_func%), LUA_MULTRET%)",
             csrc)
 

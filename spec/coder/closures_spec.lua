@@ -10,6 +10,23 @@ local h = require 'spec.support.helpers'
 
 local run_coder = h.run_coder
 
+local function captured_lambda_source(count)
+    local declarations, terms = {}, {}
+    for i = 1, count do
+        declarations[#declarations + 1] =
+            string.format("local capture_%03d: integer = %d", i, i)
+        terms[#terms + 1] = string.format("capture_%03d", i)
+    end
+    return string.format([[
+        function make(): (() -> integer)
+            %s
+            return function(): integer
+                return %s
+            end
+        end
+    ]], table.concat(declarations, "\n"), table.concat(terms, " + "))
+end
+
 describe("closures (end-to-end)", function()
     after_each(function ()
         os.execute("rm -rf *.o *.so *.dSYM")
@@ -30,6 +47,14 @@ describe("closures (end-to-end)", function()
             assert(c() == 1)
             assert(c() == 2)
             assert(c() == 3)
+        ]])
+    end)
+
+    it("constructs and calls the largest representable captured closure",
+    function()
+        run_coder(captured_lambda_source(250), [[
+            local f = test.make()
+            assert(f() == 31375)
         ]])
     end)
 
@@ -744,6 +769,36 @@ describe("closures (end-to-end)", function()
         ]], [[
             assert(test.apply(5) == 105)
             assert(test.apply(7) == 107)
+        ]])
+    end)
+
+    it("brands module-initializer lambdas and bound method refs before use", function()
+        -- Both closures are constructed while _init is evaluating module
+        -- variables. Their exact type tags must already be published then;
+        -- otherwise a later compatible non-exact call mistakes them for plain
+        -- Lua callables and applies the coercive result boundary.
+        run_coder([[
+            record Source end
+            function Source:get(): value return 2.0 end
+
+            local lambda: () -> value =
+                function (): value return 2.0 end
+            local bound: () -> value = Source.new():get
+
+            function call_lambda_as_integer(): integer
+                local f: () -> integer = lambda
+                return f()
+            end
+
+            function call_bound_as_integer(): integer
+                local f: () -> integer = bound
+                return f()
+            end
+        ]], [[
+            local ok_lambda = pcall(test.call_lambda_as_integer)
+            local ok_bound = pcall(test.call_bound_as_integer)
+            assert(not ok_lambda)
+            assert(not ok_bound)
         ]])
     end)
 end)

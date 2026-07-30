@@ -5,9 +5,9 @@ determined at compile time. The compiler rejects programs that violate the
 typing rules with **compile-time errors** of the form
 `file:line:col: type error: <message>`. Where Titan deliberately admits
 dynamism — the `value` type, [option types](option-types.md), and every
-value arriving from Lua — the compiler inserts **run-time checks** instead,
-which raise ordinary Lua errors when they fail (see
-[Error handling](error-handling.md)).
+value arriving from Lua — the compiler records the corresponding run-time
+guard or boundary conversion. A failing partial operation raises an ordinary
+Lua error (see [Error handling](error-handling.md)).
 
 ## The type language
 
@@ -55,6 +55,14 @@ proxies, while maps are ordinary Lua tables. Both can cross the Lua boundary,
 but an Array requires the exact proxy created by Titan rather than an arbitrary
 Lua table; the full account is in
 [Arrays and maps](arrays-maps.md).
+
+The type syntax does not promise that every FFI representation supports every
+container operation. A typed element/value read is accepted only when Titan
+has a sound guard for the optional result type. In particular, raw C-pointer
+Array and Map reads are compile-time errors. Constructing an Array with a raw
+C-pointer element is also rejected because the Array cannot provide its
+required sound Lua writer; a Map may store a statically typed raw pointer, but
+that typed value view cannot be indexed.
 
 ```lua
 function sum(xs: {float}): float
@@ -165,7 +173,8 @@ C integer and float types, pointers, arrays, struct/union types, and C
 typedefs. They can be written in local annotations through the foreign module
 namespace (`c.size_t`, `c.FILE`, `c.ffi_point`) and they participate in the
 relations below through explicit FFI conversion rules. They cannot appear in
-exported Titan interfaces; the details live in [The C FFI](ffi.md).
+exported compiled-module interfaces; the details live in
+[The C FFI](ffi.md).
 
 ## Type equality
 
@@ -204,72 +213,119 @@ compared by mathematical value, with no promotion) or two strings, and
 the `or` defaulting rule for options (`x or d` where `x: t?`) requires
 `d` to have exactly the base type `t`.
 
-## Compatibility: how `value` flows through compound types
+## Relations and boundaries: no subtyping
 
-Between equality and "unrelated" sits *compatibility* — the consistency
-relation of gradual typing: two types are compatible when, ignoring every
-position where one of them says `value`, they agree. The compiler accepts
-a compatible type wherever a given type is expected, in equality
-comparisons, and as the precondition of explicit `as` casts. The rules:
+Titan does not need a subtyping relation. Even an apparently widening use such
+as `T` in a `T?` context is an automatic conversion: the two types can have
+different representations, and the conversion does not automatically lift
+through an Array, Map, or Function. In particular:
 
-1. Equal types are compatible.
-2. `value` is compatible with **every** type.
-3. Compatibility recurses through arrays and maps, and directionally through
-   function types:
-   `{value}` is compatible with `{float}`, `{value: integer}` with
-   `{string: integer}`. For a function assignment, the expected slot controls
-   future calls: parameter positions are checked in the reverse direction,
-   result positions in the forward direction, and safe arity/tail adjustment
-   is allowed. An actual function may ignore inputs or results hidden by the
-   expected type. Additional nil-accepting actual parameters may be filled by
-   adjustment, but an actual function may not require a non-nil input or omit a
-   fixed result that callers of the expected type rely on.
-4. Record and union types are compatible only with themselves. The recursion of
-   rule 3 does **not** look inside nominal values: `PointV` above, whose fields
-   are `value`, is still incompatible with `PointF`. Nominal means
-   nominal.
-5. C FFI compatibility is exact except for the boundary conversions documented
-   in [the FFI](ffi.md): C integers with `integer`, C floats with `float`,
-   Titan `integer`/`float` with C floats, nullable C pointers with `nil`, C
-   arrays and counted owned C arrays with compatible pointers, non-function C
-   object pointers with `void *`, non-pointer by-value C object expressions with
-   compatible `const *T` parameters, mutable non-pointer C locals/formals with
-   compatible mutable pointer parameters, Titan `string` with C `char *`/`void
-   *`, C `TValue` with Titan `value`, and boxable C values with `value`. C
-   `char *`/`void *` to Titan `string` is explicit-cast-only. Lua's internal
-   `Udata *` is a special boxable pointer: non-NULL values cross as the same
-   full userdata rather than lightuserdata, and NULL crosses as nil.
-
-When two types are merely compatible — related through `value` inside a
-compound type rather than by a direct coercion — **no conversion happens
-at all**. The value passes through unchanged, and the type mismatch is
-paid for later, as run-time checks at the points where elements are
-actually read. With `sum: ({float}) -> float` from above:
-
-```lua
-function caller(): float
-    local vs: {value} = { 1.0, 2.0, 3.0 }
-    return sum(vs)   -- accepted: {value} is compatible with {float}
-end
+```text
+integer -> float                 direct coercion
+integer -> integer?              direct coercion
+{integer} -> {float}             rejected
+() -> integer -> () -> float    rejected
+() -> integer -> () -> integer? rejected
 ```
 
-If an element of `vs` had been a string, `caller` would still compile and
-`sum` would raise a run-time error at the `xs[i]` read. This deferred
-checking is the same mechanism that guards tables arriving from Lua — see
-[Lua interoperability](lua-interop.md).
+The compiler instead keeps several deliberately separate relations and
+operations:
 
-Function compatibility is therefore not generally symmetric. An actual
-`(integer) -> (integer, string)` can inhabit an expected
-`(integer, string) -> integer`: it ignores the extra input and callers ignore
-the extra result. The reverse assignment is unsafe. Flexible result positions
-project as options for finite consumers, while an expected flexible tail
-observes every compatible actual result beyond its fixed prefix. See
-[Flexible returns](flexible-returns.md#function-compatibility-is-directional)
-for the complete input and result rules.
+* **consistent** is the symmetric, non-transitive relation of gradual typing.
+  Equal types are consistent. A guardable type is consistent with `value`,
+  and consistency descends pointwise through Arrays, Maps, Options, and
+  aligned Function components. Records and unions remain nominal. For
+  example, `{integer}` is consistent with `{value}`, and `{value}` with
+  `{float}`, but `{integer}` is not consistent with `{float}`. This is the
+  intended non-transitivity; the compiler never searches for a path through
+  an intermediate type. Function consistency is likewise symmetric: it asks
+  whether either direction can align the two shapes, but does not itself
+  authorize a directional assignment.
+* **coercible** means that one named, direct automatic conversion plan exists
+  from the source type to the target type. Numeric conversion, Option
+  introduction/force, and the enumerated FFI conversions are coercions.
+  Coercions are directional and do not recurse generically through Arrays,
+  Maps, Functions, or nominal fields.
+* A **gradual view** observes the same compound value under a consistent
+  static shape. It performs no element conversion when the view is made.
+  Every later typed Array or Map read establishes the requested type with a
+  strict guard before Titan uses the value. An Option has no mutable backing:
+  when an `A?` is viewed as a consistent `B?`, nil passes and a present payload
+  is guarded immediately as `B`.
+* **callable adjustment** is Titan's directional function-shape operation:
+  it records fixed-position alignment, ignored values, nil-filled positions,
+  input/output tails, and flexible projection. Aligned components may use
+  consistency and nested callable adjustment, but never ordinary numeric,
+  Option, C, or future Interface coercions.
+* **dynamic coercion** is the target-directed conversion used at an explicitly
+  dynamic boundary: a written `value as/is T`, a genuine Lua-to-Titan sink,
+  or a result entering Titan from a non-Titan Lua callable.
+* **written-castable** means that the programmer explicitly requested one of
+  the conversions or checks admitted by `as`/`is`. Written casts include the
+  dynamic operation from `value` and a few explicitly unsafe FFI operations.
+* **comparable** is the symmetric policy used by `==` and `~=`. It is not
+  inferred from directional assignment or coercibility.
+* A type is **guardable** (or **reifiable**) when the requested run-time type
+  can actually be established, or a normal error can be raised before a value
+  is used at that type. Being representable inside a Lua `TValue` is not by
+  itself sufficient.
+
+Transparent Titan aliases and C typedef chains are normalized before any of
+these questions are asked. Alias transparency is therefore identity, not a
+transitive relation edge.
+
+### Normative boundary matrix
+
+This is the canonical boundary policy for the language. The Array, Function,
+Option, Lua-interoperation, flexible-return, variadic, and FFI chapters refer
+back to this matrix rather than defining competing conversion rules.
+
+| Context or operation | Rule | What happens at run time |
+| --- | --- | --- |
+| Ordinary typed Titan declaration, assignment, argument, return, or constructor slot | Exact identity, one direct outer coercion, a gradual view, or a directional callable adjustment must exist. Ordinary coercions never lift through an Array, Map, Function, or nominal member. | The checker-selected direct conversion is performed; a same-representation gradual view preserves the object. |
+| Implicit `value -> T` in a typed Titan context | Strict gradual projection; `T` must be guardable. This is not the broad dynamic coercion used by written casts or Lua. | The exact tag, shape, or nominal identity required for `T` is checked. No integral-float narrowing, integer-to-float conversion, truthiness, Option introduction/force, or pointer assertion is added by the guard. |
+| Typed Titan Array element or Map value read | Strict target guard, regardless of which static view was used to write the slot or whether a Map value came from Lua. The checker rejects a read whose optional result type is not guardable. | An accepted read either produces the requested value or raises before Titan uses it. Array reads never invoke the Array's Lua writer. Map reads do not track write provenance. |
+| Written `v as T` / `v is T` with `v: value` | Shared dynamic coercion, except for the explicitly unsafe raw-C-pointer rule below. | `as` converts or raises; `is` tests acceptance without returning the converted value or raising for a mismatch. Both evaluate `v` once. |
+| Genuine Lua function argument, exported module-variable write, public record-field write, non-nil Array-element write, or result from a non-Titan Lua callable entering Titan | The same dynamic coercion as the preceding row. | Equal target types accept, reject, and convert the same values at all of these boundaries. |
+| Lua writes `nil` to an Array proxy | Deletion is recognized before element conversion. | The position is removed; the writer is not called, and an out-of-capacity deletion does not allocate. |
+| Array passes through `value`, Lua, an import, a return, a nested box, or another consistent static view | Preserve the canonical proxy, backing, and construction-time writer. | No target-view writer is synthesized, compared, or installed. The writer describes future genuine-Lua writes, not the current contents. |
+| Exact native Titan function call | Exact function tag and static type. | Call the native entry directly; no Lua-stack boundary conversion occurs. |
+| Non-exact call of a branded Titan function through a static view (from callable adjustment or a dynamic Function boundary) | Strict Titan-generic entry selected through the function's brand and trailer. | Arguments and observed results use strict gradual guards and the statically recorded shape demand. Ordinary coercions are not smuggled through the call. |
+| Genuine Lua call of a Titan function | Coercive Lua entry. | Lua arguments use dynamic coercion; the Titan function's ordinary result conversion returns values to Lua. |
+| Titan call of a non-Titan Lua callable | Ordinary Lua call, followed by the dynamic boundary for results entering Titan. | Callability follows Lua, including `__call`; requested result types use dynamic coercion. |
+| `value as/is` a raw C pointer | Written, explicitly unsafe pointer assertion only. Implicit gradual projection, typed container reads, callable adjustment, and non-Titan Lua-result conversion to a raw pointer are rejected. | The written operation may accept the lightuserdata/nil representation, but cannot prove the pointee type. See [the FFI policy](ffi.md#casts-and-coercions). |
+| Future Interface target (Interfaces are not language syntax in this release) | Dynamic conversion may accept only an already-built wrapper of that exact nominal Interface type (or nil for an option). It never discovers that a bare record/union implements the Interface. | Concrete record/union-to-Interface wrapper construction is a direct outer Titan coercion at a statically known edge and does not lift through containers or callable results. |
+
+For every row marked **dynamic coercion**, the target rules are the same:
+
+* `integer` accepts a Lua integer or an exactly integral, in-range float and
+  produces an integer; `float` accepts either numeric representation and
+  produces a float.
+* `boolean` applies Lua truthiness, so `value is boolean` is total.
+* `string`, records, unions, and owned C userdata require their exact run-time
+  category or nominal metatable.
+* an Array target validates the canonical Titan proxy; a Map target validates
+  a table. Neither operation walks contents, and later typed reads remain
+  strict.
+* a Function target preserves the boxed value and defers callability and
+  signature enforcement until the call.
+* an Option target accepts nil first and otherwise recursively applies the
+  dynamic rule for its base. Thus `value as boolean?` preserves nil and
+  truthiness-converts every present value, and `value is boolean?` is total.
+* `value` and a raw C `TValue` copy the whole dynamic slot. Other supported C
+  targets follow the explicit classifications in [the FFI](ffi.md); a raw C
+  pointer is the written-only exception in the matrix.
+
+Consistency is symmetric but does not by itself authorize assignment.
+Callable adjustment and direct coercion are directional but are not subtyping.
+Comparison has its own symmetric rules. Keeping these facts separate is what
+prevents a valid scalar conversion from becoming an unchecked conversion of
+every element or function result.
 
 ## Implicit coercions
 
-Distinct from compatibility, a *coercion* is a conversion the compiler
+Distinct from consistency, gradual views, and callable adjustment, a
+*coercion* is one direct conversion plan the compiler
 inserts for you. Some coercions always succeed (they are pure conversions
 or boxing); others compile into a single run-time check that raises an
 error shaped like
@@ -279,15 +335,13 @@ float-to-integer narrowing,
 prefixed only `type error at line <line>`, with no file or column) when
 the value does not conform.
 
-### The coercion table
+### The direct coercion table
 
 | From | To | Can fail at run time? |
 | --- | --- | --- |
 | `integer` | `float` | no |
 | `float` | `integer` | yes — error if the float has no exact integer representation (`2.0` is fine, `2.5` raises) |
-| any type except `boolean` | `boolean` | no — `nil` and `false` become `false`, everything else `true` |
-| any type except `value` | `value` | no |
-| `value` | any type except `value` | yes — checked against the target type; for `t?`, nil is accepted and preserved while a present value must successfully convert to `t` |
+| any non-C Titan type except `boolean` and `value` | `boolean` | no — `nil` and `false` become `false`, everything else `true` |
 | `t` | `t?` | no |
 | `t?` | `t` | yes — error `expected t but found nil` if the value is absent |
 | `nil` | `t?` | no |
@@ -295,20 +349,20 @@ the value does not conform.
 | `s` | `t?` | as for `s` to `t` (convert, then wrap) |
 | `s?` | `t`, for inter-coercible bases | yes — nil check, then convert (in practice the numeric pairs: `integer? → float`, `float? → integer`; an option over a non-coercible base, like `boolean? → integer`, is a clean compile-time type error) |
 | `integer` or `float` | `string` | no — **only** as an operand of `..`; integral floats format with a `.0` suffix exactly like Lua's `tostring` |
-| C integer | `integer` | no |
-| `integer` | C integer | no |
-| C float | `float` | no |
-| `float` or `integer` | C float | no |
+| C integer | `integer` | yes — values outside the target `lua_Integer` range are rejected |
+| `integer` | C integer | yes — values outside the target C interval are rejected; C `_Bool` accepts only 0 and 1 |
+| C float | `float` | when the target profile cannot prove a same-or-wider conversion — narrowing rejects non-finite or out-of-range values, while rounding and underflow are allowed |
+| `float` or `integer` | C float | when the target profile cannot prove the conversion's range — checked floating narrowing rejects non-finite or out-of-range values |
 | C pointer | `boolean` | no — null is false, non-null is true |
+| owned C userdata | `boolean` | no — an owned object is true |
 | `nil` | C pointer | no — becomes `NULL` |
 | C array or counted owned C array | compatible C pointer | no |
 | non-function C pointer | `void *` | no |
-| Array, Map, record, union, or function value | C `void *` | no — exposes the native identity pointer; the function case can fail when its value is non-collectable |
 | non-pointer C object expression | compatible `const *T` or `const void *` | no (FFI calls; materializes the address for the call) |
 | mutable non-pointer C local or formal | compatible `*T` or `void *` | no (FFI calls; C may write through the pointer) |
 | `string` | C `char *` or `void *` | no (FFI only) |
-| C integer, C float, ordinary C pointer, C array-as-pointer, or owned C userdata | `value` | no — ordinary pointers become lightuserdata; owned objects stay full userdata |
-| `value` | C integer, C float, ordinary C pointer, C array-as-pointer, or owned C userdata | yes — checked against the target C representation |
+| C integer or C float | `value` | yes when the exact C value does not fit its `lua_Integer` or `lua_Number` carrier |
+| ordinary C pointer, C array-as-pointer, or owned C userdata | `value` | no — ordinary pointers become lightuserdata; owned objects stay full userdata |
 | Lua-internal `Udata *` | `value` | no — non-NULL becomes that same full userdata; NULL becomes nil |
 | `value` | Lua-internal `Udata *` | yes — accepts full userdata or nil, not lightuserdata |
 | C `TValue` | `value` | no |
@@ -316,11 +370,21 @@ the value does not conform.
 
 Notes on the entries a Lua programmer might not expect:
 
-* **Anything coerces to `boolean`.** Assigning any value to a
-  boolean-typed variable or parameter gives you its truthiness — Lua's
-  rule, where only `nil` and `false` are false. The same coercion is what
-  makes `return a and b` legal in a function returning `boolean` even
-  when `a` and `b` are integers.
+* **`value` uses gradual injection/projection, not this table.** Converting
+  an ordinary non-C Titan value with a `TValue` representation to `value` is a
+  total gradual injection. C scalars instead use the checked carrier row
+  above, and C aggregates/function pointers have no such representation.
+  Implicitly projecting `value` to `T` uses the strict guard in the
+  [normative boundary matrix](#normative-boundary-matrix). A written
+  `value as/is T` deliberately uses the broader dynamic rule instead.
+
+* **Most statically known Titan values coerce to `boolean`.** Assigning such a
+  value to a boolean-typed variable or parameter gives you its truthiness —
+  Lua's rule, where only `nil` and `false` are false. The same coercion is what
+  makes `return a and b` legal in a function returning `boolean` even when
+  `a` and `b` are integers. A dynamic `value` is deliberately different:
+  implicit projection requires an actual boolean tag, while written `as/is`
+  and genuine-Lua boundaries request truthiness conversion.
 * **Numbers become strings only in concatenation.** `"x = " .. 3.0`
   produces `"x = 3.0"`, but there is no implicit number-to-string
   coercion anywhere else: `local s: string = 3` is the compile-time error
@@ -328,15 +392,19 @@ Notes on the entries a Lua programmer might not expect:
   but found integer`. There is no explicit cast either — `3 as string` is
   also rejected — so concatenating with the empty string (`"" .. n`) is
   the idiom for converting a number to a string.
-* **The option rules compose with the others.** Coercing `arr[i]` (an
+* **The named Option rules compose with direct coercions.** Coercing `arr[i]` (an
   `integer?`) to `float` first inserts the nil check, then the numeric
   conversion. Coercions targeting `boolean` or `value` do *not* unwrap
   the option — nil-ness maps to falseness, or rides along in the `value`.
+  This explicit Option composition does not authorize arbitrary structural
+  coercion through an Array, Map, or Function.
 
-### Where implicit coercions are applied
+### Where implicit adjustments are applied
 
-The compiler inserts coercions in exactly these syntactic contexts,
-whenever the expression's type is coercible to the expected type:
+The compiler applies the accepted assignment adjustment in exactly these
+syntactic contexts. Depending on the source and target, that adjustment may be
+identity, one direct coercion from the table above, a gradual view/projection,
+or a callable adjustment:
 
 1. The right-hand side of a **local variable declaration** with a type
    annotation (including finite projections of trailing call results).
@@ -385,8 +453,9 @@ promote — a mixed `integer`/`float` comparison compares mathematical
 values exactly, as in Lua; the bitwise operators
 narrow float operands to `integer` with a run-time check; `..` converts
 numeric operands to strings; `not` — and `and`/`or` in a boolean
-context — coerce to `boolean`; `==`/`~=` box the other side to `value`
-if either side is a `value`, and lift each side to its own option type
+context — coerce to `boolean`; `==`/`~=` box the non-`value` side only when
+the symmetric comparison plan authorizes that injection (raw C pointers are
+excluded, and a C scalar carrier check can raise), and lift each side to its own option type
 if either side is an option; and most operators (`#`, unary `-`,
 arithmetic, relational, concatenation, bitwise, indexing) implicitly
 unwrap an option operand with a run-time nil check. The complete
@@ -441,14 +510,20 @@ de-optionization rule — see [Modules](modules.md).
 ## The `value` type in depth
 
 `value` is Titan's dynamic type, in the gradual-typing sense: a `value`
-can hold any Titan value and anything Lua can produce. It is the
-deliberate escape hatch for code that traffics in genuinely dynamic data
+can hold any Lua-representable Titan value and anything Lua can produce.
+Raw by-value C aggregates and C function pointers are notable exceptions
+because they have no scalar `TValue` representation. It is the deliberate
+escape hatch for code that traffics in genuinely dynamic data
 — heterogeneous tables, values handed over by Lua, containers like
 `{value}` whose element values are checked dynamically.
 
-Conversions *to* `value` are free, implicit and total. Conversions *from*
-`value` are implicit in every coercion context listed above, and compile
-to a single run-time type check:
+Gradual injections *to* `value` are free, implicit and total for ordinary
+non-C Titan values. A C scalar type can have a `TValue` representation even
+when a particular value lies outside the configured `lua_Integer` or
+`lua_Number` carrier; boxing such a value performs the same checked carrier
+conversion used by the FFI. Implicit projections *from* `value` are accepted in the typed
+contexts listed above only when the requested type is guardable, and compile
+to a strict run-time type check:
 
 ```lua
 function double(v: value): integer
@@ -457,16 +532,25 @@ function double(v: value): integer
 end
 ```
 
-`double(21)` returns `42`; `double("foo")` raises the run-time error
+`double(21)` returns `42`; a `value` holding the Lua float `21.0` or the string
+`"foo"` raises rather than being converted. The latter error has the form
 `... type error, expected integer but found string`.
+
+This implicit projection is intentionally stricter than a written
+`v as integer` or an integer arriving from genuine Lua: those dynamic
+operations accept an exactly integral, in-range float and convert it. The
+distinction is normative in the
+[boundary matrix](#normative-boundary-matrix).
 
 What you **can** do with a `value`, beyond converting it:
 
 * **Store it and pass it along** — in variables, arrays, maps, record fields,
   union payloads of type `value`, arguments, and returns.
-* **Compare it with `==` and `~=`.** If either operand of an equality
-  test is a `value`, the other side is boxed and the comparison is Lua's
-  *raw* equality — `__eq` metamethods are not consulted. (An earlier
+* **Compare it with `==` and `~=`.** When `value` and the other operand are
+  comparable, the other side is boxed and the comparison is Lua's *raw*
+  equality — `__eq` metamethods are not consulted. Equality checks the
+  symmetric comparable relation first; it does not box a type such as a raw C
+  pointer merely because that type has a separate conversion to `value`. (An earlier
   version of this manual claimed casting and passing along were the only
   available operations; equality has been supported since the type was
   introduced.)
@@ -475,8 +559,11 @@ What you **can** do with a `value`, beyond converting it:
   false). These operators have no metamethods in Lua, so their raw
   semantics are already the Lua semantics.
 * **Use it as an index.** An index expression of type `value` is coerced
-  to the container's key type with a run-time check: `xs[v]` works when
-  `v` holds `2` or `2.0`, and raises when it holds `"foo"`.
+  to the container's key type with the implicit strict projection:
+  `xs[v]` works when `v` holds the Lua integer `2`, and raises when it
+  holds the float `2.0` or the string `"foo"`. Write
+  `xs[v as integer]` to explicitly request dynamic integral-float
+  conversion.
 * **Call it contextually.** Positional call syntax derives a temporary
   function type from the written arguments and the surrounding result demand.
   Titan then checks callability and argument/result types at run time. A
@@ -495,28 +582,32 @@ the length (`#` requires an array, an exact integer-keyed map, or a string);
 and indexing *into* it
 (`expression in indexing is not an array or map but value`). Contextual calls
 are the deliberate callable exception: the surrounding demand supplies a
-complete temporary contract, and the generic path may honor an ordinary Lua
-`__call` metamethod while checking that contract. Arithmetic and container
-operations still require an explicit cast because implicit unboxing inside
-them would silently give raw semantics to code that looks statically typed.
+complete temporary contract. An exact Titan closure may use its native entry,
+a non-exact branded Titan closure uses its strict entry, and an ordinary Lua
+callable may honor `__call` before dynamically converting results. Arithmetic
+and container operations still require an explicit cast because implicit
+unboxing inside them would silently give raw semantics to code that looks
+statically typed.
 
 `value` composes with the compound types: `{value}` is an array of
 anything, `{string: value}` a string-keyed map of anything, and the
-[compatibility rules](#compatibility-how-value-flows-through-compound-types)
-let such containers stand in for their fully-typed counterparts (and vice
-versa) with element checks deferred to the point of use — except inside
-records or unions, which are nominal and admit no such substitution.
+[consistency and gradual-view rules](#relations-and-boundaries-no-subtyping)
+let such containers stand in for consistently shaped counterparts (and vice
+versa) with strict element checks deferred to the point of use — except inside
+records or unions, which are nominal and admit no such substitution. A direct
+conversion such as `integer -> float` does not lift: `{integer}` and
+`{float}` remain unrelated.
 
 ## Explicit casts
 
-The cast expression `e as t` is *narrower* than the implicit coercion relation,
-not wider: a cast must relate types that are both coercible **and** compatible,
-with a few FFI-only explicit conversions. For pure Titan types this mostly means
-the conversions involving the dynamic type — `e as value` (always succeeds) and
-`e as t` for a `value`-typed `e` (run-time checked, for any `t`). Identity casts
-are accepted as no-ops. Ordinary numeric/option conversions such as
-`integer -> float` or `t -> t?` are normally requested by placing the expression
-in a context that expects the target type.
+The cast expression `e as t` is admitted by the separate
+**written-castable** relation. Identity casts are no-ops; direct automatic
+conversions and gradual edges may be written where that relation enumerates
+them; and the FFI supplies a few additional explicit-only conversions. Most
+importantly, `e as t` for `e: value` requests the broad dynamic coercion in the
+[normative boundary matrix](#normative-boundary-matrix), not the strict
+implicit gradual projection. Ordinary numeric and Option conversions can
+still be requested simply by placing an expression in a typed context.
 
 For C FFI types, regular `as <type>` is also the explicit cast mechanism:
 C integers can be cast to `integer`, C floats can be cast to `float`, Titan
@@ -526,12 +617,21 @@ can cross through `value`, C `TValue` can cross to/from Titan `value`, and C
 `char *` / `void *` can be cast to `string` (copying bytes up to the first `\0`
 and raising if the pointer is `NULL`). Lua-internal `Udata *` crosses the
 `value` boundary as full userdata rather than an ordinary lightuserdata
-pointer. A written cast can also erase a C function pointer to C `void *`, or
+pointer. A written `value as <raw C pointer>` is an explicitly unsafe
+lightuserdata/nil assertion: Titan cannot establish the pointee type, so the
+same edge is unavailable to implicit projection, typed container reads, and
+generic calls. A written cast can also erase a C function pointer to C `void *`, or
 expose the native GC identity of an Array, Map, record, union, or function value as C
 `void *`. The function identity cast raises when its boxed value is not
 collectable; the other GC-identity cases are total. These are borrowed
 internal addresses, not ownership transfers. There is no separate FFI cast
 form.
+These numeric casts are checked against the selected C target and Titan's
+configured numeric carriers before any narrowing cast or boxed store.
+Written C-integer-to-C-integer casts are the deliberate exception: they retain
+ordinary C conversion semantics, including C's signed/unsigned result rules.
+For every partial numeric cast, `is` runs the identical representability test
+without converting or raising.
 Full details and examples are in [Expressions](expressions.md) and
 [The C FFI](ffi.md).
 
@@ -541,7 +641,9 @@ finish without a cast error, rather than performing the conversion or raising
 on a mismatch. It is only a predicate: it does not narrow `e`'s static type in
 the true branch. Total casts always test true, including the deliberately
 unchecked `value`-to-`boolean` and `value`-to-function conversions; a
-function-typed value may still fail when it is later called. Testing that
+function-typed value may still fail when it is later called. A dynamic Option
+test recurses through its base: `value is boolean?` is total because nil is
+accepted and every present value has a truthiness conversion. Testing a
 function value as C `void *` is the separate collectability check described
 above, so it may return false. See
 [Explicit casts and type tests](expressions.md#explicit-casts-and-type-tests-as-and-is)

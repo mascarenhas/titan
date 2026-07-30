@@ -114,8 +114,8 @@ type or `false`; `index` is the absolute zero-based source-order tag.
 unions. A `Type.Variant` is never returned by `typefromnode` as a legal source
 type. A qualified lookup that reaches a variant diagnoses that the union
 member is not a type, including from type annotations, aliases, `as`, and
-`is`. The core coercion, compatibility, explicit-cast, and equality-facing
-relations also reject `Type.Variant` explicitly instead of allowing it to
+`is`. The identity, consistency, coercion, written-cast, and comparison
+operations also reject `Type.Variant` explicitly instead of allowing it to
 participate through a generic same-tag or `value` rule.
 
 Union equality checks the owner name and complete variant/function/method
@@ -329,7 +329,7 @@ The `__index` entry first performs the same exact nominal metatable check used
 by other Lua entry wrappers. Methods therefore cannot be borrowed onto a
 different union or record userdata.
 
-## Serialized interfaces and ABI 0.19
+## Serialized interfaces: ABI 0.19 origin and current 0.20 boundary
 
 `types.serialize` adds canonical schemas:
 
@@ -380,18 +380,20 @@ record constructor, union constructor, or user nominal static as the exact
 canonical first-class closure without loading a Lua namespace table or
 inventing another identity.
 
-The union schemas, userdata/tag protocol, and public-prefix change form one
-compatibility boundary. `TITAN_VER` is `0.19`, its suffix is `_0_19`, the
-versioned search variable is `TITAN_PATH_0_19`, the installed provider
-namespace is `lib/titan/0.19`, and the generated standard-library support
-namespace is `stdlib_0_19`. A 0.18 interface is rejected before type
-rehydration or native linking.
+The union schemas, userdata/tag protocol, and public-prefix change formed the
+ABI 0.19 compatibility boundary. ABI 0.20 retains those schemas and prefix
+unchanged while changing Array proxies and first-class function closures.
+`TITAN_VER` is now `0.20`, its suffix is `_0_20`, the versioned search variable
+is `TITAN_PATH_0_20`, the installed provider namespace is
+`lib/titan/0.20`, and the generated standard-library support namespace is
+`stdlib_0_20`. A 0.19 interface is rejected before type rehydration or native
+linking.
 
-ABI 0.19 is a clean-start prototype boundary, not a migration layer. An
-installed 0.18 tree is left as a separately versioned predecessor. The build
-preparation path creates or replaces only exact known active-0.19 Titan
-artifacts, establishes its ABI-keyed caches, and verifies that
-`package.cpath` selects 0.19 rather than 0.18.
+ABI 0.20 is a clean-start prototype boundary, not a migration layer. Installed
+0.18 and 0.19 trees remain separately versioned predecessors. Build
+preparation creates or replaces only exact known active-0.20 Titan artifacts,
+establishes its ABI-keyed caches, and verifies that `package.cpath` selects
+0.20 rather than 0.19.
 
 ## Standard-library dogfooding
 

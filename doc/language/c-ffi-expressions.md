@@ -101,12 +101,13 @@ C keyword and cannot name a field).
 ### Titan keywords as C names
 
 Member and qualified-type lookup after a foreign namespace or C receiver uses
-a contextual raw C identifier. A legal C spelling such as `when`, `type`, or
-`repeat` is therefore available as `c.when`, `c.type`, or `object.repeat`
-when the imported declarations provide it. This does not unreserve the word
-for an ordinary Titan variable, declaration, record field, union variant, or
-member. Named C parameter labels use the analogous contextual rule before
-`=` in a named call.
+a contextual raw C identifier. A legal C spelling such as `when`, `type`,
+`repeat`, or `interface` is therefore available as `c.when`, `c.type`,
+`object.repeat`, or `c.interface` when the imported declarations provide it.
+This contextual rule continues to apply when a spelling is a current or future
+Titan keyword; it does not make a reserved spelling available for an ordinary
+Titan variable, declaration, record field, union variant, or member. Named C
+parameter labels use the analogous contextual rule before `=` in a named call.
 
 ## Contextual object-pointer conversions
 
@@ -153,7 +154,8 @@ Guardrails apply before the compiler probe:
 * reachable `const` or `volatile` qualification may be added but not discarded;
 * qualifiers carried by typedefs and array element types remain effective;
 * the conversion is directional and does not change the global
-  `types.compatible` relation.
+  symmetric gradual-consistency relation. It remains one explicit,
+  destination-directed C conversion plan.
 
 Fixed C arrays decay to their element pointer before this rule is considered.
 An automatic or imported array is therefore passed as the array expression,
@@ -380,6 +382,9 @@ C integer promotions and usual arithmetic conversions determine result types.
 Arithmetic drops typedef identity and produces the target's resolved primitive
 C type. Float rank follows C (`long double`, `double`, `float`), shifts use the
 promoted left type, and pointer subtraction produces a Titan `integer`.
+The subtraction itself has the target's exact `ptrdiff_t` type; the subsequent
+conversion to `lua_Integer` is checked and raises if the result is not
+representable rather than narrowing silently.
 
 A Titan `integer` mixed with a C operand participates as the configured
 `lua_Integer`; a Titan `float` participates as the configured `lua_Number`.
@@ -410,6 +415,14 @@ divide-by-zero guard. For example:
 local q = (c_value(-7) / c_value(3))  -- C result: -2
 local r = (c_value(-7) % c_value(3))  -- C result: -1
 ```
+
+Ordinary C integer promotions and signed/unsigned usual-arithmetic
+conversions keep those C semantics. When an operator instead requires an
+integer-to-floating conversion whose range the active target profile cannot
+prove sufficient, Titan checks the operand before performing the C cast. A
+failure raises a normal type error rather than evaluating an out-of-range C
+conversion. Exact C results otherwise remain raw C values until a later
+Titan/Lua carrier boundary requests conversion.
 
 Unsigned conversion and wrap, signed overflow, division by zero, invalid
 shifts, and implementation-defined right shift consequently have their C
@@ -521,4 +534,5 @@ header.
 * [Statements](statements.md) covers ordinary initialized local declarations.
 * [Expressions](expressions.md) describes Titan operator semantics and
   precedence outside C mode.
-* [Types](types.md) describes Titan's normal coercion and compatibility rules.
+* [Types](types.md) describes Titan's separated consistency, coercion,
+  written-cast, callable-adjustment, and boundary rules.

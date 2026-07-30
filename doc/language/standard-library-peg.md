@@ -270,14 +270,16 @@ capture operation and returns exactly one accumulator.
 
 These APIs use their declared function types; callbacks are not hidden behind
 an unqualified `value`. Supplying a callback follows Titan's ordinary
-function-value rules: an exact Titan function can use the exact call path,
-while Lua functions, C functions, and values with `__call` use the generic
-callable path. Construction does not eagerly reject a value merely because it
-is not a raw Lua function. A genuinely noncallable value raises only if
-matching or capture evaluation actually invokes it. Query tables remain
-tables even if they also have `__call`, because `query_capture` has the
-distinct `{value: value}` parameter type. Callback execution is non-yieldable;
-attempting to yield raises an ordinary Lua boundary error.
+function-value rules: an exact Titan function can use the exact call path, an
+adjusted or otherwise non-exact Titan function uses its strict branded entry,
+and Lua functions, C functions, and values with `__call` use the ordinary Lua
+call path with dynamic result coercion. Construction does not eagerly reject
+a value merely because it is not a raw Lua function. A genuinely noncallable
+value raises only if matching or capture evaluation actually invokes it.
+Query tables remain tables even if they also have `__call`, because
+`query_capture` has the distinct `{value: value}` parameter type. Callback
+execution is non-yieldable; attempting to yield raises an ordinary Lua
+boundary error.
 
 The pinned engine does not implement LPeg 1.1 accumulator `%` captures.
 Upstream calls the delayed `/ function` form a function capture. Its C

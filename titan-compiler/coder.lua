@@ -2,7 +2,9 @@ local types = require "titan-compiler.types"
 local util  = require "titan-compiler.util"
 local cdeclarator = require "titan-compiler.cdeclarator"
 
-local coder = {}
+local coder = {
+    _csemantics = require "titan-compiler.csemantics",
+}
 
 -- Lua 5.5's CallInfo encodes finite result requests only through MAXRESULTS.
 -- The checker rejects wider finite generic function-value calls; keep the same
@@ -215,6 +217,10 @@ local function bound_method_luaname(typ)
     return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG .. "_boundlua"
 end
 
+function coder._bound_method_strictname(typ)
+    return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG .. "_boundstrict"
+end
+
 local function modprefix(modname)
     return mangle_qn(modname) .. "_"
 end
@@ -225,6 +231,14 @@ end
 
 local function func_luaname(modname, name)
     return modprefix(modname) .. name .. "_" .. TITAN_ENTRY_TAG .. "_lua"
+end
+
+function coder._func_strictname(modname, name)
+    return modprefix(modname) .. name .. "_" .. TITAN_ENTRY_TAG .. "_strict"
+end
+
+function coder._static_strictname(typ)
+    return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG .. "_strictstatic"
 end
 
 local function module_initializer_name(tlcontext)
@@ -268,6 +282,8 @@ function coder.external_symbols(modname, ast)
                 add(bound_method_name(node._type), owner .. " bound entry")
                 add(bound_method_luaname(node._type),
                     owner .. " bound Lua entry")
+                add(coder._bound_method_strictname(node._type),
+                    owner .. " bound strict entry")
             end
         end
     end
@@ -315,6 +331,8 @@ function coder.interface_external_symbols(modname, modtype)
                         add(bound_method_name(method), owner .. " bound entry")
                         add(bound_method_luaname(method),
                             owner .. " bound Lua entry")
+                        add(coder._bound_method_strictname(method),
+                            owner .. " bound strict entry")
                     end
                 end
             end
@@ -386,6 +404,38 @@ function array_metatable(ctx)
     })
 end
 
+-- Return the module-local Lua-writer entry for an Array element type,
+-- allocating its private module slot on first construction.  Writer identity
+-- is deliberately local to the emitting module: the closure is behavior
+-- carried by the canonical proxy, never a runtime type tag.
+function coder._array_writer(ctx, elem, plan)
+    local tlcontext = ctx.tlcontext or ctx
+    assert(elem and plan ~= nil,
+        "Array construction is missing its checker writer annotation")
+    assert(plan ~= false,
+        "rejected Array writer plan reached code generation")
+    coder._checked_dynamic_plan(plan, elem, "Array writer inventory")
+    for _, entry in ipairs(tlcontext.array_writer_list) do
+        if types.equals(entry.elem, elem) then
+            assert(entry.plan.kind == plan.kind
+                    and entry.plan.op == plan.op
+                    and types.equals(entry.plan.target, plan.target),
+                "equal constructed Array types disagree on writer plan")
+            return entry
+        end
+    end
+    local entry = {
+        elem = elem,
+        plan = plan,
+        slot = nextupvalue(tlcontext),
+        name = tlcontext.prefix .. "array_writer_"
+            .. tostring(tlcontext.array_writer_count),
+    }
+    tlcontext.array_writer_count = tlcontext.array_writer_count + 1
+    table.insert(tlcontext.array_writer_list, entry)
+    return entry
+end
+
 local function owned_c_metatable_key(typ)
     assert(typ._tag == "Type.COwned")
     return types.tostring(typ)
@@ -446,6 +496,11 @@ local function function_type_tag(tlcontext, ftype --[[:table]])
     return entry.id
 end
 
+-- `checkandget`/`checkandset` lower the deliberately coercive dynamic
+-- boundary shared by written `value as/is T` and genuine Lua entry points.
+-- Strict Titan observations (implicit gradual projections, typed Array/Map
+-- reads, and branded non-exact Titan calls) use the separate helpers declared
+-- here and defined once the native C type helpers are available.
 local checkandset
 
 -- `loc` is the .titan source location of the raise; it stamps a fully-resolved
@@ -531,52 +586,12 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         })
     elseif typ._tag == "Type.CInteger" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CInteger") then
-        return render([[
-            if (TITAN_LIKELY(ttisinteger($EXP))) {
-                $VAR = ($CT)ivalue($EXP);
-            } else if (ttisfloat($EXP)) {
-                lua_Number _v = fltvalue($EXP);
-                lua_Number _flt = l_floor(_v);
-                lua_Integer _i;
-                if (TITAN_UNLIKELY(_v != _flt)) {
-                    $THROWFLOAT
-                } else if (TITAN_UNLIKELY(!lua_numbertointeger(_flt, &_i))) {
-                    $THROWFLOAT
-                } else {
-                    $VAR = ($CT)_i;
-                }
-            } else {
-                $THROWINTEGER
-            }
-        ]], {
-            EXP = exp,
-            VAR = cvar,
-            CT = cdeclarator.render_type_name(typ),
-            FILE = c_string_literal(loc.filename),
-            LINE = c_integer_literal(loc.line),
-            COL = c_integer_literal(loc.col),
-            THROWFLOAT = codethrow(loc, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
-            THROWINTEGER = codethrow(loc, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
-        })
+        return coder._code_checked_boxed_numeric(
+            ctx, typ, cvar, exp, loc, false)
     elseif typ._tag == "Type.CFloat" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CFloat") then
-        return render([[
-            if (TITAN_LIKELY(ttisfloat($EXP))) {
-                $VAR = ($CT)fltvalue($EXP);
-            } else if (ttisinteger($EXP)) {
-                $VAR = ($CT)ivalue($EXP);
-            } else {
-                $THROW
-            }
-        ]], {
-            EXP = exp,
-            VAR = cvar,
-            CT = cdeclarator.render_type_name(typ),
-            FILE = c_string_literal(loc.filename),
-            LINE = c_integer_literal(loc.line),
-            COL = c_integer_literal(loc.col),
-            THROW = codethrow(loc, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
-        })
+        return coder._code_checked_boxed_numeric(
+            ctx, typ, cvar, exp, loc, false)
     elseif types.is_c_udata_pointer(typ) then
         return render([[
             if (TITAN_LIKELY(ttisfulluserdata($EXP))) {
@@ -745,152 +760,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
 end
 
 function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]], loc --[[:table]])
-    local tag
-    if typ._tag == "Type.Integer" then
-        -- Accept an integral float (and reject a non-integral or out-of-range
-        -- one) exactly like checkandget, so an integer? slot/parameter is
-        -- consistent with a plain integer at the Lua boundary.
-        return render([[
-            if (TITAN_LIKELY(ttisinteger($SRC))) {
-                setobj2t(L, $DST, $SRC);
-            } else if (ttisfloat($SRC)) {
-                lua_Number _v = fltvalue($SRC);
-                lua_Number _flt = l_floor(_v);
-                lua_Integer _i;
-                if (TITAN_UNLIKELY(_v != _flt)) {
-                    $THROWFLOAT
-                } else if (TITAN_UNLIKELY(!lua_numbertointeger(_flt, &_i))) {
-                    $THROWFLOAT
-                } else {
-                    setivalue($DST, _i);
-                }
-            } else {
-                $THROWINT
-            }
-        ]], {
-            SRC = src,
-            DST = dst,
-            FILE = c_string_literal(loc.filename),
-            LINE = c_integer_literal(loc.line),
-            COL = c_integer_literal(loc.col),
-            THROWFLOAT = codethrow(loc, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
-            THROWINT = codethrow(loc, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
-        })
-    elseif typ._tag == "Type.Float" then
-        return render([[
-            if (TITAN_LIKELY(ttisfloat($SRC))) {
-                setobj2t(L, $DST, $SRC);
-            } else if (ttisinteger($SRC)) {
-                setfltvalue($DST, ((lua_Number)ivalue($SRC)));
-            } else {
-                $THROW
-                luaL_error(L, "%s:%d:%d: type error, expected float but found %s", $FILE, $LINE, $COL, lua_typename(L, ttype($SRC)));
-            }
-        ]], {
-            SRC = src,
-            DST = dst,
-            FILE = c_string_literal(loc.filename),
-            LINE = c_integer_literal(loc.line),
-            COL = c_integer_literal(loc.col),
-            THROW = codethrow(loc, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
-        })
-    elseif typ._tag == "Type.COwned" then
-        return render([[
-            {
-                Udata *_titan_owner = NULL;
-                $CHECKANDGET
-                setuvalue(L, $DST, _titan_owner);
-            }
-        ]], {
-            CHECKANDGET =
-                checkandget(ctx, typ, "_titan_owner", src, loc),
-            DST = dst,
-        })
-    elseif typ._tag == "Type.Array" then
-        return render([[
-            {
-                Table *_titan_array = titan_array_try_backing($SRC, $META);
-                if (TITAN_LIKELY(_titan_array != NULL)) {
-                    sethvalue(L, $DST, _titan_array);
-                } else {
-                    $THROW
-                }
-            }
-        ]], {
-            SRC = src,
-            DST = dst,
-            META = array_metatable(ctx),
-            FILE = c_string_literal(loc.filename),
-            LINE = c_integer_literal(loc.line),
-            COL = c_integer_literal(loc.col),
-            THROW = codethrow(loc,
-                "%s:%d:%d: type error, expected array but found %s",
-                { "$FILE", "$LINE", "$COL",
-                  "lua_typename(L, ttype($SRC))" }),
-        })
-    elseif typ._tag == "Type.Boolean" then tag = "boolean"
-    elseif typ._tag == "Type.Nil" then tag = "nil"
-    elseif typ._tag == "Type.String" then tag = "string"
-    elseif typ._tag == "Type.Map" then tag = "table"
-    elseif typ._tag == "Type.Value" then
-        return render([[
-            setobj2t(L, $DST, $SRC);
-        ]], {
-            SRC = src,
-            DST = dst,
-        })
-    elseif typ._tag == "Type.Function" then
-        -- Like `value`: store boxed with no callability check (deferred to the
-        -- call). Used when a function value crosses the boundary into a record
-        -- field or map slot.
-        return render([[
-            setobj2t(L, $DST, $SRC);
-        ]], {
-            SRC = src,
-            DST = dst,
-        })
-    elseif typ._tag == "Type.Option" then
-        return render([[
-            if(ttisnil($SRC)) {
-                setnilvalue($DST);
-            } else {
-                $CHECKANDSET
-            }
-        ]], {
-            SRC = src,
-            DST = dst,
-            CHECKANDSET = checkandset(ctx, typ.base, dst, src, loc)
-        })
-    elseif typ._tag == "Type.Nominal" then
-        return render([[
-            {
-              Udata *_recval = NULL;
-              $CHECKANDGET
-              setuvalue(L, $DST, _recval);
-            }
-        ]], {
-            CHECKANDGET = checkandget(ctx, typ, "_recval", src, loc),
-            DST = dst
-        })
-    else
-        error("invalid type " .. types.tostring(typ))
-    end
-    return render([[
-        if (TITAN_LIKELY($PREDICATE($SRC))) {
-            setobj2t(L, $DST, $SRC);
-        } else {
-            $THROW
-        }
-    ]], {
-        TAG = c_string_literal(tag),
-        PREDICATE = 'ttis'..tag,
-        SRC = src,
-        DST = dst,
-        FILE = c_string_literal(loc.filename),
-        LINE = c_integer_literal(loc.line),
-        COL = c_integer_literal(loc.col),
-        THROW = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttype($SRC))" })
-    })
+    return coder._dynamiccheckandset_from_get(ctx, typ, dst, src, loc)
 end
 
 local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
@@ -909,10 +779,10 @@ local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     elseif typ._tag == "Type.Function" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     elseif typ._tag == "Type.CInteger" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CInteger") then
-        tmpl = "setivalue($DST, ((lua_Integer)$SRC));"
+        return coder._code_checked_numeric_setslot(typ, dst, src)
     elseif typ._tag == "Type.CFloat" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CFloat") then
-        tmpl = "setfltvalue($DST, ((lua_Number)$SRC));"
+        return coder._code_checked_numeric_setslot(typ, dst, src)
     elseif types.is_c_udata_pointer(typ) then
         tmpl = [[do {
             Udata *_titan_u = (Udata *)($SRC);
@@ -932,6 +802,85 @@ local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     end
     local code = render(tmpl, { DST = dst, SRC = src })
     return code
+end
+
+coder._dynamic_op_for_tag = {
+    ["Type.Integer"] = "integer",
+    ["Type.Float"] = "float",
+    ["Type.Boolean"] = "truthiness",
+    ["Type.Nil"] = "nil",
+    ["Type.String"] = "string",
+    ["Type.Value"] = "value",
+    ["Type.Array"] = "array",
+    ["Type.Map"] = "map",
+    ["Type.Function"] = "callable",
+    ["Type.Nominal"] = "nominal",
+    ["Type.Record"] = "nominal",
+    ["Type.Union"] = "nominal",
+    ["Type.Interface"] = "nominal",
+    ["Type.Option"] = "option",
+    ["Type.CInteger"] = "c_integer",
+    ["Type.CFloat"] = "c_float",
+    ["Type.COwned"] = "c_owned",
+}
+
+-- Validate the checker-owned dynamic decision before emitting any operation.
+-- `false` is an explicit unavailable policy at the annotated root (currently
+-- raw C pointers and compounds that contain one); nil means a checker
+-- annotation was lost. A nonfalse Option plan is inductive and therefore must
+-- contain one complete, nonfalse child plan.
+function coder._checked_dynamic_plan_impl(plan, typ, use, seen, root)
+    assert(plan ~= nil,
+        (use or "dynamic boundary") .. " is missing its checker plan")
+    if plan == false then
+        assert(root,
+            (use or "dynamic boundary")
+                .. " contains an unavailable recursive plan")
+        return false
+    end
+    assert(plan.kind == "dynamic_coercion",
+        (use or "dynamic boundary") .. " has unknown plan kind "
+            .. tostring(plan.kind))
+
+    local target = assert(types.normalize(typ),
+        (use or "dynamic boundary") .. " has an unnormalizable target")
+    assert(plan.target and types.equals(plan.target, target),
+        (use or "dynamic boundary") .. " plan target does not match "
+            .. types.tostring(typ))
+
+    seen = seen or {}
+    local prior = seen[plan]
+    if prior then
+        assert(types.equals(prior.target, target),
+            (use or "dynamic boundary")
+                .. " reuses one recursive plan for different targets")
+        assert(not prior.active,
+            (use or "dynamic boundary")
+                .. " contains a recursive dynamic-plan cycle")
+        return plan
+    end
+    seen[plan] = { target = target, active = true }
+
+    local expected = types.is_c_tvalue(target)
+        and "c_tvalue" or coder._dynamic_op_for_tag[target._tag]
+    assert(expected,
+        (use or "dynamic boundary") .. " has unsupported target "
+            .. types.tostring(target))
+    assert(plan.op == expected,
+        (use or "dynamic boundary") .. " has unknown/mismatched operation "
+            .. tostring(plan.op))
+    if plan.op == "option" then
+        coder._checked_dynamic_plan_impl(
+            plan.inner, target.base,
+            (use or "dynamic boundary") .. " Option present value",
+            seen, false)
+    end
+    seen[plan].active = false
+    return plan
+end
+
+function coder._checked_dynamic_plan(plan, typ, use)
+    return coder._checked_dynamic_plan_impl(plan, typ, use, {}, true)
 end
 
 -- Store a native/internal Titan value in a Lua-visible TValue domain.  Arrays
@@ -1224,6 +1173,1173 @@ local function cvardecl(ctx, typ, name)
         return cdeclarator.render_declaration(typ, name)
     end
     return ctype(typ) .. " " .. name
+end
+
+local function fresh_lowering_name(ctx, prefix)
+    local index = ctx.tmp or 1
+    ctx.tmp = index + 1
+    return prefix .. tostring(index)
+end
+
+-- Some boxed-store paths predate checker-owned boundary plans, but C
+-- scalar/pointer values still need a native temporary because their boxed and
+-- native representations differ.  This helper only performs that mechanical
+-- representation step; its caller remains responsible for authorization.
+function coder._dynamiccheckandset_from_get(ctx, typ, dst, src, loc)
+    local name = fresh_lowering_name(ctx, "_titan_checked_c_value_")
+    return render([[
+        {
+            $DECL = $INIT;
+            $CHECK
+            $STORE
+        }
+    ]], {
+        DECL = cvardecl(ctx, typ, name),
+        INIT = initval(typ),
+        CHECK = checkandget(ctx, typ, name, src, loc),
+        STORE = setslot(typ, dst, name),
+    })
+end
+
+-- Lower the checker-owned DynamicCoercionPlan to a native/internal result.
+-- The per-type emitter below is deliberately not an authorization oracle: the
+-- plan operation is validated first, Option recursion consumes `inner`, and a
+-- checked unavailable marker emits a well-behaved boundary error.
+function coder._dynamiccheckandget(ctx, plan, typ, cvar, exp, loc, use)
+    plan = coder._checked_dynamic_plan(plan, typ, use)
+    if plan == false then
+        return render([[
+            (void)($EXP);
+            $THROW
+        ]], {
+            EXP = exp,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            TYPE = c_string_literal(types.tostring(typ)),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, dynamic coercion to %s is unavailable",
+                { "$FILE", "$LINE", "$COL", "$TYPE" }),
+        })
+    elseif plan.op == "option" then
+        return render([[
+            if (ttisnil($EXP)) {
+                setnilvalue(&$VAR);
+            } else {
+                $PRESENT
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            PRESENT = coder._dynamiccheckandset(
+                ctx, plan.inner, typ.base, "&" .. cvar, exp, loc,
+                (use or "dynamic boundary") .. " Option present value"),
+        })
+    end
+    return checkandget(ctx, typ, cvar, exp, loc)
+end
+
+-- Derive the boxed-store form from the exact same native-result plan.  This is
+-- the single path used by Lua formals, module/record writes, Array writers,
+-- and any other genuine Lua sink, preventing representation-specific drift.
+function coder._dynamiccheckandset(ctx, plan, typ, dst, src, loc, use)
+    local name = fresh_lowering_name(ctx, "_titan_dynamic_value_")
+    return render([[
+        {
+            $DECL = $INIT;
+            $CHECK
+            $STORE
+        }
+    ]], {
+        DECL = cvardecl(ctx, typ, name),
+        INIT = initval(typ),
+        CHECK = coder._dynamiccheckandget(
+            ctx, plan, typ, name, src, loc, use),
+        STORE = setslot(typ, dst, name),
+    })
+end
+
+function coder._planned_value_projection_get(ctx, node, cvar, source)
+    local adjustment = node._adjustment
+    if adjustment
+       and adjustment.kind == "gradual_view"
+       and adjustment.op == "project" then
+        return coder._strictcheckandget(
+            ctx, adjustment.guard, node._type, cvar, source, node.loc,
+            "implicit value projection")
+    elseif adjustment
+           and adjustment.kind == "direct_coercion"
+           and adjustment.coercion
+           and adjustment.coercion.op == "value_to_c_value" then
+        -- A named Option force/map may carry the strict Value-to-C leaf as an
+        -- inner coercion because the outer Option operation is itself direct.
+        -- It retains gradual-observation semantics: exact C scalar/owned
+        -- categories only, never the broader written/Lua conversion.
+        return coder._strictcheckandget(
+            ctx, adjustment.coercion.guard, node._type, cvar, source,
+            node.loc, "Option-composed value projection")
+    end
+
+    local cast = assert(node._written_cast,
+        "value projection is missing its checker written-cast plan")
+    if cast.op == "dynamic" then
+        return coder._dynamiccheckandget(
+            ctx, assert(cast.dynamic,
+                "dynamic written cast lacks its embedded plan"),
+            node._type, cvar, source, node.loc, "written value as")
+    elseif cast.op == "explicit"
+           and cast.conversion
+           and cast.conversion.op == "unsafe_dynamic_c_pointer" then
+        local target = types.normalize(node._type)
+        assert(target and target._tag == "Type.CPointer",
+            "unsafe dynamic pointer exception has a non-pointer target")
+        -- This is the sole intentional use of the old lightuserdata
+        -- category conversion without a DynamicCoercionPlan.  Its authority
+        -- is the checker-owned written-cast conversion above.
+        return checkandget(ctx, node._type, cvar, source, node.loc)
+    end
+    error("unknown value projection plan operation " .. tostring(cast.op))
+end
+
+coder._gradual_op_for_tag = {
+    ["Type.Integer"] = "integer",
+    ["Type.Float"] = "float",
+    ["Type.Boolean"] = "boolean",
+    ["Type.Nil"] = "nil",
+    ["Type.String"] = "string",
+    ["Type.Value"] = "value",
+    ["Type.Array"] = "array",
+    ["Type.Map"] = "map",
+    ["Type.Function"] = "callable",
+    ["Type.Nominal"] = "nominal",
+    ["Type.Record"] = "nominal",
+    ["Type.Union"] = "nominal",
+    ["Type.Interface"] = "nominal",
+    ["Type.Option"] = "option",
+    ["Type.CInteger"] = "c_integer",
+    ["Type.CFloat"] = "c_float",
+    ["Type.COwned"] = "c_owned",
+}
+
+local function checked_gradual_guard(plan, typ, use, seen, root)
+    use = use or "strict gradual observation"
+    assert(plan ~= nil, use .. " is missing its checker guard plan")
+    if plan == false then
+        assert(root, use .. " contains an unavailable recursive guard")
+        return false
+    end
+    assert(plan.kind == "gradual_guard",
+        use .. " has unknown guard plan kind " .. tostring(plan.kind))
+
+    local target = assert(types.normalize(typ),
+        use .. " has an unnormalizable target")
+    assert(plan.target and types.equals(plan.target, target),
+        use .. " guard target does not match " .. types.tostring(typ))
+
+    seen = seen or {}
+    if seen[plan] then
+        assert(types.equals(seen[plan], target),
+            use .. " reuses one recursive guard for different targets")
+        return plan
+    end
+    seen[plan] = target
+
+    local expected = types.is_c_tvalue(target)
+        and "c_tvalue" or coder._gradual_op_for_tag[target._tag]
+    assert(expected,
+        use .. " has unsupported guard target " .. types.tostring(target))
+    assert(plan.op == expected,
+        use .. " has unknown/mismatched guard operation "
+            .. tostring(plan.op))
+    if expected == "array" then
+        checked_gradual_guard(
+            plan.element, target.elem, use .. " Array element", seen, false)
+    elseif expected == "map" then
+        checked_gradual_guard(
+            plan.key, target.keys, use .. " Map key", seen, false)
+        checked_gradual_guard(
+            plan.value, target.values, use .. " Map value", seen, false)
+    elseif expected == "option" then
+        checked_gradual_guard(
+            plan.inner, target.base, use .. " Option present value",
+            seen, false)
+    end
+    return plan
+end
+
+function coder._checked_gradual_guard(plan, typ, use)
+    return checked_gradual_guard(plan, typ, use, {}, true)
+end
+
+function coder._checked_plan_pair(plan, source_type, target_type, use)
+    local source = assert(types.normalize(source_type),
+        use .. " has an unnormalizable source")
+    local target = assert(types.normalize(target_type),
+        use .. " has an unnormalizable target")
+    local planned_source = plan.source and types.normalize(plan.source)
+    local planned_target = plan.target and types.normalize(plan.target)
+    assert(planned_source and planned_target
+           and types.equals(planned_source, source)
+           and types.equals(planned_target, target),
+        use .. " plan does not match its operand types")
+    return source, target
+end
+
+function coder._checked_identity_plan(plan, source_type, target_type, use)
+    assert(plan ~= nil, use .. " lacks its checker plan")
+    assert(plan ~= false, use .. " reached code generation after rejection")
+    assert(plan.kind == "identity",
+        use .. " has unknown plan kind " .. tostring(plan.kind))
+    local source, target =
+        coder._checked_plan_pair(plan, source_type, target_type, use)
+    assert(types.equals(source, target),
+        use .. " identity plan changes its operand type")
+    return plan
+end
+
+function coder._is_c_pointer_plan_type(typ)
+    return typ and typ._tag == "Type.CPointer"
+end
+
+function coder._is_boxable_c_value_plan_type(typ)
+    if not typ then return false end
+    return typ._tag == "Type.CInteger"
+        or typ._tag == "Type.CFloat"
+        or typ._tag == "Type.COwned"
+        or types.is_c_tvalue(typ)
+        or (typ._tag == "Type.CPointer"
+            and types.c_pointer_category(typ) ~= "function")
+end
+
+function coder._checked_coercion_plan_impl(
+        coercion, source_type, target_type, use, seen)
+    use = use or "direct coercion"
+    assert(coercion ~= nil, use .. " lacks its checker plan")
+    assert(coercion ~= false,
+        use .. " reached code generation after rejection")
+    if coercion.kind == "identity" then
+        return coder._checked_identity_plan(
+            coercion, source_type, target_type, use)
+    end
+    assert(coercion.kind == "coercion",
+        use .. " has unknown plan kind " .. tostring(coercion.kind))
+
+    local source, target =
+        coder._checked_plan_pair(coercion, source_type, target_type, use)
+    seen = seen or {}
+    local prior = seen[coercion]
+    if prior then
+        assert(types.equals(prior.source, source)
+               and types.equals(prior.target, target),
+            use .. " reuses one recursive plan for different operand types")
+        assert(not prior.active,
+            use .. " contains a recursive coercion cycle")
+        return coercion
+    end
+    seen[coercion] = {
+        source = source,
+        target = target,
+        active = true,
+    }
+
+    local op = coercion.op
+    local numeric_key = source._tag .. ":" .. target._tag
+    local expected_numeric = coder._numeric_coercion_ops
+        and coder._numeric_coercion_ops[numeric_key]
+    if expected_numeric and op == expected_numeric then
+        coder._checked_numeric_coercion(
+            coercion, source, target, use)
+    elseif op == "c_owner_truthiness" then
+        assert(source._tag == "Type.COwned"
+               and target._tag == "Type.Boolean",
+            use .. " has a mismatched C-owner truthiness operation")
+    elseif op == "c_pointer_truthiness" then
+        assert(coder._is_c_pointer_plan_type(source)
+               and target._tag == "Type.Boolean",
+            use .. " has a mismatched C-pointer truthiness operation")
+    elseif op == "nil_to_c_pointer" then
+        assert(source._tag == "Type.Nil"
+               and coder._is_c_pointer_plan_type(target),
+            use .. " has a mismatched nil-to-C-pointer operation")
+    elseif op == "c_address" then
+        assert(types.c_address_coerceable(source, target),
+            use .. " has a mismatched const C-address operation")
+    elseif op == "mutable_c_address" then
+        assert(types.c_mutable_address_coerceable(source, target),
+            use .. " has a mismatched mutable C-address operation")
+    elseif op == "c_pointer" then
+        assert(types.is_c_pointer_coercion(source, target),
+            use .. " has a mismatched C-pointer operation")
+    elseif op == "c_object_to_void_pointer" then
+        assert(types.is_c_object_to_void_pointer_conversion(
+                source, target),
+            use .. " has a mismatched C object-to-void-pointer operation")
+    elseif op == "c_void_to_object_pointer" then
+        assert(types.is_c_void_to_object_pointer_coercion(
+                source, target),
+            use .. " has a mismatched C void-to-object-pointer operation")
+    elseif op == "string_to_c_pointer" then
+        assert(types.is_string_to_c_pointer_coercion(source, target),
+            use .. " has a mismatched string-to-C-pointer operation")
+    elseif op == "c_value_to_value" then
+        assert(coder._is_boxable_c_value_plan_type(source)
+               and target._tag == "Type.Value",
+            use .. " has a mismatched C-value boxing operation")
+    elseif op == "value_to_c_value" then
+        assert(source._tag == "Type.Value"
+               and coder._is_boxable_c_value_plan_type(target)
+               and not coder._is_c_pointer_plan_type(target),
+            use .. " has a mismatched value-to-C operation")
+        coder._checked_gradual_guard(
+            coercion.guard, target, use .. " strict C-value guard")
+    elseif op == "c_value_to_c_tvalue" then
+        assert(coder._is_boxable_c_value_plan_type(source)
+               and types.is_c_tvalue(target),
+            use .. " has a mismatched C-TValue boxing operation")
+    elseif op == "to_c_tvalue" then
+        assert(not types.is_direct_c(source)
+               and types.is_c_tvalue(target),
+            use .. " has a mismatched whole-slot C-TValue operation")
+    elseif op == "truthiness" then
+        assert(target._tag == "Type.Boolean"
+               and source._tag ~= "Type.Boolean"
+               and source._tag ~= "Type.Value"
+               and not types.is_direct_c(source),
+            use .. " has a mismatched truthiness operation")
+    elseif op == "option_nil" then
+        assert(source._tag == "Type.Nil"
+               and target._tag == "Type.Option",
+            use .. " has a mismatched Option-nil operation")
+        assert(coercion.inner == nil,
+            use .. " Option-nil operation has an unexpected inner plan")
+    elseif op == "option_map" then
+        assert(source._tag == "Type.Option"
+               and target._tag == "Type.Option",
+            use .. " has a mismatched Option-map operation")
+        coder._checked_coercion_plan_impl(
+            coercion.inner, source.base, target.base,
+            use .. " Option map", seen)
+    elseif op == "option_wrap" then
+        assert(source._tag ~= "Type.Nil"
+               and source._tag ~= "Type.Option"
+               and target._tag == "Type.Option",
+            use .. " has a mismatched Option-wrap operation")
+        coder._checked_coercion_plan_impl(
+            coercion.inner, source, target.base,
+            use .. " Option wrap", seen)
+    elseif op == "option_force" then
+        assert(source._tag == "Type.Option"
+               and target._tag ~= "Type.Option",
+            use .. " has a mismatched Option-force operation")
+        coder._checked_coercion_plan_impl(
+            coercion.inner, source.base, target,
+            use .. " Option force", seen)
+    elseif op == "legacy_pointer" then
+        assert(target._tag == "Type.Pointer"
+               and (source._tag == "Type.Pointer"
+                    or source._tag == "Type.String"
+                    or source._tag == "Type.Nil"),
+            use .. " has a mismatched legacy-pointer operation")
+    elseif op == "interface_wrapper" then
+        assert(source._tag == "Type.Nominal"
+               and target._tag == "Type.Nominal"
+               and type(coercion.methods) == "table",
+            use .. " has a mismatched Interface-wrapper operation")
+        error(use
+            .. " reached Interface-wrapper lowering before Interfaces v1")
+    else
+        error(use .. " has unknown/mismatched operation " .. tostring(op))
+    end
+
+    seen[coercion].active = false
+    return coercion
+end
+
+function coder._checked_coercion_plan(
+        coercion, source_type, target_type, use)
+    return coder._checked_coercion_plan_impl(
+        coercion, source_type, target_type, use, {})
+end
+
+function coder._checked_callable_plan_impl(
+        callable, source_type, target_type, use, seen)
+    use = use or "callable adjustment"
+    assert(callable ~= nil, use .. " lacks its checker plan")
+    assert(callable ~= false,
+        use .. " reached code generation after rejection")
+    assert(callable.kind == "callable",
+        use .. " has unknown plan kind " .. tostring(callable.kind))
+    local source, target =
+        coder._checked_plan_pair(callable, source_type, target_type, use)
+    assert(source._tag == "Type.Function"
+           and target._tag == "Type.Function",
+        use .. " has non-callable operand types")
+    assert(callable.exact == types.equals(source, target),
+        use .. " has a mismatched exact-callable marker")
+    assert(not (source.vararg or target.vararg) or callable.exact,
+        use .. " adjusts a non-identical untyped C vararg callable")
+    assert(type(callable.arguments) == "table"
+           and type(callable.results) == "table",
+        use .. " lacks its action lists")
+
+    seen = seen or {}
+    local prior = seen[callable]
+    if prior then
+        assert(types.equals(prior.source, source)
+               and types.equals(prior.target, target),
+            use .. " reuses one recursive plan for different callable types")
+        assert(not prior.active,
+            use .. " contains a recursive callable-plan cycle")
+        return callable
+    end
+    seen[callable] = {
+        source = source,
+        target = target,
+        active = true,
+    }
+
+    local argument_index = 0
+    local function argument(kind, label)
+        argument_index = argument_index + 1
+        local action = callable.arguments[argument_index]
+        assert(action,
+            use .. " is missing " .. label)
+        assert(action.kind == kind,
+            use .. " has " .. tostring(action.kind)
+                .. " where " .. kind .. " was required")
+        return action
+    end
+    local function component(action, from, to, label)
+        assert(action.adjustment
+               and action.adjustment.kind ~= "direct_coercion",
+            use .. " " .. label
+                .. " contains an ordinary component coercion")
+        coder._checked_adjustment_plan_impl(
+            action.adjustment, from, to,
+            use .. " " .. label, seen)
+    end
+
+    local function accepts_missing_nil(typ)
+        typ = types.normalize(typ)
+        local tag = typ and typ._tag
+        return tag == "Type.Nil" or tag == "Type.Value"
+            or tag == "Type.Option" or tag == "Type.Pointer"
+            or tag == "Type.CPointer"
+    end
+
+    local shared_arguments = math.min(#source.params, #target.params)
+    for index = 1, shared_arguments do
+        local action = argument("argument", "shared argument action")
+        assert(action.expected_index == index
+               and action.actual_index == index,
+            use .. " has mismatched shared argument indexes")
+        component(action, target.params[index], source.params[index],
+            "argument " .. index)
+    end
+    for index = #target.params + 1, #source.params do
+        assert(accepts_missing_nil(source.params[index]),
+            use .. " nil-fills a non-nullable actual argument")
+        if target.varargtype then
+            local action = argument(
+                "tail_or_nil_to_argument", "tail-to-argument action")
+            assert(action.actual_index == index
+                   and action.expected_tail_offset
+                       == index - #target.params,
+                use .. " has mismatched tail-to-argument indexes")
+            component(action, target.varargtype, source.params[index],
+                "tail-to-argument " .. index)
+        else
+            local action = argument("nil_fill", "nil-fill action")
+            assert(action.actual_index == index,
+                use .. " has a mismatched nil-fill index")
+            assert(action.adjustment == nil,
+                use .. " nil-fill action has an unexpected adjustment")
+        end
+    end
+    for index = #source.params + 1, #target.params do
+        if source.varargtype then
+            local action = argument(
+                "argument_to_tail", "argument-to-tail action")
+            assert(action.expected_index == index,
+                use .. " has a mismatched argument-to-tail index")
+            component(action, target.params[index], source.varargtype,
+                "argument-to-tail " .. index)
+        else
+            local action = argument(
+                "ignore_argument", "ignored-argument action")
+            assert(action.expected_index == index,
+                use .. " has a mismatched ignored-argument index")
+            assert(action.adjustment == nil,
+                use .. " ignored-argument action has an unexpected adjustment")
+        end
+    end
+    if source.varargtype and target.varargtype then
+        local action = argument("tail_to_tail", "tail-to-tail action")
+        assert(action.expected_tail_consumed
+                   == math.max(0, #source.params - #target.params),
+            use .. " has a mismatched tail-to-tail offset")
+        component(action, target.varargtype, source.varargtype,
+            "input tail")
+    elseif source.varargtype then
+        local action = argument("empty_tail", "empty-tail action")
+        assert(action.adjustment == nil,
+            use .. " empty-tail action has an unexpected adjustment")
+    elseif target.varargtype then
+        local action = argument("ignore_tail", "ignored-tail action")
+        assert(action.expected_tail_consumed
+                   == math.max(0, #source.params - #target.params),
+            use .. " has a mismatched ignored-tail offset")
+        assert(action.adjustment == nil,
+            use .. " ignored-tail action has an unexpected adjustment")
+    end
+    assert(argument_index == #callable.arguments,
+        use .. " has unexpected extra argument actions")
+
+    local result_index = 0
+    local function result(kind, label)
+        result_index = result_index + 1
+        local action = callable.results[result_index]
+        assert(action,
+            use .. " is missing " .. label)
+        assert(action.kind == kind,
+            use .. " has " .. tostring(action.kind)
+                .. " where " .. kind .. " was required")
+        return action
+    end
+
+    for index, expected in ipairs(target.rettypes) do
+        local actual = source.rettypes[index]
+        if actual then
+            local action = result("result", "fixed-result action")
+            assert(action.actual_index == index
+                   and action.expected_index == index,
+                use .. " has mismatched fixed-result indexes")
+            component(action, actual, expected, "result " .. index)
+        else
+            assert(source.flexrettype,
+                use .. " lacks a source result for expected result "
+                    .. index)
+            if expected._tag == "Type.Option" then
+                local action = result(
+                    "flex_to_optional_result",
+                    "flexible-to-optional result action")
+                assert(action.expected_index == index
+                       and action.actual_flex_offset
+                           == index - #source.rettypes,
+                    use .. " has mismatched flexible-result indexes")
+                assert(action.wrap_present == nil
+                       or action.wrap_present == true,
+                    use .. " has invalid optional-result wrap metadata")
+                local adjusted_target =
+                    action.wrap_present and expected.base or expected
+                component(action, source.flexrettype, adjusted_target,
+                    "flexible result " .. index)
+            else
+                local action = result(
+                    "flex_to_result", "flexible-result action")
+                assert(action.expected_index == index
+                       and action.actual_flex_offset
+                           == index - #source.rettypes,
+                    use .. " has mismatched flexible-result indexes")
+                assert(action.wrap_present == nil,
+                    use .. " non-optional flexible result has wrap metadata")
+                component(action, source.flexrettype, expected,
+                    "flexible result " .. index)
+            end
+        end
+    end
+    for index = #target.rettypes + 1, #source.rettypes do
+        if target.flexrettype then
+            local action = result(
+                "result_to_flex", "result-to-flex action")
+            assert(action.actual_index == index
+                   and action.expected_flex_offset
+                       == index - #target.rettypes,
+                use .. " has mismatched result-to-flex indexes")
+            component(action, source.rettypes[index], target.flexrettype,
+                "result-to-flex " .. index)
+        else
+            local action = result("hide_result", "hidden-result action")
+            assert(action.actual_index == index,
+                use .. " has a mismatched hidden-result index")
+            assert(action.adjustment == nil,
+                use .. " hidden-result action has an unexpected adjustment")
+        end
+    end
+    if source.flexrettype and target.flexrettype then
+        local action = result("flex_to_flex", "flex-to-flex action")
+        assert(action.actual_flex_consumed
+                   == math.max(0, #target.rettypes - #source.rettypes),
+            use .. " has a mismatched flex-to-flex offset")
+        component(action, source.flexrettype, target.flexrettype,
+            "flexible result tail")
+    elseif source.flexrettype then
+        local action = result("hide_flex", "hidden-flex action")
+        assert(action.actual_flex_consumed
+                   == math.max(0, #target.rettypes - #source.rettypes),
+            use .. " has a mismatched hidden-flex offset")
+        assert(action.adjustment == nil,
+            use .. " hidden-flex action has an unexpected adjustment")
+    elseif target.flexrettype then
+        local action = result("end_flex", "end-flex action")
+        assert(action.adjustment == nil,
+            use .. " end-flex action has an unexpected adjustment")
+    end
+    assert(result_index == #callable.results,
+        use .. " has unexpected extra result actions")
+
+    seen[callable].active = false
+    return callable
+end
+
+function coder._checked_adjustment_plan_impl(
+        adjustment, source_type, target_type, use, seen)
+    use = use or "assignment adjustment"
+    assert(adjustment ~= nil, use .. " lacks its checker plan")
+    assert(adjustment ~= false,
+        use .. " reached code generation after rejection")
+    local kind = adjustment.kind
+    if kind == "identity" then
+        return coder._checked_identity_plan(
+            adjustment, source_type, target_type, use)
+    end
+
+    local source, target =
+        coder._checked_plan_pair(adjustment, source_type, target_type, use)
+    if kind == "direct_coercion" then
+        coder._checked_coercion_plan_impl(
+            adjustment.coercion, source, target,
+            use .. " direct coercion", {})
+    elseif kind == "gradual_view" then
+        local op = adjustment.op
+        if op == "inject" then
+            assert(target._tag == "Type.Value"
+                   and source._tag ~= "Type.Value",
+                use .. " has a mismatched gradual injection")
+            assert(adjustment.guard == nil,
+                use .. " gradual injection has an unexpected guard")
+        elseif op == "project" then
+            assert(source._tag == "Type.Value"
+                   and target._tag ~= "Type.Value",
+                use .. " has a mismatched gradual projection")
+            coder._checked_gradual_guard(
+                adjustment.guard, target, use .. " projection guard")
+        elseif op == "structural" then
+            assert(source._tag == target._tag
+                   and (source._tag == "Type.Array"
+                        or source._tag == "Type.Map"
+                        or source._tag == "Type.Option"),
+                use .. " has a mismatched structural gradual view")
+            coder._checked_gradual_guard(
+                adjustment.guard, target, use .. " structural guard")
+        else
+            error(use .. " has unknown gradual-view operation "
+                .. tostring(op))
+        end
+    elseif kind == "callable" then
+        coder._checked_callable_plan_impl(
+            adjustment, source, target, use, seen or {})
+    else
+        error(use .. " has unknown plan kind " .. tostring(kind))
+    end
+    return adjustment
+end
+
+function coder._checked_adjustment_plan(
+        adjustment, source_type, target_type, use)
+    return coder._checked_adjustment_plan_impl(
+        adjustment, source_type, target_type, use, {})
+end
+
+function coder._checked_callable_plan(
+        callable, source_type, target_type, use)
+    return coder._checked_callable_plan_impl(
+        callable, source_type, target_type, use, {})
+end
+
+coder._explicit_conversion_ops = {
+    pointer_to_string = true,
+    gc_identity_to_void_pointer = true,
+    legacy_pointer_to_c_void = true,
+    c_function_pointer_to_void = true,
+    counted_owner_to_string = true,
+    c_numeric = true,
+    c_object_to_void_pointer = true,
+    c_void_to_object_pointer = true,
+    unsafe_dynamic_c_pointer = true,
+}
+
+function coder._checked_explicit_conversion_plan(
+        conversion, source_type, target_type, use)
+    use = use or "written explicit conversion"
+    assert(conversion ~= nil, use .. " lacks its checker plan")
+    assert(conversion ~= false,
+        use .. " reached code generation after rejection")
+    local source = assert(types.normalize(source_type),
+        use .. " has an unnormalizable source")
+    local target = assert(types.normalize(target_type),
+        use .. " has an unnormalizable target")
+
+    if conversion.kind == "unsafe_object_pointer"
+       or conversion.kind == "address_then_unsafe_object_pointer" then
+        local planned_source = conversion.source
+            and types.normalize(conversion.source)
+        local planned_target = conversion.target
+            and types.normalize(conversion.target)
+        local expected_source
+        local source_is_addressable_object = source._tag == "Type.CStruct"
+            or source._tag == "Type.CUnion"
+        if conversion.kind == "unsafe_object_pointer" then
+            if coder._is_c_pointer_plan_type(source) then
+                expected_source = source
+            elseif source._tag == "Type.CArray" then
+                expected_source = types.normalize(
+                    types.c_local_address_pointer(source_type))
+            end
+        else
+            expected_source = types.normalize(
+                types.c_local_address_pointer(source_type))
+        end
+        local candidate = planned_source and planned_target
+            and types.c_unsafe_object_pointer_candidate(
+                planned_source, planned_target)
+        assert(coder._is_c_pointer_plan_type(planned_source)
+               and coder._is_c_pointer_plan_type(expected_source)
+               and coder._is_c_pointer_plan_type(planned_target)
+               and coder._is_c_pointer_plan_type(target)
+               and candidate
+               and types.equals(planned_source, expected_source)
+               and types.equals(planned_target, target)
+               and type(conversion.probe_key) == "string"
+               and conversion.probe_key ~= "",
+            use .. " has a mismatched checked C-pointer operation")
+        if conversion.kind == "unsafe_object_pointer" then
+            assert(coder._is_c_pointer_plan_type(source)
+                   or source._tag == "Type.CArray",
+                use .. " has an invalid checked C-pointer source")
+        else
+            assert(source_is_addressable_object,
+                use .. " has an invalid checked C-address source")
+        end
+        return conversion
+    end
+
+    assert(conversion.kind == "explicit_conversion",
+        use .. " has unknown plan kind " .. tostring(conversion.kind))
+    coder._checked_plan_pair(conversion, source, target, use)
+    assert(coder._explicit_conversion_ops[conversion.op],
+        use .. " has unknown operation " .. tostring(conversion.op))
+
+    local op = conversion.op
+    if op == "c_numeric" then
+        coder._checked_explicit_numeric_conversion(
+            conversion, source, target, use)
+    elseif op == "pointer_to_string" then
+        assert(types.is_pointer_to_string_cast(source, target),
+            use .. " has a mismatched pointer-to-string operation")
+    elseif op == "counted_owner_to_string" then
+        assert(types.is_counted_c_character_owner(source)
+               and target._tag == "Type.String",
+            use .. " has a mismatched counted-owner-to-string operation")
+    elseif op == "unsafe_dynamic_c_pointer" then
+        assert(source._tag == "Type.Value"
+               and coder._is_c_pointer_plan_type(target),
+            use .. " has a mismatched unsafe dynamic-pointer operation")
+    elseif op == "gc_identity_to_void_pointer" then
+        assert(types.is_gc_identity_void_pointer_cast(source, target),
+            use .. " has a mismatched GC-identity pointer operation")
+    elseif op == "legacy_pointer_to_c_void" then
+        assert(types.is_legacy_pointer_to_c_void_cast(source, target),
+            use .. " has a mismatched legacy-to-C-pointer operation")
+    elseif op == "c_function_pointer_to_void" then
+        assert(types.is_c_function_pointer_void_cast(source, target),
+            use .. " has a mismatched C-function-to-void-pointer operation")
+    elseif op == "c_object_to_void_pointer" then
+        assert(types.is_c_object_to_void_pointer_conversion(
+                source, target),
+            use .. " has a mismatched written object-to-void-pointer operation")
+    elseif op == "c_void_to_object_pointer" then
+        assert(types.is_written_c_void_to_object_pointer_cast(
+                source, target),
+            use .. " has a mismatched written void-to-object-pointer operation")
+    end
+    return conversion
+end
+
+function coder._checked_written_cast_plan(
+        cast, source_type, target_type, use)
+    use = use or "written cast"
+    assert(cast ~= nil, use .. " lacks its checker plan")
+    assert(cast ~= false, use .. " reached code generation after rejection")
+    assert(cast.kind == "written_cast",
+        use .. " has unknown plan kind " .. tostring(cast.kind))
+    local source, target =
+        coder._checked_plan_pair(cast, source_type, target_type, use)
+
+    if cast.op == "identity" then
+        assert(types.equals(source, target),
+            use .. " identity operation changes its operand type")
+    elseif cast.op == "dynamic" then
+        assert(source._tag == "Type.Value",
+            use .. " dynamic operation has a non-value source")
+        coder._checked_dynamic_plan(
+            cast.dynamic, target, use .. " dynamic conversion")
+    elseif cast.op == "coercion" then
+        coder._checked_coercion_plan(
+            cast.coercion, source, target, use .. " direct coercion")
+    elseif cast.op == "explicit" then
+        coder._checked_explicit_conversion_plan(
+            cast.conversion, source, target, use .. " explicit conversion")
+    elseif cast.op == "callable" then
+        coder._checked_callable_plan(
+            cast.callable, source, target, use .. " callable adjustment")
+    elseif cast.op == "gradual" then
+        coder._checked_adjustment_plan(
+            cast.view, source, target, use .. " gradual view")
+        assert(cast.guard == cast.view.guard,
+            use .. " gradual guard differs from its view plan")
+    else
+        error(use .. " has unknown operation " .. tostring(cast.op))
+    end
+    return cast
+end
+
+function coder._checked_comparison_plan(plan, left, right, use)
+    use = use or "equality comparison"
+    assert(plan ~= nil, use .. " is missing its checker comparison plan")
+    assert(plan ~= false, use .. " reached code generation after rejection")
+    assert(plan.kind == "comparison",
+        use .. " has unknown comparison plan kind " .. tostring(plan.kind))
+    left, right = types.normalize(left), types.normalize(right)
+    assert(left and right and plan.left and plan.right
+           and types.equals(plan.left, left)
+           and types.equals(plan.right, right),
+        use .. " comparison plan does not match its operand types")
+    local op = plan.op
+    assert(op == "identity" or op == "consistent"
+           or op == "numeric" or op == "option",
+        use .. " has unknown comparison operation " .. tostring(op))
+    if op == "identity" then
+        assert(types.equals(left, right),
+            use .. " identity comparison has unequal operands")
+    elseif op == "numeric" then
+        assert((left._tag == "Type.Integer"
+                and right._tag == "Type.Float")
+               or (left._tag == "Type.Float"
+                   and right._tag == "Type.Integer"),
+            use .. " numeric comparison has nonnumeric operand tags")
+    elseif op == "consistent" then
+        local left_value = left._tag == "Type.Value"
+        local right_value = right._tag == "Type.Value"
+        if left_value ~= right_value then
+            local adjustment
+            local unexpected
+            if left_value then
+                adjustment = plan.right_adjustment
+                unexpected = plan.left_adjustment
+            else
+                adjustment = plan.left_adjustment
+                unexpected = plan.right_adjustment
+            end
+            assert(unexpected == nil,
+                use .. " has an adjustment on the value operand")
+            coder._checked_adjustment_plan_impl(
+                adjustment,
+                left_value and right or left,
+                left_value and left or right,
+                use .. " value injection", {})
+        else
+            assert(not left_value,
+                use .. " consistent comparison duplicates identity")
+            assert(plan.left_adjustment == nil
+                   and plan.right_adjustment == nil,
+                use .. " has an unexpected consistency adjustment")
+            assert(left._tag == right._tag
+                   and (left._tag == "Type.Array"
+                        or left._tag == "Type.Map"
+                        or left._tag == "Type.Option"
+                        or left._tag == "Type.Function"),
+                use .. " has no structural consistency evidence")
+        end
+    elseif op == "option" then
+        assert(left._tag == "Type.Option"
+               and right._tag == "Type.Option",
+            use .. " Option comparison has non-Option operands")
+        coder._checked_comparison_plan(
+            plan.inner, left.base, right.base, use .. " Option payload")
+    end
+    return plan
+end
+
+-- Read a boxed slot for a Titan observation through a gradual view.  Unlike
+-- `checkandget`, this is a tag guard, not a dynamic conversion: Titan integer,
+-- float, and boolean representations must already be exact.  The remaining
+-- categories already use exact outer-kind/metatable checks in `checkandget`;
+-- Option recurses here so its present arm cannot accidentally regain the
+-- coercive numeric/truthiness policy.
+function coder._strictcheckandget(ctx, plan, typ, cvar, exp, loc, use)
+    plan = coder._checked_gradual_guard(plan, typ, use)
+    if plan == false then
+        return render([[
+            (void)($EXP);
+            $THROW
+        ]], {
+            EXP = exp,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            TYPE = c_string_literal(types.tostring(typ)),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, strict observation of %s is unavailable",
+                { "$FILE", "$LINE", "$COL", "$TYPE" }),
+        })
+    end
+    local resolved = typ._tag == "Type.CTypedef"
+        and types.resolve_c_typedef(typ) or typ
+    if typ._tag == "Type.Integer" then
+        return render([[
+            if (TITAN_LIKELY(ttisinteger($EXP))) {
+                $VAR = ivalue($EXP);
+            } else {
+                $THROW
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, expected integer tag but found %s",
+                { "$FILE", "$LINE", "$COL",
+                  "lua_typename(L, ttype($EXP))" }),
+        })
+    elseif typ._tag == "Type.Float" then
+        return render([[
+            if (TITAN_LIKELY(ttisfloat($EXP))) {
+                $VAR = fltvalue($EXP);
+            } else {
+                $THROW
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, expected float tag but found %s",
+                { "$FILE", "$LINE", "$COL",
+                  "lua_typename(L, ttype($EXP))" }),
+        })
+    elseif typ._tag == "Type.Boolean" then
+        return render([[
+            if (TITAN_LIKELY(ttisboolean($EXP))) {
+                $VAR = !l_isfalse($EXP);
+            } else {
+                $THROW
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, expected boolean tag but found %s",
+                { "$FILE", "$LINE", "$COL",
+                  "lua_typename(L, ttype($EXP))" }),
+        })
+    elseif resolved._tag == "Type.CInteger" then
+        return coder._code_checked_boxed_numeric(
+            ctx, typ, cvar, exp, loc, true)
+    elseif resolved._tag == "Type.CFloat" then
+        return coder._code_checked_boxed_numeric(
+            ctx, typ, cvar, exp, loc, true)
+    elseif typ._tag == "Type.Option" then
+        return render([[
+            if (ttisnil($EXP)) {
+                setnilvalue(&$VAR);
+            } else {
+                $CHECK
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            CHECK = coder._strictcheckandsetmixed(
+                ctx, plan.inner, typ.base, "&" .. cvar, exp, loc,
+                (use or "strict gradual observation")
+                    .. " Option present value"),
+        })
+    end
+    return checkandget(ctx, typ, cvar, exp, loc)
+end
+
+-- Box the result of the same strict observation.  Keeping this mechanically
+-- derived from `strictcheckandget` prevents the old function-argument versus
+-- field-write split from reappearing for strict paths.
+function coder._strictcheckandset(ctx, plan, typ, dst, src, loc, use)
+    local name = fresh_lowering_name(ctx, "_titan_strict_value_")
+    return render([[
+        {
+            $DECL = $INIT;
+            $CHECK
+            $STORE
+        }
+    ]], {
+        DECL = cvardecl(ctx, typ, name),
+        INIT = initval(typ),
+        CHECK = coder._strictcheckandget(
+            ctx, plan, typ, name, src, loc, use),
+        STORE = setslot(typ, dst, name),
+    })
+end
+
+-- Array/Map slots may contain a nested Array either as its internal backing or
+-- as the canonical Lua proxy.  Normalize only those two sanctioned shapes;
+-- all leaf observations still use the strict tag policy above.
+function coder._strictcheckandgetmixed(
+        ctx, plan, typ, cvar, exp, loc, use)
+    plan = coder._checked_gradual_guard(plan, typ, use)
+    if plan == false then
+        return coder._strictcheckandget(
+            ctx, plan, typ, cvar, exp, loc, use)
+    end
+    if typ._tag == "Type.Array" then
+        return render([[
+            {
+                Table *_titan_array = NULL;
+                if (ttistable($EXP)) {
+                    Table *_titan_candidate = hvalue($EXP);
+                    if (titan_array_try_proxy(_titan_candidate, $META) != NULL)
+                        _titan_array = _titan_candidate;
+                } else {
+                    _titan_array = titan_array_try_backing($EXP, $META);
+                }
+                if (TITAN_LIKELY(_titan_array != NULL)) {
+                    $VAR = _titan_array;
+                } else {
+                    $THROW
+                }
+            }
+        ]], {
+            EXP = exp,
+            META = array_metatable(ctx),
+            VAR = cvar,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, expected array but found %s",
+                { "$FILE", "$LINE", "$COL",
+                  "lua_typename(L, ttype($EXP))" }),
+        })
+    elseif typ._tag == "Type.Value" then
+        return render([[
+            if (ttistable($EXP)) {
+                Udata *_titan_proxy =
+                    titan_array_try_proxy(hvalue($EXP), $META);
+                if (_titan_proxy != NULL) {
+                    setuvalue(L, &$VAR, _titan_proxy);
+                } else {
+                    setobj2t(L, &$VAR, $EXP);
+                }
+            } else {
+                setobj2t(L, &$VAR, $EXP);
+            }
+        ]], {
+            EXP = exp,
+            META = array_metatable(ctx),
+            VAR = cvar,
+        })
+    elseif typ._tag == "Type.Option" then
+        return render([[
+            if (ttisnil($EXP)) {
+                setnilvalue(&$VAR);
+            } else {
+                $CHECK
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            CHECK = coder._strictcheckandsetmixed(
+                ctx, plan.inner, typ.base, "&" .. cvar, exp, loc,
+                (use or "strict gradual observation")
+                    .. " Option present value"),
+        })
+    end
+    return coder._strictcheckandget(
+        ctx, plan, typ, cvar, exp, loc, use)
+end
+
+function coder._strictcheckandsetmixed(
+        ctx, plan, typ, dst, src, loc, use)
+    local name = fresh_lowering_name(ctx, "_titan_strict_mixed_value_")
+    return render([[
+        {
+            $DECL = $INIT;
+            $CHECK
+            $STORE
+        }
+    ]], {
+        DECL = cvardecl(ctx, typ, name),
+        INIT = initval(typ),
+        CHECK = coder._strictcheckandgetmixed(
+            ctx, plan, typ, name, src, loc, use),
+        STORE = setslot(typ, dst, name),
+    })
+end
+
+-- Emit the generated dynamic-boundary writer and initialize its module-local
+-- cached CClosure for each Array element type constructed by this module.
+-- These closures are carried by proxies; they are never published as tags.
+function coder._emit_array_writers(tlcontext, sigs, code, initfuncs)
+    for _, entry in ipairs(tlcontext.array_writer_list) do
+        local loc = {
+            filename = "<Lua write to "
+                .. types.tostring(types.Array(entry.elem)) .. ">",
+            line = 1,
+            col = 1,
+        }
+        table.insert(sigs, render([[
+            static int $NAME(lua_State *L);
+        ]], {
+            NAME = entry.name,
+        }))
+        table.insert(code, render([[
+            static int $NAME(lua_State *L) {
+                StkId func = L->ci->func.p;
+                if (TITAN_UNLIKELY(L->top.p - func - 1 < 1)) {
+                    return luaL_error(L,
+                        "missing value for Titan Array writer");
+                }
+                CClosure *_fn = clCvalue(s2v(func));
+                Udata *_mod = uvalue(&_fn->upvalue[0]);
+                (void)_mod; /* conversion policies without nominal/C caches */
+                titan_ensure_stack(L, 1);
+                func = L->ci->func.p;
+                TValue *_src = s2v(func + 1);
+                $CONVERT
+                L->top.p++;
+                return 1;
+            }
+        ]], {
+            NAME = entry.name,
+            CONVERT = coder._dynamiccheckandset(
+                tlcontext, entry.plan, entry.elem,
+                "s2v(L->top.p)", "_src", loc, "Array writer"),
+        }))
+        table.insert(initfuncs, render([[
+            titan_pushmodule(L, _mod);
+            lua_pushcclosure(L, $NAME, 1);
+            setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
+            luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
+            lua_pop(L, 1);
+        ]], {
+            NAME = entry.name,
+            SLOT = c_integer_literal(entry.slot),
+        }))
+    end
 end
 
 local function cpointerdecl(typ, name)
@@ -1803,6 +2919,7 @@ local function newcontext(tlcontext)
         module = tlcontext.module, -- module name,
         modules = tlcontext.modules, -- set of record metatables that we need
         bound_luas = tlcontext.bound_luas, -- external bound-method Lua trampolines we bind
+        bound_stricts = tlcontext.bound_stricts,
         tlcontext = tlcontext -- toplevel context
     }
 end
@@ -1975,8 +3092,12 @@ local function spill_reload(ctx)
 end
 
 local function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]])
-    local tmp = ctx.tmp
-    ctx.tmp = ctx.tmp + 1
+    -- Module-level Lua entry wrappers share the translation-unit context but
+    -- may be emitted before any native body has needed a temporary. Treat that
+    -- as the first allocation just like `fresh_lowering_name`; GC-bearing
+    -- temporaries still require an ordinary function context with stack slots.
+    local tmp = ctx.tmp or 1
+    ctx.tmp = tmp + 1
     local tmpname = "_tmp_" .. tmp
     -- A temporary freezes an expression value, so a C array/function uses its
     -- adjusted pointer representation. Direct array declarators are reserved
@@ -2034,6 +3155,481 @@ function coder._resolve_cast_type(typ)
     return types.resolve_c_typedef(typ)
 end
 
+function coder._is_numeric_type(typ)
+    local resolved = coder._resolve_cast_type(typ)
+    local tag = resolved and resolved._tag
+    return tag == "Type.Integer" or tag == "Type.Float"
+        or tag == "Type.CInteger" or tag == "Type.CFloat"
+end
+
+function coder._is_c_numeric_type(typ)
+    local resolved = coder._resolve_cast_type(typ)
+    local tag = resolved and resolved._tag
+    return tag == "Type.CInteger" or tag == "Type.CFloat"
+end
+
+function coder._numeric_carriers(source_type, target_type)
+    local source = coder._resolve_cast_type(source_type)
+    local target = coder._resolve_cast_type(target_type)
+    local anchor
+    if source and (source._tag == "Type.CInteger"
+                   or source._tag == "Type.CFloat") then
+        anchor = source
+    elseif target and (target._tag == "Type.CInteger"
+                       or target._tag == "Type.CFloat") then
+        anchor = target
+    end
+    assert(anchor and anchor._c_numeric_carriers,
+        "C numeric lowering lacks authoritative target-profile metadata")
+    return anchor._c_numeric_carriers
+end
+
+function coder._numeric_trait(source_type, target_type, typ)
+    local resolved = coder._resolve_cast_type(typ)
+    local tag = resolved and resolved._tag
+    local carriers = coder._numeric_carriers(source_type, target_type)
+    if tag == "Type.Integer" then
+        return carriers.lua_integer
+    elseif tag == "Type.Float" then
+        return carriers.lua_number
+    elseif tag == "Type.CInteger" or tag == "Type.CFloat" then
+        assert(resolved._c_numeric,
+            "direct C numeric type lacks target-profile traits")
+        assert(resolved._c_numeric_carriers
+               and resolved._c_numeric_carriers.identity == carriers.identity,
+            "C numeric conversion combines different target profiles")
+        return resolved._c_numeric
+    end
+    error("non-numeric type in numeric lowering: " .. types.tostring(typ))
+end
+
+function coder._numeric_c_name(typ, trait)
+    local resolved = coder._resolve_cast_type(typ)
+    if resolved._tag == "Type.Integer" then return "lua_Integer" end
+    if resolved._tag == "Type.Float" then return "lua_Number" end
+    return trait.spelling
+end
+
+function coder._integer_maximum_expression(trait)
+    local ct = trait.spelling
+    if not trait.signed then
+        if trait.precision == 1 then
+            return render("(($CT)1)", { CT = ct })
+        end
+        return render("((($CT)~($CT)0))", { CT = ct })
+    end
+    assert(trait.unsigned and trait.precision,
+        "signed C integer trait lacks its unsigned partner/precision")
+    return render([[
+        (($CT)((((($UCT)1) << $PRECISION) - (($UCT)1))))
+    ]], {
+        CT = ct,
+        UCT = trait.unsigned,
+        PRECISION = c_integer_literal(trait.precision),
+    })
+end
+
+function coder._integer_minimum_expression(trait)
+    if not trait.signed then
+        return render("(($CT)0)", { CT = trait.spelling })
+    end
+    return render("(($CT)(-($MAXIMUM) - 1))", {
+        CT = trait.spelling,
+        MAXIMUM = coder._integer_maximum_expression(trait),
+    })
+end
+
+function coder._integer_range_predicate(
+        source_type, target_type, source, source_trait, target_trait)
+    local contains, err =
+        coder._csemantics.integer_range_contains(
+            target_trait, source_trait)
+    assert(contains ~= nil, err)
+    if contains then return "1" end
+
+    local checks = {}
+    local source_ct = coder._numeric_c_name(source_type, source_trait)
+    if source_trait.signed and not target_trait.signed then
+        checks[#checks + 1] = render("(($SOURCE) >= 0)", {
+            SOURCE = source,
+        })
+    elseif source_trait.signed and target_trait.signed
+           and target_trait.precision < source_trait.precision then
+        checks[#checks + 1] = render(
+            "(($SOURCE) >= (($SOURCE_CT)($MINIMUM)))", {
+                SOURCE = source,
+                SOURCE_CT = source_ct,
+                MINIMUM = coder._integer_minimum_expression(target_trait),
+            })
+    end
+
+    local needs_maximum
+    if source_trait.signed == target_trait.signed then
+        needs_maximum =
+            target_trait.precision < source_trait.precision
+    else
+        needs_maximum =
+            target_trait.precision < source_trait.precision
+    end
+    if needs_maximum then
+        checks[#checks + 1] = render(
+            "(($SOURCE) <= (($SOURCE_CT)($MAXIMUM)))", {
+                SOURCE = source,
+                SOURCE_CT = source_ct,
+                MAXIMUM = coder._integer_maximum_expression(target_trait),
+            })
+    end
+    assert(#checks > 0,
+        "non-containing integer ranges produced no runtime checks")
+    return "(" .. table.concat(checks, " && ") .. ")"
+end
+
+function coder._float_integer_capacity(trait)
+    assert(trait and trait.kind == "float"
+           and trait.maximum_exponent and trait.radix,
+        "integer-to-floating lowering lacks target radix/exponent metadata")
+    local radix = trait.radix
+    local radix_binary_exponent = 0
+    while radix >= 2 do
+        radix = math.floor(radix / 2)
+        radix_binary_exponent = radix_binary_exponent + 1
+    end
+    assert(radix_binary_exponent > 0)
+    -- C's maximum finite value is at least radix^(maximum_exponent - 1).
+    -- This lower bound is deliberately conservative for non-binary targets.
+    return radix_binary_exponent * (trait.maximum_exponent - 1)
+end
+
+-- Generate the non-raising acceptance half of one native numeric conversion.
+-- The source expression must already be stable. The returned setup statements
+-- run before the predicate; callers cast/store only after it succeeds.
+function coder._code_native_numeric_predicate(
+        ctx, source_type, target_type, source, mode)
+    assert(coder._is_numeric_type(source_type)
+           and coder._is_numeric_type(target_type),
+        "numeric predicate received a non-numeric type")
+    local source_res = coder._resolve_cast_type(source_type)
+    local target_res = coder._resolve_cast_type(target_type)
+    local source_trait =
+        coder._numeric_trait(source_type, target_type, source_type)
+    local target_trait =
+        coder._numeric_trait(source_type, target_type, target_type)
+
+    if source_trait.kind == "integer"
+       and target_trait.kind == "integer" then
+        if mode == "c_operator"
+           or (mode == "explicit_c"
+               and source_res._tag == "Type.CInteger"
+               and target_res._tag == "Type.CInteger") then
+            return "", "1"
+        end
+        return "", coder._integer_range_predicate(
+            source_type, target_type, source, source_trait, target_trait)
+    elseif source_trait.kind == "float"
+           and target_trait.kind == "float" then
+        if target_trait.rank >= source_trait.rank then
+            return "", "1"
+        end
+        assert(target_trait.maximum_macro,
+            "narrow C floating target lacks its <float.h> maximum")
+        return "", render([[
+            (isfinite((long double)($SOURCE))
+                && fabsl((long double)($SOURCE))
+                    <= (long double)($MAXIMUM))
+        ]], {
+            SOURCE = source,
+            MAXIMUM = target_trait.maximum_macro,
+        })
+    elseif source_trait.kind == "integer"
+           and target_trait.kind == "float" then
+        if source_trait.precision <=
+           coder._float_integer_capacity(target_trait) then
+            return "", "1"
+        end
+        local long_double = coder._numeric_carriers(
+            source_type, target_type).long_double
+        assert(source_trait.precision <=
+               coder._float_integer_capacity(long_double),
+            "integer source is wider than the target profile's long double")
+        assert(target_trait.maximum_macro,
+            "C floating target lacks its <float.h> maximum")
+        return "", render([[
+            (fabsl((long double)($SOURCE))
+                <= (long double)($MAXIMUM))
+        ]], {
+            SOURCE = source,
+            MAXIMUM = target_trait.maximum_macro,
+        })
+    elseif source_trait.kind == "float"
+           and target_trait.kind == "integer" then
+        assert(ctx, "float-to-integer acceptance needs a lowering context")
+        local truncated =
+            fresh_lowering_name(ctx, "_titan_numeric_truncated_")
+        local magnitude = render(
+            "ldexpl(1.0L, $PRECISION)", {
+                PRECISION = c_integer_literal(target_trait.precision),
+            })
+        local lower = target_trait.signed
+            and "(-(" .. magnitude .. "))" or "0.0L"
+        return render([[
+            long double $TRUNCATED =
+                truncl((long double)($SOURCE));
+        ]], {
+            TRUNCATED = truncated,
+            SOURCE = source,
+        }), render([[
+            (isfinite((long double)($SOURCE))
+                && $TRUNCATED >= $LOWER
+                && $TRUNCATED < $UPPER)
+        ]], {
+            SOURCE = source,
+            TRUNCATED = truncated,
+            LOWER = lower,
+            UPPER = magnitude,
+        })
+    end
+    error("unknown numeric conversion category")
+end
+
+coder._numeric_coercion_ops = {
+    ["Type.Integer:Type.Float"] = "integer_to_float",
+    ["Type.Float:Type.Integer"] = "float_to_integer",
+    ["Type.CInteger:Type.Integer"] = "c_integer_to_integer",
+    ["Type.Integer:Type.CInteger"] = "integer_to_c_integer",
+    ["Type.CFloat:Type.Float"] = "c_float_to_float",
+    ["Type.Float:Type.CFloat"] = "float_to_c_float",
+    ["Type.Integer:Type.CFloat"] = "integer_to_c_float",
+}
+
+-- Central authority check for scalar coercion lowering. Tag-driven dispatch is
+-- not permission: every automatic/written coercion must carry the exact
+-- checker-owned source/target/op decision.
+function coder._checked_numeric_coercion(plan, source_type, target_type, use)
+    assert(plan, (use or "numeric coercion") .. " lacks its checker plan")
+    assert(plan.kind == "coercion",
+        (use or "numeric coercion") .. " has unknown plan kind "
+            .. tostring(plan.kind))
+    local source = assert(types.normalize(source_type))
+    local target = assert(types.normalize(target_type))
+    assert(plan.source and plan.target
+           and types.equals(plan.source, source)
+           and types.equals(plan.target, target),
+        (use or "numeric coercion")
+            .. " plan does not match its operand types")
+    local key = source._tag .. ":" .. target._tag
+    local expected = coder._numeric_coercion_ops[key]
+    assert(expected and plan.op == expected,
+        (use or "numeric coercion")
+            .. " has unknown/mismatched operation " .. tostring(plan.op))
+    return plan
+end
+
+function coder._checked_explicit_numeric_conversion(
+        conversion, source_type, target_type, use)
+    assert(conversion,
+        (use or "explicit C numeric conversion") .. " lacks its checker plan")
+    assert(conversion.kind == "explicit_conversion"
+           and conversion.op == "c_numeric",
+        (use or "explicit C numeric conversion")
+            .. " has unknown plan operation " .. tostring(conversion.op))
+    local source = assert(types.normalize(source_type))
+    local target = assert(types.normalize(target_type))
+    assert(conversion.source and conversion.target
+           and types.equals(conversion.source, source)
+           and types.equals(conversion.target, target)
+           and coder._is_c_numeric_type(source)
+           and coder._is_c_numeric_type(target),
+        (use or "explicit C numeric conversion")
+            .. " plan does not match its operand types")
+    return conversion
+end
+
+function coder._numeric_range_throw(loc, source_type, target_type)
+    return codethrow(loc,
+        "%s:%d:%d: type error, numeric value is outside the range of %s",
+        {
+            c_string_literal(loc.filename),
+            c_integer_literal(loc.line),
+            c_integer_literal(loc.col),
+            c_string_literal(types.tostring(target_type)),
+        })
+end
+
+-- Checked native-to-native scalar conversion. Integer-to-integer explicit C
+-- casts retain C semantics; every other potentially unsafe crossing validates
+-- representability before the cast and before any destination mutation.
+function coder._code_checked_numeric_cast(
+        ctx, source_type, target_type, source, loc, mode)
+    local csource, source_name = newtmp(ctx, source_type)
+    local ctarget, target_name = newtmp(ctx, target_type)
+    local predicate_stats, predicate =
+        coder._code_native_numeric_predicate(
+            ctx, source_type, target_type, source_name, mode)
+    local target_trait =
+        coder._numeric_trait(source_type, target_type, target_type)
+    return render([[
+        $CSOURCE
+        $SOURCE_NAME = $SOURCE;
+        $PREDICATE_STATS
+        if (TITAN_UNLIKELY(!($PREDICATE))) {
+            $THROW
+        }
+        $CTARGET
+        $TARGET_NAME = (($TARGET_CT)$SOURCE_NAME);
+    ]], {
+        CSOURCE = csource,
+        SOURCE_NAME = source_name,
+        SOURCE = source,
+        PREDICATE_STATS = predicate_stats,
+        PREDICATE = predicate,
+        THROW = coder._numeric_range_throw(
+            loc, source_type, target_type),
+        CTARGET = ctarget,
+        TARGET_NAME = target_name,
+        TARGET_CT = coder._numeric_c_name(target_type, target_trait),
+    }), target_name
+end
+
+function coder._code_boxed_numeric_predicate(
+        ctx, target, source, strict)
+    local resolved = coder._resolve_cast_type(target)
+    local result_decl, result = newtmp(ctx, types.Boolean())
+    local lines = { result_decl, result .. " = 0;" }
+
+    local function branch(tag_predicate, source_type, get_value, prefix)
+        local source_decl, source_name = newtmp(ctx, source_type)
+        local predicate_stats, predicate =
+            coder._code_native_numeric_predicate(
+                ctx, source_type, target, source_name, "boundary")
+        lines[#lines + 1] = render([[
+            $PREFIX ($TAG_PREDICATE) {
+                $SOURCE_DECL
+                $SOURCE_NAME = $GET_VALUE;
+                $PREDICATE_STATS
+                $RESULT = $PREDICATE;
+            }
+        ]], {
+            PREFIX = prefix,
+            TAG_PREDICATE = tag_predicate,
+            SOURCE_DECL = source_decl,
+            SOURCE_NAME = source_name,
+            GET_VALUE = get_value,
+            PREDICATE_STATS = predicate_stats,
+            RESULT = result,
+            PREDICATE = predicate,
+        })
+    end
+
+    if resolved._tag == "Type.CInteger" then
+        branch("ttisinteger(" .. source .. ")", types.Integer(),
+            "ivalue(" .. source .. ")", "if")
+        if not strict then
+            local value_decl, value = newtmp(ctx, types.Float())
+            local integer_decl, integer = newtmp(ctx, types.Integer())
+            local predicate_stats, predicate =
+                coder._code_native_numeric_predicate(
+                    ctx, types.Integer(), target, integer, "boundary")
+            lines[#lines + 1] = render([[
+                else if (ttisfloat($SOURCE)) {
+                    $VALUE_DECL
+                    $INTEGER_DECL
+                    $VALUE = fltvalue($SOURCE);
+                    if (isfinite($VALUE)
+                        && truncl((long double)$VALUE)
+                            == (long double)$VALUE
+                        && lua_numbertointeger($VALUE, &$INTEGER)) {
+                        $PREDICATE_STATS
+                        $RESULT = $PREDICATE;
+                    }
+                }
+            ]], {
+                SOURCE = source,
+                VALUE_DECL = value_decl,
+                INTEGER_DECL = integer_decl,
+                VALUE = value,
+                INTEGER = integer,
+                PREDICATE_STATS = predicate_stats,
+                RESULT = result,
+                PREDICATE = predicate,
+            })
+        end
+    else
+        branch("ttisfloat(" .. source .. ")", types.Float(),
+            "fltvalue(" .. source .. ")", "if")
+        if not strict then
+            branch("ttisinteger(" .. source .. ")", types.Integer(),
+                "ivalue(" .. source .. ")", "else if")
+        end
+    end
+    return table.concat(lines, "\n"), result
+end
+
+function coder._code_checked_boxed_numeric(
+        ctx, target, cvar, source, loc, strict)
+    local predicate_stats, predicate =
+        coder._code_boxed_numeric_predicate(
+            ctx, target, source, strict)
+    local resolved = coder._resolve_cast_type(target)
+    local tag_name = resolved._tag == "Type.CInteger"
+        and "C-integer" or "C-float"
+    return render([[
+        $PREDICATE_STATS
+        if (TITAN_UNLIKELY(!($PREDICATE))) {
+            $THROW
+        }
+        if (ttisinteger($SOURCE)) {
+            $CVAR = (($CT)ivalue($SOURCE));
+        } else {
+            $CVAR = (($CT)fltvalue($SOURCE));
+        }
+    ]], {
+        PREDICATE_STATS = predicate_stats,
+        PREDICATE = predicate,
+        SOURCE = source,
+        CVAR = cvar,
+        CT = cdeclarator.render_type_name(target),
+        THROW = codethrow(loc,
+            "%s:%d:%d: type error, expected representable %s but found %s",
+            {
+                c_string_literal(loc.filename),
+                c_integer_literal(loc.line),
+                c_integer_literal(loc.col),
+                c_string_literal(tag_name),
+                "lua_typename(L, ttype(" .. source .. "))",
+            }),
+    })
+end
+
+function coder._code_checked_numeric_setslot(typ, dst, src)
+    local resolved = coder._resolve_cast_type(typ)
+    local target = resolved._tag == "Type.CInteger"
+        and types.Integer() or types.Float()
+    local predicate_stats, predicate =
+        coder._code_native_numeric_predicate(
+            nil, typ, target, "_titan_numeric_box_source", "carrier")
+    assert(predicate_stats == "",
+        "C scalar carrier boxing unexpectedly needs predicate setup")
+    local store = resolved._tag == "Type.CInteger"
+        and "setivalue($DST, ((lua_Integer)_titan_numeric_box_source));"
+        or "setfltvalue($DST, ((lua_Number)_titan_numeric_box_source));"
+    return render([[
+        do {
+            $DECL = $SRC;
+            if (TITAN_UNLIKELY(!($PREDICATE))) {
+                luaL_error(L,
+                    "type error, C scalar is outside its Titan carrier range");
+            }
+            $STORE
+        } while (0);
+    ]], {
+        DECL = cdeclarator.render_declaration(
+            typ, "_titan_numeric_box_source"),
+        SRC = src,
+        PREDICATE = predicate,
+        STORE = render(store, { DST = dst }),
+    })
+end
+
 -- Predicate twin of checkandget's value->integer/C-integer conversion.
 function coder._code_boxed_is_integer(ctx, source)
     local cresult, result = newtmp(ctx, types.Boolean())
@@ -2067,36 +3663,29 @@ function coder._code_boxed_is_integer(ctx, source)
     }), result
 end
 
--- Return setup statements and a C boolean expression saying whether a boxed
--- `value` would pass the cast boundary for `target`. A direct target mirrors
--- checkandget; an Option base mirrors checkandset because that is the path
--- checkandget uses after accepting nil. In particular direct Boolean and all
--- Function targets are intentionally unchecked, Arrays use their canonical
--- proxy identity, and nominal/owned values compare exact metatables.
-function coder._code_boxed_cast_predicate(ctx, target, source, slot_check)
+-- Return setup statements and a C boolean expression for the non-raising form
+-- of one checker-owned DynamicCoercionPlan.  This is the predicate twin of
+-- `dynamiccheckandget`: in particular Option recurses through the embedded
+-- plan, so a present `boolean?` uses truthiness just like `boolean`.
+function coder._code_dynamic_predicate(ctx, plan, target, source)
+    plan = coder._checked_dynamic_plan(plan, target, "written value is")
+    if plan == false then return "", "0" end
     local resolved = coder._resolve_cast_type(target)
-    local tag = resolved._tag
+    local op = plan.op
 
-    if tag == "Type.Integer" or tag == "Type.CInteger" then
+    if op == "integer" then
         return coder._code_boxed_is_integer(ctx, source)
-    elseif tag == "Type.Float" or tag == "Type.CFloat" then
+    elseif op == "c_integer" or op == "c_float" then
+        return coder._code_boxed_numeric_predicate(
+            ctx, target, source, false)
+    elseif op == "float" then
         return "", render("(ttisfloat($SOURCE) || ttisinteger($SOURCE))", {
             SOURCE = source,
         })
-    elseif tag == "Type.Boolean" and slot_check then
-        return "", render("ttisboolean($SOURCE)", { SOURCE = source })
-    elseif tag == "Type.Boolean" or tag == "Type.Value"
-           or tag == "Type.Function" or types.is_c_tvalue(resolved) then
+    elseif op == "truthiness" or op == "value"
+           or op == "callable" or op == "c_tvalue" then
         return "", "1"
-    elseif types.is_c_udata_pointer(resolved) then
-        return "", render(
-            "(ttisfulluserdata($SOURCE) || ttisnil($SOURCE))",
-            { SOURCE = source })
-    elseif tag == "Type.CPointer" then
-        return "", render(
-            "(ttislightuserdata($SOURCE) || ttisnil($SOURCE))",
-            { SOURCE = source })
-    elseif tag == "Type.COwned" then
+    elseif op == "c_owned" then
         return "", render([[
             (ttisfulluserdata($SOURCE)
                 && uvalue($SOURCE)->metatable ==
@@ -2105,19 +3694,24 @@ function coder._code_boxed_cast_predicate(ctx, target, source, slot_check)
             SOURCE = source,
             META = c_integer_literal(owned_c_metatable(ctx, resolved)),
         })
-    elseif tag == "Type.Array" then
-        return "", render(
-            "(titan_array_try_backing($SOURCE, $META) != NULL)", {
-                SOURCE = source,
-                META = array_metatable(ctx),
-            })
-    elseif tag == "Type.Nil" then
+    elseif op == "array" then
+        return "", render([[
+            ((ttistable($SOURCE)
+                && titan_array_try_proxy(hvalue($SOURCE), $META) != NULL)
+             || titan_array_try_backing($SOURCE, $META) != NULL)
+        ]], {
+            SOURCE = source,
+            META = array_metatable(ctx),
+        })
+    elseif op == "nil" then
         return "", render("ttisnil($SOURCE)", { SOURCE = source })
-    elseif tag == "Type.String" then
+    elseif op == "string" then
         return "", render("ttisstring($SOURCE)", { SOURCE = source })
-    elseif tag == "Type.Map" then
+    elseif op == "map" then
         return "", render("ttistable($SOURCE)", { SOURCE = source })
-    elseif tag == "Type.Nominal" then
+    elseif op == "nominal" then
+        assert(resolved._tag == "Type.Nominal",
+            "current nominal dynamic lowering requires a nominal value type")
         return "", render([[
             (ttisfulluserdata($SOURCE)
                 && uvalue($SOURCE)->metatable == $META)
@@ -2127,10 +3721,10 @@ function coder._code_boxed_cast_predicate(ctx, target, source, slot_check)
                 INDEX = c_integer_literal(type2metatable(ctx, resolved)),
             }),
         })
-    elseif tag == "Type.Option" then
+    elseif op == "option" then
         local basestats, baseexp =
-            coder._code_boxed_cast_predicate(
-                ctx, resolved.base, source, true)
+            coder._code_dynamic_predicate(
+                ctx, plan.inner, resolved.base, source)
         local cresult, result = newtmp(ctx, types.Boolean())
         return render([[
             $CRESULT
@@ -2149,14 +3743,204 @@ function coder._code_boxed_cast_predicate(ctx, target, source, slot_check)
         }), result
     end
 
-    error("invalid target type for boxed cast predicate: "
-        .. types.tostring(target))
+    error("unknown dynamic predicate operation " .. tostring(op))
+end
+
+-- Non-raising twin of `_strictcheckandget` for a checker-owned GuardPlan.
+-- Written tests between gradual Option views need to inspect the immediate
+-- present payload without accidentally applying the broader Lua conversion
+-- policy. Arrays, Maps, and callables retain deferred component checks; their
+-- outer representation test is all that this predicate observes.
+function coder._code_strict_predicate(ctx, plan, target, source)
+    plan = coder._checked_gradual_guard(
+        plan, target, "written gradual type test")
+    if plan == false then return "", "0" end
+
+    local resolved = coder._resolve_cast_type(target)
+    local op = plan.op
+    if op == "integer" then
+        return "", render("ttisinteger($SOURCE)", { SOURCE = source })
+    elseif op == "c_integer" or op == "c_float" then
+        return coder._code_boxed_numeric_predicate(
+            ctx, target, source, true)
+    elseif op == "float" then
+        return "", render("ttisfloat($SOURCE)", { SOURCE = source })
+    elseif op == "boolean" then
+        return "", render("ttisboolean($SOURCE)", { SOURCE = source })
+    elseif op == "nil" then
+        return "", render("ttisnil($SOURCE)", { SOURCE = source })
+    elseif op == "string" then
+        return "", render("ttisstring($SOURCE)", { SOURCE = source })
+    elseif op == "value" or op == "callable"
+           or op == "c_tvalue" then
+        return "", "1"
+    elseif op == "array" then
+        return "", render([[
+            ((ttistable($SOURCE)
+                && titan_array_try_proxy(hvalue($SOURCE), $META) != NULL)
+             || titan_array_try_backing($SOURCE, $META) != NULL)
+        ]], {
+            SOURCE = source,
+            META = array_metatable(ctx),
+        })
+    elseif op == "map" then
+        return "", render("ttistable($SOURCE)", { SOURCE = source })
+    elseif op == "nominal" then
+        assert(resolved._tag == "Type.Nominal",
+            "strict nominal predicate requires a nominal value type")
+        return "", render([[
+            (ttisfulluserdata($SOURCE)
+                && uvalue($SOURCE)->metatable == $META)
+        ]], {
+            SOURCE = source,
+            META = render("hvalue(&_mod->uv[$INDEX].uv)", {
+                INDEX = c_integer_literal(type2metatable(ctx, resolved)),
+            }),
+        })
+    elseif op == "c_owned" then
+        return "", render([[
+            (ttisfulluserdata($SOURCE)
+                && uvalue($SOURCE)->metatable ==
+                    hvalue(&_mod->uv[$META].uv))
+        ]], {
+            SOURCE = source,
+            META = c_integer_literal(owned_c_metatable(ctx, resolved)),
+        })
+    elseif op == "option" then
+        local innerstats, innerexp = coder._code_strict_predicate(
+            ctx, plan.inner, resolved.base, source)
+        local cresult, result = newtmp(ctx, types.Boolean())
+        return render([[
+            $CRESULT
+            if (ttisnil($SOURCE)) {
+                $RESULT = 1;
+            } else {
+                $INNERSTATS
+                $RESULT = $INNEREXP;
+            }
+        ]], {
+            CRESULT = cresult,
+            RESULT = result,
+            SOURCE = source,
+            INNERSTATS = innerstats,
+            INNEREXP = innerexp,
+        }), result
+    end
+
+    error("unknown strict predicate operation " .. tostring(op))
+end
+
+-- Non-raising twin of a checker-owned direct CoercionPlan. Most direct
+-- coercions are total; the numeric narrowing and recursive Option operations
+-- below are the cases whose corresponding `as` can reject the already
+-- evaluated operand. The recursive helper consumes the exact stored inner
+-- plan rather than asking the relation again.
+function coder._code_coercion_predicate(
+        ctx, coercion, source_type, target_type, source)
+    coercion = coder._checked_coercion_plan(
+        coercion, source_type, target_type,
+        "written coercion type test")
+    if coercion.kind == "identity" then return "", "1" end
+
+    local op = coercion.op
+    if coder._numeric_coercion_ops[
+            assert(types.normalize(source_type))._tag .. ":"
+            .. assert(types.normalize(target_type))._tag] then
+        coder._checked_numeric_coercion(
+            coercion, source_type, target_type,
+            "written numeric coercion type test")
+    end
+    if op == "float_to_integer" then
+        local cvalue, value = newtmp(ctx, types.Float())
+        local cfloor, floor = newtmp(ctx, types.Float())
+        local cinteger, integer = newtmp(ctx, types.Integer())
+        local cresult, result = newtmp(ctx, types.Boolean())
+        return render([[
+            $CVALUE
+            $CFLOOR
+            $CINTEGER
+            $CRESULT
+            $VALUE = $SOURCE;
+            $FLOOR = l_floor($VALUE);
+            $RESULT = ($VALUE == $FLOOR
+                && lua_numbertointeger($FLOOR, &$INTEGER));
+        ]], {
+            CVALUE = cvalue,
+            VALUE = value,
+            CFLOOR = cfloor,
+            FLOOR = floor,
+            CINTEGER = cinteger,
+            INTEGER = integer,
+            CRESULT = cresult,
+            RESULT = result,
+            SOURCE = source,
+        }), result
+    elseif op == "integer_to_float" then
+        return render("(void)($SOURCE);", { SOURCE = source }), "1"
+    elseif op == "c_integer_to_integer"
+           or op == "integer_to_c_integer"
+           or op == "c_float_to_float"
+           or op == "float_to_c_float"
+           or op == "integer_to_c_float" then
+        return coder._code_native_numeric_predicate(
+            ctx, source_type, target_type, source, "boundary")
+    elseif op == "value_to_c_value" then
+        assert(source_type._tag == "Type.Value",
+            "value-to-C predicate has a non-value source")
+        return coder._code_strict_predicate(
+            ctx, assert(coercion.guard,
+                "value-to-C predicate lacks its strict guard"),
+            target_type, "&" .. source)
+    elseif op == "option_nil" then
+        return "", "1"
+    elseif op == "option_wrap" then
+        return coder._code_coercion_predicate(
+            ctx, coercion.inner, source_type, target_type.base, source)
+    elseif op == "option_force" or op == "option_map" then
+        local source_base = source_type.base
+        local inner_target = op == "option_map"
+            and target_type.base or target_type
+        local cbase, basename =
+            newtmp(ctx, source_base, types.is_gc(source_base))
+        local innerstats, innerexp = coder._code_coercion_predicate(
+            ctx, coercion.inner, source_base, inner_target, basename)
+        local cresult, result = newtmp(ctx, types.Boolean())
+        return render([[
+            $CBASE
+            $CRESULT
+            if (ttisnil(&$SOURCE)) {
+                $RESULT = $NILRESULT;
+            } else {
+            $GETBASE;
+                $INNERSTATS
+                $RESULT = $INNEREXP;
+            }
+        ]], {
+            CBASE = cbase,
+            CRESULT = cresult,
+            SOURCE = source,
+            RESULT = result,
+            NILRESULT = op == "option_map" and "1" or "0",
+            GETBASE = getslot(source_base, basename, "&" .. source),
+            INNERSTATS = innerstats,
+            INNEREXP = innerexp,
+        }), result
+    end
+
+    -- Truthiness, widening, boxing, admitted pointer conversions, and whole
+    -- C-TValue copies cannot reject an already evaluated value. Checked C
+    -- scalar representability operations are handled here by their dedicated
+    -- branches once classified with the same CoercionPlan.
+    return render("(void)($SOURCE);", { SOURCE = source }), "1"
 end
 
 function coder._codeis(ctx, node)
     -- Freeze the operand before inspecting it. This both enforces exactly-once
     -- evaluation and roots GC values while metatable/Array checks run.
     local original_source_type = node.exp._type
+    coder._checked_written_cast_plan(
+        node._written_cast, original_source_type, node.target,
+        "written type test")
     local source_type = coder._resolve_cast_type(node.exp._type)
     local target_type = coder._resolve_cast_type(node.target)
     local stats, source
@@ -2172,15 +3956,65 @@ function coder._codeis(ctx, node)
     local predicate_stats, predicate
 
     if source_type._tag == "Type.Value" then
+        local cast = assert(node._written_cast,
+            "value type test is missing its checker written-cast plan")
+        if cast.op == "dynamic" then
+            predicate_stats, predicate =
+                coder._code_dynamic_predicate(
+                    ctx, assert(cast.dynamic,
+                        "dynamic written cast lacks its embedded plan"),
+                    node.target, "&" .. source)
+        elseif cast.op == "explicit"
+               and cast.conversion
+               and cast.conversion.op == "unsafe_dynamic_c_pointer" then
+            predicate_stats = ""
+            local category = types.is_c_udata_pointer(node.target)
+                and "ttisfulluserdata" or "ttislightuserdata"
+            predicate = render(
+                "($CATEGORY($SOURCE) || ttisnil($SOURCE))", {
+                    CATEGORY = category,
+                    SOURCE = "&" .. source,
+                })
+        else
+            error("unknown value type-test plan operation "
+                .. tostring(cast.op))
+        end
+    elseif node._written_cast
+           and node._written_cast.op == "coercion" then
+        predicate_stats, predicate = coder._code_coercion_predicate(
+            ctx, assert(node._written_cast.coercion),
+            original_source_type, node.target, source)
+    elseif node._written_cast
+           and node._written_cast.op == "explicit"
+           and node._written_cast.conversion
+           and node._written_cast.conversion.op == "c_numeric" then
+        coder._checked_explicit_numeric_conversion(
+            node._written_cast.conversion,
+            original_source_type, node.target,
+            "written C numeric type test")
         predicate_stats, predicate =
-            coder._code_boxed_cast_predicate(
-                ctx, node.target, "&" .. source)
+            coder._code_native_numeric_predicate(
+                ctx, original_source_type, node.target,
+                source, "explicit_c")
+    elseif node._written_cast
+           and node._written_cast.op == "gradual"
+           and source_type._tag == "Type.Option"
+           and target_type._tag == "Type.Option" then
+        -- Option has no separate component-bearing backing. A written gradual
+        -- test therefore observes its present payload now, with strict
+        -- consistency guards rather than Lua-boundary coercions. Structural
+        -- Array/Map/callable tests remain total at this outer view edge.
+        predicate_stats, predicate = coder._code_strict_predicate(
+            ctx, node._written_cast.guard, node.target, "&" .. source)
     elseif original_source_type._tag == "Type.Option"
            and types.equals(original_source_type.base, node.target) then
         predicate = render("!ttisnil(&$SOURCE)", { SOURCE = source })
         predicate_stats = ""
-    elseif types.is_gc_identity_void_pointer_cast(
-               original_source_type, node.target)
+    elseif node._written_cast
+           and node._written_cast.op == "explicit"
+           and node._written_cast.conversion
+           and node._written_cast.conversion.op ==
+               "gc_identity_to_void_pointer"
            and source_type._tag == "Type.Function" then
         -- Function values deliberately defer callability checks until call
         -- time, so their boxed TValue is not necessarily collectable.  The
@@ -3648,33 +5482,40 @@ end
 local function mutable_out_anchor(ctx, exp, target)
     local source = exp
     local direct_address_source = false
+    local mutable_authority = false
     while source._tag == "Ast.ExpCast" and source.exp do
         local operand = source.exp
         local conversion = source._c_conversion
         if conversion and conversion.kind ==
            "address_then_unsafe_object_pointer" then
             direct_address_source = operand
+            mutable_authority = true
         elseif is_addressable_local(operand)
-           and types.c_mutable_address_coerceable(
-               operand._type, source._type) then
+           and source._adjustment
+           and source._adjustment.kind == "direct_coercion"
+           and source._adjustment.coercion
+           and source._adjustment.coercion.op == "mutable_c_address" then
             -- Preserve the local root across an exact-address inner cast and
             -- an unrelated-pointer outer cast.
             direct_address_source = operand
+            mutable_authority = true
+        elseif is_addressable_local(operand)
+           and source._written_cast then
+            local written = coder._checked_written_cast_plan(
+                source._written_cast, operand._type, source._type,
+                "mutable C out-argument cast")
+            local coercion = written.op == "coercion"
+                and written.coercion or nil
+            if coercion and coercion.op == "mutable_c_address" then
+                direct_address_source = operand
+                mutable_authority = true
+            end
         end
         source = operand
     end
 
     source = direct_address_source or exp
-    local mutable_address = target
-        and types.c_mutable_address_coerceable(source._type, target)
-    if direct_address_source then
-        local target_res = types.resolve_c_typedef(target)
-        mutable_address = target_res
-            and target_res._tag == "Type.CPointer"
-            and not types.c_pointer_has_qual(target_res, "const")
-    end
-
-    if not mutable_address
+    if not mutable_authority
        or not is_addressable_local(source)
        or not types.is_gc(source._type) then
         return nil
@@ -3686,36 +5527,83 @@ local function mutable_out_anchor(ctx, exp, target)
     return setslot(source._type, decl._slot, decl._cvar)
 end
 
-local function nativetoforeignexp(ctx, exp, cexp, target)
+local function nativetoforeignexp(ctx, exp, cexp, target, projection)
     local stype = coder._resolve_cast_type(exp._type)
     local ttype = target and coder._resolve_cast_type(target) or nil
+    local coercion
+    local conversion
+    local has_projection_authority = false
+    if projection and target then
+        if projection._adjustment then
+            coder._checked_adjustment_plan(
+                projection._adjustment, exp._type, target,
+                "native-to-foreign adjustment")
+            has_projection_authority = true
+            if projection._adjustment.kind == "direct_coercion" then
+                coercion = projection._adjustment.coercion
+            end
+        elseif projection._written_cast then
+            coder._checked_written_cast_plan(
+                projection._written_cast, exp._type, target,
+                "written native-to-foreign cast")
+            has_projection_authority = true
+            if projection._written_cast.op == "coercion" then
+                coercion = projection._written_cast.coercion
+            elseif projection._written_cast.op == "explicit" then
+                conversion = projection._written_cast.conversion
+            end
+        elseif projection._c_conversion then
+            conversion = coder._checked_explicit_conversion_plan(
+                projection._c_conversion, exp._type, target,
+                "checked native-to-foreign C conversion")
+            has_projection_authority = true
+        end
+    end
+    local operation = coercion and coercion.op
+        or conversion and (conversion.op or conversion.kind)
 
-    if target and types.c_mutable_address_coerceable(exp._type, target)
-       and exp._tag == "Ast.ExpVar"
-       and exp.var._tag == "Ast.VarName"
-       and exp.var._decl
-       and exp.var._decl._tag == "Ast.Decl"
-       and not exp.var._decl._boxed then
+    if projection and target
+       and coder._is_numeric_type(exp._type)
+       and coder._is_numeric_type(target)
+       and not types.equals(stype, ttype) then
+        local mode = "boundary"
+        if coercion then
+            coder._checked_numeric_coercion(
+                coercion,
+                exp._type, target, "native-to-C numeric coercion")
+        elseif conversion then
+            coder._checked_explicit_numeric_conversion(
+                conversion,
+                exp._type, target, "written C numeric conversion")
+            mode = "explicit_c"
+        else
+            error("native-to-C numeric conversion lacks checker authority")
+        end
+        return coder._code_checked_numeric_cast(
+            ctx, exp._type, target, cexp, projection.loc, mode)
+    end
+
+    if operation == "mutable_c_address" then
+        assert(is_addressable_local(exp),
+            "mutable C-address plan has a non-addressable source")
         return "", render("(&($CEXP))", { CEXP = cexp })
     end
 
-    if target and types.c_address_coerceable(exp._type, target)
-       and is_addressable_local(exp) then
-        return "", render("(&($CEXP))", { CEXP = cexp })
-    elseif target and types.c_address_coerceable(exp._type, target) then
+    if operation == "c_address" then
+        if is_addressable_local(exp) then
+            return "", render("(&($CEXP))", { CEXP = cexp })
+        end
         return materialize_address_tmp(ctx, exp, cexp)
     end
 
-    if target and types.is_c_function_pointer_void_cast(
-            exp._type, target) then
+    if operation == "c_function_pointer_to_void" then
         return "", render("titan_cast_func($TARGET, $SOURCE)", {
             TARGET = cdeclarator.render_type_name(target),
             SOURCE = cexp,
         })
     end
 
-    if target and types.is_gc_identity_void_pointer_cast(
-            exp._type, target) then
+    if operation == "gc_identity_to_void_pointer" then
         -- Freeze and anchor the native representation before any later call
         -- argument can collect it. Array/Map/record expressions already
         -- evaluate to their Table*/Udata* identity.
@@ -3751,6 +5639,13 @@ local function nativetoforeignexp(ctx, exp, cexp, target)
                 "%s:%d:%d: type error, function value has no GC identity",
                 { "$FILE", "$LINE", "$COL" }),
         }), pointer
+    end
+
+    if target and not types.equals(stype, ttype)
+       and not has_projection_authority then
+        error("native-to-foreign conversion lacks checker authority: "
+            .. types.tostring(exp._type) .. " -> "
+            .. types.tostring(target))
     end
 
     if target and types.is_c_tvalue(target) then
@@ -3811,13 +5706,16 @@ local function nativetoforeignexp(ctx, exp, cexp, target)
     end
 
     if exp._type._tag == "Type.Value" and target then
+        assert(projection and projection._tag == "Ast.ExpCast",
+            "boxed value to foreign target lacks its checker cast node")
         local texp, tmp = newforeigntmp(ctx, target)
         return render([[
             $TEXP
             $CHECKANDGET
         ]], {
             TEXP = texp,
-            CHECKANDGET = checkandget(ctx, target, tmp, "&" .. cexp, exp.loc),
+            CHECKANDGET = coder._planned_value_projection_get(
+                ctx, projection, tmp, "&" .. cexp),
         }), tmp
     end
 
@@ -3830,9 +5728,13 @@ local function foreigntonativeexp(ctx, exp, cexp, target)
     if etype._tag == "Type.Value" then
         return "", cexp
     elseif etype._tag == "Type.CInteger" then
-        return "", "((lua_Integer)" .. cexp .. ")"
+        -- Keep the declaration's exact C carrier. A later explicit/implicit
+        -- crossing to Titan integer, or boxing into a TValue slot, performs the
+        -- checked range conversion. Prematurely narrowing here would lose the
+        -- very value that the boundary must validate.
+        return "", cexp
     elseif etype._tag == "Type.CFloat" then
-        return "", "((lua_Number)" .. cexp .. ")"
+        return "", cexp
     elseif etype._tag == "Type.CPointer" then
         return "", cexp
     elseif etype._tag == "Type.CArray" then
@@ -4047,19 +5949,6 @@ local function is_static_callee(node)
         or decl._tag == "Type.StaticMethod")
 end
 
-local function optionize_type(t)
-    if t._tag == "Type.Option" or t._tag == "Type.Value" then
-        return t
-    else
-        return types.Option(t)
-    end
-end
-
-local function nil_can_adjust_to(typ)
-    return typ and (types.coerceable(types.Nil(), typ)
-        or types.compatible(typ, types.Nil()))
-end
-
 -- Build and append the backing-struct argument (`_varargs` + `_start`) for a
 -- native call to a variadic callee. Appends the two C expressions to `caexps`
 -- and any setup statements to `castats`. `vargexps` holds the already-coerced
@@ -4125,43 +6014,7 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                 DELTA = c_integer_literal(node._open_args.start - 1),
             })
         elseif k < m then
-            -- Borrow `...[1 .. (m-k)]` for the remaining fixed params before
-            -- forwarding the rest as the variadic tail. This is needed even
-            -- when the tail representation changes and we must fresh-copy it.
-            local delta = m - k
-            for j = 1, delta do
-                -- Synthesize a `...[j]` read using the same lowering as a
-                -- user-written `...[i]`, then use an ordinary cast node when the
-                -- callee fixed parameter needs the borrowed element coerced.
-                -- The checker proved that the present element can be coerced.
-                local ptype = callee_ftype.params[k + j]
-                local nilfill = nil_can_adjust_to(ptype)
-                local btype = nilfill and optionize_type(ef) or ef
-                local idxnode = {
-                    _tag = "Ast.ExpDotsIndex",
-                    loc = node.loc,
-                    exp = { _tag = "Ast.ExpInteger", value = j, loc = node.loc,
-                            _type = types.Integer() },
-                    _type = btype,
-                    _nilfill = nilfill,
-                }
-                local borrow = idxnode
-                if not types.equals(btype, ptype) and
-                   types.coerceable(btype, ptype) then
-                    borrow = {
-                        _tag = "Ast.ExpCast",
-                        loc = node.loc,
-                        exp = idxnode,
-                        target = ptype,
-                        _type = ptype,
-                    }
-                end
-                local bstat, bexp = codeexp(ctx, borrow)
-                table.insert(castats, bstat)
-                table.insert(caexps, bexp)
-            end
-            tail_start = render("($START + $DELTA)",
-                { START = va.start, DELTA = c_integer_literal(delta) })
+            error("checker failed to materialize fixed arguments borrowed from '...'")
         end
         -- The logical projection can lie past an empty/short physical backing
         -- run. Clamp the descriptor start once and use that same physical view
@@ -4258,33 +6111,16 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                     { SRC = va.cname, START = tail_start })
                 local dst = render("$VNAME->args[$NPREFIX + _vj]",
                     { VNAME = vname, NPREFIX = c_integer_literal(nprefix) })
-                -- Drive conversion from the semantic Titan types, recursively
-                -- through Option/value as ordinary expression lowering does.
-                -- Descriptor C families cannot distinguish the required
-                -- internal/boxed domains.
-                local csrc, srcname = newtmp(ctx, ef)
-                local synthvar = {
-                    _tag = "Ast.VarName",
-                    _type = ef,
-                    _decl = { _cvar = srcname },
-                }
-                local synthcast = {
-                    _tag = "Ast.ExpCast",
-                    loc = node.loc,
-                    exp = synthvar,
-                    target = eg,
-                    _type = eg,
-                }
-                local convstats, convexp = codeexp(ctx, synthcast)
+                local adjustment = assert(node._open_args
+                        and node._open_args.adjustment,
+                    "open variadic forwarding lacks checker adjustment")
+                local convstats, convexp =
+                    coder._code_adjustment_value(
+                        ctx, adjustment, ef, eg, src, node.loc)
                 convbody = render([[
-                    $CSRC
-                    $SRCNAME = $SRC;
                     $CONVSTATS
                     $DST = $CONVEXP;
                 ]], {
-                    CSRC = csrc,
-                    SRCNAME = srcname,
-                    SRC = src,
                     CONVSTATS = convstats,
                     DST = dst,
                     CONVEXP = convexp,
@@ -4456,17 +6292,71 @@ function coder._cleanup_result_run(run)
     })
 end
 
--- Read one typed run element and convert it through the ordinary Titan cast
--- lowering.  The source run remains rooted for the whole sink operation, so
--- the temporary need not acquire another slot merely to bridge this copy.
--- Returns setup statements plus the converted C expression.
-function coder._convert_result_run_element(ctx, run, target, index, loc)
-    local raw = run.args .. "[" .. run.start .. " + " .. index .. "]"
-    if types.equals(run.elem, target) then return "", raw end
-    local csrc, srcname = newtmp(ctx, run.elem)
+-- Lower one checker-produced assignment adjustment over an already available
+-- C expression. Identity, structural gradual views, and callable adjustments
+-- preserve representation. Every representation-changing edge is reified as
+-- an annotated cast carrying the exact checker plan; code generation never
+-- reruns a type relation to rediscover permission.
+function coder._code_adjustment_value(
+        ctx, adjustment, source_type, target, raw, loc)
+    adjustment = coder._checked_adjustment_plan(
+        adjustment, source_type, target, "value adjustment")
+    if adjustment.kind == "identity"
+       or adjustment.kind == "callable" then
+        return "", raw
+    end
+    if adjustment.kind == "gradual_view"
+       and adjustment.op == "structural" then
+        -- Arrays, Maps, and callables retain a durable view whose component
+        -- observations are guarded later. An Option has no separate mutable
+        -- backing: its present payload is the immediate component observation.
+        -- Guard it while the checker-owned view plan is still attached so a
+        -- later identity option_force/option_map cannot forget the actual base
+        -- type stored in this TValue.
+        local asource = assert(adjustment.source)
+        local atarget = assert(adjustment.target)
+        if asource._tag ~= "Type.Option"
+           or atarget._tag ~= "Type.Option" then
+            return "", raw
+        end
+        assert(adjustment.guard
+               and adjustment.guard.op == "option",
+            "structural Option view lacks its strict guard plan")
+        local csrc, srcname, srcslot =
+            newtmp(ctx, source_type, types.is_gc(source_type))
+        local cdst, dstname, dstslot =
+            newtmp(ctx, target, types.is_gc(target))
+        return render([[
+            $CSRC
+            $SRCNAME = $RAW;
+            $ANCHORSRC
+            $CDST
+            $CHECK
+            $ANCHORDST
+        ]], {
+            CSRC = csrc,
+            SRCNAME = srcname,
+            RAW = raw,
+            ANCHORSRC = srcslot
+                and setslot(source_type, srcslot, srcname) or "",
+            CDST = cdst,
+            CHECK = coder._strictcheckandget(
+                ctx, adjustment.guard, target, dstname, "&" .. srcname,
+                loc, "structural Option view"),
+            ANCHORDST = dstslot
+                and setslot(target, dstslot, dstname) or "",
+        }), dstname
+    end
+    assert(adjustment.kind == "direct_coercion"
+            or (adjustment.kind == "gradual_view"
+                and (adjustment.op == "inject"
+                     or adjustment.op == "project")),
+        "unknown checker adjustment kind " .. tostring(adjustment.kind))
+
+    local csrc, srcname = newtmp(ctx, source_type)
     local synthvar = {
         _tag = "Ast.VarName",
-        _type = run.elem,
+        _type = source_type,
         _decl = { _cvar = srcname },
     }
     local synthcast = {
@@ -4475,6 +6365,8 @@ function coder._convert_result_run_element(ctx, run, target, index, loc)
         exp = synthvar,
         target = target,
         _type = target,
+        _implicit_coercion = true,
+        _adjustment = adjustment,
     }
     local convstats, convexp = codeexp(ctx, synthcast)
     return render([[
@@ -4487,6 +6379,25 @@ function coder._convert_result_run_element(ctx, run, target, index, loc)
         RAW = raw,
         CONVSTATS = convstats,
     }), convexp
+end
+
+-- Read one typed run element and consume the open sink's stored adjustment.
+-- The source run remains rooted for the whole sink operation, so the temporary
+-- need not acquire another slot merely to bridge this copy.
+function coder._convert_result_run_element(ctx, run, target, index, loc)
+    local raw = run.args .. "[" .. run.start .. " + " .. index .. "]"
+    coder._checked_adjustment_plan(
+        run.adjustment, run.elem, target, "open result adjustment")
+    if types.equals(run.elem, target) then
+        assert(run.adjustment.kind == "identity",
+            "equal open result elements lack an identity checker adjustment: "
+                .. types.tostring(run.elem) .. " -> "
+                .. types.tostring(target) .. " used "
+                .. tostring(run.adjustment.kind))
+        return "", raw
+    end
+    return coder._code_adjustment_value(
+        ctx, run.adjustment, run.elem, target, raw, loc)
 end
 
 -- Lower the sole open producer of an adjusted expression list. Input `...`
@@ -4572,6 +6483,8 @@ function coder._codeadjustedopen(ctx, adjusted, want, effectively_open)
         end
     end
     assert(run, "adjusted open expression list produced no result run")
+    run.adjustment = assert(adjusted.open_adjustment,
+        "open expression list lacks checker adjustment")
     return stats, fixednames, tailnames, run
 end
 
@@ -4640,7 +6553,8 @@ end
 
 -- Generate a call through a first-class function *value* (a boxed TValue of
 -- type Type.Function). The value may be a Titan closure, a Lua closure, a C
--- function, or a `__call` object, so the call goes through the Lua stack with
+-- function, or a `__call` object. An exact Titan tag takes the direct native
+-- path; generic Titan and Lua-callable cases go through the Lua stack with
 -- `luaD_callnoyield`, which raises cleanly if the value is not callable.
 --
 -- luaD_callnoyield can grow (and relocate) the Lua stack for the callee's
@@ -4798,7 +6712,7 @@ local function codevaluecall(ctx, node)
     ctx.valuecall_count = (ctx.valuecall_count or 0) + 1
     local fptype = "_vc_fp_t_" .. ctx.valuecall_count
     -- _fn on the fast path is the callee closure itself, so its native entry can
-    -- reach any captured upvalues (slots 3+).
+    -- reach any captured upvalues (slots 4+).
     local fastargs = { "L", "_vc_mod", "_vc_callee" }
     for _, aname in ipairs(argnames) do table.insert(fastargs, aname) end
     -- A variadic callee: `vargca` holds the trailing native args at the pinned ABI
@@ -4861,11 +6775,11 @@ local function codevaluecall(ctx, node)
     -- variadic callee, push every fixed and surplus static arg, then (when
     -- forwarding) each `...` element one by one; the callee's genluaentry reads
     -- `nfixed` fixed params and the rest as vararg, coercing each.
-    local pushes = { "setobj2s(L, L->top.p, &" .. fname .. "); L->top.p++;" }
+    local argpushes = {}
     local pushfixed = callee_vararg and nfixed or npassed
     for i = 1, pushfixed do
         if argnames[i] then
-            table.insert(pushes,
+            table.insert(argpushes,
                 setboxed(ctx, argtypes[i], "s2v(L->top.p)", argnames[i])
                     .. " L->top.p++;")
         end
@@ -4874,7 +6788,7 @@ local function codevaluecall(ctx, node)
     if inputrun then
         npush_dynamic = " + " .. c_integer_literal(#inputtail)
             .. " + " .. inputrun.count
-        table.insert(pushes, render([[
+        table.insert(argpushes, render([[
             if (TITAN_UNLIKELY($NPREFIX + $COUNT > TITAN_VARARG_MAX)) {
                 luaL_error(L,
                     "%s:%d:%d: too many variadic arguments (%d, max %d)",
@@ -4889,7 +6803,7 @@ local function codevaluecall(ctx, node)
             COL = c_integer_literal(node.loc.col),
         }))
         for _, name in ipairs(inputtail) do
-            table.insert(pushes,
+            table.insert(argpushes,
                 setboxed(ctx, callee_vararg, "s2v(L->top.p)", name)
                     .. " L->top.p++;")
         end
@@ -4912,7 +6826,7 @@ local function codevaluecall(ctx, node)
             pushstats, pushexp = coder._convert_result_run_element(
                 ctx, inputrun, callee_vararg, "_vpj", node.loc)
         end
-        table.insert(pushes, render([[
+        table.insert(argpushes, render([[
             for (int _vpj = 0; _vpj < $COUNT; _vpj++) {
                 $PUSHSTATS
                 $SETSLOT L->top.p++;
@@ -4927,7 +6841,7 @@ local function codevaluecall(ctx, node)
         }))
     else
         for _, vexp in ipairs(vargexps) do
-            table.insert(pushes,
+            table.insert(argpushes,
                 setboxed(ctx, callee_vararg, "s2v(L->top.p)", vexp)
                     .. " L->top.p++;")
         end
@@ -4946,7 +6860,7 @@ local function codevaluecall(ctx, node)
         ]], { SRC = va.cname, LOGICAL = source_start })
         npush_dynamic = render(" + ((int)$SRC->n_args - $START)",
             { SRC = va.cname, START = source_start })
-        table.insert(pushes, render([[
+        table.insert(argpushes, render([[
             for (int _vpj = 0; _vpj < (int)$SRC->n_args - $START; _vpj++) {
                 $SETSLOT L->top.p++;
             }
@@ -4958,21 +6872,58 @@ local function codevaluecall(ctx, node)
                     { SRC = va.cname, START = source_start })),
         }))
     end
-    local slowreads = {}
-    for i = 1, nresults do
-        table.insert(slowreads, checkandget(ctx, visible_types[i], visnames[i],
-            "s2v(restorestack(L, _vc_func) + " .. (i-1) .. ")", node.loc))
+    local lua_pushes = {
+        "setobj2s(L, L->top.p, &" .. fname .. "); L->top.p++;",
+    }
+    local strict_pushes = {
+        [[
+        setobj2s(L, L->top.p,
+            &_vc_callee->upvalue[_vc_callee->nupvalues - 1]);
+        L->top.p++;]],
+        "setobj2s(L, L->top.p, &" .. fname .. "); L->top.p++;",
+    }
+    for _, push in ipairs(argpushes) do
+        table.insert(lua_pushes, push)
+        table.insert(strict_pushes, push)
     end
+
+    local function make_slowreads(strict)
+        local reads = {}
+        for i = 1, nresults do
+            local source =
+                "s2v(restorestack(L, _vc_func) + " .. (i - 1) .. ")"
+            if strict then
+                local plans = assert(node._strict_result_guard_plans,
+                    "generic call lacks checker strict result guards")
+                assert(plans[i] ~= nil,
+                    "generic call result lacks its checker strict guard")
+                table.insert(reads, coder._strictcheckandget(
+                    ctx, plans[i], visible_types[i], visnames[i], source,
+                    node.loc, "branded Titan callable result"))
+            else
+                local plans = assert(node._lua_result_dynamic_plans,
+                    "generic call lacks checker dynamic result plans")
+                assert(plans[i] ~= nil,
+                    "generic call result lacks its checker dynamic plan")
+                table.insert(reads, coder._dynamiccheckandget(
+                    ctx, plans[i], visible_types[i], visnames[i], source,
+                    node.loc, "non-Titan Lua callable result"))
+            end
+        end
+        return table.concat(reads, "\n")
+    end
+    local lua_slowreads = make_slowreads(false)
+    local strict_slowreads = make_slowreads(true)
     local slowcall = render([[
         luaD_callnoyield(L, restorestack(L, _vc_func), $NRESULTS);
     ]], { NRESULTS = c_integer_literal(nresults) })
-    local slowpre, slowopen = "", ""
+    local slowpre, lua_slowopen, strict_slowopen = "", "", ""
     -- Reserve the generic branch's complete finite result area as well as the
     -- function and arguments. `luaD_callnoyield` is an internal primitive and
     -- therefore assumes its caller has satisfied the public API's
     -- `checkresults` capacity invariant; finite nil-padding may write every
     -- requested slot even when the callable returns nothing.
-    local npushfixed = 1 + pushfixed
+    local npushfixed = 2 + pushfixed
         + (inputrun and 0 or #vargexps) + nresults
     if flexrun and flexrun.isopen then
         -- A statically open generic producer always uses LUA_MULTRET. Its
@@ -4990,7 +6941,27 @@ local function codevaluecall(ctx, node)
                 L->top.p++;
             }
         ]], { NVISIBLE = c_integer_literal(nresults) })
-        slowopen = render([[
+        local function make_slowopen(strict)
+            local readone
+            local source = "s2v(restorestack(L, _vc_func) + "
+                .. c_integer_literal(abi_nresults) .. " + _vri)"
+            if strict then
+                assert(node._strict_open_result_guard_plan ~= nil,
+                    "open generic call result lacks its checker strict guard")
+                readone = coder._strictcheckandget(
+                    ctx, node._strict_open_result_guard_plan,
+                    flexrun.elem, flexrun.args .. "[_vri]",
+                    source, node.loc,
+                    "branded Titan callable flexible result")
+            else
+                assert(node._lua_open_result_dynamic_plan ~= nil,
+                    "open generic call result lacks its checker dynamic plan")
+                readone = coder._dynamiccheckandget(
+                    ctx, node._lua_open_result_dynamic_plan, flexrun.elem,
+                    flexrun.args .. "[_vri]", source, node.loc,
+                    "non-Titan Lua callable flexible result")
+            end
+            return render([[
             int _vc_flexraw = _vc_raw - $NFIXED;
             if (_vc_flexraw < 0) _vc_flexraw = 0;
             int _vc_want = $WANT;
@@ -5016,13 +6987,12 @@ local function codevaluecall(ctx, node)
             LINE = c_integer_literal(node.loc.line),
             COL = c_integer_literal(node.loc.col),
             DESC = flexrun.desc,
-            READONE = checkandget(ctx, flexrun.elem,
-                flexrun.args .. "[_vri]",
-                "s2v(restorestack(L, _vc_func) + "
-                    .. c_integer_literal(abi_nresults) .. " + _vri)",
-                node.loc),
+            READONE = readone,
             ANCHORRUN = coder._anchor_result_run(flexrun),
         })
+        end
+        lua_slowopen = make_slowopen(false)
+        strict_slowopen = make_slowopen(true)
     end
 
     -- Only consumer-visible holders are live after branch convergence. Hidden
@@ -5036,11 +7006,14 @@ local function codevaluecall(ctx, node)
         end
     end
     table.insert(stats, render([[
-        if (ttisCclosure(&$FNAME) && clCvalue(&$FNAME)->nupvalues >= 3
-            && ttislightuserdata(&clCvalue(&$FNAME)->upvalue[1])
-            && pvalue(&clCvalue(&$FNAME)->upvalue[1]) == $FUNCTAG) {
+        {
+        CClosure *_vc_callee =
+            ttisCclosure(&$FNAME) ? clCvalue(&$FNAME) : NULL;
+        if (TITAN_LIKELY(_vc_callee != NULL
+                && _vc_callee->nupvalues >= 5
+                && pvalueraw(valraw(&_vc_callee->upvalue[1]))
+                    == $FUNCTAG)) {
             /* fast path: exact function-type match, unboxed native call */
-            CClosure *_vc_callee = clCvalue(&$FNAME);
             Udata *_vc_mod = uvalue(&_vc_callee->upvalue[0]);
             $FPTYPEDEF;
             $FPTYPE _vc_fp = titan_cast_func($FPTYPE,
@@ -5050,21 +7023,44 @@ local function codevaluecall(ctx, node)
             $FASTCALL
             $FASTPROJECTIONS
         } else {
-            /* generic path: call any callable value through the Lua stack;
-               luaD_callnoyield raises if it is not callable */
-            lua_checkstack(L, $NPUSH);
-            ptrdiff_t _vc_func = savestack(L, L->top.p);
-            $PUSHES
-            $LINEDIR
-            $SLOWCALL
-            $SLOWPRE
-            $SLOWREADS
-            $SLOWOPEN
-            L->top.p = restorestack(L, _vc_func);
+            int _vc_is_titan =
+                _vc_callee != NULL
+                && _vc_callee->nupvalues >= 5
+                && pvalueraw(valraw(&_vc_callee->upvalue[3]))
+                    == TITAN_FUNCTION_CLOSURE_BRAND;
+            if (_vc_is_titan) {
+                /* Branded non-exact Titan closure: call its trailing strict
+                   entry. The original closure is the hidden first VM argument
+                   so the strict entry retains the owning module and captures. */
+                titan_ensure_stack(L, $NPUSH);
+                ptrdiff_t _vc_func = savestack(L, L->top.p);
+                $STRICTPUSHES
+                $LINEDIR
+                $SLOWCALL
+                $SLOWPRE
+                $STRICTSLOWREADS
+                $STRICTSLOWOPEN
+                L->top.p = restorestack(L, _vc_func);
+            } else {
+                /* Genuine Lua/dynamic callable: dispatch through Lua with the
+                   same already checker-adjusted arguments; only results
+                   crossing back into typed Titan slots use the dynamic
+                   boundary plan. */
+                titan_ensure_stack(L, $NPUSH);
+                ptrdiff_t _vc_func = savestack(L, L->top.p);
+                $LUAPUSHES
+                $LINEDIR
+                $SLOWCALL
+                $SLOWPRE
+                $LUASLOWREADS
+                $LUASLOWOPEN
+                L->top.p = restorestack(L, _vc_func);
+            }
         }
         _base = restorestack(L, _base_off);
         $ANCHORS
         $INPUTCLEANUP
+        }
     ]], {
         FNAME = fname,
         FUNCTAG = function_type_tag(ctx.tlcontext, ftype),
@@ -5075,11 +7071,14 @@ local function codevaluecall(ctx, node)
         FASTCALL = fastcall,
         FASTPROJECTIONS = table.concat(fastprojections, "\n"),
         NPUSH = c_integer_literal(npushfixed) .. npush_dynamic,
-        PUSHES = table.concat(pushes, "\n"),
+        STRICTPUSHES = table.concat(strict_pushes, "\n"),
+        LUAPUSHES = table.concat(lua_pushes, "\n"),
         SLOWCALL = slowcall,
         SLOWPRE = slowpre,
-        SLOWREADS = table.concat(slowreads, "\n"),
-        SLOWOPEN = slowopen,
+        STRICTSLOWREADS = strict_slowreads,
+        STRICTSLOWOPEN = strict_slowopen,
+        LUASLOWREADS = lua_slowreads,
+        LUASLOWOPEN = lua_slowopen,
         ANCHORS = table.concat(anchors, "\n"),
         INPUTCLEANUP = inputrun and coder._cleanup_result_run(inputrun) or "",
     }))
@@ -5760,6 +7759,8 @@ function coder._lower_return_to_destination(ctx, node, destination)
         end
     end
     if openrun then
+        openrun.adjustment = assert(adjusted.open_adjustment,
+            "open return expression lacks its checker adjustment")
         local convstats, convexp = coder._convert_result_run_element(
             ctx, openrun, flex.elem, "_ori", node.loc)
         local root = coder._flex_root(flex, flex.count)
@@ -5867,7 +7868,7 @@ local function coderaise(ctx, node)
         local errcvar = ctx.catch_error_decl._cvar      -- TValue (the error value)
         local tbcvar = ctx.catch_traceback_decl._cvar   -- TString* (the trace)
         return render([[
-            lua_checkstack(L, 2);
+            titan_ensure_stack(L, 2);
             lua_pushliteral(L, TITAN_BACKTRACE_KEY);
             setsvalue2s(L, L->top.p, $TB);
             L->top.p++;
@@ -5892,7 +7893,7 @@ local function coderaise(ctx, node)
         $CTMP
         $TMPNAME = $CEXP;
         $ANCHOR
-        lua_checkstack(L, 1);
+        titan_ensure_stack(L, 1);
         setobj2t(L, s2v(L->top.p), &$TMPNAME);
         L->top.p++;
         $LINEDIR
@@ -6035,7 +8036,7 @@ local function dispatch_after_finally(ctx, pa_var, frame, d_pa_err, d_pa_tb)
     -- RAISE arm: reinstall the saved trace + pin (preserve original trace), push
     -- the saved error, lua_error.
     local raise_arm = render([[
-        lua_checkstack(L, 2);
+        titan_ensure_stack(L, 2);
         lua_pushliteral(L, TITAN_BACKTRACE_KEY);
         setsvalue2s(L, L->top.p, tsvalue($PATB));
         L->top.p++;
@@ -7039,10 +9040,15 @@ local function codevar(ctx, node)
             return codecfield(ctx, node)
         elseif node._decl._tag == "Type.CPseudoSize" then
             local op = node._decl.name == "sizeof" and "sizeof" or "_Alignof"
-            return "", render("((lua_Integer)$OP($CT))", {
+            local expression = render("$OP($CT)", {
                 OP = op,
                 CT = ctype(node._decl.ctype),
             })
+            assert(node._decl.result_source,
+                "C size pseudo-member lacks its checker-owned size_t type")
+            return coder._code_checked_numeric_cast(
+                ctx, node._decl.result_source, node._type,
+                expression, node.loc, "boundary")
         elseif node._decl._tag == "Type.ModuleMember"
                and node._type._tag == "Type.Function" then
             -- Reference to an imported module's function as a first-class value:
@@ -7203,9 +9209,17 @@ local function codearray(ctx, node, target)
     table.insert(stats, ctmp)
     for _, stat in ipairs(inputstats) do table.insert(stats, stat) end
     ctx.uses_base_off = true
+    local elemtype = node._type.elem
+    local writer_elem = assert(node._array_element_type,
+        "Array construction lacks its normalized checker element type")
+    assert(types.equals(writer_elem, types.normalize(elemtype)),
+        "Array construction writer element disagrees with final Array type")
+    local writer = coder._array_writer(
+        ctx, writer_elem, node._array_writer_plan)
     local function initarray(capacity)
         return render([[
-            $TMPNAME = titan_array_new(L, $META, $CAPACITY);
+            $TMPNAME = titan_array_new(
+                L, $META, $CAPACITY, &_mod->uv[$WRITER].uv);
             _base = restorestack(L, _base_off);
             sethvalue(L, $TMPSLOT, $TMPNAME);
         ]], {
@@ -7213,9 +9227,9 @@ local function codearray(ctx, node, target)
             TMPSLOT = tmpslot,
             META = array_metatable(ctx),
             CAPACITY = capacity,
+            WRITER = c_integer_literal(writer.slot),
         })
     end
-    local elemtype = node._type.elem
     local nstored = #slots
     if openrun then
         -- Runtime-sized array build. The vararg elements are already anchored
@@ -7246,35 +9260,18 @@ local function codearray(ctx, node, target)
         local barrier = types.is_gc(elemtype) and render([[
             luaC_barrierback(L, obj2gco($TMPNAME), &$VSLOT);
         ]], { TMPNAME = tmpname, VSLOT = vslot }) or ""
-        -- The per-element store. When the vararg element type matches the array
-        -- element type, wrap the raw `args[]` read straight into the TValue slot.
-        -- Otherwise materialize the read into a `va.elem` temp, convert it to the
-        -- array element type via the ordinary cast codegen (a synthetic ExpCast,
-        -- as in the option t1?->t2? path), and wrap the result.
-        local rawread = openrun.args .. "[" .. openrun.start .. " + _vj]"
-        local element_store
-        if types.equals(openrun.elem, elemtype) then
-            element_store = setslot(elemtype, "&" .. vslot, rawread)
-        else
-            local csrc, srcname = newtmp(ctx, openrun.elem)
-            local synthvar = { _tag = "Ast.VarName", _type = openrun.elem,
-                               _decl = { _cvar = srcname } }
-            local synthcast = { _tag = "Ast.ExpCast", loc = node.loc,
-                                exp = synthvar, target = elemtype, _type = elemtype }
-            local convstats, convexp = codeexp(ctx, synthcast)
-            element_store = render([[
-                $CSRC
-                $SRCNAME = $RAWREAD;
-                $CONVSTATS
-                $SETWRAPPED
-            ]], {
-                CSRC = csrc,
-                SRCNAME = srcname,
-                RAWREAD = rawread,
-                CONVSTATS = convstats,
-                SETWRAPPED = setslot(elemtype, "&" .. vslot, convexp),
-            })
-        end
+        -- The per-element store consumes the checker's open adjustment. Equal
+        -- types copy directly; every other accepted edge is lowered by the
+        -- plan-aware conversion helper.
+        local convstats, convexp = coder._convert_result_run_element(
+            ctx, openrun, elemtype, "_vj", node.loc)
+        local element_store = render([[
+            $CONVSTATS
+            $SETWRAPPED
+        ]], {
+            CONVSTATS = convstats,
+            SETWRAPPED = setslot(elemtype, "&" .. vslot, convexp),
+        })
         table.insert(stats, render([[
             {
                 int _vacount = $RUNCOUNT;
@@ -7676,7 +9673,22 @@ function coder._freeze_c_operator_operand(ctx, exp, target)
         cstats = cstats .. "\n(void)(" .. cexp .. ");"
         cexp = "0"
     else
-        cstats, cexp = codeforeignexp(ctx, exp, target)
+        -- The checker-owned C-operator trait, not an assignment relation on
+        -- the operand AST, selects `target`. First recover the operand's raw
+        -- C representation without asking the generic native-to-foreign
+        -- bridge to authorize that distinct target; the checked numeric path
+        -- below and the final explicit C cast then consume the trait.
+        cstats, cexp = codeforeignexp(ctx, exp)
+    end
+    if coder._is_numeric_type(exp._type)
+       and coder._is_numeric_type(target)
+       and not types.equals(
+            coder._resolve_cast_type(exp._type),
+            coder._resolve_cast_type(target)) then
+        local nstats, nexp = coder._code_checked_numeric_cast(
+            ctx, exp._type, target, cexp, exp.loc, "c_operator")
+        cstats = cstats .. nstats
+        cexp = nexp
     end
     local cdecl, cname = newforeigntmp(ctx, target)
     return render([[
@@ -7717,7 +9729,12 @@ function coder._code_c_binary_operator(ctx, node)
        and ltarget._tag == "Type.CPointer"
        and rtarget._tag == "Type.CPointer"
        and trait.cop == "-" then
-        expression = "((lua_Integer)(" .. expression .. "))"
+        assert(trait.result_source,
+            "C pointer subtraction lacks its checker-owned ptrdiff_t type")
+        local cstats, cexp = coder._code_checked_numeric_cast(
+            ctx, trait.result_source, node._type,
+            expression, node.loc, "boundary")
+        return lstats .. "\n" .. rstats .. "\n" .. cstats, cexp
     end
     return lstats .. "\n" .. rstats, expression
 end
@@ -7986,6 +10003,34 @@ local function codebinaryop(ctx, node, _)
     end
     local op = node.op
     if op == "~=" then op = "!=" end
+    local comparison
+    if op == "==" or op == "!=" then
+        local plan = node._comparison
+        local function original_operand_type(exp, adjustment, side)
+            if not adjustment then return exp._type end
+            assert(exp._tag == "Ast.ExpCast"
+                   and exp._adjustment == adjustment,
+                "equality " .. side
+                    .. " operand lost its ComparisonPlan adjustment")
+            assert(exp.exp
+                   and types.equals(
+                       types.normalize(exp.exp._type),
+                       types.normalize(adjustment.source)),
+                "equality " .. side
+                    .. " operand has the wrong original type")
+            assert(types.equals(exp._type, adjustment.target),
+                "equality " .. side
+                    .. " operand has the wrong adjusted type")
+            return adjustment.source
+        end
+        comparison = coder._checked_comparison_plan(
+            plan,
+            original_operand_type(
+                node.lhs, plan and plan.left_adjustment, "left"),
+            original_operand_type(
+                node.rhs, plan and plan.right_adjustment, "right"),
+            "equality comparison")
+    end
     if op == "and" then
         if node._type._tag == "Type.Boolean" then
             local lstats, lcode = materialize(ctx, node.lhs)
@@ -8212,7 +10257,8 @@ local function codebinaryop(ctx, node, _)
             return stats, "luaV_rawequalobj(&(" .. lcode .. "),&(" .. rcode .. "))"
         end
     elseif (op == "<" or op == "<=" or op == ">" or op == ">="
-            or op == "==" or op == "!=")
+            or ((op == "==" or op == "!=")
+                and comparison.op == "numeric"))
            and ((node.lhs._type._tag == "Type.Integer" and node.rhs._type._tag == "Type.Float")
              or (node.lhs._type._tag == "Type.Float"   and node.rhs._type._tag == "Type.Integer")) then
         local stats, lcode, rcode = ordered_binary_operands(ctx, node)
@@ -8265,7 +10311,9 @@ local function codeindexarray(ctx, node)
     local typ = node._type
     local ctmp, tmpname, tmpslot = newtmp(ctx, typ, types.is_gc(typ))
     local cset = ""
-    local ccheck = checkandgetmixed(ctx, typ, tmpname, "_s", node.loc)
+    local ccheck = coder._strictcheckandgetmixed(
+        ctx, node._read_guard, typ, tmpname, "_s", node.loc,
+        "typed Array read")
     if types.is_gc(typ) then
         cset = setslot(typ, tmpslot, tmpname)
     end
@@ -8312,7 +10360,9 @@ local function codeindexmap(ctx, node)
     local typ = node._type
     local ctmp, tmpname, tmpslot = newtmp(ctx, typ, types.is_gc(typ))
     local cset = ""
-    local ccheck = checkandgetmixed(ctx, typ, tmpname, "_s", node.loc)
+    local ccheck = coder._strictcheckandgetmixed(
+        ctx, node._read_guard, typ, tmpname, "_s", node.loc,
+        "typed Map read")
     if types.is_gc(typ) then
         cset = setslot(typ, tmpslot, tmpname)
     end
@@ -8524,6 +10574,31 @@ function codedotsindex(ctx, node)
     end
 end
 
+function coder._cast_coercion(node)
+    local plan = node._adjustment or node._written_cast
+    local coercion = plan and plan.coercion
+    if not coercion then return nil end
+    return coder._checked_coercion_plan(
+        coercion, node.exp._type, node._type, "expression coercion")
+end
+
+function coder._inner_assignment(source, target, inner)
+    assert(inner, "Option conversion lacks its inner checker plan")
+    inner = coder._checked_coercion_plan(
+        inner, source, target, "Option inner conversion")
+    source = assert(types.normalize(source),
+        "Option inner conversion has an unnormalizable source")
+    target = assert(types.normalize(target),
+        "Option inner conversion has an unnormalizable target")
+    if inner.kind == "identity" then return inner end
+    return {
+        kind = "direct_coercion",
+        source = source,
+        target = target,
+        coercion = inner,
+    }
+end
+
 -- Generate code for expression 'node'
 -- 'iscondition' is 'true' if expression is used not for value but for
 --    controlling conditinal execution
@@ -8531,6 +10606,23 @@ end
 --    in this case it will be the '_decl' of the lvalue
 local function codeexp_dispatch(ctx, node, iscondition, target)
     local tag = node._tag
+    if tag == "Ast.ExpCast" and not node._typedef_resolved then
+        if node._adjustment then
+            coder._checked_adjustment_plan(
+                node._adjustment, node.exp._type, node._type,
+                "expression adjustment")
+        end
+        if node._written_cast then
+            coder._checked_written_cast_plan(
+                node._written_cast, node.exp._type, node._type,
+                "written expression cast")
+        end
+        if node._c_conversion then
+            coder._checked_explicit_conversion_plan(
+                node._c_conversion, node.exp._type, node._type,
+                "checked expression C conversion")
+        end
+    end
     if tag == "Ast.VarDot" and node.exp._type._tag == "Type.CModule" then
         local fstats, fexp = codeforeignvar(ctx, node)
         local cstats, cexp = foreigntonativeexp(ctx, node, fexp, target)
@@ -8597,6 +10689,25 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
     elseif tag == "Ast.ExpCast" and types.equals(node.exp._type, node._type) then
         return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast"
+           and node._written_cast
+           and (node._written_cast.op == "gradual"
+                or node._written_cast.op == "callable") then
+        -- Written structural consistency and callable adjustment are views,
+        -- not scalar coercions. Reuse the same checker-owned adjustment
+        -- lowering as implicit assignments: Array/Map/callable representations
+        -- are preserved, while an Option view eagerly guards its immediate
+        -- present payload before the source base type is forgotten.
+        local cast = node._written_cast
+        local adjustment = cast.op == "gradual"
+            and assert(cast.view,
+                "written gradual cast lacks its checker view plan")
+            or assert(cast.callable,
+                "written callable cast lacks its checker adjustment")
+        local cstats, cexp = codeexp(ctx, node.exp, iscondition)
+        local astats, aexp = coder._code_adjustment_value(
+            ctx, adjustment, node.exp._type, node._type, cexp, node.loc)
+        return cstats .. astats, aexp
+    elseif tag == "Ast.ExpCast"
            and (node.exp._type._tag == "Type.Typedef"
                 or node._type._tag == "Type.Typedef") then
         -- A scalar foreign typedef (e.g. size_t) IS its underlying scalar in C,
@@ -8632,6 +10743,15 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         end
         local synthcast = { _tag = "Ast.ExpCast", loc = node.loc,
                             exp = synthexp, target = ttype, _type = ttype }
+        for _, key in ipairs({
+            "_implicit_coercion",
+            "_adjustment",
+            "_written_cast",
+            "_c_conversion",
+            "_operator_conversion",
+        }) do
+            synthcast[key] = node[key]
+        end
         return codeexp(ctx, synthcast, iscondition, target)
     elseif tag == "Ast.ExpCast" and node._typedef_resolved then
         -- Pass-through wrapper produced above: the operand's static type is a
@@ -8642,14 +10762,28 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
            and node._c_conversion
            and node._c_conversion.kind ==
                "address_then_unsafe_object_pointer" then
+        coder._checked_explicit_conversion_plan(
+            node._c_conversion, node.exp._type, node._type,
+            "native address-then-pointer conversion")
+        assert(is_addressable_local(node.exp),
+            "native address-then-pointer conversion has a "
+            .. "non-addressable source")
         local cstats, cexp = codeexp(ctx, node.exp)
         local address = render("(&($CEXP))", { CEXP = cexp })
         return cstats, foreigncast(address, node._type)
     elseif tag == "Ast.ExpCast"
            and types.is_direct_c(node._type)
-           and node.exp._type._tag ~= "Type.Option" then
+           and (node.exp._type._tag ~= "Type.Option"
+                or (types.is_c_tvalue(node._type)
+                    and coder._cast_coercion(node)
+                    and coder._cast_coercion(node).op == "to_c_tvalue")) then
+        if node.exp._type._tag == "Type.Option" then
+            assert(coder._cast_coercion(node).op == "to_c_tvalue",
+                "Option-to-C-TValue cast lacks its whole-slot checker plan")
+        end
         local cstats, cexp = codeexp(ctx, node.exp)
-        local fstats, fexp = nativetoforeignexp(ctx, node.exp, cexp, node._type)
+        local fstats, fexp =
+            nativetoforeignexp(ctx, node.exp, cexp, node._type, node)
         if types.is_c_tvalue(node._type) then
             return cstats .. fstats, fexp
         end
@@ -8657,11 +10791,21 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
     elseif tag == "Ast.ExpCast" and types.is_direct_c(node.exp._type)
            and node._type._tag == "Type.Integer" then
         local cstats, cexp = codeexp(ctx, node.exp)
-        return cstats, "((lua_Integer)" .. cexp .. ")"
+        coder._checked_numeric_coercion(
+            coder._cast_coercion(node),
+            node.exp._type, node._type, "C-to-Titan integer coercion")
+        local nstats, nexp = coder._code_checked_numeric_cast(
+            ctx, node.exp._type, node._type, cexp, node.loc, "boundary")
+        return cstats .. nstats, nexp
     elseif tag == "Ast.ExpCast" and types.is_direct_c(node.exp._type)
            and node._type._tag == "Type.Float" then
         local cstats, cexp = codeexp(ctx, node.exp)
-        return cstats, "((lua_Number)" .. cexp .. ")"
+        coder._checked_numeric_coercion(
+            coder._cast_coercion(node),
+            node.exp._type, node._type, "C-to-Titan float coercion")
+        local nstats, nexp = coder._code_checked_numeric_cast(
+            ctx, node.exp._type, node._type, cexp, node.loc, "boundary")
+        return cstats .. nstats, nexp
     elseif tag == "Ast.ExpCast" and types.is_direct_c(node.exp._type)
            and node._type._tag == "Type.Boolean" then
         local cstats, cexp = codeexp(ctx, node.exp)
@@ -8699,8 +10843,11 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         })
         local mkstats, mkexp = makestring(ctx, tmpname, target)
         return guard .. "\n" .. mkstats, mkexp
-    elseif tag == "Ast.ExpCast" and node.exp._tag == "Ast.ExpVar" and node.exp.var._tag == "Ast.VarBracket"
-           and node.exp._type._tag ~= "Type.Option" then
+    elseif tag == "Ast.ExpCast"
+           and node.exp._tag == "Ast.ExpVar"
+           and node.exp.var._tag == "Ast.VarBracket"
+           and node.exp._type._tag ~= "Type.Option"
+           and node.exp._type._tag ~= "Type.Value" then
         -- Fold casts of array/map indexing into the code for the operation
         local t = node.exp.var._type
         node.exp.var._type = node._type
@@ -8708,11 +10855,13 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         node.exp.var._type = t
         return cstats, cexp
     elseif tag == "Ast.ExpCast" and node.exp._type._tag == "Type.Value" then
-        -- cast from value to any type
+        -- An implicit projection is a strict gradual observation; a written
+        -- `value as T` consumes the broader Lua-boundary conversion plan.
         local cstats, cexp = codeexp(ctx, node.exp, iscondition)
         local ctmps, tmpnames = newtmp(ctx, node.exp._type)
         local ctmpt, tmpnamet = newtmp(ctx, node.target)
-        local cget = checkandget(ctx, node._type, tmpnamet, "&" .. tmpnames, node.loc)
+        local cget = coder._planned_value_projection_get(
+            ctx, node, tmpnamet, "&" .. tmpnames)
         return render([[
             $EXPSTATS
             $TMPSOURCE
@@ -8742,6 +10891,9 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         }), tmpname
     elseif tag == "Ast.ExpCast" and node.exp._type._tag == "Type.Integer" and node._type._tag == "Type.Float" then
         -- cast from integer to float
+        coder._checked_numeric_coercion(
+            coder._cast_coercion(node),
+            node.exp._type, node._type, "integer-to-float coercion")
         local cstat, cexp = codeexp(ctx, node.exp)
         return cstat, "((lua_Number)" .. cexp .. ")"
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Boolean" then
@@ -8750,6 +10902,9 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         return cstat, toboolean(node.exp._type, cexp)
     elseif tag == "Ast.ExpCast" and node.exp._type._tag == "Type.Float" and node.target._tag == "Type.Integer" then
         -- cast from float to integer
+        coder._checked_numeric_coercion(
+            coder._cast_coercion(node),
+            node.exp._type, node._type, "float-to-integer coercion")
         local cstat, cexp = codeexp(ctx, node.exp)
         local ctmp1, tmpname1 = newtmp(ctx, types.Float())
         local ctmp2, tmpname2 = newtmp(ctx, types.Float())
@@ -8784,8 +10939,18 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         local cvt
         local cstats, cexp = codeexp(ctx, node.exp)
         if node.exp._type._tag == "Type.Integer" then
+            local conversion = assert(node._operator_conversion,
+                "integer-to-string cast lacks its checker operator plan")
+            assert(conversion.kind == "operator_conversion"
+                    and conversion.op == "number_to_string",
+                "integer-to-string cast has the wrong checker operator plan")
             cvt = render("_integer2str(L, $EXP)", { EXP = cexp })
         elseif node.exp._type._tag == "Type.Float" then
+            local conversion = assert(node._operator_conversion,
+                "float-to-string cast lacks its checker operator plan")
+            assert(conversion.kind == "operator_conversion"
+                    and conversion.op == "number_to_string",
+                "float-to-string cast has the wrong checker operator plan")
             cvt = render("_float2str(L, $EXP)", { EXP = cexp })
         else
             error("invalid node type for coercion to string: " .. types.tostring(node.exp._type))
@@ -8839,8 +11004,17 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         local cdst, dstname = newtmp(ctx, node._type)
         local synthvar = { _tag = "Ast.VarName", _type = sbase,
                            _decl = { _cvar = basename } }
+        local outer_coercion = coder._cast_coercion(node)
+        assert(outer_coercion and outer_coercion.op == "option_map",
+            "Option-to-Option cast lacks its checker coercion plan")
+        local inner = assert(outer_coercion.inner,
+            "Option map lacks its inner adjustment")
+        local inner_adjustment =
+            coder._inner_assignment(sbase, tbase, inner)
         local synthcast = { _tag = "Ast.ExpCast", loc = node.loc,
-                            exp = synthvar, target = tbase, _type = tbase }
+                            exp = synthvar, target = tbase, _type = tbase,
+                            _implicit_coercion = true,
+                            _adjustment = inner_adjustment }
         local convstats, convexp = codeexp(ctx, synthcast)
         return render([[
             $CSTATS
@@ -8868,9 +11042,32 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
             SETDST = setslot(tbase, "&" .. dstname, convexp),
         }), dstname
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Option" then
-        -- cast from t to t?
-        assert(types.equals(node._type.base, node.exp._type))
-        local cstats, cexp = codeexp(ctx, node.exp)
+        -- Cast from S to T?. The checker records one outer option_wrap plan;
+        -- lower its inner S-to-T operation here without reclassifying it.
+        local coercion = coder._cast_coercion(node)
+        assert(coercion and coercion.op == "option_wrap",
+            "Option injection has the wrong checker adjustment")
+        local tbase = node._type.base
+        local inner = assert(coercion.inner,
+            "Option injection lacks its inner checker plan")
+        local inner_adjustment =
+            coder._inner_assignment(node.exp._type, tbase, inner)
+        local converted = node.exp
+        if inner.kind ~= "identity" then
+            converted = {
+                _tag = "Ast.ExpCast",
+                loc = node.loc,
+                exp = node.exp,
+                target = tbase,
+                _type = tbase,
+                _implicit_coercion = true,
+                _adjustment = inner_adjustment,
+            }
+        else
+            assert(types.equals(node.exp._type, tbase),
+                "identity Option injection changes its base type")
+        end
+        local cstats, cexp = codeexp(ctx, converted)
         local ctmp, tmpname = newtmp(ctx, node._type)
         return render([[
             $CSTATS
@@ -8879,16 +11076,46 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         ]], {
             CSTATS = cstats,
             CTMP = ctmp,
-            SETSLOT = setslot(node._type.base, "&" .. tmpname, cexp)
+            SETSLOT = setslot(tbase, "&" .. tmpname, cexp)
         }), tmpname
     elseif tag == "Ast.ExpCast" and node.exp._type._tag == "Type.Option" then
-        -- cast from t? to t
-        assert(types.equals(node.exp._type.base, node._type))
+        -- Cast from S? to T. Preserve nil failure, then lower the checker
+        -- plan's inner S-to-T operation without reclassifying it.
+        local coercion = coder._cast_coercion(node)
+        assert(coercion and coercion.op == "option_force",
+            "Option projection has the wrong checker adjustment")
+        local sbase = node.exp._type.base
+        local inner = assert(coercion.inner,
+            "Option projection lacks its inner checker plan")
+        local inner_adjustment =
+            coder._inner_assignment(sbase, node._type, inner)
         local cstats, cexp = codeexp(ctx, node.exp)
         -- Materialize the option value into a TValue temp first: the operand
         -- may be a non-lvalue (e.g. a direct call returning t?), so we cannot
         -- take its address directly.
         local csrc, srcname = newtmp(ctx, node.exp._type)
+        local cbase, basename = newtmp(ctx, sbase)
+        local synthvar = {
+            _tag = "Ast.VarName",
+            _type = sbase,
+            _decl = { _cvar = basename },
+        }
+        local converted = synthvar
+        if inner.kind ~= "identity" then
+            converted = {
+                _tag = "Ast.ExpCast",
+                loc = node.loc,
+                exp = synthvar,
+                target = node._type,
+                _type = node._type,
+                _implicit_coercion = true,
+                _adjustment = inner_adjustment,
+            }
+        else
+            assert(types.equals(sbase, node._type),
+                "identity Option projection changes its base type")
+        end
+        local convstats, convexp = codeexp(ctx, converted)
         local ctmp, tmpname = newtmp(ctx, node._type)
         return render([[
             $CSTATS
@@ -8898,19 +11125,26 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
             if(TITAN_UNLIKELY(ttisnil(&$SRCNAME))) {
                 $THROW_WRONG_CAST
             } else {
-                $GETSLOT;
+                $CBASE
+                $GETBASE;
+                $CONVSTATS
+                $TMPNAME = $CONVEXP;
             }
         ]], {
             CSTATS = cstats,
             CSRC = csrc,
             SRCNAME = srcname,
             CEXP = cexp,
+            CBASE = cbase,
+            GETBASE = getslot(sbase, basename, "&" .. srcname),
+            CONVSTATS = convstats,
+            CONVEXP = convexp,
             CTMP = ctmp,
+            TMPNAME = tmpname,
             FILE = c_string_literal(node.loc.filename),
             LINE = node.loc.line,
             COL = node.loc.col,
             TYPENAME = c_string_literal(types.tostring(node._type)),
-            GETSLOT = getslot(node._type, tmpname, "&" .. srcname),
             THROW_WRONG_CAST = codethrow(node.loc, "%s:%d:%d: type error, expected %s but found nil", { "$FILE", "$LINE", "$COL", "$TYPENAME" })
         }), tmpname
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Pointer" then
@@ -9005,7 +11239,17 @@ end
 -- dispatch passthrough (the function-entry/statement/throw stamps cover the
 -- rest).
 function codeexp(ctx, node, iscondition, target)
-    return codeexp_dispatch(ctx, node, iscondition, target)
+    local stats, value =
+        codeexp_dispatch(ctx, node, iscondition, target)
+    local adjustment = node._assignment_adjustment
+    if not adjustment then
+        return stats, value
+    end
+    local adjusted_stats, adjusted_value =
+        coder._code_adjustment_value(
+            ctx, adjustment, node._type,
+            adjustment.target or node._type, value, node.loc)
+    return stats .. adjusted_stats, adjusted_value
 end
 
 function codeforeignexp(ctx, node, target)
@@ -9041,6 +11285,12 @@ function codeforeignexp(ctx, node, target)
            and node._c_conversion
            and node._c_conversion.kind ==
                "address_then_unsafe_object_pointer" then
+        coder._checked_explicit_conversion_plan(
+            node._c_conversion, node.exp._type, node._type,
+            "foreign address-then-pointer conversion")
+        assert(is_addressable_local(node.exp),
+            "foreign address-then-pointer conversion has a "
+            .. "non-addressable source")
         local cstats, cexp = codeexp(ctx, node.exp)
         local address = render("(&($CEXP))", { CEXP = cexp })
         return cstats, foreigncast(address, node._type)
@@ -9048,7 +11298,8 @@ function codeforeignexp(ctx, node, target)
            and types.is_direct_c(node._type)
            and node.exp._type._tag ~= "Type.Option" then
         local cstats, cexp = codeexp(ctx, node.exp)
-        local fstats, fexp = nativetoforeignexp(ctx, node.exp, cexp, node._type)
+        local fstats, fexp =
+            nativetoforeignexp(ctx, node.exp, cexp, node._type, node)
         if types.is_c_tvalue(node._type) then
             return cstats .. fstats, fexp
         end
@@ -9060,11 +11311,40 @@ function codeforeignexp(ctx, node, target)
     end
 end
 
--- Generate Lua entry point `lua_name` for a Titan
--- function or method with name `titan_name` and Titan
--- entry point `titan_entry`, type `typ`, and declared on location `loc`
-local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_name)
-    -- generate Lua entry point
+-- Generate one Lua-stack entry for a Titan function. The ordinary entry is the
+-- canonical closure's CClosure.f and applies genuine-Lua dynamic coercions.
+-- The strict entry is stored as the closure's final LCF upvalue; it receives
+-- the original closure as one hidden first argument and applies gradual tag
+-- guards before calling the same native entry.
+local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
+                           lua_name, options)
+    options = options or {}
+    local strict = options.strict == true
+    local hidden = strict and 1 or 0
+    local dynamic_plans = options.dynamic_plans
+    local strict_plans = options.strict_plans
+    if not strict then
+        assert(type(dynamic_plans) == "table",
+            "genuine Lua function entry lacks checker parameter plans")
+    else
+        assert(type(strict_plans) == "table",
+            "strict Titan function entry lacks checker guard plans")
+    end
+    local function readfixed(param, cvar, slot, index)
+        if strict then
+            assert(strict_plans[index] ~= nil,
+                "strict Titan function parameter lacks its checker guard")
+            return coder._strictcheckandget(
+                tlcontext, strict_plans[index], param, cvar, slot, loc,
+                "strict Titan function parameter")
+        end
+        assert(dynamic_plans[index] ~= nil,
+            "genuine Lua function parameter lacks its checker plan")
+        return coder._dynamiccheckandget(
+            tlcontext, dynamic_plans[index], param, cvar, slot, loc,
+            "genuine Lua function parameter")
+    end
+    local storage = options.storage or "static"
     local stats = {}
     local pnames = { "L", "_mod", "_fn" }
     local params
@@ -9076,11 +11356,11 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
     end
     for i, param in ipairs(params) do
         local pname = "_param_" .. tostring(i)
-        local slot = "s2v(func + " .. i .. ")"
+        local slot = "s2v(func + " .. (i + hidden) .. ")"
         table.insert(pnames, pname)
         table.insert(stats, cvardecl(tlcontext, param, pname)
             .. " = " .. initval(param) .. ";")
-        table.insert(stats, checkandget(tlcontext, param, pname, slot, loc))
+        table.insert(stats, readfixed(param, pname, slot, i))
     end
     -- Variadic: build the backing struct from the surplus Lua-stack args. Pinned
     -- after the fixed params and before the out-params in the native call. The
@@ -9101,15 +11381,31 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         -- the fixed params use, into `_varargs->args[j]`. `_start` is 0 (the
         -- generic entry always builds a fresh, fully-backed run). The entry guard
         -- below has already ensured the arg count is >= nfixed.
-        local readone = checkandget(tlcontext, varargtype,
-            "_varargs->args[_vj]", "s2v(_vfunc + " .. nfixed .. " + 1 + _vj)", loc)
+        local readone
+        if strict then
+            assert(options.strict_vararg_plan ~= nil,
+                "strict Titan variadic parameter lacks its checker guard")
+            readone = coder._strictcheckandget(
+                tlcontext, options.strict_vararg_plan, varargtype,
+                "_varargs->args[_vj]",
+                "s2v(_vfunc + " .. (nfixed + hidden) .. " + 1 + _vj)",
+                loc, "strict Titan variadic parameter")
+        else
+            assert(options.dynamic_vararg_plan ~= nil,
+                "genuine Lua variadic parameter lacks its checker plan")
+            readone = coder._dynamiccheckandget(
+                tlcontext, options.dynamic_vararg_plan, varargtype,
+                "_varargs->args[_vj]",
+                "s2v(_vfunc + " .. (nfixed + hidden) .. " + 1 + _vj)",
+                loc, "genuine Lua variadic parameter")
+        end
         table.insert(stats, render([[
             ptrdiff_t _vcount = _nargs - $NFIXED;
             if (TITAN_UNLIKELY(_vcount > TITAN_VARARG_MAX)) {
                 luaL_error(L, "too many variadic arguments to Titan function %s (%d, max %d)", $NAME, (int)_vcount, (int)TITAN_VARARG_MAX);
             }
             lu_byte _nvarargs = (lu_byte)_vcount;
-            lua_checkstack(L, 1);
+            titan_ensure_stack(L, 1);
             Udata *_varargs_ud = gco2u(luaC_newobj(L, LUA_VUSERDATA,
                 sizeudata(0, (size_t)_nvarargs * sizeof($ELEM_CT))));
             _varargs_ud->len = (size_t)_nvarargs * sizeof($ELEM_CT);
@@ -9169,7 +11465,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         table.insert(pnames, "_flexwant")
     end
     local rettype = typ.rettypes[1]
-    if #params > 0 then
+    if strict or #params > 0 then
         table.insert(stats, [[
             lua_pushvalue(L, 1); /* make space for error slot */
             lua_pushnil(L);
@@ -9205,7 +11501,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
             }))
         end
         table.insert(stats, render([[
-            lua_checkstack(L, $NFIXED + _flexcap);
+            titan_ensure_stack(L, $NFIXED + _flexcap);
             ptrdiff_t _firstret_off = savestack(L, L->top.p);
             for (int _ri = 0; _ri < $NFIXED + _flexcap; _ri++) {
                 setnilvalue(s2v(L->top.p + _ri));
@@ -9239,7 +11535,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         }))
     else
         table.insert(stats, render([[
-            lua_checkstack(L, $NRET);
+            titan_ensure_stack(L, $NRET);
             ptrdiff_t _firstret_off = savestack(L, L->top.p);
             L->top.p += $NRET;
             $DECL = $NAME($PARAMS);
@@ -9283,10 +11579,10 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
     local argcheck
     if varargtype then
         argcheck = render([[
-        ptrdiff_t _nargs = L->top.p - func - 1;
+        ptrdiff_t _nargs = L->top.p - func - 1 - $HIDDEN;
         if (_nargs < $EXPECTED) {
             ptrdiff_t _missing = $EXPECTED - _nargs;
-            lua_checkstack(L, (int)_missing);
+            titan_ensure_stack(L, (int)_missing);
             func = L->ci->func.p;
             while (_missing-- > 0) {
                 setnilvalue(s2v(L->top.p));
@@ -9295,14 +11591,15 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
             }
         }]], {
             EXPECTED = c_integer_literal(#params),
+            HIDDEN = c_integer_literal(hidden),
             NAME = c_string_literal(titan_name),
         })
     else
         argcheck = render([[
-        ptrdiff_t _nargs = L->top.p - func - 1;
+        ptrdiff_t _nargs = L->top.p - func - 1 - $HIDDEN;
         if (_nargs < $EXPECTED) {
             ptrdiff_t _missing = $EXPECTED - _nargs;
-            lua_checkstack(L, (int)_missing);
+            titan_ensure_stack(L, (int)_missing);
             func = L->ci->func.p;
             while (_missing-- > 0) {
                 setnilvalue(s2v(L->top.p));
@@ -9311,11 +11608,48 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
             }
         }]], {
             EXPECTED = c_integer_literal(#params),
+            HIDDEN = c_integer_literal(hidden),
         })
     end
+    local carrier
+    if strict then
+        assert(options.strict_name)
+        assert(options.lua_entry)
+        carrier = render([[
+        ptrdiff_t _strict_raw_nargs = L->top.p - func - 1;
+        if (TITAN_UNLIKELY(_strict_raw_nargs < 1
+                || !ttisCclosure(s2v(func + 1)))) {
+            return luaL_error(L, "invalid Titan strict-call carrier");
+        }
+        CClosure *_fn = clCvalue(s2v(func + 1));
+        if (TITAN_UNLIKELY(_fn->nupvalues < 5
+                || _fn->f != $LUAENTRY
+                || !ttisfulluserdata(&_fn->upvalue[0])
+                || !ttislightuserdata(&_fn->upvalue[1])
+                || !ttislightuserdata(&_fn->upvalue[2])
+                || !ttislcf(&_fn->upvalue[_fn->nupvalues - 1])
+                || fvalue(&_fn->upvalue[_fn->nupvalues - 1])
+                    != $STRICTENTRY)) {
+            return luaL_error(L, "invalid Titan strict-call closure");
+        }
+        if (TITAN_UNLIKELY(
+                pvalue(&_fn->upvalue[1]) != $FUNCTAG)) {
+            return luaL_error(L, "mistagged Titan strict-call closure");
+        }
+        ]], {
+            LUAENTRY = options.lua_entry,
+            STRICTENTRY = options.strict_name,
+            FUNCTAG = function_type_tag(tlcontext, typ),
+        })
+    else
+        carrier = [[
+        CClosure *_fn = clCvalue(s2v(func));
+        ]]
+    end
     return render([[
-    static int $LUANAME(lua_State *L) {
+    $STORAGE int $LUANAME(lua_State *L) {
         StkId func = L->ci->func.p;
+        $CARRIER
         $ARGCHECK
         $ERRORSLOT
         ptrdiff_t __save_errfunc = L->errfunc;
@@ -9325,13 +11659,15 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
             L->errfunc = savestack(L, L->top.p - 1);
             __installed_errfunc = 1;
         }
-        CClosure *_fn = clCvalue(s2v(func));
         Udata *_mod = uvalue(&_fn->upvalue[0]);
         $ENTRYLINE$BODY
     }]], {
         LUANAME = lua_name,
+        STORAGE = storage,
+        CARRIER = carrier,
         ARGCHECK = argcheck,
-        ERRORSLOT = #params == 0 and "lua_pushnil(L);" or "",
+        ERRORSLOT = (not strict and #params == 0)
+            and "lua_pushnil(L);" or "",
         NAME = c_string_literal(titan_name),
         -- Stamp the Lua-entry wrapper to the function definition's .titan loc
         -- so its native frame, and any arg-coercion throw within it, symbolizes
@@ -9373,18 +11709,27 @@ local function codefuncdec(tlcontext, node)
     local ctx = newcontext(tlcontext)
     local stats = {}
     local rettype = node._type.rettypes[1]
-    local fname, luaname
+    local has_function_value = node._tag ~= "Ast.TopLevelFunc"
+        or not node.islocal
+        or node._closure_upvalue
+    local fname, luaname, strictname, tracename
     if node._tag == "Ast.TopLevelFunc" then
         fname = func_name(tlcontext.module, node.name)
         luaname = func_luaname(tlcontext.module, node.name)
-        register_trace_name(tlcontext, fname,
-            tlcontext.module .. "." .. node.name)
+        strictname = coder._func_strictname(tlcontext.module, node.name)
+        tracename = tlcontext.module .. "." .. node.name
+        register_trace_name(tlcontext, fname, tracename)
+        if has_function_value then
+            register_trace_name(tlcontext, strictname, tracename)
+        end
     elseif node._tag == "Ast.TopLevelStatic" then
         fname = static_name(node._type)
         luaname = static_luaname(node._type)
+        strictname = coder._static_strictname(node._type)
         -- fqtn is "<module>.<record>"; a static is "<module>.<record>.<static>".
-        register_trace_name(tlcontext, fname,
-            node._type.fqtn .. "." .. node._type.name)
+        tracename = node._type.fqtn .. "." .. node._type.name
+        register_trace_name(tlcontext, fname, tracename)
+        register_trace_name(tlcontext, strictname, tracename)
     else
         assert(node._tag == "Ast.TopLevelMethod")
         fname = method_name(node._type)
@@ -9539,7 +11884,23 @@ local function codefuncdec(tlcontext, node)
         ISLOCAL = node.islocal and "static" or "",
         SIGNATURE = nativesig,
     })
-    node._luabody = genluaentry(tlcontext, node.name, fname, node._type, node.loc, luaname)
+    node._luabody = genluaentry(
+        tlcontext, node.name, fname, node._type, node.loc, luaname, {
+            dynamic_plans = node._lua_dynamic_plans,
+            dynamic_vararg_plan = node._lua_vararg_dynamic_plan,
+        })
+    if strictname and has_function_value then
+        node._strictbody = genluaentry(
+            tlcontext, node.name, fname, node._type, node.loc, strictname, {
+                strict = true,
+                strict_name = strictname,
+                lua_entry = luaname,
+                strict_plans = node._strict_guard_plans,
+                strict_vararg_plan = node._strict_vararg_guard_plan,
+            })
+        node._sig = node._sig .. "\n    static int " .. strictname
+            .. "(lua_State *L);"
+    end
 end
 
 local function codeinitializerdec(tlcontext, node)
@@ -9607,7 +11968,7 @@ end
 -- Emit the two bound-method trampolines for a TopLevelMethod, delegating to the
 -- method's own native/Lua entries. They turn `obj:m` into a first-class function
 -- value of the self-removed type `(params) -> rettypes`, with `self` captured in
--- the closure's `upvalue[3]`. Public methods export these trampolines so a bind
+-- the closure's `upvalue[4]`. Public methods export these trampolines so a bind
 -- site in a module that only has this module's `.so` can still reach them; local
 -- methods keep them file-local.
 -- Produces node._boundsig / node._boundbody.
@@ -9618,11 +11979,14 @@ local function codemethodtrampoline(tlcontext, node)
         mtype.varargtype, mtype.flexrettype)
     local nativename = bound_method_name(mtype)
     local luaname = bound_method_luaname(mtype)
+    local strictname = coder._bound_method_strictname(mtype)
     local mnative = method_name(mtype)
     local mlua = method_luaname(mtype)
     -- The bound trampoline forwards to the method; if its own native frame ever
     -- appears in a trace, name it after the method (<module>.<record>:<method>).
     register_trace_name(tlcontext, nativename,
+        mtype.fqtn .. ":" .. mtype.name)
+    register_trace_name(tlcontext, strictname,
         mtype.fqtn .. ":" .. mtype.name)
     local rettype = mtype.rettypes[1]
 
@@ -9631,7 +11995,7 @@ local function codemethodtrampoline(tlcontext, node)
     -- `_outparam_N` for out-params), independent of the method's own _cvar names.
     local cparams = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
     local callargs = { "L", "_mod", "NULL",
-        "uvalue(&_fn->upvalue[3])" }
+        "uvalue(&_fn->upvalue[4])" }
     for i, ptype in ipairs(mtype.params) do
         local pname = "_bp_" .. i
         table.insert(cparams, cvardecl(tlcontext, ptype, pname))
@@ -9673,6 +12037,16 @@ local function codemethodtrampoline(tlcontext, node)
     -- native trampoline signature == function_sig of the self-removed type, but
     -- with named parameters so the body can forward them.
     local storage = node.islocal and "static TITAN_UNUSED " or ""
+    local strictbody = genluaentry(
+        tlcontext, mtype.name, nativename, ftype, node.loc,
+        strictname, {
+            strict = true,
+            strict_name = strictname,
+            lua_entry = luaname,
+            storage = node.islocal and "static TITAN_UNUSED" or "",
+            strict_plans = node._bound_strict_guard_plans,
+            strict_vararg_plan = node._bound_strict_vararg_guard_plan,
+        })
     local nativesig = storage .. cfunctiondecl(
         rettype, nativename, table.concat(cparams, ", "), false)
     -- Public bound trampolines are exported (non-static): a bind site in a
@@ -9685,31 +12059,35 @@ local function codemethodtrampoline(tlcontext, node)
     $STORAGE int $LUANAME(lua_State *L) {
         /* insert the captured receiver (self) as the first stack argument, then
            delegate to the method's Lua entry (which reuses all the boundary
-           checks/coercions). upvalue[3] holds the record udata directly (the
+           checks/coercions). upvalue[4] holds the record udata directly (the
            record value IS the udata), which is exactly the Lua-facing value the
            method Lua entry expects. The bound closure's upvalue[0] is the
            method's module, so the method Lua entry recovers _mod correctly from
            it. */
         CClosure *_bound = clCvalue(s2v(L->ci->func.p));
-        lua_checkstack(L, 1);
-        setobj2s(L, L->top.p, &(_bound->upvalue[3]));
+        titan_ensure_stack(L, 1);
+        setobj2s(L, L->top.p, &(_bound->upvalue[4]));
         L->top.p++;
         lua_insert(L, 1);
         return $MLUA(L);
-    }]], {
+    }
+    $STRICTBODY]], {
         SIG = nativesig,
         STORAGE = storage,
         BODYCALL = bodycall,
         LUANAME = luaname,
         MLUA = mlua,
+        STRICTBODY = strictbody,
     })
     node._boundsig = render([[
         $STORAGE$SIG;
         $STORAGE int $LUANAME(lua_State *L);
+        $STORAGE int $STRICTNAME(lua_State *L);
     ]], {
         STORAGE = storage,
         SIG = function_sig(nativename, ftype, false),
         LUANAME = luaname,
+        STRICTNAME = strictname,
     })
     -- Publish the bound function type's tag from the DEFINING module (every
     -- method, even one never bound here): a `.so`-only importer recovers the tag
@@ -9728,9 +12106,14 @@ local function lambda_register(tlcontext, node)
         tlcontext.lambda_count = n + 1
         node._lambda_native = tlcontext.prefix .. "lambda_" .. n
         node._lambda_lua = tlcontext.prefix .. "lambda_" .. n .. "_" .. TITAN_ENTRY_TAG .. "_lua"
+        node._lambda_strict =
+            tlcontext.prefix .. "lambda_" .. n .. "_" ..
+                TITAN_ENTRY_TAG .. "_strict"
         -- An anonymous function shows as "anonymous function at <file>:<defline>"
         -- (the lambda's DEFINITION loc), formatted into the name table here.
         register_trace_name(tlcontext, node._lambda_native, anon_qualname(node.loc))
+        register_trace_name(tlcontext, node._lambda_strict,
+            anon_qualname(node.loc))
         table.insert(tlcontext.lambdas, node)
     end
 end
@@ -9761,10 +12144,12 @@ local function read_capture(ctx, decl)
 end
 
 -- Use-site code for an anonymous function: build a fresh CClosure with
--- upvalue[0]=_mod, [1]=type tag, [2]=native ptr, and [3+i]=captured variable i
--- (a box Udata* or a copied value), then return the closure value (anchored in
--- a gc temp). The capture pushes are transient raw stack pushes (guarded by
--- lua_checkstack, consumed by lua_pushcclosure), not nslots-accounted.
+-- upvalue[0]=_mod, [1]=type tag, [2]=native ptr, [3]=closure brand,
+-- [4+i]=captured variable i, and the strict LCF in the final upvalue, then
+-- return the closure value
+-- (anchored in a gc temp). The capture pushes are transient raw stack pushes
+-- (guarded by lua_checkstack, consumed by lua_pushcclosure), not
+-- nslots-accounted.
 function codelambda(ctx, node)
     local tlcontext = ctx.tlcontext
     lambda_register(tlcontext, node)
@@ -9774,12 +12159,13 @@ function codelambda(ctx, node)
     -- _base recomputed from its saved offset afterwards (like a value call).
     ctx.uses_base_off = true
     table.insert(stats, render([[
-        lua_checkstack(L, $NPUSH);
+        titan_ensure_stack(L, $NPUSH);
         titan_pushmodule(L, _mod);
         lua_pushlightuserdata(L, (void*)$FUNCTAG);
         lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+        lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
     ]], {
-        NPUSH = c_integer_literal(3 + ncap),
+        NPUSH = c_integer_literal(5 + ncap),
         FUNCTAG = function_type_tag(tlcontext, node._type),
         NATIVE = node._lambda_native,
     }))
@@ -9800,6 +12186,11 @@ function codelambda(ctx, node)
             }))
         end
     end
+    table.insert(stats, render([[
+        lua_pushcfunction(L, $STRICTNAME);
+    ]], {
+        STRICTNAME = node._lambda_strict,
+    }))
     -- lua_pushcclosure moves the pushed upvalues into the fresh (white) closure,
     -- so no barrier is needed at creation. The result closure is on top.
     local cdecl, tmpname, tmpslot = newtmp(ctx, node._type, true)
@@ -9812,7 +12203,7 @@ function codelambda(ctx, node)
         L->top.p--;
     ]], {
         LUANAME = node._lambda_lua,
-        NUP = c_integer_literal(3 + ncap),
+        NUP = c_integer_literal(5 + ncap),
         CDECL = cdecl,
         TMPSLOT = tmpslot,
         GETSLOT = getslot(node._type, tmpname, "s2v(L->top.p - 1)"),
@@ -9821,12 +12212,14 @@ function codelambda(ctx, node)
 end
 
 -- Use-site code for a bound method reference `obj:m`: evaluate the receiver once
--- into an anchored gc temp, then build a 4-upvalue CClosure exactly like a
+-- into an anchored gc temp, then build a 6-upvalue CClosure exactly like a
 -- 1-capture lambda whose capture is `self`:
 --   upvalue[0] = the method's module closure
 --   upvalue[1] = the self-removed function-type tag (light userdata)
 --   upvalue[2] = the bound native trampoline pointer (light userdata)
---   upvalue[3] = self (the captured receiver)
+--   upvalue[3] = the Titan function-closure brand (light userdata)
+--   upvalue[4] = self (the captured receiver)
+--   upvalue[5] = the bound strict entry (light C function)
 -- The closure's lua_CFunction is the bound Lua trampoline. The result is an
 -- ordinary Type.Function value, callable through both paths and Lua-crossable.
 function codemethodref(ctx, node)
@@ -9835,6 +12228,7 @@ function codemethodref(ctx, node)
     local ftype = node._type      -- Type.Function (self removed)
     local nativename = bound_method_name(mtype)
     local luaname = bound_method_luaname(mtype)
+    local strictname = coder._bound_method_strictname(mtype)
     local mod, record = mtype.fqtn:match("^(.*)%.([^.]+)$")
 
     -- The bound closure's upvalue[0] must be the defining module's closure: `_mod`
@@ -9854,6 +12248,7 @@ function codemethodref(ctx, node)
         -- the Lua trampoline (the closure's lua_CFunction) is not function_sig
         -- shaped, so it gets its own extern/dlsym registry entry
         ctx.bound_luas[luaname] = { module = mod }
+        ctx.bound_stricts[strictname] = { module = mod }
         if not ctx.modules[mod] then
             ctx.modules[mod] = nextupvalue(ctx.tlcontext)
         end
@@ -9874,24 +12269,27 @@ function codemethodref(ctx, node)
     table.insert(stats, rname .. " = " .. rexp .. ";")
     table.insert(stats, setslot(rtype, rslot, rname))
 
-    -- 2. push the four upvalues and build the closure
+    -- 2. push the six upvalues and build the closure
     table.insert(stats, render([[
-        lua_checkstack(L, 4);
+        titan_ensure_stack(L, 6);
         titan_pushmodule(L, $MODEXPR);
         lua_pushlightuserdata(L, (void*)$FUNCTAG);
         lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+        lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
         $PUSHSELF L->top.p++;
+        lua_pushcfunction(L, $STRICTNAME);
     ]], {
         MODEXPR = modexpr,
         FUNCTAG = function_type_tag(tlcontext, ftype),
         NATIVE = nativename,
         PUSHSELF = setslot(rtype, "s2v(L->top.p)", rname),
+        STRICTNAME = strictname,
     }))
 
     -- 3. consume the closure into an anchored gc temp
     local cdecl, tmpname, tmpslot = newtmp(ctx, ftype, true)
     table.insert(stats, render([[
-        lua_pushcclosure(L, $LUANAME, 4);
+        lua_pushcclosure(L, $LUANAME, 6);
         _base = restorestack(L, _base_off);
         $CDECL
         setobj2t(L, $TMPSLOT, s2v(L->top.p - 1));
@@ -9908,7 +12306,7 @@ end
 
 -- File-scope emission of a lambda: its native entry (signature via function_sig,
 -- so the uniform (L,_mod,_fn,params...,outparams) ABI) and Lua entry. The body
--- reads captures from _fn->upvalue[3+i]; the ctx.captures map (decl -> {index,
+-- reads captures from _fn->upvalue[4+i]; the ctx.captures map (decl -> {index,
 -- boxed, boxvar}) is consulted by codevar/codeassignment before the local/box
 -- logic. Produces node._sig / node._body / node._luabody.
 function codelambdadec(tlcontext, node)
@@ -9932,7 +12330,7 @@ function codelambdadec(tlcontext, node)
     ctx.captures = {}
     local capbinds = {}
     for i, decl in ipairs(node._captures) do
-        local index = 3 + (i - 1)
+        local index = 4 + (i - 1)
         local boxed = decl._boxed and true or false
         local entry = { index = index, boxed = boxed }
         if boxed then
@@ -10041,11 +12439,26 @@ function codelambdadec(tlcontext, node)
     node._sig = render([[
         static $SIGNATURE;
         static int $LUANAME(lua_State *L);
+        static int $STRICTNAME(lua_State *L);
     ]], {
         SIGNATURE = nativesig,
         LUANAME = luaname,
+        STRICTNAME = node._lambda_strict,
     })
-    node._luabody = genluaentry(tlcontext, "lambda", fname, node._type, node.loc, luaname)
+    node._luabody = genluaentry(
+        tlcontext, "lambda", fname, node._type, node.loc, luaname, {
+            dynamic_plans = node._lua_dynamic_plans,
+            dynamic_vararg_plan = node._lua_vararg_dynamic_plan,
+        })
+    node._strictbody = genluaentry(
+        tlcontext, "lambda", fname, node._type, node.loc,
+        node._lambda_strict, {
+            strict = true,
+            strict_name = node._lambda_strict,
+            lua_entry = luaname,
+            strict_plans = node._strict_guard_plans,
+            strict_vararg_plan = node._strict_vararg_guard_plan,
+        })
 end
 
 local function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
@@ -10093,7 +12506,9 @@ local function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
             }
         ]], {
             I = c_integer_literal(node._upvalue),
-            SETSLOT = checkandset(ctx, node._type, node._slot, "_value", node.loc),
+            SETSLOT = coder._dynamiccheckandset(
+                ctx, node._lua_write_dynamic_plan, node._type,
+                node._slot, "_value", node.loc, "Lua module-variable write"),
             BARRIER = types.is_gc(node._type)
                       and "luaC_barrierback(L, obj2gco(_mod), " .. node._slot .. ");" or ""
         }))
@@ -10134,7 +12549,7 @@ local init = [[
 static int _initialized = 0; /* tags and external functions are set up */
 
 Udata *$INITNAME(lua_State *L) {
-    lua_checkstack(L, 10);
+    titan_ensure_stack(L, 10);
     lua_getfield(L, LUA_REGISTRYINDEX, $MODNAMESTR);
     if(lua_isnil(L, -1)) {
         _initialized = 1;
@@ -10147,8 +12562,9 @@ Udata *$INITNAME(lua_State *L) {
         $INITMODULES
         $LOADGLOBALS
         $INITRECORDS
-        $INITVARS
         $INITFUNCTAGS
+        $INITARRAYWRITERS
+        $INITVARS
         $FUNCS
         $INITNAMES
         $CREATEMETA
@@ -10357,6 +12773,29 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods,
         end
     end
 
+    -- A cross-module bind site also installs the defining provider's strict
+    -- stack entry as the bound closure's final LCF upvalue.
+    for strictname, info in pairs(tlcontext.bound_stricts) do
+        local is_dynamic = static_deps[info.module] ~= true
+        if is_dynamic then
+            local mprefix = mprefixes[info.module]
+            table.insert(includes,
+                "static int (*" .. strictname .. ")(lua_State *L);")
+            if mprefix then
+                table.insert(loadmods, render([[
+                    $NAME = titan_cast_func(int (*)(lua_State *L), loadsym(L, $HANDLE, "$NAME"));
+                ]], { NAME = strictname, HANDLE = mprefix .. "handle" }))
+            else
+                table.insert(loadglobals, render([[
+                    $NAME = titan_cast_func(int (*)(lua_State *L), loadglobalsym(L, "$NAME"));
+                ]], { NAME = strictname }))
+            end
+        else
+            table.insert(includes,
+                "extern int " .. strictname .. "(lua_State *L);")
+        end
+    end
+
     for fqtn, entry in pairs(tlcontext.metatables) do
         table.insert(initmetas, render([[
             luaL_getmetatable(L, "Titan $KIND $TYPE metatable");
@@ -10414,7 +12853,9 @@ local function coderecorddec(ctx, code, initrecs, node)
                 }
             ]], {
                 INDEX = c_integer_literal(field.index),
-                CHECKANDSET = checkandset(ctx, field.type, "_dst", "_src", node.loc)
+                CHECKANDSET = coder._dynamiccheckandset(
+                    ctx, field.dynamic_plan, field.type, "_dst", "_src",
+                    node.loc, "Lua record-field write")
             }))
         end
     end
@@ -10485,7 +12926,10 @@ local function coderecorddec(ctx, code, initrecs, node)
             }
         ]], {
             RECNAME = mangle_qn(node._type.name),
-            CHECKANDGET = checkandget(ctx, types.Nominal(node._type.name), "_rec", "_recslot", node.loc),
+            CHECKANDGET = coder._dynamiccheckandget(
+                ctx, node._dynamic_receiver_plan,
+                types.Nominal(node._type.name), "_rec", "_recslot",
+                node.loc, "Lua record receiver"),
             FQTN = c_string_literal(node._type.name),
             FILE = c_string_literal(node.loc.filename),
             LINE = c_integer_literal(node.loc.line),
@@ -10597,8 +13041,10 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         }
     ]], {
         UNIONNAME = mangle_qn(node._type.name),
-        CHECKANDGET = checkandget(ctx, types.Nominal(node._type.name),
-            "_union", "_unionslot", node.loc),
+        CHECKANDGET = coder._dynamiccheckandget(
+            ctx, node._dynamic_receiver_plan,
+            types.Nominal(node._type.name),
+            "_union", "_unionslot", node.loc, "Lua union receiver"),
         FQTN = c_string_literal(node._type.name),
         FILE = c_string_literal(node.loc.filename),
         LINE = c_integer_literal(node.loc.line),
@@ -10723,7 +13169,10 @@ function coder.generate(modname, ast, static_deps, abi)
         functags = {},
         functag_list = {},   -- same entries, in allocation order (for emission)
         functag_count = 0,
+        array_writer_list = {}, -- constructed Array element policies
+        array_writer_count = 0,
         bound_luas = {},     -- mangled bound-Lua-trampoline name -> { module }
+        bound_stricts = {},  -- mangled bound-strict-entry name -> { module }
         static_slots = {},   -- "fqtn.name" -> module upvalue slot of a static's closure
         nominal_namespace_slots = {}, -- nominal fqtn -> module uv slot of its static-namespace table
         lambdas = {},        -- ExpFunction nodes pending file-scope emission
@@ -10848,18 +13297,22 @@ function coder.generate(modname, ast, static_deps, abi)
                 table.insert(code, node._body)
                 if tag == "Ast.TopLevelFunc" and not node.islocal then
                     table.insert(code, node._luabody)
+                    table.insert(code, node._strictbody)
                     if node._closure_upvalue then
                         -- Build the canonical closure once into its shadow slot;
                         -- `m.f` is served from that same slot via the module
                         -- metatable, so internal references and `m.f` denote one
                         -- identity. The closure carries its function-type tag
-                        -- (upvalue[1]) and native entry pointer (upvalue[2]) for
-                        -- the fast call path.
+                        -- (upvalue[1]), native entry pointer (upvalue[2]),
+                        -- fixed closure brand (upvalue[3]), and trailing strict
+                        -- entry (upvalue[4]).
                         table.insert(funcs, render([[
                             titan_pushmodule(L, _mod);
                             lua_pushlightuserdata(L, (void*)$FUNCTAG);
                             lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
-                            lua_pushcclosure(L, $LUANAME, 3);
+                            lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
+                            lua_pushcfunction(L, $STRICTNAME);
+                            lua_pushcclosure(L, $LUANAME, 5);
                             setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
                             luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                             lua_pop(L, 1);
@@ -10868,6 +13321,8 @@ function coder.generate(modname, ast, static_deps, abi)
                             SLOT = c_integer_literal(node._closure_upvalue),
                             FUNCTAG = function_type_tag(tlcontext, node._type),
                             NATIVE = func_name(tlcontext.module, node.name),
+                            STRICTNAME = coder._func_strictname(
+                                tlcontext.module, node.name),
                         }))
                         register_readonly_member(node.name, node._closure_upvalue)
                     else
@@ -10880,11 +13335,14 @@ function coder.generate(modname, ast, static_deps, abi)
                     -- emit its Lua entry and build its canonical closure straight
                     -- into the shadow slot.
                     table.insert(code, node._luabody)
+                    table.insert(code, node._strictbody)
                     table.insert(funcs, render([[
                         titan_pushmodule(L, _mod);
                         lua_pushlightuserdata(L, (void*)$FUNCTAG);
                         lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
-                        lua_pushcclosure(L, $LUANAME, 3);
+                        lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
+                        lua_pushcfunction(L, $STRICTNAME);
+                        lua_pushcclosure(L, $LUANAME, 5);
                         setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
                         luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                         lua_pop(L, 1);
@@ -10893,6 +13351,8 @@ function coder.generate(modname, ast, static_deps, abi)
                         SLOT = c_integer_literal(node._closure_upvalue),
                         FUNCTAG = function_type_tag(tlcontext, node._type),
                         NATIVE = func_name(tlcontext.module, node.name),
+                        STRICTNAME = coder._func_strictname(
+                            tlcontext.module, node.name),
                     }))
                 elseif tag == "Ast.TopLevelMethod" then
                     table.insert(code, node._luabody)
@@ -10904,7 +13364,8 @@ function coder.generate(modname, ast, static_deps, abi)
                     table.insert(code, node._boundbody)
                 elseif tag == "Ast.TopLevelStatic" then
                     table.insert(code, node._luabody)
-                    -- Build the static's canonical 3-upvalue closure once into
+                    table.insert(code, node._strictbody)
+                    -- Build the static's canonical 5-upvalue closure once into
                     -- its shadow slot. Public statics are also installed into
                     -- the record's static-namespace table; local record functions remain
                     -- reachable to Titan code through direct/static-slot paths.
@@ -10914,7 +13375,9 @@ function coder.generate(modname, ast, static_deps, abi)
                             titan_pushmodule(L, _mod);
                             lua_pushlightuserdata(L, (void*)$FUNCTAG);
                             lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
-                            lua_pushcclosure(L, $LUANAME, 3);
+                            lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
+                            lua_pushcfunction(L, $STRICTNAME);
+                            lua_pushcclosure(L, $LUANAME, 5);
                             setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
                             luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                             lua_pop(L, 1);
@@ -10926,7 +13389,9 @@ function coder.generate(modname, ast, static_deps, abi)
                             titan_pushmodule(L, _mod);
                             lua_pushlightuserdata(L, (void*)$FUNCTAG);
                             lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
-                            lua_pushcclosure(L, $LUANAME, 3);
+                            lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
+                            lua_pushcfunction(L, $STRICTNAME);
+                            lua_pushcclosure(L, $LUANAME, 5);
                             setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
                             luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                             lua_setfield(L, -2, $NAMESTR);
@@ -10944,6 +13409,7 @@ function coder.generate(modname, ast, static_deps, abi)
                                 node._type.varargtype,
                                 node._type.flexrettype)),
                         NATIVE = static_name(node._type),
+                        STRICTNAME = coder._static_strictname(node._type),
                     }))
                 end
             elseif node._module_initializer or tag == "Ast.StatBlock" then
@@ -10973,9 +13439,16 @@ function coder.generate(modname, ast, static_deps, abi)
             table.insert(sigs, lnode._sig)
             table.insert(code, lnode._body)
             table.insert(code, lnode._luabody)
+            table.insert(code, lnode._strictbody)
             i = i + 1
         end
     end
+
+    -- Array constructors encountered while emitting functions/lambdas have
+    -- now frozen the complete module-local writer inventory.
+    local array_writer_inits = {}
+    coder._emit_array_writers(
+        tlcontext, sigs, code, array_writer_inits)
 
     if #switch_get > 0 then
         table.insert(code, render([[
@@ -11064,7 +13537,7 @@ function coder.generate(modname, ast, static_deps, abi)
         and "\n            ptrdiff_t _base_off = savestack(L, _base);" or ""
     if nslots > 0 then
         table.insert(initvars, 1, render([[
-            lua_checkstack(L, $NSLOTS);
+            titan_ensure_stack(L, $NSLOTS);
             StkId _base = L->top.p;
             L->top.p += $NSLOTS;
             for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
@@ -11127,16 +13600,8 @@ function coder.generate(modname, ast, static_deps, abi)
     for _, entry in ipairs(tlcontext.functag_list) do
         table.insert(sigs, "static const void *" .. entry.id .. ";")
         table.insert(initfunctags, render([[
-            lua_getfield(L, LUA_REGISTRYINDEX, $KEYSTR);
-            if(lua_isnil(L, -1)) {
-                lua_pop(L, 1);
-                $ID = &$ID;
-                lua_pushlightuserdata(L, (void*)$ID);
-                lua_setfield(L, LUA_REGISTRYINDEX, $KEYSTR);
-            } else {
-                $ID = lua_topointer(L, -1);
-                lua_pop(L, 1);
-            }
+            $ID = titan_publish_function_type_tag(
+                L, $KEYSTR, (const void *)&$ID);
         ]], {
             ID = entry.id,
             KEYSTR = c_string_literal(
@@ -11184,6 +13649,7 @@ function coder.generate(modname, ast, static_deps, abi)
         LOADMODULES2 = #loadmods > 1 and table.concat(loadmods, "\n") or "",
         LOADGLOBALS = table.concat(loadglobals, "\n"),
         INITFUNCTAGS = table.concat(initfunctags, "\n"),
+        INITARRAYWRITERS = table.concat(array_writer_inits, "\n"),
         INITVARS = table.concat(initvars, "\n"),
         INITRECORDS = table.concat(initrecs, "\n"),
         FUNCS = table.concat(funcs, "\n"),
@@ -11230,6 +13696,11 @@ function coder.generate(modname, ast, static_deps, abi)
         end
     end
     for _, info in pairs(tlcontext.bound_luas) do
+        if static_deps[info.module] == true then
+            direct_native_modules[info.module] = true
+        end
+    end
+    for _, info in pairs(tlcontext.bound_stricts) do
         if static_deps[info.module] == true then
             direct_native_modules[info.module] = true
         end

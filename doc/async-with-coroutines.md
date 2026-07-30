@@ -621,9 +621,9 @@ Build `titan/coroutine.titan` as the ordinary qualified logical Titan module
 `titan.coroutine`. The combined standard binary exports `titan_coroutine_init`,
 `titan_coroutine_abi`, `titan_coroutine_types`, and
 `luaopen_titan_coroutine`. Install the paired physical standard provider as
-`<root>/lib/titan/0.19/{titan.so,titan.a}` and the generated logical shim as
+`<root>/lib/titan/0.20/{titan.so,titan.a}` and the generated logical shim as
 `<root>/share/lua/5.5/titan/coroutine.lua`. Titan's configured module path
-contains `<root>/lib/titan/0.19`; the parser desugars `import "coroutine"` to
+contains `<root>/lib/titan/0.20`; the parser desugars `import "coroutine"` to
 that qualified identity and prefix lookup claims it from the preferred native
 form.
 `require "titan.coroutine"` uses the shim to promote/map that provider and
@@ -637,8 +637,10 @@ owned by Lua's standard library.
 
 ABI 0.17 introduced the rule that a coroutine `value` containing an Array
 carries the canonical proxy Udata rather than the private backing Table. ABI
-0.18 preserved that `TValue` transport rule, and ABI 0.19 preserves it again.
-Exact typed Array paths continue to use backing `Table *`. See
+0.18 and 0.19 preserved that `TValue` transport rule. ABI 0.20 preserves it
+while adding the proxy's construction-selected Lua writer and the strict
+generic function-closure trailer. Exact typed Array paths continue to use
+backing `Table *`. See
 [Dense Arrays](implementation/dense-arrays.md#exact-and-generic-call-paths).
 
 The rockspec and Makefile make `luarocks make` and `make test` build all nine

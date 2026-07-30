@@ -60,12 +60,18 @@ write its exported variables, index its records. Titan functions receive
 and return Lua-compatible values; Maps are ordinary Lua tables, while Arrays
 cross the boundary as canonical Titan userdata proxies over private Lua
 tables. Titan shares Lua's garbage collector rather than bringing its own.
-Crossing from Lua into Titan costs one dynamic type check per argument —
+Crossing from Lua into Titan costs one target-directed dynamic conversion per argument —
 comparable to what a careful C function would do with the `luaL_check*`
-API — and crossing between Titan functions costs nothing at all beyond a
-C function call. The boundary is also where Titan's safety lives: every
-value that enters typed Titan code is checked once, at the edge, so the
-code inside can run unchecked at full speed. (See
+API. Exact Titan-to-Titan calls cost nothing beyond a C function call; a
+non-exact branded Titan function view uses a strict generic entry instead of
+pretending to be a Lua boundary. Container crossings remain shallow:
+genuine-Lua Array writes are dynamically converted by the Array's carried
+writer, raw Lua Map writes are not intercepted, and every later typed
+Array/Map read strictly establishes the requested value before native use.
+The distinction is where Titan's safety lives: dynamic conversion is applied
+only at an explicitly dynamic boundary, while gradual views pay strict checks
+when their contents are observed. The canonical split is the
+[normative boundary matrix](types.md#normative-boundary-matrix). (See
 [Lua interoperability](lua-interop.md) and, for the machinery,
 [the implementation documentation](../implementation/lua-interop-internals.md).)
 
@@ -103,8 +109,10 @@ slides records were spelled `struct` and the FFI was an inline
 **Pay-as-you-go dynamism.** Static types are the default, but Lua is next
 door, and pretending otherwise would make the boundary unusable. The
 `value` type is the deliberate escape hatch: a `value` can hold anything
-Lua can produce, conversions *to* `value` are free and implicit, and
-conversions *from* `value` are implicit where the context names a type —
+Lua can produce. Conversions from ordinary non-C Titan values *to* `value`
+are free and implicit; a boxable C scalar first checks its
+`lua_Integer`/`lua_Number` carrier, while C aggregates and function pointers
+are not boxable. Conversions *from* `value` are implicit where the context names a type —
 compiled, like the boundary, into a single run-time check. Option types
 (`T?`) play the same role for the smaller question of "this or nil",
 giving nil-tolerant code a checked, first-class shape instead of an
@@ -160,6 +168,15 @@ Variants are deliberately not first-class types, constructors are positional,
 and every arm is an ordinary full block. The first version therefore reuses
 the existing nominal, function, option, and error-handling models instead of
 creating parallel ones.
+
+The 0.20 prototype separates gradual consistency from direct and written
+coercions. Typed Array/Map observations and non-exact branded Titan calls now
+use strict guards, while written `value as/is T` and genuine Lua boundaries
+share a broader target-directed conversion. Arrays carry their Lua-write
+policy, and function closures distinguish exact native, strict Titan-generic,
+and coercive Lua entries. These representation changes account for the ABI
+advance; Interface syntax remains a coordinated future addition rather than a
+feature of this release.
 
 ## Principles, distilled
 

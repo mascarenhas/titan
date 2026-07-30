@@ -28,6 +28,43 @@ typedef char titan_array_assert_capacity_fits_lua_integer[
 typedef char titan_array_assert_useful_capacity[
     (TITAN_ARRAY_MAX_CAPACITY >= 2u) ? 1 : -1];
 
+const void *titan_publish_function_type_tag(lua_State *L,
+                                            const char *registry_key,
+                                            const void *candidate) {
+    int base;
+    const void *canonical;
+
+    if (registry_key == NULL || registry_key[0] == '\0')
+        luaL_error(L, "invalid Titan function-type registry key");
+    if (candidate == NULL)
+        luaL_error(L, "invalid Titan function-type tag candidate");
+    if (!lua_checkstack(L, 1))
+        luaL_error(L, "stack overflow publishing Titan function-type tag");
+    base = lua_gettop(L);
+
+    /*
+    ** The type-specific string slot elects one canonical tag independently of
+    ** module/provider load order. A later publisher recovers that pointer
+    ** rather than publishing its own translation-unit-local candidate.
+    */
+    lua_getfield(L, LUA_REGISTRYINDEX, registry_key);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        canonical = candidate;
+        lua_pushlightuserdata(L, (void *)canonical);
+        lua_setfield(L, LUA_REGISTRYINDEX, registry_key);
+    }
+    else {
+        if (!lua_islightuserdata(L, -1))
+            luaL_error(L, "invalid Titan function-type tag registry entry");
+        canonical = lua_touserdata(L, -1);
+        lua_pop(L, 1);
+    }
+
+    lua_settop(L, base);
+    return canonical;
+}
+
 static Table *titan_array_callback_metatable(lua_State *L) {
     TValue value = lua_totvalue(L, lua_upvalueindex(1));
     if (!ttistable(&value))
@@ -66,7 +103,7 @@ Udata *titan_array_try_proxy(Table *backing, Table *metatable) {
         !ttisfulluserdata(&value))
         return NULL;
     proxy = uvalue(&value);
-    if (proxy->len != 0 || proxy->nuvalue != 1 ||
+    if (proxy->len != 0 || proxy->nuvalue != 2 ||
         proxy->metatable != metatable ||
         !ttistable(&proxy->uv[0].uv) ||
         hvalue(&proxy->uv[0].uv) != backing)
@@ -90,7 +127,7 @@ Table *titan_array_try_backing(const TValue *value, Table *metatable) {
     if (metatable == NULL || !ttisfulluserdata(value))
         return NULL;
     proxy = uvalue(value);
-    if (proxy->len != 0 || proxy->nuvalue != 1 ||
+    if (proxy->len != 0 || proxy->nuvalue != 2 ||
         proxy->metatable != metatable ||
         !ttistable(&proxy->uv[0].uv))
         return NULL;
@@ -238,7 +275,9 @@ static int titan_array_lua_newindex(lua_State *L) {
     TValue receiver = lua_totvalue(L, 1);
     Table *backing =
         titan_array_require_backing(L, &receiver, metatable);
+    Udata *proxy = uvalue(&receiver);
     lua_Integer index;
+    lua_Unsigned logical_index;
     int isinteger;
 
     if (lua_type(L, 2) != LUA_TNUMBER)
@@ -246,7 +285,47 @@ static int titan_array_lua_newindex(lua_State *L) {
     index = lua_tointegerx(L, 2, &isinteger);
     if (!isinteger)
         return luaL_error(L, "Titan array index must be an integer");
-    titan_array_set_stack(L, backing, index, 3);
+    if (index < 1)
+        return luaL_error(L, "Titan array index must be positive");
+
+    /*
+    ** Nil is the representation-independent deletion operation. In
+    ** particular, deleting beyond the current capacity remains an
+    ** allocation-free no-op and never invokes the type-directed writer.
+    */
+    if (lua_isnil(L, 3)) {
+        titan_array_set_stack(L, backing, index, 3);
+        return 0;
+    }
+
+    /*
+    ** Classify an oversized positive write before running user-visible
+    ** conversion code. titan_array_growth is a pure preflight here; the
+    ** actual resize happens only after the writer succeeds.
+    */
+    logical_index = l_castS2U(index);
+    if (logical_index > backing->asize)
+        cast_void(titan_array_growth(L, logical_index));
+
+    /*
+    ** Construction installed a generated CClosure in uv[1]. Ordinary Array
+    ** validation deliberately never reads that slot: the shared metatable and
+    ** uv[0]/key-0 cycle remain the hot Array identity check. The debug library
+    ** can violate this private invariant, as it can other Titan invariants.
+    */
+    if (!lua_checkstack(L, 2))
+        return luaL_error(L, "stack overflow writing Titan array");
+    lua_pushtvalue(L, proxy->uv[1].uv);
+    lua_pushvalue(L, 3);
+    lua_call(L, 1, 1);
+
+    /*
+    ** The converted result is stack-rooted across any resize. No backing
+    ** mutation, capacity change, length change, or barrier occurs until this
+    ** point, so a writer error leaves the Array untouched.
+    */
+    titan_array_set_stack(L, backing, index, -1);
+    lua_pop(L, 1);
     return 0;
 }
 
@@ -293,29 +372,45 @@ Table *titan_array_metatable(lua_State *L) {
 }
 
 Table *titan_array_new(lua_State *L, Table *metatable,
-                       lua_Unsigned capacity) {
+                       lua_Unsigned capacity, const TValue *writer) {
     int base;
+    int writer_index;
     int backing_index;
     int proxy_index;
     Table *backing;
     Udata *proxy;
     TValue value;
+    TValue writer_value;
 
     if (metatable == NULL)
         luaL_error(L, "invalid Titan array metatable");
+    if (writer == NULL)
+        luaL_error(L, "invalid Titan array writer");
+    writer_value = *writer;
+    if (!ttisCclosure(&writer_value))
+        luaL_error(L, "invalid Titan array writer");
     if (capacity > TITAN_ARRAY_MAX_CAPACITY)
         luaL_error(L, "array index too large");
     if (!lua_checkstack(L, 4))
         luaL_error(L, "stack overflow creating Titan array");
 
     base = lua_gettop(L);
+    /*
+    ** Root the writer before either construction object is allocated. The
+    ** caller also owns a root (normally the module's cached private slot), but
+    ** this local stack root makes all later allocation/barrier ordering
+    ** self-contained.
+    */
+    lua_pushtvalue(L, writer_value);
+    writer_index = base + 1;
+
     backing = luaH_new(L);
     sethvalue(L, &value, backing);
     lua_pushtvalue(L, value);
-    backing_index = base + 1;
+    backing_index = base + 2;
 
-    lua_newuserdatauv(L, 0, 1);
-    proxy_index = base + 2;
+    lua_newuserdatauv(L, 0, 2);
+    proxy_index = base + 3;
     value = lua_totvalue(L, proxy_index);
     proxy = uvalue(&value);
 
@@ -330,6 +425,14 @@ Table *titan_array_new(lua_State *L, Table *metatable,
         int set;
         lua_pushvalue(L, backing_index);
         set = lua_setiuservalue(L, proxy_index, 1);
+        lua_assert(set);
+        cast_void(set);
+    }
+
+    {
+        int set;
+        lua_pushvalue(L, writer_index);
+        set = lua_setiuservalue(L, proxy_index, 2);
         lua_assert(set);
         cast_void(set);
     }

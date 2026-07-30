@@ -7,13 +7,15 @@
 > * **Upvalue ordering.** The shipped Titan function closure uses
 >   upvalue[0] = the module reference (`_mod`), upvalue[1] = the
 >   function-type tag (light userdata), upvalue[2] = the native entry
->   pointer (light userdata) — i.e. the module reference stays at slot 0
->   rather than moving to slot 2 as proposed below.
-> * **Call paths.** There are **two**, not three: an exact-type *fast path*
->   (a direct native call) and a *generic path* through the Lua stack (via
->   `luaD_callnoyield`) used for non-exact Titan function values, Lua
->   closures, C functions, and `__call` objects. Titan can now call Lua
->   functions directly through the generic path.
+>   pointer (light userdata), and upvalue[3] = the fixed opaque closure
+>   brand. Captures begin at upvalue 4 and the strict Titan-generic light C
+>   function is the final upvalue. The module reference therefore stays at
+>   slot 0 rather than moving to slot 2 as proposed below.
+> * **Call paths.** There are three entry roles: an exact-type *fast path*
+>   makes a direct native call; a branded non-exact Titan function uses its
+>   strict trailer through `luaD_callnoyield`; and a genuine Lua call enters
+>   the closure's coercive `CClosure.f`. Non-Titan Lua closures, C functions,
+>   and `__call` objects use ordinary Lua dispatch.
 > * **Default return type.** A function with no return annotation now
 >   defaults to **zero returns** (`() -> ()`, returning nothing as in Lua),
 >   not a single `nil`.

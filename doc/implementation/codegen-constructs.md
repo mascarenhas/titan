@@ -256,10 +256,12 @@ authoritative-length protocol is in [Dense Arrays](dense-arrays.md).
 ### Constructor (`codearray`)
 
 `codearray` consumes the checker's `_positional_adjustment`. It evaluates
-every retained scalar and open-tail producer in lexical order, asks
-`titan_array_new` for an exact initial capacity, and fills only positive
-array-part slots. The backing and proxy are independently rooted across
-allocation; collectable element stores barrier the backing Table.
+every retained scalar and open-tail producer in lexical order, asks the
+module-local writer inventory for the constructor's final element type,
+passes that cached closure to `titan_array_new` with the exact initial
+capacity, and fills only positive array-part slots. The writer, backing, and
+proxy are independently rooted across allocation; collectable element stores
+barrier the backing Table.
 
 The final logical length is the highest non-nil produced position, so trailing
 nils do not inflate `#array`. A final open producer (`...`, a flexible-return
@@ -287,13 +289,16 @@ if (_k < 1) {
     }
 }
 const TValue *_s = &_av;
-/* checkandget(elem-type, result, _s, loc) follows */
+/* strict GuardPlan(elem-type) lowering follows */
 ```
 
 The inline path returns nil for every index below 1, beyond capacity, or in a
 hole. It never consults the hash part. The mixed-domain converter then
-validates the element; nested Array reads additionally accept either an
-internal backing Table or a canonical proxy written by Lua.
+consumes the static element's strict `GuardPlan`: numeric and boolean tags are
+not coerced, Option recurses on its present arm, and C/nominal/container
+categories have explicit guards. Nested Array reads additionally accept either
+an internal backing Table or a canonical proxy written by Lua. The direct
+shared-metatable test does not inspect the proxy's writer user value.
 
 ### Write (`codeassignment`, VarBracket on an array)
 
@@ -322,6 +327,11 @@ scan when deleting the tail, and barriers collectable elements against the
 backing Table. `#arr` reads the guarded authoritative `lenhint`; it never calls
 `luaH_getn`.
 
+This is the typed Titan path and bypasses the proxy writer. The shared Lua
+`__newindex` path instead treats nil as deletion, or calls the construction
+writer's checker-provided `DynamicCoercionPlan` before any growth or store.
+Writer failure leaves length, capacity, and contents unchanged.
+
 ## Maps
 
 Map access dispatches on the **static key type**; the key is boxed into
@@ -333,7 +343,7 @@ an anchored temp slot and passed as a `TValue*`.
 keys call `luaH_getint(t, ivalue(k), ...)`; **float** keys are first
 normalized with `luaV_tointeger(k, &ik, F2Ieq)` so `m[1.0]` and `m[1]`
 hit the same entry; anything else takes plain `luaH_get`. All variants
-normalize an empty tag to nil and finish with the same `checkandget` (or
+normalize an empty tag to nil and finish with the same strict guard (or
 option-nil shortcut) as arrays. Real output for `m: {string:integer}`:
 
 ```c
@@ -351,8 +361,11 @@ if (tagisempty(_s_tag)) {
 }
 ```
 
-A value Lua smuggled in with the wrong type surfaces here as a deferred
-run-time error, e.g. `expected integer but found string`.
+A wrong stored value surfaces here as a deferred run-time error, e.g.
+`expected integer but found string`. The guard does not depend on whether
+Titan or raw Lua performed the write: Maps are ordinary Tables and carry no
+write-interception or provenance channel. An integral float therefore does not
+become an integer on a typed Map read.
 
 ### Write (`set_table_entry`) and constructor (`codemap`)
 
@@ -653,49 +666,44 @@ large `integer` is never rounded to a float before the test (`> >=` are
 emitted as the swapped `< <=` helper, `~=` as the negated `==`). An
 `int`/`int` or `float`/`float` comparison stays a plain C `<`/`<=`/`==`.
 
-## Casts: every `ExpCast` variant
+## Casts and checker plans
 
-The checker materializes every implicit coercion as an `Ast.ExpCast`
-([the type checker](checker.md)), so this dispatch in `codeexp` is the
-complete inventory of conversions:
+The checker materializes representation-changing fixed operations as
+annotated `Ast.ExpCast` nodes and retains same-representation/open operations
+on their consumers ([the type checker](checker.md)). `codeexp` dispatches on
+the stored plan rather than treating every unequal pair as a scalar cast:
 
-1. **Cast of an array/map index expression** is folded into the read:
-   the `VarBracket`'s `_type` is temporarily replaced by the cast target
-   so the read's `checkandget` lands directly in the target type.
-2. **`value` → T**: copy the `TValue` to a temp, then
-   `checkandget(typ, dst, &src, loc)`. The errors are the boundary
-   shapes: `%s:%d:%d: type error, expected %s but found %s` (Lua's tag
-   name for primitives, the registry-mapped record name for foreign
-   records), and for integer targets fed a fractional float,
-   `%s:%d:%d: type error, number '%f' has no integer representation`.
-3. **T → `value`**: `setboxed` into a `TValue` temp — records and unions
-   remain their Udata and Arrays become their canonical proxy. No new slot: the source
-   stays anchored where it was.
-4. **integer → float**: `((lua_Number)<exp>)`.
-5. **anything → boolean**: `toboolean(type, exp)`.
-6. **float → integer**: an exactness check with `lua_Number` temps —
-   `$TMP2 = l_floor($TMP1);` then
-   `if ($TMP1 != $TMP2) { luaL_error(L, "type error at line %d, number '%f' has no integer representation", ...); } else { lua_numbertointeger($TMP2, &$TMP3); }`
-   — so an integer coerced from `2.0` is `2` and one coerced from `2.5`
-   raises at run time. This variant is only ever checker-synthesized:
-   an explicit `2.0 as integer` is a *compile-time* error (`cannot cast
-   'float' to 'integer'`), because the checker's cast rule demands the
-   pair also be `types.compatible`, which float/integer is not.
-7. **integer/float → string**: `_integer2str` / `_float2str` (see
+1. **Array/Map index projection** uses the read's strict `GuardPlan`; a
+   written cast is not folded into this path merely because both share an
+   `Ast.ExpCast` shape.
+2. **Implicit `value` → T** consumes a gradual projection and performs the
+   strict tag/shape guard. Numeric cross-tag conversion and truthiness are not
+   available.
+3. **Written `value as T`** consumes the embedded
+   `DynamicCoercionPlan`: integral in-range floats may produce integers,
+   integers may produce floats, booleans use truthiness, and Option recurses.
+   The same plan's non-raising form implements `is`.
+4. **T → `value`** uses `setboxed` into a `TValue` temp — records and unions
+   remain their Udata and Arrays become their canonical proxy. No new slot:
+   the source stays anchored where it was.
+5. **integer → float** is `((lua_Number)<exp>)`.
+6. **anything → boolean** uses the direct truthiness coercion selected by the
+   checker, distinct from a strict gradual guard.
+7. **float → integer** performs the exactness/range check with
+   `lua_Number` temps and `lua_numbertointeger`. Both automatic and written
+   numeric conversions have explicit plans; neither is consistency.
+8. **integer/float → string** uses `_integer2str` / `_float2str` (see
    [Strings](#strings)), anchored unless built into a target.
-8. **nil → `t?`**: `setnilvalue(&$TMP);`.
-9. **t → `t?`** (wrap): `setslot(base-type, &$TMP, exp)` — box the
-   native value into a `TValue`.
-10. **`t?` → t** (unwrap):
-    `if(TITAN_UNLIKELY(ttisnil(&$CEXP))) { luaL_error(L, "%s:%d:%d: type error, expected %s but found nil", ...); } else { $GETSLOT }`,
-    so a nil reaching any unwrap position raises a clean
-    `expected <T> but found nil` at run time.
-11. **→ foreign pointer**: `nativetoforeignexp` first performs any required
-    boundary conversion, followed by the target C cast. A `value` source uses
-    `checkandget`; in particular, Lua-internal `Udata *` accepts full userdata
-    or nil and rejects lightuserdata. Ordinary already-native pointer
-    conversions can remain a plain `(($CTYPE)($CEXP))` cast
-    ([FFI internals](ffi-internals.md)).
+9. **nil → `t?`** emits `setnilvalue`.
+10. **t → `t?`** boxes the present value with the plan's `option_wrap`.
+11. **`t?` → t** checks nil before lowering `option_force`'s inner plan, so
+    absence raises a clean `expected <T> but found nil`.
+12. **→ foreign pointer** lets `nativetoforeignexp` lower the exact C
+    conversion plan. A `value` source needs the separately written unsafe
+    raw-pointer operation; it is never an implicit gradual projection.
+    Lua-internal `Udata *` accepts full userdata or nil and rejects
+    lightuserdata. Ordinary already-native pointer conversions can remain a
+    plain C cast ([FFI internals](ffi-internals.md)).
 
 ## Type tests: `ExpIs`
 
@@ -709,18 +717,21 @@ path instead of the generic scalar temporary path. This preserves exact-once
 evaluation without generating an invalid scalar initializer for a C
 aggregate.
 
-* A boxed `value` target mirrors `checkandget`: integer tests accept an integer
-  tag or an exact integral float that passes `lua_numbertointeger`; float tests
-  accept either numeric tag; primitive/Map tests use `ttis*`; Array, nominal
-  record/union, and owned-C tests compare the same exact metatable; C pointer targets
-  distinguish ordinary lightuserdata from the Lua-internal `Udata *`
-  full-userdata case.
-* A target `Option(T)` first accepts nil, then mirrors `checkandset(T, ...)`.
-  This distinction matters for boolean: direct `value as boolean` uses
-  truthiness and therefore `value is boolean` is total, while
-  `value as boolean?` requires nil or an actual boolean and
-  `value is boolean?` uses that strict tag predicate. Function slots remain
-  deliberately unchecked.
+* A written `value is T` backed by a `DynamicCoercionPlan`: integer tests
+  accept an integer tag or an exact integral float that passes
+  `lua_numbertointeger`; float tests accept either numeric tag;
+  primitive/Map tests use `ttis*`; Array, nominal record/union, and owned-C
+  tests compare the same exact metatable. Once Interfaces v1 is enabled, an
+  Interface target likewise accepts only an existing exact wrapper.
+* A target `Option(T)` first accepts nil, then recursively applies the same
+  dynamic plan for `T`. Thus direct `value as boolean` and present
+  `value as boolean?` both use truthiness, while nil is preserved;
+  `value is boolean?` reports the same total acceptance. Function slots remain
+  deliberately unchecked until invocation.
+* A raw C-pointer target has no `DynamicCoercionPlan`. The separately
+  authorized written unsafe `value is CPointer(T)` predicate accepts the broad
+  lightuserdata/nil category without claiming to prove the pointee type;
+  `Udata *` is the specialized full-userdata/nil case.
 * Exact `T? is T` is `!ttisnil`, and C `char *`/`void * is string` is a
   non-NULL test.
 * Identity and every other total admitted cast emit true after consuming the
@@ -789,8 +800,10 @@ count, and install the error handler — see
 
 ## Run-time errors: `codethrow` and message conventions
 
-Every run-time error in generated code is a `luaL_error(L, ...)` emitted
-by `codethrow` or its callers. Two prefix conventions coexist:
+Generated run-time errors ultimately use `luaL_error(L, ...)`, either through
+`codethrow` or through a boundary/runtime-specific check. The following are
+the two most common source-location formats; they are conventions, not an
+exhaustive inventory of every generated diagnostic:
 
 * **`%s:%d:%d:` — `filename:line:col`** (the `.titan` path given to the
   checker). Used by all `checkandget`/`checkandset` sites: boundary
@@ -804,8 +817,12 @@ by `codethrow` or its callers. Two prefix conventions coexist:
   unknown `%` sequence through literally), and
   `type error at line %d, number '%f' has no integer representation`.
 
-Boolean and `value` targets never throw — every Lua value converts.
-Flexible input/output runs instead report their explicit
+At a genuine Lua/dynamic boundary, boolean truthiness and copying an existing
+Lua `TValue` into `value` are total. Strict implicit `value -> boolean`
+projection, typed Array/Map reads, and branded Titan-generic observations
+instead require the exact boolean tag and may raise. Injecting a native C
+scalar into `value` may also raise when the value does not fit Titan's
+`TValue` carrier. Flexible input/output runs report their explicit
 `TITAN_VARARG_MAX` overflow errors. The module metatable raises
 `member '%s' does not exist in Titan module '%s'`. Whenever an
 error crosses a Lua entry wrapper, the runtime's `errorhandler` records

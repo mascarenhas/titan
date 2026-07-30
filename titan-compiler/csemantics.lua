@@ -1,6 +1,7 @@
 local types = require "titan-compiler.types"
 
 local csemantics = {}
+local evaluate_expression
 
 -- A target profile is an injected, immutable-by-convention table:
 --
@@ -9,6 +10,8 @@ local csemantics = {}
 --   unsigned_int = "unsigned int",
 --   lua_integer = "long long",
 --   lua_number = "double",
+--   size_t = "unsigned long",
+--   ptrdiff_t = "long",
 --   integers = {
 --     ["int"] = {
 --       type = types.CInteger("int", true, 3, 32),
@@ -34,14 +37,14 @@ local csemantics = {}
 -- so a profile can compare exact ranges outside the host Lua integer range.
 -- Large bounds should therefore be supplied as decimal strings.
 --
--- build_profile(macros, lua_integer, lua_number) constructs this schema from
--- an injected predefined-macro table. The table may use the cpp representation
--- (an object macro is an array of replacement tokens) or direct replacement
--- strings. No compiler is queried here and no target program is executed.
--- lua_integer and lua_number are the C spellings selected by the configured
--- luaconf.h; common equivalent spellings such as "signed long int" are
--- canonicalized. The function also accepts one options table containing
--- `macros`, `lua_integer`, and `lua_number`.
+-- build_profile(options) constructs this schema from an injected predefined-
+-- macro table, carrier typedef spellings, and parsed <limits.h> minimum
+-- expressions. The macro table may use the cpp representation (an object macro
+-- is an array of replacement tokens) or direct replacement strings. No
+-- compiler is queried here and no target program is executed. lua_integer and
+-- lua_number are the C spellings selected by the configured luaconf.h; size_t
+-- and ptrdiff_t are the configured <stddef.h> spellings. Common equivalent
+-- spellings such as "signed long int" are canonicalized.
 --
 -- classify_integer_literal(profile, literal) consumes the metadata preserved
 -- by c-parser/cdefines.lua and chooses the first target type in its ordered
@@ -298,11 +301,43 @@ local function divide_decimals(left, right)
         decimal_from_parts(left_sign, remainder)
 end
 
+-- Profile validation and integer-expression evaluation ask for the same small
+-- set of exact powers repeatedly. Cache this pure decimal result by exponent,
+-- rather than caching validation of a profile table: externally assembled
+-- profiles are still fully revalidated on every public macro-evaluation call.
+-- A bounded FIFO retains only modest decimal strings, so synthetic wide
+-- profiles and many distinct shift counts cannot grow module-lifetime memory
+-- without bound. Larger powers remain exact; they are simply not retained.
+local POWER_CACHE_ENTRIES = 64
+local POWER_CACHE_MAX_DIGITS = 4096
+local powers_of_two = {}
+local power_cache_order = {}
+local power_cache_count = 0
+local power_cache_oldest = 1
+
+local function cache_power_of_two(exponent, value)
+    if #value > POWER_CACHE_MAX_DIGITS then return end
+    if power_cache_count < POWER_CACHE_ENTRIES then
+        power_cache_count = power_cache_count + 1
+        power_cache_order[power_cache_count] = exponent
+    else
+        local evicted = power_cache_order[power_cache_oldest]
+        powers_of_two[evicted] = nil
+        power_cache_order[power_cache_oldest] = exponent
+        power_cache_oldest =
+            power_cache_oldest % POWER_CACHE_ENTRIES + 1
+    end
+    powers_of_two[exponent] = value
+end
+
 local function power_of_two(exponent)
+    local cached = powers_of_two[exponent]
+    if cached then return cached end
     local value = "1"
     for _ = 1, exponent do
         value = multiply_magnitude_small(value, 2)
     end
+    cache_power_of_two(exponent, value)
     return value
 end
 
@@ -497,12 +532,18 @@ end
 -- pure constructor: callers own acquisition of the macro table and luaconf.h
 -- spellings.
 function csemantics.build_profile(macros, lua_integer, lua_number)
+    local size_t
+    local ptrdiff_t
+    local signed_minima
     if lua_integer == nil and lua_number == nil
        and type(macros) == "table" and macros.macros ~= nil then
         local options = macros
         macros = options.macros
         lua_integer = options.lua_integer
         lua_number = options.lua_number
+        size_t = options.size_t
+        ptrdiff_t = options.ptrdiff_t
+        signed_minima = options.signed_minima
     end
     if type(macros) ~= "table" then
         return nil, "target profile predefined macros must be a table"
@@ -519,6 +560,19 @@ function csemantics.build_profile(macros, lua_integer, lua_number)
         return nil, "unsupported lua_Number C spelling '" ..
             tostring(lua_number) .. "'"
     end
+    local canonical_size_t = canonical_integer_spelling(size_t)
+    if not canonical_size_t then
+        return nil, "unsupported size_t C spelling '" ..
+            tostring(size_t) .. "'"
+    end
+    local canonical_ptrdiff_t = canonical_integer_spelling(ptrdiff_t)
+    if not canonical_ptrdiff_t then
+        return nil, "unsupported ptrdiff_t C spelling '" ..
+            tostring(ptrdiff_t) .. "'"
+    end
+    if type(signed_minima) ~= "table" then
+        return nil, "target profile must provide parsed signed integer minima"
+    end
 
     local char_bit, err = required_macro_integer(macros, "__CHAR_BIT__")
     if not char_bit then return nil, err end
@@ -533,6 +587,8 @@ function csemantics.build_profile(macros, lua_integer, lua_number)
         unsigned_int = "unsigned int",
         lua_integer = canonical_lua_integer,
         lua_number = canonical_lua_number,
+        size_t = canonical_size_t,
+        ptrdiff_t = canonical_ptrdiff_t,
         char_bit = char_bit_number,
         char_signed = macros.__CHAR_UNSIGNED__ == nil,
         integers = {},
@@ -630,14 +686,6 @@ function csemantics.build_profile(macros, lua_integer, lua_number)
             "0", unsigned_maximum)
     end
 
-    local char_source = profile.char_signed
-        and profile.integers["signed char"]
-        or profile.integers["unsigned char"]
-    profile.integers.char = make_profile_integer(
-        "char", profile.char_signed, 1, char_source.type.bits,
-        char_source.precision, char_source.minimum, char_source.maximum,
-        profile.char_signed and "unsigned char" or nil)
-
     -- __int128 is a compiler extension, not a mandatory C99 primitive. Keep it
     -- out of the semantic universe unless the selected target explicitly
     -- advertises storage for it. Its range follows the same binary integer
@@ -668,10 +716,67 @@ function csemantics.build_profile(macros, lua_integer, lua_number)
                 "0", unsigned_maximum)
     end
 
+    -- The maximum traits determine precision, but they cannot distinguish
+    -- two's-complement from one's-complement or sign-magnitude signed ranges.
+    -- Evaluate the configured <limits.h> minima exactly, then let profile
+    -- validation issue Titan's explicit supported-target diagnostic.
+    for _, spelling in ipairs({
+        "signed char", "short", "int", "long", "long long",
+    }) do
+        local source = signed_minima[spelling]
+        if source == nil then
+            return nil, "target profile is missing the configured minimum for '"
+                .. spelling .. "'"
+        end
+        local minimum
+        if type(source) == "string" or type(source) == "number" then
+            local sign, magnitude = normalized_bound(source)
+            if sign == nil then
+                return nil, "configured minimum for '" .. spelling
+                    .. "' is not a decimal integer"
+            end
+            minimum = decimal_from_parts(sign, magnitude)
+        elseif type(source) == "table" then
+            local evaluated, evaluation_error =
+                evaluate_expression(profile, source)
+            if not evaluated then
+                return nil, "cannot evaluate configured minimum for '"
+                    .. spelling .. "': " .. tostring(evaluation_error)
+            end
+            minimum = evaluated.value
+        else
+            return nil, "configured minimum for '" .. spelling
+                .. "' has an unsupported representation"
+        end
+        profile.integers[spelling].minimum = minimum
+    end
+
+    local char_source = profile.char_signed
+        and profile.integers["signed char"]
+        or profile.integers["unsigned char"]
+    profile.integers.char = make_profile_integer(
+        "char", profile.char_signed, 1, char_source.type.bits,
+        char_source.precision, char_source.minimum, char_source.maximum,
+        profile.char_signed and "unsigned char" or nil)
+
+    local float_radix
+    if macros.__FLT_RADIX__ ~= nil then
+        float_radix, err =
+            required_macro_integer(macros, "__FLT_RADIX__")
+        if not float_radix then return nil, err end
+        float_radix = tonumber(float_radix)
+        if not float_radix or float_radix < 2
+           or float_radix > 1000000000 then
+            return nil, "predefined floating radix is outside the supported profile range"
+        end
+    end
     local float_specs = {
-        {"float", 1, "__SIZEOF_FLOAT__"},
-        {"double", 2, "__SIZEOF_DOUBLE__"},
-        {"long double", 3, "__SIZEOF_LONG_DOUBLE__"},
+        {"float", 1, "__SIZEOF_FLOAT__", "__FLT_MAX_EXP__", "FLT_MAX",
+            "__FLT_MANT_DIG__"},
+        {"double", 2, "__SIZEOF_DOUBLE__", "__DBL_MAX_EXP__", "DBL_MAX",
+            "__DBL_MANT_DIG__"},
+        {"long double", 3, "__SIZEOF_LONG_DOUBLE__",
+            "__LDBL_MAX_EXP__", "LDBL_MAX", "__LDBL_MANT_DIG__"},
     }
     for _, spec in ipairs(float_specs) do
         local bytes
@@ -683,10 +788,38 @@ function csemantics.build_profile(macros, lua_integer, lua_number)
             return nil, "predefined storage width for '" .. spec[1] ..
                 "' is outside the supported profile range"
         end
+        local maximum_exponent
+        if macros[spec[4]] ~= nil then
+            maximum_exponent, err =
+                required_macro_integer(macros, spec[4])
+            if not maximum_exponent then return nil, err end
+            maximum_exponent = tonumber(maximum_exponent)
+            if not maximum_exponent or maximum_exponent < 1
+               or maximum_exponent > 1000000000 then
+                return nil, "predefined maximum exponent for '" .. spec[1]
+                    .. "' is outside the supported profile range"
+            end
+        end
+        local mantissa_digits
+        if macros[spec[6]] ~= nil then
+            mantissa_digits, err =
+                required_macro_integer(macros, spec[6])
+            if not mantissa_digits then return nil, err end
+            mantissa_digits = tonumber(mantissa_digits)
+            if not mantissa_digits or mantissa_digits < 1
+               or mantissa_digits > 1000000000 then
+                return nil, "predefined mantissa width for '" .. spec[1]
+                    .. "' is outside the supported profile range"
+            end
+        end
         profile.floats[spec[1]] = {
             type = types.CFloat(spec[1]),
             rank = spec[2],
             bits = byte_number * char_bit_number,
+            maximum_exponent = maximum_exponent,
+            maximum_macro = spec[5],
+            radix = float_radix,
+            mantissa_digits = mantissa_digits,
         }
     end
 
@@ -695,6 +828,54 @@ function csemantics.build_profile(macros, lua_integer, lua_number)
     if not ok then return nil, err end
 
     profile.identity = assert(csemantics.profile_identity(profile))
+
+    -- Keep the authoritative target traits on the canonical scalar descriptor
+    -- objects handed to the foreign-type converter. These fields are
+    -- deliberately outside typedecl's structural schema: they are
+    -- checker-local lowering metadata, not part of a published Titan type.
+    local integer_traits = {}
+    for spelling, entry in pairs(profile.integers) do
+        integer_traits[spelling] = {
+            kind = "integer",
+            spelling = spelling,
+            signed = entry.type.signed,
+            rank = entry.type.rank,
+            bits = entry.type.bits,
+            precision = entry.precision,
+            minimum = entry.minimum,
+            maximum = entry.maximum,
+            unsigned = entry.unsigned,
+        }
+    end
+    local float_traits = {}
+    for spelling, entry in pairs(profile.floats) do
+        float_traits[spelling] = {
+            kind = "float",
+            spelling = spelling,
+            rank = entry.rank,
+            bits = entry.bits,
+            maximum_exponent = entry.maximum_exponent,
+            maximum_macro = entry.maximum_macro,
+            radix = entry.radix,
+            mantissa_digits = entry.mantissa_digits,
+        }
+    end
+    local carrier_traits = {
+        identity = profile.identity,
+        lua_integer = assert(integer_traits[profile.lua_integer]),
+        lua_number = assert(float_traits[profile.lua_number]),
+        size_t = assert(integer_traits[profile.size_t]),
+        ptrdiff_t = assert(integer_traits[profile.ptrdiff_t]),
+        long_double = assert(float_traits["long double"]),
+    }
+    for spelling, entry in pairs(profile.integers) do
+        entry.type._c_numeric = integer_traits[spelling]
+        entry.type._c_numeric_carriers = carrier_traits
+    end
+    for spelling, entry in pairs(profile.floats) do
+        entry.type._c_numeric = float_traits[spelling]
+        entry.type._c_numeric_carriers = carrier_traits
+    end
     return profile
 end
 
@@ -783,6 +964,10 @@ function csemantics.validate_profile(profile)
        or type(profile.lua_number) ~= "string" then
         return nil, "target profile must name lua_Integer and lua_Number"
     end
+    if type(profile.size_t) ~= "string"
+       or type(profile.ptrdiff_t) ~= "string" then
+        return nil, "target profile must name size_t and ptrdiff_t"
+    end
 
     for _, spelling in ipairs(sorted_keys(profile.integers)) do
         local entry = profile.integers[spelling]
@@ -811,6 +996,20 @@ function csemantics.validate_profile(profile)
             return nil, "target integer profile has a reversed range for '" ..
                 spelling .. "'"
         end
+        if entry.type.signed then
+            local expected_minimum = "-" .. power_of_two(entry.precision)
+            local expected_maximum =
+                subtract_magnitudes(power_of_two(entry.precision), "1")
+            if assert(compare_bounds(
+                    entry.minimum, expected_minimum)) ~= 0
+               or assert(compare_bounds(
+                    entry.maximum, expected_maximum)) ~= 0 then
+                return nil, "unsupported C target profile: Titan requires "
+                    .. "two's-complement signed integers, but '" .. spelling
+                    .. "' has range " .. tostring(entry.minimum) .. ".."
+                    .. tostring(entry.maximum)
+            end
+        end
     end
 
     for _, spelling in ipairs(sorted_keys(profile.floats)) do
@@ -823,7 +1022,21 @@ function csemantics.validate_profile(profile)
            or (entry.bits ~= nil
                and (type(entry.bits) ~= "number"
                     or entry.bits <= 0
-                    or entry.bits % 1 ~= 0)) then
+                    or entry.bits % 1 ~= 0))
+           or (entry.maximum_exponent ~= nil
+               and (type(entry.maximum_exponent) ~= "number"
+                    or entry.maximum_exponent < 1
+                    or entry.maximum_exponent % 1 ~= 0))
+           or (entry.maximum_macro ~= nil
+               and type(entry.maximum_macro) ~= "string")
+           or (entry.radix ~= nil
+               and (type(entry.radix) ~= "number"
+                    or entry.radix < 2
+                    or entry.radix % 1 ~= 0))
+           or (entry.mantissa_digits ~= nil
+               and (type(entry.mantissa_digits) ~= "number"
+                    or entry.mantissa_digits < 1
+                    or entry.mantissa_digits % 1 ~= 0)) then
             return nil, "invalid target floating profile entry for '" ..
                 spelling .. "'"
         end
@@ -845,6 +1058,18 @@ function csemantics.validate_profile(profile)
     if not lua_integer_entry then return nil, lua_integer_err end
     if not lua_integer_entry.type.signed then
         return nil, "target profile's lua_Integer type must be signed"
+    end
+    local size_t_entry, size_t_err =
+        profile_integer(profile, profile.size_t)
+    if not size_t_entry then return nil, size_t_err end
+    if size_t_entry.type.signed then
+        return nil, "target profile's size_t type must be unsigned"
+    end
+    local ptrdiff_t_entry, ptrdiff_t_err =
+        profile_integer(profile, profile.ptrdiff_t)
+    if not ptrdiff_t_entry then return nil, ptrdiff_t_err end
+    if not ptrdiff_t_entry.type.signed then
+        return nil, "target profile's ptrdiff_t type must be signed"
     end
     local lua_number_entry, lua_number_err =
         profile_float(profile, profile.lua_number)
@@ -883,6 +1108,8 @@ function csemantics.profile_identity(profile)
         "char_signed=" .. tostring(profile.char_signed),
         "lua_Integer=" .. profile.lua_integer,
         "lua_Number=" .. profile.lua_number,
+        "size_t=" .. profile.size_t,
+        "ptrdiff_t=" .. profile.ptrdiff_t,
     }
     for _, spelling in ipairs(sorted_keys(profile.integers)) do
         local entry = profile.integers[spelling]
@@ -900,6 +1127,10 @@ function csemantics.profile_identity(profile)
         local entry = profile.floats[spelling]
         identity[#identity + 1] = table.concat({
             spelling, tostring(entry.rank), tostring(entry.bits),
+            tostring(entry.maximum_exponent or ""),
+            tostring(entry.maximum_macro or ""),
+            tostring(entry.radix or ""),
+            tostring(entry.mantissa_digits or ""),
         }, ":")
     end
     return table.concat(identity, "|")
@@ -969,6 +1200,75 @@ function csemantics.scalar_category(profile, typ)
         return nil, "type is not a C scalar operand"
     end
     return info
+end
+
+local function copy_numeric_trait(entry)
+    if not entry then return nil end
+    if entry.type._tag == "Type.CInteger" then
+        return {
+            kind = "integer",
+            spelling = entry.type.spelling,
+            signed = entry.type.signed,
+            rank = entry.type.rank,
+            bits = entry.type.bits,
+            precision = entry.precision,
+            minimum = entry.minimum,
+            maximum = entry.maximum,
+            unsigned = entry.unsigned,
+        }
+    end
+    return {
+        kind = "float",
+        spelling = entry.type.spelling,
+        rank = entry.rank,
+        bits = entry.bits,
+        maximum_exponent = entry.maximum_exponent,
+        maximum_macro = entry.maximum_macro,
+        radix = entry.radix,
+        mantissa_digits = entry.mantissa_digits,
+    }
+end
+
+-- Return the authoritative scalar traits for a Titan carrier or direct C
+-- numeric type. This is intentionally a profile query rather than a spelling
+-- table in the coder: integer padding/ranges and the configured lua_Integer /
+-- lua_Number spellings belong to the selected target.
+function csemantics.numeric_trait(profile, typ)
+    local resolved = types.resolve_c_typedef(typ)
+    if not resolved then return nil, "missing numeric type" end
+    if resolved._tag == "Type.Integer" then
+        local entry, err = profile_integer(profile, profile.lua_integer)
+        if not entry then return nil, err end
+        return copy_numeric_trait(entry)
+    elseif resolved._tag == "Type.Float" then
+        local entry, err = profile_float(profile, profile.lua_number)
+        if not entry then return nil, err end
+        return copy_numeric_trait(entry)
+    elseif resolved._tag == "Type.CInteger" then
+        local canonical, entry = canonical_integer(profile, resolved)
+        if not canonical then return nil, entry end
+        return copy_numeric_trait(entry)
+    elseif resolved._tag == "Type.CFloat" then
+        local canonical, entry = canonical_float(profile, resolved)
+        if not canonical then return nil, entry end
+        return copy_numeric_trait(entry)
+    end
+    return nil, "type is not a numeric scalar"
+end
+
+-- Pure range query used while generating one checked scalar crossing.
+function csemantics.integer_range_contains(target, source)
+    if not target or target.kind ~= "integer"
+       or not source or source.kind ~= "integer" then
+        return nil, "integer range containment requires integer traits"
+    end
+    local minimum_order, minimum_err =
+        compare_bounds(target.minimum, source.minimum)
+    if minimum_order == nil then return nil, minimum_err end
+    local maximum_order, maximum_err =
+        compare_bounds(target.maximum, source.maximum)
+    if maximum_order == nil then return nil, maximum_err end
+    return minimum_order <= 0 and maximum_order >= 0
 end
 
 local function can_represent_all(target, source)
@@ -1324,7 +1624,6 @@ local comparison_operators = {
     ["!="] = true,
 }
 
-local evaluate_expression
 local expression_integer_type
 
 local function integer_type_result(profile, typ)
@@ -2203,10 +2502,15 @@ local function pointer_arithmetic_trait(
     return trait
 end
 
-local function pointer_pair_trait(trait, decision)
+local function pointer_pair_trait(profile, trait, decision)
     trait.lhs_target = decision.lhs
     trait.rhs_target = decision.rhs
     trait.result = decision.result
+    if decision.result._tag == "Type.Integer" then
+        local entry, err = profile_integer(profile, profile.ptrdiff_t)
+        if not entry then return nil, err end
+        trait.result_source = entry.type
+    end
     return trait
 end
 
@@ -2270,7 +2574,8 @@ function csemantics.decide_binary_operator(profile, op, lhs, rhs)
                 csemantics.pointer_common_type(
                     lhs, rhs, "subtraction")
             if pointer_decision then
-                decision = pointer_pair_trait(trait, pointer_decision)
+                decision, err =
+                    pointer_pair_trait(profile, trait, pointer_decision)
             end
         else
             err = "requires an arithmetic pair, a complete object "
@@ -2328,7 +2633,8 @@ function csemantics.decide_binary_operator(profile, op, lhs, rhs)
             pointer_decision, err =
                 csemantics.pointer_common_type(lhs, rhs, "ordering")
             if pointer_decision then
-                decision = pointer_pair_trait(trait, pointer_decision)
+                decision, err =
+                    pointer_pair_trait(profile, trait, pointer_decision)
             end
         else
             err = "requires arithmetic operands or "
@@ -2344,7 +2650,8 @@ function csemantics.decide_binary_operator(profile, op, lhs, rhs)
             pointer_decision, err =
                 csemantics.pointer_common_type(lhs, rhs, "equality")
             if pointer_decision then
-                decision = pointer_pair_trait(trait, pointer_decision)
+                decision, err =
+                    pointer_pair_trait(profile, trait, pointer_decision)
             end
         else
             err = "requires arithmetic operands, object pointers, "

@@ -121,15 +121,16 @@ end
 
 Parameter names belong to the source API, not to structural function types.
 Renaming an exported parameter can therefore break a named caller when that
-caller is recompiled, but it does not change function-type compatibility, the
-native symbol, or the binary calling convention. The same distinction applies
-to parameter spellings in C headers.
+caller is recompiled, but it does not change the structural function type,
+callable adjustment, native symbol, or binary calling convention. The same
+distinction applies to parameter spellings in C headers.
 
 ## Matching, checking, and omission
 
 Names may appear in any order. The compiler rejects unknown names and rejects
 a name supplied more than once. Each supplied expression is checked against
-its matched formal and receives the ordinary implicit argument coercions.
+its matched formal and receives the ordinary identity, direct-coercion,
+gradual-view, or callable argument adjustment.
 
 Every omitted formal is treated as a synthesized `nil`. The omission is
 accepted only when that formal's type accepts or can coerce `nil`. This includes

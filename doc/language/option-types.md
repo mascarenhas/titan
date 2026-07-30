@@ -40,6 +40,14 @@ Two consequences of that rationale shape everything below:
   immediate run-time error at the point of use, not a `nil` propagating
   through your data.
 
+“Gradually typed” in that historical description does not mean that `T` is a
+subtype of `T?`, or that the pair belongs to Titan's gradual-consistency
+relation. `T -> T?` and `T? -> T` are named automatic coercions with explicit
+representation and nil behavior. They do not lift through an Array, Map, or
+Function: in particular, an `() -> T` value cannot be adjusted to
+`() -> T?`. See the type system's
+[relations and normative boundary matrix](types.md#relations-and-boundaries-no-subtyping).
+
 A declared [flexible return](flexible-returns.md) is another source of
 may-be-absent positions. When a finite context requests a `...: T` result,
 that position is `T?`: the call may not have produced it. An unannotated local
@@ -125,7 +133,7 @@ tagged Lua value (a `TValue`), since it must be able to hold nil. See
 
 ### Wrapping is free
 
-A `T` converts implicitly to `T?` wherever implicit coercions happen
+A `T` converts implicitly to `T?` wherever implicit adjustments happen
 (declarations, assignments, arguments, returns, initializer entries —
 the full list is in [the type system](types.md)), and `nil` converts to any
 option type:
@@ -152,6 +160,13 @@ Titan run-time error — see [error handling](error-handling.md)):
 ```
 <file>:<line>:<col>: type error, expected <T> but found nil
 ```
+
+Gradually consistent option bases retain the same strict policy. For example,
+a `value?` may be used where `integer?` is expected. Nil passes unchanged; a
+present payload must already carry the integer tag. An integral float such as
+`2.0` is not converted at this implicit Titan view and raises a normal type
+error. Written `value as integer?` and a genuine Lua-to-Titan boundary remain
+the broader dynamic conversions described below.
 
 For example, compiling and running:
 
@@ -215,8 +230,9 @@ Nil does not select the case statement's `else`.
 
 ### Conversions between different option types
 
-Options interconvert across base types: `t1?` converts to `t2?` whenever
-`t1` is coercible to `t2` (for example `integer?` to `float?`). The
+Options interconvert across base types through Titan's explicitly named
+Option coercion plans: `t1?` converts to `t2?` whenever the direct base
+conversion is one of those plans (for example `integer?` to `float?`). The
 conversion is **nil-preserving** — `nil` flows straight through as `nil`,
 and a present value is unwrapped, converted base-to-base, and re-wrapped.
 Same-base conversions (`T` ↔ `T?`, and `nil → T?`) are implicit and
@@ -225,13 +241,17 @@ one can still fail at run time on a present value — converting a `float?`
 that holds a non-integral or out-of-range number to `integer?` raises the
 usual "no integer representation" error, while `nil` is unaffected.
 
-A `value` coerced to `T?` is likewise checked against the whole option type:
-`nil` remains `nil`, while a present value must successfully convert to `T`.
-This direct, nil-preserving conversion applies in every implicit coercion
-context, including declarations, assignments, arguments, and returns; it does
-not first coerce the dynamic value to non-option `T`, which would incorrectly
-reject nil or turn it into a present base value (notably `false` for
-`boolean`).
+An implicit gradual projection from `value` to `T?` is checked against the
+whole Option type: nil remains nil, while a present value must pass the
+**strict** gradual guard for `T`. It does not apply numeric conversion or
+truthiness. Thus a `value` holding an actual boolean projects to `boolean?`,
+but a present string does not become `true`. This differs deliberately from
+the written/Lua dynamic Option rule described below.
+
+These recursive Option plans are a deliberate exception for the Option
+constructor itself, not a general transitive-closure rule. They do not license
+`{T?}`/`{U?}` element conversion or component conversion through Function
+types.
 
 ### Explicit `as` casts
 
@@ -301,11 +321,12 @@ end
 
 At run time, comparing options compares the underlying Lua values, "like
 comparing two `value`s" (PR #255): nil equals only nil, and non-nil values
-compare with Lua's primitive (raw) equality — which still equates numbers
-across subtypes, so `1` held in an `integer?` equals `1.0` held in a
-`float?`. (`__eq` metamethods are never involved; no Titan type has them.)
+compare with Lua's primitive (raw) equality — which still equates the Lua
+integer and floating representations, so `1` held in an `integer?` equals
+`1.0` held in a `float?`. (`__eq` metamethods are never involved; no Titan
+type has them.)
 
-Otherwise the two sides must be compatible types — `integer? == string` is
+Otherwise the two sides must be comparable types — `integer? == string` is
 the usual **compile-time error**
 `trying to compare values of incomparable types: integer? and string?` —
 with one carve-out: an `integer?` may be compared with a `float?` (and, via
@@ -406,13 +427,15 @@ loops while the element is present), and `not` yields a `boolean`; see
 
 ## Options at the Lua boundary
 
-Options cross the Lua boundary as plain Lua values. A Titan function with a
-`T?` parameter accepts nil from Lua, and otherwise checks the value as a
-`T` parameter would: a `float?` parameter converts a Lua integer the way
-`float` does, and an `integer?` parameter converts an integral float like
-`3.0` exactly as a plain `integer` parameter would. A wrong, non-nil value
-raises the usual boundary error (see [Lua interoperability](lua-interop.md)).
-A `T?` return value simply arrives in Lua as nil or as the value.
+Options cross the Lua boundary as plain Lua values. At a genuine Lua boundary,
+a `T?` target accepts nil first and otherwise applies the exact same
+target-directed dynamic conversion as `T`. Thus `float?` converts a Lua
+integer, `integer?` converts an exactly integral in-range float, and
+`boolean?` preserves nil but truthiness-converts every present value. The
+same recursive rule governs `value as/is T?`; in particular,
+`value is boolean?` is total. A wrong, non-nil value raises the usual
+boundary error (see [Lua interoperability](lua-interop.md)). A `T?` return
+value simply arrives in Lua as nil or as the value.
 
 ```lua
 -- Titan (greet.titan)
@@ -429,10 +452,12 @@ print(m.greet("titan"))    --> hello titan
 print(pcall(m.greet, 42))  --> false   greet.titan:1:1: type error, expected string but found number
 ```
 
-The same applies to option-typed record fields and union payloads written from
-Lua, and to
-nil read out of arrays and maps — which is how most options are born: Lua
-passes a table with holes, and the holes surface in Titan as nil options.
+The same dynamic rule applies to option-typed module or record fields written
+from Lua and to constructor/function parameters, including union payload
+constructors. By contrast, a present value read from a typed Array or Map uses
+the strict gradual guard for `T`; only absence itself produces nil. These
+distinctions are centralized in the
+[normative boundary matrix](types.md#normative-boundary-matrix).
 
 ## Limitations
 

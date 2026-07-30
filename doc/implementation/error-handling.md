@@ -351,8 +351,8 @@ therefore not itself a stack-relocation hazard.
 
 ## ABI and search path
 
-The current compiled-module ABI is `0.19`. The error-handling control-flow
-machinery did not by itself require an ABI bump, but this branch also
+The current compiled-module ABI is `0.20`. The error-handling control-flow
+machinery did not by itself require an ABI bump. The earlier ABI-0.10 change
 changed the `TitanVargX` structs from inline flexible-array backing
 objects to descriptor structs with an `args` pointer. That layout change
 is visible across `.so` boundaries even though the native parameter type
@@ -394,17 +394,22 @@ objects now directly reference promoted libuv callback trampolines and no
 longer reference replaced libuv/coroutine helper symbols. A 0.18 provider and
 runtime had to be distributed together.
 
-ABI 0.19 likewise keeps the pending-action and longjmp machinery unchanged.
-It advances the boundary for serialized union/variant schemas, union userdata
+ABI 0.19 likewise kept the pending-action and longjmp machinery unchanged.
+It advanced the boundary for serialized union/variant schemas, union userdata
 dispatch, and the reconstructible public nominal-static slot prefix. A case
 arm still runs through the ordinary `StatTry` cleanup path.
 
+ABI 0.20 again leaves pending actions and longjmp unwinding unchanged. Its
+boundary covers the two-user-value Array proxy and the strict-entry-bearing
+first-class function closure; errors raised by either a strict guard or a
+dynamic conversion still use the same Titan error handler.
+
 The compiler and runtime therefore agree on:
 
-* `TITAN_VER "0.19"`
-* `TITAN_VER_SUFFIX "_0_19"`
-* versioned binary path variable `TITAN_PATH_0_19`
-* default binary path `.;<root>/lib/titan/0.19`, with `<root>` recovered from
+* `TITAN_VER "0.20"`
+* `TITAN_VER_SUFFIX "_0_20"`
+* versioned binary path variable `TITAN_PATH_0_20`
+* default binary path `.;<root>/lib/titan/0.20`, with `<root>` recovered from
   the Lua `PREFIX`'s `package.cpath` in the currently supported layout where
   that path also names the equal Titan `ROCKS_TREE`
 

@@ -29,7 +29,7 @@ end
 describe("compiler installation discovery", function()
     it("uses the first literal Lua 5.5 C-module prefix", function()
         local cpath = table.concat({
-            "/first prefix/lib/titan/0.19/?.so",
+            "/first prefix/lib/titan/0.20/?.so",
             "/wrong/lib/lua/5.4/?.so",
             "/also-wrong/lib/lua/5.5/?.dylib",
             "/first prefix/lib/lua/5.5/?.so",
@@ -100,8 +100,8 @@ describe("compiler installation discovery", function()
             libtitan = "/opt/titan/lib/libtitan.a",
             libbacktrace = "/opt/titan/lib/libbacktrace.a",
             liblua = "/opt/titan/lib/liblua.a",
-            titan_bin = "/opt/titan/lib/titan/0.19",
-            lua_cpath = "/opt/titan/lib/titan/0.19/?.so",
+            titan_bin = "/opt/titan/lib/titan/0.20",
+            lua_cpath = "/opt/titan/lib/titan/0.20/?.so",
         }, paths)
 
         assert.same({

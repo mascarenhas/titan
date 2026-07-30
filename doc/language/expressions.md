@@ -185,8 +185,10 @@ rules (infinities and NaN), as in Lua.
 
 ### Equality: `==` and `~=`
 
-Equality is defined between operands of the same type, and across a few
-type pairs:
+Equality uses Titan's symmetric **comparable** relation; it is not derived
+from directional assignment, callable adjustment, or coercibility. It is
+defined between exact or gradually consistent operands, plus a few separately
+enumerated symmetric type pairs:
 
 * **Numbers** compare across `integer`/`float` by **mathematical
   value**, with *no* promotion of the integer to float — exactly Lua's
@@ -199,12 +201,19 @@ type pairs:
   any comparison with NaN is false, so `x ~= x` is true when `x` is NaN.
 * **Strings** compare by content (lexicographically for the relational
   operators), exactly as in Lua.
-* **Arrays, maps, records and unions** compare by identity. Arrays and nominal values use
-  canonical userdata identities; maps use ordinary table identities.
-  Metamethods are never involved.
-* **Two `value`s** (or a `value` and anything else, which is promoted to
-  `value`) compare with Lua's *raw* equality — `__eq` metamethods on
-  tables that arrived from Lua are not consulted.
+* **Arrays, maps, records, unions, and function-typed values** compare by
+  identity. Consistent non-exact Array, Map, or Function views still share the
+  same boxed object; nominal records and unions require their exact type.
+  Arrays and nominal values use canonical userdata identities, and maps use
+  ordinary table identities. A Titan function has its stable canonical
+  `CClosure` identity, while a non-Titan Lua function, C function, or
+  `__call` value retains its own boxed identity. Metamethods are never
+  involved.
+* **Two `value`s** (or a `value` and a guardable type gradually consistent
+  with it) compare with Lua's *raw* equality — `__eq` metamethods on tables
+  that arrived from Lua are not consulted. Equality does not infer a separate
+  directional coercion merely because one exists; for example, explicitly
+  box a raw C pointer as `value` before comparing it with another `value`.
 * **An option and its base type** can be compared: `s1 == s2` works for
   `s1: string?`, `s2: string`, and is false when `s1` is nil. See
   [option types](option-types.md).
@@ -220,6 +229,10 @@ function found(t: {integer}, i: integer): boolean
     if t[i] then return true else return false end
 end
 ```
+
+The complete separation between comparability and the other type relations is
+summarized in the type system's
+[normative boundary matrix](types.md#normative-boundary-matrix).
 
 ### Relational: `<` `>` `<=` `>=`
 
@@ -346,31 +359,35 @@ end
 
 The cast expression `exp as type` converts a value to another type. It
 binds tighter than multiplication and all looser binary operators and does
-not chain (parenthesize for two steps). In Titan, ordinary conversions —
-`integer` to `float`, a
-type to and from its option, anything to `boolean` in a condition —
-happen *implicitly* wherever a typed context calls for them (see
-[the type system](types.md)). `as` is **not** for those; the casts the
-checker accepts are deliberately few:
+not chain (parenthesize for two steps). It explicitly requests a conversion
+admitted by Titan's **written-castable** relation. That includes identity,
+the named direct conversions that can also happen implicitly in a typed
+context, gradual injection/projection, and the explicitly enumerated FFI-only
+operations. It does not make arbitrary types related and it never searches
+for a chain of conversions.
 
 | From | To | Can fail at run time? |
 | --- | --- | --- |
+| a source with a direct coercion | that coercion's target | as specified by the coercion; for example, `integer -> float` is total and `float -> integer` can fail |
 | option `T?` | base `T` | yes — checked (raises on `nil`) |
-| any type (including options) | `value` | never |
-| `value` | any type (including options) | checked, except the total `boolean`, function, `value`, and C `TValue` cases |
-| C integer | `integer` | no |
-| C float | `float` | no |
-| `integer` | C integer | no |
-| `integer` or `float` | C float | no |
-| C numeric type | another C numeric type | no |
+| any non-FFI type with a `TValue` representation (including options) | `value` | never |
+| `value` | any dynamically reifiable type (including options) | uses the broad dynamic rule; total for `boolean`, function, `value`, `boolean?`, and C `TValue` |
+| `value` | raw C pointer | explicitly unsafe: accepts the lightuserdata/nil representation but cannot establish the pointee type |
+| C integer | `integer` | yes — values outside the configured `lua_Integer` range are rejected |
+| C float | `float` | when narrowing is not profile-proven — non-finite and out-of-range values are rejected |
+| `integer` | C integer | yes — values outside the C target interval are rejected; `_Bool` accepts only 0 and 1 |
+| `integer` or `float` | C float | when the target profile cannot prove the range; floating narrowing rejects non-finite and out-of-range values |
+| C integer | another C integer | no cast error — this explicitly written conversion retains ordinary C semantics |
+| any other C numeric pair | another C numeric type | yes when the source value is not representable under the checked floating/integer rule |
 | C `char *` or `void *` (FFI) | `string` | yes — raises on `NULL` |
 | `string` | C `char *` or `void *` (FFI) | no |
 | non-function C pointer | C `void *` | no |
 | C function pointer | C `void *` | no — requires a written cast |
 | Array, Map, record, or union | C `void *` | no — exposes the native GC identity |
 | function | C `void *` | yes — raises if its boxed value is not collectable |
-| C integer, C float, ordinary C pointer, or owned C userdata | `value` | never — ordinary pointers become lightuserdata; owned objects stay full userdata |
-| `value` | C integer, C float, ordinary C pointer, or owned C userdata | yes — checked |
+| C integer or C float | `value` | yes when the exact C value does not fit its `lua_Integer` or `lua_Number` carrier |
+| ordinary C pointer or owned C userdata | `value` | never — ordinary pointers become lightuserdata; owned objects stay full userdata |
+| `value` | C integer, C float, or owned C userdata | yes — dynamically checked |
 | Lua-internal `Udata *` | `value` | never — non-NULL becomes that same full userdata; NULL becomes nil |
 | `value` | Lua-internal `Udata *` | yes — accepts full userdata or nil, not lightuserdata |
 | C `TValue` | `value` | no |
@@ -386,6 +403,10 @@ exact integral values and raises
 `... number '2.5' has no integer representation` otherwise. Casts *to*
 `value`, and from `value` *to* `boolean` or a function type, never fail — any
 boxed value converts (function callability is checked only when it is called).
+This is intentionally broader than an implicit `value -> T` projection or a
+typed Array/Map read, both of which use strict gradual guards and do not apply
+numeric conversion or truthiness. All boundary distinctions are normative in
+[the type-system matrix](types.md#normative-boundary-matrix).
 An option cast `o as T` unwraps the option, raising
 `expected T but found nil` when `o` is `nil` (the explicit form of the
 implicit option unwrap; see [option types](option-types.md)). The C rows belong
@@ -403,6 +424,10 @@ For the admitted casts that can fail, the test uses the same checks as `as`:
 
 * `value is integer` accepts Lua integers and exact integral floats within
   Lua's integer range; `value is float` accepts either numeric representation.
+* C numeric tests use exactly the representability predicate of the
+  corresponding cast. This includes C target ranges, `_Bool`'s 0/1
+  restriction, finite/range checks for floating narrowing, and the same rule
+  recursively beneath an Option.
 * Checked primitive targets, Maps, Arrays, records, unions, and owned-C targets use
   the same Lua tag or exact metatable identity as their casts. In particular,
   an ordinary Lua table is a Map, not an Array proxy, and distinct record
@@ -419,9 +444,16 @@ casts are worth spelling out: `value as boolean` uses truthiness, and
 callability. Their `is` tests are therefore always true, even for nil or a
 non-callable value. A function-typed value that is not callable raises only
 when it is invoked. The same always-true rule applies to `value is value` and
-`value is C-TValue`. An option target uses the option-slot conversion instead:
-`value is boolean?` accepts only nil or an actual boolean, while
-`value is <function type>?` remains unchecked.
+`value is C-TValue`. An Option target accepts nil first and otherwise applies
+the same dynamic conversion recursively. Consequently `value is boolean?` is
+also always true: nil is accepted as absent, and every present value can be
+truthiness-converted to `boolean`.
+
+A written `value as <raw C pointer>` is different. It is an explicit
+programmer assertion about a lightuserdata address (or nil), not a sound
+pointee-type test. Its `is` form can test only that outer representation.
+Implicit gradual projection, typed Array/Map reads, callable adjustment, and
+results from non-Titan Lua callables cannot use this operation.
 
 GC-identity pointers are borrowed internal addresses. The cast roots its
 operand during evaluation and later argument setup, but retaining the pointer
@@ -450,25 +482,22 @@ function present(o: integer?): boolean
 end
 ```
 
-For non-FFI types, other casts are the compile-time error
-`cannot cast 'T1' to 'T2'` — in the current compiler all of these are rejected:
+Other casts are the compile-time error `cannot cast 'T1' to 'T2'`.
+In particular, a scalar conversion does not lift through a compound type:
 
 ```lua
-function rejected(i: integer, x: float)
-    local a = i as float       -- cannot cast 'integer' to 'float'
-    local b = x as integer     -- cannot cast 'float' to 'integer'
-    local d = i as integer?    -- cannot cast 'integer' to 'integer?'
-    local e = x is integer     -- same inadmissible relation for `is`
+function rejected(xs: {integer}, f: () -> integer)
+    local a = xs as {float}       -- cannot cast '{integer}' to '{float}'
+    local b = f as () -> float    -- cannot cast '() -> integer' to '() -> float'
+    local c = f as () -> integer? -- Option wrapping does not lift through Function
 end
 ```
 
-Use the implicit coercions instead: `local a: float = i` converts, and
-`local b: integer = x` converts with the run-time exactness check. If
-you genuinely need an explicit two-step conversion, going through
-`value` works: `(i as value) as float`. For an expression whose imported C type
-is, say, `c.size_t`, use the ordinary FFI cast: `n as integer`. Identity casts
-and tests such as `i as integer` and `i is integer` are accepted as total
-no-ops.
+Direct written conversions remain legal: `i as float` converts an integer,
+`x as integer` performs checked narrowing, and `i as integer?` wraps. For an
+expression whose imported C type is, say, `c.size_t`, use the ordinary FFI
+cast `n as integer`. Identity casts and tests such as `i as integer` and
+`i is integer` are total no-ops.
 
 ## Constructor expressions
 
@@ -564,6 +593,12 @@ so is calling a function value. The callable things are module-level
 functions (local or imported), record/union methods (`r:move(...)`), nominal
 functions (`Point.new(...)`, `Point.origin(...)`), and any function value held in a
 variable, parameter, field, or container slot.
+Function-value dispatch follows the three paths defined in
+[Functions as values](functions.md#functions-as-values): exact Titan native,
+non-exact Titan-branded strict generic, and genuine Lua. These paths use the
+single [normative boundary matrix](types.md#normative-boundary-matrix);
+generic stack representation alone does not turn a Titan call into a coercive
+Lua boundary.
 For Titan functions, too few positional arguments are padded with `nil` and
 then type-checked against the missing formals. Surplus argument expressions
 are evaluated, but a non-variadic Titan function ignores their values; a

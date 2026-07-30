@@ -26,6 +26,8 @@ local function lp64_profile()
         unsigned_int = "unsigned int",
         lua_integer = "long long",
         lua_number = "double",
+        size_t = "unsigned long",
+        ptrdiff_t = "long",
         integers = {
             ["char"] = integer("char", true, 1, 8, 7,
                 "-128", "127"),
@@ -70,6 +72,8 @@ local function narrow_int_profile()
         unsigned_int = "unsigned int",
         lua_integer = "long",
         lua_number = "float",
+        size_t = "unsigned long",
+        ptrdiff_t = "long",
         integers = {
             ["signed char"] = integer("signed char", true, 1, 8, 7,
                 "-128", "127"),
@@ -122,6 +126,13 @@ local function lp64_macros()
         __SIZEOF_FLOAT__ = macro("4"),
         __SIZEOF_DOUBLE__ = macro("8"),
         __SIZEOF_LONG_DOUBLE__ = macro("16"),
+        __FLT_RADIX__ = macro("2"),
+        __FLT_MAX_EXP__ = macro("128"),
+        __DBL_MAX_EXP__ = macro("1024"),
+        __LDBL_MAX_EXP__ = macro("16384"),
+        __FLT_MANT_DIG__ = macro("24"),
+        __DBL_MANT_DIG__ = macro("53"),
+        __LDBL_MANT_DIG__ = macro("64"),
         __SIZEOF_INT128__ = macro("16"),
         __SCHAR_MAX__ = macro("0x7f"),
         __UCHAR_MAX__ = macro("0xffU"),
@@ -162,6 +173,44 @@ local function alternative_macros()
     }
 end
 
+local lp64_signed_minima = {
+    ["signed char"] = "-128",
+    short = "-32768",
+    int = "-2147483648",
+    long = "-9223372036854775808",
+    ["long long"] = "-9223372036854775808",
+}
+
+local alternative_signed_minima = {
+    ["signed char"] = "-128",
+    short = "-32768",
+    int = "-32768",
+    long = "-2147483648",
+    ["long long"] = "-9223372036854775808",
+}
+
+local function build_lp64(macros)
+    return csemantics.build_profile({
+        macros = macros or lp64_macros(),
+        lua_integer = "long long",
+        lua_number = "double",
+        size_t = "unsigned long",
+        ptrdiff_t = "long",
+        signed_minima = lp64_signed_minima,
+    })
+end
+
+local function build_alternative(macros)
+    return csemantics.build_profile({
+        macros = macros or alternative_macros(),
+        lua_integer = "long",
+        lua_number = "float",
+        size_t = "unsigned long",
+        ptrdiff_t = "long",
+        signed_minima = alternative_signed_minima,
+    })
+end
+
 local function registered_expression(text)
     local registered = {}
     cdefines.register_define(registered, "TEST_MACRO", text, {})
@@ -185,14 +234,42 @@ describe("pure C expression semantics", function()
                 err, 1, true)
         end)
 
+        it("rejects non-two's-complement signed target ranges explicitly",
+        function()
+            local profile = lp64_profile()
+            profile.integers.int.minimum = "-2147483647"
+            local ok, err = csemantics.validate_profile(profile)
+            assert.is_nil(ok)
+            assert.matches(
+                "Titan requires two's%-complement signed integers", err)
+            assert.matches("'int' has range %-2147483647%.%.2147483647",
+                err)
+        end)
+
+        it("revalidates a mutated profile after warming exact powers",
+        function()
+            local profile = lp64_profile()
+            local expression = registered_expression("1")
+            assert(csemantics.evaluate_macro_expression(
+                profile, expression))
+
+            profile.integers.int.minimum = "-2147483647"
+            local result, err =
+                csemantics.evaluate_macro_expression(profile, expression)
+            assert.is_nil(result)
+            assert.matches(
+                "Titan requires two's%-complement signed integers", err)
+        end)
+
         it("builds an exact canonical LP64 profile from injected traits",
         function()
-            local profile = assert(csemantics.build_profile(
-                lp64_macros(), "long long int", "double"))
+            local profile = assert(build_lp64())
 
             assert.is_true(csemantics.validate_profile(profile))
             assert.equal("long long", profile.lua_integer)
             assert.equal("double", profile.lua_number)
+            assert.equal("unsigned long", profile.size_t)
+            assert.equal("long", profile.ptrdiff_t)
             assert.equal(8, profile.char_bit)
             assert.is_true(profile.char_signed)
             assert.equal(32, profile.integers.int.type.bits)
@@ -204,6 +281,12 @@ describe("pure C expression semantics", function()
             assert.equal("18446744073709551615",
                 profile.integers["unsigned long long"].maximum)
             assert.equal(128, profile.floats["long double"].bits)
+            assert.equal(128,
+                profile.floats.float.maximum_exponent)
+            assert.equal(53,
+                profile.floats.double.mantissa_digits)
+            assert.equal("LDBL_MAX",
+                profile.floats["long double"].maximum_macro)
             assert.equal(8, profile.integers._Bool.type.bits)
             assert.equal("1", profile.integers._Bool.maximum)
             assert.equal(128, profile.integers["__int128"].type.bits)
@@ -214,11 +297,22 @@ describe("pure C expression semantics", function()
                 profile.integers["unsigned __int128"].maximum)
             assert.matches("lua_Integer=long long",
                 profile.identity, 1, true)
+            assert.matches("size_t=unsigned long",
+                profile.identity, 1, true)
+            assert.equal("unsigned long",
+                profile.integers[profile.size_t].type
+                    ._c_numeric_carriers.size_t.spelling)
+            assert.equal("long",
+                profile.integers[profile.ptrdiff_t].type
+                    ._c_numeric_carriers.ptrdiff_t.spelling)
 
             local from_options = assert(csemantics.build_profile({
                 macros = lp64_macros(),
                 lua_integer = "long long",
                 lua_number = "double",
+                size_t = "unsigned long",
+                ptrdiff_t = "long",
+                signed_minima = lp64_signed_minima,
             }))
             assert.equal(profile.identity, from_options.identity)
 
@@ -231,16 +325,39 @@ describe("pure C expression semantics", function()
             signed_only.__UINT_MAX__ = nil
             signed_only.__ULONG_MAX__ = nil
             signed_only.__ULONG_LONG_MAX__ = nil
-            local derived = assert(csemantics.build_profile(
-                signed_only, "long long", "double"))
+            local derived = assert(build_lp64(signed_only))
             assert.equal("18446744073709551615",
                 derived.integers["unsigned long"].maximum)
         end)
 
+        it("exposes target numeric traits and exact integer range order",
+        function()
+            local profile = assert(build_lp64())
+            local titan_integer = assert(csemantics.numeric_trait(
+                profile, types.Integer()))
+            local target_float = assert(csemantics.numeric_trait(
+                profile, profile.floats.float.type))
+
+            assert.equal("integer", titan_integer.kind)
+            assert.equal("long long", titan_integer.spelling)
+            assert.equal(63, titan_integer.precision)
+            assert.equal("float", target_float.kind)
+            assert.equal(128, target_float.maximum_exponent)
+            assert.equal(24, target_float.mantissa_digits)
+
+            local int = assert(csemantics.numeric_trait(
+                profile, profile.integers.int.type))
+            local unsigned_int = assert(csemantics.numeric_trait(
+                profile, profile.integers["unsigned int"].type))
+            assert.is_true(csemantics.integer_range_contains(
+                titan_integer, unsigned_int))
+            assert.is_false(csemantics.integer_range_contains(
+                int, unsigned_int))
+        end)
+
         it("derives a synthetic target and unsigned plain char without host assumptions",
         function()
-            local profile = assert(csemantics.profile_from_macros(
-                alternative_macros(), "signed long int", "float"))
+            local profile = assert(build_alternative())
 
             assert.equal("long", profile.lua_integer)
             assert.equal("float", profile.lua_number)
@@ -259,8 +376,7 @@ describe("pure C expression semantics", function()
         it("reports the exact missing or inconsistent target trait", function()
             local missing = lp64_macros()
             missing.__LONG_MAX__ = nil
-            local profile, err = csemantics.build_profile(
-                missing, "long long", "double")
+            local profile, err = build_lp64(missing)
             assert.is_nil(profile)
             assert.matches(
                 "missing required predefined macro '__LONG_MAX__'",
@@ -268,8 +384,7 @@ describe("pure C expression semantics", function()
 
             local inconsistent = lp64_macros()
             inconsistent.__UINT_MAX__ = macro("65535U")
-            profile, err = csemantics.build_profile(
-                inconsistent, "long long", "double")
+            profile, err = build_lp64(inconsistent)
             assert.is_nil(profile)
             assert.matches(
                 "predefined macro '__UINT_MAX__' disagrees",
@@ -426,8 +541,7 @@ describe("pure C expression semantics", function()
     describe("integer macro classification and evaluation", function()
         it("selects candidates by suffix, base, and exact target range",
         function()
-            local profile = assert(csemantics.build_profile(
-                lp64_macros(), "long long", "double"))
+            local profile = assert(build_lp64())
             local bases = {"17", "021", "0x11"}
             local suffixes = {
                 {"", "int"},
@@ -469,8 +583,7 @@ describe("pure C expression semantics", function()
         end)
 
         it("preserves UINT_MAX as an exact unsigned-int constant", function()
-            local profile = assert(csemantics.build_profile(
-                lp64_macros(), "long long", "double"))
+            local profile = assert(build_lp64())
             local result = assert(csemantics.evaluate_integer_macro(
                 profile, registered_expression("0xffffffffU")))
 
@@ -492,8 +605,7 @@ describe("pure C expression semantics", function()
 
         it("uses promotions and usual conversions throughout compound ASTs",
         function()
-            local profile = assert(csemantics.build_profile(
-                lp64_macros(), "long long", "double"))
+            local profile = assert(build_lp64())
             local shifted = assert(csemantics.evaluate_macro_expression(
                 profile,
                 registered_expression("( 1U + 02L ) << 0x3ULL")))
@@ -515,8 +627,7 @@ describe("pure C expression semantics", function()
 
         it("does not evaluate short-circuited integer subexpressions",
         function()
-            local profile = assert(csemantics.build_profile(
-                lp64_macros(), "long long", "double"))
+            local profile = assert(build_lp64())
             local cases = {
                 {"0 && ( 1 / 0 )", "int", "0"},
                 {"1 || ( 1 / 0 )", "int", "1"},
@@ -539,8 +650,7 @@ describe("pure C expression semantics", function()
 
         it("lets a synthetic width change an unsuffixed hexadecimal type",
         function()
-            local profile = assert(csemantics.build_profile(
-                alternative_macros(), "long", "float"))
+            local profile = assert(build_alternative())
             local result = assert(csemantics.evaluate_macro_expression(
                 profile, registered_expression("0xffff")))
             assert.equal("unsigned int", result.type.spelling)

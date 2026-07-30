@@ -145,8 +145,8 @@ Lua boundary is a run-time error that names both types:
 test.titan:1:1: type error, expected test.Rec but found test.Point
 ```
 
-Nominal typing is also a hard wall for the `value` type's compatibility
-rules: while `{value}` is compatible with `{float}`, compatibility never
+Nominal typing is also a hard wall for gradual consistency:
+while `{value}` is consistent with `{float}`, consistency never
 recurses *into* a record — a record with `value` fields is not
 interchangeable with a record with `float` fields (see
 [the type system](types.md)).
@@ -169,9 +169,9 @@ That means `Point.new(1)` is accepted only when the second field can
 accept `nil`; for a required `float` field it is a compile-time type
 error (`expected float but found nil`). Surplus positional expressions are
 evaluated and ignored, like those of every fixed-parameter Titan function.
-Each argument used by `new` gets the usual implicit coercions of a function
-argument, so `Point.new(2, 3)` fills the `float` fields with `2.0` and
-`3.0`. As a record static declaration, `new` also supports
+Each argument used by `new` gets the usual function-argument adjustment, so
+`Point.new(2, 3)` fills the `float` fields with `2.0` and `3.0`. As a record
+static declaration, `new` also supports
 [named-call syntax](named-arguments.md): fields may be written in any order,
 and any omitted parameter receives the same checked `nil` fill.
 
@@ -210,14 +210,16 @@ The field list is checked at compile time:
 
 * every entry must name a field — `{ x = 1.0, z = 2.0 }` gives
   `field 'z' not found in record type 'test.Point'`;
-* an omitted field is filled with `nil` only when its type accepts or can
-  coerce `nil` (for example `T?`, `value`, `boolean`, or a nullable pointer);
+* an omitted field is filled with `nil` only when `nil` has an assignment
+  adjustment to its type (for example `T?`, `value`, `boolean`, or a nullable
+  pointer);
   otherwise the compiler reports that the field cannot be omitted because its
   type does not accept nil;
 * entries must be named, never positional — `{ 1.0, 2.0 }` gives
   `missing field in initializer for record type 'test.Point'`;
-* each value must match (or coerce to) the field's type, with the usual
-  `expected float but found string` style of message;
+* each value must have an assignment adjustment to the field's type (identity,
+  direct coercion, gradual view/projection, or callable adjustment), with the
+  usual `expected float but found string` style of message;
 * if an explicit field is repeated, both values are evaluated and stored in
   source order, so the final entry wins. Named *calls*, by contrast, reject a
   repeated argument name.
@@ -283,8 +285,8 @@ end
 
 Reading a field the record does not have, or writing to one, is a
 compile-time error (`field 'z' not found in record 'test.Point'`).
-Assignments must match the field's declared type, with the same implicit
-coercions as any assignment.
+Assignments use the same assignment adjustments as any other typed target and
+must be accepted at the field's declared type.
 
 A record is a *reference* value: assigning it to another variable,
 passing it to a function, or storing it in an array, map, module

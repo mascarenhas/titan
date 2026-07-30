@@ -407,7 +407,7 @@ describe("standalone main top-level error handler", function()
             end
         ]])
         assert.equal(1, status)
-        assert.equal([=[test: test.titan:3:24: type error, expected integer but found userdata
+        assert.equal([=[test: test.titan:3:24: type error, expected integer tag but found userdata
 stack traceback:
 	test.titan:3: in test.deep
 	test.titan:6: in test.mid

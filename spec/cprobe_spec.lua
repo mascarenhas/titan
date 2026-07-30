@@ -97,21 +97,34 @@ end
 
 local function target_profile()
     return assert(csemantics.build_profile({
-        __CHAR_BIT__ = "8",
-        __SIZEOF_BOOL__ = "1",
-        __SIZEOF_SHORT__ = "2",
-        __SIZEOF_INT__ = "4",
-        __SIZEOF_LONG__ = "8",
-        __SIZEOF_LONG_LONG__ = "8",
-        __SIZEOF_FLOAT__ = "4",
-        __SIZEOF_DOUBLE__ = "8",
-        __SIZEOF_LONG_DOUBLE__ = "16",
-        __SCHAR_MAX__ = "127",
-        __SHRT_MAX__ = "32767",
-        __INT_MAX__ = "2147483647",
-        __LONG_MAX__ = "9223372036854775807L",
-        __LONG_LONG_MAX__ = "9223372036854775807LL",
-    }, "long long", "double"))
+        macros = {
+            __CHAR_BIT__ = "8",
+            __SIZEOF_BOOL__ = "1",
+            __SIZEOF_SHORT__ = "2",
+            __SIZEOF_INT__ = "4",
+            __SIZEOF_LONG__ = "8",
+            __SIZEOF_LONG_LONG__ = "8",
+            __SIZEOF_FLOAT__ = "4",
+            __SIZEOF_DOUBLE__ = "8",
+            __SIZEOF_LONG_DOUBLE__ = "16",
+            __SCHAR_MAX__ = "127",
+            __SHRT_MAX__ = "32767",
+            __INT_MAX__ = "2147483647",
+            __LONG_MAX__ = "9223372036854775807L",
+            __LONG_LONG_MAX__ = "9223372036854775807LL",
+        },
+        lua_integer = "long long",
+        lua_number = "double",
+        size_t = "unsigned long",
+        ptrdiff_t = "long",
+        signed_minima = {
+            ["signed char"] = "-128",
+            short = "-32768",
+            int = "-2147483648",
+            long = "-9223372036854775808",
+            ["long long"] = "-9223372036854775808",
+        },
+    }))
 end
 
 describe("session-scoped C probe service", function()

@@ -3,6 +3,18 @@ local coder = require "titan-compiler.coder"
 local driver = require "titan-compiler.driver"
 local h = require "spec.support.helpers"
 
+local function with_header(contents, fn)
+    local header = os.tmpname() .. ".h"
+    local file = assert(io.open(header, "w"))
+    assert.truthy(file:write(contents))
+    assert.truthy(file:close())
+
+    local results = table.pack(pcall(fn, header))
+    os.remove(header)
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 local function clean_module(name)
     for _, suffix in ipairs({
         ".c", ".o", ".so", ".a", ".lua", "__entrypoint.c",
@@ -45,6 +57,11 @@ local function generated_function(csrc, marker)
         end
         search = line_end + 1
     end
+end
+
+local function count_matches(text, pattern)
+    local _, count = text:gsub(pattern, "")
+    return count
 end
 
 describe("dense Array code generation and boundaries", function()
@@ -226,9 +243,11 @@ describe("dense Array code generation and boundaries", function()
             "_array_length %- 1u%)%)%) _array_length%-%-;"
 
         -- Fixed constructors pass their exact positional count, not a rounded
-        -- growth capacity, then backscan trailing nils for the final length.
+        -- growth capacity, carry their module-local Lua writer, then backscan
+        -- trailing nils for the final length.
         assert.match(
-            "titan_array_new%(L, [^,]+, 4%);", fixed_flat)
+            "titan_array_new%(%s*L, [^,]+, 4, " ..
+            "&_mod%->uv%[%d+%]%.uv%);", fixed_flat)
         assert.match(backscan, fixed_flat)
         assert.match(
             "unsigned _array_length = 4; .*" ..
@@ -239,8 +258,9 @@ describe("dense Array code generation and boundaries", function()
         -- prefix in lua_Unsigned before allocation, then compute length from
         -- that same produced run rather than blindly recording its count.
         assert.match(
-            "titan_array_new%(L, [^,]+, " ..
-            "%(%(lua_Unsigned%)1 %+ %(lua_Unsigned%)_vacount%)%s*%);",
+            "titan_array_new%(%s*L, [^,]+, " ..
+            "%(%(lua_Unsigned%)1 %+ %(lua_Unsigned%)_vacount%)%s*, " ..
+            "&_mod%->uv%[%d+%]%.uv%);",
             opened_flat)
         assert.match(backscan, opened_flat)
         assert.match(
@@ -261,6 +281,207 @@ describe("dense Array code generation and boundaries", function()
             assert(opened[1] == 1 and opened[2] == 2
                 and opened[3] == nil and opened[4] == 4
                 and opened[5] == nil)
+        ]])
+    end)
+
+    it("carries one module-local writer per constructed element type",
+    function()
+        local csrc = generate([[
+            function ints_one(): {integer}
+                return { 1 }
+            end
+
+            function ints_two(): {integer}
+                return { 2 }
+            end
+
+            function values(): {value}
+                return { 3 }
+            end
+
+            function booleans(): {boolean}
+                return { false }
+            end
+
+            function words(): {string}
+                return { "word" }
+            end
+
+            function nested(): {{value}}
+                local inner: {value} = { 4 }
+                return { inner }
+            end
+        ]])
+        local flat = csrc:gsub("%s+", " ")
+
+        -- Five distinct element types are constructed: integer, value,
+        -- boolean, string, and {value}. Repeated integer/value constructors
+        -- reuse their module-local closure and slot.
+        assert.equal(5, count_matches(flat,
+            "static int test_array_writer_%d+%(lua_State %*L%) %{"))
+        assert.equal(5, count_matches(flat,
+            "lua_pushcclosure%(L, test_array_writer_%d+, 1%);"))
+
+        local writer_slots = {}
+        local writer_count = 0
+        for _, slot in flat:gmatch(
+            "lua_pushcclosure%(L, test_array_writer_(%d+), 1%); " ..
+            "setobj2t%(L, &_mod%->uv%[(%d+)%]%.uv")
+        do
+            writer_count = writer_count + 1
+            assert.is_nil(writer_slots[slot])
+            writer_slots[slot] = true
+        end
+        assert.equal(5, writer_count)
+
+        local call_counts = {}
+        local call_count = 0
+        for call in flat:gmatch("titan_array_new%b()") do
+            local slot = assert(call:match(
+                ", &_mod%->uv%[(%d+)%]%.uv%)$"))
+            assert.is_true(writer_slots[slot])
+            call_counts[slot] = (call_counts[slot] or 0) + 1
+            call_count = call_count + 1
+        end
+        assert.equal(7, call_count)
+
+        local counts = {}
+        for _, count in pairs(call_counts) do
+            table.insert(counts, count)
+        end
+        table.sort(counts)
+        assert.same({ 1, 1, 1, 2, 2 }, counts)
+
+        local function constructor_writer(marker)
+            local body = generated_function(csrc, marker):gsub("%s+", " ")
+            local call = assert(body:match("titan_array_new%b()"))
+            return assert(call:match(
+                ", &_mod%->uv%[(%d+)%]%.uv%)$"))
+        end
+        assert.equal(
+            constructor_writer("test_ints_one_titan(lua_State *L"),
+            constructor_writer("test_ints_two_titan(lua_State *L"))
+        assert.not_equal(
+            constructor_writer("test_ints_one_titan(lua_State *L"),
+            constructor_writer("test_values_titan(lua_State *L"))
+    end)
+
+    it("applies carried writers only at genuine Lua Array writes", function()
+        h.run_coder([[
+            function integers(): {integer}
+                return { 10, 20 }
+            end
+
+            function booleans(): {boolean}
+                return { false, false }
+            end
+
+            function integer_at(
+                values: {integer},
+                index: integer
+            ): integer
+                return values[index]
+            end
+
+            function boolean_at(
+                values: {boolean},
+                index: integer
+            ): boolean
+                return values[index]
+            end
+
+            function widened_integer(): {value}
+                local concrete: {integer} = { 11 }
+                local view: {value} = concrete
+                return view
+            end
+
+            function projected_value(): {integer}
+                local concrete: {value} = { 31 }
+                local view: {integer} = concrete
+                return view
+            end
+
+            function nested(): {{value}}
+                local concrete: {integer} = { 41 }
+                local view: {value} = concrete
+                return { view }
+            end
+
+            function nested_integer_at(
+                values: {{integer}},
+                index: integer
+            ): integer
+                local inner: {integer} = values[index]
+                return inner[1]
+            end
+        ]], [[
+            local function fails(f, text)
+                local ok, err = pcall(f)
+                assert(not ok)
+                assert(tostring(err):find(text, 1, true), tostring(err))
+            end
+
+            local integers = test.integers()
+            assert(math.type(12.0) == "float")
+            integers[2] = 12.0
+            assert(math.type(integers[2]) == "integer")
+            assert(test.integer_at(integers, 2) == 12)
+
+            -- Writer failure precedes both replacement and growth.
+            fails(function() integers[2] = "wrong" end,
+                "expected integer")
+            assert(#integers == 2)
+            assert(integers[2] == 12)
+            fails(function() integers[3] = "wrong" end,
+                "expected integer")
+            assert(#integers == 2)
+            assert(integers[3] == nil)
+
+            -- Nil is deletion, not an element conversion.
+            integers[2] = nil
+            assert(#integers == 1)
+            assert(integers[2] == nil)
+            integers[100] = nil
+            assert(#integers == 1)
+
+            local booleans = test.booleans()
+            booleans[1] = "truthy"
+            booleans[2] = 0
+            assert(test.boolean_at(booleans, 1))
+            assert(test.boolean_at(booleans, 2))
+            booleans[2] = false
+            assert(not test.boolean_at(booleans, 2))
+
+            -- A view change does not replace the writer selected where the
+            -- backing was constructed.
+            local widened = test.widened_integer()
+            widened[1] = 21.0
+            assert(math.type(widened[1]) == "integer")
+            assert(widened[1] == 21)
+            fails(function() widened[2] = "wrong" end,
+                "expected integer")
+            assert(#widened == 1 and widened[2] == nil)
+
+            local projected = test.projected_value()
+            projected[1] = 32.0
+            assert(math.type(projected[1]) == "float")
+            fails(function()
+                return test.integer_at(projected, 1)
+            end, "expected integer")
+
+            -- Outer and inner Arrays use the same shared metatable even when
+            -- their writers were selected under different element views.
+            local outer = test.nested()
+            local inner = outer[1]
+            assert(getmetatable(outer) == "Titan array metatable")
+            assert(getmetatable(inner) == getmetatable(outer))
+            inner[1] = 42.0
+            assert(math.type(inner[1]) == "integer")
+            outer[2] = widened
+            assert(outer[2] == widened)
+            assert(test.nested_integer_at(outer, 1) == 42)
+            assert(test.nested_integer_at(outer, 2) == 21)
         ]])
     end)
 
@@ -365,9 +586,12 @@ describe("dense Array code generation and boundaries", function()
             assert(test.map_length({10, 20, 30}) == 3)
 
             local ints = test.make_int()
-            ints[2] = "wrong"
-            fails(function() return test.int_at(ints, 2) end,
-                  "expected integer")
+            local ok, err = pcall(function() ints[2] = "wrong" end)
+            assert(not ok)
+            assert(tostring(err):find("expected integer", 1, true),
+                tostring(err))
+            assert(#ints == 3)
+            assert(test.int_at(ints, 2) == 2)
         ]])
     end)
 
@@ -1220,6 +1444,24 @@ describe("dense Array code generation and boundaries", function()
         assert.equal(0, #errors, table.concat(errors, "\n"))
         local ok, err = h.compile_app("dense_array_args", ast)
         assert.truthy(ok, err)
+
+        local entrypoint_file = assert(io.open(
+            "dense_array_args__entrypoint.c", "r"))
+        local entrypoint = entrypoint_file:read("*a"):gsub("%s+", " ")
+        entrypoint_file:close()
+        assert.match(
+            "static int titan_main_string_array_writer" ..
+            "%(lua_State %*L%)", entrypoint)
+        assert.match(
+            "if %(lua_type%(L, 1%) != LUA_TSTRING%)", entrypoint)
+        assert.match(
+            "lua_pushcclosure%(L, titan_main_string_array_writer, 1%);",
+            entrypoint)
+        assert.match("writer = lua_totvalue%(L, %-1%);", entrypoint)
+        assert.match(
+            "arguments = titan_array_new%(%s*" ..
+            "L, array_metatable, nargs, &writer%);", entrypoint)
+
         local empty, empty_why, empty_status =
             h.call_app("./dense_array_args")
         assert.truthy(empty, empty_why)
@@ -1233,5 +1475,47 @@ describe("dense Array code generation and boundaries", function()
             "./dense_array_args", "one", "two")
         assert.truthy(ran, why)
         assert.equal(0, status)
+    end)
+
+    it("keeps the standalone argument Array's string writer active", function()
+        with_header([[
+            #include <lua.h>
+            typedef struct TValue TValue;
+
+            static void titan_test_write_integer(
+                    lua_State *L, TValue array) {
+                lua_pushtvalue(L, array);
+                lua_pushinteger(L, 17);
+                lua_seti(L, -2, 1);
+                lua_pop(L, 1);
+            }
+
+            static void titan_test_write_string(
+                    lua_State *L, TValue array) {
+                lua_pushtvalue(L, array);
+                lua_pushstring(L, "written through the carried writer");
+                lua_seti(L, -2, 1);
+                lua_pop(L, 1);
+            }
+        ]], function(header)
+            h.run_coder_app(
+                'local c = foreign import "' .. header .. '"',
+                [[
+                    local rejected = false
+                    do
+                        c.titan_test_write_integer(L, args)
+                    catch
+                        rejected = true
+                    end
+                    if not rejected or #args ~= 0 then return 1 end
+
+                    c.titan_test_write_string(L, args)
+                    if #args ~= 1 then return 2 end
+                    if args[1] ~= "written through the carried writer" then
+                        return 3
+                    end
+                    return 0
+                ]], 0)
+        end)
     end)
 end)

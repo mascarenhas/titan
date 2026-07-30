@@ -231,6 +231,13 @@ describe("C FFI operator type checking", function()
                    and resolved_tag(trait.lhs_target) == "Type.CPointer"
                    and resolved_tag(trait.rhs_target) == "Type.CPointer" then
                     assert.equal("Type.Integer", trait.result._tag)
+                    assert.equal("Type.CInteger",
+                        trait.result_source._tag)
+                    assert.is_true(trait.result_source.signed)
+                    assert.equal(
+                        trait.result_source._c_numeric_carriers
+                            .ptrdiff_t.spelling,
+                        trait.result_source.spelling)
                     saw.pointer_difference = true
                 end
                 if node.op == "=="

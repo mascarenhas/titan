@@ -3,6 +3,7 @@
 
 #include <float.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "llimits.h"
@@ -95,9 +96,14 @@
    unions add a nominal namespace/metatable/tag/payload contract, and the
    public module-userdata prefix gains canonical closure slots for exported
    record and union statics. Older compilers cannot decode those interfaces or
-   safely reconstruct imported first-class static selectors. */
-#define TITAN_VER "0.19"
-#define TITAN_VER_SUFFIX "_0_19"
+   safely reconstruct imported first-class static selectors.
+   0.19 -> 0.20: Array proxies gain a second traced user value for their
+   construction-selected Lua writer, and Titan function closures gain the
+   strict generic-entry trailer and fixed closure-brand upvalue. This version is
+   also the coordinated Interface representation cutover; relation-only and
+   Interface-only intermediate layouts are not separately publishable ABIs. */
+#define TITAN_VER "0.20"
+#define TITAN_VER_SUFFIX "_0_20"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"
@@ -123,6 +129,14 @@
 ** A runtime/_init addition only: it does not by itself change the compiled
 ** module ABI. */
 #define TITAN_NAMES_KEY "a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"
+
+/* Opaque ABI-owned brand stored as light userdata in every Titan function
+** closure. It is compared only as raw pointer bits and must never be
+** dereferenced. Together with the fixed upvalue slot/count, this
+** astronomically unlikely sentinel distinguishes Titan closures without a
+** Lua-registry lookup on generic calls. */
+#define TITAN_FUNCTION_CLOSURE_BRAND                                      \
+  ((void *)(uintptr_t)UINT64_C(0x649b61b49f68a8b2))
 
 /* When set (boolean true) in the registry, errorhandler() KEEPS the existing
 ** TITAN_BACKTRACE_KEY slot instead of regenerating it, and clears the pin. A
@@ -333,16 +347,24 @@ LUAI_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
                                const char *file);
 LUAI_FUNC void titan_invalidate_backtrace_state(lua_State *L);
 LUAI_FUNC void titan_init_paths(lua_State *L);
+/* Publish/recover one type-specific canonical pointer. The candidate is an
+** opaque identity key and is never dereferenced. The helper preserves the Lua
+** stack on success. */
+LUAI_FUNC const void *titan_publish_function_type_tag(
+    lua_State *L, const char *registry_key, const void *candidate);
 
 /*
 ** Dense Array runtime. A backing Table has no metatable, uses only its array
 ** part for positive indices, and stores its logical length in lenhint. Its
 ** reserved integer hash key 0 points at a canonical zero-payload Udata proxy;
-** the proxy's sole uservalue points back at the backing table.
+** proxy uservalue 1 points back at the backing table and uservalue 2 carries
+** the generated type-directed Lua writer CClosure. The writer operand passed
+** to titan_array_new must remain rooted for the duration of the call.
 */
 LUAI_FUNC Table *titan_array_metatable(lua_State *L);
 LUAI_FUNC Table *titan_array_new(lua_State *L, Table *metatable,
-                                 lua_Unsigned capacity);
+                                 lua_Unsigned capacity,
+                                 const TValue *writer);
 LUAI_FUNC lua_Unsigned titan_array_length(const Table *backing);
 LUAI_FUNC void titan_array_set_length(Table *backing, lua_Unsigned length);
 LUAI_FUNC unsigned titan_array_growth(lua_State *L, lua_Unsigned index);

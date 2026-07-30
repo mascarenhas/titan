@@ -255,10 +255,16 @@ ABI 0.18 preserved folder composition, contributor ordering, and the logical
 interface again. Its compatibility boundary is instead the external callback
 symbol contract between standard-library archive objects and the runtime.
 
-ABI 0.19 still gives contributors no runtime identity. It adds union schemas
+ABI 0.19 still gave contributors no runtime identity. It added union schemas
 and absolute variant tags, plus the reconstructible public nominal-static slot
 prefix. Folder order therefore remains authoritative for public owner/member
 order and for variant tags, while keyed static maps use bytewise ordering.
+
+ABI 0.20 again leaves folder composition unchanged. Array writer inventories
+and callable strict entries are collected only after the contributors have
+become one checked AST, then emitted once per logical module. Their
+module-private slots follow the same importer-reconstructible public prefix and
+never give a contributor a runtime identity.
 
 ## `titan.uv` dogfooding
 

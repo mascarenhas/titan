@@ -1049,7 +1049,7 @@ describe("C FFI code generation", function()
                         + (c.ffi_int.alignof as integer)
                         + (c.ffi_read_const_int(x) as integer)
                         + read_pointer(x)
-                        + (c.ffi_has_const_ptr(v) as integer)
+                        + (c.ffi_has_const_ptr(x) as integer)
                         + (c.ffi_has_const_tvalue(v as c.TValue) as integer)
                 end
 

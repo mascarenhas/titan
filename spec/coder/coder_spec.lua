@@ -1649,7 +1649,7 @@ describe("Titan code generator", function()
         end)
     end
 
-    it("pass value type in array index", function()
+    it("guards value-typed array indices strictly", function()
         local code = [[
             function values(): {float}
                 return {1, 2, 3}
@@ -1667,7 +1667,7 @@ describe("Titan code generator", function()
         local ok, err = call("titan_test", [[
             arr=titan_test.values()
             assert(2==titan_test.read(arr, 2))
-            assert(2==titan_test.read(arr, 2.0))
+            assert(pcall(titan_test.read, arr, 2.0) == false)
             assert(pcall(titan_test.read, arr, "foo") == false)
         ]])
         assert.truthy(ok, err)
@@ -1868,8 +1868,8 @@ describe("Titan code generator", function()
         -- `strlen` returns `size_t`, which stays a `Type.Typedef` (resolving to
         -- the underlying `integer` only at the storage layer). Explicitly casting
         -- that typedef-typed value with `as value` is the typedef cast Titan
-        -- permits (a cast gates on `types.compatible`, which only crosses scalars
-        -- through `value`). The coder resolves the `Type.Typedef` source to its
+        -- permits (the written-cast plan normalizes transparent scalar
+        -- typedefs). The coder resolves the `Type.Typedef` source to its
         -- underlying scalar at the cast site, so the wrapped slot stores the
         -- integer length; before the fix this raised `invalid type size_t` in
         -- `setslot`. The returned `value` must carry the string length back to Lua.
@@ -3097,7 +3097,7 @@ describe("Titan code generator", function()
                 titan_test.f(m) -- supposed to give an error here
             ]])
             assert.falsy(ok)
-            assert.match("expected integer but found string", err)
+            assert.match("expected integer tag but found string", err)
         end)
 
         local test_types = {

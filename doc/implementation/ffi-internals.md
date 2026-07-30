@@ -233,8 +233,15 @@ length, aggregate identity/shape, and the other representation fields.
 deliberately does not compare the stored target graph. The separate C
 declaration-compatibility relation unwraps typedef chains, preserves their
 qualifiers, and compares the resolved targets before accepted repeated
-declarations are canonicalized. The compatibility/coercion relations add the
-Titan boundary conversions:
+declarations are canonicalized. This C declaration relation is unrelated to
+Titan gradual consistency.
+
+Titan use sites consume plans. `types.consistent` admits a C-bearing type
+against `value` only when that C-bearing type has a sound `TValue`
+representation and a strict guard. `types.coercion(source, target)` plans
+ordinary automatic C adjustments; `types.written_cast` owns the additional
+explicitly requested operations. No caller obtains permission from a broad boolean
+"compatibility" result. The automatic coercions include:
 
 * C integer -> Titan `integer`, and Titan `integer` -> C integer;
 * C float -> Titan `float`, and Titan `integer`/`float` -> C float;
@@ -242,25 +249,57 @@ Titan boundary conversions:
 * C array / counted `COwned` -> compatible pointer;
 * scalar `COwned` -> its payload object pointer;
 * any non-function C pointer -> `void *`;
-* a written C function pointer -> `void *` cast, outside ordinary
-  object-pointer compatibility;
-* a written Titan Array, Map, nominal record/union, or function -> C `void *`
-  identity cast;
 * non-pointer by-value C object expressions -> compatible `const *T` pointers
   by address;
 * mutable non-pointer local/formal C variables -> compatible mutable `*T` or
   `void *` out-parameters by address;
 * Titan `string` -> C `char *` or `void *`;
 * C `TValue` -> Titan `value`, and Titan `value` -> C `TValue`;
-* C integers, C floats, non-function C pointers, and `COwned` <-> `value`;
+* C integers, C floats, and `COwned` <-> `value`;
+* non-function C pointers -> `value`; the reverse direction is written and
+  unsafe rather than automatic;
 * counted `COwned` arrays of typedef-resolved `char`, `signed char`, or
   `unsigned char` -> Titan `string`;
-* Lua-internal `Udata *` <-> full-userdata `value`, with NULL <-> nil.
+* Lua-internal `Udata *` -> full-userdata `value`, with NULL -> nil; written
+  `value as Udata *` is the reverse full-userdata/nil operation.
+
+The numeric entries are partial whenever the selected target profile cannot
+prove range containment. The profile supplies exact integer intervals,
+floating radix/mantissa/range, and the configured `lua_Integer`/`lua_Number`
+carriers. C scalar results remain raw until a checker-owned conversion or
+boxing plan reaches an actual boundary. At that point the shared checked
+numeric lowering validates representability before casting or mutating a
+`TValue`. Written C-integer-to-C-integer conversions and checker-selected C
+usual-arithmetic integer conversions retain ordinary C semantics; potentially
+out-of-range integer-to-floating operator conversions remain checked.
+
+Written-only conversions include C-function-pointer erasure to `void *`, GC
+identity erasure from a Titan Array, Map, nominal record/union, or function to
+C `void *`, counted-character-owner to `string`, and the explicitly unsafe
+raw object-pointer cases. These are recorded in `WrittenCastPlan` and never
+participate in recursive Array/Map/Option/function consistency.
 
 Owner-to-pointer adjustment constructs the same qualified pointer view used by
 ordinary pointer/array compatibility. It may add qualification and perform
 legal object-pointer-to-`void *` adjustment, but it never discards
 typedef-carried `const` or `volatile`.
+
+`types.dynamic_coercion(target)` covers Lua-boundary and written-`value`
+conversion for C integers, C floats, `COwned`, and C `TValue`. It deliberately
+returns no plan for a raw C pointer: a lightuserdata address cannot establish
+the requested pointee type. `value as CPointer(T)` is the narrow exception;
+the written cast records `unsafe_dynamic_c_pointer`, making the unsafe intent
+explicit. Implicit `value` projection and Lua boundary entry reject the same
+request.
+
+For C numeric targets, strict plans accept only the exact Lua numeric tag and
+then validate the target interval. Dynamic C-integer plans additionally admit
+an integral float that first fits `lua_Integer`; dynamic C-float plans admit
+either numeric tag. `_Bool` accepts only 0 and 1. Floating narrowing rejects
+non-finite or out-of-range values while allowing rounding and underflow, and
+floating-to-integer conversion truncates only after its finite/range check.
+The non-raising written `is` lowering consumes the same plan and predicate as
+the corresponding `as`.
 
 `types.is_gc_identity_void_pointer_cast` is a deliberately narrower
 representation relation. It resolves Titan aliases and the C target typedef,
@@ -504,8 +543,12 @@ pointer.
 module name is gone by codegen time. Fixed and C-vararg arguments both flow
 through `codeforeignexp`, so Titan strings become `getstr(TString*)`, owned C
 objects decay to payload pointers when the target is a C pointer, and most
-`value` arguments are checked with `checkandget` when the target C type is
-known. A target C type of `TValue` is special: Titan passes the raw `TValue`
+`value` arguments consume their checker-attached plan when the target C type
+has a sound runtime representation. An implicit typed Titan projection carries
+a strict `GuardPlan`; an explicitly written or genuine-Lua boundary carries
+the broader dynamic plan before this foreign sink. A raw C-pointer target has
+no implicit guard and must have arisen from an explicit unsafe written cast. A
+target C type of `TValue` is special: Titan passes the raw `TValue`
 struct by value, for private runtime helpers that already know how to preserve
 the owning Lua state and root any collectable payloads.
 
@@ -521,10 +564,11 @@ name-to-position mapping itself—from reordering Titan effects. The path retain
 the positional implementation's post-call `mutable_out_anchor` refreshes for
 GC-bearing `TValue` out parameters.
 
-`codeforeignvar` emits a bare C variable or public macro name. Reading a C
-scalar into Titan code keeps the C value type until a cast or context converts
-it. C arrays are kept as C array expressions and can be indexed or decayed to
-pointers. For a live pure dotted-identifier macro, the checker resolves the
+`codeforeignvar` emits a bare C variable or public macro name. A C scalar from
+a foreign variable, function result, field, index, macro, or C operator keeps
+its exact C type and raw value until a cast, typed context, or boxed store
+converts it. C arrays are kept as C array expressions and can be indexed or
+decayed to pointers. For a live pure dotted-identifier macro, the checker resolves the
 recorded replacement lazily against the receiver before physical field lookup,
 matching preprocessing precedence, and retains the projected field's type,
 lvalue status, and mutation rules. The coder still emits the public field
@@ -563,7 +607,8 @@ decides quote-vs-angle based on actual resolution.
   parameters are materialized as `&(expr)`;
 * local/formal non-pointer C variables passed to compatible mutable pointer
   parameters are materialized as `&(local)`, enabling C out-parameters;
-* other `value` to C conversions use the runtime `checkandget` path.
+* other sound `value` to C conversions use the attached strict `GuardPlan`;
+  raw C pointers have no implicit or dynamic plan.
 
 `nativetoforeignexp` recognizes explicit GC-identity casts before its ordinary
 direct-C pass-through. It materializes the source exactly once and anchors it
@@ -573,8 +618,10 @@ native `TValue`s, so the lowering first tests `iscollectable(&temporary)`,
 raises for an immediate value, and otherwise converts
 `gcvalue(&temporary)` to the requested C `void *` spelling. `_codeis` uses the
 same materialization but returns the collectability predicate instead of
-raising. This matters because conversion from `value` to a function type
-deliberately does not prove callability at cast time.
+raising. This GC-identity predicate belongs only to the explicitly written
+erasure to C `void *`. A written `value as Function` instead uses the
+canonical dynamic function plan, preserving the boxed value and deferring
+callability/type verification to invocation.
 
 The checker accepts the written C-function-pointer-to-`void *` case before
 `_unsafe_c_pointer_conversion` diagnoses cross-category object/function
@@ -598,8 +645,21 @@ aggregate cast is defined.
 
 `foreigntonativeexp` handles C-to-Titan conversion for call results and foreign
 variables. C `TValue` results become Titan `value`s directly. C
-integers/floats cast to Lua numeric C types when a Titan numeric target needs
-them; C pointers/arrays/aggregates remain C values; C `char *` / `void *` to
+integers/floats remain raw C values until a checker-planned numeric or carrier
+crossing; the shared checked conversion then validates the target profile
+before producing `lua_Integer`, `lua_Number`, or another C scalar.
+The same rule covers compiler-synthesized C results: `sizeof`/`_Alignof`
+retain the profile's `size_t`, and pointer subtraction retains its
+`ptrdiff_t`, until a checked conversion produces Titan `integer`. The profile
+names both carriers explicitly and is rejected unless its signed integer
+ranges are two's-complement, which is the representation assumed by emitted
+minimum-bound expressions. Public macro-expression evaluation still validates
+the complete supplied profile on every call; `csemantics` retains only a
+bounded set of modest pure exact decimal powers of two used by those range
+proofs, so macro-heavy headers do not rebuild the same constants hundreds of
+times, larger powers remain exact without being retained, and profile-table
+mutation cannot bypass validation.
+C pointers/arrays/aggregates remain C values; C `char *` / `void *` to
 `string` is implemented by an explicit cast arm with a NULL guard and
 `luaS_new` copy.
 
@@ -613,7 +673,10 @@ through `char *` retains the NUL-terminated pointer behavior above.
 
 `getslot` and `setslot` know how to box C scalars, non-function pointers, owned
 userdata, and by-value C `TValue`s for `value` conversions and for Lua-facing
-slots. Ordinary C object pointers are exposed as light userdata in `value`;
+slots. C numeric `getslot`/strict-get paths share the target-profile predicate
+with dynamic coercion, and `setslot` validates carrier representability before
+calling `setivalue` or `setfltvalue`; these are not unchecked native casts.
+Ordinary C object pointers are exposed as light userdata in `value`;
 `COwned` is full userdata. Lua-internal `Udata *` is the deliberate exception:
 boxing emits the full-userdata tag for that same object (or nil for NULL), and
 unboxing accepts full userdata or nil rather than lightuserdata. C arrays are
@@ -624,7 +687,8 @@ through `value` or the object-pointer address coercions; only the explicit
 structs/unions are deliberately not boxable in v1.
 
 An option uses one `TValue` slot and delegates its present arm to these same
-helpers, which is why `TypeOption` validates the base eagerly. Owner-to-pointer
+checked helpers, which is why `TypeOption` validates the base eagerly.
+Owner-to-pointer
 coercion also stops at an outer option: `Option(COwned(T))` cannot coerce
 directly to either `CPointer(T)` or `Option(CPointer(T))`. The source must first
 be explicitly unwrapped, keeping a definite owner live while its borrowed

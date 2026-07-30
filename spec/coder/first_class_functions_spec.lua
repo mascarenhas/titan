@@ -261,6 +261,91 @@ describe("first-class function values (end-to-end)", function()
         ]])
     end)
 
+    it("keeps Lua function arguments coercive but guards non-exact Titan arguments strictly", function()
+        run_coder([[
+            function takes_integer(x: integer): integer return x end
+            function takes_boolean(x: boolean): boolean return x end
+
+            function strict_integer(x: value): integer
+                local dynamic: value = takes_integer
+                local f: (value) -> integer = dynamic
+                return f(x)
+            end
+
+            function strict_boolean(x: value): boolean
+                local dynamic: value = takes_boolean
+                local f: (value) -> boolean = dynamic
+                return f(x)
+            end
+        ]], [[
+            -- Genuine Lua calls use the target-directed boundary coercions.
+            assert(test.takes_integer(2.0) == 2)
+            assert(test.takes_boolean("nonempty") == true)
+
+            -- The same payloads reaching branded, non-exact Titan callees are
+            -- gradual observations, so their actual tags must match.
+            local int_ok, int_result = pcall(test.strict_integer, 2.0)
+            assert(not int_ok, "strict integer returned " .. tostring(int_result))
+            local bool_ok, bool_result =
+                pcall(test.strict_boolean, "nonempty")
+            assert(not bool_ok,
+                "strict boolean returned " .. tostring(bool_result))
+        ]])
+    end)
+
+    it("guards branded Titan results strictly but coerces non-Titan Lua results", function()
+        run_coder([[
+            function float_as_value(): value return 2.0 end
+            function string_as_value(): value return "nonempty" end
+
+            function strict_integer_result(): integer
+                local dynamic: value = float_as_value
+                local f: () -> integer = dynamic
+                return f()
+            end
+
+            function strict_boolean_result(): boolean
+                local dynamic: value = string_as_value
+                local f: () -> boolean = dynamic
+                return f()
+            end
+
+            function lua_integer_result(f: () -> integer): integer
+                return f()
+            end
+
+            function lua_boolean_result(f: () -> boolean): boolean
+                return f()
+            end
+        ]], [[
+            local int_ok, int_result = pcall(test.strict_integer_result)
+            assert(not int_ok,
+                "strict integer result returned " .. tostring(int_result))
+            local bool_ok, bool_result =
+                pcall(test.strict_boolean_result)
+            assert(not bool_ok,
+                "strict boolean result returned " .. tostring(bool_result))
+
+            assert(test.lua_integer_result(function() return 2.0 end) == 2)
+            assert(test.lua_boolean_result(
+                function() return "nonempty" end) == true)
+        ]])
+    end)
+
+    it("keeps foreign C closures on the ordinary Lua-call branch", function()
+        run_coder([[
+            function next_string(f: () -> string): string
+                return f()
+            end
+        ]], [[
+            -- string.gmatch returns a C closure with private upvalues. Its shape
+            -- must not be confused with Titan's branded closure header.
+            local iter = string.gmatch("abc", ".")
+            assert(test.next_string(iter) == "a")
+            assert(test.next_string(iter) == "b")
+        ]])
+    end)
+
     it("sends a non-exact Titan function value down the slow path (extra frame)", function()
         -- The value-call in `outer` dispatches on the *runtime* type tag of `g`.
         -- run_fast passes `inner` (exact type) -> tag matches -> fast path, no

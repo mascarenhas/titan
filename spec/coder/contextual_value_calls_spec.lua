@@ -23,6 +23,60 @@ describe("contextual calls through value (code generation)", function()
         os.execute("rm -rf test.dSYM")
     end)
 
+    it("keeps exact Titan function-value calls on the static likely path",
+    function()
+        local generated = generate([[
+            function increment(number: integer): integer
+                return number + 1
+            end
+
+            function invoke(
+                fn: (integer) -> integer,
+                number: integer
+            ): integer
+                return fn(number)
+            end
+        ]])
+
+        local exact = assert(generated:find(
+            "if (TITAN_LIKELY(_vc_callee != NULL", 1, true))
+        local static_tag = assert(generated:find(
+            "pvalueraw(valraw(&_vc_callee->upvalue[1]))", exact, true))
+        local fallback = assert(generated:find(
+            "} else {", static_tag, true))
+        local brand = assert(generated:find(
+            "pvalueraw(valraw(&_vc_callee->upvalue[3]))",
+            fallback, true))
+        local strict_dispatch = assert(generated:find(
+            "if (_vc_is_titan)", brand, true))
+        assert.is_true(exact < static_tag)
+        assert.is_true(static_tag < fallback)
+        assert.is_true(fallback < brand)
+        assert.is_true(brand < strict_dispatch)
+
+        local exact_segment = generated:sub(exact, fallback - 1)
+        assert.truthy(exact_segment:find(
+            "_vc_callee->nupvalues >= 5", 1, true))
+        assert.is_nil(exact_segment:find("ttislightuserdata", 1, true))
+        assert.is_nil(exact_segment:find("ttisfulluserdata", 1, true))
+        assert.is_nil(exact_segment:find("ttislcf", 1, true))
+
+        local classifier = generated:sub(fallback, strict_dispatch - 1)
+        assert.truthy(classifier:find(
+            "_vc_callee->nupvalues >= 5", 1, true))
+        assert.truthy(classifier:find(
+            "== TITAN_FUNCTION_CLOSURE_BRAND", 1, true))
+        assert.is_nil(classifier:find("ttis", 1, true))
+        assert.is_nil(classifier:find("lua_getfield", 1, true))
+        assert.is_nil(generated:find(
+            "titan_is_function_type_tag", 1, true))
+        assert.truthy(generated:find(
+            "lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND)",
+            1, true))
+        assert.truthy(generated:find(
+            "pvalue(&_fn->upvalue[1]) != test_functag_", 1, true))
+    end)
+
     it("honors finite, open, and zero demand for every Lua callable kind",
     function()
         run_coder([[
@@ -149,12 +203,13 @@ describe("contextual calls through value (code generation)", function()
         ]]
 
         -- All three consumers are open sinks, but their producer is statically
-        -- fixed-only. The generic branch must ask the VM for exactly that one
-        -- visible result; LUA_MULTRET would leak a wider runtime callable.
+        -- fixed-only. Both non-exact branches (strict Titan and genuine Lua)
+        -- must ask the VM for exactly that one visible result; LUA_MULTRET
+        -- would leak a wider runtime callable.
         local csrc = generate(source)
         local _, finite_calls = csrc:gsub(
             "luaD_callnoyield%(L, restorestack%(L, _vc_func%), 1%);", "")
-        assert.equal(3, finite_calls)
+        assert.equal(6, finite_calls)
         assert.not_match(
             "luaD_callnoyield%(L, restorestack%(L, _vc_func%), LUA_MULTRET%)",
             csrc)

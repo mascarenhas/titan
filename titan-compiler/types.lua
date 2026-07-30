@@ -615,6 +615,25 @@ local function c_pointer_compatible(source, target)
     return false
 end
 
+-- Exact endpoint predicates for the named C-pointer plan operations.  The
+-- checker and coder share these shape classifiers so a stored plan cannot
+-- relabel a checked reinterpretation as one of the ordinary C conversions.
+function types.is_c_pointer_coercion(source, target)
+    return c_pointer_compatible(source, target)
+end
+
+function types.is_c_object_to_void_pointer_conversion(source, target)
+    return c_object_to_void_pointer_compatible(source, target)
+end
+
+function types.is_c_void_to_object_pointer_coercion(source, target)
+    return c_void_to_object_pointer_compatible(source, target, false)
+end
+
+function types.is_written_c_void_to_object_pointer_cast(source, target)
+    return c_void_to_object_pointer_compatible(source, target, true)
+end
+
 function types.c_address_coerceable(source, target)
     local target_res = resolved_c(target)
     if not (target_res and target_res._tag == "Type.CPointer"
@@ -704,6 +723,24 @@ function types.is_counted_c_character_owner(t)
              or pointee.spelling == "unsigned char")
 end
 
+function types.is_pointer_to_string_cast(source, target)
+    return (is_void_pointer(source)
+            or is_c_void_pointer(source)
+            or is_c_char_pointer(source))
+        and target._tag == "Type.String"
+end
+
+function types.is_legacy_pointer_to_c_void_cast(source, target)
+    return source._tag == "Type.Pointer"
+        and is_c_void_pointer(target)
+end
+
+function types.is_string_to_c_pointer_coercion(source, target)
+    return source._tag == "Type.String"
+        and (is_c_char_pointer(target)
+             or is_c_void_pointer(target))
+end
+
 local function resolve_value_typedef(t)
     local seen = {}
     while t and t._tag == "Type.Typedef" and not seen[t] do
@@ -742,16 +779,24 @@ end
 -- `is_c`: ordinary Titan containers and callables remain boxed values even
 -- when one of their component types contains C FFI data. Conversely, direct C
 -- aggregates and functions have no scalar TValue representation.
-function types.has_tvalue_representation(t)
+function types.has_tvalue_representation(t, seen)
     if not t then return false end
-    if t._tag == "Type.Typedef" then
-        return types.has_tvalue_representation(t._type)
-    elseif types.is_direct_c(t) then
-        return c_value_compatible(t)
-    end
 
-    local tag = t._tag
-    return tag == "Type.Invalid"
+    seen = seen or {}
+    if seen[t] ~= nil then return seen[t] end
+    -- A malformed legacy alias/Option cycle must not recurse forever or prove
+    -- its own representation. Valid recursive nominal graphs stop at their
+    -- nominal descriptor before reaching this predicate again.
+    seen[t] = false
+
+    local result
+    if t._tag == "Type.Typedef" then
+        result = types.has_tvalue_representation(t._type, seen)
+    elseif types.is_direct_c(t) then
+        result = c_value_compatible(t)
+    else
+        local tag = t._tag
+        result = tag == "Type.Invalid"
         or tag == "Type.Integer"
         or tag == "Type.Float"
         or tag == "Type.Boolean"
@@ -761,9 +806,13 @@ function types.has_tvalue_representation(t)
         or tag == "Type.Map"
         or tag == "Type.Value"
         or tag == "Type.Nominal"
+        or tag == "Type.Interface"
         or tag == "Type.Function"
         or (tag == "Type.Option"
-            and types.has_tvalue_representation(t.base))
+            and types.has_tvalue_representation(t.base, seen))
+    end
+    seen[t] = result and true or false
+    return seen[t]
 end
 
 local function optional_owner_to_pointer(source, target)
@@ -785,304 +834,6 @@ end
 -- Returns true if type always holds falsy values
 function types.is_falsy(typ)
     return typ._tag == "Type.Nil"
-end
-
-function types.explicitly_coerceable(source, target)
-    if source._tag == "Type.Variant"
-       or target._tag == "Type.Variant" then
-        return false
-    end
-    return (is_void_pointer(source) and target._tag == "Type.String")
-        or (is_c_void_pointer(source) and target._tag == "Type.String")
-        or (is_c_char_pointer(source) and target._tag == "Type.String")
-        or types.is_gc_identity_void_pointer_cast(source, target)
-        or (source._tag == "Type.Pointer" and is_c_void_pointer(target))
-        or types.is_c_function_pointer_void_cast(source, target)
-        or (types.is_counted_c_character_owner(source)
-            and target._tag == "Type.String")
-        or ((is_c_integer(source) or is_c_float(source))
-            and (is_c_integer(target) or is_c_float(target)))
-        or c_object_to_void_pointer_compatible(source, target)
-        or c_void_to_object_pointer_compatible(source, target, true)
-end
-
-function types.coerceable(source, target)
-    if source._tag == "Type.Variant"
-       or target._tag == "Type.Variant" then
-        return false
-    elseif types.equals(source, target) then
-        return false
-    elseif is_c_integer(source) and target._tag == "Type.Integer" then
-        return true
-    elseif source._tag == "Type.Integer" and is_c_integer(target) then
-        return true
-    elseif is_c_float(source) and target._tag == "Type.Float" then
-        return true
-    elseif source._tag == "Type.Float" and is_c_float(target) then
-        return true
-    elseif source._tag == "Type.Integer" and is_c_float(target) then
-        return true
-    elseif source._tag == "Type.COwned"
-       and target._tag == "Type.Boolean" then
-        -- An owner is a GC object, not a nullable C pointer. A definite owner
-        -- is therefore always truthy, while Option(COwned) reaches this same
-        -- base relation and lowers its presence test through the boxed option.
-        return true
-    elseif is_c_pointer(source) and target._tag == "Type.Boolean" then
-        return true
-    elseif source._tag == "Type.Nil" and is_c_pointer(target) then
-        return true
-    elseif types.c_address_coerceable(source, target) then
-        return true
-    elseif c_pointer_compatible(source, target) then
-        return true
-    elseif c_object_to_void_pointer_compatible(source, target) then
-        return true
-    elseif c_void_to_object_pointer_compatible(source, target, false) then
-        return true
-    elseif source._tag == "Type.String" and
-           (is_c_char_pointer(target) or is_c_void_pointer(target)) then
-        return true
-    elseif c_value_compatible(source) and target._tag == "Type.Value" then
-        return true
-    elseif source._tag == "Type.Value" and c_value_compatible(target) then
-        return true
-    elseif c_value_compatible(source) and types.is_c_tvalue(target) then
-        return true
-    elseif types.is_c_tvalue(target) and not types.is_direct_c(source) then
-        return true
-    elseif target._tag == "Type.Option" then
-        if not types.has_tvalue_representation(target.base) then
-            return false
-        end
-        if source._tag == "Type.Nil" then
-            return true
-        elseif source._tag == "Type.Option" then
-            if not types.has_tvalue_representation(source.base)
-               or optional_owner_to_pointer(source.base, target.base) then
-                return false
-            end
-            return types.equals(source.base, target.base)
-                or types.coerceable(source.base, target.base)
-        end
-        return types.equals(source, target.base)
-            or types.coerceable(source, target.base)
-    elseif source._tag == "Type.Option" then
-        if not types.has_tvalue_representation(source.base) then
-            return false
-        elseif optional_owner_to_pointer(source.base, target) then
-            -- Borrowing a pointer from an owner must keep a definite owner
-            -- live. Unwrap an optional owner to COwned first; do not combine
-            -- the potentially-raising option conversion with pointer decay.
-            return false
-        end
-        return types.equals(target, source.base)
-            or types.coerceable(source.base, target)
-    elseif types.is_direct_c(source) or types.is_direct_c(target) then
-        return false
-    end
-
-    return (target._tag == "Type.Pointer" and
-            can_coerce_pointer(source, target)) or
-
-           (source._tag == "Type.Integer" and
-            target._tag == "Type.Float") or
-
-           (source._tag == "Type.Float" and
-            target._tag == "Type.Integer") or
-
-           (target._tag == "Type.Boolean" and
-            source._tag ~= "Type.Boolean") or
-
-           (target._tag == "Type.Value" and
-            source._tag ~= "Type.Value") or
-
-           (source._tag == "Type.Value" and
-            target._tag ~= "Type.Value")
-
-end
-
-local function optional_result_type(t)
-    if t._tag == "Type.Option" or t._tag == "Type.Value" then
-        return t
-    end
-    return types.Option(t)
-end
-
--- Directional function compatibility. `expected` is the static callable type
--- that controls future calls; `actual` is the value being stored there.
--- Component values use the same compatibility/coercion boundary as ordinary
--- checker slots. Parameter positions reverse the direction; result positions
--- preserve it.
-local function slot_compatible(target, source)
-    return types.compatible(target, source)
-        or types.coerceable(source, target)
-end
-
-local function function_compatible(expected, actual)
-    -- `vararg` is the untyped C-FFI variadic bit. C call shapes remain strict;
-    -- exact equality was handled before reaching this helper.
-    if expected.vararg or actual.vararg then
-        return false
-    end
-
-    for i = 1, math.min(#actual.params, #expected.params) do
-        if not slot_compatible(actual.params[i], expected.params[i]) then
-            return false
-        end
-    end
-
-    -- Calls through a shorter expected fixed prefix adjust omitted arguments
-    -- upward with nil. If the expected type also has an input tail, each extra
-    -- actual fixed slot can instead receive one of its elements. The actual
-    -- slot must therefore accept every value that adjustment can place there.
-    for i = #expected.params + 1, #actual.params do
-        if not slot_compatible(actual.params[i], types.Nil()) then
-            return false
-        end
-        if expected.varargtype
-           and not slot_compatible(actual.params[i],
-                                   expected.varargtype) then
-            return false
-        end
-    end
-
-    -- A shorter fixed actual ignores the expected suffix. A shorter variadic
-    -- actual observes that suffix, so validate each moved fixed value and the
-    -- expected tail against the actual input element type.
-    if actual.varargtype then
-        for i = #actual.params + 1, #expected.params do
-            if not slot_compatible(actual.varargtype, expected.params[i]) then
-                return false
-            end
-        end
-        if expected.varargtype
-           and not slot_compatible(actual.varargtype,
-                                   expected.varargtype) then
-            return false
-        end
-    end
-
-    -- Expected fixed results are covariant. An actual flexible tail supplies
-    -- optional finite projections. A non-option expected slot may also accept
-    -- the raw tail type: an absent result is nil-padded at the generic boundary
-    -- and fails through the normal runtime unwrap.
-    for i = 1, #expected.rettypes do
-        local produced = actual.rettypes[i]
-        if produced then
-            if not slot_compatible(expected.rettypes[i], produced) then
-                return false
-            end
-        elseif actual.flexrettype then
-            local projected = optional_result_type(actual.flexrettype)
-            if not slot_compatible(expected.rettypes[i], projected)
-               and not slot_compatible(expected.rettypes[i],
-                                       actual.flexrettype) then
-                return false
-            end
-        else
-            return false
-        end
-    end
-
-    -- A finite expected type hides all additional actual results. An open
-    -- expected tail observes every remaining fixed result and the actual tail,
-    -- if one exists; a fixed-only actual may simply end.
-    if expected.flexrettype then
-        for i = #expected.rettypes + 1, #actual.rettypes do
-            if not slot_compatible(expected.flexrettype,
-                                   actual.rettypes[i]) then
-                return false
-            end
-        end
-        if actual.flexrettype
-           and not slot_compatible(expected.flexrettype,
-                                   actual.flexrettype) then
-            return false
-        end
-    end
-
-    return true
-end
-
--- The type consistency relation, a-la gradual typing. Its argument order is
--- directional: `t1` is expected and `t2` is found.
-function types.compatible(t1, t2)
-    if t1._tag == "Type.Variant" or t2._tag == "Type.Variant" then
-        return false
-    elseif types.equals(t1, t2) then
-        return true
-    elseif t1._tag == "Type.CTypedef" then
-        return types.compatible(types.resolve_c_typedef(t1), t2)
-    elseif t2._tag == "Type.CTypedef" then
-        return types.compatible(t1, types.resolve_c_typedef(t2))
-    elseif is_c_integer(t1) and t2._tag == "Type.Integer" then
-        return true
-    elseif t1._tag == "Type.Integer" and is_c_integer(t2) then
-        return true
-    elseif is_c_float(t1) and t2._tag == "Type.Float" then
-        return true
-    elseif t1._tag == "Type.Float" and is_c_float(t2) then
-        return true
-    elseif t1._tag == "Type.Integer" and is_c_float(t2) then
-        return true
-    elseif is_c_pointer(t1) and t2._tag == "Type.Boolean" then
-        return true
-    elseif t1._tag == "Type.Nil" and is_c_pointer(t2) then
-        return true
-    elseif types.c_address_coerceable(t1, t2) then
-        return true
-    elseif c_pointer_compatible(t1, t2) then
-        return true
-    elseif c_object_to_void_pointer_compatible(t1, t2) then
-        return true
-    elseif c_object_to_void_pointer_compatible(t2, t1) then
-        return true
-    elseif c_void_to_object_pointer_compatible(t1, t2, true) then
-        return true
-    elseif c_void_to_object_pointer_compatible(t2, t1, true) then
-        return true
-    elseif t1._tag == "Type.String" and
-           (is_c_char_pointer(t2) or is_c_void_pointer(t2)) then
-        return true
-    elseif c_value_compatible(t1) and t2._tag == "Type.Value" then
-        return true
-    elseif t1._tag == "Type.Value" and c_value_compatible(t2) then
-        return true
-    elseif c_value_compatible(t1) and types.is_c_tvalue(t2) then
-        return true
-    elseif types.is_c_tvalue(t2) and not types.is_direct_c(t1) then
-        return true
-    elseif t1._tag == "Type.Typedef" then
-        return types.compatible(t1._type, t2)
-    elseif t2._tag == "Type.Typedef" then
-        return types.compatible(t1, t2._type)
-    elseif t1._tag == "Type.CPointer" and t2._tag == "Type.Nil" then
-        return true
-    elseif t1._tag == "Type.Nil" and t2._tag == "Type.CPointer" then
-        return true
-    elseif types.is_direct_c(t1) or types.is_direct_c(t2) then
-        return false
-    elseif t1._tag == "Type.Pointer" and t2._tag == "Type.Nil" then
-        return true -- nullable pointer
-    elseif t1._tag == "Type.Nil" and t2._tag == "Type.Pointer" then
-        return true -- nullable pointer
-    elseif types.explicitly_coerceable(t1, t2) then
-        return true
-    elseif t1._tag == "Type.Value" or t2._tag == "Type.Value" then
-        return true
-    elseif t1._tag == "Type.Array" and t2._tag == "Type.Array" then
-        return types.compatible(t1.elem, t2.elem)
-    elseif t1._tag == "Type.Map" and t2._tag == "Type.Map" then
-        return types.compatible(t1.keys, t2.keys) and
-               types.compatible(t1.values, t2.values)
-    elseif t1._tag == "Type.Nominal" and t2._tag == "Type.Nominal" then
-        return t1.fqtn == t2.fqtn
-    elseif t1._tag == "Type.Function" and t2._tag == "Type.Function" then
-        return function_compatible(t1, t2)
-    else
-        return false
-    end
 end
 
 local type_equals
@@ -1459,6 +1210,1103 @@ end
 
 function types.equals(t1, t2)
     return type_equals(t1, t2)
+end
+
+-- The relations below deliberately separate gradual consistency from the
+-- operations that may be performed at an assignment or language boundary.
+-- Keep their result objects data-only: later checker/coder phases can attach
+-- and lower these plans without having to rerun a semantic relation.
+
+-- Collapse transparent aliases before relation dispatch. Qualification that
+-- affects a surrounding C declarator remains on that declarator; the named
+-- value type itself is transparent here. Alias chains are cycle-safe.
+function types.normalize(typ)
+    local seen = {}
+    while typ do
+        if seen[typ] then
+            -- Cyclic aliases are malformed legacy graphs, not a recursive type
+            -- constructor. Reject the chain uniformly regardless of which
+            -- alias in the cycle was supplied as the entry point.
+            return nil
+        end
+        seen[typ] = true
+        if typ._tag == "Type.Typedef" then
+            typ = typ._type
+        elseif typ._tag == "Type.CTypedef" then
+            typ = typ.target
+        else
+            break
+        end
+    end
+    return typ
+end
+
+local function plan(kind, fields)
+    fields = fields or {}
+    fields.kind = kind
+    return fields
+end
+
+local function normalized_pair(left, right)
+    return types.normalize(left), types.normalize(right)
+end
+
+local function is_relation_nominal(typ)
+    local tag = typ and typ._tag
+    return tag == "Type.Nominal"
+        or tag == "Type.Record"
+        or tag == "Type.Union"
+        or tag == "Type.Interface"
+end
+
+local function nominal_name(typ)
+    return typ.fqtn or typ.name
+end
+
+local function relation_identity(left, right)
+    left, right = normalized_pair(left, right)
+    if not left or not right
+       or left._tag == "Type.Variant"
+       or right._tag == "Type.Variant" then
+        return false
+    elseif is_relation_nominal(left) or is_relation_nominal(right) then
+        return left._tag == right._tag
+            and nominal_name(left) == nominal_name(right)
+    end
+    return types.equals(left, right)
+end
+
+local function sound_guardable(typ, seen)
+    typ = types.normalize(typ)
+    if not typ then return false end
+
+    seen = seen or {}
+    if seen[typ] ~= nil then return seen[typ] end
+    -- Titan's structural type grammar is finite. Recursion through a record,
+    -- union, or interface stops at its nominal descriptor; revisiting an
+    -- Array/Map/Option/Function table can therefore only be a malformed
+    -- internal graph, not evidence that the graph is guardable.
+    seen[typ] = false
+
+    local tag = typ._tag
+    local ok
+    if tag == "Type.Integer" or tag == "Type.Float"
+       or tag == "Type.Boolean" or tag == "Type.Nil"
+       or tag == "Type.String" or tag == "Type.Value"
+       or tag == "Type.Nominal" or tag == "Type.Record"
+       or tag == "Type.Union" or tag == "Type.Interface"
+       or tag == "Type.COwned" or tag == "Type.CInteger"
+       or tag == "Type.CFloat" or types.is_c_tvalue(typ) then
+        ok = true
+    elseif tag == "Type.Array" then
+        ok = sound_guardable(typ.elem, seen)
+    elseif tag == "Type.Map" then
+        ok = sound_guardable(typ.keys, seen)
+            and sound_guardable(typ.values, seen)
+    elseif tag == "Type.Option" then
+        ok = sound_guardable(typ.base, seen)
+    elseif tag == "Type.Function" then
+        ok = not typ.vararg
+        for _, param in ipairs(typ.params) do
+            ok = ok and sound_guardable(param, seen)
+        end
+        for _, result in ipairs(typ.rettypes) do
+            ok = ok and sound_guardable(result, seen)
+        end
+        if typ.varargtype then
+            ok = ok and sound_guardable(typ.varargtype, seen)
+        end
+        if typ.flexrettype then
+            ok = ok and sound_guardable(typ.flexrettype, seen)
+        end
+    else
+        -- In particular, raw C/legacy pointers are TValue-boxable but do not
+        -- retain enough pointee identity for a sound gradual guard.
+        ok = false
+    end
+    seen[typ] = ok
+    return ok
+end
+
+function types.has_sound_gradual_guard(typ)
+    return sound_guardable(typ, {})
+end
+
+local function guard_plan(target, seen)
+    target = types.normalize(target)
+    if not target or not sound_guardable(target, {}) then return false end
+
+    seen = seen or {}
+    if seen[target] then return seen[target] end
+
+    local result = plan("gradual_guard", { target = target })
+    seen[target] = result
+    local tag = target._tag
+    if tag == "Type.Integer" then
+        result.op = "integer"
+    elseif tag == "Type.Float" then
+        result.op = "float"
+    elseif tag == "Type.Boolean" then
+        result.op = "boolean"
+    elseif tag == "Type.Nil" then
+        result.op = "nil"
+    elseif tag == "Type.String" then
+        result.op = "string"
+    elseif tag == "Type.Value" then
+        result.op = "value"
+    elseif tag == "Type.Array" then
+        result.op = "array"
+        result.element = guard_plan(target.elem, seen)
+    elseif tag == "Type.Map" then
+        result.op = "map"
+        result.key = guard_plan(target.keys, seen)
+        result.value = guard_plan(target.values, seen)
+    elseif tag == "Type.Option" then
+        result.op = "option"
+        result.inner = guard_plan(target.base, seen)
+    elseif tag == "Type.Function" then
+        result.op = "callable"
+    elseif is_relation_nominal(target) then
+        result.op = "nominal"
+        result.name = nominal_name(target)
+    elseif tag == "Type.COwned" then
+        result.op = "c_owned"
+    elseif tag == "Type.CInteger" then
+        result.op = "c_integer"
+    elseif tag == "Type.CFloat" then
+        result.op = "c_float"
+    elseif types.is_c_tvalue(target) then
+        result.op = "c_tvalue"
+    else
+        return false
+    end
+    return result
+end
+
+function types.gradual_guard(target)
+    return guard_plan(target, {})
+end
+
+local relation_consistent
+local callable_adjustment_impl
+
+local function gradual_view_plan(source, target)
+    source, target = normalized_pair(source, target)
+    if not source or not target then
+        return false
+    elseif source._tag == "Type.Value" then
+        local guard = guard_plan(target, {})
+        if not guard then return false end
+        return plan("gradual_view", {
+            op = "project",
+            source = source,
+            target = target,
+            guard = guard,
+        })
+    elseif target._tag == "Type.Value" then
+        if not types.has_tvalue_representation(source)
+           or not sound_guardable(source, {}) then
+            return false
+        end
+        return plan("gradual_view", {
+            op = "inject",
+            source = source,
+            target = target,
+        })
+    end
+    local guard = guard_plan(target, {})
+    if not guard then return false end
+    return plan("gradual_view", {
+        op = "structural",
+        source = source,
+        target = target,
+        guard = guard,
+    })
+end
+
+local function component_adjustment(source, target, context)
+    source, target = normalized_pair(source, target)
+    if not source or not target then
+        return false
+    elseif relation_identity(source, target) then
+        return plan("identity", { source = source, target = target })
+    elseif source._tag == "Type.Function"
+       and target._tag == "Type.Function" then
+        return callable_adjustment_impl(source, target, context)
+    elseif relation_consistent(source, target) then
+        return gradual_view_plan(source, target)
+    end
+    return false
+end
+
+local function accepts_missing_nil(target)
+    target = types.normalize(target)
+    local tag = target and target._tag
+    return tag == "Type.Nil" or tag == "Type.Value"
+        or tag == "Type.Option" or tag == "Type.Pointer"
+        or tag == "Type.CPointer"
+end
+
+callable_adjustment_impl = function(source, target, context)
+    source, target = normalized_pair(source, target)
+    if not source or not target
+       or source._tag ~= "Type.Function"
+       or target._tag ~= "Type.Function" then
+        return false
+    end
+
+    context = context or {
+        callable_seen = {},
+        allow_partial_flex = true,
+    }
+    local matches = context.callable_seen[source]
+    if matches and matches[target] ~= nil then
+        return matches[target]
+    end
+
+    local exact = relation_identity(source, target)
+    if (source.vararg or target.vararg) and not exact then
+        return false
+    end
+
+    local result = plan("callable", {
+        source = source,
+        target = target,
+        exact = exact,
+        arguments = {},
+        results = {},
+    })
+    if not matches then
+        matches = {}
+        context.callable_seen[source] = matches
+    end
+    -- Callable adjustment is an inductive derivation. A recursive revisit
+    -- before any finite component has completed is not evidence for itself:
+    -- reject that pending branch. Exact/bisimilar cycles have already stopped
+    -- at relation_identity above, while ordinary recursive records/unions are
+    -- nominal leaves rather than structural Function-table cycles.
+    matches[target] = false
+
+    local nargs = math.min(#source.params, #target.params)
+    for index = 1, nargs do
+        -- A call through `target` supplies a target parameter to the actual
+        -- `source` function.
+        local adjustment = component_adjustment(
+            target.params[index], source.params[index], context)
+        if not adjustment then
+            matches[target] = nil
+            return false
+        end
+        result.arguments[#result.arguments + 1] = {
+            kind = "argument",
+            expected_index = index,
+            actual_index = index,
+            adjustment = adjustment,
+        }
+    end
+
+    -- Fixed actual suffixes receive either an expected tail element or nil.
+    for index = #target.params + 1, #source.params do
+        if not accepts_missing_nil(source.params[index]) then
+            matches[target] = nil
+            return false
+        end
+        if target.varargtype then
+            local adjustment = component_adjustment(
+                target.varargtype, source.params[index], context)
+            if not adjustment then
+                matches[target] = nil
+                return false
+            end
+            result.arguments[#result.arguments + 1] = {
+                kind = "tail_or_nil_to_argument",
+                actual_index = index,
+                expected_tail_offset = index - #target.params,
+                adjustment = adjustment,
+            }
+        else
+            result.arguments[#result.arguments + 1] = {
+                kind = "nil_fill",
+                actual_index = index,
+            }
+        end
+    end
+
+    -- A shorter fixed actual ignores the expected suffix unless it has an
+    -- input tail that observes those values.
+    for index = #source.params + 1, #target.params do
+        if source.varargtype then
+            local adjustment = component_adjustment(
+                target.params[index], source.varargtype, context)
+            if not adjustment then
+                matches[target] = nil
+                return false
+            end
+            result.arguments[#result.arguments + 1] = {
+                kind = "argument_to_tail",
+                expected_index = index,
+                adjustment = adjustment,
+            }
+        else
+            result.arguments[#result.arguments + 1] = {
+                kind = "ignore_argument",
+                expected_index = index,
+            }
+        end
+    end
+
+    if source.varargtype and target.varargtype then
+        local adjustment = component_adjustment(
+            target.varargtype, source.varargtype, context)
+        if not adjustment then
+            matches[target] = nil
+            return false
+        end
+        result.arguments[#result.arguments + 1] = {
+            kind = "tail_to_tail",
+            expected_tail_consumed =
+                math.max(0, #source.params - #target.params),
+            adjustment = adjustment,
+        }
+    elseif source.varargtype then
+        result.arguments[#result.arguments + 1] = {
+            kind = "empty_tail",
+        }
+    elseif target.varargtype then
+        result.arguments[#result.arguments + 1] = {
+            kind = "ignore_tail",
+            expected_tail_consumed =
+                math.max(0, #source.params - #target.params),
+        }
+    end
+
+    for index, expected in ipairs(target.rettypes) do
+        local actual = source.rettypes[index]
+        if actual then
+            local adjustment =
+                component_adjustment(actual, expected, context)
+            if not adjustment then
+                matches[target] = nil
+                return false
+            end
+            result.results[#result.results + 1] = {
+                kind = "result",
+                actual_index = index,
+                expected_index = index,
+                adjustment = adjustment,
+            }
+        elseif source.flexrettype then
+            local adjustment
+            local optional = expected._tag == "Type.Option"
+            local wrap_present = false
+            if optional then
+                adjustment = component_adjustment(
+                    source.flexrettype, expected, context)
+                if not adjustment then
+                    adjustment = component_adjustment(
+                        source.flexrettype, expected.base, context)
+                    wrap_present = adjustment and true or false
+                end
+            elseif context.allow_partial_flex ~= false then
+                adjustment = component_adjustment(
+                    source.flexrettype, expected, context)
+            end
+            if not adjustment then
+                matches[target] = nil
+                return false
+            end
+            result.results[#result.results + 1] = {
+                kind = optional and "flex_to_optional_result"
+                    or "flex_to_result",
+                expected_index = index,
+                actual_flex_offset = index - #source.rettypes,
+                adjustment = adjustment,
+                wrap_present = optional and wrap_present or nil,
+            }
+        else
+            matches[target] = nil
+            return false
+        end
+    end
+
+    for index = #target.rettypes + 1, #source.rettypes do
+        if target.flexrettype then
+            local adjustment = component_adjustment(
+                source.rettypes[index], target.flexrettype, context)
+            if not adjustment then
+                matches[target] = nil
+                return false
+            end
+            result.results[#result.results + 1] = {
+                kind = "result_to_flex",
+                actual_index = index,
+                expected_flex_offset = index - #target.rettypes,
+                adjustment = adjustment,
+            }
+        else
+            result.results[#result.results + 1] = {
+                kind = "hide_result",
+                actual_index = index,
+            }
+        end
+    end
+
+    if source.flexrettype and target.flexrettype then
+        local adjustment = component_adjustment(
+            source.flexrettype, target.flexrettype, context)
+        if not adjustment then
+            matches[target] = nil
+            return false
+        end
+        result.results[#result.results + 1] = {
+            kind = "flex_to_flex",
+            actual_flex_consumed =
+                math.max(0, #target.rettypes - #source.rettypes),
+            adjustment = adjustment,
+        }
+    elseif source.flexrettype then
+        result.results[#result.results + 1] = {
+            kind = "hide_flex",
+            actual_flex_consumed =
+                math.max(0, #target.rettypes - #source.rettypes),
+        }
+    elseif target.flexrettype then
+        result.results[#result.results + 1] = {
+            kind = "end_flex",
+        }
+    end
+
+    matches[target] = result
+    return result
+end
+
+local consistent_impl
+
+local function callable_shape_consistent(source, target, context)
+    local exact = relation_identity(source, target)
+    if (source.vararg or target.vararg) and not exact then
+        return false
+    end
+
+    local nargs = math.min(#source.params, #target.params)
+    for index = 1, nargs do
+        -- A call through `target` supplies a target parameter to the actual
+        -- `source` callable.
+        if not consistent_impl(
+                target.params[index], source.params[index], context) then
+            return false
+        end
+    end
+
+    for index = #target.params + 1, #source.params do
+        if not accepts_missing_nil(source.params[index]) then
+            return false
+        elseif target.varargtype
+           and not consistent_impl(
+               target.varargtype, source.params[index], context) then
+            return false
+        end
+    end
+
+    for index = #source.params + 1, #target.params do
+        if source.varargtype
+           and not consistent_impl(
+               target.params[index], source.varargtype, context) then
+            return false
+        end
+    end
+
+    if source.varargtype and target.varargtype
+       and not consistent_impl(
+           target.varargtype, source.varargtype, context) then
+        return false
+    end
+
+    for index, expected_unresolved in ipairs(target.rettypes) do
+        local actual = source.rettypes[index]
+        if actual then
+            if not consistent_impl(actual, expected_unresolved, context) then
+                return false
+            end
+        elseif source.flexrettype then
+            local expected = types.normalize(expected_unresolved)
+            local compatible =
+                consistent_impl(
+                    source.flexrettype, expected_unresolved, context)
+            if not compatible
+               and expected and expected._tag == "Type.Option" then
+                compatible =
+                    consistent_impl(
+                        source.flexrettype, expected.base, context)
+            end
+            if not compatible then return false end
+        else
+            return false
+        end
+    end
+
+    for index = #target.rettypes + 1, #source.rettypes do
+        if target.flexrettype
+           and not consistent_impl(
+               source.rettypes[index], target.flexrettype, context) then
+            return false
+        end
+    end
+
+    if source.flexrettype and target.flexrettype
+       and not consistent_impl(
+           source.flexrettype, target.flexrettype, context) then
+        return false
+    end
+
+    return true
+end
+
+consistent_impl = function(left, right, context)
+    left, right = normalized_pair(left, right)
+    if not left or not right
+       or left._tag == "Type.Variant"
+       or right._tag == "Type.Variant" then
+        return false
+    elseif relation_identity(left, right) then
+        return true
+    end
+
+    local completed_left = context.completed[left]
+    if completed_left and completed_left[right] ~= nil then
+        return completed_left[right]
+    end
+
+    -- Titan's grammar does not admit recursive structural types. Alias
+    -- resolution rejects cycles, while recursion in records, unions, and
+    -- interfaces reaches a nominal leaf. Keep this pending-pair check only as
+    -- a defense against a malformed cycle supplied by an internal caller
+    -- serving as its own non-identity proof; it is not a fixed-point rule in
+    -- the language relation.
+    local active = context.active
+    local left_active = active[left]
+    local right_active = active[right]
+    if (left_active and left_active[right])
+       or (right_active and right_active[left]) then
+        return false
+    end
+    if not left_active then
+        left_active = {}
+        active[left] = left_active
+    end
+    if not right_active then
+        right_active = {}
+        active[right] = right_active
+    end
+    left_active[right] = true
+    right_active[left] = true
+
+    local result
+    if left._tag == "Type.Value"
+       or right._tag == "Type.Value" then
+        local other = left._tag == "Type.Value" and right or left
+        result = sound_guardable(other, {})
+            and types.has_tvalue_representation(other)
+    elseif left._tag == "Type.Array"
+       and right._tag == "Type.Array" then
+        result = consistent_impl(left.elem, right.elem, context)
+    elseif left._tag == "Type.Map"
+       and right._tag == "Type.Map" then
+        result = consistent_impl(left.keys, right.keys, context)
+            and consistent_impl(left.values, right.values, context)
+    elseif left._tag == "Type.Option"
+       and right._tag == "Type.Option" then
+        result = consistent_impl(left.base, right.base, context)
+    elseif left._tag == "Type.Function"
+       and right._tag == "Type.Function" then
+        result = callable_shape_consistent(left, right, context)
+            or callable_shape_consistent(right, left, context)
+    else
+        result = false
+    end
+
+    left_active[right] = nil
+    right_active[left] = nil
+    completed_left = context.completed[left]
+    if not completed_left then
+        completed_left = {}
+        context.completed[left] = completed_left
+    end
+    local completed_right = context.completed[right]
+    if not completed_right then
+        completed_right = {}
+        context.completed[right] = completed_right
+    end
+    completed_left[right] = result and true or false
+    completed_right[left] = result and true or false
+    return result
+end
+
+relation_consistent = function(left, right)
+    return consistent_impl(left, right, {
+        active = {},
+        completed = {},
+    })
+end
+
+function types.consistent(left, right)
+    return relation_consistent(left, right)
+end
+
+function types.callable_adjustment(source_actual, target_expected, policy)
+    policy = policy or {}
+    return callable_adjustment_impl(source_actual, target_expected, {
+        callable_seen = {},
+        allow_partial_flex = policy.allow_partial_flex ~= false,
+    })
+end
+
+local function coercion_plan(op, source, target, fields)
+    fields = fields or {}
+    fields.op = op
+    fields.source = source
+    fields.target = target
+    return plan("coercion", fields)
+end
+
+local function coercion_impl(source, target, policy, seen)
+    source, target = normalized_pair(source, target)
+    if not source or not target
+       or source._tag == "Type.Variant"
+       or target._tag == "Type.Variant"
+       or relation_identity(source, target) then
+        return false
+    end
+
+    seen = seen or {}
+    local matches = seen[source]
+    if matches and matches[target] ~= nil then
+        return matches[target]
+    end
+    if not matches then
+        matches = {}
+        seen[source] = matches
+    end
+    -- Recursive Option plans are the only recursive direct coercions. Mark a
+    -- pending pair rejected; a named rule below replaces it on success.
+    matches[target] = false
+
+    local result
+    if is_c_integer(source) and target._tag == "Type.Integer" then
+        result = coercion_plan("c_integer_to_integer", source, target)
+    elseif source._tag == "Type.Integer" and is_c_integer(target) then
+        result = coercion_plan("integer_to_c_integer", source, target)
+    elseif is_c_float(source) and target._tag == "Type.Float" then
+        result = coercion_plan("c_float_to_float", source, target)
+    elseif source._tag == "Type.Float" and is_c_float(target) then
+        result = coercion_plan("float_to_c_float", source, target)
+    elseif source._tag == "Type.Integer" and is_c_float(target) then
+        result = coercion_plan("integer_to_c_float", source, target)
+    elseif source._tag == "Type.COwned"
+       and target._tag == "Type.Boolean" then
+        result = coercion_plan("c_owner_truthiness", source, target)
+    elseif is_c_pointer(source) and target._tag == "Type.Boolean" then
+        result = coercion_plan("c_pointer_truthiness", source, target)
+    elseif source._tag == "Type.Nil" and is_c_pointer(target) then
+        result = coercion_plan("nil_to_c_pointer", source, target)
+    elseif source._tag == "Type.Value" and is_c_pointer(target) then
+        result = false
+    elseif types.c_address_coerceable(source, target) then
+        result = coercion_plan("c_address", source, target)
+    elseif types.is_c_pointer_coercion(source, target) then
+        result = coercion_plan("c_pointer", source, target)
+    elseif types.is_c_object_to_void_pointer_conversion(source, target) then
+        result = coercion_plan(
+            "c_object_to_void_pointer", source, target)
+    elseif types.is_c_void_to_object_pointer_coercion(source, target) then
+        result = coercion_plan(
+            "c_void_to_object_pointer", source, target)
+    elseif types.is_string_to_c_pointer_coercion(source, target) then
+        result = coercion_plan("string_to_c_pointer", source, target)
+    elseif c_value_compatible(source)
+       and target._tag == "Type.Value" then
+        -- Boxing an ordinary object pointer as untyped lightuserdata is safe;
+        -- only recovery of a precise pointee type is non-reifiable and
+        -- restricted to an explicitly written unsafe cast.
+        result = coercion_plan("c_value_to_value", source, target)
+    elseif source._tag == "Type.Value"
+       and c_value_compatible(target)
+       and sound_guardable(target, {}) then
+        result = coercion_plan("value_to_c_value", source, target, {
+            guard = guard_plan(target, {}),
+        })
+    elseif c_value_compatible(source)
+       and types.is_c_tvalue(target) then
+        result = coercion_plan("c_value_to_c_tvalue", source, target)
+    elseif types.is_c_tvalue(target)
+       and not types.is_direct_c(source) then
+        -- This is intentionally a whole-slot operation, including for Option:
+        -- nil must not be forced before it is copied into the C TValue.
+        result = coercion_plan("to_c_tvalue", source, target)
+    elseif target._tag == "Type.Boolean"
+       and source._tag ~= "Type.Boolean"
+       and source._tag ~= "Type.Value"
+       and not types.is_direct_c(source) then
+        result = coercion_plan("truthiness", source, target)
+    elseif target._tag == "Type.Option" then
+        if types.has_tvalue_representation(target.base) then
+            if source._tag == "Type.Nil" then
+                result = coercion_plan("option_nil", source, target)
+            elseif source._tag == "Type.Option" then
+                if types.has_tvalue_representation(source.base)
+                   and not optional_owner_to_pointer(
+                       source.base, target.base) then
+                    local inner
+                    if relation_identity(source.base, target.base) then
+                        inner = plan("identity", {
+                            source = source.base,
+                            target = target.base,
+                        })
+                    else
+                        inner = coercion_impl(
+                            source.base, target.base, policy, seen)
+                    end
+                    if inner then
+                        result = coercion_plan(
+                            "option_map", source, target, { inner = inner })
+                    end
+                end
+            else
+                local inner
+                if relation_identity(source, target.base) then
+                    inner = plan("identity", {
+                        source = source,
+                        target = target.base,
+                    })
+                else
+                    inner = coercion_impl(
+                        source, target.base, policy, seen)
+                end
+                if inner then
+                    result = coercion_plan(
+                        "option_wrap", source, target, { inner = inner })
+                end
+            end
+        end
+    elseif source._tag == "Type.Option" then
+        if types.has_tvalue_representation(source.base)
+           and not optional_owner_to_pointer(source.base, target) then
+            local inner
+            if relation_identity(source.base, target) then
+                inner = plan("identity", {
+                    source = source.base,
+                    target = target,
+                })
+            else
+                inner = coercion_impl(
+                    source.base, target, policy, seen)
+            end
+            if inner then
+                result = coercion_plan(
+                    "option_force", source, target, { inner = inner })
+            end
+        end
+    elseif types.is_direct_c(source) or types.is_direct_c(target) then
+        result = false
+    elseif target._tag == "Type.Pointer"
+       and can_coerce_pointer(source, target) then
+        result = coercion_plan("legacy_pointer", source, target)
+    elseif source._tag == "Type.Integer"
+       and target._tag == "Type.Float" then
+        result = coercion_plan("integer_to_float", source, target)
+    elseif source._tag == "Type.Float"
+       and target._tag == "Type.Integer" then
+        result = coercion_plan("float_to_integer", source, target)
+    elseif source._tag == "Type.Nominal"
+       and target._tag == "Type.Nominal"
+       and policy and policy.interface_coercion then
+        -- Scalar expressions carry nominals, not their Record/Union/Interface
+        -- declaration descriptors. The cast-site callback owns descriptor
+        -- resolution, owner-kind checks, and visibility. A false result leaves
+        -- unrelated nominal pairs rejected; a successful result authorizes
+        -- only this direct outer wrapper coercion.
+        local methods =
+            policy.interface_coercion(source, target, policy)
+        if methods then
+            result = coercion_plan(
+                "interface_wrapper", source, target, { methods = methods })
+        end
+    end
+
+    matches[target] = result or false
+    return result or false
+end
+
+function types.coercion(source, target, policy)
+    return coercion_impl(source, target, policy or {}, {})
+end
+
+local function dynamic_plan(target, seen)
+    target = types.normalize(target)
+    if not target or target._tag == "Type.Variant"
+       or not sound_guardable(target, {}) then
+        return false
+    end
+
+    seen = seen or {}
+    if seen[target] ~= nil then return seen[target] end
+    seen[target] = false
+
+    local tag = target._tag
+    local result = plan("dynamic_coercion", { target = target })
+    if tag == "Type.Integer" then
+        result.op = "integer"
+    elseif tag == "Type.Float" then
+        result.op = "float"
+    elseif tag == "Type.Boolean" then
+        result.op = "truthiness"
+    elseif tag == "Type.Nil" then
+        result.op = "nil"
+    elseif tag == "Type.String" then
+        result.op = "string"
+    elseif tag == "Type.Value" then
+        result.op = "value"
+    elseif tag == "Type.Array" then
+        result.op = "array"
+    elseif tag == "Type.Map" then
+        result.op = "map"
+    elseif tag == "Type.Function" then
+        result.op = "callable"
+    elseif is_relation_nominal(target) then
+        result.op = "nominal"
+        result.name = nominal_name(target)
+    elseif tag == "Type.Option" then
+        local inner = dynamic_plan(target.base, seen)
+        if not inner then return false end
+        result.op = "option"
+        result.inner = inner
+    elseif tag == "Type.CInteger" then
+        result.op = "c_integer"
+    elseif tag == "Type.CFloat" then
+        result.op = "c_float"
+    elseif tag == "Type.COwned" then
+        result.op = "c_owned"
+    elseif types.is_c_tvalue(target) then
+        result.op = "c_tvalue"
+    else
+        -- Raw C pointers deliberately have no implicit dynamic plan: a
+        -- lightuserdata address cannot establish its requested pointee type.
+        return false
+    end
+    seen[target] = result
+    return result
+end
+
+function types.dynamic_coercion(target)
+    return dynamic_plan(target, {})
+end
+
+local function explicit_conversion(source, target)
+    local op
+    if types.is_pointer_to_string_cast(source, target) then
+        op = "pointer_to_string"
+    elseif types.is_gc_identity_void_pointer_cast(source, target) then
+        op = "gc_identity_to_void_pointer"
+    elseif types.is_legacy_pointer_to_c_void_cast(source, target) then
+        op = "legacy_pointer_to_c_void"
+    elseif types.is_c_function_pointer_void_cast(source, target) then
+        op = "c_function_pointer_to_void"
+    elseif types.is_counted_c_character_owner(source)
+       and target._tag == "Type.String" then
+        op = "counted_owner_to_string"
+    elseif (is_c_integer(source) or is_c_float(source))
+       and (is_c_integer(target) or is_c_float(target)) then
+        op = "c_numeric"
+    elseif types.is_c_object_to_void_pointer_conversion(source, target) then
+        op = "c_object_to_void_pointer"
+    elseif types.is_written_c_void_to_object_pointer_cast(source, target) then
+        op = "c_void_to_object_pointer"
+    end
+    if not op then return false end
+    return {
+        kind = "explicit_conversion",
+        op = op,
+        source = source,
+        target = target,
+    }
+end
+
+function types.written_cast(source, target, policy)
+    source, target = normalized_pair(source, target)
+    if not source or not target
+       or source._tag == "Type.Variant"
+       or target._tag == "Type.Variant" then
+        return false
+    elseif relation_identity(source, target) then
+        return plan("written_cast", {
+            op = "identity",
+            source = source,
+            target = target,
+        })
+    end
+
+    if source._tag == "Type.Value" then
+        local dynamic = dynamic_plan(target, {})
+        if dynamic then
+            return plan("written_cast", {
+                op = "dynamic",
+                source = source,
+                target = target,
+                dynamic = dynamic,
+            })
+        elseif target._tag == "Type.CPointer" then
+            -- Recommended raw-pointer policy: only written syntax may request
+            -- this unchecked pointee reinterpretation.
+            return plan("written_cast", {
+                op = "explicit",
+                source = source,
+                target = target,
+                conversion = {
+                    kind = "explicit_conversion",
+                    op = "unsafe_dynamic_c_pointer",
+                    source = source,
+                    target = target,
+                },
+            })
+        end
+    end
+
+    local direct = coercion_impl(source, target, policy or {}, {})
+    if direct then
+        return plan("written_cast", {
+            op = "coercion",
+            source = source,
+            target = target,
+            coercion = direct,
+        })
+    end
+
+    local conversion = explicit_conversion(source, target)
+    if conversion then
+        return plan("written_cast", {
+            op = "explicit",
+            source = source,
+            target = target,
+            conversion = conversion,
+        })
+    end
+
+    if source._tag == "Type.Function"
+       and target._tag == "Type.Function" then
+        local callable = types.callable_adjustment(source, target, policy)
+        if callable then
+            return plan("written_cast", {
+                op = "callable",
+                source = source,
+                target = target,
+                callable = callable,
+            })
+        end
+    elseif relation_consistent(source, target) then
+        local view = gradual_view_plan(source, target)
+        if view then
+            return plan("written_cast", {
+                op = "gradual",
+                source = source,
+                target = target,
+                guard = view.guard,
+                view = view,
+            })
+        end
+    end
+    return false
+end
+
+function types.comparable(left, right)
+    left, right = normalized_pair(left, right)
+    if not left or not right
+       or left._tag == "Type.Variant"
+       or right._tag == "Type.Variant" then
+        return false
+    elseif relation_identity(left, right) then
+        return plan("comparison", {
+            op = "identity",
+            left = left,
+            right = right,
+        })
+    elseif relation_consistent(left, right) then
+        local result = {
+            op = "consistent",
+            left = left,
+            right = right,
+        }
+        -- Equality is symmetric, but code generation still needs both
+        -- operands in a common boxed representation when exactly one side is
+        -- the gradual `value` hole. Record that injection as part of the
+        -- ComparisonPlan instead of asking the checker to discover a
+        -- directional assignment after comparability has been established.
+        if left._tag == "Type.Value"
+           and right._tag ~= "Type.Value" then
+            result.right_adjustment =
+                gradual_view_plan(right, left)
+        elseif right._tag == "Type.Value"
+           and left._tag ~= "Type.Value" then
+            result.left_adjustment =
+                gradual_view_plan(left, right)
+        end
+        return plan("comparison", result)
+    elseif (left._tag == "Type.Integer" and right._tag == "Type.Float")
+        or (left._tag == "Type.Float"
+            and right._tag == "Type.Integer") then
+        return plan("comparison", {
+            op = "numeric",
+            left = left,
+            right = right,
+        })
+    elseif left._tag == "Type.Option"
+       and right._tag == "Type.Option" then
+        local inner = types.comparable(left.base, right.base)
+        if inner then
+            return plan("comparison", {
+                op = "option",
+                left = left,
+                right = right,
+                inner = inner,
+            })
+        end
+    end
+    return false
+end
+
+function types.assignment_adjustment(source, target, policy)
+    policy = policy or {}
+    source, target = normalized_pair(source, target)
+    if not source or not target
+       or source._tag == "Type.Variant"
+       or target._tag == "Type.Variant" then
+        return false
+    elseif relation_identity(source, target) then
+        return plan("identity", { source = source, target = target })
+    end
+
+    -- Symmetric function consistency is useful during structural descent, but
+    -- assignment must retain the actual-to-expected direction.
+    if source._tag == "Type.Function"
+       and target._tag == "Type.Function" then
+        return types.callable_adjustment(source, target, policy)
+    end
+
+    if relation_consistent(source, target) then
+        local view = gradual_view_plan(source, target)
+        if view then return view end
+    end
+
+    if policy.allow_coercion ~= false then
+        local direct = coercion_impl(source, target, policy, {})
+        if direct then
+            return plan("direct_coercion", {
+                source = source,
+                target = target,
+                coercion = direct,
+            })
+        end
+    end
+    return false
 end
 
 local function tostring_list(items)

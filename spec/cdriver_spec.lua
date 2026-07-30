@@ -603,6 +603,14 @@ typedef double lua_Number;
 
             assert.equal("long long", inputs.lua_integer)
             assert.equal("double", inputs.lua_number)
+            assert.is_string(inputs.size_t)
+            assert.is_string(inputs.ptrdiff_t)
+            assert.is_table(inputs.signed_minima)
+            for _, spelling in ipairs({
+                "signed char", "short", "int", "long", "long long",
+            }) do
+                assert.is_table(inputs.signed_minima[spelling])
+            end
             assert.same({ "1" }, inputs.macros.__CHAR_UNSIGNED__)
             assert.same({ "23" }, inputs.macros.TITAN_PROFILE_FLAG)
             assert.same({
@@ -611,6 +619,13 @@ typedef double lua_Number;
             }, inputs.fixed_include_dirs)
             assert.equal("lua.h", inputs.lua_header.original)
             assert.matches("/lua%.h$", inputs.lua_header.resolved)
+
+            local profile = assert(
+                require("titan-compiler.csemantics").build_profile(inputs))
+            assert.is_false(
+                profile.integers[profile.size_t].type.signed)
+            assert.is_true(
+                profile.integers[profile.ptrdiff_t].type.signed)
         end)
 
         it("rebuilds profiles and resolver probe services after reconfiguration",

@@ -144,22 +144,22 @@ symbol, and — its central job — turns every spread into either synthesized
 `paramnames`). It is **distinct** from the pre-existing `vararg` boolean,
 which marks a *C-FFI* variadic (`foreigntypes.lua` sets `vararg = true`,
 `varargtype = false`). A Titan variadic sets `varargtype = t`, `vararg = false`.
-Consumers test `varargtype`; the two never mix. Four relations change:
+Consumers test `varargtype`; the two never mix. Four type operations change:
 
-* **`compatible(expected, actual)`** is now directional. Parameter positions
-  are contravariant and may move between the fixed prefix and the actual input
-  tail; an actual function may ignore an expected fixed suffix. Additional
-  actual fixed parameters are admitted only when ordinary adjustment can
-  nil-fill each one, and, for an expected input tail, when each also accepts
-  the tail element. Non-nilable hidden requirements remain incompatible.
-  The expected output shape then observes the actual fixed/flexible results
-  covariantly. Input-tail presence is therefore no longer a blanket equality
-  test. See [flexible returns](flexible-returns.md#strict-identity-and-directional-compatibility)
+* **`callable_adjustment(source_actual, target_expected)`** plans the directional callable
+  use. Parameter positions may move between the fixed prefix and the actual
+  input tail; an actual function may ignore an expected fixed suffix.
+  Additional actual fixed parameters receive the callable's enumerated
+  missing-nil action; an expected input tail must also be safely observed in
+  every such position. The expected output shape then observes
+  the actual fixed/flexible results covariantly. No numeric, Option, or other
+  automatic coercion is lifted through the callable shape. See
+  [flexible returns](flexible-returns.md#identity-and-callable-adjustment)
   for the complete matrix.
 * **`equals`** remains exact structural identity: fixed positions, input-tail
   presence/type, and output-tail presence/type must all match. Thus
   `...: integer` and `...: value` are not equal, which gives them different
-  runtime tags even if a directional gradual conversion is legal.
+runtime tags even if a directional callable adjustment is legal.
 * **`serialize`** emits `varargtype` for Function, Method, and StaticMethod (the
   historical 0.9 ABI change), alongside the independent `flexrettype` schema.
   The latter is not accepted from compiled interfaces until the coordinated
@@ -309,14 +309,15 @@ the vararg element type or checking reports the ordinary positional
 initializer coercion error. The shared `_positional_adjustment` can likewise
 name a trailing flexible-result call as its open source.
 
-### The coercion guarantee for codegen
+### The adjustment guarantee for codegen
 
 After checking, every static element destined for a `TitanVarg*` struct has
-been `trycoerce`d to the element type, so its store uses the ordinary typed
-lowering. Runtime run-to-run conversion uses the same cast machinery per
-element. A gradual `value → t` check can therefore appear in `genluaentry`, a
-fresh forwarding copy, or a flexible result-run consumer; it is never replaced
-by a representation cast.
+an attached `assignment_adjustment` to the element type, so its store consumes
+the ordinary plan lowering. Runtime run-to-run conversion uses the same
+per-element plan. A strict `value → t` guard can therefore appear in the
+strict generic entry, a fresh forwarding copy, or a flexible result-run
+consumer; it is never replaced by a representation cast. The genuine-Lua
+entry instead consumes the corresponding `DynamicCoercionPlan`.
 
 ## Code generator: the seven structs and the native ABI
 
@@ -420,8 +421,8 @@ function's `...` (scope rule 4 enforced a second time, in codegen).
 
 ### `genluaentry` builds GC-anchored element storage plus a C-stack descriptor
 
-The Lua entry wrapper (`genluaentry`), reached from `require`/Lua and the
-generic value-call path, captures the incoming arg count *before* the
+The two Lua-stack entries (`genluaentry`) capture the incoming user-argument
+count *before* the
 error-slot/errorhandler pushes inflate `L->top.p`, pads a short fixed prefix
 with nil, then builds the struct from every argument beyond `nfixed`:
 
@@ -434,11 +435,15 @@ with nil, then builds the struct from every argument beyond `nfixed`:
 3. Build a small `TitanVarg*` descriptor on the C stack:
    `{ _nvarargs, (ElemCT *)getudatamem(_varargs_ud) }`.
 4. Read each surplus arg `s2v(_vfunc + nfixed + 1 + j)` through the same
-   `checkandget` coercion the fixed params use, into `_varargs->args[j]`; this
-   is where the gradual `value → t` boundary check lives. Pass `_start = 0`.
+   policy as fixed parameters: `DynamicCoercionPlan` for the genuine-Lua
+   entry, strict `GuardPlan` for the branded Titan adapter. Store it in
+   `_varargs->args[j]` and pass `_start = 0`. The strict adapter excludes its
+   hidden original-closure argument from `_vcount`.
 
-The arg-base pointer (`_vfunc`) is recomputed after the `lua_checkstack`/push
-that may have relocated the stack.
+The entry first calls `titan_ensure_stack`, which raises normally if
+`lua_checkstack` cannot reserve the payload anchor. The arg-base pointer
+(`_vfunc`) is recomputed after that reservation/push because it may have
+relocated the stack.
 
 ### Lowering `...[i]`, `#...`, and `{...}`
 
@@ -503,7 +508,7 @@ parameter:
    prefix (each gc prefix value anchored on its own slot first — §2.D) then each
    incoming `...` element converted to the callee element type (identical ctype →
    raw copy; a `value` widening → `setboxed`; a `value` narrowing →
-   `checkandget`), set `n_args`, pass `_start = 0`. The fresh allocation can
+   the checker-attached strict guard), set `n_args`, pass `_start = 0`. The fresh allocation can
    relocate the Lua stack, so the function records
    `ctx.uses_base_off` and `_base` is recomputed from `_base_off` after the
    call.
@@ -527,23 +532,29 @@ distinguishes `...: integer` from `...: value`. So:
   struct build is spliced into the *fast branch only* (`$VARGSTATS`), so a
   gradual mismatch never allocates it (and a case-3 `checkandget` cannot raise
   spuriously before the generic path runs).
-* **Tag does not match** (a gradual `value` difference — e.g. a
-  `(integer, ...: value)`-typed value holding a `(integer, ...: integer)` function)
-  → the **generic Lua-stack path**: push the function and every fixed and
-  surplus static arg, then (when forwarding) each `...` element one by one
-  start-relative, and `luaD_callnoyield`; the callee's `genluaentry` coerces
-  each surplus arg to its real element type and rebuilds the struct. This is the
-  gradual boundary, same as for non-variadic value params.
+* **Tag differs but is branded** (for example a
+  `(integer, ...: value)`-typed view holding a
+  `(integer, ...: integer)` Titan function) → the **strict generic
+  Lua-stack path**: push the closure's strict light C function, the original
+  closure as a hidden carrier, every fixed and surplus static argument, and
+  any forwarded `...` elements. The strict entry rebuilds the descriptor with
+  `GuardPlan`s and invokes the native body with the original closure as `_fn`.
+* **The value is not a branded Titan closure** → the ordinary Lua generic path
+  calls the Lua closure, C function, or `__call` value. It receives arguments
+  already adjusted to the static callable shape and boxed for Lua; results
+  entering Titan use the canonical `DynamicCoercionPlan`, including numeric
+  conversions and truthiness.
 
 `luaD_callnoyield` can relocate the stack, so `codevaluecall` sets
-`ctx.uses_base_off` and recomputes `_base` afterward on both paths.
+`ctx.uses_base_off` and recomputes `_base` afterward on every stack path.
 The same exact tag also folds in `flexrettype`. On a matching native path the
-caller supplies the flexible output descriptor directly. On the generic path a
+caller supplies the flexible output descriptor directly. On either generic path a
 finite sink requests its exact Lua result count; an open sink for a statically
 flexible producer uses `LUA_MULTRET`, preserves the actual count, and converts
-the dynamic suffix into the shared result run before resetting the Lua stack.
+the suffix into the shared result run with strict guards for branded Titan
+values and dynamic conversion otherwise before resetting the Lua stack.
 Thus input and output tails share descriptor representations without changing
-which branch owns the boundary checks.
+which branch owns the boundary policy.
 
 ## The ABI bumps (0.9 and 0.10)
 
@@ -562,13 +573,15 @@ flexible-array object (`lu_byte n_args; T args[]`) to a descriptor
 the struct layout did not; mixing 0.9 and 0.10 modules would misread the bytes
 after `n_args`, so they must live under different `TITAN_PATH` directories.
 
-The current ABI is **0.19**, newer than this variadic change. Flexible outputs
+The current ABI is **0.20**, newer than this variadic change. Flexible outputs
 reuse these descriptors but add `flexrettype` to serialized callable shapes and
 `_flexout`/`_flexwant` to native signatures. They shipped as ABI 0.14 rather
 than accepting both layouts under one marker. ABI 0.17 introduced the current
 Array boundary while leaving `TitanVargArrayOrMap` as `Table **`: exact Array
 elements remain internal backing Tables, while generic/Lua-visible runs box
-them as proxies. ABI 0.18 and 0.19 preserve that descriptor contract. See
+them as proxies. ABI 0.18 and 0.19 preserved that descriptor contract; ABI
+0.20 keeps it while adding the Array writer user value and callable
+strict-entry trailer. See
 [Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
 
 Compiled-interface import paths round-trip `varargtype` through the same

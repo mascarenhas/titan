@@ -25,15 +25,18 @@ emission; it has no source-unit node or contributor context. The driver
 `.c` file next to the canonical flat source or folder main, and invokes the
 system C compiler
 ([driver and toolchain](driver.md)). One consequence of the checker's
-rewriting matters constantly here: every implicit coercion is already an
-`Ast.ExpCast` node, every statically demanded extra result is an
-`Ast.ExpExtra` node, and finite/open expression-list demand is recorded on
-the enclosing sink. The coder therefore lowers an explicit checked result
-plan instead of inventing conversions or arity rules of its own
+rewriting matters constantly here: every representation-changing implicit
+conversion is an annotated `Ast.ExpCast`, same-representation and open
+adjustments remain on their checked consumers, every statically demanded
+extra result is an `Ast.ExpExtra`, and finite/open expression-list demand is
+recorded on the enclosing sink. The coder therefore lowers checker-owned
+plans instead of inventing conversions or arity rules of its own
 ([the type checker](checker.md)). This chapter covers the shape
 of the output and the protocols it implements; value-level details are in
 [values and the GC](values-and-gc.md), per-construct translations in
-[code generator: constructs](codegen-constructs.md), and ABI-0.17 Array
+[code generator: constructs](codegen-constructs.md), the normative strict and
+dynamic policies in
+[type relations and boundary plans](type-relations-and-boundaries.md), and Array
 representation and lowering in [Dense Arrays](dense-arrays.md).
 
 One no-`main` CLI invocation may link several such translation units into a
@@ -105,9 +108,12 @@ semantic effect may still use `pairs`. The pieces appear in this order:
    record's type identity is its metatable (cached per-Lua-state in a
    `_mod` user value), so there is no per-record C tag static to declare
    up front.
-6. **Function bodies**: for each function, method and static, the
-   native-convention body followed by its Lua entry wrapper (local
-   functions get no wrapper).
+6. **Function bodies**: native-convention bodies plus the required stack
+   entries. Ordinary functions and statics that become values have coercive
+   genuine-Lua and strict Titan-generic entries. Methods have their ordinary
+   Lua method entry plus the native/Lua/strict bound-value trampolines. A local
+   ordinary function needs the two stack entries only when it becomes a
+   first-class value.
 7. **Module-global metamethods**: if the module exports anything, one
    `__index`/`__newindex` pair serving all members — variables, functions
    and public record namespaces — through the metatable installed on the module
@@ -148,15 +154,19 @@ lua_Integer counter_inc_titan(lua_State *L, Udata *_mod, CClosure *_fn, lua_Inte
 
 lua_Integer counter_inc_titan(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer _param_n) {
     {
-        return (_param_n+ ivalue(&_mod->uv[1].uv));
+        return (_param_n+ ivalue(&_mod->uv[0].uv));
     }
 }
 
 static int counter_inc_titanentry_lua(lua_State *L) {
-    ...    /* argument count adjustment, error handler, checkandget arguments */
+    ...    /* argument count adjustment, error handler, dynamic argument plan */
     lua_Integer res = counter_inc_titan(L, _mod, _fn, _param_1);
     setivalue(s2v(_firstret), res);
     ...
+}
+
+static int counter_inc_titanentry_strict(lua_State *L) {
+    ...    /* hidden original closure plus strict argument guards */
 }
 
 static int __index(lua_State *L) { ... }    /* module metatable: member read  */
@@ -176,13 +186,19 @@ int luaopen_counter(lua_State *L) {
 }
 ```
 
+For a non-exact branded call, caller-side `codevaluecall` applies the strict
+result guards after this adapter has boxed the native results.
+
 Symbol names come from `mangle_qn` (`coder.lua`), which replaces `.` and
 `-` with `_`: module `foo.bar` yields `foo_bar_init`, `foo_bar_abi`,
 `foo_bar_types` and
 `luaopen_foo_bar`; a function `f` in it becomes `foo_bar_f_titan` /
-`foo_bar_f_titanentry_lua`; methods and record functions use
-`<mangled-fqtn>_<name>_titanmethod` / `_titanentry_luamethod` and
-`_titanstatic` / `_titanentry_luastatic`.
+`foo_bar_f_titanentry_lua` / `foo_bar_f_titanentry_strict`. An unbound method
+uses `<mangled-fqtn>_<name>_titanmethod` /
+`_titanentry_luamethod`; its first-class bound value adds `_boundmethod`,
+`_titanentry_boundlua`, and `_titanentry_boundstrict`. A record static uses
+`_titanstatic`, `_titanentry_luastatic`, and
+`_titanentry_strictstatic`.
 
 `coder.external_symbols` inventories the non-file-local subset of these names
 plus each module protocol. Library-mode orchestration compares that exact set
@@ -190,11 +206,26 @@ before code generation, including collisions that cross a flattened
 module/member boundary; it does not wait for the linker to diagnose duplicate
 definitions.
 
-## Two C functions per Titan function
+## Three entry roles per first-class Titan function
 
-Every Titan function compiles to **two** C functions — a native-convention
-function used by Titan-to-Titan calls, and a Lua-stack entry wrapper for
-calls from Lua; local (`local function`) functions get only the native one.
+Every first-class Titan function has three entry roles:
+
+1. the typed native-convention function used by static/direct and exact-tag
+   first-class calls;
+2. a coercive Lua-stack entry used when genuine Lua calls the canonical
+   closure; and
+3. a strict Titan-generic Lua-stack entry used when Titan calls a branded
+   closure through a non-exact gradual callable view.
+
+The two stack entries share one generation template but apply different
+checker-produced policies. The canonical closure's public `CClosure.f` is the
+coercive entry; the strict entry is a light C function stored in the closure's
+final upvalue. A local function still has only the native body when it is never
+referenced as a value. Once a canonical value is required, the coder emits
+both stack entries and the same closure layout without exporting it through
+the module member map. Unbound methods use their native/Lua method entries;
+their first-class bound values receive native, Lua, and strict bound
+trampolines.
 
 ### The Titan-native function and its calling convention
 
@@ -234,7 +265,7 @@ vararg pair, when present, precedes fixed result out-pointers. The flexible
 output pair, when present, comes last. `_mod` is
 the callee's **own** module `Udata`; a cross-module caller passes it from
 one of its user values. `_fn` is the **callee's own closure** — the
-`CClosure` of the function value being invoked, whose `upvalue[3..]` hold
+`CClosure` of the function value being invoked, whose `upvalue[4..]` hold
 its captured variables; it is what a closure body reads its captures
 through (see [closures and captured variables](#closures-and-captured-variables)).
 It comes **immediately after `_mod` and before the method `self`**, and
@@ -247,7 +278,8 @@ at a call site depends on the path:
   function/method/static reached by name has no closure to pass;
 * **the callee value itself** (`_vc_callee`) on the fast value-call path
   (`codevaluecall`);
-* **`clCvalue(s2v(func))`** in the Lua entry wrapper, which then derives
+* **`clCvalue(s2v(func))`** in either Lua-stack entry (directly for the
+  genuine-Lua entry and through the strict entry's hidden carrier), which then derives
   `_mod = uvalue(&_fn->upvalue[0])` (the module value stored in the
   closure's upvalue 0 is now a `Udata`, read with `uvalue`, not
   `clCvalue`).
@@ -326,16 +358,15 @@ that may deliberately fall back to Lua's ordinary call machinery. The
 callee expression has static type `Type.Function`, but its runtime value
 is a boxed `TValue`: it may be a Titan `CClosure`, a Lua closure, a Lua C
 function, or an object with a `__call` metamethod. `codevaluecall`
-therefore emits two branches.
+therefore emits three branches.
 
-The **fast path** is taken only when the boxed value is a Titan
-`CClosure` whose runtime function-type tag is the exact tag for the
-callee expression's static type:
+The **exact fast path** is tested first and marked `TITAN_LIKELY`. It requires
+a `CClosure` with at least the five minimum Titan upvalues and raw pointer-bit
+equality between upvalue 1 and the tag for the callee expression's static
+type:
 
 ```c
-if (ttisCclosure(&fn) && clCvalue(&fn)->nupvalues >= 3
-    && ttislightuserdata(&clCvalue(&fn)->upvalue[1])
-    && pvalue(&clCvalue(&fn)->upvalue[1]) == <function-type tag>) {
+if (TITAN_LIKELY(runtime_tag == <function-type tag>)) {
     ...
 }
 ```
@@ -343,8 +374,16 @@ if (ttisCclosure(&fn) && clCvalue(&fn)->nupvalues >= 3
 Those tags are the `static const void *` identities allocated by
 `function_type_tag`, keyed by `types.tostring(ftype)` and
 publish-or-recovered through the Lua registry so source-linked and
-`.so`-loaded modules agree on the pointer for the same canonical type.
-Matching the tag is stricter than ordinary compatibility: a Titan
+`.so`-loaded modules agree on the pointer for the same canonical type. Exact
+pointer equality is sufficient evidence for the private Titan layout under
+the same trusted-debug/C-API invariant as the closure upvalues themselves; the
+hot branch neither queries the Lua registry nor rechecks the module, native
+pointer, brand, and strict-trailer slots. It first requires the five-upvalue
+minimum and reads the tag's raw pointer bits, so no `ttis*` discriminator is
+needed on this trusted private slot.
+
+Matching the tag is stricter than gradual consistency or callable adjustment:
+a Titan
 `(value) -> integer` viewed as `(integer) -> integer` through a gradual
 `value` round trip is callable, but its tag does not match the call
 site's exact type and it cannot use this branch.
@@ -359,10 +398,33 @@ anonymous closures and bound-method trampolines read their captured
 upvalues while still using the same fast branch as top-level function
 values.
 
-The **generic path** is used for everything else: non-exact Titan
-function values, Lua closures, Lua C functions, and `__call` objects.
-It pushes the boxed callee followed by the already-evaluated arguments
-onto the Lua stack with `setslot`. Ordinary finite calls use
+Only after the exact comparison fails does the coder test the type-independent
+closure brand in fixed `upvalue[3]`. The brand is the opaque, ABI-owned
+64-bit pointer sentinel `TITAN_FUNCTION_CLOSURE_BRAND`; it is never
+dereferenced. A C closure must have at least five upvalues before the coder
+reads that slot. Raw equality is then enough to trust the rest of the private
+layout: no registry access or other `ttis*` shape checks occur. An unrelated C
+closure would need both the required upvalue count and the exact random
+sentinel in the exact slot, making accidental classification astronomically
+unlikely.
+
+The branded non-exact path pushes the trailing strict light C function as the
+VM callee, then the original canonical closure as one hidden first argument,
+followed by the already evaluated ordinary arguments. The
+declaration-specific strict entry validates that hidden carrier's header,
+trailer, coercive entry, and exact static function tag; it does not repeat the
+brand check. It then recovers `_mod`, applies the strict guards for its
+already-known callee type, and invokes the native entry with the original
+closure as `_fn`. Results are boxed under that declared type and then strictly
+guarded for the caller's static view. This path never enters the coercive
+`CClosure.f`, so integral-float or truthiness conveniences cannot leak into
+gradual callable adjustment.
+
+The **non-Titan path** is used for Lua closures, Lua light C functions,
+foreign C closures, and `__call` objects. It pushes the boxed callee followed
+by the already evaluated arguments onto the Lua stack with `setslot`. Values
+returning into Titan consume the checker-attached `DynamicCoercionPlan` for
+each expected result. Ordinary finite calls use
 `luaD_callnoyield(L, restorestack(L, _vc_func), nresults)`. A generic producer
 that is statically open at the call site uses `LUA_MULTRET`, measures the raw
 result count, nil-fills any missing fixed prefix, converts the tail into the
@@ -382,64 +444,68 @@ remain rooted on the Lua stack while the generic branch measures the raw count,
 nil-pads a missing fixed prefix, converts the retained tail, and applies the
 enclosing finite/open Titan budget. It then resets `L->top.p` to discard the
 call frame and result slots. This is also where non-callable values fail
-cleanly at runtime.
-The parameter and result checks still use the Titan function type at the
-call site; if the callee is a Titan function with a different compatible
-type, its Lua entry wrapper performs the callee-side coercions before
-entering the native body. That wrapper itself received an open Lua request, so
-it owns and enforces its 200-value open-tail bound before any enclosing finite
-Titan copy budget can discard surplus results.
+cleanly at runtime. A branded non-exact Titan closure's strict entry and a
+non-Titan Lua callable retain the same finite/open shape machinery, but their
+element policies remain distinct.
 
 Because the generic branch can grow and relocate the Lua stack,
 `codevaluecall` marks the enclosing function as `uses_base_off`, saves
 the callee stack slot as an offset with `savestack`, and recomputes
-`_base = restorestack(L, _base_off)` after both branches. GC-able
+`_base = restorestack(L, _base_off)` after every branch. GC-able
 arguments were already anchored when evaluated, and GC-able fixed results are
 stored into reserved caller slots immediately after the branch joins. An open
 GC-bearing run is copied into its reserved traced range before the sink can
 allocate.
 
-### The Lua entry wrapper
+### The two Lua-stack entries
 
-For every exported function, method and static, `genluaentry` emits a
-companion `static int <name>_lua(lua_State *L)` with the standard
-`lua_CFunction` signature. It pads missing fixed arguments with nil on the Lua
-stack, ignores surplus arguments for a fixed-parameter function, and converts
-surplus arguments into a typed input descriptor for a variadic one. It
-installs the runtime's `errorhandler` as `L->errfunc` for the duration of the call,
-recovers the called closure as `_fn = clCvalue(s2v(func))` and `_mod =
-uvalue(&_fn->upvalue[0])` from it (the module value is a `Udata`; so a
-closure entered from Lua still reaches its own captures), checks and
-converts each argument with
-`checkandget`, reserves stack space for the requested return values, calls the
-native function (passing `_fn` so a closure body can read its captures), and
-writes the results back with `setboxed` (which leaves records as userdata and
-maps an internal Array backing to its canonical proxy). For a flexible result
-shape it reads Lua's requested
-result count with `get_nresults`, derives the tail budget after the fixed
-prefix, passes a typed `_flexout` descriptor plus `_flexwant`, and returns the
-fixed count plus the number the native body actually produced.
-The full anatomy — per-type boundary checks, error-slot juggling, exact
-error messages, safety argument — is in
-[Lua interop internals](lua-interop-internals.md).
+`genluaentry` emits one shared arity/tail/result/error-frame shell under two
+policies.
+
+The canonical closure's `CClosure.f` is the **coercive genuine-Lua entry**. It
+pads missing fixed arguments with nil, ignores fixed-function surplus or
+collects an input tail, installs the Titan error handler, recovers `_fn` and
+`_mod`, and consumes the checker-attached `DynamicCoercionPlan` for every
+formal. It reserves the requested result slots, calls the native function, and
+boxes results for Lua. Written `value as/is T`, record/module/Array Lua writes,
+and this entry use the same target matrix.
+
+The **strict Titan-generic entry** is a light C function stored in the
+canonical closure's final upvalue. `codevaluecall` pushes it as the callee and
+passes the original closure as a hidden argument. The entry excludes that
+argument from arity math, validates the closure/header/trailer and its
+declaration's exact static tag, recovers `_fn` from the hidden carrier, and
+applies strict gradual guards rather than dynamic coercions. It calls the same
+native body with the original closure, preserving captures and bound
+receivers.
+
+Both policies share fixed/variadic arguments, finite/flexible result request,
+stack relocation, and error-handler structure. The full generated anatomy and
+boundary matrix are in
+[Lua interop internals](lua-interop-internals.md) and
+[Type relations and boundary plans](type-relations-and-boundaries.md).
 
 ## Closures and captured variables
 
 An anonymous function ([closures](../language/closures.md)) is a function
-value just like a top-level reference — a `CClosure` whose `f` is a Lua
-entry wrapper, with `upvalue[0]=_mod`, `upvalue[1]=`function-type tag,
-`upvalue[2]=`native entry pointer. A closure adds **one upvalue per
-captured variable**, giving the layout
+value just like a top-level reference — a `CClosure` whose `f` is the
+coercive genuine-Lua entry, with a four-slot header, one upvalue per captured
+variable, and the strict Titan-generic light C function in a final trailer
+slot:
 
 ```
 upvalue[0]     = _mod                  (the module Udata, captured lexically)
 upvalue[1]     = function-type tag     (light userdata)
 upvalue[2]     = native entry ptr      (light userdata)
-upvalue[3 + i] = captured variable i   (a box, or a copied value)
+upvalue[3]     = closure brand         (light userdata)
+upvalue[4 + i] = captured variable i   (a box, or a copied value)
+upvalue[4 + ncaptures] = strict entry  (light C function)
 ```
 
-so the constant `3` separates the closure header from the captures, and a
-closure body reaches capture *i* as `_fn->upvalue[3 + i]`. The `_fn`
+The trailer is found from the closure's actual upvalue count; capture
+indices therefore remain stable. The constant `4` separates the header from
+the captures, and a closure body reaches capture *i* as
+`_fn->upvalue[4 + i]`. The `_fn`
 parameter (above) is exactly what makes this work: a top-level call passes
 `NULL`, but a closure is always entered with `_fn` pointing at itself.
 
@@ -448,42 +514,44 @@ parameter (above) is exactly what makes this work: a top-level call passes
 A variable that is both **captured and assigned** (mutated by an inner
 function) cannot be a plain C local — the inner closure must share one
 mutable cell with the declarer and any sibling closures. The
-representation is a **box**: a `CClosure` with exactly **one** upvalue,
-used purely as a heap cell. The boxed value lives in `box->upvalue[0]`;
-the box's `f` is a per-module trap stub (`titan_box_trap`) that
-`luaL_error`s if the box is ever mistakenly called, since a box is never a
-real callable and never flows into Lua. A box is chosen over a literal
-`UpVal` (which crashes under the generational GC — Lua assumes every
-`UpVal` is born open) or a one-uservalue `Udata` (8 bytes larger, with an
-unused metatable slot): the `CClosure` cell is the smallest GC-safe option
-that survives every collector mode.
+representation is a **box** Udata copied into every capturing closure. A
+non-GC value uses a zero-uservalue Udata with the raw C value in its payload.
+A GC-bearing value uses a one-uservalue Udata with the boxed value in
+`uv[0]`. The latter uses `luaC_barrierback` on mutation because userdata
+traversal participates in `genlink`; the former contains no collectable edge
+and needs no barrier. This avoids promoting every freshly stored loop value as
+a CClosure forward barrier would.
 
-Crucially the box uses the **same forward `luaC_barrier`** the coder
-already emits for every closure-upvalue store, for *both* installing the
-box into the enclosing closure *and* mutating the boxed value — one
-uniform barrier rule. The mutation barrier is load-bearing: under the
-generational collector, omitting it is a near-deterministic use-after-free
-(blacken box → store fresh white value → sweep frees it). A box is
-allocated and **immediately anchored** in a dedicated stack slot before
-its initializer is stored into it, so there is never an unanchored-box
-window. A variable that is captured-but-immutable, or mutated-but-not-
-captured, keeps its ordinary representation; only the conjunction is boxed.
+A box is allocated and **immediately anchored** in a dedicated stack slot
+before its initializer is stored into it, so there is never an unanchored-box
+window. Installing the box pointer into the enclosing function closure uses
+the ordinary closure forward barrier. A variable that is
+captured-but-immutable, or mutated-but-not-captured, keeps its ordinary
+representation; only the conjunction is boxed.
 
 ### Capture lists, lambda hoisting, transitive capture
 
 The checker computes, for each `ExpFunction`, the ordered de-duplicated
 list of enclosing-function declarations it captures (see
 [the type checker](checker.md#closures-capture-analysis-and-lambda-inference)); the coder
-turns that list into the `upvalue[3 + i]` slots in agreed order. At the
-use site the closure is built by pushing the three header upvalues then,
-in capture-list order, each capture — the box `CClosure*` for a boxed
-capture, or the copied value for a by-value capture — and calling
-`lua_pushcclosure` (preceded by a `lua_checkstack(L, 3 + ncaptured)`,
-since the capture pushes are raw transient stack pushes, not
+turns that list into the `upvalue[4 + i]` slots in agreed order. At the
+use site the closure is built by pushing the four header upvalues then,
+in capture-list order, each capture — the box `Udata*` for a boxed
+capture, or the copied value for a by-value capture — followed by the strict
+entry trailer, and calling
+`lua_pushcclosure` (preceded by
+`titan_ensure_stack(L, 5 + ncaptured)`, which raises if
+`lua_checkstack` cannot reserve the capacity, since the capture pushes are raw
+transient stack pushes, not
 slot-reserved). `lua_pushcclosure` moves the pushed upvalues into the new
 white closure, so no barrier is needed at construction.
 
-Each lambda's native and Lua entries are **hoisted to file scope** and
+Lua permits at most 255 C-closure upvalues. Five structural slots leave
+**250 captures**; the checker rejects the first larger capture list so code
+generation never depends on a Lua API failure.
+
+Each lambda's native, coercive-Lua, and strict-generic entries are **hoisted
+to file scope** and
 emitted alongside the top-level functions, named `<modprefix>lambda_<N>`.
 Because a lambda nested inside another lambda is discovered only while the
 outer one's body is generated, the emission loop drains the lambda list
@@ -501,8 +569,8 @@ copies the immutable value down.
 ### Bound-method trampolines
 
 A bound method reference `obj:m` is a one-capture closure whose captured
-"variable" is the receiver `self`, with a pair of **trampolines** that
-delegate to the method's real entries. Both are emitted by the method's
+"variable" is the receiver `self`, with **three trampolines** that delegate
+to the method's real entries. All three are emitted by the method's
 **defining module for every method**. Public methods use exported/recoverable
 symbols mirroring the method's own entries plus a `function_type_tag` for the
 self-removed type, so a bind site in another module — which may have only the
@@ -510,13 +578,18 @@ self-removed type, so a bind site in another module — which may have only the
 file-local and are not serialized into `.so` interfaces. The **native
 trampoline** matches the
 self-removed function type's ABI, extracts `self` from its closure's
-`upvalue[3]`, and tail-calls the method's native entry with that `self`;
+`upvalue[4]`, and tail-calls the method's native entry with that `self`;
 the trailing flexible-output descriptor and budget, when present, pass through
 unchanged. The **Lua trampoline** inserts `self` as the first stack argument and
 delegates to the method's existing Lua entry, reusing its boundary checks.
+The **strict trampoline** is generated for the self-removed callable shape: it
+preserves the hidden original bound closure, strictly guards the visible
+arguments/results, and invokes the native bound trampoline, which extracts
+`self`.
 At the bind site `obj` is evaluated once into an anchored temp, then the
 closure is built exactly like a one-capture lambda (`_mod`, the
-self-removed tag, the native trampoline pointer, and `self`). The result
+self-removed tag, the native trampoline pointer, `self`, and the strict
+trampoline trailer). The result
 is an ordinary `Type.Function` value with no special downstream handling.
 
 ### The `.so` ABI bump
@@ -583,7 +656,7 @@ Udata. Generated modules also reserve a per-state Array-metatable cache and
 use explicit internal-versus-boxed conversions. A 0.16 module would
 misinterpret Array values even when a serialized interface happens not to
 mention one, so the semantic/runtime boundary requires a full rebuild. See
-[Dense Arrays](dense-arrays.md#abi-017-boundary).
+[Dense Arrays](dense-arrays.md#abi-017-and-020-boundaries).
 
 ABI **0.18** preserved those generated Array shapes and the ordinary module
 protocol, but made standard-library archive objects directly reference
@@ -591,13 +664,18 @@ promoted libuv callback trampolines while removing replaced libuv/coroutine
 helper symbols. A 0.18 provider and runtime therefore had to be distributed
 together.
 
-The current ABI is **0.19**. It adds serialized union/variant schemas, the
+ABI **0.19** added serialized union/variant schemas, the
 union userdata/tag protocol, and a reconstructible public module-slot prefix
 that includes exported nominal statics. An importer and producer must agree on
 that prefix before an imported record or union constructor can be used as the
-same canonical first-class closure. The active suffix and provider namespace
-advance with the marker (`_0_19`, `TITAN_PATH_0_19`,
-`lib/titan/0.19`); 0.18 providers are rejected before interface rehydration.
+same canonical first-class closure.
+
+The current ABI is **0.20**. Array proxies now have two traced user values,
+with the per-construction-type Lua writer closure in the second; function
+closures add a fixed opaque brand upvalue and a strict-entry trailer. The
+active suffix and provider namespace advance with the
+marker (`_0_20`, `TITAN_PATH_0_20`, `lib/titan/0.20`); 0.19 providers are
+rejected before interface rehydration.
 
 ## The module protocol
 
@@ -607,7 +685,8 @@ one `Udata` (`_mod`) created by `_init`: the module table's slot is gone
 entirely, and member slots are 0-based with no reserved user value. The user values hold module
 variables, imported modules' `Udata`s, exported-function and
 exported-nominal-static canonical closures, the unconditional Array-metatable
-cache, cached record/union metatables, and per-nominal static-namespace tables
+cache, module-local Array writer closures, cached record/union metatables, and
+per-nominal static-namespace tables
 (allocation order below). Every generated function receives this `Udata` as its
 `_mod` parameter; the Lua wrappers recover it from their closure's
 upvalue 0. Around `_mod`, each module exports three protocol symbols:
@@ -617,16 +696,18 @@ upvalue 0. Around `_mod`, each module exports three protocol symbols:
 ```c
 static int _initialized = 0; /* external functions are stitched up */
 Udata *counter_init(lua_State *L) {
-    lua_checkstack(L, 10);
+    titan_ensure_stack(L, 10);
     lua_getfield(L, LUA_REGISTRYINDEX, "Titan module counter");
     if(lua_isnil(L, -1)) {
         _initialized = 1;
         /* create and register _mod (luaS_newudata(L, 0, NUPVALS));
            $LOADMODULES1 (dlopen dynamic deps), $INITMODULES (dep inits),
            $LOADGLOBALS (symbols published by transitive RTLD_GLOBAL deps),
-           $INITRECORDS (record and union metatables), $INITVARS (variable
-           initializers); install functions and public nominal namespaces into
-           their uv slots; $CREATEMETA (member metatable on the udata) */
+           $INITRECORDS (record and union metatables), $INITFUNCTAGS,
+           $INITARRAYWRITERS (module-local writer closures), $INITVARS
+           (variable initializers), then canonical function closures; install
+           public nominal namespaces into their uv slots; $CREATEMETA
+           (member metatable on the udata) */
         return _mod;
     } else {
         Udata *_mod = uvalue(s2v(L->top.p - 1));
@@ -748,8 +829,11 @@ provider is found and recorded transiently; ABI 0.17 then changes Array
 representation and adds the module-local metatable cache without changing the
 serialized `Type.Array` constructor. ABI 0.18 preserved that logical protocol
 while advancing the standard-library archive/runtime native-symbol boundary.
-ABI 0.19 adds union/variant schemas and the public nominal-static slot prefix;
-it does not change the metadata container itself.
+ABI 0.19 added union/variant schemas and the public nominal-static slot prefix;
+it did not change the metadata container itself. ABI 0.20 adds the second
+Array-proxy user value and callable strict-entry/brand protocol; those runtime
+layouts require a full boundary even though the metadata container is still
+unchanged.
 
 ## Static vs dynamic dependency wiring
 
@@ -830,17 +914,25 @@ prefix entirely from the serialized interface:
 The producer stamps the corresponding AST declarations and an importer walks
 the same layout, so an imported constructor or nominal function is the exact
 canonical first-class closure. The unconditional per-module Array metatable
-cache is the first private slot, followed by local module variables and
-imports. A final AST-order allocation pass assigns slots to referenced local
-ordinary-function closures, every static not already in the public prefix,
-and every nominal owner's private static-namespace table. Record and union
-metatables (`type2metatable`), owned-C
-metatables, and the transitive module `Udata` caches needed by cross-module
-method calls (`ctx.modules`) are then allocated on first use during codegen and
-filled in by `init_data_from_other_modules` or the module initializer. Thus all
-private groups, beginning with the Array cache, come *after* the
-importer-visible public prefix, so moving or adding
-them does not perturb the importer slot math.
+cache is the first private slot, followed by the fixed AST-order allocation
+for local variables/imports, referenced local ordinary-function closures,
+every static not already in the public prefix, and each nominal owner's
+private static-namespace table. Remaining private slots are allocated as
+their inventories or first uses are encountered during code generation:
+module-local Array writers, record/union and owned-C metatables, and
+transitive module `Udata` caches may therefore interleave. No ordering among
+those categories is serialized.
+
+Code generation freezes the distinct constructed Array element types and
+initializes each corresponding writer after nominal metatables, imports, and
+function-type tag publication but before `$INITVARS`, so an initializer can
+construct an Array without observing an empty slot. Publishing tags first is
+also required because a variable initializer may construct a lambda or
+bound-method closure and must copy a live exact tag into it. First-use private
+objects are filled by `init_data_from_other_modules` or the module
+initializer. Thus all private slots, beginning with the Array cache, come
+*after* the importer-visible public prefix, so moving or adding them does not
+perturb the importer slot math.
 
 An importing module never sees this module's AST: it recomputes the complete
 prefix from the `Type.Module` interface. Cross-module variable access then
@@ -851,8 +943,12 @@ numbering would diverge from reality. (The module metatable's name→slot
 member map, serving the same variables to Lua, bakes in the same
 indices.) A nominal owner's type identity is its per-Lua-state metatable
 pointer, so record and union metatables must live in module user values and are
-recovered through the Lua registry for imported owners. Function-type tags use a separate
-registry-published C-static mechanism.
+recovered through the Lua registry for imported owners. Function-type tags use
+a separate registry-published C-static mechanism before any variable
+initializer can construct a closure. The type-independent closure brand is a
+compile-time ABI sentinel and needs no initialization or registry state.
+Canonical top-level/static closures are populated after variable initializers
+and before module exposure.
 
 ## Per-function code-generation contexts
 

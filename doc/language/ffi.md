@@ -166,6 +166,11 @@ therefore be used as an option base only when it has that boxed
 representation: C integers, C floats, non-function object pointers, exact
 `TValue`, and owned C storage are supported. By-value C aggregates and arrays,
 direct C functions, and C function pointers are not valid option bases.
+This is a storage-shape rule, not a promise that every value of a boxable C
+scalar fits Titan's configured carrier. Storing a particular C integer or
+floating value in an Option, Array, Map, record field, union payload, or
+`value` still performs the checked `lua_Integer`/`lua_Number` conversion
+described below.
 This restriction does not make an ordinary Titan container foreign: an Array,
 Map, or local callable containing owned C values remains a boxed Titan value
 and may itself cross through `value`.
@@ -190,7 +195,10 @@ errors.
 
 An imported C type namespace exposes `sizeof` and `alignof` pseudo-members when
 no ordinary C value has the same module member name. They compile to C
-`sizeof(T)` and `_Alignof(T)` and return a Titan `integer`:
+`sizeof(T)` and `_Alignof(T)` and return a Titan `integer`. The intermediate
+result retains the target profile's exact `size_t` type; conversion to
+`lua_Integer` is range-checked, so an unusually wider `size_t` raises instead
+of narrowing:
 
 ```lua
 local ffi = foreign import "titan/ffi.h"
@@ -231,7 +239,10 @@ the call.
 ## Casts And Coercions
 
 Regular `as <type>` casts handle FFI conversions; there is no special
-`as_int` form.
+`as_int` form. C conversions are named directional coercions or explicit
+written casts, not gradual consistency. They never lift automatically through
+an Array, Map, Function, or nominal member. Option has only its explicitly
+enumerated nil-preserving plans.
 
 Allowed conversions include:
 
@@ -255,13 +266,64 @@ Allowed conversions include:
 * a counted owned array of C `char`, `signed char`, or `unsigned char` to
   Titan `string`, copying its exact allocated byte length;
 * a foreign C function name to a compatible C function pointer type;
-* C integers, C floats, non-function C pointers, and owned C userdata to/from
-  `value`, with the same run-time checks used at the Lua boundary.
+* C integers, C floats, non-function C pointers, and owned C userdata to
+  `value`; an ordinary pointer becomes lightuserdata, while an owner remains
+  full userdata.
+* `value` to a guardable C integer, C float, or owned C userdata, using either
+  the strict implicit guard or the broad written/Lua dynamic rule selected by
+  the [normative boundary matrix](types.md#normative-boundary-matrix).
+* `value` to a raw C pointer only through an explicitly written, unsafe
+  `as`/`is` assertion; implicit gradual and dynamic boundary paths do not
+  establish raw pointee types.
 * Titan `value` to C `TValue` by value, and C `TValue` back to Titan `value`,
   for private runtime helper APIs that include `<titan/ffi.h>`.
 * Lua-internal `Udata *` to the same full-userdata `value` and back. NULL maps
   to nil; unlike an ordinary C pointer, a non-NULL `Udata *` does not become
   lightuserdata, and converting back rejects lightuserdata.
+
+Mutable address-taking remains local/formal-only even with written `as` or
+`is` syntax. A call, cast, or other by-value C temporary is not addressable
+storage and is rejected instead of receiving a hidden mutable temporary.
+
+### Checked C scalar boundaries
+
+Foreign variables, call results, fields, indexes, macro values, and C-mode
+operator results retain their exact C type and raw C value. Titan does not
+prematurely narrow them to `lua_Integer` or `lua_Number`. A checked conversion
+is performed only when a typed context requests another numeric type or the
+value must enter a `TValue` carrier.
+
+The selected C target profile is authoritative for integer widths and ranges,
+floating radix/precision/range, the configured `lua_Integer` and `lua_Number`
+carriers, and the target's `size_t` and `ptrdiff_t` spellings. Titan currently
+requires a two's-complement signed-integer profile and rejects a target
+description with a different signed range:
+
+* a strict boxed projection to a C integer accepts only an integer tag whose
+  value fits the target interval; `_Bool` accepts only 0 and 1;
+* a dynamic projection to a C integer additionally accepts an exactly
+  integral float that first fits `lua_Integer`, then applies the target-range
+  check;
+* a strict boxed projection to a C float accepts only a float tag and checks
+  the target range; the dynamic form accepts either numeric tag before the
+  same range check;
+* same-or-wider floating conversions preserve finite values, NaNs, and
+  infinities. Floating narrowing rejects non-finite or out-of-range values,
+  but ordinary rounding and underflow remain allowed;
+* floating-to-integer conversion rejects non-finite values and values whose
+  truncation-toward-zero result lies outside the target interval, then
+  performs that truncating conversion;
+* moving a C scalar into Titan `integer`, `float`, `value`, or any other
+  boxed slot checks that the exact value fits the corresponding Lua carrier
+  before storing it.
+
+Written C-integer-to-C-integer casts retain ordinary C conversion semantics.
+The integer promotions and usual arithmetic conversions selected inside a C
+expression likewise retain C's integer semantics; an integer-to-floating
+operator conversion is still checked when the target profile cannot prove its
+range. Every partial written numeric cast has a matching `is` test that runs
+the identical acceptance predicate without converting or raising. The same
+predicate is reused recursively through Option conversions.
 
 By-value C structs and unions cannot cross through `value` in v1. C function
 pointers are callable and nullable, but they are not C object pointers: they
@@ -285,12 +347,24 @@ collectable, and `f as ffi.titan_ffi_void_ptr` raises in that case. The operand
 is evaluated exactly once.
 
 This identity rule is explicit only: it does not make any of these Titan types
-implicitly compatible with C `void *`, and it does not unwrap an option.
-Arbitrary `value` also gains no GC-identity conversion; its existing checked
-conversion to a C pointer still accepts only the ordinary lightuserdata/nil
-representation. Titan strings retain their established pointer conversion to
+implicitly assignable to C `void *`, and it does not unwrap an option.
+Arbitrary `value` also gains no GC-identity conversion. A written
+`value as *c.T` may accept only the ordinary lightuserdata/nil representation,
+but that operation is an unsafe programmer assertion: every lightuserdata
+looks alike and Titan cannot prove that the address points to `c.T`. The
+corresponding `is` can test only this outer representation, not the pointee.
+Implicit `value -> *c.T`, typed Array/Map reads of raw pointers, gradual
+container/function views whose eventual leaf is a raw pointer, and raw-pointer
+results from non-Titan Lua callables are rejected. Titan strings retain their
+established pointer conversion to
 the first string byte, and owned C objects retain their payload-pointer
 conversion. Neither exposes the enclosing GC object's identity.
+
+Direct statically typed pointer/address/qualifier conversions remain
+available. The restriction is specifically on treating a boxed
+lightuserdata's category as evidence of a precise pointee type. A raw pointer
+is boxable in a `TValue`, but it is not **guardable/reifiable** without a
+future tagged-pointer representation.
 
 Every pointer produced by these conversions is borrowed. Titan keeps the
 source GC object rooted while the cast is evaluated and while later arguments
@@ -373,9 +447,10 @@ named-call metadata. Named syntax then gets a specific unavailable-prototype
 diagnostic, while the positional call remains available.
 
 C member and qualified-type positions use the same contextual raw-identifier
-principle. A C field, symbol, or tag named `when`, `type`, `repeat`, or another
-Titan keyword may be written after the foreign namespace or a C receiver.
-Those spellings remain illegal for ordinary Titan identifiers.
+principle. A C field, symbol, or tag named `when`, `type`, `repeat`,
+`interface`, or another current or future Titan keyword may be written after
+the foreign namespace or a C receiver. Reserving such a spelling in Titan does
+not remove it from contextual C lookup.
 
 Parenthesized direct C calls retain strict C arity. A trailing Titan call with
 several statically visible results may be truncated to fill exactly the
@@ -804,7 +879,7 @@ process-global state.
   name or converted to compatible C function pointer types.
 * Titan functions and closures cannot be adapted to C callback ABIs.
 * C types are local to the importing Titan module and cannot appear in exported
-  Titan interfaces.
+  compiled-module interfaces.
 * Function-like macros are not imported. Object-like macros are values only
   through bounded recognized expression forms, including supported
   integer-constant expressions and typed dereferenced accessors, or when they

@@ -97,8 +97,10 @@ end
 
 A `local` function does not appear in the module's type, is invisible to
 importing Titan modules and to Lua (`require "geometry"` yields a module
-value with `dist2` but no `square`), and the compiler does not even
-generate the Lua-side entry code for it. See [Modules](modules.md) for module
+value with `dist2` but no `square`). This is an interface-visibility rule, not
+a different first-class representation: when a local function is materialized
+as a value, it uses the same canonical closure with native, strict
+Titan-generic, and coercive Lua entries. See [Modules](modules.md) for module
 interfaces and [Lua interoperability](lua-interop.md) for what exported
 functions look like from Lua.
 
@@ -142,8 +144,9 @@ direct-C call may omit a fixed parameter whose Titan-visible type accepts
 `nil`; see [Named arguments](named-arguments.md#matching-checking-and-omission).
 
 **Titan callers are checked at compile time.** Once missing positions
-have been filled with `nil`, each argument used by the callee is coerced and
-checked against the corresponding parameter type. Surplus expressions do not
+have been filled with `nil`, each argument used by the callee receives its
+admitted argument adjustment and is checked against the corresponding
+parameter type. Surplus expressions do not
 need to match a parameter, but they still run for their effects:
 
 ```lua
@@ -160,11 +163,11 @@ function ignored_extra(): float
 end
 ```
 
-**Lua callers are adjusted and checked at run time.** Lua code is not
-compiled by the Titan compiler, so the generated entry code of each
-exported function pads missing arguments with `nil`, then runs the usual
-boundary type checks. A fixed-parameter function ignores surplus Lua
-arguments; an input-variadic function collects them:
+**Lua callers are adjusted and dynamically coerced at run time.** Lua code is
+not compiled by the Titan compiler, so the generated coercive entry of each
+exported function pads missing arguments with `nil`, then applies the shared
+target-directed boundary conversion. A fixed-parameter function ignores
+surplus Lua arguments; an input-variadic function collects them:
 
 ```lua
 -- Lua
@@ -227,8 +230,8 @@ The `return` statement must fill every declared fixed result position —
 for a deficit — and each delivered expression is checked (and implicitly
 coerced, where legal) against the corresponding declared type. Surplus
 expressions are evaluated and discarded. A declared flexible tail instead
-forms an open sink and receives every compatible trailing result that actually
-exists.
+forms an open sink and receives every consistently typed trailing result that
+actually exists under the checker-recorded element adjustment.
 
 ### Consuming multiple values
 
@@ -355,20 +358,51 @@ therefore available only while the callee is reached as a direct declaration;
 storing the same function in a variable keeps it callable positionally but
 does not carry its formal names with the value.
 
-**Calling a function value** has two paths, chosen automatically. When the
-value is a Titan function whose type is *exactly* the call's static type,
-the call goes straight to its native entry with no Lua-stack round trip —
-the same cost as calling the function by name. Otherwise (a Titan function
-of a merely *compatible* type, or a plain Lua function, C function, or
-`__call` object) the call goes through the Lua stack; an attempt to call a
-value that is not actually callable raises a clean runtime error at the
-call. This is also how Titan **calls Lua code**: pass a Lua closure to a
-function-typed parameter and call it — see
-[Lua interoperability](lua-interop.md).
+**Calling a function value** has three paths, chosen automatically:
+
+1. A Titan value whose exact function tag matches the call's static type goes
+   straight to its native entry with no Lua-stack round trip — the same cost
+   as calling the function by name.
+2. A Titan-branded function called through a non-exact static view—whether
+   that view came from callable adjustment or a dynamic Function boundary—uses
+   its strict Titan-generic entry. Arguments and observed results are checked
+   with gradual guards and the static arity/tail demand; ordinary
+   numeric, Option, C, or future Interface coercions are not lifted through
+   the function type.
+3. A genuine Lua function, C function, or `__call` object uses the ordinary
+   Lua call path. Results entering Titan use the shared dynamic coercion, and
+   attempting to call a non-callable value raises a normal Lua error.
+
+Lua itself calls the coercive Lua entry of an exported Titan function, so its
+arguments use that same dynamic rule. The three paths are summarized in the
+type system's
+[normative boundary matrix](types.md#normative-boundary-matrix). Passing a Lua
+closure to a function-typed parameter remains the normal way for Titan to
+**call Lua code**; see [Lua interoperability](lua-interop.md).
 
 **Identity is stable.** Each referenced function has one canonical value,
 so `m.f == m.f` and an in-module reference equals the exported
 module-table entry seen from Lua.
+
+That canonical value is one Lua `CClosure`; Titan does not manufacture a
+companion adapter closure or an entry-descriptor indirection for another
+static view. Its ordinary callable entry is the coercive genuine-Lua entry.
+Private upvalues 0 through 3 retain, respectively, the owning module, exact
+function-type tag, native entry pointer, and an opaque Titan-closure brand.
+Lambda captures or a bound receiver begin at upvalue 4. The final upvalue is a
+light C function for the strict Titan-generic entry.
+When that strict entry runs, the caller also supplies the hidden original
+canonical closure, and the native body uses it as `_fn`, preserving all
+captures and bound receivers.
+
+Function-type tags are exact identities, not compatibility tokens. After an
+exact-tag mismatch, a generic caller recognizes a Titan closure by the fixed
+opaque 64-bit brand in upvalue 3. An unrelated C closure would need both the
+minimum Titan upvalue count and that exact sentinel in that exact slot, so
+accidental recognition is astronomically unlikely. The brand selects the
+strict trailer only; it never turns one function type tag into another.
+Debug/C extraction or mutation of the closure's private upvalues is
+programmer-responsible and outside Titan's untrusted-code contract.
 
 **`value` and function types convert both ways.** A function value flows
 into a `value` implicitly, and a `value` flows into a function type
@@ -379,14 +413,19 @@ storing it in a function-typed slot: Titan derives a temporary positional
 function type from the arguments and the surrounding result demand. See
 [Contextual calls through `value`](flexible-returns.md#contextual-calls-through-value).
 
-**Function compatibility is directional.** An actual function may ignore
+**Callable adjustment is directional.** An actual function may ignore
 inputs that callers through the expected slot are allowed to supply, and the
 expected slot may hide surplus results that the actual function produces. The
 actual may not require an input or omit a fixed result that future callers rely
 on. Input and output tails participate in the same directional rule. Exact
 identity remains stricter and selects the native fast path. The full rules and
 examples are in
-[Flexible returns](flexible-returns.md#function-compatibility-is-directional).
+[Flexible returns](flexible-returns.md#callable-adjustment-is-directional).
+
+This directional shape operation is not subtyping and does not lift a direct
+component conversion. For example, neither `() -> integer` to `() -> float`
+nor `() -> integer` to `() -> integer?` is accepted. A `value` hole or
+consistent compound component is instead enforced by the strict generic call.
 
 **Anonymous functions are values too.** A `function (...) ... end`
 expression evaluates to a function value of the same kind, and it can
@@ -400,6 +439,13 @@ What is **still not** a Titan function value: a foreign/FFI function — it can
 be called by name or converted to a compatible C function pointer, but not
 stored as a Titan function value (see [the FFI chapter](ffi.md)). Assigning
 *to* a function name (`double = bad`) also remains an error.
+
+Lua 5.5 permits at most 255 upvalues in a C closure. The four fixed header
+slots and the strict-entry trailer leave 250 slots for captures or a bound
+receiver. Titan diagnoses the first closure that would exceed that budget
+instead of emitting an invalid C closure. ABI 0.20 adds the fixed brand and
+strict trailer; a 0.19 provider has the old closure layout and is rejected
+before an old and new function value can be exchanged.
 
 ## Recursion and declaration order
 
@@ -500,7 +546,9 @@ The rules:
 
 At run time, `args` holds only the user-supplied command-line arguments:
 `args[1]` through the last argument. Index 0 is absent, so `args[0]` is nil;
-the executable's own name is not stored in the Array. The integer returned by
+the executable's own name is not stored in the Array. The standalone bootstrap
+constructs this canonical Array with the same fixed `{string}` Lua-writer
+policy as an ordinary Titan `{string}` constructor. The integer returned by
 `main` becomes the process exit status:
 
 ```lua

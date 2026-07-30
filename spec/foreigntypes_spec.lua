@@ -23,8 +23,20 @@ local function target_profile(with_int128)
         __LONG_LONG_MAX__ = "9223372036854775807LL",
     }
     if with_int128 then macros.__SIZEOF_INT128__ = "16" end
-    return assert(csemantics.build_profile(
-        macros, "long long", "double"))
+    return assert(csemantics.build_profile({
+        macros = macros,
+        lua_integer = "long long",
+        lua_number = "double",
+        size_t = "unsigned long",
+        ptrdiff_t = "long",
+        signed_minima = {
+            ["signed char"] = "-128",
+            short = "-32768",
+            int = "-2147483648",
+            long = "-9223372036854775808",
+            ["long long"] = "-9223372036854775808",
+        },
+    }))
 end
 
 describe("foreign C type conversion", function()

@@ -30,7 +30,7 @@ local m = require "sum"
 print(m.sum_list(m.sample())) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.19
+This is the reference for the language as implemented by the Titan 0.20
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -45,7 +45,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | Chapter | Covers |
 | --- | --- |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
-| [The type system](types.md) | All Titan types; type equality, compatibility and implicit coercions; type inference; the dynamic `value` type. |
+| [The type system](types.md) | All Titan types; equality, symmetric non-transitive consistency, direct coercions, gradual views, callable adjustment, the normative boundary matrix, inference, and `value`. |
 | [Type aliases](type-aliases.md) | Transparent compile-time type names, type-only namespaces, visibility, record re-exports, and alias cycles. |
 | [Option types](option-types.md) | `T?`: nil-tolerant types — syntax, semantics, defaulting with `or`, and how `nil` flows through arrays, maps, and the Lua boundary. |
 | [Expressions](expressions.md) | Literals and escapes, operators and precedence, Lua-faithful arithmetic, concatenation, `and`/`or`, explicit casts with `as`, non-raising type tests with `is`, constructors, calls. |
@@ -55,7 +55,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Named arguments](named-arguments.md) | Declaration-based `f { name = value }` and method-call syntax, omissions, evaluation order, record construction, direct C prototype names, and Lua's positional-only boundary. |
 | [Anonymous functions and closures](closures.md) | Lambda expressions, parameter/return type inference, lexical capture of enclosing locals, fresh-value-per-evaluation semantics, and bound method references `obj:method`. |
 | [Variadic parameters](variadic-parameters.md) | The trailing `...: t` parameter, `#...`, the raising `...[e]` index, spreading `...` into calls, returns, and positional Array/integer-Map constructors, slot-driven adjust-up, variadic functions as values, and the limits and bans. |
-| [Flexible returns](flexible-returns.md) | Runtime-sized homogeneous result tails, finite option projection, open sinks, contextual calls through `value`, surplus adjustment, and directional function compatibility. |
+| [Flexible returns](flexible-returns.md) | Runtime-sized homogeneous result tails, finite option projection, open sinks, contextual calls through `value`, surplus adjustment, and directional callable adjustment. |
 | [Records](records.md) | Nominal record types, constructors, fields, methods, record functions, and records as seen from Lua. |
 | [Unions](unions.md) | Nominal tagged unions, positional variant constructors, full-block `when` arms, non-exhaustive `case`, payload binding, and Lua visibility. |
 | [Arrays and maps](arrays-maps.md) | Distinct structural containers: positive-only, holed Arrays with deterministic highest-present length and canonical Lua userdata proxies; ordinary Maps, positional integer-Map construction, integer-Map border length, conversions, and performance. |
@@ -79,10 +79,16 @@ Start with the [design philosophy](philosophy.md) if you want to know
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.19. The language documented here is
+Titan is a working prototype, version 0.20. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
+
+The ABI-0.20 marker is coordinated with the forthcoming Interface cutover,
+but Interface declarations are not part of the language described by this
+relation/Array/function change. The current rules reserve only the exact
+dynamic-boundary behavior needed to avoid implying that Lua can synthesize an
+Interface wrapper from a bare record or union.
 
 ### First-class functions
 
@@ -92,8 +98,9 @@ with a clean error; each links to the chapter that documents it in full.
   and function types like `(integer) -> integer` are accepted in every
   type position. Function values can be stored in locals, parameters,
   record fields, arrays and maps, passed, returned, and called; exact
-  Titan-to-Titan calls take a zero-overhead fast path, other callables a
-  generic one
+  Titan-to-Titan calls take a zero-overhead native path, non-exact branded
+  Titan closures take a strict generic path, and non-Titan Lua callables take
+  the ordinary Lua path with dynamic result conversion
   ([functions](functions.md#functions-as-values),
   [type system](types.md#function-types)). This also means Titan can
   **call a Lua function directly** — passing a Lua closure to a

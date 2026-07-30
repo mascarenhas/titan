@@ -22,7 +22,7 @@ of native ABI truth.
 
 This chapter describes the completed implementation, including the generic
 open-consumer and pending-`finally` lifetime paths. Flexible returns introduced
-compiled-module ABI 0.14; current installed-module paths use ABI 0.19.
+compiled-module ABI 0.14; current installed-module paths use ABI 0.20.
 
 ## Representation in the AST and type graph
 
@@ -58,7 +58,7 @@ pointer is rejected.
 
 Every recursive type operation descends through `flexrettype`: C-FFI leakage
 checks, nominal-record recovery, local-record interface checks, string
-rendering, equality, compatibility, and serialization. Record walkers also
+rendering, equality, consistency/adjustment planning, and serialization. Record walkers also
 visit public record functions and methods, so a nominal used only in a
 flexible tail is still recovered from a compiled dependency.
 
@@ -139,9 +139,9 @@ parameter `main(args: {string}): integer` shape.
 * `dots_nilfill` is a specialized policy flag: generic-for tuple setup enables
   it so missing state/control positions projected from trailing input `...`
   become nil; ordinary fixed calls leave it disabled and retain raising reads
-  for non-nil-compatible targets.
+  for targets whose strict guard rejects nil.
 * the remaining options carry diagnostic terms, source locations, open-tail
-  coercion policy, `dots_limit`, and the expression checker used by specialized
+  adjustment policy, `dots_limit`, and the expression checker used by specialized
   sites.
 
 `adjust_explist(exps, demand, st, errors)` performs the elaboration. Its result
@@ -179,8 +179,9 @@ The final expression is checked under the complete remaining demand. For a
 call, `finite_result_expressions` turns each statically visible result after
 the first into an `Ast.ExpExtra`. A projected flexible slot carries
 `_from_flex`, `_possibly_absent`, and its `_result_source`. Ordinary
-`trycoerce` and `checkmatch` then insert any option widening, element
-conversion, or non-option nil force required by the sink.
+`trycoerce` attaches the `assignment_adjustment` plan for each option
+widening, strict projection, direct coercion, or non-option nil force required
+by the sink; `checkmatch` verifies that elaborated result.
 
 ### Declared call shape versus visible call shape
 
@@ -206,7 +207,7 @@ by its finite prefix. `_open_results` is present only when the callable's
 static type itself has `flexrettype`; it records the source element type, sink
 element type, and first unconsumed flexible index. Thus an open sink does not
 turn a fixed static function type into `LUA_MULTRET` and cannot reveal results
-hidden behind a narrower compatible type.
+hidden behind a narrower adjusted callable type.
 
 Call arguments also receive `_npassed_args`, the count of statically passed
 fixed/tail scalars, and `_open_args = {source, source_type, target_type,
@@ -267,7 +268,7 @@ Lua's ordinary non-callable diagnostic. A Titan closure stored in `value` can
 still recover the native path when the synthesized function type exactly
 matches its runtime tag.
 
-## Strict identity and directional compatibility
+## Identity and callable adjustment
 
 `types.equals` remains strict structural identity. For `Type.Function`, it
 compares the C `vararg` bit, every fixed parameter and result, input-vararg
@@ -280,52 +281,60 @@ declaration metadata and do not participate in structural function equality.
 `types.tostring` renders every flexible result in a parenthesized list, even
 when it is the only result. This gives function-type tags a collision-free
 canonical key: `() -> T`, `() -> (T, ...: U)`, and `() -> (...: U)` are all
-distinct. `function_type_tag` uses that exact key, so two merely compatible
+distinct. `function_type_tag` uses that exact key, so two merely consistent
 types never share a native-entry cast by accident.
 
-`types.compatible(expected, actual)` is directional. Its function arm uses
-`slot_compatible(target, source)`, which accepts ordinary compatibility or an
-implicit source-to-target coercion, with these rules:
+`types.callable_adjustment(source_actual, target_expected)` is the directional
+operation used
+when a callable value is stored or called through another callable type. It
+returns a `CallablePlan`, not a boolean. The plan records fixed/tail
+argument alignment, nil fill, ignored surplus, finite/open result demand, and
+one component `AdjustmentPlan` for every aligned slot. An exact component has
+an identity adjustment and no guard; a gradual view contains its strict
+`GuardPlan`; a nested function component contains another `CallablePlan`.
+The checker separately annotates concrete entry/result observations with
+`_strict_guard_plans` and `_strict_result_guard_plans`. Crucially, callable
+adjustment uses gradual consistency recursively; it does not lift ordinary
+numeric, Option, nominal-to-Interface, or other automatic coercions through
+the function type.
 
 ### Inputs
 
 * The actual callable may have fewer fixed parameters than the expected type;
   the actual ignores the expected suffix.
-* When the actual has more fixed parameters, every additional position is
-  checked against nil through `slot_compatible`: callers may omit the expected
-  tail, and ordinary adjustment must be able to nil-fill the position without
-  failing. If the expected type has an input tail, the same actual parameter
-  must also accept the expected tail element because a caller may provide that
-  position. This admits additional option, `value`, nil, and other
-  nil-compatible slots while rejecting hidden non-nilable requirements.
-* Shared fixed parameters reverse the recursive relation: the actual parameter
-  must accept values admitted by the expected parameter.
+* When the actual has more fixed parameters, each additional position receives
+  nil through the callable's explicit missing-nil rule. That rule admits only
+  the enumerated nil/value/Option/pointer targets; it does not ask the general
+  coercion relation or become an aligned component conversion.
+* Shared fixed parameters reverse gradual consistency: the actual parameter
+  must safely observe values admitted by the expected parameter.
 * If a shorter actual callable has an input vararg, every expected fixed value
   moved into that tail is checked against its element type.
 * An expected input tail may be ignored by a non-variadic actual. When both
   tails are observed, the actual tail must accept the expected tail element.
-* The untyped C-FFI `vararg` bit remains strict and is compatible only through
-  prior exact equality.
+* The untyped C-FFI `vararg` bit remains exact-only.
 
 ### Results
 
-* Shared fixed results preserve the recursive relation: the actual result must
-  be acceptable to the expected consumer.
+* Shared fixed results preserve gradual consistency: the expected consumer
+  must safely observe the actual result.
 * Extra actual fixed results are hidden by a finite expected type.
-* When expected fixed slots extend into an actual flexible tail, the checker
-  first compares against the optionized projection. A non-option target may
-  alternatively accept the raw element type and receive the ordinary runtime
-  nil force when that slot is absent.
+* When expected fixed slots extend into an actual flexible tail, the plan
+  records a flexible projection. An Option target either observes the
+  element as that Option or strictly observes its base and wraps a present
+  value; an allowed non-Option partial projection strictly observes a present
+  element and uses the named absence error when no value exists.
 * An expected flexible tail checks every remaining actual fixed result and the
   actual flexible element, when present, against its element type.
 * An actual fixed-only result list may end under an expected flexible tail;
   zero trailing values is a valid run.
 
-This is parameter contravariance and result covariance expressed through
-Titan's existing gradual/coercion relations. The local two-way `value` rule
-does not make whole function types symmetric. Compatibility controls storage
-and generic calls; equality alone licenses the exact native function-pointer
-path.
+This is the function-specific directional adjustment layered on Titan's
+symmetric gradual-consistency relation. The local two-way `value` rule does
+not make whole function types symmetric or transitive. The resulting
+`CallablePlan` controls storage and generic calls; equality alone licenses the
+exact native function-pointer path. See
+[Type relations and boundary plans](type-relations-and-boundaries.md).
 
 ## Generated result runs and the native ABI
 
@@ -382,7 +391,7 @@ its own C frame and never replaces `_flexout->args`. Nested or forwarded runs
 are copied into the outer caller's buffer.
 
 Every exit initializes `_flexout->n_args`, including bare return,
-flexible-only fallthrough, a fallthrough whose fixed prefix is nil-compatible,
+flexible-only fallthrough, a fallthrough whose fixed prefix accepts nil,
 and pending-return dispatch after `finally`. A producer still evaluates
 expressions beyond a finite `_flexwant`; it discards their values instead of
 materializing them in the output buffer.
@@ -421,18 +430,19 @@ the raw result count on the Lua stack, and copies only the permitted remainder.
 The inherited `_flexwant` is a Titan copy budget; it is not encoded as the Lua
 call's requested result count.
 
-The checker marks every coercion it synthesizes. For an explicit tail scalar,
+The checker marks every adjustment it synthesizes. For an explicit tail scalar,
 return lowering evaluates and stabilizes the source carrier unconditionally,
-then performs only that sink-inserted coercion inside the remaining-budget
+then performs only that sink-inserted adjustment inside the remaining-budget
 guard. This preserves effects and lexical order without letting a discarded
-`value` check or option unwrap raise. A user-written `as` cast is unmarked and
+strict `value` guard or option unwrap raise. A user-written `as` cast has its
+own `_written_cast` plan and
 remains part of source evaluation, so its failure is still observable even
 when the caller does not retain that result.
 
 The 200-element cap applies to every typed output descriptor that Titan
 materializes. A finite consumer requesting more than 200 flexible positions is
 rejected by the checker; a runtime requested count over 200 is rejected by a
-Lua wrapper. When a Titan boundary materializes an effectively open descriptor,
+Lua-stack entry. When a Titan boundary materializes an effectively open descriptor,
 more than 200 actual tail values raise. A smaller finite inherited copy budget
 materializes only the requested prefix and ignores surplus raw Lua results
 without spuriously applying the open overflow rule.
@@ -462,13 +472,21 @@ consumer iterates only the actual `n_args` range, beginning at the
 `codevaluecall` retains the existing exact-tag branch. A Titan `CClosure` with
 the exact canonical function tag loads `_mod` and the native entry pointer
 from its standard upvalues, casts the pointer to the full flexible signature,
-and calls it directly. The flexible tail is part of the tag, so a compatible
+and calls it directly. The flexible tail is part of the tag, so a consistent
 but differently shaped closure cannot enter that branch.
 
-Everything else uses the generic Lua-stack branch: compatible-but-non-exact
-Titan closures, Lua closures, Lua C functions, and `__call` values. A
-contextual `value` call reaches the same split after synthesis; exact recovery
-is therefore possible without a separate dynamic-call implementation.
+The generic Lua-stack path then splits by brand. A non-exact Titan closure has
+the opaque ABI sentinel in fixed `upvalue[3]`: `codevaluecall` pushes the
+closure's final strict light C function, passes the original closure as a
+hidden argument, and uses the checker-attached strict argument guards in that
+entry. The count-plus-raw-brand predicate needs no registry lookup. After the
+entry returns, `codevaluecall` applies the checker-attached strict result
+guards. A Lua closure, Lua C function, or `__call` value is unbranded; its
+arguments are the already adjusted and boxed values from the static call,
+while its results entering Titan use the canonical dynamic boundary
+conversions. A contextual `value` call reaches the same three-way split after
+synthesis; exact recovery is therefore possible without a separate
+dynamic-call implementation.
 
 ### Choosing the Lua VM result request
 
@@ -501,9 +519,10 @@ remaining finite budget, and applies the 200-value overflow error only when the
 enclosing sink is effectively open.
 
 No finite `_flexwant` is smuggled through `CallInfo` at a generic boundary. A
-compatible-but-non-exact Titan closure therefore enters its Lua wrapper with
-`LUA_MULTRET`; the wrapper treats its own native call as open and enforces its
-own 200-value descriptor bound before returning.
+branded non-exact Titan closure therefore enters its strict stack adapter with
+`LUA_MULTRET`; the adapter treats its own native call as open and enforces its
+own 200-value descriptor bound before returning. A non-Titan callable receives
+the same Lua result request but its returned values are dynamically coerced.
 
 Lua 5.5's finite result count is encoded in `CallInfo.callstatus` and is
 bounded by `MAXRESULTS` (250). That creates a second, independent bound only
@@ -519,25 +538,27 @@ result counts. Success restores `L->top.p` after live results have been
 converted and anchored; failures retain the ordinary non-callable and boundary
 diagnostics.
 
-## Lua entry wrappers
+## Lua-stack entries
 
-`genluaentry` accepts every Lua stack argument. It pads missing fixed
-parameters with nil and checks them as before. A fixed Titan function ignores
-surplus Lua arguments; an input-variadic function checks and collects them in
-its input descriptor.
+`genluaentry` emits the coercive genuine-Lua and strict Titan-generic entries
+from one arity/tail/result shell. Both pad missing fixed parameters with nil.
+A fixed Titan function ignores surplus user arguments; an input-variadic
+function collects them in its input descriptor. The strict entry additionally
+validates and excludes its hidden original-closure argument and consumes
+strict guards where the coercive entry consumes dynamic plans.
 
-For flexible results, the wrapper reads Lua 5.5's requested-result count from
+For flexible results, the entry reads Lua 5.5's requested-result count from
 the current `CallInfo` with `get_nresults(L->ci->callstatus)`:
 
 * a finite request passes `max(requested - fixed_count, 0)` as `_flexwant`;
 * a finite flexible demand over 200 raises before entering the native body;
 * `LUA_MULTRET` passes an open `_flexwant` and reserves the maximum tail;
-* the wrapper returns every fixed result plus the actual produced flexible
+* either entry returns every fixed result plus the actual produced flexible
   count, leaving Lua to perform the caller's final finite truncation/padding.
 
-The wrapper reserves all destination stack space before the native call. It
+Each entry reserves all destination stack space before the native call. It
 therefore has stable slots ready to anchor fixed and flexible GC-bearing
-results during the allocation-free native-to-wrapper handoff. Stack pointers
+results during the allocation-free native-to-stack-entry handoff. Stack pointers
 are recomputed from saved offsets after any operation that can relocate the
 stack.
 

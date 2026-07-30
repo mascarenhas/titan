@@ -9,21 +9,34 @@ local profile
 local function test_profile()
     if profile then return profile end
     profile = assert(csemantics.build_profile({
-        __CHAR_BIT__ = "8",
-        __SIZEOF_BOOL__ = "1",
-        __SIZEOF_SHORT__ = "2",
-        __SIZEOF_INT__ = "4",
-        __SIZEOF_LONG__ = "8",
-        __SIZEOF_LONG_LONG__ = "8",
-        __SIZEOF_FLOAT__ = "4",
-        __SIZEOF_DOUBLE__ = "8",
-        __SIZEOF_LONG_DOUBLE__ = "16",
-        __SCHAR_MAX__ = "127",
-        __SHRT_MAX__ = "32767",
-        __INT_MAX__ = "2147483647",
-        __LONG_MAX__ = "9223372036854775807L",
-        __LONG_LONG_MAX__ = "9223372036854775807LL",
-    }, "long long", "double"))
+        macros = {
+            __CHAR_BIT__ = "8",
+            __SIZEOF_BOOL__ = "1",
+            __SIZEOF_SHORT__ = "2",
+            __SIZEOF_INT__ = "4",
+            __SIZEOF_LONG__ = "8",
+            __SIZEOF_LONG_LONG__ = "8",
+            __SIZEOF_FLOAT__ = "4",
+            __SIZEOF_DOUBLE__ = "8",
+            __SIZEOF_LONG_DOUBLE__ = "16",
+            __SCHAR_MAX__ = "127",
+            __SHRT_MAX__ = "32767",
+            __INT_MAX__ = "2147483647",
+            __LONG_MAX__ = "9223372036854775807L",
+            __LONG_LONG_MAX__ = "9223372036854775807LL",
+        },
+        lua_integer = "long long",
+        lua_number = "double",
+        size_t = "unsigned long",
+        ptrdiff_t = "long",
+        signed_minima = {
+            ["signed char"] = "-128",
+            short = "-32768",
+            int = "-2147483648",
+            long = "-9223372036854775808",
+            ["long long"] = "-9223372036854775808",
+        },
+    }))
     return profile
 end
 
@@ -420,6 +433,23 @@ describe("contextual unsafe C object-pointer conversions", function()
         end)
     end)
 
+    it("rejects a written mutable address of a C rvalue", function()
+        with_header(declarations .. [[
+            extern ffi_source ffi_make_source(void);
+        ]], function(header)
+            local ok, err = fake_check(header, [[
+                local function bad(): *c.ffi_source
+                    return c.ffi_make_source() as *c.ffi_source
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("cannot take a mutable C address", err, 1, true)
+            assert.match(
+                "non-addressable expression of type 'ffi_source'",
+                err, 1, true)
+        end)
+    end)
+
     it("retains const and volatile array qualification through decay",
     function()
         with_header([[
@@ -530,6 +560,14 @@ describe("contextual unsafe C object-pointer conversions", function()
                     conversion._c_conversion.kind)
                 assert.equal(calls[2].key,
                     conversion._c_conversion.probe_key)
+                assert.equal("explicit",
+                    conversion._written_cast.op)
+                assert.equal(conversion._c_conversion,
+                    conversion._written_cast.conversion)
+                assert.equal("unsafe_object_pointer",
+                    conversion._written_cast.conversion.kind)
+                assert.equal(calls[2].key,
+                    conversion._written_cast.conversion.probe_key)
             end
         end)
     end)
