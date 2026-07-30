@@ -461,6 +461,14 @@ Records cross the Lua boundary unchanged — the value Titan computes with
 verifies the record metatable/type identity and uses the udata directly
 ([Lua interop internals](lua-interop-internals.md)).
 
+An Interface call is the deliberate exception to symbol-directed method
+dispatch. The checker records the declaration-order method slot; generated
+code anchors the wrapper, loads and casts that payload entry, and calls it with
+the concrete-owner module and receiver from wrapper user values 0 and 1.
+Exact slots point at the concrete method; adjusted slots point at a private
+adapter with the Interface signature. Bound references capture the wrapper in
+the ordinary branded-closure shape. See [Interfaces](interfaces.md).
+
 ## Unions and `case`
 
 `coder._codeunioninit` allocates a zero-byte `Udata` whose metatable is the
@@ -720,9 +728,10 @@ aggregate.
 * A written `value is T` backed by a `DynamicCoercionPlan`: integer tests
   accept an integer tag or an exact integral float that passes
   `lua_numbertointeger`; float tests accept either numeric tag;
-  primitive/Map tests use `ttis*`; Array, nominal record/union, and owned-C
-  tests compare the same exact metatable. Once Interfaces v1 is enabled, an
-  Interface target likewise accepts only an existing exact wrapper.
+  primitive/Map tests use `ttis*`; Array, nominal record/union, owned-C, and
+  Interface tests compare the same exact metatable. An Interface target accepts
+  only an existing exact wrapper; it never constructs a wrapper from a bare
+  record or union at a dynamic boundary.
 * A target `Option(T)` first accepts nil, then recursively applies the same
   dynamic plan for `T`. Thus direct `value as boolean` and present
   `value as boolean?` both use truthiness, while nil is preserved;

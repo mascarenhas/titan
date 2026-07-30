@@ -4,6 +4,7 @@ local PROCESS_CASES = [====[
 -- Public os.Process behavior against the owned test child executable.
 local lua = foreign import "lua.h"
 local os = import "os"
+local stream = import "io"
 local timer = import "timer"
 local async = import "async"
 
@@ -46,24 +47,24 @@ end
 
 local function read_stdout_all(process: os.Process): string
   local result = ""
-  local chunk: string? = process:read_stdout()
+  local chunk: string? = process.stdout:read()
   while chunk do
     local bytes = chunk as string
     check(#bytes > 0, "stdout returned an empty non-EOF chunk")
     result = result .. bytes
-    chunk = process:read_stdout()
+    chunk = process.stdout:read()
   end
   return result
 end
 
 local function read_stderr_all(process: os.Process): string
   local result = ""
-  local chunk: string? = process:read_stderr()
+  local chunk: string? = process.stderr:read()
   while chunk do
     local bytes = chunk as string
     check(#bytes > 0, "stderr returned an empty non-EOF chunk")
     result = result .. bytes
-    chunk = process:read_stderr()
+    chunk = process.stderr:read()
   end
   return result
 end
@@ -71,6 +72,14 @@ end
 local function check_normal(status: os.ExitStatus, message: string)
   check(status.code == 0 and not status.signal and
         status.signal_number == 0, message)
+end
+
+-- Return only Interface views so the source Process record goes out of scope.
+-- Each pipe record must retain the shared native process owner directly.
+local function spawn_pipe_views(
+    child: string): (stream.WriterCloser, stream.Reader, stream.Reader)
+  local process = os.spawn(child, { "echo" })
+  return process.stdin, process.stdout, process.stderr
 end
 
 local function restore_environment(name: string, original: string?)
@@ -105,7 +114,7 @@ function schedule_spawn_and_metadata(child: string,
       local process = os.spawn(child, {
         "argv-env-cwd", envname, "alpha", "", "beta",
       })
-      process:close_stdin()
+      process.stdin:close()
       local output = read_stdout_all(process)
       local diagnostics = read_stderr_all(process)
       local status = process:wait()
@@ -138,44 +147,44 @@ function schedule_binary_fifo(child: string): async.Task
       return read_stdout_all(process)
     end)
 
-    process:write_stdin("")
+    process.stdin:write("")
     local first_bytes = doubled("first\0", 15)
     local second_bytes = doubled("-second", 14)
     local third_bytes = doubled("third-", 14)
     local issued = 0
     local first = async.run(function (): value
       issued = 1
-      process:write_stdin(first_bytes)
+      process.stdin:write(first_bytes)
       return "first"
     end)
     local second = async.run(function (): value
       while issued < 1 do timer.yield() end
       issued = 2
-      process:write_stdin(second_bytes)
+      process.stdin:write(second_bytes)
       return "second"
     end)
     local third = async.run(function (): value
       while issued < 2 do timer.yield() end
       issued = 3
-      process:write_stdin(third_bytes)
+      process.stdin:write(third_bytes)
       return "third"
     end)
     while issued < 3 do timer.yield() end
 
     -- Physical EOF is FIFO behind every request that was already accepted.
-    process:close_stdin()
+    process.stdin:close()
     check(first:join() == "first" and second:join() == "second" and
           third:join() == "third", "stdin FIFO writers failed")
-    process:close_stdin()
+    process.stdin:close()
     expect_failure(function (): value
-      process:write_stdin("")
+      process.stdin:write("")
       return nil
     end, "empty write bypassed the closed-stdin lifecycle check")
 
     local output = reader:join() as string
     check(output == first_bytes .. second_bytes .. third_bytes,
           "stdin writes were reordered or changed binary bytes")
-    check(not process:read_stdout(), "stdout EOF was not sticky")
+    check(not process.stdout:read(), "stdout EOF was not sticky")
     check(read_stderr_all(process) == "",
           "echo child wrote unexpected stderr")
     check_normal(process:wait(), "echo child did not exit normally")
@@ -187,61 +196,93 @@ function schedule_delimiter_reads(child: string): async.Task
   return async.run(function (): value
     local framed = os.spawn(child, { "echo" })
     expect_failure(function (): value
-      framed:read_stdout_until("")
+      framed.stdout:read_until("")
       return nil
     end, "stdout accepted an empty read delimiter")
     expect_failure(function (): value
-      framed:read_stderr_until("")
+      framed.stderr:read_until("")
       return nil
     end, "stderr accepted an empty read delimiter")
 
-    framed:write_stdin("\nleft\r")
+    framed.stdin:write("\nleft\r")
     timer.sleep(2)
-    framed:write_stdin("\nright")
-    framed:close_stdin()
-    local empty: string? = framed:read_stdout_until("\n", true)
+    framed.stdin:write("\nright")
+    framed.stdin:close()
+    local empty: string? = framed.stdout:read_until("\n", true)
     check(empty and #(empty as string) == 0,
           "a chopped leading stdout delimiter was confused with EOF")
-    check(framed:read_stdout_until("\r\n", false) == "left\r\n",
+    check(framed.stdout:read_until("\r\n", false) == "left\r\n",
           "stdout did not retain a split delimiter or false chop")
-    check(framed:read_stdout_until("\n", true) == "right",
+    check(framed.stdout:read_until("\n", true) == "right",
           "stdout changed an unterminated EOF tail")
-    check(not framed:read_stdout_until("\n") and
-          not framed:read_stdout(), "stdout EOF was not sticky")
-    check(not framed:read_stderr_until("\n") and
-          not framed:read_stderr(), "empty stderr EOF was not sticky")
+    check(not framed.stdout:read_until("\n") and
+          not framed.stdout:read(), "stdout EOF was not sticky")
+    check(not framed.stderr:read_until("\n") and
+          not framed.stderr:read(), "empty stderr EOF was not sticky")
     check_normal(framed:wait(), "framed echo did not exit normally")
 
     local binary = os.spawn(child, { "echo" })
-    binary:write_stdin("alpha\0betaEXCESS")
-    binary:close_stdin()
-    check(binary:read_stdout_until("\0beta") == "alpha\0beta",
+    binary.stdin:write("alpha\0betaEXCESS")
+    binary.stdin:close()
+    check(binary.stdout:read_until("\0beta") == "alpha\0beta",
           "stdout changed a NUL-containing delimiter or binary data")
-    check(binary:read_stdout() == "EXCESS",
+    check(binary.stdout:read() == "EXCESS",
           "NUL-delimited stdout did not retain excess bytes")
-    check(not binary:read_stdout_until("\0beta") and
-          not binary:read_stdout(), "binary stdout EOF was not sticky")
-    check(not binary:read_stderr(), "binary echo wrote unexpected stderr")
+    check(not binary.stdout:read_until("\0beta") and
+          not binary.stdout:read(), "binary stdout EOF was not sticky")
+    check(not binary.stderr:read(), "binary echo wrote unexpected stderr")
     check_normal(binary:wait(), "binary echo did not exit normally")
 
     local independent = os.spawn(child, { "early-output-exit" })
-    independent:close_stdin()
+    independent.stdin:close()
     local stdout_reader = async.run(function (): value
-      return independent:read_stdout_until("\n")
+      return independent.stdout:read_until("\n")
     end)
     local stderr_reader = async.run(function (): value
-      return independent:read_stderr_until("\n")
+      return independent.stderr:read_until("\n")
     end)
     check(stdout_reader:join() == "early\0stdout" and
           stderr_reader:join() == "early\0stderr",
           "stdout and stderr did not drain independently")
-    check(not independent:read_stdout_until("\n") and
-          not independent:read_stderr_until("\n"),
+    check(not independent.stdout:read_until("\n") and
+          not independent.stderr:read_until("\n"),
           "independent output EOF was not sticky")
     local status = independent:wait()
     check(status.code == 23 and not status.signal,
           "independent output child exit status changed")
     return "delimiter-reads-ok"
+  end)
+end
+
+function schedule_pipe_interfaces(child: string): async.Task
+  return async.run(function (): value
+    local input, output, diagnostics = spawn_pipe_views(child)
+    lua.lua_gc(L, lua.LUA_GCGEN)
+    lua.lua_gc(L, lua.LUA_GCCOLLECT)
+    input:write("interface\0pipes\n")
+    input:close()
+    check(output:read_until("\n", true) == "interface\0pipes",
+          "WriterCloser/Reader dispatch changed process pipe bytes")
+    check(not output:read() and not diagnostics:read(),
+          "Interface pipe views did not retain sticky EOF")
+
+    -- Public pipe fields are ordinary mutable record fields. Swapping the
+    -- output records must swap their facade-visible streams without changing
+    -- either record's independent retained state.
+    local swapped = os.spawn(child, { "early-output-exit" })
+    swapped.stdin:close()
+    local original_stdout = swapped.stdout
+    swapped.stdout = swapped.stderr
+    swapped.stderr = original_stdout
+    check(swapped.stdout:read_until("\n") == "early\0stderr" and
+          swapped.stderr:read_until("\n") == "early\0stdout",
+          "Process pipe-field reassignment did not behave as record mutation")
+    check(not swapped.stdout:read() and not swapped.stderr:read(),
+          "reassigned output streams did not preserve independent EOF")
+    local status = swapped:wait()
+    check(status.code == 23 and not status.signal,
+          "reassigned-pipe child exit status changed")
+    return "pipe-interfaces-ok"
   end)
 end
 
@@ -253,7 +294,7 @@ function schedule_exit_statuses(child: string): async.Task
     end, "missing executable unexpectedly spawned")
 
     local exited = os.spawn(child, { "exit", "37" })
-    exited:close_stdin()
+    exited.stdin:close()
     check(read_stdout_all(exited) == "" and
           read_stderr_all(exited) == "",
           "exit child produced output")
@@ -269,12 +310,12 @@ function schedule_exit_statuses(child: string): async.Task
       return nil
     end, "kill targeted an already exited Process")
     expect_failure(function (): value
-      exited:write_stdin("")
+      exited.stdin:write("")
       return nil
     end, "empty write bypassed the exited-Process lifecycle check")
 
     local signalled = os.spawn(child, { "self-unknown-signal" })
-    signalled:close_stdin()
+    signalled.stdin:close()
     local unknown = signalled:wait()
     check(not unknown.signal and unknown.signal_number > 0,
           "unknown terminating signal number was not preserved")
@@ -283,8 +324,8 @@ function schedule_exit_statuses(child: string): async.Task
           "self-signalled child produced output")
 
     local killed = os.spawn(child, { "ready-wait" })
-    killed:close_stdin()
-    check(killed:read_stdout_until("\n") == "READY\n",
+    killed.stdin:close()
+    check(killed.stdout:read_until("\n") == "READY\n",
           "kill child did not publish its marker")
     killed:kill("kill")
     local killed_status = killed:wait()
@@ -298,7 +339,7 @@ function schedule_exit_statuses(child: string): async.Task
     -- A failed spawn has completed its close path before control returns, so
     -- ordinary process use in the same Runtime must remain valid.
     local followup = os.spawn(child, { "exit", "0" })
-    followup:close_stdin()
+    followup.stdin:close()
     check_normal(followup:wait(), "post-failure spawn was unusable")
     return "exit-statuses-ok"
   end)
@@ -307,8 +348,8 @@ end
 function schedule_wait_and_read_cancellation(child: string): async.Task
   return async.run(function (): value
     local process = os.spawn(child, { "ready-wait" })
-    process:close_stdin()
-    check(process:read_stdout_until("\n") == "READY\n",
+    process.stdin:close()
+    check(process.stdout:read_until("\n") == "READY\n",
           "ready child did not publish its marker")
     local waiter = async.run(function (): value
       return process:wait()
@@ -346,28 +387,28 @@ function schedule_wait_and_read_cancellation(child: string): async.Task
           "terminated child left unread output")
 
     -- duplex publishes a delimiter-free prefix before waiting for stdin EOF,
-    -- so cancellation happens only after read_stdout_until has accumulated it.
+    -- so cancellation happens only after stdout:read_until has accumulated it.
     local delayed = os.spawn(child, { "duplex", "64" })
     local expected_prefix = doubled("OUT\0pattern-1234", 2)
     local expected_stderr = doubled("ERR\0pattern-5678", 2)
-    delayed:write_stdin("x")
+    delayed.stdin:write("x")
     timer.sleep(20)
     local reader = async.run(function (): value
-      return delayed:read_stdout_until("\n", true)
+      return delayed.stdout:read_until("\n", true)
     end)
     wait_until_started(reader)
     expect_failure(function (): value
-      delayed:read_stdout()
+      delayed.stdout:read()
       return nil
     end, "stdout admitted two concurrent readers")
     reader:cancel("cancel-process-read")
     expect_cancelled(reader, "cancel-process-read")
-    delayed:close_stdin()
-    check(delayed:read_stdout_until("\n", true) == expected_prefix,
+    delayed.stdin:close()
+    check(delayed.stdout:read_until("\n", true) == expected_prefix,
           "replacement stdout reader lost its restored prefix")
-    check(delayed:read_stdout_until("\n", true) == "INPUT:1",
+    check(delayed.stdout:read_until("\n", true) == "INPUT:1",
           "replacement stdout reader lost post-cancellation output")
-    check(not delayed:read_stdout(), "replacement stdout EOF was not sticky")
+    check(not delayed.stdout:read(), "replacement stdout EOF was not sticky")
     check(read_stderr_all(delayed) == expected_stderr,
           "stdout cancellation interfered with independent stderr buffering")
     check_normal(delayed:wait(), "duplex child did not exit normally")
@@ -383,12 +424,12 @@ function schedule_queued_write_cancellation(child: string): async.Task
     end)
     local payload = doubled("queued-write\0", 18)
     local first = async.run(function (): value
-      process:write_stdin(payload)
+      process.stdin:write(payload)
       return "first-write"
     end)
     wait_until_started(first)
     local queued = async.run(function (): value
-      process:write_stdin("MUST-NOT-BE-WRITTEN")
+      process.stdin:write("MUST-NOT-BE-WRITTEN")
       return "queued-write"
     end)
     wait_until_started(queued)
@@ -398,10 +439,10 @@ function schedule_queued_write_cancellation(child: string): async.Task
     queued:cancel("cancel-queued-process-write")
     expect_cancelled(queued, "cancel-queued-process-write")
     check(first:join() == "first-write", "submitted stdin write failed")
-    process:close_stdin()
+    process.stdin:close()
     check(output_reader:join() == "EOF:" .. #payload .. "\n",
           "cancelled queued write reached the child")
-    check(not process:read_stderr(), "wait-eof child wrote stderr")
+    check(not process.stderr:read(), "wait-eof child wrote stderr")
     check_normal(process:wait(), "wait-eof child did not exit normally")
     return "queued-write-cancellation-ok"
   end)
@@ -530,8 +571,8 @@ function schedule_forced_runtime_shutdown(child: string,
   return async.run(function (): value
     local process = os.spawn(child, { "ignore-term", pid_path })
     retained_process = process
-    process:close_stdin()
-    check(process:read_stdout_until("\n") == "READY\n",
+    process.stdin:close()
+    check(process.stdout:read_until("\n") == "READY\n",
           "TERM-resistant child did not publish its marker")
     -- No Task remains after this continuation. Runtime shutdown must TERM,
     -- wait through its private grace timer, KILL, reap, and close the process.
@@ -639,6 +680,17 @@ local cases = require "os_process_cases"
 local task = assert(cases.schedule_delimiter_reads(child))
 async.loop()
 assert(task:join() == "delimiter-reads-ok")
+]==])
+    end)
+
+    it("uses public process pipes through exact stream Interfaces", function()
+        run_lua([==[
+local async = require "titan.async"
+local cases = require "os_process_cases"
+
+local task = assert(cases.schedule_pipe_interfaces(child))
+async.loop()
+assert(task:join() == "pipe-interfaces-ok")
 ]==])
     end)
 

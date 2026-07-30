@@ -13,7 +13,10 @@ which have their own chapter
 ([anonymous functions and closures](closures.md)). Everything this chapter
 says about parameters, return values and arity applies to every form, and
 to the compiler-synthesized `new` static of each record and the positional
-constructor synthesized for each union variant.
+constructor synthesized for each union variant. An
+[Interface](interfaces.md) contains bodyless method signatures that reuse the
+same parameter, variadic, and return grammar; calls through an Interface obey
+the same adjustment rules.
 
 ## Declaring functions
 
@@ -118,8 +121,8 @@ run instead.
 This is why omitted parameters are "optional" only when their declared
 type can accept the synthesized `nil` (for example `T?`, `value`,
 `boolean`, or a nullable pointer type). Omitting a non-optional
-`integer`, `float`, `string`, array, map, record, union, or function parameter
-is a type error at the call site:
+`integer`, `float`, `string`, array, map, record, union, Interface, or function
+parameter is a type error at the call site:
 
 ```lua
 function fma(a: float, b: float, c: float): float
@@ -135,7 +138,8 @@ end
 test.titan:6:15: type error: types in argument 3 of call to function 'fma' do not match, expected float but found nil
 ```
 
-The same adjustment applies to methods, record/union static functions
+The same adjustment applies to concrete and Interface methods, record/union
+static functions
 (including `Rec.new` and generated union-variant constructors), imported
 Titan functions, anonymous functions, and calls through function-typed
 values. Foreign C functions keep C-style arity: Titan does not invent
@@ -204,7 +208,8 @@ above. Explicit expressions are nevertheless evaluated left to right as
 written, and each named item contributes exactly one value.
 
 Named syntax is available for direct Titan functions, user-declared
-record/union functions, and methods, plus direct fixed-arity C functions whose
+record/union functions, and direct concrete or Interface methods, plus direct
+fixed-arity C functions whose
 prototypes publish complete
 parameter names. It is not available through a function value, anonymous
 function, bound-method value, or C function pointer, and it is rejected for
@@ -367,7 +372,7 @@ does not carry its formal names with the value.
    that view came from callable adjustment or a dynamic Function boundary—uses
    its strict Titan-generic entry. Arguments and observed results are checked
    with gradual guards and the static arity/tail demand; ordinary
-   numeric, Option, C, or future Interface coercions are not lifted through
+   numeric, Option, C, or Interface-wrapper coercions are not lifted through
    the function type.
 3. A genuine Lua function, C function, or `__call` object uses the ordinary
    Lua call path. Results entering Titan use the shared dynamic coercion, and
@@ -430,7 +435,8 @@ consistent compound component is instead enforced by the strict generic call.
 **Anonymous functions are values too.** A `function (...) ... end`
 expression evaluates to a function value of the same kind, and it can
 capture the enclosing function's locals — see
-[anonymous functions and closures](closures.md). An instance method named
+[anonymous functions and closures](closures.md). A concrete or Interface
+instance method named
 but not called, `obj:method`, is also a value: a *bound method reference*,
 the method's type with the implicit `self` bound to the receiver (see
 [bound method references](closures.md#bound-method-references)).
@@ -452,7 +458,7 @@ before an old and new function value can be exchanged.
 Before checking function bodies, the compiler has collected the declarations
 of the whole module. A function body therefore sees *all* top-level
 declarations of its module — functions, methods, record/union functions,
-records, unions,
+records, unions, Interfaces,
 aliases, variables, and imports — regardless of their written order. Callable
 signatures are also order-independent: they may use a later nominal type,
 alias, or import, and a method or nominal function may be written before its
@@ -471,7 +477,8 @@ end
 
 The one visibility frontier is a top-level *module-variable declaration*: it
 sees only imports and other module variables written earlier, while seeing all
-record/union owners, aliases, and callable declarations wherever they appear. Its
+record/union owners, Interfaces, aliases, and callable declarations wherever
+they appear. Its
 initializer must also be a compile-time constant and therefore cannot call an
 ordinary function even though that function's name is visible. See
 [Declaration order and visibility](modules.md#declaration-order-and-visibility).
@@ -492,6 +499,16 @@ this chapter and follow the same rules for parameters, return values, adjustment
 multiple returns. Either kind may precede the written owner declaration. What
 differs — implicit `self`, nominal name resolution, and member visibility — is
 described in [Records](records.md) and [Unions](unions.md).
+
+Interface declarations contain method *signatures*, not implementations:
+`function read(n: integer): string` has neither a receiver colon nor a body.
+Calling `x:read(...)` where `x` has Interface type uses the Interface's names
+and callable shape, while its wrapper dispatches to the concrete record or
+union method selected when the wrapper was constructed. Taking `x:read`
+produces the ordinary bound method value. Structural satisfaction, exact and
+adjusted method entries, and the prohibition on lifting wrapper coercions
+through callable components are specified in
+[Interfaces](interfaces.md#structural-satisfaction-at-the-coercion-site).
 
 ## Standalone programs: `main`
 

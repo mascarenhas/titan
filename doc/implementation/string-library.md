@@ -45,15 +45,16 @@ escape hatch. Both `titan.net` and `titan.os` dogfood the literal
 `titan.string.find` and byte-preserving `titan.string.sub` operations. The
 isolated delayed-DNS fixture therefore constructs complete exact PEG and
 string providers before its exact net facade; production already places all
-nine logical modules and LPegLabel in one static bundle.
+ten logical modules and LPegLabel in one static bundle.
 
-The installed standard build requests nine roots in stable order:
+The installed standard build requests ten roots in stable order:
 
 ```text
 titan.coroutine
 titan.uv
 titan.async
 titan.timer
+titan.io
 titan.fs
 titan.net
 titan.os
@@ -61,13 +62,14 @@ titan.peg
 titan.string
 ```
 
-The request order preserves the previous seven roots and appends PEG before
-string; it is not topological. Recursive import loading resolves both the
+The request order preserves the previous nine roots' relative order, inserts
+the type-only `titan.io` root before its concrete stream users, and remains
+non-topological. Recursive import loading resolves both the
 `titan.net`/`titan.os` to `titan.string` to `titan.peg` chains while those
 facades are processed.
 
-The paired `titan.so`/`titan.a` therefore contains nine logical protocols and
-nine archive metadata keys. The DSO exposes ten Lua openers: bare
+The paired `titan.so`/`titan.a` therefore contains ten logical protocols and
+ten archive metadata keys. The DSO exposes eleven Lua openers: bare
 `luaopen_titan` support plus one entry per logical module. The provider's
 metadata-free payload begins with `titanlib.o`, then the private
 `libtitan-lpeglabel.a`, then the bundled libuv archive when bundled mode is

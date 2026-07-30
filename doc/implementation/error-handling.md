@@ -400,9 +400,12 @@ dispatch, and the reconstructible public nominal-static slot prefix. A case
 arm still runs through the ordinary `StatTry` cleanup path.
 
 ABI 0.20 again leaves pending actions and longjmp unwinding unchanged. Its
-boundary covers the two-user-value Array proxy and the strict-entry-bearing
-first-class function closure; errors raised by either a strict guard or a
-dynamic conversion still use the same Titan error handler.
+boundary covers the two-user-value Array proxy, the strict-entry-bearing
+first-class function closure, and Interface metadata/wrappers/bound
+trampolines. Errors raised by an Interface adapter, strict guard, dynamic
+conversion, or failed exact downcast still use the same Titan error handler;
+all wrapper and adapter roots are ordinary Lua-traced values, so unwinding
+requires no resource-specific cleanup path.
 
 The compiler and runtime therefore agree on:
 

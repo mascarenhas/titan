@@ -2,10 +2,12 @@ local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 
-local configured_prefix = os.getenv("PREFIX")
-local LUA = configured_prefix and configured_prefix .. "/bin/lua" or "lua"
-local TITANC = configured_prefix and configured_prefix .. "/bin/titanc" or
-    "titanc"
+local REPO = lfs.currentdir()
+local PREFIX = require("spec.support.installed_prefix").active()
+local LUA = PREFIX .. "/bin/lua"
+local TITANC = PREFIX .. "/bin/titanc"
+local USE_CHECKOUT_COMPILER =
+    os.getenv("TITAN_TEST_USE_CHECKOUT_COMPILER") == "1"
 
 local function quote_argv(argv)
     local quoted = {}
@@ -78,15 +80,30 @@ describe("folder modules through the public compiler", function()
     local trace_source
 
     local function compile(modname)
-        local ok, output, why, code = run({
+        local argv = {
             "env",
             "-u", "LUA_PATH", "-u", "LUA_CPATH",
             "-u", "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5",
             "CCACHE_DISABLE=1",
             "TITAN_PATH_0_20=" .. workspace,
             "TITAN_PATH=",
-            TITANC, "--tree", source_root, modname,
-        }, workspace)
+        }
+        if USE_CHECKOUT_COMPILER then
+            table.insert(argv, "TITAN_ROCKS_ROOT=" .. PREFIX)
+            table.insert(argv, "LUA_CPATH=" .. REPO .. "/?.so;;")
+            table.insert(argv, LUA)
+            table.insert(argv, "-e")
+            table.insert(argv, string.format(
+                "package.path=%q..package.path", REPO .. "/?.lua;" ..
+                    REPO .. "/?/init.lua;"))
+            table.insert(argv, REPO .. "/titanc")
+        else
+            table.insert(argv, TITANC)
+        end
+        table.insert(argv, "--tree")
+        table.insert(argv, source_root)
+        table.insert(argv, modname)
+        local ok, output, why, code = run(argv, workspace)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         return output
@@ -129,6 +146,12 @@ function through_extra(n: integer): integer
     return extra(n)
 end
 
+function through_interface(n: integer): integer
+    local reader: Reader = Box.new(n)
+    local read: () -> integer = reader:read
+    return read()
+end
+
 function explode(): integer
     return contributor_explode()
 end
@@ -147,6 +170,10 @@ local support = import "support"
 local probe = foreign import "probe.h"
 
 local type Delta = integer
+
+interface Reader
+    function read(): integer
+end
 
 function Box.make(n: integer): Box
     return Box.new(n)
@@ -181,6 +208,10 @@ end
 
         trace_source = [[local function extra(n: integer): integer
     return n
+end
+
+function Box:read(): integer
+    return self.n
 end
 
 local function contributor_explode(): integer
@@ -243,13 +274,15 @@ end
         assert.truthy(generated:find("foldercase_types", 1, true))
         assert.truthy(generated:find("foldercase_init", 1, true))
         assert.truthy(generated:find("Titan module foldercase", 1, true))
+        assert.truthy(generated:find(
+            "foldercase_Reader_read_interface_boundmethod", 1, true))
         assert.falsy(generated:find("foldercase_a_", 1, true))
         assert.falsy(generated:find("foldercase_trace_", 1, true))
         assert.falsy(generated:find("must_not_exist", 1, true))
         assert.truthy(generated:find('#include "probe.h"', 1, true))
     end)
 
-    it("shares one API and module state between Lua require and Titan import",
+    it("shares one API, module state, and cross-constituent Interface",
        function()
         local script = string.format([[
 package.cpath = %q .. "/?.so;" .. package.cpath
@@ -267,6 +300,7 @@ assert(folder.read() == 14)
 assert(consumer.bump_box(8, 2) == 16)
 assert(folder.read() == 16)
 assert(folder.through_extra(37) == 37)
+assert(folder.through_interface(42) == 42)
 print("OK")
 ]], workspace)
         local ok, output = run({ LUA, "-e", script }, workspace)

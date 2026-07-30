@@ -127,8 +127,8 @@ entries/writes and written casts share the separate dynamic family. See
 
 `types.is_gc` in `types.lua` decides which types the collector cares
 about, and therefore which values need anchoring: string, value,
-function, array, map, record/union nominal, C `TValue`, Lua-internal `Udata *`,
-owned C userdata, the reserved Interfaces-v1 wrapper representation, and `T?`
+function, array, map, record/union nominal, Interface wrapper, C `TValue`,
+Lua-internal `Udata *`, owned C userdata, and `T?`
 when `T` is itself GC-able.
 Integers, floats, booleans, nil and ordinary foreign pointers need none.
 
@@ -322,6 +322,23 @@ not its Lua proxy userdata.
 userdata, and unboxing compares the exact union metatable just as a record
 check compares the exact record metatable. The reverse metatable map includes
 the protected `"Titan union <fqtn>"` identity for diagnostics.
+
+## Interface wrappers
+
+An Interface value is a full `Udata` whose metatable is the exact nominal
+Interface identity. Its opaque payload is a declaration-order array of
+`TitanInterfaceMethod` function-pointer storage, while its two traced user
+values retain the concrete owner's module Udata and the concrete record/union
+receiver. The payload is copied from a process-static pair array and is not a
+GC graph; both user-value stores need ordinary Udata backward barriers.
+
+Wrapper allocation follows the fresh-object rule below: save `_base` as an
+offset, allocate, rebase, anchor the wrapper, then install its metatable and
+publish both traced edges. A bound Interface method closure adds a strong edge
+to the wrapper in upvalue 4. Adjustment entries root every GC-bearing fixed
+temporary and open descriptor range across conversion and the native method
+call. See [Interfaces](interfaces.md#wrapper-representation) for the complete
+layout and dispatch contract.
 
 ## The module userdata
 

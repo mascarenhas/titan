@@ -174,6 +174,77 @@ local LATE_FS_CASES = [[
         return "late-successful-open-cancellation-ok"
       end)
     end
+
+    function schedule_read_until_cancellation_restore(
+        path: string,
+        payload: string,
+        remaining: string
+    ): uv.Task
+      return uv._run(function (): value
+        fs.write_file(path, payload)
+        local file = fs.open(path, "r")
+        check(file:read_until("|") == "seed|",
+              "could not seed retained delimiter excess")
+
+        uv.__test_delay_nth_fs_read_callback(2, 45)
+        local target = uv._run(function (): value
+          return file:read_until("missing-delimiter")
+        end)
+        local canceller = uv._run(function (): value
+          while not uv.__test_fs_callback_is_delayed() do
+            uv._yield()
+          end
+          target:cancel("cancel-accumulated-file-read")
+          return nil
+        end)
+
+        canceller:join()
+        local cancelled = false
+        do
+          target:join()
+        catch
+          local reason = error as uv.Cancelled
+          check(reason.reason == "cancel-accumulated-file-read",
+                "delimiter-read cancellation reason changed")
+          cancelled = true
+        end
+        check(cancelled and target:status() == "cancelled",
+              "delayed delimiter read did not finish cancelled")
+
+        -- Drain the delayed successful callback. It owns both the just-read
+        -- bytes and restoration of the earlier accumulated/excess prefix.
+        uv._sleep(60)
+        check(file:read_until("missing-delimiter") == remaining,
+              "cancelled delimiter read did not restore bytes in order")
+        file:close()
+        return "read-until-cancellation-restore-ok"
+      end)
+    end
+
+    function schedule_read_until_error_restore(
+        path: string,
+        payload: string
+    ): uv.Task
+      return uv._run(function (): value
+        fs.write_file(path, payload)
+        local file = fs.open(path, "r")
+        uv.__test_fail_nth_fs_read_submission(3)
+        local failed = false
+        do
+          file:read_until("missing-delimiter")
+        catch
+          local failure = error as uv.Error
+          check(failure.operation == "fs.read_until" and failure.code < 0,
+                "injected delimiter-read failure had the wrong identity")
+          failed = true
+        end
+        check(failed, "injected delimiter-read submission did not fail")
+        check(file:read_until("missing-delimiter") == payload,
+              "failed delimiter read did not restore its accumulated prefix")
+        file:close()
+        return "read-until-error-restore-ok"
+      end)
+    end
 ]]
 
 return LATE_FS_CASES

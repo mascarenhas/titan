@@ -75,6 +75,12 @@ when their contents are observed. The canonical split is the
 [Lua interoperability](lua-interop.md) and, for the machinery,
 [the implementation documentation](../implementation/lua-interop-internals.md).)
 
+Interfaces keep that boundary explicit. A statically known satisfying record
+or union converts by constructing a nominal wrapper; Lua and `value` can pass
+an existing exact wrapper but never discover an implementation from a bare
+value. This preserves a faithful userdata representation and a well-defined
+error instead of adding hidden structural search at a dynamic edge.
+
 **Fail early instead of falling back.** Where Lua reacts to an unexpected
 value by taking a slower generic path — coercing, consulting a
 metamethod, growing a representation — Titan raises an error. If a
@@ -106,6 +112,12 @@ slides records were spelled `struct` and the FFI was an inline
 `foreign C [[...]]` block, LuaJIT-style; they became `record` and
 `foreign import "header.h"` as the design matured.)
 
+Nominal [Interfaces](interfaces.md) add behavioral abstraction without turning
+record or union layout structural. Direct concrete calls stay specialized;
+conversion constructs a compact wrapper whose declaration-order vtable
+supports calls through the Interface contract. Wrapper allocation and identity
+are visible consequences of requesting that abstraction.
+
 **Pay-as-you-go dynamism.** Static types are the default, but Lua is next
 door, and pretending otherwise would make the boundary unusable. The
 `value` type is the deliberate escape hatch: a `value` can hold anything
@@ -118,6 +130,12 @@ compiled, like the boundary, into a single run-time check. Option types
 giving nil-tolerant code a checked, first-class shape instead of an
 untyped one. The design intent in both cases is the same: dynamism is
 available, explicit in the types, and paid for only where it is used.
+
+Titan consequently does not need general subtyping. Even `T -> T?` is a named
+conversion because representations may differ, and concrete-to-Interface use
+is another direct conversion with a wrapper. Neither automatically lifts
+through an Array, Map, or Function; gradual consistency remains the separate,
+symmetric relation used for checked views.
 
 **An implementation that leans on what exists.** Titan compiles to C and
 hands the result to the system C compiler — no interpreter of its own, no
@@ -174,9 +192,10 @@ coercions. Typed Array/Map observations and non-exact branded Titan calls now
 use strict guards, while written `value as/is T` and genuine Lua boundaries
 share a broader target-directed conversion. Arrays carry their Lua-write
 policy, and function closures distinguish exact native, strict Titan-generic,
-and coercive Lua entries. These representation changes account for the ABI
-advance; Interface syntax remains a coordinated future addition rather than a
-feature of this release.
+and coercive Lua entries. It also adds nominal Interface declarations,
+structural record/union satisfaction at statically known conversion sites,
+fresh wrappers, concrete downcasts, and exact-wrapper-only dynamic boundaries.
+These coordinated representation changes account for the ABI advance.
 
 ## Principles, distilled
 
@@ -202,7 +221,7 @@ by these lights, roughly in order:
    semantics demand branches (shift amounts, division signs), they are
    written so constant operands let the C compiler delete them.
 5. **Restrictions are features when they buy the above.** Nominal
-   records and unions, no user-defined metatables on Titan data — each is a smaller
+   records, unions, and Interfaces, no user-defined metatables on Titan data — each is a smaller
    language in exchange for a faster and more predictable one, and each can
    be revisited as the design matures (see the roadmap in the
    [README](../../README.md)). First-class functions began as one of these

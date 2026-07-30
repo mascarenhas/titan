@@ -1,0 +1,36 @@
+interface Reader
+  function read(): string?
+  function read_until(delimiter: string, chop: boolean?): string?
+end
+
+interface Writer
+  function write(data: string)
+end
+
+interface Closer
+  function close()
+end
+
+interface ReaderWriter
+  function read(): string?
+  function read_until(delimiter: string, chop: boolean?): string?
+  function write(data: string)
+end
+
+interface ReaderCloser
+  function read(): string?
+  function read_until(delimiter: string, chop: boolean?): string?
+  function close()
+end
+
+interface WriterCloser
+  function write(data: string)
+  function close()
+end
+
+interface ReaderWriterCloser
+  function read(): string?
+  function read_until(delimiter: string, chop: boolean?): string?
+  function write(data: string)
+  function close()
+end

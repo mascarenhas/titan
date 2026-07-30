@@ -319,6 +319,12 @@ strict generic entry, a fresh forwarding copy, or a flexible result-run
 consumer; it is never replaced by a representation cast. The genuine-Lua
 entry instead consumes the corresponding `DynamicCoercionPlan`.
 
+An adjusted Interface method uses this same descriptor ABI for an input tail.
+Its checker-frozen adapter records the run actions, element guard/injection,
+roots, and rebases in advance; the coder validates and renders that closed
+plan without asking consistency or coercion again. In particular, a scalar
+concrete-to-Interface coercion is not lifted into a variadic component.
+
 ## Code generator: the seven structs and the native ABI
 
 ### Seven `TitanVarg*` structs, one per `ctype`

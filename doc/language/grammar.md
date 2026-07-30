@@ -26,11 +26,11 @@ is not a reserved word. Tokenization is longest-match, so `andy`,
 `return17`, and `_end` are names. The reserved words are:
 
 ```
-and     as      boolean  break     case    catch   const   defer  do      else
-elseif  end     false    finally   float   for     foreign function
-goto    if      import   in        integer is      local   nil     not
-or      owned   raise    record    repeat   return  string  then    true
-type    union   until   value      when    while
+and       as      boolean  break     case    catch   const   defer  do      else
+elseif    end     false    finally   float   for     foreign function
+goto      if      import   in        integer interface is    local   nil
+not       or      owned    raise     record  repeat  return  string  then
+true      type    union    until     value   when    while
 ```
 
 `in` is used by the generic `for ... in` statement. `goto` is still
@@ -48,9 +48,9 @@ declaration, or record-field name.
 
 A **CName** has the same raw spelling and is accepted only in a contextual
 qualified member/type position that the checker resolves through a C
-`foreign import`. This permits C symbols named `when`, `type`, `repeat`, or
-another Titan keyword without making those spellings legal ordinary Titan
-identifiers.
+`foreign import`. This permits C symbols named `when`, `type`, `interface`,
+`repeat`, or another Titan keyword without making those spellings legal
+ordinary Titan identifiers.
 
 ### Other tokens
 
@@ -150,14 +150,16 @@ for a folder module only its main source may contain that initializer. Its
 
 ```
 program  ::= {tldecl} [moduleinit]
-tldecl   ::= tlmethod | tlrecfunc | tlfunc | tlvar | tlrecord | tlunion | tltype
-           | tlimport | tlforeignimport
+tldecl   ::= tlmethod | tlrecfunc | tlfunc | tlvar | tlrecord | tlunion
+           | tlinterface | tltype | tlimport | tlforeignimport
 tlmethod ::= [local] function Name ':' Name '(' [parlist] ')' [':' rettype] block end
 tlrecfunc ::= [local] function Name '.' Name '(' [parlist] ')' [':' rettype] block end
 tlfunc   ::= [local] function Name '(' [parlist] ')' [':' rettype] block end
 tlvar    ::= [local] decl '=' exp
 tlrecord ::= [local] record Name {recordfield} end
 tlunion  ::= [local] union Name unionvariant {unionvariant} end
+tlinterface ::= interface Name interfacemethod {interfacemethod} end
+interfacemethod ::= function Name '(' [parlist] ')' [':' rettype]
 tltype   ::= [local] type Name '=' type
 recordfield     ::= [local] Name ['?'] ':' type [';']
 unionvariant    ::= [local] Name [':' type] [';']
@@ -180,6 +182,9 @@ record Point
 end
 local origin_x: float = 0.0          -- local module variable
 type Coordinates = {float}           -- exported transparent type alias
+interface Movable
+    function move(dx: float, dy: float)
+end
 version = "0.5"                      -- exported module variable, inferred
 function Point:move(dx: float, dy: float)
     self.x = self.x + dx
@@ -209,6 +214,10 @@ Notes on the top level:
 * A `union` must contain at least one variant and synthesizes one
   positional-only static constructor per variant. An empty variant takes no
   parameter; a payload variant takes one. See [Unions](unions.md).
+* An `interface` is a nonempty, public, top-level type declaration. Its
+  body contains bodyless `function` signatures only: there is no `local`
+  Interface, nested Interface, method body, receiver colon, field, static, or
+  member-level `end`. See [Interfaces](interfaces.md).
 * A module variable's initializer is a full expression; after `=`, the
   keywords `import` and `foreign import` mark an import instead.
 * The optional `moduleinit` is the sole executable root construct. It runs
@@ -270,9 +279,10 @@ visible variable of a generic `for`
 write `p: T?`. Record fields admit the annotated shorthand `x?: T`, which is
 equivalent to `x: T?`.
 
-In types: `Name` is a record or union type and `mod.Name` one from an imported
-module; `{T}` is an array, `{K: V}` a map, `T?` an option type, and
-`t -> t` a function type. A function type may end its argument list with
+In types, `Name` may be a record, union, Interface, or transparent alias, and
+`mod.Name` may name an exported one from an imported module; `{T}` is an
+array, `{K: V}` a map, `T?` an option type, and `t -> t` a function type. A
+function type may end its argument list with
 `...: T` to describe a variadic function value, and a parenthesized result
 list may end with `...: T` to describe a flexible result run. The two tails
 are independent. When a fixed result prefix is present, a comma is required

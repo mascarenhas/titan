@@ -1036,6 +1036,28 @@ describe("rich logical interfaces inside one shared image", function()
         assert.truthy(lfs.mkdir(workspace))
         source_root = workspace .. "/source"
 
+        write_file(source_root .. "/shape/api.titan", [[
+interface Incrementer
+    function add(delta: integer): integer
+end
+
+interface Dynamic
+    function convert(input: value): value
+end
+]])
+        write_file(source_root .. "/shape/consumer.titan", [[
+local api = import "shape.api"
+
+function use(value_: api.Incrementer): integer
+    local add: (integer) -> integer = value_:add
+    return add(2)
+end
+
+function use_dynamic(value_: api.Dynamic, input: value): value
+    local convert: (value) -> value = value_:convert
+    return convert(input)
+end
+]])
         write_file(source_root .. "/shape/provider.titan", [[
 record Foo
     n: integer
@@ -1049,6 +1071,14 @@ function Foo:plus(delta: integer): integer
     return self.n + delta
 end
 
+function Foo:add(delta: integer): integer
+    return self.n + delta
+end
+
+function Foo:convert(input: integer): integer
+    return self.n + input
+end
+
 function inc(x: integer): integer
     return x + 1
 end
@@ -1058,6 +1088,8 @@ function twice(f: (integer) -> integer, x: integer): integer
 end
 ]])
         write_file(source_root .. "/shape/facade.titan", [[
+local api = import "shape.api"
+local consumer = import "shape.consumer"
 local provider = import "shape.provider"
 
 type Foo = provider.Foo
@@ -1075,6 +1107,17 @@ function roundtrip_exact(x: integer): integer
     local f: (integer) -> integer = dynamic
     return f(x)
 end
+
+function interface_exact(n: integer): integer
+    local incrementer: api.Incrementer = provider.Foo.new(n)
+    return consumer.use(incrementer)
+end
+
+function interface_adjusted(n: integer): integer
+    local dynamic: api.Dynamic = provider.Foo.new(n)
+    local converted = consumer.use_dynamic(dynamic, n as value)
+    return converted as integer
+end
 ]])
     end)
 
@@ -1082,15 +1125,16 @@ end
         if workspace then remove_tree(workspace) end
     end)
 
-    it("preserves records, aliases, methods, record functions, and function values",
+    it("preserves rich APIs and four-module Interface topology in both forms",
        function()
         local ok, output, why, code = compile(
-            workspace, source_root, "shape.provider", "shape.facade")
+            workspace, source_root,
+            "shape.api", "shape.consumer", "shape.provider", "shape.facade")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
         assert_provider_pair(workspace, "shape", {
-            "shape.facade", "shape.provider",
+            "shape.api", "shape.consumer", "shape.facade", "shape.provider",
         })
         assert.is_nil(lfs.attributes(
             workspace .. "/shape/provider.so", "mode"))
@@ -1100,6 +1144,10 @@ end
             workspace .. "/shape/facade.so", "mode"))
         assert.is_nil(lfs.attributes(
             workspace .. "/shape/facade.a", "mode"))
+        assert.is_nil(lfs.attributes(
+            workspace .. "/shape/api.so", "mode"))
+        assert.is_nil(lfs.attributes(
+            workspace .. "/shape/consumer.a", "mode"))
 
         write_file(source_root .. "/consumer.titan", [[
 local facade = import "shape.facade"
@@ -1124,6 +1172,10 @@ end
         assert.truthy(generated:find(
             'loadglobalsym(L, "shape_provider_Foo_plus_titanmethod")',
             1, true), generated)
+        assert.falsy(generated:find(
+            "shape_api_init", 1, true), generated)
+        assert.falsy(generated:find(
+            "shape_consumer_init", 1, true), generated)
 
         ok, output = run_lua(workspace, [[
 local consumer = require "consumer"
@@ -1132,8 +1184,44 @@ local facade = require "shape.facade"
 local provider = require "shape.provider"
 assert(facade.make(7):plus(8) == 15)
 assert(provider.Foo.make(9):plus(1) == 10)
+assert(facade.interface_exact(40) == 42)
+assert(facade.interface_adjusted(20) == 40)
 ]])
         assert.truthy(ok, output)
+
+        write_file(source_root .. "/shape_app.titan", [[
+local facade = import "shape.facade"
+
+function main(args: {string}): integer
+    if facade.interface_exact(40) == 42 and
+       facade.interface_adjusted(20) == 40 then
+        return 0
+    else
+        return 1
+    end
+end
+]])
+        ok, output, why, code = compile(
+            workspace, source_root, "--static", "shape_app")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        local static_generated = read_file(source_root .. "/shape_app.c")
+        assert.falsy(static_generated:find(
+            'loadlib(L, "shape.so")', 1, true), static_generated)
+        assert.truthy(static_generated:find(
+            "extern Udata *shape_facade_init", 1, true), static_generated)
+        assert.falsy(static_generated:find(
+            "shape_api_init", 1, true), static_generated)
+        assert.falsy(static_generated:find(
+            "shape_consumer_init", 1, true), static_generated)
+
+        -- The standalone selected the ancestor archive even while its DSO
+        -- sibling was present. Removing that sibling proves no dynamic
+        -- Interface owner or implementer lookup remains at run time.
+        assert.truthy(os.remove(workspace .. "/shape.so"))
+        ok, output, why, code = run_program(workspace, "shape_app")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
     end)
 end)
 
@@ -1167,6 +1255,104 @@ function main(args: {string}): integer
 end
 ]], dependency, expected))
     end
+
+    it("links exact Interface archives into a standalone four-module bridge",
+       function()
+        write_file(source_root .. "/exact_iface/api.titan", [[
+interface Incrementer
+    function add(delta: integer): integer
+end
+
+interface Dynamic
+    function convert(input: value): value
+end
+]])
+        write_file(source_root .. "/exact_iface/provider.titan", [[
+record Box
+    n: integer
+end
+
+function Box:add(delta: integer): integer
+    return self.n + delta
+end
+
+function Box:convert(input: integer): integer
+    return self.n + input
+end
+]])
+
+        local ok, output, why, code =
+            compile(workspace, source_root, "exact_iface.api")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        ok, output, why, code =
+            compile(workspace, source_root, "exact_iface.provider")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert_provider_pair(
+            workspace, "exact_iface/api", { "exact_iface.api" })
+        assert_provider_pair(
+            workspace, "exact_iface/provider", {
+                "exact_iface.provider",
+            })
+
+        -- Leave only the terminal regular archives visible. The consumer
+        -- knows the Interface owner but not the concrete provider; the bridge
+        -- is the first source module to introduce both.
+        assert.truthy(os.remove(workspace .. "/exact_iface/api.so"))
+        assert.truthy(os.remove(workspace .. "/exact_iface/provider.so"))
+        write_file(source_root .. "/exact_iface/consumer.titan", [[
+local api = import "exact_iface.api"
+
+function use(value_: api.Incrementer): integer
+    local add: (integer) -> integer = value_:add
+    return add(2)
+end
+
+function use_dynamic(value_: api.Dynamic, input: value): value
+    local convert: (value) -> value = value_:convert
+    return convert(input)
+end
+]])
+        write_file(source_root .. "/exact_iface/bridge.titan", [[
+local api = import "exact_iface.api"
+local consumer = import "exact_iface.consumer"
+local provider = import "exact_iface.provider"
+
+function main(args: {string}): integer
+    local incrementer: api.Incrementer = provider.Box.new(40)
+    local dynamic: api.Dynamic = provider.Box.new(20)
+    local converted = consumer.use_dynamic(dynamic, 20 as value)
+    local converted_integer = converted as integer
+    if consumer.use(incrementer) == 42 and
+       converted_integer == 40 then
+        return 0
+    else
+        return 1
+    end
+end
+]])
+        ok, output, why, code =
+            compile(workspace, source_root, "exact_iface.bridge")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        local generated =
+            read_file(source_root .. "/exact_iface/bridge.c")
+        assert.falsy(generated:find(
+            'loadlib(L, "exact_iface/api.so")', 1, true), generated)
+        assert.falsy(generated:find(
+            'loadlib(L, "exact_iface/provider.so")', 1, true), generated)
+        assert.truthy(generated:find(
+            "extern Udata *exact_iface_api_init", 1, true), generated)
+        assert.truthy(generated:find(
+            "extern Udata *exact_iface_provider_init", 1, true), generated)
+
+        ok, output, why, code =
+            run_program(workspace, "exact_iface/bridge")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+    end)
 
     it("honors default/static preference, both fallbacks, and hidden-DSO execution",
        function()
@@ -1886,6 +2072,42 @@ end
             workspace .. "/record_boundary/root.so", "mode"))
         assert.is_nil(lfs.attributes(
             workspace .. "/record_boundary/root.a", "mode"))
+    end)
+
+    it("preflights all three exported Interface bound-method symbols",
+       function()
+        write_file(source_root .. "/interface_boundary/root.titan", [[
+interface child_Stream
+    function read(): integer
+end
+]])
+        write_file(source_root .. "/interface_boundary/root/child.titan", [[
+interface Stream
+    function read(): integer
+end
+]])
+
+        local ok, output = compile(workspace, source_root,
+            "interface_boundary.root", "interface_boundary.root.child")
+        assert.falsy(ok)
+        for _, symbol in ipairs({
+            "interface_boundary_root_child_Stream_read_interface_boundmethod",
+            "interface_boundary_root_child_Stream_read_titanentry_" ..
+                "interface_boundlua",
+            "interface_boundary_root_child_Stream_read_titanentry_" ..
+                "interface_boundstrict",
+        }) do
+            assert.truthy(output:find(
+                "cannot link C symbol '" .. symbol .. "'", 1, true), output)
+        end
+        assert.is_nil(lfs.attributes(
+            source_root .. "/interface_boundary/root.c", "mode"))
+        assert.is_nil(lfs.attributes(
+            source_root .. "/interface_boundary/root/child.c", "mode"))
+        assert.is_nil(lfs.attributes(
+            workspace .. "/interface_boundary/root.so", "mode"))
+        assert.is_nil(lfs.attributes(
+            workspace .. "/interface_boundary/root.a", "mode"))
     end)
 
     it("preflights cross-family protocol symbols from source dependencies",

@@ -7,6 +7,9 @@ The `net` facade contains no C FFI types. Each `Connection` or `Server` holds
 one local `uv.uv_tcp_t` record; the `uv` module alone can unwrap its local
 `owned *uv_tcp_t` field. Repeated calls therefore adjust the native owner
 directly to a pointer without allocating pointer-boxing userdata.
+The public `Connection` method shapes exactly satisfy all seven `titan.io`
+Interfaces, so those wrappers contain direct method entries; `Server:close`
+likewise gives an exact incidental `io.Closer` implementation.
 
 ## Ownership graph
 

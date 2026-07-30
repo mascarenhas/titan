@@ -23,6 +23,7 @@ Lua error (see [Error handling](error-handling.md)).
 | maps | `{ k : v }` | [Arrays and maps](arrays-maps.md) |
 | records | `Point`, `mod.Point` | [Records](records.md) |
 | unions | `Message`, `mod.Message` | [Unions](unions.md) |
+| interfaces | `Reader`, `mod.Reader` | [Interfaces](interfaces.md) |
 | aliases | `type Name = t` | [Type aliases](type-aliases.md) |
 | option types | `t?` | [Option types](option-types.md) |
 | function types | `(t1, t2) -> t3` | below |
@@ -94,12 +95,13 @@ The typing facts that belong in this chapter:
   error `type of map key cannot be nil`; an option key type,
   `type of map key cannot be option type`.
 
-### Records and unions
+### Records, unions, and Interfaces
 
-Record and union types are declared at the top level of a module and are the
-*nominal* types in Titan — see [Type equality](#type-equality) below,
-[Records](records.md), and [Unions](unions.md). A nominal type's full name is qualified
-by its module: the `Point` declared in module `geom` is the type
+Record, union, and Interface types are declared at the top level of a module
+and are the *nominal* types in Titan — see
+[Type equality](#type-equality) below, [Records](records.md),
+[Unions](unions.md), and [Interfaces](interfaces.md). A nominal type's full
+name is qualified by its module: the `Point` declared in module `geom` is the type
 `geom.Point`, written `Point` inside its own module and `geom.Point`
 elsewhere (for an `import "geom"` bound to `geom`).
 
@@ -113,7 +115,7 @@ end
 An existing type can be given a transparent compile-time name with a
 [type alias](type-aliases.md). In particular, `type P = Point` still denotes
 this exact nominal record; it does not declare a second record type. The same
-is true for a union alias. A union variant is not itself a type:
+is true for a union or Interface alias. A union variant is not itself a type:
 `Message.write` is illegal in an annotation, alias, `as`, or `is`; use
 `Message` and inspect it with `case`.
 
@@ -178,7 +180,7 @@ exported compiled-module interfaces; the details live in
 
 ## Type equality
 
-Titan's types are *structural* except for records and unions, which are
+Titan's types are *structural* except for records, unions, and Interfaces, which are
 *nominal*:
 
 * Two basic types are equal only if they are the same type.
@@ -187,7 +189,7 @@ Titan's types are *structural* except for records and unions, which are
   fixed parameter and return lists pointwise, including the presence and
   element type of any input-variadic or flexible-result tail.
 * `t1?` equals `t2?` exactly when the base types are equal.
-* Two record or union types are equal only if they are *the same declaration* —
+* Two record, union, or Interface types are equal only if they are *the same declaration* —
   their fully-qualified names match. Field structure is irrelevant:
 
 ```lua
@@ -206,6 +208,12 @@ end
 field names — and they would still be unrelated if the field types
 matched exactly. A `PointF` can never be used where a `PointV` is
 expected, and there is no cast between them.
+
+Interfaces are nominal in the same sense: two Interface declarations with
+identical method signatures are still distinct and neither converts to the
+other. Structural method matching is used only to decide whether a concrete
+record or union can be wrapped as one particular Interface; it is not
+Interface-to-Interface structural equality. See [Interfaces](interfaces.md).
 
 Some constructs demand equality directly: relational comparisons
 (`<`, `<=`, `>`, `>=`) require two numbers (any `integer`/`float` mix —
@@ -234,7 +242,7 @@ operations:
 * **consistent** is the symmetric, non-transitive relation of gradual typing.
   Equal types are consistent. A guardable type is consistent with `value`,
   and consistency descends pointwise through Arrays, Maps, Options, and
-  aligned Function components. Records and unions remain nominal. For
+  aligned Function components. Records, unions, and Interfaces remain nominal. For
   example, `{integer}` is consistent with `{value}`, and `{value}` with
   `{float}`, but `{integer}` is not consistent with `{float}`. This is the
   intended non-transitivity; the compiler never searches for a path through
@@ -243,7 +251,8 @@ operations:
   authorize a directional assignment.
 * **coercible** means that one named, direct automatic conversion plan exists
   from the source type to the target type. Numeric conversion, Option
-  introduction/force, and the enumerated FFI conversions are coercions.
+  introduction/force, satisfying record/union-to-Interface wrapper
+  construction, and the enumerated FFI conversions are coercions.
   Coercions are directional and do not recurse generically through Arrays,
   Maps, Functions, or nominal fields.
 * A **gradual view** observes the same compound value under a consistent
@@ -256,7 +265,7 @@ operations:
   it records fixed-position alignment, ignored values, nil-filled positions,
   input/output tails, and flexible projection. Aligned components may use
   consistency and nested callable adjustment, but never ordinary numeric,
-  Option, C, or future Interface coercions.
+  Option, C, or Interface-wrapper coercions.
 * **dynamic coercion** is the target-directed conversion used at an explicitly
   dynamic boundary: a written `value as/is T`, a genuine Lua-to-Titan sink,
   or a result entering Titan from a non-Titan Lua callable.
@@ -294,7 +303,7 @@ back to this matrix rather than defining competing conversion rules.
 | Genuine Lua call of a Titan function | Coercive Lua entry. | Lua arguments use dynamic coercion; the Titan function's ordinary result conversion returns values to Lua. |
 | Titan call of a non-Titan Lua callable | Ordinary Lua call, followed by the dynamic boundary for results entering Titan. | Callability follows Lua, including `__call`; requested result types use dynamic coercion. |
 | `value as/is` a raw C pointer | Written, explicitly unsafe pointer assertion only. Implicit gradual projection, typed container reads, callable adjustment, and non-Titan Lua-result conversion to a raw pointer are rejected. | The written operation may accept the lightuserdata/nil representation, but cannot prove the pointee type. See [the FFI policy](ffi.md#casts-and-coercions). |
-| Future Interface target (Interfaces are not language syntax in this release) | Dynamic conversion may accept only an already-built wrapper of that exact nominal Interface type (or nil for an option). It never discovers that a bare record/union implements the Interface. | Concrete record/union-to-Interface wrapper construction is a direct outer Titan coercion at a statically known edge and does not lift through containers or callable results. |
+| Interface target | A statically known satisfying record/union-to-Interface edge constructs a fresh wrapper. Dynamic conversion accepts only an existing wrapper of that exact nominal Interface type (or nil for an option); it never discovers an implementation from a bare record or union. | Wrapper construction is one direct outer coercion and does not lift through containers or callable components. Calls through the wrapper use the Interface's method contract. See [Interfaces](interfaces.md). |
 
 For every row marked **dynamic coercion**, the target rules are the same:
 
@@ -302,8 +311,9 @@ For every row marked **dynamic coercion**, the target rules are the same:
   produces an integer; `float` accepts either numeric representation and
   produces a float.
 * `boolean` applies Lua truthiness, so `value is boolean` is total.
-* `string`, records, unions, and owned C userdata require their exact run-time
-  category or nominal metatable.
+* `string`, records, unions, Interfaces, and owned C userdata require their
+  exact run-time category or nominal metatable. An Interface target accepts
+  only its existing exact wrapper, not a bare structural implementer.
 * an Array target validates the canonical Titan proxy; a Map target validates
   a table. Neither operation walks contents, and later typed reads remain
   strict.
@@ -345,9 +355,15 @@ the value does not conform.
 | `t` | `t?` | no |
 | `t?` | `t` | yes — error `expected t but found nil` if the value is absent |
 | `nil` | `t?` | no |
-| `s?` | `t?` | whenever `s` coerces to `t`: `nil` passes straight through, and a present value is converted from `s` to `t` and re-wrapped — so e.g. `integer? → float?` works and is nil-preserving (a narrowing conversion can still raise on a present value) |
-| `s` | `t?` | as for `s` to `t` (convert, then wrap) |
-| `s?` | `t`, for inter-coercible bases | yes — nil check, then convert (in practice the numeric pairs: `integer? → float`, `float? → integer`; an option over a non-coercible base, like `boolean? → integer`, is a clean compile-time type error) |
+| `s?` | `t?`, for an ordinary non-Interface base plan | whenever `s` coerces to `t`: `nil` passes straight through, and a present value is converted from `s` to `t` and re-wrapped — so e.g. `integer? → float?` works and is nil-preserving (a narrowing conversion can still raise on a present value) |
+| `s` | `t?`, for an ordinary non-Interface base plan | as for `s` to `t` (convert, then wrap) |
+| `s?` | `t`, for ordinary inter-coercible non-Interface bases | yes — nil check, then convert (in practice the numeric pairs: `integer? → float`, `float? → integer`; an option over a non-coercible base, like `boolean? → integer`, is a clean compile-time type error) |
+| satisfying record or union `R` | Interface `I` | no — constructs a fresh `I` wrapper around the concrete value; satisfaction is checked statically at the conversion site |
+| satisfying record or union `R` | Interface `I?` | no — constructs a fresh `I` wrapper, then makes it present |
+| satisfying record or union `R?` | Interface `I` | yes — force non-nil, then construct a fresh `I` wrapper |
+| satisfying record or union `R?` | Interface `I?` | no — nil passes through; a present concrete value receives a fresh `I` wrapper |
+| Interface `I` | Interface `I?` | no — ordinary Option introduction with no new Interface wrapper |
+| Interface `I?` | Interface `I` | yes — ordinary checked Option force |
 | `integer` or `float` | `string` | no — **only** as an operand of `..`; integral floats format with a `.0` suffix exactly like Lua's `tostring` |
 | C integer | `integer` | yes — values outside the target `lua_Integer` range are rejected |
 | `integer` | C integer | yes — values outside the target C interval are rejected; C `_Bool` accepts only 0 and 1 |
@@ -417,9 +433,17 @@ or a callable adjustment:
    narrowing; an integer key into a `{float: v}` map is promoted, so
    `m[1]` and `m[1.0]` are the same entry.
 6. Entries of **constructor expressions**: array elements, map keys and
-   values, and record constructor fields.
+   values, and record constructor fields. Generated union payloads are
+   covered by the ordinary call-argument rule above.
 7. **Module variable initializers** (when the variable has a type
    annotation).
+8. The finite scalar slots of a **generic `for`**: yielded-variable bindings
+   and the iterator's typed state, initial-control, and close setup.
+
+Expression-list consumers apply these rules per demanded scalar. A positional
+Array/integer-Map constructor or flexible return may also consume an open run
+under an explicitly recorded element plan; that does not create a structural
+conversion between the producer and consumer's container or Function types.
 
 Conditions of `if`, `while` and `repeat` are not on this list because
 they need no coercion: *any* type is accepted as a condition, and its
@@ -594,7 +618,9 @@ anything, `{string: value}` a string-keyed map of anything, and the
 [consistency and gradual-view rules](#relations-and-boundaries-no-subtyping)
 let such containers stand in for consistently shaped counterparts (and vice
 versa) with strict element checks deferred to the point of use — except inside
-records or unions, which are nominal and admit no such substitution. A direct
+records, unions, or Interfaces, which are nominal and admit no such
+substitution. In particular, the direct `R -> I` wrapper coercion described in
+[Interfaces](interfaces.md) does not make `R` and `I` consistent. A direct
 conversion such as `integer -> float` does not lift: `{integer}` and
 `{float}` remain unrelated.
 
@@ -608,6 +634,10 @@ importantly, `e as t` for `e: value` requests the broad dynamic coercion in the
 [normative boundary matrix](#normative-boundary-matrix), not the strict
 implicit gradual projection. Ordinary numeric and Option conversions can
 still be requested simply by placing an expression in a typed context.
+Interface casts additionally provide explicit wrapper construction from a
+statically satisfying record or union and exact-concrete downcasts from an
+Interface wrapper; dynamic casts to an Interface accept only an existing exact
+wrapper. See [Interfaces](interfaces.md#concrete-tests-and-downcasts).
 
 For C FFI types, regular `as <type>` is also the explicit cast mechanism:
 C integers can be cast to `integer`, C floats can be cast to `float`, Titan
@@ -621,7 +651,7 @@ pointer. A written `value as <raw C pointer>` is an explicitly unsafe
 lightuserdata/nil assertion: Titan cannot establish the pointee type, so the
 same edge is unavailable to implicit projection, typed container reads, and
 generic calls. A written cast can also erase a C function pointer to C `void *`, or
-expose the native GC identity of an Array, Map, record, union, or function value as C
+expose the native GC identity of an Array, Map, record, union, Interface, or function value as C
 `void *`. The function identity cast raises when its boxed value is not
 collectable; the other GC-identity cases are total. These are borrowed
 internal addresses, not ownership transfers. There is no separate FFI cast

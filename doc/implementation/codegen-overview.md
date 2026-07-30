@@ -592,6 +592,17 @@ self-removed tag, the native trampoline pointer, `self`, and the strict
 trampoline trailer). The result
 is an ordinary `Type.Function` value with no special downstream handling.
 
+Interface method calls use the same native method signatures but take their
+entry from the wrapper's declaration-order payload. The hidden `_mod` and
+`self` values always come from wrapper user values 0 and 1, so an adjustment
+entry generated outside the concrete owner's module still invokes the method
+with its concrete owner. Interface bound methods are six-upvalue branded
+closures: the first four structural function slots are followed by the
+captured wrapper and strict entry. The Interface owner exports the native,
+coercive-Lua, and strict bound trampolines for cross-provider bind sites. Full
+wrapper layout, pair initialization, and all four dispatch paths are in
+[Interfaces](interfaces.md#four-dispatch-paths).
+
 ### The `.so` ABI bump
 
 Adding `_fn` to `function_sig` changes **every** native-entry signature,
@@ -624,8 +635,9 @@ fields/methods/record functions from the serialized public interface, while reta
 the full record field-slot count so an imported `.so` still reads public fields
 from their original `Udata` user-value slots. A 0.10 checker would not know how
 to interpret that layout metadata. The 0.11 to 0.12 bump added the separately
-serialized `Type.Module.type_members` map for public type aliases; a 0.11
-checker cannot rehydrate that interface shape. ABI **0.13** introduced the
+serialized `Type.Module.type_members` map for public type aliases (later also
+used by public Interface declarations); a 0.11 checker cannot rehydrate that
+interface shape. ABI **0.13** introduced the
 named-argument metadata.
 The 0.12 to 0.13 bump adds declaration `paramnames` to the serialized
 `Type.ModuleMember`, `Type.Method`, and `Type.StaticMethod` constructor shapes
@@ -672,8 +684,12 @@ same canonical first-class closure.
 
 The current ABI is **0.20**. Array proxies now have two traced user values,
 with the per-construction-type Lua writer closure in the second; function
-closures add a fixed opaque brand upvalue and a strict-entry trailer. The
-active suffix and provider namespace advance with the
+closures add a fixed opaque brand upvalue and a strict-entry trailer.
+Serialized module type members now include ordered `Type.Interface`/
+`Type.Method` declarations. Runtime Interface values are two-user-value
+wrappers with an ordered `TitanInterfaceMethod` payload; generated modules
+also publish the exact/adjusted direct and bound entry artifacts needed by
+that payload. The active suffix and provider namespace advance with the
 marker (`_0_20`, `TITAN_PATH_0_20`, `lib/titan/0.20`); 0.19 providers are
 rejected before interface rehydration.
 
@@ -685,7 +701,8 @@ one `Udata` (`_mod`) created by `_init`: the module table's slot is gone
 entirely, and member slots are 0-based with no reserved user value. The user values hold module
 variables, imported modules' `Udata`s, exported-function and
 exported-nominal-static canonical closures, the unconditional Array-metatable
-cache, module-local Array writer closures, cached record/union metatables, and
+cache, module-local Array writer closures, cached record/union/Interface
+metatables, and
 per-nominal static-namespace tables
 (allocation order below). Every generated function receives this `Udata` as its
 `_mod` parameter; the Lua wrappers recover it from their closure's
@@ -701,12 +718,15 @@ Udata *counter_init(lua_State *L) {
     if(lua_isnil(L, -1)) {
         _initialized = 1;
         /* create and register _mod (luaS_newudata(L, 0, NUPVALS));
+           $INITARRAYMETA (shared Array metatable/cache),
            $LOADMODULES1 (dlopen dynamic deps), $INITMODULES (dep inits),
            $LOADGLOBALS (symbols published by transitive RTLD_GLOBAL deps),
-           $INITRECORDS (record and union metatables), $INITFUNCTAGS,
-           $INITARRAYWRITERS (module-local writer closures), $INITVARS
-           (variable initializers), then canonical function closures; install
-           public nominal namespaces into their uv slots; $CREATEMETA
+           $INITRECORDS (record, union, and Interface metatables),
+           $INITFUNCTAGS, $INITPAIRS (Interface method payloads),
+           $INITARRAYWRITERS (module-local writer closures), then canonical
+           function closures; $INITNAMES (trace names), $INITVARS (variable
+           initializers); install public nominal namespaces into their uv
+           slots; $CREATEMETA
            (member metatable on the udata) */
         return _mod;
     } else {
@@ -716,6 +736,9 @@ Udata *counter_init(lua_State *L) {
             _initialized = 1;
             $LOADMODULES2  /* re-stitch directly imported function pointers */
             $LOADGLOBALS   /* re-stitch transitive global symbols */
+            $INITFUNCTAGS  /* restore exact function identities first */
+            $INITPAIRS     /* then Interface payload function pointers */
+            $INITNAMES     /* then trace names for those restored pointers */
         }
         return _mod;
     }
@@ -787,12 +810,14 @@ int counter_types(lua_State* L) {
 
 The literal is `types.serialize(ast._type)`: a Lua *expression* that
 rebuilds the module's type when evaluated with `types.lua`'s constructors
-as its environment. A `Type.Module` serializes runtime `members` and public
-alias `type_members` separately; aliases therefore create no module slot or
-Lua-visible member. Keyed alias, nominal-method, and nominal-static maps are
+as its environment. A `Type.Module` serializes runtime `members` separately
+from public type-only `type_members`, which contain transparent aliases and
+direct Interface declarations. Neither creates a module slot or Lua-visible
+member. Keyed type-member, nominal-method, and nominal-static maps are
 serialized in locale-independent numeric-byte name order so equivalent
-interfaces have reproducible text; ordered module members, record fields, and
-union variants retain their established source/slot order. Callable declaration descriptors also serialize formal
+interfaces have reproducible text; ordered Interface methods, module members,
+record fields, and union variants retain their established source/slot order.
+Callable declaration descriptors also serialize formal
 `paramnames`, while structural `Type.Function` values do not. Callable shapes
 also carry their optional `flexrettype`; accepting that new constructor shape
 from compiled interfaces is gated on the coordinated ABI transition described
@@ -919,8 +944,9 @@ for local variables/imports, referenced local ordinary-function closures,
 every static not already in the public prefix, and each nominal owner's
 private static-namespace table. Remaining private slots are allocated as
 their inventories or first uses are encountered during code generation:
-module-local Array writers, record/union and owned-C metatables, and
-transitive module `Udata` caches may therefore interleave. No ordering among
+module-local Array writers; record/union, Interface, and owned-C metatables;
+concrete-owner module caches needed by wrappers; and transitive module
+`Udata` caches may therefore interleave. No ordering among
 those categories is serialized.
 
 Code generation freezes the distinct constructed Array element types and

@@ -4,6 +4,7 @@ local record FsConstants
   local stat: integer
   local open: integer
   local read: integer
+  local read_until: integer
   local write: integer
   local flush: integer
   local close: integer
@@ -23,6 +24,7 @@ local FS = FsConstants.new {
   stat = 1,
   open = 2,
   read = 3,
+  read_until = 14,
   write = 4,
   flush = 5,
   close = 6,
@@ -38,12 +40,27 @@ local FS = FsConstants.new {
   file_closed = 3,
 }
 
+local FILE_READ_CHUNK_BYTES = 64 * 1024
+
 local record FsStatResult
   local size: integer
   local kind: string
   local mode: integer
   local modified_seconds: integer
   local modified_nanoseconds: integer
+end
+
+local record FsReadUntilState
+  local delimiter: string
+  local chop: boolean
+  local chunks: {string}
+  local count: integer
+  local total: integer
+  local tail: string
+  local done: boolean
+  local has_payload: boolean
+  local payload: string
+  local remaining: string
 end
 
 local record FsOperation
@@ -55,6 +72,7 @@ local record FsOperation
   local file: uv_file?
   local data: string
   local maximum: integer
+  local read_until_state: FsReadUntilState?
   local write_offset: integer
   local write_bytes: Bytes?
   local prepared_buffer: Buffer?
@@ -104,6 +122,7 @@ record uv_file
   local next_file: uv_file?
   local previous_file: uv_file?
   local close_enqueued: boolean
+  local excess: string
 end
 
 function _fs_open(path: string, mode: string): uv_file
@@ -119,6 +138,14 @@ function _fs_read(file: uv_file, max_bytes: integer): string?
   end
   validate_file(file, "read from", false)
   local request = new_file_request(FS.read, file, "", max_bytes, false)
+  return coroutine.yield(request, UV_TAG)
+end
+
+function _fs_read_until(file: uv_file, delimiter: string,
+                        chop: boolean?): string?
+  if #delimiter == 0 then raise "read delimiter must not be empty" end
+  validate_file(file, "read from", false)
+  local request = new_file_read_until_request(file, delimiter, chop == true)
   return coroutine.yield(request, UV_TAG)
 end
 
@@ -217,6 +244,7 @@ local function create_file(runtime: Runtime, handle: libuv.uv_file,
     state = FS.file_open,
     subject = subject,
     close_enqueued = false,
+    excess = "",
   }
   link_file(runtime, file)
   return file
@@ -350,6 +378,7 @@ local function fs_operation_name(kind: integer): string
   if kind == FS.stat then return "fs.stat" end
   if kind == FS.open then return "fs.open" end
   if kind == FS.read then return "fs.read" end
+  if kind == FS.read_until then return "fs.read_until" end
   if kind == FS.write then return "fs.write" end
   if kind == FS.flush then return "fs.flush" end
   if kind == FS.close or kind == FS.internal_close then return "fs.close" end
@@ -415,7 +444,7 @@ local function submit_fs_operation(operation: FsOperation):
   -- owes no callback; the operation remains rooted by its Task/File for the
   -- outer fatal path without stranding a fake submitted owner.
   operation.prepared_buffer = nil
-  if operation.kind == FS.read then
+  if operation.kind == FS.read or operation.kind == FS.read_until then
     operation.prepared_buffer = allocate_read_buffer(operation.maximum)
   elseif operation.kind == FS.write then
     if not operation.write_bytes then
@@ -443,7 +472,7 @@ local function submit_fs_operation(operation: FsOperation):
   elseif kind == FS.rename then
     path_data = operation.path.bytes
     second_path_data = operation.second_path.bytes
-  elseif kind == FS.read or kind == FS.write then
+  elseif kind == FS.read or kind == FS.read_until or kind == FS.write then
     file_handle = operation.file.handle
     buffer_handle = operation.prepared_buffer.handle
   elseif kind == FS.flush or kind == FS.close or
@@ -474,7 +503,7 @@ local function submit_fs_operation(operation: FsOperation):
       mode = 438 as ffi.titan_ffi_int,
       cb = shim.titan_uvshim_fs_cb,
     }
-  elseif kind == FS.read then
+  elseif kind == FS.read or kind == FS.read_until then
     status = libuv.uv_fs_read {
       loop = loop_handle,
       req = owner_handle,
@@ -545,6 +574,7 @@ local function make_fs_operation(kind: integer, task: Task?,
     file = file,
     data = data,
     maximum = maximum,
+    read_until_state = nil,
     write_offset = 0,
     linked = false,
     close_waiter = false,
@@ -568,6 +598,36 @@ local function new_fs_request(kind: integer, path: string,
     file = nil,
     data = data,
     maximum = 0,
+  }
+  request.subject = operation
+  return request
+end
+
+local function new_file_read_until_request(file: uv_file,
+                                           delimiter: string,
+                                           chop: boolean): Request
+  local request = new_request(REQUEST_FS, nil, 0)
+  local operation = make_fs_operation {
+    kind = FS.read_until,
+    task = request.task,
+    request = request,
+    path = nil,
+    second_path = nil,
+    file = file,
+    data = "",
+    maximum = FILE_READ_CHUNK_BYTES,
+  }
+  operation.read_until_state = FsReadUntilState.new {
+    delimiter = delimiter,
+    chop = chop,
+    chunks = {},
+    count = 0,
+    total = 0,
+    tail = "",
+    done = false,
+    has_payload = false,
+    payload = "",
+    remaining = "",
   }
   request.subject = operation
   return request
@@ -606,57 +666,279 @@ local function retire_fs_owner_now(owner: uv_fs_t)
   unlink_fs_owner(owner)
 end
 
-local function submit_file_head(file: uv_file, inline_task: Task?): Error?
+local function join_fs_read_chunks(chunks: {string}, first: integer,
+                                   last: integer): string
+  if first > last then return "" end
+  if first == last then return chunks[first] as string end
+  local middle = first + (last - first) // 2
+  return join_fs_read_chunks(chunks, first, middle) ..
+         join_fs_read_chunks(chunks, middle + 1, last)
+end
+
+local function fs_read_until_state(operation: FsOperation):
+                                   FsReadUntilState
+  local state? = operation.read_until_state
+  if not state then
+    raise internal_error("fs.read_until.state")
+  end
+  return state as FsReadUntilState
+end
+
+local function clear_fs_read_chunks(state: FsReadUntilState)
+  state.chunks = {}
+  state.count = 0
+  state.total = 0
+  state.tail = ""
+  state.done = false
+  state.has_payload = false
+  state.payload = ""
+  state.remaining = ""
+end
+
+-- Returns a logical error instead of raising after the native read has
+-- consumed bytes. The caller can then restore every accumulated chunk before
+-- propagating the error to the waiting Task.
+local function append_fs_read_chunk(operation: FsOperation,
+                                    chunk: string): string?
+  local state = fs_read_until_state(operation)
+  state.count = state.count + 1
+  state.chunks[state.count] = chunk
+  local length = #chunk
+  if state.total > 9223372036854775807 - length then
+    return "file read result exceeds Titan's string length limit"
+  end
+  state.total = state.total + length
+
+  local boundary = state.tail .. chunk
+  local match = _bytes_find(boundary, state.delimiter)
+  if match >= 0 then
+    local match_end =
+      state.total - #boundary + match + #state.delimiter
+    local result_length = match_end
+    if state.chop then
+      result_length = result_length - #state.delimiter
+    end
+    local all = join_fs_read_chunks(
+        state.chunks, 1, state.count)
+    state.payload = _bytes_slice(all, 0, result_length)
+    state.remaining =
+      _bytes_slice(all, match_end, #all - match_end)
+    state.has_payload = true
+    state.done = true
+  else
+    local keep = #state.delimiter - 1
+    if keep > #boundary then keep = #boundary end
+    state.tail =
+      _bytes_slice(boundary, #boundary - keep, keep)
+  end
+  return nil
+end
+
+local function finish_fs_read_eof(operation: FsOperation)
+  local state = fs_read_until_state(operation)
+  state.done = true
+  if state.count > 0 then
+    state.payload = join_fs_read_chunks(
+        state.chunks, 1, state.count)
+    state.has_payload = true
+  end
+end
+
+local function commit_fs_read(operation: FsOperation): value
+  local state = fs_read_until_state(operation)
+  local file = operation.file
+  file.excess = state.remaining .. file.excess
+  local payload: value = nil
+  if state.has_payload then
+    payload = state.payload
+  end
+  clear_fs_read_chunks(state)
+  return payload
+end
+
+local function restore_fs_read(operation: FsOperation)
+  local state = fs_read_until_state(operation)
+  if state.count > 0 then
+    local file = operation.file
+    file.excess =
+      join_fs_read_chunks(state.chunks, 1, state.count) ..
+      file.excess
+  end
+  clear_fs_read_chunks(state)
+end
+
+local function file_drive_control(operation: FsOperation,
+                                  mode: integer, payload: value,
+                                  trace: string,
+                                  inline_task: Task?):
+                                  (DriveControl?, boolean)
+  if not operation.task or not operation.request then return nil, false end
+  local task = operation.task
+  local request = operation.request
+  local cleanup_request: Request? = nil
+  if request.cleanup then cleanup_request = request end
+  if inline_task == task and task.current_request == request and
+      (task.epoch == request.generation or request.cleanup) then
+    task.current_request = nil
+    return DriveControl.new(mode, payload, trace, cleanup_request), true
+  elseif fs_operation_deliverable(operation) then
+    local epoch = request.generation
+    if request.cleanup then epoch = task.epoch end
+    local scheduled =
+      schedule_task_drive(task, epoch, mode, payload, trace, cleanup_request)
+    return nil, scheduled
+  end
+  return nil, false
+end
+
+local function submit_file_head(file: uv_file,
+                                inline_task: Task?): DriveControl?
+  local inline_outcome: DriveControl? = nil
   while not file.current and file.queue_head do
     local operation = file.queue_head
     file.current = operation
-    local owner, status = submit_fs_operation(operation)
-    if status >= 0 then
-      if operation.task then
-        local task = operation.task
-        if task.state == TASK_WAITING and
-            task.current_request == operation.request then
-          task.operation = owner
+
+    local owner_free = false
+    local owner_free_mode = DRIVE_RESUME
+    local owner_free_payload: value = nil
+    local owner_free_trace = ""
+    local owner_free_original_excess: string? = nil
+    do
+      if operation.kind == FS.read and #file.excess > 0 then
+        owner_free_original_excess = file.excess
+        local length = operation.maximum
+        if length > #file.excess then length = #file.excess end
+        local payload = _bytes_slice(file.excess, 0, length)
+        if fs_operation_deliverable(operation) then
+          file.excess =
+            _bytes_slice(file.excess, length, #file.excess - length)
+          owner_free_payload = payload
+        end
+        owner_free = true
+      elseif operation.kind == FS.read_until and #file.excess > 0 then
+        local retained = file.excess
+        owner_free_original_excess = retained
+        file.excess = ""
+        local read_failure? = append_fs_read_chunk(operation, retained)
+        if read_failure then
+          restore_fs_read(operation)
+          owner_free = true
+          owner_free_mode = DRIVE_ERROR
+          owner_free_payload = read_failure
+        elseif fs_read_until_state(operation).done then
+          if fs_operation_deliverable(operation) then
+            owner_free_payload = commit_fs_read(operation)
+          else
+            restore_fs_read(operation)
+          end
+          owner_free = true
         end
       end
-      return nil
+    catch
+      if operation.kind == FS.read_until then
+        restore_fs_read(operation)
+      end
+      owner_free = true
+      owner_free_mode = DRIVE_ERROR
+      owner_free_payload = error
+      owner_free_trace = traceback
     end
 
-    local failure = make_error(status, fs_operation_name(operation.kind),
-                               fs_operation_subject(operation))
-    retire_fs_owner_now(owner)
-    remove_file_operation(file, operation)
-    if operation.kind == FS.close or
-        operation.kind == FS.internal_close then
-      file.close_enqueued = false
-    end
-    if operation.task then
-      local task = operation.task
-      local request = operation.request
-      if inline_task == task and task.current_request == request and
-          task.epoch == request.generation then
-        task.current_request = nil
-        return failure
-      elseif task.state == TASK_WAITING and
-             task.current_request == request and
-             (task.epoch == request.generation or request.cleanup) then
-        local epoch = request.generation
-        if request.cleanup then epoch = task.epoch end
-        local cleanup_request: Request? = nil
-        if request.cleanup then cleanup_request = request end
-        local scheduled = schedule_task_drive(task, epoch, DRIVE_ERROR,
-            failure, "", cleanup_request)
-        if request.cleanup and not scheduled then
-          operation.kind = FS.close_wait
-          enqueue_close_waiter(file, operation)
+    if owner_free then
+      local deliverable = fs_operation_deliverable(operation)
+      remove_file_operation(file, operation)
+      if deliverable then
+        local outcome?, scheduled = file_drive_control(
+            operation, owner_free_mode, owner_free_payload,
+            owner_free_trace, inline_task)
+        if outcome then inline_outcome = outcome end
+        if not scheduled and owner_free_original_excess then
+          -- Scheduling can fail synchronously before the queue pump advances.
+          -- Put the complete original retained input back rather than
+          -- committing a result that no Task can receive.
+          file.excess = owner_free_original_excess as string
         end
+        if not scheduled then return inline_outcome end
       end
     else
-      promote_fatal(file.runtime, failure, "")
-      return nil
+      local owner: uv_fs_t? = nil
+      local status = 0
+      local submission_failure: value = nil
+      local submission_trace = ""
+      do
+        local allocated, result = submit_fs_operation(operation)
+        owner = allocated
+        status = result
+      catch
+        submission_failure = error
+        submission_trace = traceback
+      end
+
+      if submission_failure ~= nil then
+        if operation.kind == FS.read_until then
+          restore_fs_read(operation)
+        end
+        remove_file_operation(file, operation)
+        if operation.kind == FS.close or
+            operation.kind == FS.internal_close then
+          file.close_enqueued = false
+        end
+        if operation.task then
+          local outcome?, scheduled = file_drive_control(
+              operation, DRIVE_ERROR, submission_failure,
+              submission_trace, inline_task)
+          if outcome then inline_outcome = outcome end
+          local request? = operation.request
+          if request and request.cleanup and
+              not outcome and not scheduled then
+            operation.kind = FS.close_wait
+            enqueue_close_waiter(file, operation)
+          end
+        else
+          promote_fatal(file.runtime, submission_failure, submission_trace)
+          return inline_outcome
+        end
+      elseif status >= 0 then
+        local owner = owner as uv_fs_t
+        if operation.task then
+          local task = operation.task
+          if task.state == TASK_WAITING and
+              task.current_request == operation.request then
+            task.operation = owner
+          end
+        end
+        return inline_outcome
+      else
+        local owner = owner as uv_fs_t
+        local failure = make_error(status, fs_operation_name(operation.kind),
+                                   fs_operation_subject(operation))
+        if operation.kind == FS.read_until then
+          restore_fs_read(operation)
+        end
+        retire_fs_owner_now(owner)
+        remove_file_operation(file, operation)
+        if operation.kind == FS.close or
+            operation.kind == FS.internal_close then
+          file.close_enqueued = false
+        end
+        if operation.task then
+          local outcome?, scheduled = file_drive_control(
+              operation, DRIVE_ERROR, failure, "", inline_task)
+          if outcome then inline_outcome = outcome end
+          local request? = operation.request
+          if request and request.cleanup and
+              not outcome and not scheduled then
+            operation.kind = FS.close_wait
+            enqueue_close_waiter(file, operation)
+          end
+        else
+          promote_fatal(file.runtime, failure, "")
+          return inline_outcome
+        end
+      end
     end
   end
-  return nil
+  return inline_outcome
 end
 
 local function advance_file(file: uv_file)
@@ -747,7 +1029,9 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
   owner.metadata.lifecycle = FS_OWNER_CALLBACK
   local operation = owner.metadata.operation
   local payload: value = nil
-  local failure: Error? = nil
+  local failure: value = nil
+  local failure_trace = ""
+  local plain_read_payload: string? = nil
   if result < 0 then
     failure = make_error(result, fs_operation_name(operation.kind),
                          fs_operation_subject(operation))
@@ -761,7 +1045,16 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
     if result == 0 then
       payload = nil
     else
-      payload = bytes_string(owner.buffer.bytes, result)
+      plain_read_payload = bytes_string(owner.buffer.bytes, result)
+      payload = plain_read_payload
+    end
+  elseif operation.kind == FS.read_until then
+    if result == 0 then
+      finish_fs_read_eof(operation)
+    else
+      local chunk = bytes_string(owner.buffer.bytes, result)
+      local read_failure? = append_fs_read_chunk(operation, chunk)
+      if read_failure then failure = read_failure end
     end
   elseif operation.kind == FS.write then
     if result == 0 then
@@ -778,7 +1071,49 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
   end
   clean_fs_owner(owner)
 
-  if operation.kind == FS.open and not failure then
+  if operation.kind == FS.read and plain_read_payload and
+      not fs_operation_deliverable(operation) then
+    -- A successful native read advanced the shared descriptor even when
+    -- cancellation won logical delivery. Retain those bytes for the next
+    -- queued read instead of losing them.
+    local file = operation.file
+    file.excess = (plain_read_payload as string) .. file.excess
+  elseif operation.kind == FS.read_until then
+    if failure ~= nil or not fs_operation_deliverable(operation) then
+      restore_fs_read(operation)
+    elseif fs_read_until_state(operation).done then
+      payload = commit_fs_read(operation)
+    else
+      -- The delimiter is not present yet. This logical operation keeps the
+      -- File FIFO head while a fresh 64-KiB native request is submitted.
+      local next_owner: uv_fs_t? = nil
+      local status = 0
+      do
+        local allocated, result = submit_fs_operation(operation)
+        next_owner = allocated
+        status = result
+      catch
+        failure = error
+        failure_trace = traceback
+      end
+      if failure ~= nil then
+        restore_fs_read(operation)
+      elseif status >= 0 then
+        local next_owner = next_owner as uv_fs_t
+        operation.task.operation = next_owner
+        retire_fs_owner_now(owner)
+        return
+      else
+        local next_owner = next_owner as uv_fs_t
+        failure = make_error(status, "fs.read_until",
+                             fs_operation_subject(operation))
+        retire_fs_owner_now(next_owner)
+        restore_fs_read(operation)
+      end
+    end
+  end
+
+  if operation.kind == FS.open and failure == nil then
     local file = create_file(runtime, owner.metadata.acquired_file,
                              fs_operation_subject(operation))
     owner.metadata.acquired_file = -1 as libuv.uv_file
@@ -787,7 +1122,7 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
     else
       queue_internal_close(file)
     end
-  elseif operation.kind == FS.write and not failure and
+  elseif operation.kind == FS.write and failure == nil and
          operation.write_offset < #operation.data and
          fs_operation_deliverable(operation) then
     -- A partial write remains one logical File FIFO operation.  Root and
@@ -812,15 +1147,17 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
     -- failed close can act on a descriptor that the OS has already reused.
     file.handle = -1 as libuv.uv_file
     file.state = FS.file_closed
-    wake_close_waiters(file, failure)
+    local close_failure: Error? = nil
+    if failure ~= nil then close_failure = failure as Error end
+    wake_close_waiters(file, close_failure)
     if fs_operation_deliverable(operation) then
       local task = operation.task
-      if not failure then
+      if failure == nil then
         drive_task(task, DRIVE_RESUME, nil, "")
       else
         drive_task(task, DRIVE_ERROR, failure, "")
       end
-    elseif failure then
+    elseif failure ~= nil then
       promote_fatal(runtime, failure, "")
     end
     if file.state == FS.file_closed and not file.close_waiter_head then
@@ -834,8 +1171,8 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
 
   if fs_operation_deliverable(operation) then
     local task = operation.task
-    if failure then
-      drive_task(task, DRIVE_ERROR, failure, "")
+    if failure ~= nil then
+      drive_task(task, DRIVE_ERROR, failure, failure_trace)
     else
       drive_task(task, DRIVE_RESUME, payload, "")
     end
@@ -881,8 +1218,9 @@ local function repair_aborted_fs_callback(owner: uv_fs_t)
   if not owner.metadata.callback_aborted then return end
   local operation = owner.metadata.operation
   if operation.owner and operation.owner ~= owner then
-    -- A partial write may already have rooted its next submitted request.
-    -- That newer callback, not this retired owner, still owns logical repair.
+    -- A partial write or delimiter read may already have rooted its next
+    -- submitted request. That newer callback, not this retired owner, still
+    -- owns logical repair.
     return
   end
   if operation.owner == owner then operation.owner = nil end
@@ -916,6 +1254,9 @@ local function repair_aborted_fs_callback(owner: uv_fs_t)
     -- The native operation is terminal even though result delivery or
     -- bookkeeping failed. Remove it so fatal cancellation and File shutdown
     -- can make progress; no obsolete result is delivered.
+    if operation.kind == FS.read_until then
+      restore_fs_read(operation)
+    end
     remove_file_operation(file, operation)
   end
 end

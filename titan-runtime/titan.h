@@ -21,10 +21,12 @@
 #define TITAN_LIKELY(x) __builtin_expect((x), 1)
 #define TITAN_UNLIKELY(x) __builtin_expect((x), 0)
 #define TITAN_UNUSED __attribute__((unused))
+#define TITAN_NOINLINE __attribute__((noinline))
 #else
 #define TITAN_LIKELY(x) (x)
 #define TITAN_UNLIKELY(x) (x)
 #define TITAN_UNUSED
+#define TITAN_NOINLINE
 #endif
 
 /* 0.5 -> 0.6: the native ABI changed (every entry gained the _fn closure
@@ -164,6 +166,13 @@
   (((1u << (l_numbits(int) - 1)) < (MAX_SIZET / (sizeof(Value) + 1)))         \
        ? (1u << (l_numbits(int) - 1))                                        \
        : cast_uint(MAX_SIZET / (sizeof(Value) + 1)))
+
+/*
+** One copied entry in an Interface wrapper's opaque payload. Generated code
+** converts concrete native method pointers to this storage type and back
+** through titan_cast_func; the payload never contains data pointers.
+*/
+typedef void (*TitanInterfaceMethod)(void);
 
 /* Variadic-parameter descriptors. One per `ctype` so `args` has the exact
 ** element pointer type. `n_args` is the TOTAL backing count; `start` is NOT a

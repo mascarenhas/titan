@@ -2,6 +2,7 @@ local async_stdlib = require "spec.support.async_stdlib"
 
 local TIMER_CASES = [[
     local async = import "async"
+    local stream = import "io"
     local timer = import "timer"
 
     function schedule_four_ticks(): async.Task
@@ -127,6 +128,26 @@ local TIMER_CASES = [[
         return "second-waiter-rejected"
       end)
     end
+
+    function schedule_interface_close(): async.Task
+      return async.run(function (): value
+        local ticker = timer.ticker(10000)
+        local waiter = async.run(function (): value
+          return ticker:tick()
+        end)
+        while waiter:status() == "ready" do timer.yield() end
+        local closer: stream.Closer = ticker
+        closer:close()
+        closer:close()
+        if waiter:join() as boolean then
+          raise "io.Closer resumed a Ticker waiter with true"
+        end
+        if ticker:tick() then
+          raise "Ticker was not closed through incidental io.Closer"
+        end
+        return "interface-close-ok"
+      end)
+    end
 ]]
 
 describe("timer recurring handles", function()
@@ -196,6 +217,16 @@ describe("timer recurring handles", function()
             local task = cases.schedule_second_waiter_rejected()
             async.loop()
             assert(task:join() == "second-waiter-rejected")
+        ]])
+    end)
+
+    it("dispatches incidental Ticker close through io.Closer", function()
+        run([[
+            local async = require "titan.async"
+            local cases = require "timer_recurring_cases"
+            local task = cases.schedule_interface_close()
+            async.loop()
+            assert(task:join() == "interface-close-ok")
         ]])
     end)
 end)

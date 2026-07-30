@@ -155,9 +155,9 @@ state is reported.
 
 Child-process stdio follows the same callback-ownership rule without treating
 an anonymous pipe like a socket. Cancelling a queued stdin write removes it;
-a submitted write remains rooted through its callback. `Process:close_stdin()`
-is a cleanup-shielded FIFO close behind earlier writes and uses the pipe's
-`uv_close` callback, not `uv_shutdown`. Cancelling a process wait only frees
+a submitted write remains rooted through its callback.
+`process.stdin:close()` is a cleanup-shielded FIFO close behind earlier writes
+and uses the pipe's `uv_close` callback, not `uv_shutdown`. Cancelling a process wait only frees
 that waiter: it does not signal the child, and another Task can wait for the
 retained exit status. Stdout and stderr begin continuous reads after successful
 spawn, use independent reader locks and queues, and likewise detach only a

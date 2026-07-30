@@ -27,6 +27,7 @@ return typedecl("Ast", {
         TopLevelTypeAlias = {"loc", "islocal", "name", "type"},
         TopLevelRecord  = {"loc", "name", "fields"},
         TopLevelUnion   = {"loc", "name", "variants"},
+        TopLevelInterface = {"loc", "name", "methods"},
         TopLevelImport  = {"loc", "localname", "modname"},
         TopLevelForeignImport = {"loc", "localname", "headername"},
     },
@@ -37,6 +38,10 @@ return typedecl("Ast", {
 
     Union = {
         UnionVariant = {"loc", "name", "payload"},
+    },
+
+    Interface = {
+        InterfaceMethod = {"loc", "name", "params", "rettypes", "flexrettype"},
     },
 
     Stat = {

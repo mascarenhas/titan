@@ -333,7 +333,7 @@ describe("uv owned native-storage layout", function()
         assert_contains(sources["runtime.titan"], "local bytes: Bytes")
         assert_contains(sources["runtime.titan"], "local length: integer")
         assert_contains(sources["runtime.titan"],
-            "local function bytes_string(bytes: *ffi.titan_ffi_char,")
+            "local function bytes_string(bytes: const *ffi.titan_ffi_char,")
         assert_contains(sources["runtime.titan"],
             "local function queued_bytes_string(queue: {ByteChunk})")
 

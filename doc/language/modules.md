@@ -30,6 +30,8 @@ A declaration is one of:
   [Records](records.md));
 * a **union** declaration: `union Name ... end` (see
   [Unions](unions.md));
+* an **Interface** declaration: `interface Name ... end` (see
+  [Interfaces](interfaces.md));
 * a **method** declaration: `function Name:method(...) ... end`, also
   covered in [Records](records.md) and [Unions](unions.md).
 
@@ -55,8 +57,9 @@ Because every top-level `name = exp` is a declaration, writing the same
 name twice at the top level is not an assignment but a duplicate
 declaration — a compile-time error — and the rule holds across kinds: a
 function may not share a name with a module variable or an import. Type aliases
-use a separate type-only namespace: they may share a spelling with those value
-declarations, but not with another alias, record, or union.
+and Interfaces use the separate type-only namespace: they may share a spelling
+with those value declarations, but not with another alias, record, union, or
+Interface.
 
 ```lua
 -- Titan
@@ -73,10 +76,11 @@ main initializer
 ([Folder modules](folder-modules.md#declaration-order)). Visibility is broader
 than that sequence, with one deliberate frontier for module variables:
 
-* **Records, unions, type aliases, and callable declarations are
+* **Records, unions, Interfaces, type aliases, and callable declarations are
   order-independent.**
   A nominal type, ordinary function, method, or nominal function may be declared
-  before or after any of the others. Signatures, record fields, union
+  before or after any of the others. Signatures, Interface method signatures,
+  record fields, union
   payloads, and alias targets may use nominal types, aliases, and imports
   declared later in the logical
   order. Synthesized record and union constructors are likewise available
@@ -106,10 +110,10 @@ than that sequence, with one deliberate frontier for module variables:
   their aliases are available regardless of placement to every declaration
   other than a module variable. At each module-variable declaration, its type
   annotation and initializer see only import aliases and module variables that
-  occur earlier in the logical order. They still see every record, union, type
-  alias, ordinary function, method, nominal function, and synthesized
-  constructor, wherever
-  those declarations occur. This visibility does not make a non-constant
+  occur earlier in the logical order. They still see every record, union,
+  Interface, type alias, ordinary function, method, nominal function, and
+  synthesized constructor, wherever those declarations occur. This visibility
+  does not make a non-constant
   initializer legal; the separate [constant-expression
   rule](#initializers-must-be-constant) still applies.
 
@@ -140,8 +144,8 @@ than that sequence, with one deliberate frontier for module variables:
 * **Initialization order is fixed.** When a module is loaded into a Lua
   state (the first `require` from Lua, or transitively as a dependency
   of another module), its imported modules are initialized first, then
-  its record and union identities, then its module variables in declaration
-  order, and
+  its record, union, and Interface identities and concrete/Interface pair
+  vtables, then its module variables in declaration order, and
   finally its exported functions are published and its optional initialization
   block runs. A module initializes at most once per Lua state; subsequent loads
   return the same module.
@@ -303,6 +307,13 @@ constructor. An exported type alias is only
 the first of these: `alias.Name` is valid as a type but creates no run-time
 nominal-function namespace. Construct a re-exported nominal value through the
 module that owns its declaration.
+
+An exported Interface is type-only. Importers may write `alias.Name` in a type
+position and may convert visible satisfying records or unions to it, but
+`alias.Name` is not a run-time namespace or first-class member. Interface
+identity and method metadata are nevertheless part of the compiled module
+contract so wrappers constructed in another module use the owner module's
+canonical per-state Interface identity.
 
 An exported function is itself a **first-class value**: besides calling it
 as `geom.norm(p)`, the importer can reference `geom.norm` as a value — pass
@@ -478,11 +489,12 @@ developer installation currently makes those paths equal, which is why the
 driver can discover the Titan root from Lua's `package.cpath`; the names do not
 have inherently identical ownership.
 
-The standard-library names `coroutine`, `uv`, `async`, `timer`, `fs`, `net`,
-`os`, `peg`, and `string` are parser sugar for the qualified module names
-`titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.fs`,
-`titan.net`, `titan.os`, `titan.peg`, and `titan.string`. The qualified names then
-follow the ordinary module lookup rules. Thus `local os = import "os"` means
+The standard-library names `coroutine`, `uv`, `async`, `timer`, `io`, `fs`,
+`net`, `os`, `peg`, and `string` are parser sugar for the qualified module names
+`titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
+`titan.fs`, `titan.net`, `titan.os`, `titan.peg`, and `titan.string`. The
+qualified names then follow the ordinary module lookup rules. Thus
+`local os = import "os"` means
 Titan's `titan.os` module without colliding with Lua's own `os` library, which
 is not importable as a Titan module. Likewise, `import "string"` selects
 Titan's module without replacing Lua's `string` table.
@@ -571,7 +583,7 @@ A statically linked dependency is still a module of its own from Lua's point
 of view. Its generated logical loader points at the enclosing provider, so if
 `main.so` embeds `geom.point` and a Lua script also `require`s `geom.point`,
 both refer to the same module instance in that Lua state, with the same
-record/union identities and the same module variables.
+record/union/Interface identities and the same module variables.
 
 ## Standalone executables
 

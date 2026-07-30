@@ -420,6 +420,28 @@ dependencies recovered from compiled `.so` or `.a` providers. The full rules,
 errors and examples are in
 [anonymous functions and closures](closures.md#bound-method-references).
 
+## Records and Interfaces
+
+A record does not declare that it implements an
+[Interface](interfaces.md). Instead, a statically known conversion site checks
+the record's methods structurally. Every required Interface method must be
+visible at that site and satisfy the Interface signature under directional
+callable adjustment. Fields and record functions do not count.
+
+Visibility is therefore intentional. A `local` method can satisfy an Interface
+for a conversion inside its defining module, but cannot satisfy the same
+Interface for an importing module that cannot see that method. Parameter
+spellings do not participate in satisfaction; named calls through the wrapper
+use the Interface declaration's names.
+
+An accepted `R -> I` conversion constructs a fresh Interface wrapper retaining
+the record. It is one direct coercion, not inheritance, subtyping, or gradual
+consistency, and it does not lift through Arrays, Maps, Options except for the
+named option plans, or Functions. Direct calls on an `R` remain statically
+dispatched; calls through an `I` dispatch through the wrapper selected at
+conversion time. Each conversion is fresh, so two wrappers around the same
+record are not equal.
+
 ## Record functions
 
 A record function is declared at top level with a dot-qualified record name:
@@ -609,9 +631,9 @@ nil` error if the value is `nil` at run time. See
   the compiler, and protected; there is no operator overloading and no
   `__eq`/`__tostring`/`__index` customization.
 * **No inheritance.** No subtyping between record types, no method
-  overriding; method dispatch is fully static. Records were designed as
-  a deliberate stepping stone toward possible classes later, not as a
-  class system.
+  overriding; direct record-method dispatch is fully static. Interface
+  conversion is explicit wrapper construction at a typed edge, not a base
+  class relation.
 * **The record type itself is not a value.** A record type cannot be used
   as a value — `return Point` is an error. Its `new` static, by contrast,
   *is* a first-class value, like any top-level function, and an instance

@@ -63,6 +63,14 @@ feature boundary: a direct declaration can publish names while a function
 value, anonymous closure, bound-method value, or C function pointer cannot
 acquire named-call eligibility merely from its function type.
 
+An Interface method is one of those declaration descriptors. Direct
+`wrapper:method { ... }` checking uses the Interface method's `paramnames`,
+while structural satisfaction compares self-removed `Type.Function` shapes
+and deliberately ignores the concrete method's spellings. The checker lowers
+the named Interface call to Interface-slot positions before any exact or
+adjusted dispatch. A bound Interface method remains a first-class function
+value and is therefore positional-only, like every other bound method.
+
 ### Compiled Titan interfaces
 
 `types.serialize` includes `paramnames` in exported `ModuleMember`, `Method`,

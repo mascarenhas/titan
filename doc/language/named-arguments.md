@@ -77,8 +77,10 @@ libuv.uv_timer_start {
 }
 ```
 
-The keyword remains unavailable as a variable, function, record field, or
-ordinary member name.
+The same raw-label rule applies to `interface` and every other keyword. Such a
+spelling remains unavailable as a variable, function, record field, or
+ordinary Titan member name; a contextual member resolved through a C
+`foreign import` is the separate C-name exception.
 
 ## Which calls support names
 
@@ -93,6 +95,7 @@ parameter list:
 | A user-declared union static function | Yes |
 | A generated union-variant constructor | **No; positional-only** |
 | A direct record or union method call | Yes; the implicit receiver is not a named parameter |
+| A direct Interface method call | Yes; names come from the Interface signature |
 | A direct, fixed-arity C function with complete, unique prototype names | Yes |
 | A function value, anonymous function, or bound-method value | No |
 | A C function-pointer value or C pseudo-constructor such as `T.new` | No |
@@ -125,6 +128,32 @@ caller is recompiled, but it does not change the structural function type,
 callable adjustment, native symbol, or binary calling convention. The same
 distinction applies to parameter spellings in C headers.
 
+Interface method satisfaction likewise ignores the concrete method's parameter
+spellings. Once a concrete value is wrapped, a named Interface call uses the
+Interface declaration's labels and maps them to its positions:
+
+```lua
+interface PairConsumer
+    function consume(left: integer, right: string)
+end
+
+record Swapped
+end
+
+function Swapped:consume(right: integer, left: string)
+end
+
+function call(swapped: Swapped)
+    local consumer: PairConsumer = swapped
+    consumer:consume { right = "r", left = 1 }
+    -- Swapped:consume receives right == 1 and left == "r".
+end
+```
+
+This changes only call-site labeling, not evaluation order or the positional
+ABI. See
+[Interfaces](interfaces.md#parameter-names-do-not-determine-satisfaction).
+
 ## Matching, checking, and omission
 
 Names may appear in any order. The compiler rejects unknown names and rejects
@@ -135,7 +164,8 @@ gradual-view, or callable argument adjustment.
 Every omitted formal is treated as a synthesized `nil`. The omission is
 accepted only when that formal's type accepts or can coerce `nil`. This includes
 option types, `value`, `boolean`, `nil`, and nullable pointer forms. Required
-numbers, strings, containers, records, unions, and functions cannot be omitted.
+numbers, strings, containers, records, unions, Interfaces, and functions cannot
+be omitted. An `I?` Interface option can be omitted like any other option.
 
 Union-variant constructors deliberately publish no parameter-name metadata.
 Their only accepted spelling is positional:

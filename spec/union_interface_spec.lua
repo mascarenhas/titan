@@ -47,6 +47,21 @@ local function canonical_record_module()
     }), record
 end
 
+local function canonical_interface_module()
+    local fqtn = "sample.Stream"
+    local read = types.Method(
+        fqtn, "read", {types.Integer()},
+        {types.Option(types.String())},
+        false, false, {"count"})
+    local close = types.Method(
+        fqtn, "close", {}, {},
+        false, false, {})
+    local interface = types.Interface(fqtn, {read, close})
+    return types.Module("sample", {}, {
+        Stream = interface,
+    }), interface
+end
+
 describe("union module interfaces", function()
     it("accepts public variants with gaps in their absolute tags", function()
         local module = canonical_module()
@@ -257,7 +272,7 @@ describe("union module interfaces", function()
         local map = types.Map(
             types.String(), types.Option(types.Integer()))
         local module = types.Module("sample", {
-            types.ModuleMember("sample", "lookup", map, false),
+            types.ModuleVariable("sample", "lookup", map),
         })
         local ok, err =
             driver.validate_module_interface(module, "sample")
@@ -274,6 +289,13 @@ describe("union module interfaces", function()
                 member = types.ModuleMember(
                     "sample", "bad_function",
                     types.Function({}, {}, "not boolean", false, false),
+                    false),
+            },
+            {
+                pattern = "function type has an invalid schema",
+                member = types.ModuleMember(
+                    "sample", "c_vararg_function",
+                    types.Function({}, {}, true, false, false),
                     false),
             },
             {
@@ -309,6 +331,39 @@ describe("union module interfaces", function()
             "module type member 'Bad' has an invalid type graph", err)
         assert.match(
             "Type%.Field is not valid in a value%-facing type graph", err)
+
+        local _, record = canonical_record_module()
+        module = types.Module("sample", {
+            types.ModuleVariable("sample", "Box", record),
+        })
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match(
+            "Type%.Record is only valid as its owning module member", err)
+
+        module = types.Module("sample", {
+            types.ModuleMember(
+                "sample", "ordinary", types.Integer(), false),
+        })
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match(
+            "module member 'ordinary' has invalid declaration type "
+                .. "Type%.Integer",
+            err)
+
+        for _, fqtn in ipairs({
+                "evil", ".evil", "evil.", "evil..Type",
+            }) do
+            module = types.Module("sample", {
+                types.ModuleVariable(
+                    "sample", "bad_nominal", types.Nominal(fqtn)),
+            })
+            ok, err = driver.validate_module_interface(module, "sample")
+            assert.falsy(ok, fqtn)
+            assert.match(
+                "nominal type has an invalid qualified name", err)
+        end
     end)
 
     it("rejects private decorations on recovered public descriptors",
@@ -448,6 +503,27 @@ describe("union module interfaces", function()
         assert.match("record constructor does not match its fields", err)
     end)
 
+    it("rejects record field and callable namespace collisions",
+    function()
+        local module, record = canonical_record_module()
+        record.methods.first = types.Method(
+            record.name, "first", {}, {},
+            false, false, {})
+        local ok, err =
+            driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("record field and method maps collide at 'first'", err)
+
+        module, record = canonical_record_module()
+        record.functions.second = types.StaticMethod(
+            record.name, "second", {}, {},
+            false, false, {})
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match(
+            "record field and function maps collide at 'second'", err)
+    end)
+
     it("allows an absent constructor for a record with hidden fields",
     function()
         local fqtn = "sample.Partial"
@@ -462,5 +538,251 @@ describe("union module interfaces", function()
         local ok, err =
             driver.validate_module_interface(module, "sample")
         assert.truthy(ok, err)
+    end)
+
+    describe("Interface type members", function()
+        it("accepts and round-trips one canonical ordered declaration",
+        function()
+            local module, interface = canonical_interface_module()
+            local ok, err =
+                driver.validate_module_interface(module, "sample")
+            assert.truthy(ok, err)
+            assert.is_true(
+                interface.methods.read == interface.methods[1])
+            assert.is_true(
+                interface.methods.close == interface.methods[2])
+
+            local serialized = types.serialize(module)
+            local rebuilt, decode_err = driver.decode_module_interface(
+                serialized, "sample", "interface-test")
+            assert.truthy(rebuilt, decode_err)
+            local recovered = rebuilt.type_members.Stream
+            assert.equal("Type.Interface", recovered._tag)
+            assert.is_true(
+                recovered.methods.read == recovered.methods[1])
+            assert.is_true(
+                recovered.methods.close == recovered.methods[2])
+            assert.same({"count"},
+                recovered.methods.read.paramnames)
+        end)
+
+        it("rejects noncanonical owners and private decorations",
+        function()
+            local module, interface = canonical_interface_module()
+            interface.name = "sample.Other"
+            local ok, err =
+                driver.validate_module_interface(module, "sample")
+            assert.falsy(ok)
+            assert.match(
+                "interface has a noncanonical owner or locality", err)
+
+            module, interface = canonical_interface_module()
+            interface.islocal = true
+            ok, err = driver.validate_module_interface(module, "sample")
+            assert.falsy(ok)
+            assert.match(
+                "interface has a noncanonical owner or locality", err)
+
+            module, interface = canonical_interface_module()
+            interface.methods.read.islocal = true
+            ok, err = driver.validate_module_interface(module, "sample")
+            assert.falsy(ok)
+            assert.match("callable member has an invalid schema", err)
+        end)
+
+        it("rejects malformed ordered method projections", function()
+            local cases = {
+                {
+                    pattern = "does not reference its ordered descriptor",
+                    mutate = function(interface)
+                        interface.methods.read = interface.methods.close
+                    end,
+                },
+                {
+                    pattern = "extra derived key",
+                    mutate = function(interface)
+                        interface.methods.extra = interface.methods.read
+                    end,
+                },
+                {
+                    pattern = "method list is sparse",
+                    mutate = function(interface)
+                        interface.methods[1] = nil
+                    end,
+                },
+                {
+                    pattern = "belongs to a different owner",
+                    mutate = function(interface)
+                        interface.methods[1].fqtn = "other.Stream"
+                    end,
+                },
+                {
+                    pattern = "callable member has an invalid schema",
+                    mutate = function(interface)
+                        interface.methods[1].paramnames = {
+                            "count", "extra",
+                        }
+                    end,
+                },
+                {
+                    pattern = "interface method parameter names have "
+                        .. "an invalid schema",
+                    mutate = function(interface)
+                        interface.methods[1].paramnames = false
+                    end,
+                },
+                {
+                    pattern = "callable member has an invalid schema",
+                    mutate = function(interface)
+                        interface.methods[1].params.extra =
+                            types.Integer()
+                    end,
+                },
+                {
+                    pattern = "callable member has an invalid schema",
+                    mutate = function(interface)
+                        interface.methods[1].rettypes.extra =
+                            types.String()
+                    end,
+                },
+            }
+            for _, case in ipairs(cases) do
+                local module, interface =
+                    canonical_interface_module()
+                case.mutate(interface)
+                local ok, err =
+                    driver.validate_module_interface(module, "sample")
+                assert.falsy(ok,
+                    case.pattern .. ": " .. tostring(err))
+                assert.match(case.pattern, err)
+            end
+        end)
+
+        it("allows Interface descriptors only in their direct type slot",
+        function()
+            local _, interface = canonical_interface_module()
+            local module = types.Module("sample", {
+                types.ModuleMember(
+                    "sample", "bad", interface, false),
+            })
+            local ok, err =
+                driver.validate_module_interface(module, "sample")
+            assert.falsy(ok)
+            assert.match(
+                "Type%.Interface is only valid as its owning module type member",
+                err)
+
+            _, interface = canonical_interface_module()
+            module = types.Module("sample", {}, {
+                Alias = types.Array(interface),
+            })
+            ok, err = driver.validate_module_interface(module, "sample")
+            assert.falsy(ok)
+            assert.match(
+                "Type%.Interface is only valid as its owning module type member",
+                err)
+
+            module, interface = canonical_interface_module()
+            interface.methods.read.params[1] = interface
+            ok, err = driver.validate_module_interface(module, "sample")
+            assert.falsy(ok)
+            assert.match(
+                "Type%.Interface is only valid as its owning module type member",
+                err)
+        end)
+
+        it("rejects descriptors outside the closed value type language",
+        function()
+            local cases = {
+                {
+                    label = "error-recovery marker",
+                    make = types.Invalid,
+                    pattern = "Type%.Invalid",
+                },
+                {
+                    label = "no-value marker",
+                    make = types.Void,
+                    pattern = "Type%.Void",
+                },
+                {
+                    label = "nested module",
+                    make = function()
+                        return types.Module("evil", {})
+                    end,
+                    pattern = "Type%.Module",
+                },
+                {
+                    label = "C FFI descriptor",
+                    make = function()
+                        return types.CInteger("int", true, 3, 32)
+                    end,
+                    pattern = "Type%.CInteger",
+                },
+                {
+                    label = "unknown descriptor",
+                    make = function()
+                        return { _tag = "Type.Unknown" }
+                    end,
+                    pattern = "Type%.Unknown",
+                },
+            }
+            local placements = {
+                function(method, typ)
+                    method.params[1] = typ
+                end,
+                function(method, typ)
+                    method.rettypes[1] = typ
+                end,
+                function(method, typ)
+                    method.varargtype = typ
+                end,
+                function(method, typ)
+                    method.flexrettype = typ
+                end,
+            }
+
+            for _, case in ipairs(cases) do
+                for _, place in ipairs(placements) do
+                    local module, interface =
+                        canonical_interface_module()
+                    place(interface.methods.read, case.make())
+                    local ok, err =
+                        driver.validate_module_interface(module, "sample")
+                    assert.falsy(ok, case.label)
+                    assert.match(case.pattern ..
+                        " is not valid in a value%-facing type graph", err)
+                end
+            end
+        end)
+
+        it("rejects noncanonical optional type shapes", function()
+            local cases = {
+                types.Option(types.Option(types.String())),
+                types.Option(types.Value()),
+            }
+            for _, typ in ipairs(cases) do
+                local module, interface =
+                    canonical_interface_module()
+                interface.methods.read.params[1] = typ
+                local ok, err =
+                    driver.validate_module_interface(module, "sample")
+                assert.falsy(ok)
+                assert.match("option type has an invalid schema", err)
+            end
+        end)
+
+        it("keeps the type-only namespace independent of values",
+        function()
+            local _, interface = canonical_interface_module()
+            local module = types.Module("sample", {
+                types.ModuleVariable(
+                    "sample", "Stream", types.Integer()),
+            }, {
+                Stream = interface,
+            })
+            local ok, err =
+                driver.validate_module_interface(module, "sample")
+            assert.truthy(ok, err)
+        end)
     end)
 end)

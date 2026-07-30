@@ -310,6 +310,23 @@ is no cast between a Titan union and a C `union`, C `struct`, or other
 structural aggregate. C code that needs a Titan identity may use only the
 documented `void *` identity cast.
 
+## Unions and Interfaces
+
+A union can satisfy an [Interface](interfaces.md) through its visible public or
+module-local methods, exactly as a record can. The union does not carry an
+`implements` annotation. At each statically known conversion site, every
+required Interface method must be visible and satisfy the Interface signature
+under directional callable adjustment; variants, constructors, payloads, and
+union functions do not count.
+
+An accepted `U -> I` conversion constructs a fresh Interface wrapper retaining
+the union value. It is a direct coercion rather than subtyping or gradual
+consistency, and it does not lift through a container or function component.
+Interface equality compares wrapper identity, so the wrapper is incomparable
+with its concrete union and separately constructed wrappers are distinct.
+Inside Interface dispatch the concrete `self` is still the exact union value,
+including its variant tag and payload.
+
 ## Visibility and declaration order
 
 Union declarations follow the current record visibility rules.

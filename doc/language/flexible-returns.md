@@ -42,9 +42,10 @@ local g: (integer, ...: string) -> (boolean, ...: value) = both_directions
 ```
 
 The same syntax is available on every Titan callable declaration: exported
-and `local` module functions, record functions, methods, and anonymous
-functions. An input variadic tail and an output flexible tail are independent
-and may appear on the same type, as `g` does above.
+and `local` module functions, record functions, concrete and Interface method
+signatures, and anonymous functions. An input variadic tail and an output
+flexible tail are independent and may appear on the same type, as `g` does
+above.
 
 The parentheses are mandatory whenever the result list has a flexible tail.
 The tail must be last, may appear only once, and must include its type. Thus
@@ -338,6 +339,12 @@ adjustment**: an actual function is being placed in an expected slot, and
 future callers obey the expected slot's type. This operation is not subtyping
 and is distinct from symmetric gradual consistency.
 
+The same directional operation compares a concrete method against an
+Interface method signature. A wrapper may therefore select an adjusted method
+entry for harmless arity or flexible-result differences, but the comparison
+does not lift a record/union-to-Interface wrapper coercion through a result or
+parameter. See [Interfaces](interfaces.md#exact-and-adjusted-methods).
+
 For inputs:
 
 * An actual function may have fewer fixed parameters than the expected type;
@@ -355,7 +362,7 @@ For inputs:
   argument that reaches it must be accepted by its element type.
 * Shared parameter positions are checked in the input direction. Equal or
   gradually consistent components can be guarded; a nested Function uses its
-  own callable adjustment. Ordinary numeric, Option, C, or future Interface
+  own callable adjustment. Ordinary numeric, Option, C, or Interface-wrapper
   coercions are rejected rather than lifted through the function type.
 
 ```lua

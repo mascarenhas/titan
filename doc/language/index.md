@@ -47,6 +47,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
 | [The type system](types.md) | All Titan types; equality, symmetric non-transitive consistency, direct coercions, gradual views, callable adjustment, the normative boundary matrix, inference, and `value`. |
 | [Type aliases](type-aliases.md) | Transparent compile-time type names, type-only namespaces, visibility, record re-exports, and alias cycles. |
+| [Interfaces](interfaces.md) | Nominal behavioral types, structural satisfaction by records and unions, wrapper conversions, method calls, options, casts, Lua interoperation, and separate compilation. |
 | [Option types](option-types.md) | `T?`: nil-tolerant types — syntax, semantics, defaulting with `or`, and how `nil` flows through arrays, maps, and the Lua boundary. |
 | [Expressions](expressions.md) | Literals and escapes, operators and precedence, Lua-faithful arithmetic, concatenation, `and`/`or`, explicit casts with `as`, non-raising type tests with `is`, constructors, calls. |
 | [Statements](statements.md) | Declarations and inference, assignment and multiple assignment, control flow, the numeric `for`, `defer`, `return`. |
@@ -67,6 +68,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, status, and Lua interop. |
 | [Asynchronous I/O and tasks](async-io.md) | The `async` Task scheduler, nonblocking `run`, explicit/automatic loop driving, direct callback continuation model, errors, joins, cancellation, and resource/process shutdown. |
+| [I/O Interfaces](standard-library-io.md) | The seven `Reader`/`Writer`/`Closer` Interface combinations and the standard records that satisfy them exactly or through callable adjustment. |
 | [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
 | [Filesystem standard library](standard-library-fs.md) | Binary file reads and writes, per-File FIFO ordering and close, whole-file helpers, metadata, and path operations. |
 | [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads and FIFO writes, shutdown, close, and cancellation. |
@@ -84,11 +86,12 @@ implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
 
-The ABI-0.20 marker is coordinated with the forthcoming Interface cutover,
-but Interface declarations are not part of the language described by this
-relation/Array/function change. The current rules reserve only the exact
-dynamic-boundary behavior needed to avoid implying that Lua can synthesize an
-Interface wrapper from a bare record or union.
+ABI 0.20 includes [Interfaces](interfaces.md). A record or union satisfies an
+Interface structurally at a statically known conversion site, but the
+conversion constructs a fresh wrapper; it is not subtyping or gradual
+consistency and does not lift through containers or functions. Dynamic
+boundaries accept only an existing wrapper of the exact nominal Interface type:
+Lua and `value` never discover an implementation from a bare record or union.
 
 ### First-class functions
 
@@ -168,11 +171,11 @@ Interface wrapper from a bare record or union.
   chaining/cause mechanism. A new error in a catch or finally replaces the
   previous one ([error handling](error-handling.md)).
 * **Only a small standard library so far.** Titan includes stackful
-  `coroutine`, the libuv-backed `async` Task facade, `timer`, asynchronous `fs`
-  and `net`, portable `os` helpers, typed PEG construction, and byte-oriented
-  string/regex operations. Qualified Lua names such as `titan.coroutine`,
-  `titan.async`, `titan.peg`, and `titan.string` leave Lua's standard modules
-  unchanged.
+  `coroutine`, the libuv-backed `async` Task facade, the type-only `io`
+  Interface vocabulary, `timer`, asynchronous `fs` and `net`, portable `os`
+  helpers, typed PEG construction, and byte-oriented string/regex operations.
+  Qualified Lua names such as `titan.coroutine`, `titan.io`, `titan.async`,
+  `titan.peg`, and `titan.string` leave Lua's standard modules unchanged.
 
 The [README roadmap](../../README.md) lists where the language is headed;
 the [philosophy chapter](philosophy.md) explains the principles that order

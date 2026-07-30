@@ -12,14 +12,31 @@
 -- the importer. No importer code is generated or executed here -- the end-to-end
 -- run-time behaviour of the same path lives in spec/coder/so_import_spec.lua.
 local h = require 'spec.support.helpers'
+local lfs = require 'lfs'
 local types = require 'titan-compiler.types'
 local generated_modules = {}
 
+local function remove_tree(path)
+    local mode = lfs.symlinkattributes(path, "mode")
+    if mode == "directory" then
+        for name in lfs.dir(path) do
+            if name ~= "." and name ~= ".." then
+                remove_tree(path .. "/" .. name)
+            end
+        end
+        assert(lfs.rmdir(path))
+    elseif mode then
+        assert(os.remove(path))
+    end
+end
+
 local function clean_generated_modules()
     for name in pairs(generated_modules) do
-        os.remove(name .. ".c")
-        os.remove(name .. ".o")
-        os.remove(name .. ".so")
+        remove_tree(name .. ".c")
+        remove_tree(name .. ".o")
+        remove_tree(name .. ".so")
+        remove_tree(name .. ".a")
+        remove_tree(name .. ".so.dSYM")
     end
     generated_modules = {}
 end
@@ -347,6 +364,79 @@ describe("typechecker rehydration of .so-only imports", function()
             union.variants.move.payload.fqtn)
         assert.truthy(types.registry["rhunionpoint.Delta"],
             "variant payload owner should be recovered through the DSO chain")
+    end)
+
+    it("rehydrates ordered Interfaces and their transitive nominal owners",
+       function()
+        local deps = {
+            { name = "rhinterfacemodel", src = [[
+                record Point
+                    x: integer
+                end
+            ]] },
+            { name = "rhinterfaceapi", src = [[
+                local model = import "rhinterfacemodel"
+
+                interface Incrementer
+                    function step(delta: integer): integer
+                end
+
+                interface Maker
+                    function make(x: integer): model.Point
+                end
+
+                interface Left
+                    function right(): Right
+                end
+
+                interface Right
+                    function left(): Left
+                end
+            ]] },
+            { name = "rhinterfaceprovider", src = [[
+                record Box
+                    n: integer
+                end
+
+                function Box:step(delta: integer): integer
+                    return self.n + delta
+                end
+            ]] },
+        }
+
+        local good = so_check(deps, "rhinterfaceconsumer", [[
+            local api = import "rhinterfaceapi"
+            local provider = import "rhinterfaceprovider"
+
+            function use_provider(): integer
+                local incrementer: api.Incrementer =
+                    provider.Box.new(3)
+                return incrementer:step(4)
+            end
+
+            function use_transitive(maker: api.Maker): integer
+                return maker:make(7).x
+            end
+
+            function use_mutual(left: api.Left): api.Left
+                return left:right():left()
+            end
+        ]])
+        assert.equal(0, #good, table.concat(good, "\n"))
+
+        local incrementer =
+            assert(types.registry["rhinterfaceapi.Incrementer"])
+        assert.equal("Type.Interface", incrementer._tag)
+        assert.equal(1, #incrementer.methods)
+        assert.is_true(
+            incrementer.methods[1] == incrementer.methods.step)
+        assert.same({ "delta" },
+            incrementer.methods.step.paramnames)
+        assert.truthy(types.registry["rhinterfacemodel.Point"],
+            "the Interface signature's transitive nominal owner should " ..
+            "be recovered")
+        assert.truthy(types.registry["rhinterfaceapi.Left"])
+        assert.truthy(types.registry["rhinterfaceapi.Right"])
     end)
 
     it("rehydrates a module variable's type", function ()

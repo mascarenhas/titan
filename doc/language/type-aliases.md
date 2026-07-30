@@ -13,9 +13,10 @@ local type Scratch = {string}
 
 The syntax is `type Name = T`, with optional `local` visibility. The right-hand
 side can be any Titan type: a basic type, array, map, option, function type,
-record type, or union type. A union variant is not a type and therefore cannot
-appear here. Alias chains and forward references are allowed. An alias cycle,
-including a cycle through a compound type, is a compile-time error.
+record type, union type, or Interface. A union variant is not a type and
+therefore cannot appear here. Alias chains and forward references are allowed.
+An alias cycle, including a cycle through a compound type, is a compile-time
+error.
 
 ## Transparent identity
 
@@ -36,7 +37,8 @@ function total(xs: Counts): Count
 end
 ```
 
-A record or union alias preserves the original nominal identity and methods:
+A record, union, or Interface alias preserves the original nominal identity
+and methods:
 
 ```titan
 local geometry = import "geometry"
@@ -56,10 +58,15 @@ create new variants or constructor namespace, and
 `type Write = messages.Message.write` is invalid because a variant is not a
 first-class type.
 
+Likewise, `type Input = io.Reader` denotes that exact nominal Interface. It
+does not copy the method set into a structurally interchangeable new type and
+does not create an `Input` run-time namespace.
+
 ## Type names are not values
 
 Aliases occupy a type-only namespace. They may share a spelling with a
-variable or function, but not with another alias, record type, or union type. An alias can
+variable or function, but not with another alias, record type, union type, or
+Interface. An alias can
 appear in annotations and casts; it cannot be evaluated, assigned, called, or
 used as a record/union namespace:
 

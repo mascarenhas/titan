@@ -47,11 +47,21 @@ function open(path: string, mode: string): File
   return File.new(uv._fs_open(path, validated_mode(mode)))
 end
 
-function File:read(max_bytes: integer): string?
-  if max_bytes <= 0 then
+function File:read(max_bytes: integer?): string?
+  local requested = READ_CHUNK_BYTES
+  if max_bytes then requested = max_bytes as integer end
+  if requested <= 0 then
     raise "file read size must be positive"
   end
-  return uv._fs_read(self.handle, max_bytes)
+  return uv._fs_read(self.handle, requested)
+end
+
+function File:read_until(delimiter: string,
+                         chop: boolean?): string?
+  if #delimiter == 0 then
+    raise "read delimiter must not be empty"
+  end
+  return uv._fs_read_until(self.handle, delimiter, chop)
 end
 
 function File:write(data: string): integer
@@ -85,7 +95,7 @@ function read_file(path: string): string
   local nchunks = 0
   local total = 0
   while true do
-    local chunk: string? = file:read(READ_CHUNK_BYTES)
+    local chunk: string? = file:read()
     if not chunk then break end
     local bytes = chunk as string
     local length = #bytes

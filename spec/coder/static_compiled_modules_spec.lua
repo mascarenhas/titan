@@ -7,6 +7,9 @@ local parser = require "titan-compiler.parser"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
 
+local PREFIX = require("spec.support.installed_prefix").active()
+local LUA = PREFIX .. "/bin/lua"
+
 local function quote_argv(argv)
     local quoted = {}
     for index, argument in ipairs(argv) do
@@ -93,8 +96,21 @@ local function compile_titan_object(workspace)
     types.registry = {}
     driver.imported = {}
     local source = [[
+interface Dynamic
+    function convert(input: value): value
+end
+
+record Box
+    n: integer
+end
+
+function Box:convert(input: integer): integer
+    return self.n + input
+end
+
 function answer(): integer
-    return 42
+    local dynamic: Dynamic = Box.new(20)
+    return dynamic:convert(22 as value) as integer
 end
 ]]
     local filename = workspace .. "/fixture_target.titan"
@@ -509,10 +525,14 @@ exec %s "$@"
         assert.equal("old output", read_file(output))
     end)
 
-    it("links and validates an archive-backed private image", function()
+    it("links and validates an Interface archive-backed private image",
+       function()
         local archive = workspace .. "/protocol archive.a"
         local built = assert(driver.build_static_archive(
             archive, { target_object }, {}, target, false))
+        local embedded = assert(built.archive.entries["fixture.target"])
+        assert.truthy(embedded.types:find(
+            'Interface("fixture.target.Dynamic"', 1, true))
         local image = workspace .. "/archive validation.so"
         local linked, link_err =
             driver.compile_archive_validation_image(
@@ -528,7 +548,16 @@ exec %s "$@"
                 built.archive, image, { "fixture.target" })
         assert.truthy(equal, equality_err)
 
-        local original = assert(built.archive.entries["fixture.target"])
+        local executed, execution_output = run({
+            LUA, "-e", string.format([[
+local open = assert(package.loadlib(%q, "luaopen_fixture_target"))
+local target = open()
+assert(target.answer() == 42)
+]], image),
+        })
+        assert.truthy(executed, execution_output)
+
+        local original = embedded
         local forged = {
             entries = {
                 ["fixture.target"] = {

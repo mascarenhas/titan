@@ -513,6 +513,34 @@ assert(task:join() == "rooted-retry-gc-ok")
             ]==], root))
         end)
 
+        it("restores retained and accumulated delimiter bytes after " ..
+           "cancellation",
+        function()
+            run(string.format([==[
+            local root = %q
+            local cases = require "uv_late_fs_callback_cases"
+            local remaining = string.rep("r", 4 * 65536 + 19)
+            local payload = "seed|" .. remaining
+            local task = cases.schedule_read_until_cancellation_restore(
+                root .. "/read-until-cancel.dat", payload, remaining)
+            cases.loop()
+            assert(task:join() == "read-until-cancellation-restore-ok")
+            ]==], root))
+        end)
+
+        it("restores accumulated delimiter bytes after resubmission error",
+        function()
+            run(string.format([==[
+            local root = %q
+            local cases = require "uv_late_fs_callback_cases"
+            local payload = string.rep("e", 4 * 65536 + 29)
+            local task = cases.schedule_read_until_error_restore(
+                root .. "/read-until-error.dat", payload)
+            cases.loop()
+            assert(task:join() == "read-until-error-restore-ok")
+            ]==], root))
+        end)
+
         it("disposes a delayed successful open after cancellation",
         function()
             run(string.format([==[

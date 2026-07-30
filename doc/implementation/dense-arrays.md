@@ -507,7 +507,11 @@ provider ABI protocol. ABI 0.18 preserved the same Array contract while
 advancing the standard-library archive/runtime native-symbol boundary.
 ABI 0.19 still preserved that one-user-value proxy and had no strict callable
 trailer. ABI 0.20 changes the proxy shape to exactly two user values, adds the
-construction writer, and adds the three-entry function closure protocol.
+construction writer, adds the three-entry function closure protocol, and
+carries the coordinated Interface wrapper/metadata contract. Interface
+satisfaction remains an outer scalar coercion: it does not make `{R}` and
+`{I}` consistent, and typed Array reads only accept an already wrapped exact
+Interface element.
 Current providers live under `lib/titan/0.20` and use `TITAN_PATH_0_20`.
 An ABI-0.20 compiler/runtime rejects ABI-0.19 DSOs and archives before any
 Array or function value can cross the provider boundary. Separately installed

@@ -158,6 +158,7 @@ omitted from the field lists for brevity.
 | `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block` | `function Class.name(...)`, synthesized record `Class.new`, and synthesized union variant constructors; parser decorates `islocal` and marks synthesized forms |
 | `TopLevelVar` | `islocal`, `decl`, `value` | module variable |
 | `TopLevelTypeAlias` | `islocal`, `name`, `type` | compile-time-only `[local] type Name = T` |
+| `TopLevelInterface` | `name`, `methods` | top-level, non-local, nonempty Interface declaration |
 | `TopLevelRecord` | `name`, `fields` | `fields` is a list of `Decl`; parser decorates `islocal` |
 | `TopLevelUnion` | `name`, `variants` | `variants` is a source-order list of `UnionVariant`; parser decorates `islocal` |
 | `TopLevelImport` | `localname`, `modname` | `local m = import "x.y"` |
@@ -192,6 +193,13 @@ variant through `_union_variant`. Its body returns
 `ExpUnionInit {owner, variant, value}`, and its hidden single payload parameter
 is never published as named-call metadata. Unlike `Rec.new`, variant
 constructors are positional-only.
+
+`TopLevelInterface.methods` is a declaration-order list of
+`InterfaceMethod {name, params, rettypes, flexrettype}` nodes. An Interface
+method reuses the ordinary parameter and fixed/flexible result carriers but
+has no body, receiver declaration, locality flag, or per-method `end`. The
+checker turns these nodes into ordered `Type.Method` metadata; see
+[Interfaces](interfaces.md#frontend-representation).
 
 ### Declarations and the `option` flag
 
@@ -343,6 +351,9 @@ of these are declared anywhere; this table is the inventory.
 | `_assigned` | `Decl` (via `_decl`) | checker, in `StatAssign` on `VarName` targets | coder | "this variable is reassigned"; GC-able parameters and `self` get their own Lua stack slot only when set (otherwise the caller's anchoring suffices — see [values and the GC](values-and-gc.md)) |
 | `_record_constructor` | synthesized `TopLevelStatic` | parser record desugaring | checker | identifies the adjacent synthesized `Rec.new`; explicit record functions, including an explicit `Rec.new`, do not carry it |
 | `_union_constructor`, `_union_variant` | synthesized `TopLevelStatic` | parser union desugaring | checker | identify an adjacent positional-only variant constructor and its `UnionVariant`; explicit union functions do not carry the markers |
+| `_interface_conversion` | coercion-bearing expression, call adjustment, or written cast/test | checker | coder | frozen concrete-to-Interface wrapper plan, including declaration-order method mappings and any adapter graphs; the coder must not rerun structural matching |
+| `_interface_test`, `_interface_downcast` | `ExpIs`/`ExpCast` | checker | coder | respectively a statically proven concrete-to-Interface test and an exact Interface-wrapper-to-concrete payload check |
+| `_interface`, `_interface_method`, `_interface_method_index`, `_interface_bound` | Interface method call/reference | checker | coder | resolved Interface descriptor, method descriptor, declaration-order payload slot, and bound-reference marker |
 | `_contextual_c_name` | `VarDot`, `TypeQualName` | parser, when the selector came from `CNAME` | checker | admits the raw keyword spelling only when the qualifier resolves to a C module/owner; coder emits the stored `name` unchanged |
 | `_toplevel_order` | every AST root node | checker duplicate prepass | checker, symbol table | 1-based position in the unchanged flat/combined AST; drives duplicate winners and the module-variable import/variable visibility frontier |
 | `_ignore` | top-level nodes | checker declaration stages: duplicate declarations, a duplicate record's synthesized constructor, and record functions/methods whose declaration fails (missing record, name clash, redeclaration) | body checker, `makemoduletype`, coder (`generate`, `allocate_upvalues`) | "pretend this node does not exist"; every later traversal must skip it |
@@ -393,6 +404,12 @@ dense/name map contains
 is declaration and serialized-interface metadata only: `typefromnode` never
 returns it as a source type, so annotations, aliases, `as`, and `is` may name
 the union but not `Union.variant`.
+
+Interfaces likewise use `Type.Nominal(fqtn)` in value-facing positions.
+`Type.Interface(name, methods)` and its ordered `Type.Method` entries are
+registry and serialized-module descriptors, not structural value types. This
+keeps nominal Interface identity separate from the direct structural
+satisfaction predicate.
 
 ## The cost of adding a node or type
 

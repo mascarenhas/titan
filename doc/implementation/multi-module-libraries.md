@@ -171,7 +171,8 @@ dot/dash replacement) are rejected by name. It also catches a boundary that a
 prefix-only check would miss: module `a` function `b_c` and module `a.b`
 function `c` both produce `a_b_c_titan`. The same inventory covers public
 methods, their bound trampolines, record/union functions and constructors,
-and each module protocol,
+the three exported bound trampolines for every public Interface method, and
+each module protocol,
 so every collision is reported before code generation instead of as an opaque
 duplicate-symbol linker error.
 
@@ -284,16 +285,16 @@ Lua process and requires exactly one support table exposing `_loadlib` and
 proof.
 
 The production standard library is the canonical example. One compiler
-invocation names all nine logical roots and publishes root `titan.so` and
+invocation names all ten logical roots and publishes root `titan.so` and
 `titan.a`. Internal standard imports are direct. `titanlib.o` is shared `-X`
 payload and supplies bare `luaopen_titan` without adding a logical metadata
 key. The private namespaced five-member LPegLabel archive follows it as
 metadata-free payload. Bundled mode puts the private libuv archive after that,
 so both native archives are force-carried into the DSO and flattened into the
 archive. System mode keeps the pkg-config-selected libuv setting at final link
-and never copies it into `titan.a`. The DSO exports ten Lua entries
-(`luaopen_titan` plus the nine logical entries); both forms define the nine
-logical protocols, and the archive advertises exactly nine metadata keys.
+and never copies it into `titan.a`. The DSO exports eleven Lua entries
+(`luaopen_titan` plus the ten logical entries); both forms define the ten
+logical protocols, and the archive advertises exactly ten metadata keys.
 The private LPegLabel archive and its headers remain source-build inputs; they
 are not installed in the compiler/runtime SDK.
 
@@ -310,9 +311,9 @@ a private directory on the destination filesystem under the same effective
 the installer. It then executes the source-only
 `scripts/stdlib_installer.lua` directly with the installed Lua; the publisher
 is not an installed compiler module. The script rescans `titan.a`, requires
-the exact nine-key set, compares embedded metadata with the staged DSO and a
+the exact ten-key set, compares embedded metadata with the staged DSO and a
 fresh-process archive-backed validation image, validates bare
-`luaopen_titan`, the nine exact shims, and the macOS dSYM, then publishes the
+`luaopen_titan`, the ten exact shims, and the macOS dSYM, then publishes the
 paired bundle with the DSO last. It recognizes bootstrap-only, legacy complete
 ABI-0.20 DSO/shims-without-archive, and complete-pair predecessors. Injected
 failures restore the exact predecessor, including leaving `titan.a` absent
@@ -321,13 +322,13 @@ is best effort and cannot turn the coherent install into a reported hook
 failure. Separately versioned 0.17, 0.18, and 0.19 artifacts are not purged.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
-dSYM) and nine Lua shims:
+dSYM) and ten Lua shims:
 
 ```text
 <root>/lib/titan/0.20/titan.so
 <root>/lib/titan/0.20/titan.a
 <root>/lib/titan/0.20/titan.so.dSYM          # macOS only
-<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os,peg,string}.lua
+<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,os,peg,string}.lua
 ```
 
 These remain direct Titan artifacts outside the source-rock manifest. The
@@ -335,10 +336,10 @@ manifest owns the compiler Lua/script files; `luarocks remove` does not claim
 to remove Titan library-package artifacts.
 
 The checkout Make graph has one provider-pair completion/configuration stamp.
-All nine flat/folder source sets, native inputs, effective `CC`/`AR`/`RANLIB`,
+All ten flat/folder source sets, native inputs, effective `CC`/`AR`/`RANLIB`,
 embedded-format inputs, libuv mode, and extra flags are prerequisites. The
 DSO, archive, conditional dSYM, and every shim must exist; every warm
-invocation rescans `titan.a` for the exact nine-key set without changing pair
+invocation rescans `titan.a` for the exact ten-key set without changing pair
 mtimes. `make clean` removes only exact known generated outputs. Production
 library tests treat the combined set as read-only. CI snapshots and restores
 the checkout runtime archive plus the installed DSO/archive/dSYM/shims around

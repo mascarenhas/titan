@@ -46,6 +46,7 @@ local standard_imports = {
     uv = "titan.uv",
     async = "titan.async",
     timer = "titan.timer",
+    io = "titan.io",
     fs = "titan.fs",
     net = "titan.net",
     os = "titan.os",
@@ -657,7 +658,8 @@ end
 local grammar = re.compile([[
 
     program         <-  SKIP*
-                        (P (( method
+                        (P (( toplevelinterface
+                              / method
                               / static
                               / toplevelfunc
                               / topleveltype
@@ -696,6 +698,29 @@ local grammar = re.compile([[
                            unionvariants^VariantUnion
                            END^EndUnion)                         -> uniondecl
 
+    -- Interfaces are deliberately top-level and non-local. The local branch
+    -- exists only to commit to the interface-specific diagnostic before the
+    -- ordinary `local NAME = ...` alternatives get a chance to claim it.
+    toplevelinterface
+                    <- (P  (LOCAL INTERFACE %{LocalInterface} / INTERFACE)
+                           NAME^NameInterface
+                           interfacemethods
+                           (END
+                            / (!. %{EndInterface})
+                            / %{MemberInterface}))               -> TopLevelInterface
+
+    -- Unlike parameter and expression lists, the repeated method declaration
+    -- list has no arbitrary source-level length limit.
+    interfacemethods
+                    <- {| interfacemethod^MethodInterface
+                           interfacemethod* |}
+
+    interfacemethod <- (P  LOCAL FUNCTION %{LocalInterfaceMethod})
+                     / (P  FUNCTION NAME^NameInterfaceMethod
+                           LPAREN^LParInterfaceMethod paramlist
+                           RPAREN^RParInterfaceMethod
+                           interfacerettypeopt)                  -> InterfaceMethod
+
     localopt        <- (LOCAL)?                                  -> boolopt
 
     import          <- (P  LOCAL NAME^NameImport ASSIGN^AssignImport
@@ -711,6 +736,10 @@ local grammar = re.compile([[
     moduleinit      <- (P DO block END^EndBlock) -> moduleinit   -- marks StatBlock/StatTry
 
     rettypeopt      <- (P  (COLON rettype^TypeFunc)?)            -> rettypeopt
+
+    interfacerettypeopt
+                    <- (P  (COLON rettype^TypeInterfaceMethod)?)
+                                                                  -> rettypeopt
 
     -- Lambda return-type: `false` when absent (infer), distinct from `: ()`.
     lambdarettypeopt<- (P  (COLON rettype^TypeFunc)?)            -> lambdarettypeopt
@@ -911,6 +940,7 @@ local grammar = re.compile([[
     simpleblock     <- (P  {| statement* returnstat? |})         -> simpleblock
 
     statement       <- (SEMICOLON)                               -- ignore
+                     / (P  (LOCAL? INTERFACE) %{NestedInterface})
                      / (P  BREAK)                                -> StatBreak
                      / (P  RAISE (exp? -> opt))                  -> StatRaise
                      / deferstat
@@ -1132,6 +1162,7 @@ local grammar = re.compile([[
     GOTO            <- %GOTO SKIP*
     IF              <- %IF SKIP*
     IN              <- %IN SKIP*
+    INTERFACE       <- %INTERFACE SKIP*
     LOCAL           <- %LOCAL SKIP*
     NIL             <- %NIL SKIP*
     NOT             <- %NOT SKIP*

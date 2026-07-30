@@ -68,9 +68,9 @@ if process_child then
         process_args[1] = "exit"
         process_args[2] = "29"
         local exited = system.spawn(process_child, process_args)
-        exited:close_stdin()
-        assert(exited:read_stdout() == nil)
-        assert(exited:read_stderr() == nil)
+        exited.stdin:close()
+        assert(exited.stdout:read() == nil)
+        assert(exited.stderr:read() == nil)
         local exit_status = exited:wait()
         assert(exit_status.code == 29)
         assert(exit_status.signal == nil)
@@ -79,15 +79,15 @@ if process_child then
         process_args[1] = "ready-wait"
         process_args[2] = nil
         local signalled = system.spawn(process_child, process_args)
-        signalled:close_stdin()
-        assert(signalled:read_stdout_until("\n") == "READY\n")
+        signalled.stdin:close()
+        assert(signalled.stdout:read_until("\n") == "READY\n")
         signalled:kill("term")
         local signal_status = signalled:wait()
         assert(signal_status.code == 0)
         assert(signal_status.signal == "term")
         assert(signal_status.signal_number > 0)
-        assert(signalled:read_stdout() == nil)
-        assert(signalled:read_stderr() == nil)
+        assert(signalled.stdout:read() == nil)
+        assert(signalled.stderr:read() == nil)
         return output
     end)
 

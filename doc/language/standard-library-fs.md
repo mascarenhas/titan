@@ -15,7 +15,8 @@ function open(path: string, mode: string): File
 function read_file(path: string): string
 function write_file(path: string, data: string)
 
-function File:read(max_bytes: integer): string?
+function File:read(max_bytes: integer?): string?
+function File:read_until(delimiter: string, chop: boolean?): string?
 function File:write(data: string): integer
 function File:flush()
 function File:close()
@@ -28,6 +29,12 @@ function rmdir(path: string)
 function rename(from: string, to: string)
 function list(path: string): {string}
 ```
+
+`File` structurally satisfies all seven
+[`io` Interfaces](standard-library-io.md#standard-implementations). The
+Interface wrapper adjusts the zero-argument `Reader.read` call to the optional
+`max_bytes` parameter and discards `write`'s byte-count result; its
+`read_until` and `close` slots are exact.
 
 Operations that can wait must run inside an [async Task](async-io.md). Importing
 `fs` transitively installs the standalone async bootstrap, so a Titan `main`
@@ -56,9 +63,31 @@ umask.
 The returned `File` is opaque. Its exact native descriptor is stored once in a
 local record field, so callers cannot construct, forge, or extract it.
 
-`read(max_bytes)` requires a positive size. It returns up to that many bytes,
-possibly fewer, and returns `nil` only at end of file. Reads use the File's
+`read(max_bytes)` uses 64 KiB when `max_bytes` is omitted or `nil`. An
+explicit size must be positive and no larger than libuv's portable native
+buffer bound. It returns at most that many bytes, possibly fewer, and returns
+`nil` only when no bytes are available at end of file. Reads use the File's
 current position; there is no random-access offset API in this version.
+
+A delimiter read may have already retained bytes beyond its result. A plain
+`read(max_bytes)` consumes at most `max_bytes` from those bytes and returns
+immediately, without topping up the result with another native read. Any
+retained remainder stays with the File for the next read.
+
+`read_until(delimiter, chop)` reads through the first literal delimiter. The
+delimiter is included by default and omitted only when `chop` is `true`.
+Delimiter matching and results are binary-safe, including embedded NUL bytes.
+An empty delimiter raises. Bytes after the first delimiter are retained and
+are observed by the next `read` or `read_until`.
+
+```titan
+local line = file:read_until("\n", true)
+```
+
+If EOF arrives after some bytes but before the delimiter, `read_until`
+returns that unterminated tail. It returns `nil` only when EOF supplies no
+bytes. EOF is not permanently sticky: if another descriptor later grows the
+file, a subsequent read from this File can observe the new bytes.
 
 `write(data)` writes the complete string and returns `#data`. A short native
 write is continued internally before the method returns. Writing `""` returns
@@ -83,8 +112,9 @@ end
 
 Each File serializes its operations in one FIFO, even when several Tasks share
 it. Only one filesystem request for that File is submitted at a time. A
-multi-request partial write remains one logical FIFO operation, so another
-read, write, flush, or close cannot interleave with it.
+multi-request partial write remains one logical FIFO operation. So does a
+`read_until` that needs several 64-KiB native reads: another read, write,
+flush, or close cannot interleave between its submissions.
 
 `close()` immediately marks the File as closing. Operations already ahead of
 the close finish in order; later reads, writes, and flushes raise. Concurrent
@@ -96,6 +126,10 @@ Task cancellation does not abandon native lifetime work. An unsubmitted
 ordinary File operation is removed from its FIFO. For submitted work, the
 runtime requests cancellation where libuv supports it, suppresses a stale
 result after cancellation wins, and still consumes the completion callback.
+Bytes already consumed by a cancelled delimiter read are restored in order to
+the File's retained input. The same restoration happens when a later native
+submission or callback reports an error, so retrying does not silently skip
+the successfully read prefix.
 A Task cancelled while awaiting `close()` remains cleanup-shielded until the
 physical close callback and request cleanup finish. Cancellation remains
 sticky afterward: it is delivered at the next ordinary asynchronous operation,
@@ -112,7 +146,8 @@ because the operating system may already have reused that descriptor number.
 
 ## Whole-file helpers
 
-`read_file(path)` opens in `r` mode, reads fixed 64 KiB chunks until EOF, and
+`read_file(path)` opens in `r` mode, uses `File:read()`'s 64-KiB default until
+EOF, and
 closes the File on both success and error. It does not trust `stat.size`: files
 may change while they are read. Chunk lengths are checked against Titan's
 integer/string limit before joining them with a balanced concatenation tree.

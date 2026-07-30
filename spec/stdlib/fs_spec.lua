@@ -4,6 +4,7 @@ local FS_CASES = [==[
 local fs = import "fs"
 local timer = import "timer"
 local async = import "async"
+local tio = import "io"
 
 local retained_file: fs.File? = nil
 
@@ -148,6 +149,144 @@ function schedule_binary(root: string, payload: string): async.Task
     check(not file:read(1), "empty file did not report EOF")
     file:close()
     return #payload
+  end)
+end
+
+function schedule_delimited_reads(root: string, boundary_payload: string,
+                                  retained_payload: string,
+                                  many_chunks: string): async.Task
+  return async.run(function (): value
+    local default_path = root .. "/default-read.dat"
+    fs.write_file(default_path, "default-payload")
+    local file = fs.open(default_path, "r")
+    check(file:read() == "default-payload",
+          "omitted read size did not use the default")
+    check(not file:read(nil), "omitted-size read did not reach EOF")
+    file:close()
+    file = fs.open(default_path, "r")
+    check(file:read(nil) == "default-payload",
+          "explicit nil read size did not use the default")
+    file:close()
+
+    local retained_path = root .. "/retained-excess.dat"
+    fs.write_file(retained_path, "alpha--beta--tail")
+    file = fs.open(retained_path, "r")
+    check(file:read_until("--") == "alpha--",
+          "delimiter read did not include its delimiter")
+    check(file:read(2) == "be",
+          "plain read exceeded its limit while consuming excess")
+    check(file:read_until("--", true) == "ta",
+          "chopped delimiter read returned the wrong retained prefix")
+    check(file:read() == "tail",
+          "plain read did not consume the retained delimiter suffix")
+    check(not file:read_until("--"),
+          "empty EOF after retained excess did not return nil")
+    file:close()
+
+    local binary_path = root .. "/binary-delimiter.dat"
+    fs.write_file(binary_path, "\0Dpayload")
+    file = fs.open(binary_path, "r")
+    check(file:read_until("\0D", true) == "",
+          "binary delimiter at the start did not chop to an empty string")
+    check(file:read() == "payload",
+          "binary delimiter retained the wrong suffix")
+    expect_failure(function (): value
+      file:read_until("")
+      return nil
+    end, "empty read delimiter succeeded")
+    file:close()
+
+    local boundary_path = root .. "/boundary-delimiter.dat"
+    fs.write_file(boundary_path, boundary_payload)
+    file = fs.open(boundary_path, "r")
+    local boundary_prefix =
+      file:read_until("\0Y", true) as string
+    check(#boundary_prefix == 65535,
+          "delimiter spanning native reads returned the wrong prefix")
+    check(file:read() == "tail",
+          "delimiter spanning native reads lost retained bytes")
+    file:close()
+
+    local short_excess_path = root .. "/short-excess.dat"
+    fs.write_file(short_excess_path, retained_payload)
+    file = fs.open(short_excess_path, "r")
+    local first = file:read_until("END") as string
+    check(#first == 65533,
+          "near-boundary delimiter returned the wrong included length")
+    check(file:read(100) == "xyz",
+          "short excess was topped up from a new native read")
+    check(file:read(100) == "native-tail",
+          "native read after short excess returned the wrong tail")
+    file:close()
+
+    local many_path = root .. "/many-chunks.dat"
+    fs.write_file(many_path, many_chunks)
+    file = fs.open(many_path, "r")
+    check(file:read_until("delimiter-that-is-not-present") == many_chunks,
+          "unterminated many-chunk read did not return its EOF tail")
+    check(not file:read_until("delimiter-that-is-not-present"),
+          "empty EOF after many chunks did not return nil")
+    file:close()
+
+    local growth_path = root .. "/growth-after-eof.dat"
+    fs.write_file(growth_path, "old")
+    file = fs.open(growth_path, "r")
+    check(file:read_until("|") == "old",
+          "unterminated initial tail was not returned")
+    check(not file:read(), "initial EOF did not return nil")
+    local appender = fs.open(growth_path, "a")
+    appender:write("new|tail")
+    appender:close()
+    check(file:read_until("|") == "new|",
+          "File EOF became sticky after later growth")
+    check(file:read() == "tail",
+          "growth delimiter read lost its retained suffix")
+    file:close()
+
+    local interface_path = root .. "/interface.dat"
+    fs.write_file(interface_path, "interface-data|rest")
+    file = fs.open(interface_path, "r+")
+    local stream: tio.ReaderWriterCloser = file
+    check(stream:read_until("|", true) == "interface-data",
+          "File interface delimiter dispatch failed")
+    stream:write("X")
+    check(stream:read() == "rest",
+          "File interface nil-fill read adapter failed")
+    stream:close()
+    check(fs.read_file(interface_path) == "interface-data|restX",
+          "File interface result-discard write adapter failed")
+
+    local fifo_path = root .. "/read-until-fifo.dat"
+    fs.write_file(fifo_path, many_chunks)
+    file = fs.open(fifo_path, "r+")
+    local reader = async.run(function (): value
+      return file:read_until("|")
+    end)
+    local writer = async.run(function (): value
+      return file:write("|later")
+    end)
+    while reader:status() == "ready" or writer:status() == "ready" do
+      timer.yield()
+    end
+    check(reader:join() == many_chunks,
+          "queued write interleaved between delimiter-read submissions")
+    check((writer:join() as integer) == 6,
+          "write queued behind delimiter read failed")
+    file:close()
+
+    local readers_path = root .. "/concurrent-readers.dat"
+    fs.write_file(readers_path, "abcd")
+    file = fs.open(readers_path, "r")
+    local first_reader = async.run(function (): value
+      return file:read(2)
+    end)
+    local second_reader = async.run(function (): value
+      return file:read(2)
+    end)
+    check(first_reader:join() == "ab" and second_reader:join() == "cd",
+          "concurrent File readers did not follow FIFO order")
+    file:close()
+    return "delimited-reads-ok"
   end)
 end
 
@@ -416,6 +555,23 @@ assert(binary:join() == #payload)
 assert(paths:join() == "paths-ok")
 assert(symlink:join() == "symlink-stat-ok")
 if permission then assert(permission:join() == "permission-error-ok") end
+]==])
+    end)
+
+    it("supports default and delimiter reads, retained excess, growth, " ..
+       "interfaces, and one logical FIFO operation",
+    function()
+        run_lua("local root = " .. string.format("%q", root) .. [==[
+local async = require "titan.async"
+local cases = require "fs_cases"
+
+local boundary = string.rep("x", 65535) .. "\0Ytail"
+local retained = string.rep("p", 65530) .. "ENDxyznative-tail"
+local many = string.rep("z", 5 * 65536 + 17)
+local task = cases.schedule_delimited_reads(
+    root, boundary, retained, many)
+async.loop()
+assert(task:join() == "delimited-reads-ok")
 ]==])
     end)
 

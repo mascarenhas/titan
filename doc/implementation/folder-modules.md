@@ -223,6 +223,14 @@ maps whose Lua insertion order was never a contract. Ordered module members,
 record fields, and union variants retain source order because they define
 module slots, field slots, and absolute tags.
 
+A language `interface` declaration may appear in the main or any immediate
+contributor. Because the files become one dense AST before checking, it shares
+the module-wide type namespace, duplicate rules, declaration staging, and
+fully qualified identity with every other top-level declaration. Its method
+order is its written declaration order inside that source file; contributor
+byte order decides only where the whole declaration appears in the combined
+AST. No contributor name enters the Interface identity or wrapper ABI.
+
 The `titan.uv` dogfood intentionally uses that rule rather than hiding public
 declarations in the main source. Its exported records and functions live in
 the semantic contributors, so their member order follows the contributor
@@ -260,11 +268,12 @@ and absolute variant tags, plus the reconstructible public nominal-static slot
 prefix. Folder order therefore remains authoritative for public owner/member
 order and for variant tags, while keyed static maps use bytewise ordering.
 
-ABI 0.20 again leaves folder composition unchanged. Array writer inventories
-and callable strict entries are collected only after the contributors have
-become one checked AST, then emitted once per logical module. Their
-module-private slots follow the same importer-reconstructible public prefix and
-never give a contributor a runtime identity.
+ABI 0.20 again leaves folder composition unchanged. Array writer inventories,
+callable strict entries, Interface descriptors, and concrete/Interface pair
+obligations are collected only after the contributors have become one checked
+AST, then emitted once per logical module. Their module-private slots follow
+the same importer-reconstructible public prefix and never give a contributor a
+runtime identity.
 
 ## `titan.uv` dogfooding
 
@@ -279,11 +288,11 @@ and declares no record. The Makefile
 declares this set explicitly as `UV_TITAN_SOURCES`; it does not use a
 wildcard, so adding a production source changes the reviewed build graph.
 Every listed source is a prerequisite of the one combined standard-library
-completion target. The production compiler invocation names all nine logical
+completion target. The production compiler invocation names all ten logical
 roots:
 
 ```sh
-titanc titan.coroutine titan.uv titan.async titan.timer titan.fs titan.net titan.os \
+titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net titan.os \
   titan.peg titan.string \
   -X titan-runtime/titanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a  # bundled mode
@@ -292,7 +301,7 @@ titanc titan.coroutine titan.uv titan.async titan.timer titan.fs titan.net titan
 Generated `titan/uv/uv.c` and `titan/uv/uv.o` are build artifacts and are
 removed by `make clean`. No contributor DSO, archive, or contributor shim is
 built or installed. The one logical `titan.uv` object, its one generated
-`titan/uv.lua` shim, and the other eight logical standard modules reside in
+`titan/uv.lua` shim, and the other nine logical standard modules reside in
 the physical `titan.so`/`titan.a` pair. The private five-member LPegLabel
 archive is shared metadata-free payload for the `titan.peg`/`titan.string`
 folder modules. Bundled mode then supplies the private libuv archive, so its
@@ -302,7 +311,7 @@ copy it into `titan.a` (and omits `libuv-build/libuv.a` from the command).
 That setting may itself select a shared or static system library. Higher
 `async`/`timer`/`fs`/`net`/`os` modules still import
 the independent logical `titan.uv` protocol, but their calls are direct
-because all nine source roots are linked together.
+because all ten source roots are linked together.
 
 `titan.peg` and `titan.string` apply the same folder-module rules: each has one
 canonical main, immediate contributors sharing module-private scope, one

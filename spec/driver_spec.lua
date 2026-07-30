@@ -2,6 +2,7 @@ local lfs = require "lfs"
 local assert = require "luassert"
 
 local driver = require "titan-compiler.driver"
+local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
 local titan = require "titan"
@@ -725,6 +726,53 @@ describe("compiler module loader", function()
         assert.is_nil(driver.imported.empty)
     end)
 
+    it("rejects a claimed malformed Interface in an archive before fallback",
+       function()
+        local archive = binary .. "/archive_bad.a"
+        local dynamic = binary .. "/archive_bad.so"
+        write_file(archive, "selected static provider\n")
+        write_file(dynamic, "must not be inspected\n")
+        local original_scan = staticmetadata.scan_archive
+        local dynamic_probed = false
+
+        local ran, failure = pcall(function()
+            staticmetadata.scan_archive = function(filename, options)
+                assert.equal(archive, filename)
+                local serialized = [[
+                    Module("archive_bad", {}, {
+                        I = {
+                            _tag = "Type.Interface",
+                            name = "archive_bad.I",
+                            methods = {},
+                        },
+                    })
+                ]]
+                local decoded, message = options.validate_types(
+                    "archive_bad", serialized,
+                    archive .. ":archive_bad")
+                assert.is_nil(decoded)
+                return nil, message
+            end
+            titan._loadlib = function()
+                dynamic_probed = true
+                error("a dynamic provider must not hide malformed archive metadata")
+            end
+
+            local ok, message = driver.defaultloader({}, {
+                context =
+                    driver.new_resolver_context({ prefer_static = true }),
+            })("archive_bad")
+            assert.falsy(ok)
+            assert.match(archive, message, 1, true)
+            assert.match("archive_bad", message, 1, true)
+            assert.match("interface method list is empty", message, 1, true)
+            assert.is_false(dynamic_probed)
+            assert.is_nil(driver.imported.archive_bad)
+        end)
+        staticmetadata.scan_archive = original_scan
+        assert.truthy(ran, failure)
+    end)
+
     it("rejects an occupied nonregular static candidate without opening it",
        function()
         local candidate = binary .. "/blocked.a"
@@ -932,7 +980,23 @@ describe("compiler module loader", function()
                             { _tag = "Type.Unknown" }, false)
                     })]]
                 end,
-                expected = "module interface is not serializable",
+                expected = "Type.Unknown is not valid in a " ..
+                    "value-facing type graph",
+            },
+            {
+                name = "meta.interface_schema",
+                abi = function() return driver.TITAN_VER end,
+                metadata = function()
+                    return [[Module("meta.interface_schema", {}, {
+                        I = {
+                            _tag = "Type.Interface",
+                            name = "meta.interface_schema.I",
+                            methods = {},
+                        },
+                    })]]
+                end,
+                expected = "interface method list is empty",
+                retains_claim = true,
             },
         }
 
@@ -951,6 +1015,10 @@ describe("compiler module loader", function()
             local ok, message = driver.defaultloader({})(case.name)
             assert.falsy(ok)
             assert.match(case.expected, message, 1, true)
+            if case.retains_claim then
+                assert.match(binary .. "/meta.so", message, 1, true)
+                assert.match(case.name, message, 1, true)
+            end
             assert.is_nil(driver.imported[case.name])
         end
     end)
@@ -1152,6 +1220,93 @@ describe("compiler module loader", function()
             imported.ast[7].loc.filename,
         })
         assert.equal("Ast.StatBlock", imported.ast[7]._tag)
+    end)
+
+    it("shares an Interface declaration and implementation across constituents",
+       function()
+        local folder = source .. "/titan/interfaces"
+        assert(lfs.mkdir(folder))
+        local main = folder .. "/interfaces.titan"
+        local part = folder .. "/provider.titan"
+        write_file(main, [[
+            interface Counter
+                function step(delta: integer): integer
+            end
+        ]])
+        write_file(part, [[
+            record Box
+                n: integer
+            end
+
+            function Box:step(delta: integer): integer
+                return self.n + delta
+            end
+
+            function use(box: Box): integer
+                local counter: Counter = box
+                return counter:step(2)
+            end
+        ]])
+
+        local ok, modtype, errors = driver.defaultloader({}, {
+            source_roots = { ["titan.interfaces"] = true },
+        })("titan.interfaces")
+        assert.truthy(ok)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("Type.Interface",
+            modtype.type_members.Counter._tag)
+        assert.is_nil(modtype.members.Counter)
+        assert.equal("Type.Record",
+            modtype.members.Box.type._tag)
+        assert.equal("Type.Function",
+            modtype.members.use.type._tag)
+
+        local imported = driver.imported["titan.interfaces"]
+        assert.equal(main, imported.ast[1].loc.filename)
+        assert.equal(part, imported.ast[2].loc.filename)
+        assert.equal(part, imported.ast[3].loc.filename)
+        assert.equal(part, imported.ast[4].loc.filename)
+    end)
+
+    it("attributes a cross-constituent Interface mismatch to the real cast file",
+       function()
+        local folder = source .. "/titan/interface_mismatch"
+        assert(lfs.mkdir(folder))
+        local main = folder .. "/interface_mismatch.titan"
+        local provider = folder .. "/provider.titan"
+        local bridge = folder .. "/bridge.titan"
+        write_file(main, [[
+            interface Counter
+                function step(delta: integer): integer
+            end
+        ]])
+        write_file(provider, [[
+            record Box end
+
+            function Box:step(delta: string): integer
+                return 0
+            end
+        ]])
+        write_file(bridge, [[
+            function use(box: Box): Counter
+                return box
+            end
+        ]])
+
+        local ok, _, errors = driver.defaultloader({}, {
+            source_roots = {
+                ["titan.interface_mismatch"] = true,
+            },
+        })("titan.interface_mismatch")
+        assert.truthy(ok)
+        assert.equal(1, #errors)
+        assert.match(bridge .. ":2:24: type error:", errors[1], 1, true)
+        assert.match(
+            "record 'titan%.interface_mismatch%.Box' does not implement " ..
+            "interface 'titan%.interface_mismatch%.Counter'",
+            errors[1])
+        assert.match("method 'step' has incompatible type", errors[1], 1, true)
+        assert.match("expected", errors[1], 1, true)
     end)
 
     it("honors source-root order across flat and folder representations",
@@ -1592,12 +1747,14 @@ end
         write_file(main, table.concat({
             "record Box end",
             "type Count = integer",
+            "interface Stream function read(): string end",
             "local item = 1",
             "",
         }, "\n"))
         write_file(part, table.concat({
             "type Count = string",
             "type Box = integer",
+            "interface Stream function read(): string end",
             "local item = 2",
             "",
         }, "\n"))
@@ -1606,7 +1763,7 @@ end
             source_roots = { ["titan.sample"] = true },
         })("titan.sample")
         assert.truthy(ok)
-        assert.equal(3, #errors)
+        assert.equal(4, #errors)
         local all_errors = table.concat(errors, "\n")
         assert.match(part .. ":1:1: type error: duplicate type alias for " ..
             "Count, previous one at " .. main .. ":2:1",
@@ -1614,8 +1771,11 @@ end
         assert.match(part .. ":2:1: type error: type alias 'Box' conflicts " ..
             "with record declared at " .. main .. ":1:1",
             all_errors, 1, true)
-        assert.match(part .. ":3:1: type error: duplicate declaration for " ..
-            "item, previous one at " .. main .. ":3:1",
+        assert.match(part .. ":3:1: type error: duplicate interface 'Stream', " ..
+            "previous one at " .. main .. ":3:1",
+            all_errors, 1, true)
+        assert.match(part .. ":4:1: type error: duplicate declaration for " ..
+            "item, previous one at " .. main .. ":4:1",
             all_errors, 1, true)
     end)
 

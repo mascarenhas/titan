@@ -40,6 +40,7 @@
 /titan/uv.lua
 /titan/async.lua
 /titan/timer.lua
+/titan/io.lua
 /titan/fs.lua
 /titan/net.lua
 /titan/os.lua

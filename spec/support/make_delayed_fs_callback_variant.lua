@@ -82,7 +82,36 @@ local active_runtime: Runtime? = nil
 local test_fs_delay = 0
 local test_fs_callback_delayed = false
 local test_fs_delayed_result = 0
+local test_fs_read_callback_target = 0
+local test_fs_read_callback_count = 0
+local test_fs_read_callback_delay = 0
+local test_fs_read_submission_target = 0
+local test_fs_read_submission_count = 0
 ]==], "callback-control state")
+
+patch("file.titan", [==[
+  local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
+  if kind == FS.stat then
+]==], [==[
+  local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
+  if kind == FS.read_until and test_fs_read_submission_target > 0 then
+    test_fs_read_submission_count = test_fs_read_submission_count + 1
+    if test_fs_read_submission_count == test_fs_read_submission_target then
+      test_fs_read_submission_target = 0
+      status = libuv.UV_EIO
+    else
+      status = libuv.uv_fs_read {
+        loop = loop_handle,
+        req = owner_handle,
+        file = file_handle,
+        bufs = buffer_handle,
+        nbufs = 1,
+        offset = -1,
+        cb = shim.titan_uvshim_fs_cb,
+      }
+    end
+  elseif kind == FS.stat then
+]==], "Nth delimiter-read submission failure")
 
 patch("file.titan", [==[
   if result >= 0 and owner.metadata.operation.kind == FS.open then
@@ -93,8 +122,16 @@ patch("file.titan", [==[
   if result >= 0 and owner.metadata.operation.kind == FS.open then
     owner.metadata.acquired_file = result as libuv.uv_file
   end
-  if test_fs_delay > 0 then
-    local delay = test_fs_delay
+  local delay = test_fs_delay
+  if owner.metadata.operation.kind == FS.read_until and
+      test_fs_read_callback_target > 0 then
+    test_fs_read_callback_count = test_fs_read_callback_count + 1
+    if test_fs_read_callback_count == test_fs_read_callback_target then
+      delay = test_fs_read_callback_delay
+      test_fs_read_callback_target = 0
+    end
+  end
+  if delay > 0 then
     test_fs_delay = 0
     test_fs_callback_delayed = true
     test_fs_delayed_result = result
@@ -130,6 +167,25 @@ end
 
 function __test_fs_callback_is_delayed(): boolean
   return test_fs_callback_delayed
+end
+
+function __test_delay_nth_fs_read_callback(nth: integer,
+                                           milliseconds: integer)
+  if nth <= 0 or milliseconds < 0 then
+    raise "invalid delayed filesystem read callback control"
+  end
+  test_fs_read_callback_target = nth
+  test_fs_read_callback_count = 0
+  test_fs_read_callback_delay = milliseconds
+  test_fs_callback_delayed = false
+end
+
+function __test_fail_nth_fs_read_submission(nth: integer)
+  if nth <= 0 then
+    raise "invalid filesystem read submission failure control"
+  end
+  test_fs_read_submission_target = nth
+  test_fs_read_submission_count = 0
 end
 ]==]
 
