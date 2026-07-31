@@ -1,11 +1,11 @@
 # Interfaces v1 — expanded specification and implementation plan
 
-Status: **maintainer decisions recorded and the separate type-relation
-remediation implemented, review-complete, locally validated, and committed on
-its companion branch, pending publication and exact-head Linux CI; do not
-implement Interfaces yet. Interfaces and the prerequisite
-relation/Array/function-layout repair share one ABI-0.20 cutover even if
-reviewed as two PRs**.
+Status: **approved for implementation. The separate type-relation remediation
+was merged as PR #42, including the relation/Array/function-layout half of the
+shared ABI-0.20 cutover. Interfaces v1 is the immediately chained feature and
+inherits ABI 0.20 without another version transition. For this implementation
+PR the maintainer waived the manual macOS run; exact-head Linux CI and Codecov
+remain required**.
 
 Primary feature brief:
 `/home/mascarenhas/.codex/attachments/54844c65-02b6-4be6-a695-e2d542790a5c/pasted-text-1.txt`
@@ -225,6 +225,14 @@ inconsistent edge. The central remediation removes that overclaim.
 - `I -> C void *` is the existing explicit GC-identity cast and denotes the
   outer interface-wrapper `Udata *`, not the wrapped concrete object.
 
+The automatic whole-slot `value -> TValue` coercion does not compose
+transitively with C address coercion. A `value` used directly where
+`const void *` or `const TValue *` is expected is ambiguous between the
+address of the `TValue` carrier and an unboxed pointer payload, so keep that
+conversion explicit. The coroutine `mco_push` call therefore deliberately
+uses `payload as ffi.TValue` to select the carrier before its address is
+passed.
+
 Do not silently broaden implicit C pointer conversion.
 
 ### 0.7 Reject empty interfaces in v1
@@ -235,11 +243,12 @@ The brief grammar requires one method followed by zero or more methods.
 universal interfaces are outside v1. Diagnose them explicitly rather than
 letting a zero-byte vtable happen accidentally.
 
-### 0.8 Use one `ProcessOutput` type and make the OS migration a clean break
+### 0.8 Name process streams from Titan's direction and make a clean break
 
-**Decision:** add public `ProcessInput` and `ProcessOutput` records.
-`Process.stdin` has the first type; both `stdout` and `stderr` have the second,
-with a private discriminator and independent read state. Remove the old
+**Decision:** add public `InputStream` and `OutputStream` records.
+The names describe what Titan does: `Process.stdin` is an `OutputStream`
+because Titan writes to it, while `stdout` and `stderr` are independent
+`InputStream` values because Titan reads from them. Remove the old
 `Process:write_stdin`, `close_stdin`, `read_stdout[_until]`, and
 `read_stderr[_until]` forwarding methods. The brief says the pipe fields
 replace them, and retaining both APIs would blunt the dogfood result.
@@ -1859,8 +1868,8 @@ declared relationship. Document the concrete implementer matrix:
 |---|---|---|
 | `net.Connection` | all seven | exact |
 | `fs.File` | all seven | nil-fill `read`; discard `write` result |
-| `os.ProcessInput` | `Writer`, `Closer`, `WriterCloser` | exact |
-| `os.ProcessOutput` | `Reader` | exact |
+| `os.InputStream` | `Reader` | exact |
+| `os.OutputStream` | `Writer`, `Closer`, `WriterCloser` | exact |
 | `net.Server` | `Closer` | incidental exact implementation |
 | `timer.Ticker` | `Closer` | incidental exact implementation |
 
@@ -1893,41 +1902,36 @@ Semantics:
 - bytes after the delimiter are retained for the next read;
 - EOF with accumulated bytes returns the tail; empty EOF returns nil;
 - EOF is not permanently sticky for a file that may grow;
-- cancellation or an error after consuming bytes restores them to the file's
-  excess before propagating; and
+- if a later `read` raises, chunks returned by earlier iterations are restored
+  to the file's excess before propagating; and
 - fs errors remain per-operation rather than becoming stream-sticky.
 
-Do **not** implement `File:read_until` as a high-level loop of separate
-`uv._fs_read` calls. Another Task's write, flush, or close could interleave
-between those FIFO operations. Extend `titan/uv/file.titan` so one logical
-`FsOperation` retains its queue position while resubmitting native reads,
-analogous to the existing partial-write state machine.
+Keep this behavior in the high-level `titan.fs` facade:
 
-The low-level work should:
+- add retained excess to `fs.File`, not `uv_file`;
+- import `titan.string` and use its binary-safe `find`/`sub` operations;
+- have `File:read` slice retained excess before calling the existing
+  `uv._fs_read`;
+- use a non-submitting `uv._fs_validate_read` state bridge before serving
+  retained excess, so cancellation, stale-generation, closing, and closed
+  checks cannot be bypassed by the facade fast path;
+- implement `File:read_until` directly as a loop over `File:read`;
+- accumulate multiple chunks without repeated whole-prefix concatenation and
+  guard `total + #chunk` before allocating the final result; and
+- restore chunks returned by completed loop iterations when a later read
+  raises.
 
-- add retained excess to `uv_file`;
-- add read-until/delimiter/chop/accumulation state to `FsOperation`;
-- expose one focused `uv._fs_read_until(file, delimiter, chop)` facade entry
-  for `titan.fs`, while `_fs_read` also consumes the shared retained excess;
-- reuse folder-local byte search/slice helpers rather than importing
-  `titan.string`;
-- use an internal 64-KiB native submission size for read-until, accumulate
-  multiple chunks without repeated whole-prefix string concatenation, and
-  guard `total + #chunk` against overflow before allocating the final result;
-- restore consumed data on cancellation/error;
-- service existing excess within the same queued operation, never
-  synchronously ahead of older queued work; and
-- refresh the `titan.uv` public fixture/projection for that intentional
-  `_fs_read_until` addition and any required signature change, without
-  exposing the operation state itself.
-
-The excess-only path must be a real owner-free head completion, not a fake
-zero-byte libuv request or timer. Refactor `submit_file_head`/its caller so it
-can return a `DriveControl` for the Task that just yielded and can schedule the
-ordinary drive for an already-waiting queued Task. Dequeue/advance the file
-head before delivering the result. A read-until whose retained bytes lack the
-delimiter keeps the same head operation and submits another native read; a
-plain read returns the available prefix immediately as specified above.
+Do not add `_fs_read_until`, delimiter state, retained excess, or byte-slicing
+helpers to `titan.uv`; `_fs_validate_read` is only the existing File-state
+validation prefix without a request. An excess-only `File:read` is synchronous
+facade work. When native input is needed, each underlying read is an ordinary
+operation in the existing uv File FIFO. A concurrent read, write, flush, or
+close may therefore run between `read_until` iterations; the high-level method
+does not reserve one compound FIFO position. A cancelled in-flight native read retains
+the ordinary `File:read` semantics because the facade cannot restore a payload
+that was never delivered to it. `File:close` clears facade excess both before
+yielding and after physical close, so an older delimiter read cannot leave
+repopulated bytes attached to a closing or closed File.
 
 `File.write` continues to return the number of bytes. `Writer.write` returns no
 values, deliberately exercising result-discard adjustment. `File.read`'s
@@ -1939,44 +1943,48 @@ optional parameter deliberately exercises nil-fill adjustment for
 Use this public/private shape:
 
 ```titan
-record ProcessInput
-  local handle: uv.uv_process_t
-end
-
-record ProcessOutput
-  local handle: uv.uv_process_t
-  local stdout: boolean
+record InputStream
+  local handle: uv.uv_pipe_t
   local excess: string
   local reading: boolean
 end
 
+record OutputStream
+  local handle: uv.uv_pipe_t
+end
+
 record Process
   local handle: uv.uv_process_t
-  stdin: ProcessInput
-  stdout: ProcessOutput
-  stderr: ProcessOutput
+  stdin: OutputStream
+  stdout: InputStream
+  stderr: InputStream
 end
 ```
 
 Methods:
 
 ```titan
-function ProcessInput:write(data: string)
-function ProcessInput:close()
+function InputStream:read(): string?
+function InputStream:read_until(delimiter: string,
+                                chop: boolean?): string?
 
-function ProcessOutput:read(): string?
-function ProcessOutput:read_until(delimiter: string,
-                                  chop: boolean?): string?
+function OutputStream:write(data: string)
+function OutputStream:close()
 
 function Process:wait(): ExitStatus
 function Process:kill(signal: string)
 ```
 
-Move the existing per-output excess/reader-lock behavior into each
-`ProcessOutput`. Keep the low-level `titan.uv` process API unchanged unless the
-move exposes a real ownership bug. Holding the low-level process handle
-directly avoids a Process/pipe reference cycle and means an interface-wrapped
-pipe retains the native owner.
+Move the existing per-readable-pipe excess/reader-lock behavior into each
+`InputStream`. Expose the already distinct low-level `uv_pipe_t` wrappers
+through the private os/uv bridge, and have every stream facade retain its own
+pipe handle rather than the `uv_process_t`. The pipe control already retains
+the shared process control, so an interface-wrapped stream keeps the native
+owner alive without a facade-level Process/stream cycle. The pipe handle
+identifies stdout versus stderr; do not retain a duplicate boolean
+discriminator in `InputStream`. Validate the pipe's Runtime generation before
+serving retained facade excess so stream fast paths cannot cross into a
+replacement Runtime.
 
 `spawn` creates all three pipe records and stores them in the Process. Remove
 the old forwarding methods and migrate:
@@ -2582,9 +2590,6 @@ Update:
 - `spec/stdlib_installer_spec.lua`;
 - `spec/installed_prefix_spec.lua`;
 - `spec/stdlib/fs_spec.lua`;
-- `spec/stdlib/uv_late_callbacks_spec.lua`;
-- `spec/support/make_delayed_fs_callback_variant.lua`;
-- `spec/support/uv_late_fs_callback_cases.lua`;
 - `spec/stdlib/timer_spec.lua`;
 - `spec/stdlib/net_spec.lua`;
 - `spec/stdlib/os_process_spec.lua`;
@@ -2608,26 +2613,21 @@ FS behavior coverage:
   with checked total-length overflow behavior;
 - EOF empty and unterminated tail;
 - later growth after EOF;
-- cancellation and error restoration;
-- FIFO proof that write/flush/close cannot interleave between one logical
-  read-until's submissions;
-- concurrent reader rule; and
+- restoration of chunks returned before a later read error;
+- ordinary per-read FIFO behavior, without a compound read-until ordering
+  guarantee; and
+- existing concurrent-reader behavior; and
 - calls through `ReaderWriterCloser` exercising both adapters.
 
-Normal `fs_spec` covers public behavior, but post-consumption
-cancellation/error restoration needs the isolated delayed-FS flow. Extend
-`make_delayed_fs_callback_variant.lua` with uniquely anchored Nth-read
-delay/failure behavior and add cases in `uv_late_fs_callback_cases.lua` proving
-that accumulated and excess bytes are restored in order and remain readable.
-Run them through `uv_late_callbacks_spec.lua`; keep all hooks out of installed
-modules and preserve the validated `TITAN_TEST_UV_LATE_FS_ONLY=1` sanitizer
-scope.
+Normal `fs_spec` covers the public high-level behavior. Do not extend the
+isolated delayed-FS uv variant for delimiter reads: `titan.uv` has no
+delimiter-specific state or contract.
 
 OS coverage:
 
 - `spawn` initializes public stdin/stdout/stderr records;
-- stdin exact `WriterCloser`;
-- each output exact `Reader`;
+- stdin `OutputStream` exact `WriterCloser`;
+- stdout/stderr `InputStream` exact `Reader`;
 - stdout/stderr independent retained state and reader locks;
 - full migration from old forwarding calls;
 - stdin close/write FIFO and idempotence;
@@ -2704,13 +2704,22 @@ payload offsets, raw mangled symbols, or unordered Lua table iteration.
    `.agents/plans/type-relations-soundness.md` remediation before changing the
    central relations for Interface. Interface work must consume its regression
    tests and invariants.
-5. Prototype the common function-pointer copied-array representation under the
+5. Run a small inherited relation-cleanup pass before Interface work: remove
+   the now-unreachable `Type.Value` arm from
+   `types.c_address_coerceable`, preserve the direct implicit
+   `value -> C pointer` rejection, and retain the explicit
+   `payload as ffi.TValue` carrier selection in `titan/coroutine.titan`.
+   Add focused relation/checker coverage that direct `value -> const void *`
+   and `value -> const TValue *` remain rejected while the explicit
+   `value -> TValue` carrier path remains accepted. This is dead-code and
+   contract cleanup, not a behavior or ABI change.
+6. Prototype the common function-pointer copied-array representation under the
    supported C toolchains/warnings.
-6. Prototype concrete-owner adjustment lowering for every §0.2 case, two Lua
+7. Prototype concrete-owner adjustment lowering for every §0.2 case, two Lua
    states, and dynamic/static providers.
-7. Characterize current top-level bound method/lambda tag initialization with
+8. Characterize current top-level bound method/lambda tag initialization with
    a focused regression.
-8. Decide trace attribution from the prototype output.
+9. Decide trace attribution from the prototype output.
 
 **Gate:** the central relation/Array/function remediation is implemented and
 its relation, dynamic-boundary, strict-read, callable, and ABI regressions are
@@ -2802,7 +2811,8 @@ green on a clean 0.20 tree before stdlib publication expands.
    implementation chapters listed in §4.1, including the new Interface and IO
    chapters.
 3. Add `titan.io`.
-4. Implement queued low-level fs read/read-until state and facade API.
+4. Implement high-level fs read/read-until retained-excess behavior while
+   leaving the low-level uv request surface unchanged.
 5. Refactor OS process pipes and migrate every caller/spec/smoke.
 6. Add exact/adjusted interface use to net/fs/os behavior and production
    smokes.
@@ -2829,10 +2839,9 @@ eleven openers.
 5. Resolve findings and rerun affected targeted/full gates.
 6. Commit intentionally on a feature branch, push, and verify exact-head Linux
    CI plus Codecov uploads.
-7. Only after final Linux and adversarial review are green, manually dispatch
-   one exact-head macOS `workflow_dispatch` pre-merge run. If that run requires
-   a patch, re-establish exact-head Linux and run the necessary final macOS
-   check; do not call a stale run the gate.
+7. Record the maintainer's macOS waiver for this implementation PR and do not
+   manually dispatch `workflow_dispatch`; exact-head Linux and Codecov are the
+   pre-merge CI evidence for this run.
 8. Refresh the PR description with semantics, ABI break, dogfood migration,
    decisions, tests, and CI evidence.
 
@@ -2909,12 +2918,11 @@ Publication evidence:
 
 ```sh
 gh run list --branch <feature-branch>
-gh workflow run ci.yml --ref <feature-branch>
 gh run view <run-id>
 ```
 
-The manual dispatch is the macOS gate only; Linux evidence comes from the
-final pushed head.
+Linux evidence comes from the final pushed head. The manual macOS dispatch is
+explicitly waived for this implementation PR.
 
 ## 11. Completion criteria
 
@@ -2966,8 +2974,8 @@ The feature is done only when all of these are true:
   `doc/language/standard-library-io.md` are linked, and all affected current
   documentation is accurate;
 - `titan.io` publishes seven interfaces;
-- fs read/read-until preserves one logical FIFO operation and all documented
-  cancellation/error/excess behavior;
+- fs read/read-until preserves the documented high-level excess behavior while
+  each underlying read remains an ordinary uv FIFO operation;
 - Process pipe records preserve lifecycle semantics and the old forwarding
   surface is fully migrated;
 - the standard provider has exactly ten modules/keys/shims and eleven openers,
@@ -2975,7 +2983,8 @@ The feature is done only when all of these are true:
 - targeted suites and `make test` pass;
 - final adversarial reviews are resolved;
 - exact-head Linux CI and Codecov uploads are green; and
-- one final exact-head macOS manual pre-merge run is green.
+- the maintainer's explicit macOS waiver is recorded; no manual dispatch is
+  required for this implementation PR.
 
 ## 12. Principal risks and review traps
 
@@ -3006,10 +3015,12 @@ The feature is done only when all of these are true:
    fixture can create misleading loader behavior.
 10. **Provider symbol asymmetry.** Bound trampolines must be equally reachable
     in source, DSO, archive, ancestor-container, and standalone modes.
-11. **FS facade loop.** Repeating public `_fs_read` operations violates the
-    documented per-file FIFO by permitting interleaving.
-12. **OS ownership cycles/regressions.** Pipe records must retain the native
-    handle without weakening close/read/wait cleanup.
+11. **Invented compound FS ordering.** `File:read_until` intentionally
+    composes separate high-level `File:read` calls; do not claim it reserves
+    one uv FIFO position or move delimiter state back into uv.
+12. **OS ownership cycles/regressions.** Stream records must retain their
+    exact pipe handles, with the pipe controls retaining shared process state,
+    without weakening close/read/wait cleanup.
 13. **Count drift.** Ten logical modules means ten keys and shims but eleven
     openers; installer snapshots and docs often encode these separately.
 14. **Coverage misclassification.** Library behavior belongs outside LuaCov;
