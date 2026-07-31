@@ -14,6 +14,9 @@ function Ticker:tick(): boolean
 function Ticker:close()
 ```
 
+`Ticker` incidentally satisfies the exact
+[`io.Closer`](standard-library-io.md#standard-implementations) Interface.
+
 These functions must be called from a running
 [`async.Task`](async-io.md#scheduling-and-driving-tasks).
 

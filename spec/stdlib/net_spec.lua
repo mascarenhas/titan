@@ -2,6 +2,7 @@ local async_stdlib = require "spec.support.async_stdlib"
 
 local NET_CASES = [==[
 local net = import "net"
+local stream = import "io"
 local timer = import "timer"
 local async = import "async"
 
@@ -71,6 +72,105 @@ local function listen_available(host: string, first_port: integer,
     if port > 60999 then port = 20000 end
   end
   raise "could not find an available loopback port"
+end
+
+function schedule_interface_matrix(first_port: integer): async.Task
+  return async.run(function (): value
+    local server, port = listen_available("127.0.0.1", first_port, 8)
+    local peer = async.run(function (): value
+      local connection = server:accept()
+      connection:write("reader\n")
+      connection:shutdown()
+      check(read_all(connection) == "", "Reader client sent bytes")
+      connection:close()
+
+      connection = server:accept()
+      check(read_all(connection) == "writer",
+            "Writer Interface changed bytes")
+      connection:close()
+
+      connection = server:accept()
+      check(read_all(connection) == "",
+            "Closer Interface did not close its connection")
+      connection:close()
+
+      connection = server:accept()
+      connection:write("reader-writer\n")
+      connection:shutdown()
+      check(read_all(connection) == "reader-writer-out",
+            "ReaderWriter Interface changed bytes")
+      connection:close()
+
+      connection = server:accept()
+      connection:write("reader-closer\n")
+      connection:shutdown()
+      check(read_all(connection) == "",
+            "ReaderCloser Interface did not close its connection")
+      connection:close()
+
+      connection = server:accept()
+      check(read_all(connection) == "writer-closer-out",
+            "WriterCloser Interface changed bytes")
+      connection:close()
+
+      connection = server:accept()
+      connection:write("composite\n")
+      connection:shutdown()
+      check(read_all(connection) == "composite-out",
+            "ReaderWriterCloser Interface changed bytes")
+      connection:close()
+      return "interface-peer-ok"
+    end)
+
+    local concrete = net.connect("127.0.0.1", port)
+    local reader: stream.Reader = concrete
+    check(reader:read_until { delimiter = "\n", chop = true } == "reader",
+          "named Reader.read_until Interface call failed")
+    concrete:close()
+
+    concrete = net.connect("127.0.0.1", port)
+    local writer: stream.Writer = concrete
+    writer:write("writer")
+    concrete:shutdown()
+    concrete:close()
+
+    concrete = net.connect("127.0.0.1", port)
+    local closer: stream.Closer = concrete
+    closer:close()
+
+    concrete = net.connect("127.0.0.1", port)
+    local reader_writer: stream.ReaderWriter = concrete
+    check(reader_writer:read_until("\n", true) == "reader-writer",
+          "ReaderWriter read dispatch failed")
+    reader_writer:write("reader-writer-out")
+    concrete:shutdown()
+    concrete:close()
+
+    concrete = net.connect("127.0.0.1", port)
+    local reader_closer: stream.ReaderCloser = concrete
+    check(reader_closer:read_until("\n", true) == "reader-closer",
+          "ReaderCloser read dispatch failed")
+    reader_closer:close()
+
+    concrete = net.connect("127.0.0.1", port)
+    local writer_closer: stream.WriterCloser = concrete
+    writer_closer:write("writer-closer-out")
+    writer_closer:close()
+
+    concrete = net.connect("127.0.0.1", port)
+    local composite: stream.ReaderWriterCloser = concrete
+    check(composite:read_until("\n", true) == "composite",
+          "ReaderWriterCloser read dispatch failed")
+    local send: (string) -> () = composite:write
+    send("composite-out")
+    composite:close()
+
+    check(peer:join() == "interface-peer-ok",
+          "Interface matrix peer failed")
+    local server_closer: stream.Closer = server
+    server_closer:close()
+    return "interface-matrix-ok"
+  end)
 end
 
 function schedule_ipv4_core(first_port: integer): async.Task
@@ -514,6 +614,13 @@ end
 assert(run("schedule_ipv4_core") == "ipv4-core-ok")
 assert(run("schedule_partial_and_excess") == "partial-excess-ok")
 assert(run("schedule_fifo_and_shutdown") == "fifo-shutdown-ok")
+]==])
+    end)
+
+    it("dispatches every stream Interface and incidental Server Closer",
+    function()
+        run_lua(port_prelude("interfaces") .. [==[
+assert(run("schedule_interface_matrix") == "interface-matrix-ok")
 ]==])
     end)
 

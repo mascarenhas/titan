@@ -199,14 +199,14 @@ UV_TITAN_SOURCES := \
 	titan/uv/task.titan \
 	titan/uv/tcp.titan
 UV_CONFIG_STAMP := titan-runtime/.titan-uv-build-config
-STDLIB_MODULES := coroutine uv async timer fs net os peg string
+STDLIB_MODULES := coroutine uv async timer io fs net os peg string
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
-	titan.fs titan.net titan.os titan.peg titan.string
+	titan.io titan.fs titan.net titan.os titan.peg titan.string
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
-	titan/async.titan titan/timer.titan titan/fs.titan titan/net.titan \
-	titan/os.titan \
+	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
+	titan/net.titan titan/os.titan \
 	titan/peg/peg.titan titan/peg/combinators.titan \
 	titan/peg/native.titan \
 	titan/peg/relabel.titan titan/peg/relabel_parser.titan \
@@ -215,7 +215,7 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/string/regex_api.titan titan/string/regex_compile.titan \
 	titan/string/regex_parser.titan
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
-	titan/timer.lua titan/fs.lua titan/net.lua titan/os.lua \
+	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/os.lua \
 	titan/peg.lua titan/string.lua
 STDLIB_CONTAINER := titan.so
 STDLIB_STATIC_ARCHIVE := titan.a
@@ -1157,7 +1157,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 
 # FORCE runs the inexpensive completeness check on every invocation. The
 # compiler itself runs only when an input is newer, configuration changed, or
-# one public output is absent. All nine roots are explicit source roots in one
+# one public output is absent. All ten roots are explicit source roots in one
 # process, so their internal imports are linked into the paired titan.so/titan.a
 # provider. The warm check rescans the archive without rewriting either output.
 $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
@@ -1253,9 +1253,9 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 STDLIB_STAGED_EXTRA_OBJECTS = $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(abspath $(object)))
 
 # LuaRocks invokes this only after deploying titanc and its Lua compiler
-# modules. Build all nine source roots once in a private directory on the
+# modules. Build all ten source roots once in a private directory on the
 # destination filesystem. The Lua publisher validates the complete protocol,
-# commits nine shims, the archive, and the one macOS dSYM before renaming
+# commits ten shims, the archive, and the one macOS dSYM before renaming
 # titan.so last; any caught failure restores the prior pair, the legacy
 # DSO-only installation, or the first-install bootstrap.
 rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS)

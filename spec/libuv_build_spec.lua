@@ -1,25 +1,34 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
+local checker = require "titan-compiler.checker"
 local parser = require "titan-compiler.parser"
 local staticmetadata = require "titan-compiler.staticmetadata"
+local types = require "titan-compiler.types"
 
 local PKG_CONFIG = "sh spec/fixtures/libuv/fake-pkg-config.sh"
 local UV_MAIN_SOURCE = "titan/uv/uv.titan"
 local STDLIB_TYPES_FIXTURE =
 "spec/fixtures/stdlib/titan_stdlib_types.lua"
+-- These seven roots predate peg, string, and the active-0.20 titan.io
+-- addition. Their fixture values still track the current public metadata.
 local PREEXISTING_STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.fs", "titan.net", "titan.os",
 }
+local STDLIB_MODULES = {
+    "coroutine", "uv", "async", "timer", "io", "fs", "net", "os",
+    "peg", "string",
+}
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
-    "titan.fs", "titan.net", "titan.os", "titan.peg", "titan.string",
+    "titan.io", "titan.fs", "titan.net", "titan.os", "titan.peg",
+    "titan.string",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
-    "titan/timer.lua", "titan/fs.lua", "titan/net.lua", "titan/os.lua",
-    "titan/peg.lua", "titan/string.lua",
+    "titan/timer.lua", "titan/io.lua", "titan/fs.lua", "titan/net.lua",
+    "titan/os.lua", "titan/peg.lua", "titan/string.lua",
 }
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
@@ -934,6 +943,7 @@ describe("libuv Makefile configuration", function()
 
     it("keeps the reviewed standard-library roots, sources, and shims exact",
         function()
+            assert.same(STDLIB_MODULES, makefile_words("STDLIB_MODULES"))
             assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
             assert.same(STDLIB_SHIMS, makefile_words("STDLIB_SHIMS"))
             assert.same({
@@ -969,8 +979,8 @@ describe("libuv Makefile configuration", function()
                 "titan/uv/os.titan", "titan/uv/process.titan",
                 "titan/uv/runtime.titan", "titan/uv/task.titan",
                 "titan/uv/tcp.titan", "titan/async.titan",
-                "titan/timer.titan", "titan/fs.titan", "titan/net.titan",
-                "titan/os.titan", "titan/peg/peg.titan",
+                "titan/timer.titan", "titan/io.titan", "titan/fs.titan",
+                "titan/net.titan", "titan/os.titan", "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
                 "titan/peg/relabel.titan",
                 "titan/peg/relabel_parser.titan",
@@ -982,10 +992,98 @@ describe("libuv Makefile configuration", function()
             }, expanded)
         end)
 
-    it("pins all seven pre-existing interfaces in the container",
+    it("typechecks titan.io as seven ordered nominal Interface contracts",
+        function()
+            local function source_type_name(typ)
+                if typ._tag == "Ast.TypeString" then return "string" end
+                if typ._tag == "Ast.TypeBoolean" then return "boolean" end
+                if typ._tag == "Ast.TypeOption" then
+                    return source_type_name(typ.basetype) .. "?"
+                end
+                error("unexpected titan.io source type " .. tostring(typ._tag))
+            end
+
+            local path = "titan/io.titan"
+            local source = read_file(path)
+            local ast, parse_error = parser.parse(path, source)
+            assert.truthy(ast, parse_error and parse_error.label)
+            local module_type, errors = checker.check(
+                "titan.io", ast, source, path, nil)
+            assert.equal(0, #errors)
+            local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
+            assert.equal(expected.io, types.serialize(module_type))
+
+            local interfaces = {}
+            for _, node in ipairs(ast) do
+                assert.equal("Ast.TopLevelInterface", node._tag)
+                local methods = {}
+                for _, method in ipairs(node.methods) do
+                    local params = {}
+                    for _, param in ipairs(method.params) do
+                        params[#params + 1] =
+                            param.name .. ":" .. source_type_name(param.type)
+                    end
+                    local results = {}
+                    for _, result in ipairs(method.rettypes) do
+                        results[#results + 1] = source_type_name(result)
+                    end
+                    methods[#methods + 1] = {
+                        name = method.name,
+                        params = params,
+                        results = results,
+                    }
+                end
+                interfaces[#interfaces + 1] = {
+                    name = node.name,
+                    methods = methods,
+                }
+            end
+
+            local read = {
+                { name = "read", params = {}, results = { "string?" } },
+                {
+                    name = "read_until",
+                    params = { "delimiter:string", "chop:boolean?" },
+                    results = { "string?" },
+                },
+            }
+            local write = {
+                {
+                    name = "write",
+                    params = { "data:string" },
+                    results = {},
+                },
+            }
+            local close = {
+                { name = "close", params = {}, results = {} },
+            }
+            local function joined(...)
+                local result = {}
+                for _, group in ipairs({ ... }) do
+                    for _, method in ipairs(group) do
+                        result[#result + 1] = method
+                    end
+                end
+                return result
+            end
+            assert.same({
+                { name = "Reader", methods = joined(read) },
+                { name = "Writer", methods = joined(write) },
+                { name = "Closer", methods = joined(close) },
+                { name = "ReaderWriter", methods = joined(read, write) },
+                { name = "ReaderCloser", methods = joined(read, close) },
+                { name = "WriterCloser", methods = joined(write, close) },
+                {
+                    name = "ReaderWriterCloser",
+                    methods = joined(read, write, close),
+                },
+            }, interfaces)
+        end)
+
+    it("pins current metadata for the seven pre-existing roots",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
-            assert.equal(7611, #expected.uv)
+            assert.equal(7953, #expected.uv)
 
             local support = require "titan"
             local container = installed_stdlib_container()
@@ -998,12 +1096,54 @@ describe("libuv Makefile configuration", function()
             end
         end)
 
+    it("pins the new titan.io interface metadata and eleven DSO openers",
+        function()
+            local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
+            assert.truthy(expected.io)
+
+            local support = require "titan"
+            local container = installed_stdlib_container()
+            local types_function, load_error = support._loadlib(
+                container, "titan_io_types")
+            assert.truthy(types_function, load_error)
+            assert.equal(expected.io, assert(types_function()))
+
+            local ok, output, why, code = run_argv(tool_argv(
+                "NM", "nm", "-g", container))
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            local wanted = { luaopen_titan = true }
+            for _, module in ipairs(STDLIB_MODULES) do
+                wanted["luaopen_titan_" .. module] = true
+            end
+            local found = {}
+            for line in output:gmatch("[^\r\n]+") do
+                local symbol = line:match("(%S+)%s*$")
+                if symbol and symbol:sub(1, 1) == "_" then
+                    symbol = symbol:sub(2)
+                end
+                if symbol and (symbol == "luaopen_titan" or
+                        symbol:match("^luaopen_titan_")) then
+                    assert.truthy(wanted[symbol],
+                        "unexpected Titan opener " .. symbol)
+                    found[symbol] = true
+                end
+            end
+            assert.equal(11, (function()
+                local count = 0
+                for _ in pairs(found) do count = count + 1 end
+                return count
+            end)())
+            assert.same(wanted, found)
+        end)
+
     it("keeps every uv export with its semantic contributor", function()
         assert.same({}, public_declarations(UV_MAIN_SOURCE))
         assert.same({
-            "uv_file", "_fs_open", "_fs_read", "_fs_write", "_fs_flush",
-            "_fs_is_closed", "_fs_close", "_fs_stat", "_fs_mkdir",
-            "_fs_unlink", "_fs_rmdir", "_fs_rename", "_fs_list",
+            "uv_file", "_fs_open", "_fs_read", "_fs_write",
+            "_fs_flush", "_fs_is_closed", "_fs_validate_read",
+            "_fs_close", "_fs_stat", "_fs_mkdir", "_fs_unlink",
+            "_fs_rmdir", "_fs_rename", "_fs_list",
         }, public_declarations("titan/uv/file.titan"))
         assert.same({
             "_os_getenv", "_os_setenv", "_os_unsetenv", "_os_cwd",
@@ -1012,11 +1152,11 @@ describe("libuv Makefile configuration", function()
             "_os_signal_name",
         }, public_declarations("titan/uv/os.titan"))
         assert.same({
-            "uv_process_t", "_os_process_spawn", "_os_process_wait",
-            "_os_process_kill", "_os_process_write_stdin",
-            "_os_process_close_stdin", "_os_process_read_stdout",
-            "_os_process_read_stderr", "_os_process_read_error_is",
-            "_os_communicate",
+            "uv_pipe_t", "uv_process_t", "_os_process_spawn",
+            "_os_process_pipes", "_os_process_wait", "_os_process_kill",
+            "_os_stream_write", "_os_stream_close",
+            "_os_stream_read", "_os_stream_validate_read",
+            "_os_stream_read_error_is", "_os_communicate",
         }, public_declarations("titan/uv/process.titan"))
         assert.same({
             "Error", "Error.new", "_loop", "_version",
@@ -1111,7 +1251,7 @@ describe("libuv Makefile configuration", function()
             assert.same({
                 "ProcessControl", "PipeControl", "ProcessOperation",
                 "ProcessRequestControl", "ProcessExitResult", "HelperGroup",
-                "uv_pipe_t", "uv_pipe_write_t", "uv_process_grace_t",
+                "uv_pipe_write_t", "uv_process_grace_t",
             }, local_record_declarations("titan/uv/process.titan"))
             assert.same({
                 "Loop", "Runtime", "ByteChunk", "Text", "Buffer",
@@ -1597,8 +1737,8 @@ exit 64
         function()
             local sources = {
                 "titan/coroutine.titan", "titan/async.titan",
-                "titan/timer.titan", "titan/fs.titan", "titan/net.titan",
-                "titan/os.titan", "titan/peg/peg.titan",
+                "titan/timer.titan", "titan/io.titan", "titan/fs.titan",
+                "titan/net.titan", "titan/os.titan", "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
                 "titan/peg/relabel.titan",
                 "titan/peg/relabel_parser.titan",
@@ -1902,6 +2042,7 @@ fi
                 'write_manifest "$manifest" "${artifacts[@]}"',
                 'cmp -s "$manifest" "$restored_manifest"',
                 '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
+                '"$shim_dir/io.lua"',
             }) do
                 assert.truthy(snapshot:find(contract, 1, true), contract)
             end
@@ -1911,6 +2052,7 @@ fi
             for _, contract in ipairs({
                 'local async = import "async"',
                 'local timer = import "timer"',
+                'local titan_io = import "io"',
                 'local fs = import "fs"',
                 'local net = import "net"',
                 'local system = import "os"',
@@ -1922,11 +2064,20 @@ fi
                 'local found = strings.match("regex42", "([0-9]+)")',
                 'strings.find("static\\0string", "\\0str")',
                 'strings.find("a\\0b", "\\0b")',
+                'local builtin_io = require "io"',
+                'local titan_io = require "titan.io"',
+                'assert(require "io" == builtin_io)',
                 "local peer = async.run(",
                 "timer.sleep(0)",
                 "fs.write_file(marker,",
                 "local metadata = fs.stat(marker)",
                 "system.communicate(process_child, process_args, process_payload)",
+                "local process = system.spawn(process_child, process_args)",
+                "local writer: titan_io.WriterCloser = process.stdin",
+                "local reader: titan_io.Reader = process.stdout",
+                "local error_reader: titan_io.Reader = process.stderr",
+                'writer:write(process_payload .. "\\n")',
+                'reader:read_until("\\n", true) == process_payload',
                 'net.connect("127.0.0.1", port)',
                 "system.exepath()",
                 '"$LIBUV_PKG_CONFIG" --static --libs libuv',
@@ -1956,7 +2107,7 @@ fi
             assert.truthy(workflow:find(
                 "ci_test_groups.sh library-peg-string", 1, true), workflow)
             assert.truthy(workflow:find(
-                "for module in coroutine uv async timer fs net os peg string",
+                "for module in coroutine uv async timer io fs net os peg string",
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "--name='titan.peg GC roots patterns and callbacks across " ..

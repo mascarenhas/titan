@@ -49,11 +49,13 @@ end
 A variadic parameter is written `...: t` — the literal three dots, a colon, and
 its element type, with **no name** (the `name: type` declaration style used
 everywhere else, just with no name before the colon). It must be the **last**
-parameter of the function. On a top-level function or a method the element type
-is **mandatory** (there is no inference for it, just as for any parameter); an
+parameter of the function. On a top-level function, a concrete method, or an
+Interface method signature the element type is **mandatory** (there is no
+inference for it, just as for any parameter); an
 [anonymous function](closures.md) may instead write a bare `...` whose element
 type is [inferred from context](#untyped-lambda-vararg). The same form works on
-top-level functions, anonymous functions, and [methods](records.md#methods):
+top-level functions, anonymous functions, concrete methods, and
+[Interface signatures](interfaces.md#declaring-an-interface):
 
 ```lua
 function log(level: string, ...: string)          -- top-level function
@@ -78,8 +80,8 @@ end
 A function may also have *only* the variadic parameter (`function f(...: integer)`),
 or a fixed prefix followed by it (`function f(a: integer, ...: string)`). Because
 the grammar admits `...: t` only as the trailing parameter, and requires the
-`: t` on top-level functions and methods, both rejected forms below are caught as
-**syntax errors** at parse time:
+`: t` on top-level functions and concrete or Interface methods, both rejected
+forms below are caught as **syntax errors** at parse time:
 
 ```lua
 function bad1(...: integer, a: integer)  -- syntax error: nothing may follow ...
@@ -113,7 +115,8 @@ function type, its element type is used; if the context is non-variadic (or
 there is no usable context at all), the bare `...` is a type error (`cannot infer
 the type of '...'`), just like an uninferable untyped parameter. A lambda that
 writes an explicit `...: t` keeps that type regardless of context. Top-level
-functions and methods get no such inference — their `...: t` is mandatory.
+functions and concrete or Interface methods get no such inference — their
+`...: t` is mandatory.
 
 ## `...` is usable only inside its own function
 
@@ -338,7 +341,9 @@ representation mismatch such as `...: integer` into a `...: float` callee is the
 compile-time error `'...' element type integer is not compatible with the
 '...' element type float of function 'sink'` (naming the callee). The
 ordinary scalar `integer -> float` coercion does not lift through a variadic
-run.
+run. A satisfying record/union-to-Interface wrapper coercion likewise does not
+lift through a variadic run; forwarding `...: R` into `...: I` is rejected even
+when `R` directly satisfies `I`.
 
 ## Variadic functions are first-class values
 
@@ -370,6 +375,10 @@ callable adjustment (for example a `(...: value) -> integer` slot holding a
 `(...: integer) -> integer` function) uses the strict generic trailer. A
 plain Lua function instead uses the ordinary Lua call path and dynamic result
 conversion.
+
+Calling a variadic Interface method follows the same rules. Direct calls use
+the Interface signature's fixed prefix and tail; a bound Interface method is an
+ordinary variadic function value whose receiver has already been captured.
 
 `(...: integer) -> integer` and `(...: value) -> integer` are mutually
 **consistent** at their aligned components (gradually, through `value`).

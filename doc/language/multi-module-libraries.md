@@ -63,7 +63,7 @@ their longest common sequence of complete components:
 | `foo.left foo.right` | `foo` | `foo.so`, `foo.a` |
 | `foo.bar.left foo.bar.right` | `foo.bar` | `foo/bar.so`, `foo/bar.a` |
 | `foo foo.bar` | `foo` | `foo.so`, `foo.a` |
-| all nine `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
+| all ten `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
 
 The comparison is component-based: `foo.bar` and `foo.baz` share `foo`, but
 `foo` and `foobar` share no module component. Unrelated roots are therefore an
@@ -92,7 +92,8 @@ Each logical module in a provider still has its own:
 * exported type interface and ABI marker;
 * initializer and `luaopen_*` entry;
 * private module state and once-per-Lua-state initialization guard;
-* module variables, functions, record/union metatables, and nominal names.
+* module variables, functions, record/union/Interface metatables, and nominal
+  names.
 
 Loading one member does not initialize every sibling. Ordinary import edges
 still determine initialization order, and unrelated siblings initialize only
@@ -102,9 +103,9 @@ create a logical module `a.b`; it may contain only `a.b.left` and
 
 Within one Lua state, repeated imports and requires of a logical module return
 that module's one instance. Different Lua states receive independent module
-instances even though the operating system reuses the same mapped DSO. Record
-identity remains the fully qualified logical record/union identity and the
-per-state metatable for that nominal type, not the provider prefix.
+instances even though the operating system reuses the same mapped DSO. Nominal
+identity remains the fully qualified logical record/union/Interface identity
+and the per-state metatable for that nominal type, not the provider prefix.
 
 ## Finding a compiled module in a provider
 
@@ -252,14 +253,13 @@ recorded only an imported module's exact child-DSO pathname and could not
 discover a shallower 0.16 container. The installation creates no compatibility
 child copies for either transition.
 
-ABI 0.20 is a coordinated cutover with the forthcoming Interface feature.
-Interfaces are not source syntax in this relation/Array/function change: a
-relation-only validation image still contains the existing nine standard
-logical modules. Final ABI-0.20 release publication is gated on the Interface
-half, which completes the standard provider at ten logical metadata
-keys/loaders and eleven `luaopen_*` entries (native support plus those ten)
-under the same version rather than advancing it again. Artifacts from the two
-review heads must be rebuilt, not mixed.
+ABI 0.20 also introduces Interfaces. Serialized metadata carries each
+Interface's nominal owner and declaration-order method signatures; each module
+initializes its per-state Interface identities, and generated wrappers,
+vtables, and method trampolines use the new layout. The same version therefore
+covers the Interface, relation, Array-writer, and strict-function-entry changes
+as one clean break. A 0.19 artifact has none of these Interface contracts and
+is rejected rather than adapted.
 
 ## Standalone programs
 
@@ -271,8 +271,8 @@ legal in one program.
 
 ## The standard-library provider
 
-On the relation-only review head, Titan's standard library remains the
-non-published nine-root validation example of this model. One paired provider:
+Titan's standard library is the ten-root production example of this model. One
+paired provider:
 
 ```text
 $ROCKS_TREE/lib/titan/0.20/titan.so
@@ -280,15 +280,16 @@ $ROCKS_TREE/lib/titan/0.20/titan.a
 ```
 
 contains the native support entry plus the independent logical modules
-`titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.fs`,
-`titan.net`, `titan.os`, `titan.peg`, and `titan.string`. Their generated
-logical loaders live at:
+`titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
+`titan.fs`, `titan.net`, `titan.os`, `titan.peg`, and `titan.string`. Their
+generated logical loaders live at:
 
 ```text
 $ROCKS_TREE/share/lua/5.5/titan/coroutine.lua
 $ROCKS_TREE/share/lua/5.5/titan/uv.lua
 $ROCKS_TREE/share/lua/5.5/titan/async.lua
 $ROCKS_TREE/share/lua/5.5/titan/timer.lua
+$ROCKS_TREE/share/lua/5.5/titan/io.lua
 $ROCKS_TREE/share/lua/5.5/titan/fs.lua
 $ROCKS_TREE/share/lua/5.5/titan/net.lua
 $ROCKS_TREE/share/lua/5.5/titan/os.lua
@@ -304,9 +305,3 @@ library. There are
 no production child DSOs, aliases, symbolic links, hard links, or Lua-facing
 copies. `require "titan.async"` and `import "async"` still select the same
 logical module and state; only their physical provider has been combined.
-
-The final coordinated ABI-0.20 publication adds `titan.io` as the tenth
-logical module and publishes its tenth loader/key in this same pair, as
-described under [Compiled compatibility](#compiled-compatibility). The
-nine-root intermediate image is validation evidence for this change, not a
-separately released ABI layout.

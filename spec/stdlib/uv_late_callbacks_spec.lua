@@ -477,14 +477,6 @@ assert(task:join() == "rooted-retry-gc-ok")
 
     describe("filesystem cases", function()
         setup(function()
-            async_stdlib.write_source(workspace, "titan.fs",
-                async_stdlib.read(async_stdlib.repo .. "/titan/fs.titan"))
-            async_stdlib.compile(workspace, "titan.fs", {
-                layout = layout,
-                cppflags = "",
-            })
-            async_stdlib.register_exact_provider(layout, "titan.fs")
-
             async_stdlib.write_source(workspace, "uv_late_fs_callback_cases",
                 LATE_FS_CASES)
             async_stdlib.compile(workspace, "uv_late_fs_callback_cases", {

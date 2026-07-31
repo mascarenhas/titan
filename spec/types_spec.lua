@@ -235,6 +235,524 @@ describe("Titan types", function()
             types.Function({i}, {i}, true, false, false), base))
     end)
 
+    describe("Interface descriptors and direct implementation matching",
+    function()
+        local function method(
+                owner, name, params, results, paramnames,
+                varargtype, flexrettype)
+            return types.Method(
+                owner,
+                name,
+                params or {},
+                results or {},
+                varargtype or false,
+                flexrettype or false,
+                paramnames or {})
+        end
+
+        local function constructor_fails(owner, methods, pattern)
+            local ok, err = pcall(types.Interface, owner, methods)
+            assert.is_false(ok)
+            assert.match(pattern, tostring(err))
+        end
+
+        it("builds one canonical ordered list and name-map projection",
+        function()
+            local owner = "api.Stream"
+            local read = method(
+                owner, "read", {types.Integer()}, {types.String()},
+                {"count"})
+            local close = method(owner, "close")
+            local interface = types.Interface(owner, {read, close})
+
+            assert.equal(2, #interface.methods)
+            assert.is_true(interface.methods[1] == read)
+            assert.is_true(interface.methods[2] == close)
+            assert.is_true(interface.methods.read == read)
+            assert.is_true(interface.methods.close == close)
+            assert.is_true(
+                types.validate_interface_descriptor(interface)
+                    == interface)
+            assert.equal(owner, types.tostring(interface))
+            assert.is_false(types.is_gc(interface))
+            assert.is_false(
+                types.has_tvalue_representation(interface))
+            assert.is_false(types.consistent(
+                interface, interface))
+            assert.is_false(types.gradual_guard(interface))
+            assert.is_false(types.dynamic_coercion(interface))
+            assert.is_false(types.coercion(
+                interface, types.Value()))
+            assert.is_false(types.assignment_adjustment(
+                interface, types.Value()))
+            assert.is_false(types.written_cast(
+                interface, types.Value()))
+
+            local nominal = types.Nominal(owner)
+            assert.is_true(types.is_gc(nominal))
+            assert.is_true(
+                types.has_tvalue_representation(nominal))
+            assert.is_true(types.consistent(
+                nominal, types.Value()))
+        end)
+
+        it("rejects noncanonical Interface constructor input",
+        function()
+            local owner = "api.Stream"
+            local read = method(owner, "read")
+            local close = method(owner, "close")
+
+            constructor_fails(owner, {},
+                "at least one method")
+            constructor_fails(owner, {
+                [1] = read,
+                [3] = close,
+            }, "dense")
+            constructor_fails(owner, {
+                [1] = read,
+                read = read,
+            }, "numeric list keys only")
+            constructor_fails(owner, {
+                read,
+                method(owner, "read"),
+            }, "duplicate method")
+            constructor_fails(owner, {
+                method("other.Stream", "read"),
+            }, "different owner")
+            constructor_fails(owner, {
+                types.StaticMethod(
+                    owner, "read", {}, {},
+                    false, false, {}),
+            }, "not a method descriptor")
+        end)
+
+        it("compares and serializes only canonical declaration order",
+        function()
+            local owner = "api.Stream"
+            local first = types.Interface(owner, {
+                method(owner, "read",
+                    {types.Integer()}, {types.String()}, {"count"}),
+                method(owner, "close"),
+            })
+            local renamed = types.Interface(owner, {
+                method(owner, "read",
+                    {types.Integer()}, {types.String()}, {"n"}),
+                method(owner, "close"),
+            })
+            local reordered = types.Interface(owner, {
+                method(owner, "close"),
+                method(owner, "read",
+                    {types.Integer()}, {types.String()}, {"count"}),
+            })
+            local distinct = types.Interface("other.Stream", {
+                method("other.Stream", "read",
+                    {types.Integer()}, {types.String()}, {"count"}),
+                method("other.Stream", "close"),
+            })
+
+            -- Declaration parameter names support named calls but are not
+            -- part of projected callable identity.
+            assert.is_true(types.equals(first, renamed))
+            assert.is_false(types.equals(first, reordered))
+            assert.is_false(types.equals(first, distinct))
+            assert.is_false(types.consistent(
+                types.Nominal(owner),
+                types.Nominal("other.Stream")))
+
+            local serialized = types.serialize(first)
+            local read_position =
+                assert(serialized:find("'read'", 1, true))
+            local close_position =
+                assert(serialized:find("'close'", 1, true))
+            assert.is_true(read_position < close_position)
+            assert.is_nil(serialized:find("[\"read\"]", 1, true))
+
+            local rebuilt = assert(load(
+                "return " .. serialized, owner, "t", types))()
+            assert.is_true(types.equals(first, rebuilt))
+            assert.is_true(
+                rebuilt.methods.read == rebuilt.methods[1])
+            assert.is_true(
+                rebuilt.methods.close == rebuilt.methods[2])
+            assert.same({"count"},
+                rebuilt.methods.read.paramnames)
+
+            local malformed = types.Interface(owner, {
+                method(owner, "read"),
+            })
+            malformed.methods.read = method(owner, "read")
+            local valid, validation_error =
+                types.validate_interface_descriptor(malformed)
+            assert.is_nil(valid)
+            assert.match("does not reference",
+                validation_error)
+            assert.is_false(types.equals(malformed, malformed))
+            local ok, err = pcall(types.serialize, malformed)
+            assert.is_false(ok)
+            assert.match("malformed Interface descriptor",
+                tostring(err))
+        end)
+
+        it("traverses Interface method signatures for C FFI types",
+        function()
+            local owner = "api.Foreign"
+            local cint =
+                types.CInteger("int", true, 3, 32)
+            local interface = types.Interface(owner, {
+                method(owner, "take", {cint}),
+            })
+
+            assert.is_true(
+                types.first_c_type(interface) == cint)
+            assert.is_true(
+                types.first_c_ffi_type(interface) == cint)
+            local ok, err = pcall(types.serialize, interface)
+            assert.is_false(ok)
+            assert.match("cannot serialize C FFI type int",
+                tostring(err))
+        end)
+
+        it("projects methods without self or parameter-name identity",
+        function()
+            local owner = "api.Stream"
+            local declaration = method(
+                owner, "read",
+                {types.Integer()}, {types.String()}, {"count"},
+                types.Value(), types.Boolean())
+            local renamed = method(
+                owner, "read",
+                {types.Integer()}, {types.String()}, {"n"},
+                types.Value(), types.Boolean())
+            local projected =
+                types.method_function_type(declaration)
+            local other =
+                types.method_function_type(renamed)
+
+            assert.equal("Type.Function", projected._tag)
+            assert.is_false(projected.vararg)
+            assert.is_true(
+                projected.params == declaration.params)
+            assert.is_true(
+                projected.rettypes == declaration.rettypes)
+            assert.is_true(
+                projected.varargtype == declaration.varargtype)
+            assert.is_true(
+                projected.flexrettype == declaration.flexrettype)
+            assert.is_true(types.equals(projected, other))
+        end)
+
+        it("matches record and union methods in Interface order",
+        function()
+            local iname, rname, uname =
+                "api.Consumer", "sample.Record", "sample.Union"
+            local consume_required = method(
+                iname, "consume",
+                {types.Integer(), types.Integer()},
+                {types.Value()}, {"left", "right"})
+            local close_required =
+                method(iname, "close", {}, {}, {"unused"})
+            local interface = types.Interface(
+                iname, {consume_required, close_required})
+
+            local consume = method(
+                rname, "consume",
+                {types.Integer()}, {types.Integer()}, {"renamed"})
+            local close = method(
+                rname, "close", {}, {}, {"different"})
+            local extra = method(rname, "extra")
+            local record = types.Record(
+                rname, {}, {}, {
+                    extra = extra,
+                    close = close,
+                    consume = consume,
+                }, 0)
+
+            local seen_policy
+            local original = types.callable_adjustment
+            types.callable_adjustment = function(source, target, policy)
+                seen_policy = policy
+                return original(source, target, policy)
+            end
+            local ok, implementation = pcall(
+                types.interface_implementation,
+                record, interface, {visibility = "sample"})
+            types.callable_adjustment = original
+            assert.is_true(ok, implementation)
+            assert.equal("interface_implementation",
+                implementation.kind)
+            assert.is_false(implementation.exact)
+            assert.equal(2, #implementation.methods)
+            assert.equal("consume",
+                implementation.methods[1].name)
+            assert.equal(0, implementation.methods[1].index)
+            assert.is_true(
+                implementation.methods[1].concrete == consume)
+            assert.is_false(
+                implementation.methods[1].exact)
+            assert.equal("ignore_argument",
+                implementation.methods[1]
+                    .adjustment.arguments[2].kind)
+            assert.equal("gradual_view",
+                implementation.methods[1]
+                    .adjustment.results[1].adjustment.kind)
+            assert.equal("close",
+                implementation.methods[2].name)
+            assert.is_true(
+                implementation.methods[2].exact)
+            assert.is_false(seen_policy.aligned_coercions)
+
+            local union_consume = method(
+                uname, "consume",
+                {types.Integer(), types.Integer()},
+                {types.Value()}, {"x", "y"})
+            local union_close =
+                method(uname, "close")
+            local union = types.Union(
+                uname, {}, {}, {
+                    consume = union_consume,
+                    close = union_close,
+                }, 0)
+            local union_implementation =
+                assert(types.interface_implementation(
+                    union, interface, {
+                        method_visible = function()
+                            return true
+                        end,
+                    }))
+            assert.is_true(union_implementation.exact)
+            assert.is_true(
+                union_implementation.methods[1].concrete
+                    == union_consume)
+        end)
+
+        it("reports the first ordered shape or visibility failure",
+        function()
+            local iname, rname =
+                "api.Required", "sample.Concrete"
+            local interface = types.Interface(iname, {
+                method(iname, "first"),
+                method(iname, "second"),
+            })
+            local record =
+                types.Record(rname, {}, {}, {}, 0)
+
+            local implementation, failure =
+                types.interface_implementation(
+                    record, interface, {visibility = "sample"})
+            assert.is_false(implementation)
+            assert.equal("missing", failure.reason)
+            assert.equal(1, failure.index)
+            assert.equal("first", failure.name)
+
+            implementation, failure =
+                types.interface_implementation(record, interface)
+            assert.is_false(implementation)
+            assert.equal("missing_visibility", failure.reason)
+
+            local local_first = method(rname, "first")
+            local_first.islocal = true
+            record.methods.first = local_first
+            record.methods.second = method(rname, "second")
+            implementation = assert(
+                types.interface_implementation(
+                    record, interface, {visibility = "sample"}))
+            assert.is_true(implementation.exact)
+
+            implementation, failure =
+                types.interface_implementation(
+                    record, interface, {visibility = "client"})
+            assert.is_false(implementation)
+            assert.equal("inaccessible", failure.reason)
+            assert.equal("first", failure.name)
+        end)
+
+        it("preserves callable nil-fill, tail, and flexible-result actions",
+        function()
+            local iname, rname =
+                "api.Shape", "sample.Shape"
+            local interface = types.Interface(iname, {
+                method(iname, "fill",
+                    {types.Integer()}, {types.Option(types.Integer())}),
+                method(iname, "tail",
+                    {types.Integer(), types.Integer()}),
+            })
+            local fill = method(
+                rname, "fill",
+                {types.Integer(), types.Option(types.Integer())}, {},
+                {}, false, types.Integer())
+            local tail = method(
+                rname, "tail",
+                {types.Integer()}, {}, {},
+                types.Integer(), false)
+            local record = types.Record(
+                rname, {}, {}, {
+                    fill = fill,
+                    tail = tail,
+                }, 0)
+
+            local implementation = assert(
+                types.interface_implementation(
+                    record, interface, {visibility = "sample"}))
+            assert.equal("nil_fill",
+                implementation.methods[1]
+                    .adjustment.arguments[2].kind)
+            assert.equal("flex_to_optional_result",
+                implementation.methods[1]
+                    .adjustment.results[1].kind)
+            assert.is_true(
+                implementation.methods[1]
+                    .adjustment.results[1].wrap_present)
+            assert.equal("argument_to_tail",
+                implementation.methods[2]
+                    .adjustment.arguments[2].kind)
+            assert.equal("empty_tail",
+                implementation.methods[2]
+                    .adjustment.arguments[3].kind)
+        end)
+
+        it("rejects non-method and coercion-only implementation slots",
+        function()
+            local iname, rname =
+                "api.Required", "sample.Concrete"
+            local required = types.Interface(iname, {
+                method(iname, "convert", {},
+                    {types.Float()}),
+            })
+            local numeric_method = method(
+                rname, "convert", {},
+                {types.Integer()})
+            local record = types.Record(
+                rname, {}, {}, {convert = numeric_method}, 0)
+            local implementation, failure =
+                types.interface_implementation(
+                    record, required, {visibility = "sample"})
+            assert.is_false(implementation)
+            assert.equal("incompatible", failure.reason)
+
+            local field = types.Field(
+                rname, "convert", types.Integer(), 0)
+            local field_record =
+                types.Record(rname, {field}, {}, {}, 1)
+            implementation, failure =
+                types.interface_implementation(
+                    field_record, required,
+                    {visibility = "sample"})
+            assert.is_false(implementation)
+            assert.equal("not_method", failure.reason)
+            assert.is_true(failure.member == field)
+
+            local static = types.StaticMethod(
+                rname, "convert", {}, {types.Float()},
+                false, false, {})
+            local static_record =
+                types.Record(rname, {}, {convert = static}, {}, 0)
+            implementation, failure =
+                types.interface_implementation(
+                    static_record, required,
+                    {visibility = "sample"})
+            assert.is_false(implementation)
+            assert.equal("not_method", failure.reason)
+            assert.is_true(failure.member == static)
+        end)
+
+        it("does not recurse through concrete-to-Interface results",
+        function()
+            local iname, rname =
+                "api.Cloneable", "sample.Concrete"
+            local interface = types.Interface(iname, {
+                method(iname, "clone", {},
+                    {types.Nominal(iname)}),
+            })
+            local concrete_result = method(
+                rname, "clone", {},
+                {types.Nominal(rname)})
+            local record = types.Record(
+                rname, {}, {}, {clone = concrete_result}, 0)
+
+            local implementation, failure =
+                types.interface_implementation(
+                    record, interface, {visibility = "sample"})
+            assert.is_false(implementation)
+            assert.equal("incompatible", failure.reason)
+
+            local interface_result = method(
+                rname, "clone", {},
+                {types.Nominal(iname)})
+            record.methods.clone = interface_result
+            implementation = assert(
+                types.interface_implementation(
+                    record, interface, {visibility = "sample"}))
+            assert.is_true(implementation.exact)
+        end)
+
+        it("authorizes only a direct nominal wrapper coercion",
+        function()
+            local iname, rname =
+                "api.Closer", "sample.Concrete"
+            local required =
+                method(iname, "close")
+            local concrete =
+                method(rname, "close")
+            local interface =
+                types.Interface(iname, {required})
+            local record = types.Record(
+                rname, {}, {}, {close = concrete}, 0)
+            local descriptors = {
+                [iname] = interface,
+                [rname] = record,
+            }
+            local calls = 0
+            local policy = {
+                visibility = "sample",
+                interface_coercion = function(source, target, received)
+                    calls = calls + 1
+                    local implementation =
+                        types.interface_implementation(
+                            descriptors[source.fqtn],
+                            descriptors[target.fqtn],
+                            received)
+                    return implementation
+                        and implementation.methods
+                end,
+            }
+            local source, target =
+                types.Nominal(rname), types.Nominal(iname)
+
+            assert.is_false(types.consistent(source, target))
+            assert.is_false(types.coercion(source, target))
+            local coercion = assert(types.coercion(
+                source, target, policy))
+            assert.equal("interface_wrapper", coercion.op)
+            assert.is_true(coercion.source == source)
+            assert.is_true(coercion.target == target)
+            assert.is_true(
+                coercion.methods[1].concrete == concrete)
+            assert.equal(1, calls)
+
+            assert.equal("direct_coercion",
+                assert(types.assignment_adjustment(
+                    source, target, policy)).kind)
+            assert.equal(2, calls)
+            assert.is_false(types.coercion(
+                target, source, policy))
+            assert.equal(3, calls)
+            assert.is_false(types.coercion(
+                types.Array(source),
+                types.Array(target), policy))
+            assert.is_false(types.callable_adjustment(
+                types.Function({}, {source}, false, false, false),
+                types.Function({}, {target}, false, false, false)))
+            assert.equal(3, calls)
+
+            local optional = assert(types.coercion(
+                types.Option(source),
+                types.Option(target), policy))
+            assert.equal("option_map", optional.op)
+            assert.equal("interface_wrapper", optional.inner.op)
+            assert.equal(4, calls)
+        end)
+    end)
+
     describe("separated type relations", function()
         local function fn(params, results, varargtype, flexrettype)
             return types.Function(params or {}, results or {}, false,
@@ -1653,6 +2171,28 @@ describe("Titan types", function()
                 types.COwned(char, false)))
             assert.is_false(types.is_counted_c_character_owner(
                 types.COwned(cint(), true)))
+        end)
+
+        it("does not take an automatic C address of a dynamic value",
+        function()
+            local const_void_pointer =
+                types.CPointer(types.CVoid(), {"const"})
+            local tvalue = types.CStruct(
+                "TValue", "TValue", false, {}, true, false)
+            local const_tvalue_pointer =
+                types.CPointer(tvalue, {"const"})
+            local dynamic = types.Value()
+
+            assert.is_false(types.c_address_coerceable(
+                dynamic, const_void_pointer))
+            assert.is_false(types.c_address_coerceable(
+                dynamic, const_tvalue_pointer))
+            -- Keep the earlier direct-coercion rejection authoritative even
+            -- if addressability grows new C cases later.
+            assert.is_false(types.coercion(
+                dynamic, const_void_pointer))
+            assert.is_false(types.coercion(
+                dynamic, const_tvalue_pointer))
         end)
 
         it("uses C-compatible pointer conversions", function()

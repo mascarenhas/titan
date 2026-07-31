@@ -236,7 +236,7 @@ raised as run-time errors via `luaL_error`:
 | `value` | anything, copied with `setobj2t` | never fails |
 | `T?` | nil, otherwise the same dynamic plan as `T`; in particular `boolean?` uses Lua truthiness for every non-nil value | the base type's message |
 | record or union | a full userdata whose metatable equals the nominal owner's metatable | three-way message, below |
-| Interface (reserved for Interfaces v1) | once enabled, only an existing wrapper with the exact target Interface metatable | `type error, expected <interface> but found %s` |
+| Interface | only an existing wrapper with the exact target Interface metatable; a bare record or union is never discovered dynamically | `type error, expected <interface> but found %s` |
 | function | any Lua value, copied unchanged; exact/strict/Lua dispatch checks it when Titan later calls it | the later call either dispatches or raises Lua's ordinary non-callable error |
 | C integer | strict: integer tag; dynamic: integer or exactly integral float that first fits `lua_Integer`; both then check the C target interval and `_Bool` admits only 0/1 | expected-tag, integer-representation, or target-range error |
 | C float | strict: float tag; dynamic: either numeric tag; both then check the C target range | expected-tag or target-range error |
@@ -488,6 +488,23 @@ dispatch, so a method extracted with `debug` cannot be borrowed onto another
 record or union. Plain Lua can construct and pass union values but cannot
 inspect or mutate their representation.
 
+## Interfaces from Lua
+
+An Interface wrapper is a protected full userdata whose `__index` map exposes
+the Interface's public methods and whose `__newindex` rejects every write. The
+method closure first checks the receiver's exact Interface metatable, applies
+the Interface signature's dynamic argument plans, and then loads the
+declaration-order payload entry. It invokes that entry with wrapper user value
+0 as the concrete owner's `_mod` and user value 1 as the concrete receiver.
+
+Lua can retain and call a wrapper produced by Titan, or pass it back through a
+sink expecting the same nominal Interface. It cannot hand a bare Titan record
+or union to such a sink and ask the boundary to discover an implementation:
+the concrete static type and checked method mapping are no longer available.
+Bound Interface methods use the same three-role closure split as other Titan
+functions, with the wrapper captured before the strict trailer. See
+[Interfaces](interfaces.md#four-dispatch-paths).
+
 ### Identity and tag security
 
 From Lua, a record is a full userdata with stable identity: the same
@@ -688,7 +705,7 @@ eager load. A second Lua state repeats its own cache insertion and promotion
 request while the operating-system loader may reuse the mapped image.
 
 The installed standard layout has paired providers at
-`<root>/lib/titan/0.20/{titan.so,titan.a}` and nine generated shims below
+`<root>/lib/titan/0.20/{titan.so,titan.a}` and ten generated shims below
 `<root>/share/lua/5.5/titan/`; the shims use the DSO form. A direct-libuv
 extension explicitly imports
 `uv` and foreign-imports `uv.h`; Titan runtime initialization loads the
@@ -854,8 +871,9 @@ become structural callable consistency.
 
 On the way **out**, every value has one canonical Lua representation:
 numbers, strings, booleans and nil as-is; Maps as their ordinary Tables;
-Arrays as their proxy Udata; and records/unions as their stable `Udata`. Identity is
-preserved and no container is copied. An exactly branded Titan closure uses
+Arrays as their proxy Udata; records/unions as their stable `Udata`; and
+Interfaces as their nominal wrapper Udata. Identity is preserved and no
+container is copied. An exactly branded Titan closure uses
 the native convention. A branded non-exact Titan closure uses its strict
 adapter; a Lua closure/C function or `__call` object uses Lua's internal call
 machinery and the dynamic boundary plan. Finite calls use a concrete result request;

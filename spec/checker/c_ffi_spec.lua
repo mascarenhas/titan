@@ -134,8 +134,8 @@ describe("C FFI type checking", function()
 
             static int repeat = 3;
             static int interface = 4;
-            static int when(int repeat, type value) {
-                return repeat + value;
+            static int when(int repeat, type interface) {
+                return repeat + interface;
             }
         ]], function(header)
             local ok, err = run_checker([[
@@ -143,7 +143,10 @@ describe("C FFI type checking", function()
 
                 local function read(h: c.ffi_keyword_holder): c.type
                     return h.when + h.interface
-                        + c.when(c.repeat, c.interface)
+                        + c.when {
+                            interface = c.interface,
+                            repeat = c.repeat,
+                        }
                 end
             ]])
             assert.truthy(ok, err)
@@ -395,6 +398,7 @@ describe("C FFI type checking", function()
         with_header([[
             typedef struct TValue TValue;
             extern int ffi_value_pointer(const TValue *value);
+            extern int ffi_void_pointer(const void *value);
             extern TValue ffi_value_array[2];
         ]], function(header)
             local ok, err = run_checker([[
@@ -405,6 +409,7 @@ describe("C FFI type checking", function()
                     local p: const *c.TValue = raw
                     return (c.ffi_value_pointer(raw) as integer)
                         + (c.ffi_value_pointer(p) as integer)
+                        + (c.ffi_void_pointer(raw) as integer)
                 end
 
                 function array_entry(): value
@@ -417,6 +422,15 @@ describe("C FFI type checking", function()
                 local c = foreign import "]] .. header .. [["
                 local function bad(v: value): integer
                     return c.ffi_value_pointer(v)
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("do not match", err)
+
+            ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                local function bad(v: value): integer
+                    return c.ffi_void_pointer(v)
                 end
             ]])
             assert.falsy(ok)

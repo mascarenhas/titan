@@ -217,6 +217,10 @@ union Result
     box: Box
 end
 
+interface Incrementer
+    function add(delta: integer): integer
+end
+
 function Box.make(n: integer): Box
     return Box.new(n)
 end
@@ -273,13 +277,14 @@ function use_everything(): integer
     api.counter = before + 1
     local encoded = api.combine { right = 2, left = 4 }
     local box: api.Alias = api.Box.make { n = encoded }
+    local incrementer: api.Incrementer = box
     local wrap: (api.Box) -> api.Result = api.Result.box
     local result = wrap(box)
     local first: string?, second: string? = api.labels()
     local count = api.sum(1, 2, 3)
     case result
     when box: selected then
-        return selected:add { delta = count }
+        return incrementer:add { delta = count }
     when none then
         return 0
     else
@@ -300,6 +305,11 @@ end
         assert.equal(provider.archive,
             driver.imported["rich.api"].static_archive)
         assert.truthy(types.registry["rich.api.Box"])
+        local interface =
+            assert(types.registry["rich.api.Incrementer"])
+        assert.equal("Type.Interface", interface._tag)
+        assert.equal("add", interface.methods[1].name)
+        assert.is_true(interface.methods.add == interface.methods[1])
         local union = assert(types.registry["rich.api.Result"])
         assert.equal(3, union.nvariants)
         assert.equal(2, #union.variants)
@@ -321,9 +331,18 @@ end
             types.Field("middle.bridge.Link", "box",
                 types.Nominal("right.owner.Box"), 0),
         })
+        local bridge_interface = types.Interface(
+            "middle.bridge.BoxConsumer", {
+                types.Method(
+                    "middle.bridge.BoxConsumer", "consume",
+                    {types.Nominal("right.owner.Box")}, {},
+                    false, false, {"box"}),
+            })
         local bridge = types.Module("middle.bridge", {
             types.ModuleMember(
                 "middle.bridge", "Link", bridge_record, false),
+        }, {
+            BoxConsumer = bridge_interface,
         })
         local facade = facade_interface(
             "left.facade", "Link", "middle.bridge.Link")
@@ -343,6 +362,12 @@ end
         assert.truthy(modtype)
         assert.equal(0, #errors)
         assert.truthy(types.registry["middle.bridge.Link"])
+        local recovered_interface =
+            assert(types.registry["middle.bridge.BoxConsumer"])
+        assert.equal("Type.Interface", recovered_interface._tag)
+        assert.equal("consume", recovered_interface.methods[1].name)
+        assert.equal("right.owner.Box",
+            recovered_interface.methods[1].params[1].fqtn)
         assert.truthy(types.registry["right.owner.Box"])
         assert.is_nil(driver.imported["middle.bridge"])
         assert.is_nil(driver.imported["right.owner"])

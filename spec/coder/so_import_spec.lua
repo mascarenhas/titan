@@ -13,12 +13,41 @@
 -- forced onto the `.so` route. Dependencies are built in order, so an earlier
 -- one can itself be a `.so`-only dependency of a later one (transitive case).
 local h = require 'spec.support.helpers'
-local build_so_chain, call = h.build_so_chain, h.call
+local lfs = require 'lfs'
+local call = h.call
+local generated_modules = {}
+
+local function remove_tree(path)
+    local mode = lfs.symlinkattributes(path, "mode")
+    if mode == "directory" then
+        for name in lfs.dir(path) do
+            if name ~= "." and name ~= ".." then
+                remove_tree(path .. "/" .. name)
+            end
+        end
+        assert(lfs.rmdir(path))
+    elseif mode then
+        assert(os.remove(path))
+    end
+end
+
+local function build_so_chain(modules)
+    for _, module in ipairs(modules) do
+        generated_modules[module.name] = true
+    end
+    return h.build_so_chain(modules)
+end
 
 describe(".so-only cross-module imports", function()
     after_each(function ()
-        os.execute("rm -rf *.o *.so *.dSYM")
-        os.execute("rm -f *.c")
+        for name in pairs(generated_modules) do
+            remove_tree(name .. ".c")
+            remove_tree(name .. ".o")
+            remove_tree(name .. ".so")
+            remove_tree(name .. ".a")
+            remove_tree(name .. ".so.dSYM")
+        end
+        generated_modules = {}
     end)
 
     it("calls a function in a .so-only module", function ()
@@ -33,6 +62,89 @@ describe(".so-only cross-module imports", function()
         })
         assert.truthy(ok, err)
         local rok, out = call("sbar", "assert(sbar.bar() == 42)")
+        assert.truthy(rok, out)
+    end)
+
+    it("dispatches exact and adjusted Interfaces through four .so-only modules",
+       function()
+        local ok, err = build_so_chain({
+            { name = "interface_api", src = [[
+                interface Incrementer
+                    function add(delta: integer): integer
+                end
+
+                interface Dynamic
+                    function convert(input: value): value
+                end
+            ]] },
+            { name = "interface_consumer", src = [[
+                local api = import "interface_api"
+
+                function use(value_: api.Incrementer): integer
+                    local add: (integer) -> integer = value_:add
+                    return add(2)
+                end
+
+                function use_dynamic(
+                    value_: api.Dynamic,
+                    input: value
+                ): value
+                    local convert: (value) -> value = value_:convert
+                    return convert(input)
+                end
+            ]] },
+            { name = "interface_provider", src = [[
+                bias: integer = 1
+
+                record Box
+                    n: integer
+                end
+
+                function Box:add(delta: integer): integer
+                    return self.n + delta + bias
+                end
+
+                function Box:convert(input: integer): integer
+                    return self.n + input + bias
+                end
+            ]] },
+            { name = "interface_bridge", src = [[
+                local api = import "interface_api"
+                local consumer = import "interface_consumer"
+                local provider = import "interface_provider"
+
+                function run(n: integer): integer
+                    local incrementer: api.Incrementer =
+                        provider.Box.new(n)
+                    return consumer.use(incrementer)
+                end
+
+                function run_adjusted(n: integer): integer
+                    local dynamic: api.Dynamic =
+                        provider.Box.new(n)
+                    local converted = consumer.use_dynamic(
+                        dynamic, n as value)
+                    return converted as integer
+                end
+
+                function reject_adjusted(input: value): value
+                    local dynamic: api.Dynamic =
+                        provider.Box.new(1)
+                    return consumer.use_dynamic(dynamic, input)
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+
+        local rok, out = call("interface_bridge", [[
+            assert(interface_bridge.run(40) == 43)
+            assert(interface_bridge.run_adjusted(20) == 41)
+            local ok, err =
+                pcall(interface_bridge.reject_adjusted, 1.0)
+            assert(not ok)
+            assert(tostring(err):find("expected integer", 1, true),
+                tostring(err))
+        ]])
         assert.truthy(rok, out)
     end)
 

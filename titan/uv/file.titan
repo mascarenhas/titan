@@ -144,6 +144,13 @@ function _fs_is_closed(file: uv_file): boolean
   return file.state == FS.file_closed
 end
 
+function _fs_validate_read(file: uv_file)
+  -- Mirror the non-submission prefix of _fs_read so a facade-retained result
+  -- cannot bypass cancellation, stale-generation, closing, or closed checks.
+  validate_file(file, "read from", false)
+  ordinary_task()
+end
+
 function _fs_close(file: uv_file)
   if file.state == FS.file_closed then return end
   validate_file(file, "close", true)

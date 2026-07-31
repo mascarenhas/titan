@@ -3,7 +3,7 @@ local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 
 local STDLIB_MODULES = {
-    "coroutine", "uv", "async", "timer", "fs", "net", "os",
+    "coroutine", "uv", "async", "timer", "io", "fs", "net", "os",
     "peg", "string",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
@@ -485,6 +485,7 @@ describe("standalone-prefix source installation", function()
             "vendor/lpeglabel/testrelabelparser.lua",
             "vendor/lpeglabel/LICENSE",
             "vendor/lpeglabel/UPSTREAM.md",
+            "titan/io.titan",
             "titan/peg/peg.titan",
             "titan/peg/combinators.titan",
             "titan/peg/native.titan",
@@ -714,11 +715,13 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             local provider_path = %q
             local shim_root = %q
             local builtin_coroutine = require "coroutine"
+            local builtin_io = require "io"
             local builtin_os = require "os"
             local titan = require "titan"
             local coroutine = require "titan.coroutine"
             local async = require "titan.async"
             local timer = require "titan.timer"
+            local titan_io = require "titan.io"
             local peg = require "titan.peg"
             local titan_string = require "titan.string"
             local builtin_string = require "string"
@@ -748,6 +751,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             assert(type(uv) == "userdata")
             assert(type(async) == "userdata")
             assert(type(timer) == "userdata")
+            assert(type(titan_io) == "userdata")
             assert(type(fs) == "userdata")
             assert(type(net) == "userdata")
             assert(type(system) == "userdata")
@@ -761,6 +765,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 uv = uv,
                 async = async,
                 timer = timer,
+                io = titan_io,
                 fs = fs,
                 net = net,
                 os = system,
@@ -777,6 +782,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 assert(rawequal(canonical_open(), module))
             end
             assert(require "coroutine" == builtin_coroutine)
+            assert(require "io" == builtin_io)
             assert(require "os" == builtin_os)
             assert(system.pid() > 0)
             local task = async.run(function()

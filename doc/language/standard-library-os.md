@@ -90,19 +90,23 @@ record ExitStatus
   signal_number: integer
 end
 
+record InputStream
+record OutputStream
+
 record Process
+  stdin: OutputStream
+  stdout: InputStream
+  stderr: InputStream
+end
 
 function spawn(file: string, args: {string}): Process
 function Process:wait(): ExitStatus
 function Process:kill(signal: string)
-function Process:write_stdin(data: string)
-function Process:close_stdin()
-function Process:read_stdout(): string?
-function Process:read_stdout_until(delimiter: string,
-                                   chop: boolean?): string?
-function Process:read_stderr(): string?
-function Process:read_stderr_until(delimiter: string,
-                                   chop: boolean?): string?
+function InputStream:read(): string?
+function InputStream:read_until(delimiter: string,
+                                chop: boolean?): string?
+function OutputStream:write(data: string)
+function OutputStream:close()
 ```
 
 Process operations are asynchronous and must run inside an async Task. A Titan
@@ -115,21 +119,30 @@ after `argv[0]`; the library supplies `file` as `argv[0]`. The child inherits
 the current environment and working directory. File and argument strings are
 text and reject embedded NUL before any native resource is created.
 
-Every child has separate stdin, stdout, and stderr pipes. Pipe payloads are
-binary strings and preserve embedded NUL. Nonempty `write_stdin` operations
-are FIFO across Tasks and return only after their native write callback; an
-empty write is a checked no-op. Cancelling a queued write removes it;
-cancelling a submitted write consumes its eventual callback without killing
-the child. On Unix, loading `titan.uv` changes a default `SIGPIPE` disposition
-to ignored so a child that closes stdin produces the ordinary libuv write
-error instead of terminating the parent process. An already ignored signal or
-an application-installed handler is preserved.
+Every child has separate stdin, stdout, and stderr stream records in its three
+public fields. Stream names describe the Titan caller's direction:
+`process.stdin` is an `OutputStream` because Titan writes to the child, while
+`process.stdout` and `process.stderr` are `InputStream` values because Titan
+reads from them. Pipe payloads are binary strings and preserve embedded NUL.
+Nonempty `process.stdin:write(data)` operations are FIFO across Tasks and
+return only after their native write callback; an empty write is a checked
+no-op. Cancelling a queued write removes it; cancelling a submitted write
+consumes its eventual callback without killing the child. On Unix, loading
+`titan.uv` changes a default `SIGPIPE` disposition to ignored so a child that
+closes stdin produces the ordinary libuv write error instead of terminating
+the parent process. An already ignored signal or an application-installed
+handler is preserved.
 
-`close_stdin` is idempotent and ordered after earlier writes. Its first call
-immediately rejects later writes, then cleanup-shields the physical pipe close.
-Closing the write-end pipe is what delivers EOF to the child; socket-style
-half-shutdown is not used. Programs whose child waits for input EOF must call
-it.
+`process.stdin:close()` is idempotent and ordered after earlier writes. Its
+first call immediately rejects later writes, then cleanup-shields the physical
+pipe close. Closing the write-end pipe is what delivers EOF to the child;
+socket-style half-shutdown is not used. Programs whose child waits for input
+EOF must call it.
+
+`InputStream` satisfies the standard `io.Reader` Interface exactly.
+`OutputStream` satisfies `io.Writer`, `io.Closer`, and `io.WriterCloser`
+exactly. These are structural conversions at typed use sites; `Process` itself
+intentionally exposes only `wait` and `kill` methods.
 
 Successful spawn initialization starts continuous reads on stdout and stderr.
 Each pipe retains GC-owned chunks even when no Task is waiting, with no maximum
@@ -139,19 +152,19 @@ cannot start, spawn initialization closes all three pipes, terminates and reaps
 the child, closes its process handle, and reports the original failure instead
 of publishing a partially initialized Process.
 
-`read_stdout()` and `read_stderr()` return that pipe's oldest facade excess
-first. Otherwise they return all native chunks already queued when the
-low-level call is serviced, or wait for the next positive callback. A positive
-batch is nonempty, binary, and timing-dependent. EOF returns `nil` permanently.
-A read error closes that output pipe; after completed chunks have drained, the
-same or an equivalent `async.Error` is raised on every later read.
+`process.stdout:read()` and `process.stderr:read()` return that stream's oldest
+facade excess first. Otherwise they return all native chunks already queued
+when the low-level call is serviced, or wait for the next positive callback. A
+positive batch is nonempty, binary, and timing-dependent. EOF returns `nil`
+permanently. A read error closes that output pipe; after completed chunks have
+drained, the same or an equivalent `async.Error` is raised on every later
+read.
 
-`read_stdout_until(delimiter, chop)` and
-`read_stderr_until(delimiter, chop)` reject an empty delimiter and consume
-through its first occurrence. With `chop` absent or false, an actual delimiter
-is included; with `chop == true`, it is omitted. A chopped delimiter at the
-start returns `""`, not EOF. Bytes after the delimiter remain retained for the
-next call.
+`process.stdout:read_until(delimiter, chop)` and the corresponding
+`process.stderr` call reject an empty delimiter and consume through its first
+occurrence. With `chop` absent or false, an actual delimiter is included; with
+`chop == true`, it is omitted. A chopped delimiter at the start returns `""`,
+not EOF. Bytes after the delimiter remain retained for the next call.
 
 EOF after a nonempty unterminated tail returns that tail unchanged and becomes
 `nil` on later calls. A read error after such a tail likewise returns the tail
@@ -164,6 +177,11 @@ and delimiter methods, so the two pipes can be drained concurrently but a
 second Task cannot enter either read method for the same pipe. Cancelling a
 waiting read detaches only its waiter; the physical read continues and another
 Task may read afterward.
+
+Every stream belongs to the libuv Runtime generation that spawned its child.
+After that Runtime has shut down, reads reject even if the `InputStream`
+facade retained excess, and writes or repeated closes reject as stale instead
+of observing the replacement Runtime.
 
 `wait` returns after the operating system has reaped the child. Only one Task
 may wait at a time; cancelling it does not kill the child, and a replacement

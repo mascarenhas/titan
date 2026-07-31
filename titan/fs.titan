@@ -1,12 +1,15 @@
 local uv = import "uv"
+local str = import "string"
 
 -- Fixed-size reads keep whole-file helpers independent of stat metadata. The
 -- uv middle layer may return a shorter chunk and returns nil only at EOF.
 local READ_CHUNK_BYTES = 64 * 1024
+local MAX_READ_BYTES = 4294967295
 local MAX_STRING_BYTES = 9223372036854775807
 
 record File
   local handle: uv.uv_file
+  local excess: string
 end
 
 record Stat
@@ -31,9 +34,9 @@ local function validated_mode(mode: string): string
   raise "invalid file mode '" .. mode .. "'"
 end
 
--- Titan intentionally has no dependency on Lua's string library here. Joining
--- a chunk tree avoids the quadratic copying of repeatedly appending to one
--- ever-growing string.
+-- Joining a chunk tree avoids the quadratic copying of repeatedly appending
+-- to one ever-growing string. Delimiter search and slicing stay in this
+-- high-level facade through titan.string.
 local function join_chunks(chunks: {string}, first: integer,
                            last: integer): string
   if first > last then return "" end
@@ -43,15 +46,95 @@ local function join_chunks(chunks: {string}, first: integer,
          join_chunks(chunks, middle + 1, last)
 end
 
-function open(path: string, mode: string): File
-  return File.new(uv._fs_open(path, validated_mode(mode)))
+local function restore_chunks(file: File, chunks: {string},
+                              count: integer)
+  if count > 0 then
+    file.excess = join_chunks(chunks, 1, count) .. file.excess
+  end
 end
 
-function File:read(max_bytes: integer): string?
-  if max_bytes <= 0 then
+function open(path: string, mode: string): File
+  return File.new(uv._fs_open(path, validated_mode(mode)), "")
+end
+
+function File:read(max_bytes: integer?): string?
+  local requested = READ_CHUNK_BYTES
+  if max_bytes then requested = max_bytes as integer end
+  if requested <= 0 then
     raise "file read size must be positive"
   end
-  return uv._fs_read(self.handle, max_bytes)
+  if requested > MAX_READ_BYTES then
+    raise "read size exceeds the portable libuv buffer limit"
+  end
+  if #self.excess > 0 then
+    -- Retained bytes do not submit a uv operation, but they must observe the
+    -- same cancellation and File lifecycle checks as an ordinary read.
+    uv._fs_validate_read(self.handle)
+    local length = requested
+    if length > #self.excess then length = #self.excess end
+    local result = str.sub(self.excess, 1, length)
+    self.excess = str.sub(self.excess, length + 1)
+    return result
+  end
+  return uv._fs_read(self.handle, requested)
+end
+
+function File:read_until(delimiter: string,
+                         chop: boolean?): string?
+  if #delimiter == 0 then
+    raise "read delimiter must not be empty"
+  end
+
+  local chunks: {string} = {}
+  local count = 0
+  local total = 0
+  local tail = ""
+  local result: string? = nil
+  local finished = false
+  do
+    while not finished do
+      local maybe_chunk: string? = nil
+      maybe_chunk = self:read()
+      if not maybe_chunk then
+        if total > 0 then result = join_chunks(chunks, 1, count) end
+        finished = true
+      else
+        local chunk = maybe_chunk as string
+        if #chunk == 0 then
+          raise "file read returned an empty non-EOF chunk"
+        end
+
+        count = count + 1
+        chunks[count] = chunk
+        if total > MAX_STRING_BYTES - #chunk then
+          raise "file read result exceeds Titan's string length limit"
+        end
+
+        local boundary = tail .. chunk
+        local match: integer? = str.find(boundary, delimiter)
+        total = total + #chunk
+        if match then
+          local match_end =
+            total - #boundary + (match as integer) - 1 + #delimiter
+          local result_end = match_end
+          if chop then result_end = result_end - #delimiter end
+          local all = join_chunks(chunks, 1, count)
+          result = str.sub(all, 1, result_end)
+          self.excess =
+            str.sub(all, match_end + 1) .. self.excess
+          finished = true
+        else
+          local keep = #delimiter - 1
+          if keep > #boundary then keep = #boundary end
+          tail = str.sub(boundary, #boundary - keep + 1)
+        end
+      end
+    end
+  catch
+    restore_chunks(self, chunks, count)
+    raise
+  end
+  return result
 end
 
 function File:write(data: string): integer
@@ -70,7 +153,15 @@ end
 
 function File:close()
   -- The uv layer coalesces close waiters and cleanup-shields physical close.
-  uv._fs_close(self.handle)
+  -- Clear before yielding so no later facade read can observe old excess,
+  -- then clear again because an earlier queued read_until may finish while
+  -- the low-level File is closing and restore or retain its consumed bytes.
+  self.excess = ""
+  do
+    uv._fs_close(self.handle)
+  finally
+    self.excess = ""
+  end
 end
 
 function File:is_closed(): boolean
@@ -85,7 +176,7 @@ function read_file(path: string): string
   local nchunks = 0
   local total = 0
   while true do
-    local chunk: string? = file:read(READ_CHUNK_BYTES)
+    local chunk: string? = file:read()
     if not chunk then break end
     local bytes = chunk as string
     local length = #bytes

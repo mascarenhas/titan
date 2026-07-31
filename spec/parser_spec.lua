@@ -791,6 +791,12 @@ end
             name = "when",
             _contextual_c_name = true,
         })
+        assert_type_ast("c.interface", {
+            _tag = "Ast.TypeQualName",
+            module = "c",
+            name = "interface",
+            _contextual_c_name = true,
+        })
         assert_expression_ast("c.when", {
             _tag = "Ast.ExpVar",
             var = {
@@ -807,6 +813,14 @@ end
                 _contextual_c_name = true,
             },
         })
+        assert_expression_ast("c.interface", {
+            _tag = "Ast.ExpVar",
+            var = {
+                _tag = "Ast.VarDot",
+                name = "interface",
+                _contextual_c_name = true,
+            },
+        })
 
         local ast = assert_parses_successfuly("local x: c.member = c.member")
         assert.is_nil(ast[1].decl.type._contextual_c_name)
@@ -819,6 +833,8 @@ end
             "function R.when(): nil end",
             "record R when: integer end",
             "union U when end",
+            "function interface(): nil end",
+            "record R interface: integer end",
         }) do
             local rejected = parser.parse("(parser_spec)", source)
             assert.falsy(rejected)
@@ -1731,6 +1747,12 @@ end
                 { name = "when", exp = { value = 2 } },
             } },
         })
+        assert_expression_ast([[ f{ interface = 3 } ]], {
+            _tag = "Ast.ExpCall",
+            args = { _tag = "Ast.ArgsNamedFunc", fields = {
+                { name = "interface", exp = { value = 3 } },
+            } },
+        })
 
         assert_program_syntax_error([[
             function repeat(): nil end
@@ -1850,7 +1872,7 @@ end
     it("desugars standard-library short imports to qualified modules",
        function()
         local names = {
-            "coroutine", "uv", "async", "timer", "fs", "net", "os",
+            "coroutine", "uv", "async", "timer", "io", "fs", "net", "os",
             "peg", "string",
         }
         for _, name in ipairs(names) do
@@ -2137,6 +2159,280 @@ end
             end
         ]])
         assert.falsy(top_case)
+    end)
+
+    it("parses one or several ordered, bodyless interface methods", function()
+        assert_program_ast([[
+            interface Ping
+                function ping()
+            end
+        ]], {
+            {
+                _tag = "Ast.TopLevelInterface",
+                name = "Ping",
+                methods = {
+                    {
+                        _tag = "Ast.InterfaceMethod",
+                        name = "ping",
+                        params = {},
+                        rettypes = {},
+                        flexrettype = false,
+                    },
+                },
+            },
+        })
+
+        local source = table.concat({
+            "interface Reader",
+            "function read(): string?",
+            "function flush()",
+            "function read_until(delimiter: string, chop: boolean?): (string, integer)",
+            "function scan(prefix: string, ...: integer): (boolean, ...: value)",
+            "end",
+        }, "\n")
+        local parsed = assert_parses_successfuly(source)
+
+        assert_is_subset({
+            {
+                _tag = "Ast.TopLevelInterface",
+                name = "Reader",
+                methods = {
+                    {
+                        _tag = "Ast.InterfaceMethod",
+                        name = "read",
+                        params = {},
+                        rettypes = {
+                            {
+                                _tag = "Ast.TypeOption",
+                                basetype = { _tag = "Ast.TypeString" },
+                            },
+                        },
+                        flexrettype = false,
+                    },
+                    {
+                        _tag = "Ast.InterfaceMethod",
+                        name = "flush",
+                        params = {},
+                        rettypes = {},
+                        flexrettype = false,
+                    },
+                    {
+                        _tag = "Ast.InterfaceMethod",
+                        name = "read_until",
+                        params = {
+                            {
+                                _tag = "Ast.Decl",
+                                name = "delimiter",
+                                type = { _tag = "Ast.TypeString" },
+                            },
+                            {
+                                _tag = "Ast.Decl",
+                                name = "chop",
+                                type = {
+                                    _tag = "Ast.TypeOption",
+                                    basetype = { _tag = "Ast.TypeBoolean" },
+                                },
+                            },
+                        },
+                        rettypes = {
+                            { _tag = "Ast.TypeString" },
+                            { _tag = "Ast.TypeInteger" },
+                        },
+                        flexrettype = false,
+                    },
+                    {
+                        _tag = "Ast.InterfaceMethod",
+                        name = "scan",
+                        params = {
+                            {
+                                _tag = "Ast.Decl",
+                                name = "prefix",
+                                type = { _tag = "Ast.TypeString" },
+                            },
+                            {
+                                _tag = "Ast.Decl",
+                                name = false,
+                                type = { _tag = "Ast.TypeInteger" },
+                            },
+                        },
+                        rettypes = {
+                            { _tag = "Ast.TypeBoolean" },
+                        },
+                        flexrettype = { _tag = "Ast.TypeValue" },
+                    },
+                },
+            },
+        }, parsed)
+
+        local interface = parsed[1]
+        assert.are.same({
+            filename = "(parser_spec)",
+            line = 1,
+            col = 1,
+        }, interface.loc)
+        assert.are.same({
+            filename = "(parser_spec)",
+            line = 2,
+            col = 1,
+        }, interface.methods[1].loc)
+        assert.are.same({
+            filename = "(parser_spec)",
+            line = 2,
+            col = 18,
+        }, interface.methods[1].rettypes[1].loc)
+        assert.are.same({
+            filename = "(parser_spec)",
+            line = 4,
+            col = 21,
+        }, interface.methods[3].params[1].loc)
+        assert.are.same({
+            filename = "(parser_spec)",
+            line = 5,
+            col = 31,
+        }, interface.methods[4].params[2].loc)
+    end)
+
+    it("preserves duplicate interface method declarations for the checker",
+    function()
+        local parsed = assert_parses_successfuly([[
+            interface Duplicate
+                function same()
+                function same(item: integer): nil
+            end
+        ]])
+        assert.are.equal(2, #parsed[1].methods)
+        assert.are.equal("same", parsed[1].methods[1].name)
+        assert.are.equal("same", parsed[1].methods[2].name)
+    end)
+
+    it("does not apply the parameter/expression list cap to interface methods",
+    function()
+        local source = { "interface Many" }
+        local method_count = 140
+        for i = 1, method_count do
+            source[#source + 1] = string.format("function method_%d()", i)
+        end
+        source[#source + 1] = "end"
+
+        local parsed = assert_parses_successfuly(table.concat(source, "\n"))
+        assert.are.equal(method_count, #parsed[1].methods)
+        assert.are.equal("method_1", parsed[1].methods[1].name)
+        assert.are.equal(
+            "method_" .. method_count,
+            parsed[1].methods[method_count].name)
+    end)
+
+    it("rejects invalid interface declaration and member forms", function()
+        local cases = {
+            {
+                [[interface Empty
+end]],
+                "MethodInterface",
+            },
+            {
+                [[local interface Local
+function f()
+end]],
+                "LocalInterface",
+            },
+            {
+                [[interface I
+local function f()
+end]],
+                "LocalInterfaceMethod",
+            },
+            {
+                [[interface I
+function I:f()
+end]],
+                "LParInterfaceMethod",
+            },
+            {
+                [[interface I
+function f(): integer
+return 1
+end
+end]],
+                "MemberInterface",
+            },
+            {
+                [[interface I
+function f()
+value: integer
+end]],
+                "MemberInterface",
+            },
+            {
+                [[interface I
+function I.make()
+end]],
+                "LParInterfaceMethod",
+            },
+            {
+                [[interface I
+function I.new()
+end]],
+                "LParInterfaceMethod",
+            },
+            {
+                [[function outer(): nil
+interface Nested
+function f()
+end
+end]],
+                "NestedInterface",
+            },
+            {
+                [[interface
+function f()
+end]],
+                "NameInterface",
+            },
+            {
+                [[interface I
+function ()
+end]],
+                "NameInterfaceMethod",
+            },
+            {
+                [[interface I
+function f: nil
+end]],
+                "LParInterfaceMethod",
+            },
+            {
+                [[interface I
+function f(value: integer: nil
+end]],
+                "RParInterfaceMethod",
+            },
+            {
+                [[interface I
+function f():
+end]],
+                "TypeInterfaceMethod",
+            },
+            {
+                [[interface I
+function f()]],
+                "EndInterface",
+            },
+        }
+
+        for _, case in ipairs(cases) do
+            assert_program_syntax_error(case[1], case[2])
+        end
+
+        -- With no body, the first `end` necessarily closes the interface.
+        -- A second one therefore proves that a per-method `end` is not
+        -- silently accepted as part of the interface declaration.
+        local parsed = parser.parse("(parser_spec)", [[
+            interface I
+                function f()
+                end
+            end
+        ]])
+        assert.falsy(parsed)
     end)
 
     it("can parse public and local type aliases", function()

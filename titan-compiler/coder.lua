@@ -221,6 +221,28 @@ function coder._bound_method_strictname(typ)
     return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG .. "_boundstrict"
 end
 
+-- Interface method artifacts live in the Interface owner's translation unit.
+-- Direct Titan calls dispatch through the wrapper payload inline. The generic
+-- Lua method entry remains file-local; only the three first-class bound-method
+-- roles need stable exported C symbols.
+function coder._interface_method_luaname(typ)
+    return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG .. "_interfacelua"
+end
+
+function coder._interface_bound_method_name(typ)
+    return fname_prefix(typ) .. "_interface_boundmethod"
+end
+
+function coder._interface_bound_method_luaname(typ)
+    return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG
+        .. "_interface_boundlua"
+end
+
+function coder._interface_bound_method_strictname(typ)
+    return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG
+        .. "_interface_boundstrict"
+end
+
 local function modprefix(modname)
     return mangle_qn(modname) .. "_"
 end
@@ -284,6 +306,17 @@ function coder.external_symbols(modname, ast)
                     owner .. " bound Lua entry")
                 add(coder._bound_method_strictname(node._type),
                     owner .. " bound strict entry")
+            elseif node._tag == "Ast.TopLevelInterface" then
+                for _, method in ipairs(node._type.methods) do
+                    local owner = "interface method '" .. method.fqtn
+                        .. ":" .. method.name .. "'"
+                    add(coder._interface_bound_method_name(method),
+                        owner .. " bound entry")
+                    add(coder._interface_bound_method_luaname(method),
+                        owner .. " bound Lua entry")
+                    add(coder._interface_bound_method_strictname(method),
+                        owner .. " bound strict entry")
+                end
             end
         end
     end
@@ -338,6 +371,29 @@ function coder.interface_external_symbols(modname, modtype)
             end
         end
     end
+    -- Interfaces are type-only module members. They are published directly in
+    -- Type.Module.type_members and deliberately never occupy a value-facing
+    -- ModuleMember or module-userdata prefix slot.
+    local interface_names = {}
+    for name, typ in pairs(modtype.type_members or {}) do
+        if typ._tag == "Type.Interface" then
+            interface_names[#interface_names + 1] = name
+        end
+    end
+    table.sort(interface_names, util.bytewise_less)
+    for _, name in ipairs(interface_names) do
+        local interface = modtype.type_members[name]
+        for _, method in ipairs(interface.methods) do
+            local owner = "interface method '" .. method.fqtn
+                .. ":" .. method.name .. "'"
+            add(coder._interface_bound_method_name(method),
+                owner .. " bound entry")
+            add(coder._interface_bound_method_luaname(method),
+                owner .. " bound Lua entry")
+            add(coder._interface_bound_method_strictname(method),
+                owner .. " bound strict entry")
+        end
+    end
     return symbols
 end
 
@@ -364,7 +420,7 @@ local function anon_qualname(loc)
 end
 
 -- Get the module uservalue slot holding the canonical metatable for this
--- nominal type. Records and unions share the Type.Nominal value
+-- nominal type. Records, unions, and Interfaces share the Type.Nominal value
 -- representation, but their registry keys are intentionally distinct; retain
 -- the owner kind beside the slot so imported recovery uses the right key.
 -- `ctx` may be a per-function context (has `.tlcontext`) or the top-level
@@ -379,11 +435,14 @@ local function type2metatable(ctx, typ --[[:table]])
     if not entry then
         local owner = assert(types.registry[typ.fqtn],
             "nominal type is missing from the registry: " .. typ.fqtn)
-        assert(owner._tag == "Type.Record" or owner._tag == "Type.Union",
+        assert(owner._tag == "Type.Record" or owner._tag == "Type.Union"
+               or owner._tag == "Type.Interface",
             "invalid nominal owner " .. owner._tag)
         entry = {
             slot = nextupvalue(tlcontext),
-            kind = owner._tag == "Type.Record" and "record" or "union",
+            kind = owner._tag == "Type.Record" and "record"
+                or owner._tag == "Type.Union" and "union"
+                or "interface",
         }
         ctx.metatables[typ.fqtn] = entry
     end
@@ -396,6 +455,9 @@ end
 -- representation remains Table*: only boxed/Lua-facing conversions consult
 -- this cached pointer.
 function array_metatable(ctx)
+    if ctx.interface_adapter_array_metatable then
+        return ctx.interface_adapter_array_metatable
+    end
     local tlcontext = ctx.tlcontext or ctx
     assert(tlcontext.array_metatable_upvalue,
         "Array metatable slot was not allocated")
@@ -453,6 +515,33 @@ local function owned_c_metatable(ctx, typ)
         tlcontext.owned_c_metatables[key] = entry
     end
     return entry.slot
+end
+
+-- Most generated code reaches nominal/owned-C identities through module
+-- uservalue slots. A private Interface adapter may be emitted in a third
+-- bridge module while its `_mod` operand is deliberately the concrete
+-- owner's module. Such an adapter resolves the identities it needs from the
+-- per-state registry on entry and supplies stack-neutral local expressions
+-- through these two override maps.
+function coder._nominal_metatable_expr(ctx, typ)
+    local overrides = ctx.interface_adapter_nominal_metatables
+    if overrides and overrides[typ.fqtn] then
+        return overrides[typ.fqtn]
+    end
+    return render("hvalue(&_mod->uv[$I].uv)", {
+        I = c_integer_literal(type2metatable(ctx, typ)),
+    })
+end
+
+function coder._owned_c_metatable_expr(ctx, typ)
+    local key = owned_c_metatable_key(typ)
+    local overrides = ctx.interface_adapter_owned_c_metatables
+    if overrides and overrides[key] then
+        return overrides[key]
+    end
+    return render("hvalue(&_mod->uv[$I].uv)", {
+        I = c_integer_literal(owned_c_metatable(ctx, typ)),
+    })
 end
 
 -- Get the C identifier of the `static const void *` holding the type tag for a
@@ -632,7 +721,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
     elseif typ._tag == "Type.COwned" then
         return render([[
             if (TITAN_LIKELY(ttisfulluserdata($EXP)
-                    && uvalue($EXP)->metatable == hvalue(&_mod->uv[$META].uv))) {
+                    && uvalue($EXP)->metatable == $META)) {
                 $VAR = uvalue($EXP);
             } else {
                 $THROW
@@ -640,7 +729,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         ]], {
             EXP = exp,
             VAR = cvar,
-            META = c_integer_literal(owned_c_metatable(ctx, typ)),
+            META = coder._owned_c_metatable_expr(ctx, typ),
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
@@ -727,7 +816,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
               $THROWPRIM
             }
         ]], {
-            MT = render("hvalue(&_mod->uv[$I].uv)", { I = c_integer_literal(type2metatable(ctx, typ)) }),
+            MT = coder._nominal_metatable_expr(ctx, typ),
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
@@ -1545,8 +1634,11 @@ function coder._checked_coercion_plan_impl(
                and target._tag == "Type.Nominal"
                and type(coercion.methods) == "table",
             use .. " has a mismatched Interface-wrapper operation")
-        error(use
-            .. " reached Interface-wrapper lowering before Interfaces v1")
+        -- The scalar operation is representation-changing and must be paired
+        -- with the richer cast-site `_interface_conversion` annotation. This
+        -- validator only proves that the ordinary coercion tree retained the
+        -- expected endpoint/op; expression lowering validates and consumes the
+        -- canonical descriptors, ordered mappings, and exactness marker.
     else
         error(use .. " has unknown/mismatched operation " .. tostring(op))
     end
@@ -1998,6 +2090,19 @@ function coder._checked_written_cast_plan(
             cast.view, source, target, use .. " gradual view")
         assert(cast.guard == cast.view.guard,
             use .. " gradual guard differs from its view plan")
+    elseif cast.op == "interface_downcast" then
+        local source_base = source._tag == "Type.Option"
+            and source.base or source
+        local source_owner = source_base._tag == "Type.Nominal"
+            and types.registry[source_base.fqtn] or nil
+        local target_owner = target._tag == "Type.Nominal"
+            and types.registry[target.fqtn] or nil
+        assert(source_owner
+               and source_owner._tag == "Type.Interface"
+               and target_owner
+               and (target_owner._tag == "Type.Record"
+                    or target_owner._tag == "Type.Union"),
+            use .. " has a mismatched Interface downcast")
     else
         error(use .. " has unknown operation " .. tostring(cast.op))
     end
@@ -3148,6 +3253,2075 @@ local function materialize(ctx, node)
     return materialize_code(ctx, node._type, stats, exp)
 end
 
+function coder._interface_owner_module_expr(ctx, owner)
+    assert(owner and type(owner.name) == "string",
+        "Interface concrete/owner descriptor has no qualified name")
+    local module = assert(owner.name:match("^(.*)%.[^.]+$"),
+        "nominal owner is not module-qualified: " .. owner.name)
+    if module == ctx.module then return "_mod" end
+    if not ctx.modules[module] then
+        ctx.modules[module] = nextupvalue(ctx.tlcontext)
+    end
+    return render("uvalue(&_mod->uv[$INDEX].uv)", {
+        INDEX = c_integer_literal(ctx.modules[module]),
+    })
+end
+
+function coder._interface_closed_record(value, allowed, use)
+    assert(type(value) == "table", use .. " is not a table")
+    for key in pairs(value) do
+        assert(allowed[key] == true,
+            use .. " has unknown field " .. tostring(key))
+    end
+end
+
+function coder._interface_dense_list(value, use)
+    assert(type(value) == "table", use .. " is not a list")
+    local count = #value
+    for key in pairs(value) do
+        assert(type(key) == "number"
+               and key >= 1 and key <= count
+               and key == math.floor(key),
+            use .. " is not a closed dense list")
+    end
+    return count
+end
+
+function coder._interface_frozen_value_equal(actual, expected)
+    if type(actual) ~= type(expected) then return false end
+    if type(expected) ~= "table" then return actual == expected end
+    if expected._tag and expected._tag:match("^Type%.") then
+        return actual._tag ~= nil and types.equals(actual, expected)
+    end
+    for key, value in pairs(expected) do
+        if not coder._interface_frozen_value_equal(actual[key], value) then
+            return false
+        end
+    end
+    for key in pairs(actual) do
+        if expected[key] == nil then return false end
+    end
+    return true
+end
+
+function coder._interface_adapter_is_gc(typ)
+    if typ == false or typ == nil then return false end
+    local normalized = types.normalize(typ)
+    return normalized ~= nil and types.is_gc(normalized) or false
+end
+
+function coder._interface_injection_may_relocate(typ)
+    typ = types.normalize(typ)
+    if not typ then return false end
+    if typ._tag == "Type.Array" then return true end
+    if typ._tag == "Type.Option" then
+        return coder._interface_injection_may_relocate(typ.base)
+    end
+    return false
+end
+
+function coder._validate_interface_frozen_guard(
+        guard, target, use, seen)
+    target = assert(types.normalize(target),
+        use .. " has an unnormalizable target")
+    coder._interface_closed_record(guard, {
+        kind = true, op = true, target = true,
+        element = true, key = true, value = true,
+        inner = true, name = true,
+    }, use)
+    assert(guard.kind == "gradual_guard"
+           and guard.target
+           and types.equals(guard.target, target),
+        use .. " has a mismatched target")
+
+    seen = seen or {}
+    assert(not seen[guard], use .. " contains a recursive guard cycle")
+    seen[guard] = true
+    local tag = target._tag
+    if tag == "Type.Array" then
+        assert(guard.op == "array"
+               and guard.element
+               and guard.key == nil and guard.value == nil
+               and guard.inner == nil and guard.name == nil,
+            use .. " has a malformed Array guard")
+        coder._validate_interface_frozen_guard(
+            guard.element, target.elem, use .. " Array element", seen)
+    elseif tag == "Type.Map" then
+        assert(guard.op == "map"
+               and guard.key and guard.value
+               and guard.element == nil
+               and guard.inner == nil and guard.name == nil,
+            use .. " has a malformed Map guard")
+        coder._validate_interface_frozen_guard(
+            guard.key, target.keys, use .. " Map key", seen)
+        coder._validate_interface_frozen_guard(
+            guard.value, target.values, use .. " Map value", seen)
+    elseif tag == "Type.Option" then
+        assert(guard.op == "option"
+               and guard.inner
+               and guard.element == nil
+               and guard.key == nil and guard.value == nil
+               and guard.name == nil,
+            use .. " has a malformed Option guard")
+        coder._validate_interface_frozen_guard(
+            guard.inner, target.base, use .. " Option value", seen)
+    elseif tag == "Type.Nominal"
+           or tag == "Type.Record"
+           or tag == "Type.Union" then
+        local name = target.fqtn or target.name
+        assert(guard.op == "nominal" and guard.name == name
+               and guard.element == nil
+               and guard.key == nil and guard.value == nil
+               and guard.inner == nil,
+            use .. " has a malformed nominal guard")
+    else
+        local expected = types.is_c_tvalue(target)
+            and "c_tvalue" or coder._gradual_op_for_tag[tag]
+        assert(expected and guard.op == expected
+               and guard.element == nil
+               and guard.key == nil and guard.value == nil
+               and guard.inner == nil and guard.name == nil,
+            use .. " has a malformed leaf guard")
+    end
+    seen[guard] = nil
+end
+
+function coder._validate_interface_adapter_operation(
+        operation, declared_source, declared_target, use, seen)
+    coder._interface_closed_record(operation, {
+        kind = true, mode = true,
+        source = true, target = true,
+        declared_source = true, declared_target = true,
+        timing = true, may_raise = true, may_relocate = true,
+        guard = true, callable = true,
+    }, use)
+    local source = assert(types.normalize(declared_source),
+        use .. " has an unnormalizable declared source")
+    local target = assert(types.normalize(declared_target),
+        use .. " has an unnormalizable declared target")
+    assert(operation.source and operation.target
+           and operation.declared_source
+           and operation.declared_target
+           and types.equals(operation.source, source)
+           and types.equals(operation.target, target)
+           and types.equals(
+               types.normalize(operation.declared_source), source)
+           and types.equals(
+               types.normalize(operation.declared_target), target),
+        use .. " changes its frozen endpoints")
+
+    if operation.kind == "identity" then
+        assert(types.equals(source, target)
+               and operation.mode == nil
+               and operation.timing == "immediate"
+               and operation.may_raise == false
+               and operation.may_relocate == false
+               and operation.guard == nil
+               and operation.callable == nil,
+            use .. " has a malformed identity operation")
+    elseif operation.kind == "gradual_inject" then
+        local relocates =
+            coder._interface_injection_may_relocate(source)
+        assert(target._tag == "Type.Value"
+               and operation.mode == nil
+               and operation.timing == "immediate"
+               and operation.may_raise == relocates
+               and operation.may_relocate == relocates
+               and operation.guard == nil
+               and operation.callable == nil,
+            use .. " has a malformed gradual injection")
+    elseif operation.kind == "gradual_guard" then
+        local delayed = operation.mode == "structural"
+            and target._tag ~= "Type.Option"
+        assert((operation.mode == "project"
+                or operation.mode == "structural")
+               and operation.timing == (delayed
+                    and "delayed_observation" or "immediate")
+               and operation.may_raise == not delayed
+               and operation.may_relocate == not delayed
+               and operation.guard ~= nil
+               and operation.callable == nil,
+            use .. " has a malformed gradual guard")
+        coder._validate_interface_frozen_guard(
+            operation.guard, target, use .. " guard", {})
+        -- Keep the central strict helper's closed low-level representation
+        -- check as a second assertion, without asking any type relation.
+        coder._checked_gradual_guard(
+            operation.guard, target, use .. " guard")
+    elseif operation.kind == "callable_view" then
+        assert(source._tag == "Type.Function"
+               and target._tag == "Type.Function"
+               and operation.mode == nil
+               and operation.timing == "delayed_call"
+               and operation.may_raise == false
+               and operation.may_relocate == false
+               and operation.guard == nil
+               and operation.callable ~= nil,
+            use .. " has a malformed callable view")
+        coder._validate_interface_callable_actions(
+            operation.callable, source, target,
+            use .. " callable view", seen)
+    else
+        error(use .. " has unknown operation "
+            .. tostring(operation.kind))
+    end
+    return operation
+end
+
+function coder._validate_interface_adapter_action(
+        action, expected, operation_source, operation_target, use, seen)
+    assert(type(action) == "table", use .. " is not a table")
+    local allowed = {}
+    for key in pairs(expected) do allowed[key] = true end
+    local has_operation = operation_source ~= nil
+    if has_operation then allowed.operation = true end
+    coder._interface_closed_record(action, allowed, use)
+    if has_operation then
+        assert(action.operation ~= nil,
+            use .. " lacks its frozen component operation")
+        coder._validate_interface_adapter_operation(
+            action.operation, operation_source, operation_target,
+            use .. " operation", seen)
+        expected.rebase_after = action.operation.may_relocate
+    end
+    for key, value in pairs(expected) do
+        assert(coder._interface_frozen_value_equal(action[key], value),
+            use .. " has a mismatched " .. tostring(key))
+    end
+    if has_operation then
+        assert(action.rebase_after
+               == action.operation.may_relocate,
+            use .. " has a mismatched rebase marker")
+    else
+        assert(action.operation == nil
+               and action.rebase_after == false,
+            use .. " has an unexpected component operation")
+    end
+end
+
+function coder._interface_expected_action(
+        kind, order, phase, source_type, target_type, extra)
+    local expected = {
+        kind = kind,
+        order = order,
+        id = phase .. ":" .. tostring(order),
+        phase = phase,
+        source_type = source_type,
+        target_type = target_type,
+        source_gc =
+            coder._interface_adapter_is_gc(source_type),
+        destination_gc =
+            coder._interface_adapter_is_gc(target_type),
+        rebase_after = false,
+    }
+    for key, value in pairs(extra or {}) do expected[key] = value end
+    return expected
+end
+
+function coder._validate_interface_callable_actions(
+        callable, source, target, use, seen)
+    coder._interface_closed_record(callable, {
+        kind = true, source = true, target = true,
+        exact = true, arguments = true, results = true,
+    }, use)
+    assert(source._tag == "Type.Function"
+           and target._tag == "Type.Function"
+           and callable.kind == "interface_callable_actions"
+           and callable.source and callable.target
+           and types.equals(callable.source, source)
+           and types.equals(callable.target, target)
+           and callable.exact == types.equals(source, target),
+        use .. " has mismatched callable signatures")
+    coder._interface_dense_list(
+        callable.arguments, use .. " arguments")
+    coder._interface_dense_list(
+        callable.results, use .. " results")
+
+    seen = seen or {}
+    assert(not seen[callable],
+        use .. " contains a recursive callable cycle")
+    seen[callable] = true
+
+    local ai = 0
+    local function argument(kind, source_type, target_type, extra,
+            operation_source, operation_target)
+        ai = ai + 1
+        local expected = coder._interface_expected_action(
+            kind, ai, "argument", source_type, target_type, extra)
+        coder._validate_interface_adapter_action(
+            callable.arguments[ai], expected,
+            operation_source, operation_target,
+            use .. " argument " .. tostring(ai), seen)
+    end
+
+    local shared = math.min(#source.params, #target.params)
+    for index = 1, shared do
+        argument("argument",
+            target.params[index], source.params[index], {
+                expected_index = index,
+                actual_index = index,
+                source_kind = "interface_fixed",
+                destination_kind = "concrete_fixed",
+            }, target.params[index], source.params[index])
+    end
+    for index = #target.params + 1, #source.params do
+        if target.varargtype then
+            argument("tail_or_nil_to_argument",
+                target.varargtype, source.params[index], {
+                    actual_index = index,
+                    expected_tail_offset =
+                        index - #target.params,
+                    source_kind = "interface_tail",
+                    source_open = true,
+                    destination_kind = "concrete_fixed",
+                    missing_arm = {
+                        kind = "nil_fill",
+                        admissible = true,
+                        target_type = source.params[index],
+                    },
+                    present_arm = "operation",
+                }, target.varargtype, source.params[index])
+        else
+            argument("nil_fill",
+                types.Nil(), source.params[index], {
+                    actual_index = index,
+                    source_kind = "constant_nil",
+                    destination_kind = "concrete_fixed",
+                    admissible = true,
+                    missing_arm = {
+                        kind = "nil_fill",
+                        admissible = true,
+                        target_type = source.params[index],
+                    },
+                })
+        end
+    end
+    for index = #source.params + 1, #target.params do
+        if source.varargtype then
+            argument("argument_to_tail",
+                target.params[index], source.varargtype, {
+                    expected_index = index,
+                    source_kind = "interface_fixed",
+                    destination_kind = "concrete_tail",
+                    destination_open = true,
+                }, target.params[index], source.varargtype)
+        else
+            argument("ignore_argument",
+                target.params[index], false, {
+                    expected_index = index,
+                    source_kind = "interface_fixed",
+                    destination_kind = "discard",
+                    destination_gc = false,
+                    effect = "evaluate_and_discard",
+                })
+        end
+    end
+    if source.varargtype and target.varargtype then
+        argument("tail_to_tail",
+            target.varargtype, source.varargtype, {
+                expected_tail_consumed =
+                    math.max(0, #source.params - #target.params),
+                source_kind = "interface_tail",
+                source_open = true,
+                destination_kind = "concrete_tail",
+                destination_open = true,
+            }, target.varargtype, source.varargtype)
+    elseif source.varargtype then
+        argument("empty_tail", false, source.varargtype, {
+            source_kind = "empty",
+            destination_kind = "concrete_tail",
+            source_gc = false,
+            destination_open = true,
+            count = 0,
+        })
+    elseif target.varargtype then
+        argument("ignore_tail", target.varargtype, false, {
+            expected_tail_consumed =
+                math.max(0, #source.params - #target.params),
+            source_kind = "interface_tail",
+            source_open = true,
+            destination_kind = "discard",
+            destination_gc = false,
+            effect = "evaluate_run_and_discard",
+        })
+    end
+    assert(ai == #callable.arguments,
+        use .. " has extra argument actions")
+
+    local ri = 0
+    local function result(kind, source_type, target_type, extra,
+            operation_source, operation_target)
+        ri = ri + 1
+        local expected = coder._interface_expected_action(
+            kind, ri, "result", source_type, target_type, extra)
+        coder._validate_interface_adapter_action(
+            callable.results[ri], expected,
+            operation_source, operation_target,
+            use .. " result " .. tostring(ri), seen)
+    end
+
+    for index, expected_type in ipairs(target.rettypes) do
+        local actual_type = source.rettypes[index]
+        if actual_type then
+            result("result", actual_type, expected_type, {
+                actual_index = index,
+                expected_index = index,
+                source_kind = "concrete_fixed",
+                destination_kind = "interface_fixed",
+            }, actual_type, expected_type)
+        else
+            assert(source.flexrettype,
+                use .. " has a fixed result without a source")
+            local optional = expected_type._tag == "Type.Option"
+            local wraps =
+                callable.results[ri + 1].wrap_present == true
+            local operation_target =
+                wraps and expected_type.base or expected_type
+            result(optional and "flex_to_optional_result"
+                    or "flex_to_result",
+                source.flexrettype, expected_type, {
+                    expected_index = index,
+                    actual_flex_offset =
+                        index - #source.rettypes,
+                    source_kind = "concrete_flex",
+                    source_open = true,
+                    destination_kind = "interface_fixed",
+                    operation_target_type = operation_target,
+                    missing_arm = {
+                        kind = optional and "nil_fill"
+                            or "raise_missing_result",
+                        target_type = expected_type,
+                    },
+                    present_arm = {
+                        kind = "operation",
+                        wrap_present = wraps,
+                        target_type = operation_target,
+                    },
+                    wrap_present = wraps,
+                }, source.flexrettype, operation_target)
+            assert(optional
+                   or callable.results[ri].wrap_present == false,
+                use .. " has Option wrapping on a non-Option result")
+        end
+    end
+    for index = #target.rettypes + 1, #source.rettypes do
+        if target.flexrettype then
+            result("result_to_flex",
+                source.rettypes[index], target.flexrettype, {
+                    actual_index = index,
+                    expected_flex_offset =
+                        index - #target.rettypes,
+                    source_kind = "concrete_fixed",
+                    destination_kind = "interface_flex",
+                    destination_open = true,
+                }, source.rettypes[index], target.flexrettype)
+        else
+            result("hide_result", source.rettypes[index], false, {
+                actual_index = index,
+                source_kind = "concrete_fixed",
+                destination_kind = "discard",
+                destination_gc = false,
+                effect = "discard",
+            })
+        end
+    end
+    if source.flexrettype and target.flexrettype then
+        result("flex_to_flex",
+            source.flexrettype, target.flexrettype, {
+                actual_flex_consumed =
+                    math.max(0,
+                        #target.rettypes - #source.rettypes),
+                source_kind = "concrete_flex",
+                source_open = true,
+                destination_kind = "interface_flex",
+                destination_open = true,
+            }, source.flexrettype, target.flexrettype)
+    elseif source.flexrettype then
+        result("hide_flex", source.flexrettype, false, {
+            actual_flex_consumed =
+                math.max(0,
+                    #target.rettypes - #source.rettypes),
+            source_kind = "concrete_flex",
+            source_open = true,
+            destination_kind = "discard",
+            destination_gc = false,
+            effect = "discard_run",
+        })
+    elseif target.flexrettype then
+        result("end_flex", false, target.flexrettype, {
+            source_kind = "empty",
+            destination_kind = "interface_flex",
+            source_gc = false,
+            destination_open = true,
+            count = 0,
+        })
+    end
+    assert(ri == #callable.results,
+        use .. " has extra result actions")
+    seen[callable] = nil
+end
+
+function coder._validate_interface_adapter_fixed_roots(
+        roots, actions, side, phase, use)
+    coder._interface_dense_list(roots, use)
+    local expected = {}
+    local gc_field = side == "source"
+        and "source_gc" or "destination_gc"
+    local open_field = side == "source"
+        and "source_open" or "destination_open"
+    local type_field = side == "source"
+        and "source_type" or "target_type"
+    for _, action in ipairs(actions) do
+        if action[gc_field] and not action[open_field] then
+            expected[#expected + 1] = {
+                action = action.id,
+                type = action[type_field],
+                storage = "lua_stack_slot",
+                retain_until = phase == "argument"
+                    and (side == "source"
+                        and "all_arguments_converted"
+                        or "concrete_call_returns")
+                    or (side == "source"
+                        and "all_results_converted"
+                        or "interface_caller_handoff"),
+            }
+        end
+    end
+    assert(coder._interface_frozen_value_equal(roots, expected),
+        use .. " does not match its action inventory")
+end
+
+function coder._validate_interface_adapter_range(
+        range, id, phase, side, element_type, lifetime, use)
+    local present = element_type ~= nil
+        and element_type ~= false
+    local gc_bearing = present
+        and coder._interface_adapter_is_gc(element_type) or false
+    local expected = {
+        kind = "open_root_range",
+        id = id,
+        phase = phase,
+        side = side,
+        present = present,
+        element_type = element_type or false,
+        gc_bearing = gc_bearing,
+        traced = gc_bearing,
+        storage = gc_bearing
+            and "parallel_lua_stack_range" or false,
+        dynamic_start = present and "run_start" or false,
+        dynamic_count = present and "run_count" or false,
+        retain_until = lifetime,
+        raw_storage_is_root = false,
+    }
+    coder._interface_closed_record(range, {
+        kind = true, id = true, phase = true, side = true,
+        present = true, element_type = true,
+        gc_bearing = true, traced = true, storage = true,
+        dynamic_start = true, dynamic_count = true,
+        retain_until = true, raw_storage_is_root = true,
+    }, use)
+    assert(coder._interface_frozen_value_equal(range, expected),
+        use .. " is not canonical")
+end
+
+function coder._validate_interface_adapter_rooting(adapter, use)
+    local rooting = adapter.rooting
+    coder._interface_closed_record(rooting, {
+        raw_descriptors_are_roots = true,
+        raw_buffers_are_roots = true,
+        fixed = true, ranges = true,
+    }, use .. " rooting")
+    assert(rooting.raw_descriptors_are_roots == false
+           and rooting.raw_buffers_are_roots == false,
+        use .. " treats raw adapter storage as a root")
+    coder._interface_closed_record(rooting.fixed, {
+        argument_source = true,
+        argument_destination = true,
+        result_source = true,
+        result_destination = true,
+    }, use .. " fixed roots")
+    coder._validate_interface_adapter_fixed_roots(
+        rooting.fixed.argument_source, adapter.arguments,
+        "source", "argument", use .. " argument source roots")
+    coder._validate_interface_adapter_fixed_roots(
+        rooting.fixed.argument_destination, adapter.arguments,
+        "destination", "argument",
+        use .. " argument destination roots")
+    coder._validate_interface_adapter_fixed_roots(
+        rooting.fixed.result_source, adapter.results,
+        "source", "result", use .. " result source roots")
+    coder._validate_interface_adapter_fixed_roots(
+        rooting.fixed.result_destination, adapter.results,
+        "destination", "result",
+        use .. " result destination roots")
+
+    coder._interface_closed_record(rooting.ranges, {
+        argument_source = true,
+        argument_destination = true,
+        result_source = true,
+        result_destination = true,
+    }, use .. " root ranges")
+    coder._validate_interface_adapter_range(
+        rooting.ranges.argument_source,
+        "argument_source", "argument", "source",
+        adapter.interface_signature.varargtype,
+        "all_arguments_converted",
+        use .. " argument source range")
+    coder._validate_interface_adapter_range(
+        rooting.ranges.argument_destination,
+        "argument_destination", "argument", "destination",
+        adapter.concrete_signature.varargtype,
+        "concrete_call_returns",
+        use .. " argument destination range")
+    coder._validate_interface_adapter_range(
+        rooting.ranges.result_source,
+        "result_source", "result", "source",
+        adapter.concrete_signature.flexrettype,
+        "all_results_converted",
+        use .. " result source range")
+    coder._validate_interface_adapter_range(
+        rooting.ranges.result_destination,
+        "result_destination", "result", "destination",
+        adapter.interface_signature.flexrettype,
+        "interface_caller_handoff",
+        use .. " result destination range")
+end
+
+function coder._validate_interface_adapter_rebases(adapter, use)
+    coder._interface_dense_list(
+        adapter.rebase_points, use .. " rebase points")
+    local expected = {}
+    for _, action in ipairs(adapter.arguments) do
+        if action.rebase_after then
+            expected[#expected + 1] = {
+                kind = "after_action",
+                action = action.id,
+                reason = "immediate_gradual_guard",
+            }
+        end
+    end
+    expected[#expected + 1] = {
+        kind = "after_native_call",
+        method = adapter.concrete_method,
+        reason = "concrete_call_may_relocate_stack",
+    }
+    for _, action in ipairs(adapter.results) do
+        if action.rebase_after then
+            expected[#expected + 1] = {
+                kind = "after_action",
+                action = action.id,
+                reason = "immediate_gradual_guard",
+            }
+        end
+    end
+    for index, point in ipairs(adapter.rebase_points) do
+        local wanted = expected[index]
+        assert(wanted, use .. " has an extra rebase point")
+        coder._interface_closed_record(point,
+            point.kind == "after_action"
+                and { kind = true, action = true, reason = true }
+                or { kind = true, method = true, reason = true },
+            use .. " rebase point " .. tostring(index))
+        assert(coder._interface_frozen_value_equal(point, wanted),
+            use .. " has a mismatched rebase point "
+                .. tostring(index))
+    end
+    assert(#adapter.rebase_points == #expected,
+        use .. " is missing a rebase point")
+end
+
+function coder._validate_interface_adapter(
+        adapter, concrete, interface, mapping, use)
+    coder._interface_closed_record(adapter, {
+        kind = true, slot = true, slot_kind = true,
+        name = true, symbol_key = true, trace_name = true,
+        concrete_owner = true, concrete_owner_module = true,
+        concrete_method = true, concrete_signature = true,
+        interface = true, interface_method = true,
+        native_signature = true, interface_signature = true,
+        hidden_operands = true,
+        arguments = true, results = true, callable = true,
+        relation_free = true,
+        no_nested_interface_conversions = true,
+        uses_base_off = true, rooting = true,
+        rebase_points = true,
+    }, use)
+    local owner_module = assert(
+        concrete.name:match("^(.*)%.[^.]+$"),
+        use .. " concrete owner is not module-qualified")
+    assert(adapter.kind == "interface_method_adapter"
+           and adapter.slot == mapping.index
+           and adapter.slot_kind == "adapter"
+           and adapter.name == mapping.name
+           and adapter.symbol_key == string.format(
+               "%s->%s#%d:%s", concrete.name, interface.name,
+               mapping.index, mapping.name)
+           and adapter.trace_name == string.format(
+               "%s:%s [adapter for %s:%s]",
+               interface.name, mapping.name,
+               concrete.name, mapping.name)
+           and adapter.concrete_owner == concrete
+           and adapter.concrete_owner_module == owner_module
+           and adapter.concrete_method == mapping.concrete
+           and adapter.concrete_signature == mapping.source
+           and adapter.interface == interface
+           and adapter.interface_method == mapping.required
+           and adapter.native_signature == mapping.required
+           and adapter.interface_signature == mapping.target
+           and adapter.arguments == adapter.callable.arguments
+           and adapter.results == adapter.callable.results
+           and adapter.relation_free == true
+           and adapter.no_nested_interface_conversions == true
+           and adapter.uses_base_off == true,
+        use .. " has mismatched adapter identity/signatures")
+
+    coder._interface_closed_record(adapter.hidden_operands, {
+        concrete_owner_module = true,
+        closure = true, self = true,
+    }, use .. " hidden operands")
+    local module_operand =
+        adapter.hidden_operands.concrete_owner_module
+    coder._interface_closed_record(module_operand, {
+        parameter = true, provenance = true,
+        owner = true, module = true,
+        forwards_unchanged = true,
+        emitter_module_is_forbidden = true,
+    }, use .. " concrete module operand")
+    assert(module_operand.parameter == "_mod"
+           and module_operand.provenance
+               == "interface_wrapper_uservalue_0"
+           and module_operand.owner == concrete
+           and module_operand.module == owner_module
+           and module_operand.forwards_unchanged == true
+           and module_operand.emitter_module_is_forbidden == true,
+        use .. " changes concrete-owner module provenance")
+    local closure_operand = adapter.hidden_operands.closure
+    coder._interface_closed_record(closure_operand, {
+        parameter = true, adapter_value = true,
+        concrete_call_value = true,
+    }, use .. " closure operand")
+    assert(closure_operand.parameter == "_fn"
+           and closure_operand.adapter_value == "NULL"
+           and closure_operand.concrete_call_value == "NULL",
+        use .. " does not freeze NULL payload closures")
+    local self_operand = adapter.hidden_operands.self
+    coder._interface_closed_record(self_operand, {
+        provenance = true, type = true,
+        forwards_unchanged = true,
+    }, use .. " self operand")
+    assert(self_operand.provenance
+               == "interface_wrapper_uservalue_1"
+           and self_operand.type
+           and types.equals(
+               self_operand.type, types.Nominal(concrete.name))
+           and self_operand.forwards_unchanged == true,
+        use .. " changes concrete self provenance")
+
+    coder._validate_interface_callable_actions(
+        adapter.callable, mapping.source, mapping.target,
+        use .. " callable", {})
+    coder._validate_interface_adapter_rooting(adapter, use)
+    coder._validate_interface_adapter_rebases(adapter, use)
+    return adapter
+end
+
+function coder._interface_adapter_signature(name, method, is_pointer)
+    assert(method._tag == "Type.Method")
+    local params = {
+        "lua_State *L",
+        "Udata *_mod",
+        "CClosure *_fn",
+        "Udata *_self",
+    }
+    for index, typ in ipairs(method.params) do
+        params[#params + 1] =
+            cvardecl(nil, typ, "_ia_param_" .. tostring(index))
+    end
+    if method.varargtype then
+        params[#params + 1] =
+            varg_struct_name(method.varargtype) .. " *_varargs"
+        params[#params + 1] = "int _start"
+    end
+    for index = 2, #method.rettypes do
+        params[#params + 1] = cpointertype(method.rettypes[index])
+            .. " _ia_out_" .. tostring(index)
+    end
+    if method.flexrettype then
+        params[#params + 1] =
+            varg_struct_name(method.flexrettype) .. " *_flexout"
+        params[#params + 1] = "int _flexwant"
+    end
+    return cfunctiondecl(
+        method.rettypes[1], name,
+        table.concat(params, ", "), is_pointer)
+end
+
+function coder._interface_adapter_collect_identity(
+        inventory, typ)
+    typ = types.normalize(typ)
+    if not typ then return end
+    if typ._tag == "Type.Array" then
+        inventory.array = true
+    elseif typ._tag == "Type.Option" then
+        coder._interface_adapter_collect_identity(
+            inventory, typ.base)
+    elseif typ._tag == "Type.Nominal" then
+        inventory.nominals[typ.fqtn] = typ
+    elseif typ._tag == "Type.Record"
+           or typ._tag == "Type.Union" then
+        inventory.nominals[typ.name] =
+            types.Nominal(typ.name)
+    elseif typ._tag == "Type.COwned" then
+        inventory.owned_c[owned_c_metatable_key(typ)] = typ
+    end
+end
+
+function coder._interface_adapter_identity_inventory(adapter)
+    local inventory = {
+        array = false,
+        nominals = {},
+        owned_c = {},
+    }
+    local function operation(op)
+        if op.kind == "gradual_inject" then
+            if coder._interface_injection_may_relocate(op.source) then
+                coder._interface_adapter_collect_identity(
+                    inventory, op.source)
+            end
+        elseif op.kind == "gradual_guard"
+               and op.timing == "immediate" then
+            coder._interface_adapter_collect_identity(
+                inventory, op.target)
+        end
+    end
+    for _, action in ipairs(adapter.arguments) do
+        if action.operation then operation(action.operation) end
+    end
+    for _, action in ipairs(adapter.results) do
+        if action.operation then operation(action.operation) end
+    end
+    return inventory
+end
+
+function coder._interface_adapter_identity_prelude(
+        ctx, adapter)
+    local inventory =
+        coder._interface_adapter_identity_inventory(adapter)
+    local code = {}
+    -- A registry lookup needs one API result slot. First creation of the
+    -- shared Array metatable needs three: the table, its retained callback
+    -- upvalue, and the closure being installed by luaL_setfuncs.
+    local scratch_slots = inventory.array and 3 or 0
+    ctx.interface_adapter_nominal_metatables = {}
+    ctx.interface_adapter_owned_c_metatables = {}
+    if inventory.array then
+        ctx.interface_adapter_array_metatable =
+            "_ia_array_metatable"
+        code[#code + 1] =
+            "Table *_ia_array_metatable = titan_array_metatable(L);"
+    end
+
+    local nominal_names = {}
+    for name in pairs(inventory.nominals) do
+        nominal_names[#nominal_names + 1] = name
+    end
+    table.sort(nominal_names, util.bytewise_less)
+    for _, name in ipairs(nominal_names) do
+        scratch_slots = math.max(scratch_slots, 1)
+        local owner = assert(types.registry[name],
+            "Interface adapter nominal is absent from registry: " .. name)
+        assert(owner._tag == "Type.Record"
+               or owner._tag == "Type.Union"
+               or owner._tag == "Type.Interface",
+            "Interface adapter nominal has invalid owner "
+                .. tostring(owner._tag))
+        local kind = owner._tag == "Type.Record" and "record"
+            or owner._tag == "Type.Union" and "union"
+            or "interface"
+        local cvar = "_ia_nominal_metatable_"
+            .. coder._interface_symbol_fragment(name)
+        ctx.interface_adapter_nominal_metatables[name] = cvar
+        code[#code + 1] = render([[
+            luaL_getmetatable(
+                L, "Titan $KIND $TYPE metatable");
+            if (TITAN_UNLIKELY(!ttistable(s2v(L->top.p - 1)))) {
+                luaL_error(L,
+                    "missing per-state metatable for Interface adapter type %s",
+                    $DISPLAY);
+            }
+            Table *$CVAR = hvalue(s2v(L->top.p - 1));
+            lua_pop(L, 1);
+        ]], {
+            KIND = kind,
+            TYPE = name,
+            DISPLAY = c_string_literal(name),
+            CVAR = cvar,
+        })
+    end
+
+    local owned_names = {}
+    for name in pairs(inventory.owned_c) do
+        owned_names[#owned_names + 1] = name
+    end
+    table.sort(owned_names, util.bytewise_less)
+    for _, name in ipairs(owned_names) do
+        scratch_slots = math.max(scratch_slots, 1)
+        local typ = inventory.owned_c[name]
+        -- COwned identities are private to the translation unit performing
+        -- the conversion, not to the record whose method is being called.
+        -- Inventory the emitter-owned metatable so module initialization
+        -- creates it, then resolve that exact registry identity without ever
+        -- indexing the inbound concrete-owner `_mod`.
+        owned_c_metatable(ctx, typ)
+        local cvar = "_ia_owned_c_metatable_"
+            .. coder._interface_symbol_fragment(name)
+        ctx.interface_adapter_owned_c_metatables[name] = cvar
+        code[#code + 1] = render([[
+            luaL_getmetatable(
+                L, "Titan owned C $MODULE $TYPE metatable");
+            if (TITAN_UNLIKELY(!ttistable(s2v(L->top.p - 1)))) {
+                luaL_error(L,
+                    "missing per-state owned-C metatable in Interface adapter");
+            }
+            Table *$CVAR = hvalue(s2v(L->top.p - 1));
+            lua_pop(L, 1);
+        ]], {
+            MODULE = ctx.tlcontext.module,
+            TYPE = types.tostring(typ),
+            CVAR = cvar,
+        })
+    end
+    return table.concat(code, "\n"), scratch_slots
+end
+
+function coder._interface_adapter_allocate_roots(ctx, adapter)
+    -- Keep this in lockstep with titan-runtime/titan.h's TITAN_VARARG_MAX.
+    -- Existing callable lowering uses the same 200-element ABI bound. The
+    -- emitted adapter checks every dynamic count before indexing either its C
+    -- buffer or the parallel traced range.
+    local open_cap = 200
+    local roots = {
+        argument_source = {},
+        argument_destination = {},
+        result_source = {},
+        result_destination = {},
+        ranges = {},
+    }
+    local frame_base = ctx.depth
+    local frame_end = frame_base
+    for _, phase in ipairs({ "argument", "result" }) do
+        -- Argument roots die when the concrete call returns. Result roots are
+        -- born only after that return, so both phases safely reuse one physical
+        -- frame region while retaining distinct frozen logical inventories.
+        ctx.depth = frame_base
+        local names = {
+            phase .. "_source",
+            phase .. "_destination",
+        }
+        for _, name in ipairs(names) do
+            local list = adapter.rooting.fixed[name]
+            for _, root in ipairs(list) do
+                roots[name][root.action] = reserveslot(ctx)
+            end
+        end
+        for _, name in ipairs(names) do
+            local range = adapter.rooting.ranges[name]
+            if range.traced then
+                roots.ranges[name] = ctx.depth
+                for _ = 1, open_cap do reserveslot(ctx) end
+            end
+        end
+        if ctx.depth > frame_end then frame_end = ctx.depth end
+    end
+    ctx.depth = frame_end
+    return roots
+end
+
+function coder._interface_adapter_anchor(
+        typ, depth, value)
+    if depth == nil then return "" end
+    return setslot(typ, slotat(depth), value)
+end
+
+function coder._interface_adapter_anchor_range(
+        typ, depth, count, value)
+    if depth == nil then return "" end
+    return render([[
+        for (int _ia_root_i = 0;
+             _ia_root_i < $COUNT; _ia_root_i++) {
+            $STORE
+        }
+    ]], {
+        COUNT = count,
+        STORE = setslot(typ,
+            "s2v(" .. stackslotat(depth) .. " + _ia_root_i)",
+            value),
+    })
+end
+
+function coder._interface_adapter_nil_fill(typ, destination)
+    typ = types.normalize(typ)
+    assert(typ, "Interface adapter nil-fill target is unnormalizable")
+    if typ._tag == "Type.Value"
+       or typ._tag == "Type.Option"
+       or types.is_c_tvalue(typ) then
+        return "setnilvalue(&" .. destination .. ");"
+    elseif typ._tag == "Type.Nil" then
+        return destination .. " = 0;"
+    elseif typ._tag == "Type.Pointer"
+           or typ._tag == "Type.CPointer" then
+        return destination .. " = NULL;"
+    end
+    error("Interface adapter cannot nil-fill "
+        .. types.tostring(typ))
+end
+
+function coder._emit_interface_adapter_operation(
+        ctx, operation, source, destination, loc, use)
+    local code
+    if operation.kind == "identity"
+       or operation.kind == "callable_view"
+       or (operation.kind == "gradual_guard"
+           and operation.timing == "delayed_observation") then
+        code = destination .. " = " .. source .. ";"
+    elseif operation.kind == "gradual_inject" then
+        code = setboxed(
+            ctx, operation.source, "&" .. destination, source)
+    elseif operation.kind == "gradual_guard" then
+        code = coder._strictcheckandget(
+            ctx, operation.guard, operation.target,
+            destination, "&" .. source, loc, use)
+    else
+        error(use .. " has unsupported operation "
+            .. tostring(operation.kind))
+    end
+    if operation.may_relocate then
+        code = code
+            .. "\n_base = restorestack(L, _base_off);"
+    end
+    return code
+end
+
+function coder._emit_interface_adapter_argument_sources(
+        ctx, adapter, roots, loc)
+    local code = {}
+    local interface = adapter.interface_signature
+    if interface.varargtype then
+        code[#code + 1] = render([[
+            if (TITAN_UNLIKELY(
+                    _varargs == NULL
+                    || _start < 0
+                    || _start > (int)_varargs->n_args
+                    || (int)_varargs->n_args > TITAN_VARARG_MAX)) {
+                luaL_error(L,
+                    "malformed Interface adapter variadic input for %s",
+                    $TRACE);
+            }
+            int _ia_interface_tail_count =
+                (int)_varargs->n_args - _start;
+        ]], {
+            TRACE = c_string_literal(adapter.trace_name),
+        })
+    end
+
+    -- Incoming fixed arguments and the incoming open run are roots before any
+    -- projection/injection can allocate or raise.
+    for _, action in ipairs(adapter.arguments) do
+        local depth = roots.argument_source[action.id]
+        if depth ~= nil then
+            local index = action.expected_index
+            assert(index and action.source_kind == "interface_fixed",
+                "fixed Interface argument root has no fixed source")
+            code[#code + 1] =
+                coder._interface_adapter_anchor(
+                    action.source_type, depth,
+                    "_ia_param_" .. tostring(index))
+        end
+    end
+    if roots.ranges.argument_source ~= nil then
+        code[#code + 1] =
+            coder._interface_adapter_anchor_range(
+                interface.varargtype,
+                roots.ranges.argument_source,
+                "_ia_interface_tail_count",
+                "_varargs->args[_start + _ia_root_i]")
+    end
+    return table.concat(code, "\n")
+end
+
+function coder._emit_interface_adapter_arguments(
+        ctx, adapter, roots, loc)
+    local code = {}
+    local concrete = adapter.concrete_signature
+    if concrete.varargtype then
+        code[#code + 1] = render([[
+            $ELEM _ia_concrete_vargs[TITAN_VARARG_MAX] = {0};
+            int _ia_concrete_vcount = 0;
+        ]], {
+            ELEM = ctype(concrete.varargtype),
+        })
+    end
+    for index, typ in ipairs(concrete.params) do
+        code[#code + 1] = render("$DECL = $INIT;", {
+            DECL = cvardecl(
+                ctx, typ, "_ia_concrete_arg_" .. tostring(index)),
+            INIT = initval(typ),
+        })
+    end
+
+    local function anchor_fixed(action)
+        local depth = roots.argument_destination[action.id]
+        if depth == nil then return "" end
+        return coder._interface_adapter_anchor(
+            action.target_type, depth,
+            "_ia_concrete_arg_" .. tostring(action.actual_index))
+    end
+    local function anchor_tail(action)
+        local depth = roots.ranges.argument_destination
+        if depth == nil then return "" end
+        return setslot(action.target_type,
+            "s2v(" .. stackslotat(depth)
+                .. " + _ia_concrete_vcount)",
+            "_ia_concrete_vargs[_ia_concrete_vcount]")
+    end
+    local function append_guard()
+        return render([[
+            if (TITAN_UNLIKELY(
+                    _ia_concrete_vcount >= TITAN_VARARG_MAX)) {
+                luaL_error(L,
+                    "too many variadic arguments in Interface adapter %s",
+                    $TRACE);
+            }
+        ]], {
+            TRACE = c_string_literal(adapter.trace_name),
+        })
+    end
+
+    for _, action in ipairs(adapter.arguments) do
+        local use = adapter.trace_name
+            .. " " .. action.id
+        if action.kind == "argument" then
+            code[#code + 1] =
+                coder._emit_interface_adapter_operation(
+                    ctx, action.operation,
+                    "_ia_param_" .. tostring(action.expected_index),
+                    "_ia_concrete_arg_" .. tostring(action.actual_index),
+                    loc, use)
+            code[#code + 1] = anchor_fixed(action)
+        elseif action.kind == "tail_or_nil_to_argument" then
+            code[#code + 1] = render([[
+                if (_ia_interface_tail_count >= $OFFSET) {
+                    $PRESENT
+                } else {
+                    $MISSING
+                }
+                $ANCHOR
+            ]], {
+                OFFSET =
+                    c_integer_literal(action.expected_tail_offset),
+                PRESENT = coder._emit_interface_adapter_operation(
+                    ctx, action.operation,
+                    "_varargs->args[_start + "
+                        .. c_integer_literal(
+                            action.expected_tail_offset - 1)
+                        .. "]",
+                    "_ia_concrete_arg_"
+                        .. tostring(action.actual_index),
+                    loc, use),
+                MISSING = coder._interface_adapter_nil_fill(
+                    action.target_type,
+                    "_ia_concrete_arg_"
+                        .. tostring(action.actual_index)),
+                ANCHOR = anchor_fixed(action),
+            })
+        elseif action.kind == "nil_fill" then
+            code[#code + 1] =
+                coder._interface_adapter_nil_fill(
+                    action.target_type,
+                    "_ia_concrete_arg_"
+                        .. tostring(action.actual_index))
+            code[#code + 1] = anchor_fixed(action)
+        elseif action.kind == "argument_to_tail" then
+            code[#code + 1] = append_guard()
+            code[#code + 1] =
+                coder._emit_interface_adapter_operation(
+                    ctx, action.operation,
+                    "_ia_param_" .. tostring(action.expected_index),
+                    "_ia_concrete_vargs[_ia_concrete_vcount]",
+                    loc, use)
+            code[#code + 1] = anchor_tail(action)
+            code[#code + 1] = "_ia_concrete_vcount++;"
+        elseif action.kind == "tail_to_tail" then
+            code[#code + 1] = render([[
+                for (int _ia_tail_i = $CONSUMED;
+                     _ia_tail_i < _ia_interface_tail_count;
+                     _ia_tail_i++) {
+                    $GUARD
+                    $CONVERT
+                    $ANCHOR
+                    _ia_concrete_vcount++;
+                }
+            ]], {
+                CONSUMED = c_integer_literal(
+                    action.expected_tail_consumed),
+                GUARD = append_guard(),
+                CONVERT =
+                    coder._emit_interface_adapter_operation(
+                        ctx, action.operation,
+                        "_varargs->args[_start + _ia_tail_i]",
+                        "_ia_concrete_vargs[_ia_concrete_vcount]",
+                        loc, use),
+                ANCHOR = anchor_tail(action),
+            })
+        elseif action.kind == "empty_tail"
+               or action.kind == "ignore_argument"
+               or action.kind == "ignore_tail" then
+            -- Parameters have already been evaluated by the caller; ignored
+            -- values/runs remain rooted through the frozen source lifetime.
+        else
+            error(use .. " has unsupported argument action "
+                .. tostring(action.kind))
+        end
+    end
+    if concrete.varargtype then
+        code[#code + 1] = render([[
+            $STRUCT _ia_concrete_vdesc = {
+                (lu_byte)_ia_concrete_vcount,
+                _ia_concrete_vargs
+            };
+        ]], {
+            STRUCT = varg_struct_name(concrete.varargtype),
+        })
+    end
+    return table.concat(code, "\n")
+end
+
+function coder._emit_interface_adapter_call(
+        ctx, adapter, roots)
+    local code = {}
+    local concrete = adapter.concrete_signature
+    local interface = adapter.interface_signature
+    for index, typ in ipairs(concrete.rettypes) do
+        code[#code + 1] = render("$DECL = $INIT;", {
+            DECL = cvardecl(
+                ctx, typ,
+                "_ia_concrete_result_" .. tostring(index)),
+            INIT = initval(typ),
+        })
+    end
+    if concrete.flexrettype then
+        local consumed = math.max(
+            0, #interface.rettypes - #concrete.rettypes)
+        local fixed_surplus = math.max(
+            0, #concrete.rettypes - #interface.rettypes)
+        assert(consumed <= 200,
+            "Interface adapter fixed flex demand exceeds ABI cap")
+        code[#code + 1] = render([[
+            $ELEM _ia_concrete_fargs[TITAN_VARARG_MAX] = {0};
+            $STRUCT _ia_concrete_fdesc = {
+                0, _ia_concrete_fargs
+            };
+            int _ia_concrete_fwant = $DEMAND;
+        ]], {
+            ELEM = ctype(concrete.flexrettype),
+            STRUCT = varg_struct_name(concrete.flexrettype),
+            DEMAND = interface.flexrettype and render([[
+                (_flexwant == LUA_MULTRET)
+                    ? LUA_MULTRET
+                    : ((_flexwant <= $SURPLUS)
+                        ? $PREFIX
+                        : (((_flexwant - $SURPLUS) >= $REMAINING)
+                            ? TITAN_VARARG_MAX
+                            : _flexwant - $SURPLUS + $PREFIX))
+            ]], {
+                REMAINING =
+                    c_integer_literal(200 - consumed),
+                PREFIX = c_integer_literal(consumed),
+                SURPLUS = c_integer_literal(fixed_surplus),
+            }) or c_integer_literal(consumed),
+        })
+    end
+
+    local args = { "L", "_mod", "NULL", "_self" }
+    for index = 1, #concrete.params do
+        args[#args + 1] =
+            "_ia_concrete_arg_" .. tostring(index)
+    end
+    if concrete.varargtype then
+        args[#args + 1] = "&_ia_concrete_vdesc"
+        args[#args + 1] = "0"
+    end
+    for index = 2, #concrete.rettypes do
+        args[#args + 1] =
+            "&_ia_concrete_result_" .. tostring(index)
+    end
+    if concrete.flexrettype then
+        args[#args + 1] = "&_ia_concrete_fdesc"
+        args[#args + 1] = "_ia_concrete_fwant"
+    end
+    local invocation = method_name(adapter.concrete_method)
+        .. "(" .. table.concat(args, ", ") .. ")"
+    if #concrete.rettypes > 0 then
+        invocation = "_ia_concrete_result_1 = "
+            .. invocation .. ";"
+    else
+        invocation = invocation .. ";"
+    end
+    code[#code + 1] = invocation
+    code[#code + 1] =
+        "_base = restorestack(L, _base_off);"
+    for index = 1, #concrete.rettypes do
+        code[#code + 1] =
+            "(void)_ia_concrete_result_" .. tostring(index) .. ";"
+    end
+
+    if concrete.flexrettype then
+        code[#code + 1] = render([[
+            if (TITAN_UNLIKELY(
+                    (int)_ia_concrete_fdesc.n_args
+                        > TITAN_VARARG_MAX
+                    || (_ia_concrete_fwant != LUA_MULTRET
+                        && (int)_ia_concrete_fdesc.n_args
+                            > _ia_concrete_fwant))) {
+                luaL_error(L,
+                    "malformed flexible result run in Interface adapter %s",
+                    $TRACE);
+            }
+        ]], {
+            TRACE = c_string_literal(adapter.trace_name),
+        })
+    end
+
+    for _, action in ipairs(adapter.results) do
+        local depth = roots.result_source[action.id]
+        if depth ~= nil then
+            assert(action.source_kind == "concrete_fixed"
+                   and action.actual_index,
+                "fixed Interface result root has no fixed source")
+            code[#code + 1] =
+                coder._interface_adapter_anchor(
+                    action.source_type, depth,
+                    "_ia_concrete_result_"
+                        .. tostring(action.actual_index))
+        end
+    end
+    if roots.ranges.result_source ~= nil then
+        code[#code + 1] =
+            coder._interface_adapter_anchor_range(
+                concrete.flexrettype,
+                roots.ranges.result_source,
+                "(int)_ia_concrete_fdesc.n_args",
+                "_ia_concrete_fargs[_ia_root_i]")
+    end
+    return table.concat(code, "\n")
+end
+
+function coder._emit_interface_adapter_results(
+        ctx, adapter, roots, loc)
+    local code = {}
+    local interface = adapter.interface_signature
+    for index, typ in ipairs(interface.rettypes) do
+        code[#code + 1] = render("$DECL = $INIT;", {
+            DECL = cvardecl(
+                ctx, typ,
+                "_ia_interface_result_" .. tostring(index)),
+            INIT = initval(typ),
+        })
+    end
+    if interface.flexrettype then
+        code[#code + 1] = [[
+            int _ia_interface_fcount = 0;
+            _flexout->n_args = 0;
+        ]]
+    end
+
+    local function anchor_fixed(action)
+        local depth = roots.result_destination[action.id]
+        if depth == nil then return "" end
+        return coder._interface_adapter_anchor(
+            action.target_type, depth,
+            "_ia_interface_result_"
+                .. tostring(action.expected_index))
+    end
+    local function anchor_flex(action)
+        local depth = roots.ranges.result_destination
+        if depth == nil then return "" end
+        return setslot(action.target_type,
+            "s2v(" .. stackslotat(depth)
+                .. " + _ia_interface_fcount)",
+            "_flexout->args[_ia_interface_fcount]")
+    end
+    local function append_guard()
+        return render([[
+            if (TITAN_UNLIKELY(
+                    _ia_interface_fcount >= TITAN_VARARG_MAX)) {
+                luaL_error(L,
+                    "too many flexible results in Interface adapter %s",
+                    $TRACE);
+            }
+        ]], {
+            TRACE = c_string_literal(adapter.trace_name),
+        })
+    end
+    local function wants_more()
+        return "(_flexwant == LUA_MULTRET"
+            .. " || _ia_interface_fcount < _flexwant)"
+    end
+
+    for _, action in ipairs(adapter.results) do
+        local use = adapter.trace_name
+            .. " " .. action.id
+        if action.kind == "result" then
+            code[#code + 1] =
+                coder._emit_interface_adapter_operation(
+                    ctx, action.operation,
+                    "_ia_concrete_result_"
+                        .. tostring(action.actual_index),
+                    "_ia_interface_result_"
+                        .. tostring(action.expected_index),
+                    loc, use)
+            code[#code + 1] = anchor_fixed(action)
+        elseif action.kind == "flex_to_optional_result"
+               or action.kind == "flex_to_result" then
+            local present
+            if action.wrap_present then
+                local base_name = "_ia_present_"
+                    .. tostring(action.order)
+                present = render([[
+                    $DECL = $INIT;
+                    $CONVERT
+                    $WRAP
+                ]], {
+                    DECL = cvardecl(
+                        ctx, action.operation_target_type, base_name),
+                    INIT = initval(action.operation_target_type),
+                    CONVERT =
+                        coder._emit_interface_adapter_operation(
+                            ctx, action.operation,
+                            "_ia_concrete_fargs["
+                                .. c_integer_literal(
+                                    action.actual_flex_offset - 1)
+                                .. "]",
+                            base_name, loc, use),
+                    WRAP = setslot(
+                        action.operation_target_type,
+                        "&_ia_interface_result_"
+                            .. tostring(action.expected_index),
+                        base_name),
+                })
+            else
+                present =
+                    coder._emit_interface_adapter_operation(
+                        ctx, action.operation,
+                        "_ia_concrete_fargs["
+                            .. c_integer_literal(
+                                action.actual_flex_offset - 1)
+                            .. "]",
+                        "_ia_interface_result_"
+                            .. tostring(action.expected_index),
+                        loc, use)
+            end
+            local missing
+            if action.missing_arm.kind == "nil_fill" then
+                missing = coder._interface_adapter_nil_fill(
+                    action.target_type,
+                    "_ia_interface_result_"
+                        .. tostring(action.expected_index))
+            else
+                missing = render([[
+                    luaL_error(L,
+                        "Interface adapter %s expected result %d",
+                        $TRACE, $INDEX);
+                ]], {
+                    TRACE = c_string_literal(adapter.trace_name),
+                    INDEX = c_integer_literal(action.expected_index),
+                })
+            end
+            code[#code + 1] = render([[
+                if ((int)_ia_concrete_fdesc.n_args >= $OFFSET) {
+                    $PRESENT
+                } else {
+                    $MISSING
+                }
+                $ANCHOR
+            ]], {
+                OFFSET =
+                    c_integer_literal(action.actual_flex_offset),
+                PRESENT = present,
+                MISSING = missing,
+                ANCHOR = anchor_fixed(action),
+            })
+        elseif action.kind == "result_to_flex" then
+            code[#code + 1] = render([[
+                if ($WANTS) {
+                    $GUARD
+                    $CONVERT
+                    $ANCHOR
+                    _ia_interface_fcount++;
+                }
+            ]], {
+                WANTS = wants_more(),
+                GUARD = append_guard(),
+                CONVERT =
+                    coder._emit_interface_adapter_operation(
+                        ctx, action.operation,
+                        "_ia_concrete_result_"
+                            .. tostring(action.actual_index),
+                        "_flexout->args[_ia_interface_fcount]",
+                        loc, use),
+                ANCHOR = anchor_flex(action),
+            })
+        elseif action.kind == "flex_to_flex" then
+            code[#code + 1] = render([[
+                for (int _ia_flex_i = $CONSUMED;
+                     _ia_flex_i < (int)_ia_concrete_fdesc.n_args
+                        && $WANTS;
+                     _ia_flex_i++) {
+                    $GUARD
+                    $CONVERT
+                    $ANCHOR
+                    _ia_interface_fcount++;
+                }
+            ]], {
+                CONSUMED = c_integer_literal(
+                    action.actual_flex_consumed),
+                WANTS = wants_more(),
+                GUARD = append_guard(),
+                CONVERT =
+                    coder._emit_interface_adapter_operation(
+                        ctx, action.operation,
+                        "_ia_concrete_fargs[_ia_flex_i]",
+                        "_flexout->args[_ia_interface_fcount]",
+                        loc, use),
+                ANCHOR = anchor_flex(action),
+            })
+        elseif action.kind == "hide_result"
+               or action.kind == "hide_flex"
+               or action.kind == "end_flex" then
+            -- Concrete results were evaluated by the call and remain rooted
+            -- for their frozen source lifetime; hidden/end actions publish none.
+        else
+            error(use .. " has unsupported result action "
+                .. tostring(action.kind))
+        end
+    end
+    if interface.flexrettype then
+        code[#code + 1] =
+            "_flexout->n_args = (lu_byte)_ia_interface_fcount;"
+    end
+    return table.concat(code, "\n")
+end
+
+function coder._emit_interface_adapter(
+        tlcontext, pair, index, mapping)
+    local adapter = assert(mapping.interface_adapter)
+    local name = assert(pair.adapter_ids[index])
+    local ctx = newcontext(tlcontext)
+    local roots =
+        coder._interface_adapter_allocate_roots(ctx, adapter)
+    local identities, identity_scratch =
+        coder._interface_adapter_identity_prelude(ctx, adapter)
+    local loc = {
+        -- Native traceback filtering recognizes generated Titan frames by a
+        -- `.titan` line-table source. The separately registered symbol name is
+        -- the stable logical adapter trace shown to the user.
+        filename = adapter.trace_name .. ".titan",
+        line = 1,
+        col = 1,
+    }
+    local argument_sources =
+        coder._emit_interface_adapter_argument_sources(
+            ctx, adapter, roots, loc)
+    local flex_validation = ""
+    if adapter.interface_signature.flexrettype then
+        flex_validation = render([[
+            if (TITAN_UNLIKELY(
+                    _flexout == NULL
+                    || (_flexwant != LUA_MULTRET
+                        && (_flexwant < 0
+                            || _flexwant > TITAN_VARARG_MAX)))) {
+                luaL_error(L,
+                    "malformed Interface adapter flexible-result demand for %s",
+                    $TRACE);
+            }
+        ]], {
+            TRACE = c_string_literal(adapter.trace_name),
+        })
+    end
+    local arguments = coder._emit_interface_adapter_arguments(
+        ctx, adapter, roots, loc)
+    local call = coder._emit_interface_adapter_call(
+        ctx, adapter, roots)
+    local results = coder._emit_interface_adapter_results(
+        ctx, adapter, roots, loc)
+    local interface = adapter.interface_signature
+    local handoff = {}
+    for index = 2, #interface.rettypes do
+        handoff[#handoff + 1] = render([[
+            *_ia_out_$INDEX = _ia_interface_result_$INDEX;
+        ]], {
+            INDEX = c_integer_literal(index),
+        })
+    end
+    local finish
+    if #interface.rettypes == 0 then
+        finish = "L->top.p = _base;\nreturn;"
+    else
+        finish = [[
+            L->top.p = _base;
+            return _ia_interface_result_1;
+        ]]
+    end
+    register_trace_name(tlcontext, name, adapter.trace_name)
+    local signature =
+        coder._interface_adapter_signature(
+            name, adapter.native_signature, false)
+    local root_preamble
+    if ctx.nslots > 0 then
+        root_preamble = render([[
+            /*
+            ** Rooted scratch occupies NSLOTS entries. Identity setup later
+            ** uses transient API slots, so reserve them without adding them
+            ** to the GC-visible rooted range.
+            */
+            titan_ensure_stack(L, $NRESERVE);
+            StkId _base = L->top.p;
+            L->top.p += $NSLOTS;
+            for (StkId _ia_slot = L->top.p - 1;
+                 _base <= _ia_slot; _ia_slot--) {
+                setnilvalue(s2v(_ia_slot));
+            }
+            ptrdiff_t _base_off = savestack(L, _base);
+        ]], {
+            NSLOTS = c_integer_literal(ctx.nslots),
+            NRESERVE =
+                c_integer_literal(ctx.nslots + identity_scratch),
+        })
+    elseif identity_scratch > 0 then
+        root_preamble = render([[
+            /* Reserve transient Interface identity-setup results. */
+            titan_ensure_stack(L, $NRESERVE);
+            StkId _base = L->top.p;
+            ptrdiff_t _base_off = savestack(L, _base);
+        ]], {
+            NRESERVE = c_integer_literal(identity_scratch),
+        })
+    else
+        root_preamble = [[
+            StkId _base = L->top.p;
+            ptrdiff_t _base_off = savestack(L, _base);
+        ]]
+    end
+    local body = render([[
+        static TITAN_NOINLINE $SIGNATURE {
+            (void)_fn;
+            $ROOT_PREAMBLE
+            $ARGUMENT_SOURCES
+            $FLEX_VALIDATION
+            $IDENTITIES
+            $ARGUMENTS
+            $CALL
+            $RESULTS
+            $HANDOFF
+            $FINISH
+        }
+    ]], {
+        SIGNATURE = signature,
+        ROOT_PREAMBLE = root_preamble,
+        ARGUMENT_SOURCES = argument_sources,
+        FLEX_VALIDATION = flex_validation,
+        IDENTITIES = identities,
+        ARGUMENTS = arguments,
+        CALL = call,
+        RESULTS = results,
+        HANDOFF = table.concat(handoff, "\n"),
+        FINISH = finish,
+    })
+    return "static TITAN_NOINLINE "
+        .. coder._interface_adapter_signature(
+            name, adapter.native_signature, false)
+        .. ";", body
+end
+
+-- Encode a source identity injectively into a portable C identifier fragment.
+-- Pair/adapter identities must not depend on AST discovery order, and the
+-- ordinary source-name mangler is intentionally not injective (`.` and `-`
+-- both become `_`). Two hex digits per source byte keep this private symbol
+-- namespace deterministic without relying on a collision-prone hash.
+function coder._interface_symbol_fragment(name)
+    assert(type(name) == "string" and name ~= "",
+        "Interface symbol identity is not a nonempty string")
+    local bytes = {}
+    for i = 1, #name do
+        bytes[i] = string.format("%02x", name:byte(i))
+    end
+    return table.concat(bytes)
+end
+
+-- Validate and inventory one concrete/Interface pair. Exact slots point
+-- directly at the concrete method; adjusted slots carry one checker-frozen
+-- adapter plan and receive a deterministic private adapter symbol.
+function coder._interface_pair(ctx, conversion)
+    local use = "concrete-to-Interface conversion"
+    assert(conversion and conversion.kind == "interface_conversion",
+        use .. " lacks its checker annotation")
+    local concrete = assert(conversion.concrete,
+        use .. " lacks its concrete descriptor")
+    local interface = assert(conversion.interface,
+        use .. " lacks its Interface descriptor")
+    assert(concrete._tag == "Type.Record" or concrete._tag == "Type.Union",
+        use .. " has a non-concrete owner")
+    assert(interface._tag == "Type.Interface"
+           and types.validate_interface_descriptor(interface),
+        use .. " has an invalid Interface descriptor")
+    assert(conversion.concrete_type
+           and conversion.concrete_type._tag == "Type.Nominal"
+           and conversion.concrete_type.fqtn == concrete.name,
+        use .. " has a mismatched concrete value type")
+    assert(conversion.interface_type
+           and conversion.interface_type._tag == "Type.Nominal"
+           and conversion.interface_type.fqtn == interface.name,
+        use .. " has a mismatched Interface value type")
+    assert(type(conversion.methods) == "table"
+           and #conversion.methods == #interface.methods,
+        use .. " has a noncanonical ordered method mapping")
+    local tlcontext = ctx.tlcontext
+    local key = concrete.name .. "\0" .. interface.name
+    local prior = tlcontext.interface_pairs[key]
+    local entry = prior
+    if not entry then
+        local pair_fragment =
+            coder._interface_symbol_fragment(concrete.name)
+            .. "_to_"
+            .. coder._interface_symbol_fragment(interface.name)
+        entry = {
+            key = key,
+            id = tlcontext.prefix .. "interface_pair_" .. pair_fragment,
+            concrete = concrete,
+            interface = interface,
+            methods = conversion.methods,
+            adapter_ids = {},
+        }
+        tlcontext.interface_pairs[key] = entry
+        table.insert(tlcontext.interface_pair_list, entry)
+    else
+        assert(entry.concrete == concrete
+               and entry.interface == interface
+               and #entry.methods == #conversion.methods,
+            use .. " disagrees with an existing pair obligation")
+    end
+
+    local all_exact = true
+    for index, mapping in ipairs(conversion.methods) do
+        local required = interface.methods[index]
+        assert(mapping.index == index - 1
+               and mapping.name == required.name
+               and mapping.required == required
+               and mapping.concrete
+               and mapping.concrete._tag == "Type.Method"
+               and mapping.concrete.fqtn == concrete.name,
+            use .. " has a malformed mapping at slot "
+                .. tostring(index - 1))
+        assert(mapping.source
+               and mapping.source._tag == "Type.Function"
+               and mapping.target
+               and mapping.target._tag == "Type.Function"
+               and types.equals(
+                   mapping.source,
+                   types.method_function_type(mapping.concrete))
+               and types.equals(
+                   mapping.target,
+                   types.method_function_type(required)),
+            use .. " has mismatched projected signatures at slot "
+                .. tostring(index - 1))
+        assert(mapping.exact == types.equals(
+                mapping.source, mapping.target),
+            use .. " has an inconsistent exactness marker")
+        all_exact = all_exact and mapping.exact
+        if mapping.exact then
+            assert(mapping.slot_kind == "exact"
+                   and mapping.interface_adapter == nil,
+                use .. " has a malformed exact mapping")
+        else
+            assert(mapping.slot_kind == "adapter"
+                   and mapping.interface_adapter,
+                use .. " has an adjusted mapping without a frozen adapter")
+            entry.adapter_ids[index] =
+                entry.id .. "_adapter_" .. tostring(index - 1)
+            coder._validate_interface_adapter(
+                mapping.interface_adapter,
+                concrete, interface, mapping,
+                use .. " slot " .. tostring(index - 1))
+        end
+        if prior then
+            local old = prior.methods[index]
+            assert(old.concrete == mapping.concrete
+                   and old.required == mapping.required
+                   and old.exact == mapping.exact,
+                use .. " disagrees with an existing mapping at slot "
+                    .. tostring(index - 1))
+        end
+
+        local method = mapping.concrete
+        local module, record =
+            assert(method.fqtn:match("^(.*)%.([^.]+)$"))
+        if module ~= ctx.module then
+            local symbol = method_name(method)
+            ctx.functions[method.fqtn .. ":interface:"
+                .. interface.name .. ":" .. method.name] = {
+                module = module,
+                record = record,
+                name = method.name,
+                type = method,
+                mangled = symbol,
+            }
+        end
+    end
+    assert(conversion.exact == all_exact,
+        use .. " has a mismatched pair exactness marker")
+    return entry
+end
+
+-- Build the exact two-uservalue wrapper from an already authorized scalar
+-- conversion. `source_stats/source_exp` still describe the concrete value;
+-- this helper materializes it once into a traced stack root before allocating.
+function coder._code_interface_wrapper(
+        ctx, conversion, source_stats, source_exp)
+    local pair = coder._interface_pair(ctx, conversion)
+    local rooted_stats, concrete_value = materialize_code(
+        ctx, conversion.concrete_type, source_stats, source_exp)
+    local wrapper_decl, wrapper, wrapper_slot =
+        newtmp(ctx, conversion.interface_type, true)
+    local metatable_slot =
+        type2metatable(ctx, conversion.interface_type)
+    local concrete_module =
+        coder._interface_owner_module_expr(ctx, conversion.concrete)
+
+    -- luaS_newudata may relocate the Lua stack. Both the source and destination
+    -- roots are addressed by saved offsets, so force the ordinary `_base_off`
+    -- preamble and rebase immediately after allocation.
+    ctx.uses_base_off = true
+    return render([[
+        $SOURCE_STATS
+        $WRAPPER_DECL
+        {
+            Udata *_titan_interface_concrete_module = $CONCRETE_MODULE;
+            Table *_titan_interface_metatable =
+                hvalue(&_mod->uv[$METATABLE_SLOT].uv);
+            $WRAPPER = luaS_newudata(
+                L, sizeof($VTABLE), 2);
+            _base = restorestack(L, _base_off);
+            setuvalue(L, $WRAPPER_SLOT, $WRAPPER);
+            $WRAPPER->metatable = _titan_interface_metatable;
+            setuvalue(L, &$WRAPPER->uv[0].uv,
+                _titan_interface_concrete_module);
+            luaC_barrierback(L, obj2gco($WRAPPER),
+                &$WRAPPER->uv[0].uv);
+            setuvalue(L, &$WRAPPER->uv[1].uv, $CONCRETE_VALUE);
+            luaC_barrierback(L, obj2gco($WRAPPER),
+                &$WRAPPER->uv[1].uv);
+            memcpy(getudatamem($WRAPPER), $VTABLE, sizeof($VTABLE));
+        }
+    ]], {
+        SOURCE_STATS = rooted_stats,
+        WRAPPER_DECL = wrapper_decl,
+        WRAPPER = wrapper,
+        WRAPPER_SLOT = wrapper_slot,
+        CONCRETE_MODULE = concrete_module,
+        CONCRETE_VALUE = concrete_value,
+        METATABLE_SLOT = c_integer_literal(metatable_slot),
+        VTABLE = pair.id,
+    }), wrapper
+end
+
+function coder._code_interface_conversion(ctx, node)
+    local conversion = assert(node._interface_conversion,
+        "Interface cast is missing its checker conversion")
+    assert(conversion.source and conversion.target
+           and types.equals(conversion.source, node.exp._type)
+           and types.equals(conversion.target, node._type),
+        "Interface conversion does not match its cast node")
+
+    if conversion.option == "interface_wrapper" then
+        assert(not conversion.source_optional
+               and not conversion.target_optional,
+            "scalar Interface wrapper has optional endpoints")
+        local source_stats, source_exp = codeexp(ctx, node.exp)
+        return coder._code_interface_wrapper(
+            ctx, conversion, source_stats, source_exp)
+    end
+
+    assert(conversion.option == "option_map"
+           or conversion.option == "option_wrap"
+           or conversion.option == "option_force",
+        "unknown Interface Option operation "
+            .. tostring(conversion.option))
+
+    if conversion.option == "option_wrap" then
+        assert(not conversion.source_optional
+               and conversion.target_optional,
+            "Interface Option-wrap has mismatched endpoints")
+        local source_stats, source_exp = codeexp(ctx, node.exp)
+        local wrapper_stats, wrapper =
+            coder._code_interface_wrapper(
+                ctx, conversion, source_stats, source_exp)
+        local result_decl, result = newtmp(ctx, node._type)
+        return render([[
+            $WRAPPER_STATS
+            $RESULT_DECL
+            setuvalue(L, &$RESULT, $WRAPPER);
+        ]], {
+            WRAPPER_STATS = wrapper_stats,
+            RESULT_DECL = result_decl,
+            RESULT = result,
+            WRAPPER = wrapper,
+        }), result
+    end
+
+    local source_stats, source =
+        materialize(ctx, node.exp)
+    local concrete_decl, concrete =
+        newtmp(ctx, conversion.concrete_type)
+    local wrapper_stats, wrapper =
+        coder._code_interface_wrapper(
+            ctx, conversion, "", concrete)
+    local result_decl, result = newtmp(ctx, node._type)
+    local nil_arm
+    local present_store
+    if conversion.option == "option_map" then
+        assert(conversion.source_optional
+               and conversion.target_optional
+               and conversion.nil_propagates,
+            "Interface Option-map has mismatched endpoints")
+        nil_arm = "setnilvalue(&" .. result .. ");"
+        present_store = "setuvalue(L, &" .. result .. ", "
+            .. wrapper .. ");"
+    else
+        assert(conversion.option == "option_force"
+               and conversion.source_optional
+               and not conversion.target_optional
+               and conversion.forces_source,
+            "Interface Option-force has mismatched endpoints")
+        nil_arm = codethrow(node.loc,
+            "%s:%d:%d: type error, expected %s but found nil", {
+                c_string_literal(node.loc.filename),
+                c_integer_literal(node.loc.line),
+                c_integer_literal(node.loc.col),
+                c_string_literal(
+                    types.tostring(conversion.interface_type)),
+            })
+        present_store = result .. " = " .. wrapper .. ";"
+    end
+    return render([[
+        $SOURCE_STATS
+        $RESULT_DECL
+        if (TITAN_UNLIKELY(ttisnil(&$SOURCE))) {
+            $NIL_ARM
+        } else {
+            $CONCRETE_DECL
+            $GET_CONCRETE;
+            $WRAPPER_STATS
+            $PRESENT_STORE
+        }
+    ]], {
+        SOURCE_STATS = source_stats,
+        SOURCE = source,
+        RESULT_DECL = result_decl,
+        RESULT = result,
+        NIL_ARM = nil_arm,
+        CONCRETE_DECL = concrete_decl,
+        GET_CONCRETE = getslot(
+            conversion.concrete_type, concrete, "&" .. source),
+        WRAPPER_STATS = wrapper_stats,
+        PRESENT_STORE = present_store,
+    }), result
+end
+
+function coder._code_interface_downcast(ctx, node, predicate_only)
+    local downcast = assert(node._interface_downcast,
+        "Interface downcast lacks its checker annotation")
+    assert(downcast.kind == "interface_downcast"
+           and downcast.interface
+           and downcast.interface._tag == "Type.Interface"
+           and downcast.concrete
+           and (downcast.concrete._tag == "Type.Record"
+                or downcast.concrete._tag == "Type.Union"),
+        "malformed Interface downcast annotation")
+    local target = node.target or node._type
+    assert(target._tag == "Type.Nominal"
+           and target.fqtn == downcast.concrete.name,
+        "Interface downcast target is not its concrete nominal")
+
+    local source_stats, source = materialize(ctx, node.exp)
+    local wrapper_decl, wrapper =
+        newtmp(ctx, types.Nominal(downcast.interface.name))
+    local concrete_decl, concrete =
+        newtmp(ctx, target)
+    local result_decl, result = newtmp(
+        ctx, predicate_only and types.Boolean() or target)
+    local metatable_slot = type2metatable(ctx, target)
+    local unwrap
+    if downcast.source_optional then
+        unwrap = render([[
+            if (!ttisnil(&$SOURCE)) {
+                $GET_WRAPPER;
+            }
+        ]], {
+            SOURCE = source,
+            GET_WRAPPER = getslot(
+                types.Nominal(downcast.interface.name),
+                wrapper, "&" .. source),
+        })
+    else
+        unwrap = wrapper .. " = " .. source .. ";"
+    end
+
+    local failure
+    local success
+    if predicate_only then
+        failure = result .. " = 0;"
+        success = result .. " = 1;"
+    else
+        failure = codethrow(node.loc,
+            "%s:%d:%d: type error, Interface value does not wrap %s", {
+                c_string_literal(node.loc.filename),
+                c_integer_literal(node.loc.line),
+                c_integer_literal(node.loc.col),
+                c_string_literal(types.tostring(target)),
+            })
+        success = result .. " = " .. concrete .. ";"
+    end
+    return render([[
+        $SOURCE_STATS
+        $WRAPPER_DECL
+        $CONCRETE_DECL
+        $RESULT_DECL
+        $UNWRAP
+        if ($WRAPPER != NULL) {
+            $CONCRETE = uvalue(&$WRAPPER->uv[1].uv);
+        }
+        if (TITAN_LIKELY($CONCRETE != NULL
+                && $CONCRETE->metatable ==
+                    hvalue(&_mod->uv[$METATABLE_SLOT].uv))) {
+            $SUCCESS
+        } else {
+            $FAILURE
+        }
+    ]], {
+        SOURCE_STATS = source_stats,
+        WRAPPER_DECL = wrapper_decl,
+        WRAPPER = wrapper,
+        CONCRETE_DECL = concrete_decl,
+        CONCRETE = concrete,
+        RESULT_DECL = result_decl,
+        RESULT = result,
+        UNWRAP = unwrap,
+        METATABLE_SLOT = c_integer_literal(metatable_slot),
+        SUCCESS = success,
+        FAILURE = failure,
+    }), result
+end
+
 function coder._resolve_cast_type(typ)
     -- `Type.Typedef` is the legacy scalar typedef representation retained by
     -- a few compiler paths; current C imports use `Type.CTypedef`.
@@ -3935,6 +6109,68 @@ function coder._code_coercion_predicate(
 end
 
 function coder._codeis(ctx, node)
+    if node._interface_downcast then
+        return coder._code_interface_downcast(ctx, node, true)
+    elseif node._interface_test then
+        local test = node._interface_test
+        local conversion = assert(test.conversion)
+        assert(test.kind == "interface_implementation_test"
+               and test.allocation_free == true
+               and conversion.kind == "interface_conversion"
+               and not conversion.source_optional
+               and not conversion.target_optional,
+            "malformed allocation-free Interface implementation test")
+        local concrete = assert(conversion.concrete)
+        local interface = assert(conversion.interface)
+        assert((concrete._tag == "Type.Record"
+                or concrete._tag == "Type.Union")
+               and interface._tag == "Type.Interface"
+               and types.validate_interface_descriptor(interface)
+               and #conversion.methods == #interface.methods,
+            "malformed allocation-free Interface implementation mapping")
+        local all_exact = true
+        for index, mapping in ipairs(conversion.methods) do
+            local required = interface.methods[index]
+            assert(mapping.index == index - 1
+                   and mapping.required == required
+                   and mapping.name == required.name
+                   and mapping.concrete
+                   and mapping.concrete._tag == "Type.Method"
+                   and mapping.concrete.fqtn == concrete.name
+                   and mapping.source
+                   and mapping.target
+                   and types.equals(
+                       mapping.source,
+                       types.method_function_type(mapping.concrete))
+                   and types.equals(
+                       mapping.target,
+                       types.method_function_type(required))
+                   and mapping.exact == types.equals(
+                       mapping.source, mapping.target),
+                "malformed allocation-free Interface mapping at slot "
+                    .. tostring(index - 1))
+            all_exact = all_exact and mapping.exact
+            if mapping.exact then
+                assert(mapping.slot_kind == "exact"
+                       and mapping.interface_adapter == nil,
+                    "malformed exact Interface implementation mapping")
+            else
+                assert(mapping.slot_kind == "adapter"
+                       and mapping.interface_adapter,
+                    "adjusted Interface implementation test lacks its plan")
+                coder._validate_interface_adapter(
+                    mapping.interface_adapter,
+                    concrete, interface, mapping,
+                    "allocation-free Interface test slot "
+                        .. tostring(index - 1))
+            end
+        end
+        assert(conversion.exact == all_exact,
+            "allocation-free Interface test has wrong exactness")
+        local stats, source = materialize(ctx, node.exp)
+        return stats .. "\n(void)(" .. source .. ");", "1"
+    end
+
     -- Freeze the operand before inspecting it. This both enforces exactly-once
     -- evaluation and roots GC values while metatable/Array checks run.
     local original_source_type = node.exp._type
@@ -6367,6 +8603,7 @@ function coder._code_adjustment_value(
         _type = target,
         _implicit_coercion = true,
         _adjustment = adjustment,
+        _interface_conversion = adjustment.interface_conversion,
     }
     local convstats, convexp = codeexp(ctx, synthcast)
     return render([[
@@ -7153,36 +9390,92 @@ local function codecall(ctx, node)
         table.insert(caexps, "NULL")  -- _fn: a static top-level call has no closure
     else
         assert(node.args._tag == "Ast.ArgsMethod")
-        local mtype = node._method
-        fname = method_name(mtype)
-        local mod, record = mtype.fqtn:match("^(.*)%.([^.]+)$")
-        if mod ~= ctx.module then
-            ctx.functions[mtype.fqtn .. ":" .. mtype.name] = {
-                module = mod,
-                record = record,
-                name = mtype.name,
-                type = mtype,
-                mangled = fname
-            }
-            if not ctx.modules[mod] then
-                ctx.modules[mod] = nextupvalue(ctx.tlcontext)
+        if node._interface then
+            local interface = node._interface
+            local mtype = assert(node._interface_method)
+            local index = assert(node._interface_method_index)
+            local indexed = interface.methods[index + 1]
+            assert(interface._tag == "Type.Interface"
+                   and index >= 0
+                   and indexed
+                   and indexed.name == mtype.name
+                   and types.equals(
+                       types.method_function_type(indexed),
+                       types.method_function_type(mtype)),
+                "Interface call has a noncanonical method slot")
+            local cstat, wrapper = materialize(ctx, node.exp)
+            local fptr = fresh_lowering_name(
+                ctx, "_titan_interface_call_")
+            table.insert(castats, cstat)
+            table.insert(castats, render([[
+                if (TITAN_UNLIKELY(
+                        $WRAPPER->len % sizeof(TitanInterfaceMethod) != 0
+                        || $WRAPPER->len / sizeof(TitanInterfaceMethod)
+                            != $METHOD_COUNT)) {
+                    luaL_error(L,
+                        "malformed internal Interface wrapper for %s",
+                        $IFACE);
+                }
+                TitanInterfaceMethod $STORED =
+                    ((TitanInterfaceMethod *)getudatamem(
+                        $WRAPPER))[$INDEX];
+                if (TITAN_UNLIKELY(
+                        $STORED == NULL)) {
+                    luaL_error(L,
+                        "uninitialized internal Interface method %s:%s",
+                        $IFACE, $METHOD);
+                }
+                $FPTR_DECL = titan_cast_func(
+                    $FPTR_TYPE,
+                    $STORED);
+            ]], {
+                WRAPPER = wrapper,
+                METHOD_COUNT = c_integer_literal(#interface.methods),
+                IFACE = c_string_literal(interface.name),
+                METHOD = c_string_literal(mtype.name),
+                INDEX = c_integer_literal(index),
+                STORED = fptr .. "_stored",
+                FPTR_DECL = function_sig(fptr, mtype, true),
+                FPTR_TYPE = function_sig("", mtype, true),
+            }))
+            fname = fptr
+            table.insert(caexps,
+                "uvalue(&" .. wrapper .. "->uv[0].uv)")
+            table.insert(caexps, "NULL")
+            table.insert(caexps,
+                "uvalue(&" .. wrapper .. "->uv[1].uv)")
+        else
+            local mtype = node._method
+            fname = method_name(mtype)
+            local mod, record = mtype.fqtn:match("^(.*)%.([^.]+)$")
+            if mod ~= ctx.module then
+                ctx.functions[mtype.fqtn .. ":" .. mtype.name] = {
+                    module = mod,
+                    record = record,
+                    name = mtype.name,
+                    type = mtype,
+                    mangled = fname
+                }
+                if not ctx.modules[mod] then
+                    ctx.modules[mod] = nextupvalue(ctx.tlcontext)
+                end
+                modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
+                    INDEX = c_integer_literal(ctx.modules[mod])
+                })
             end
-            modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
-                INDEX = c_integer_literal(ctx.modules[mod])
-            })
+            local cstat, cexp = materialize(ctx, node.exp)
+            table.insert(castats, cstat)
+            table.insert(caexps, modarg)
+            table.insert(caexps, "NULL")
+            table.insert(caexps, cexp)
         end
-        local cstat, cexp = materialize(ctx, node.exp)
-        table.insert(castats, cstat)
-        table.insert(caexps, modarg)
-        table.insert(caexps, "NULL")  -- _fn: a record method call has no closure
-        table.insert(caexps, cexp)
     end
     -- The callee's static type, to detect a variadic callee and its fixed arity.
     -- ArgsMethod -> node._method; a static-method VarDot -> fnode._decl; otherwise
     -- the var's resolved Type.Function on fnode._type.
     local callee_ftype
     if node.args._tag == "Ast.ArgsMethod" then
-        callee_ftype = node._method
+        callee_ftype = node._interface_method or node._method
     elseif fnode._tag == "Ast.VarDot"
            and fnode._decl and fnode._decl._tag == "Type.StaticMethod" then
         callee_ftype = fnode._decl
@@ -10686,6 +12979,10 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         return "", node.exp._extras[node.index]
     elseif tag == "Ast.ExpIs" then
         return coder._codeis(ctx, node)
+    elseif tag == "Ast.ExpCast" and node._interface_conversion then
+        return coder._code_interface_conversion(ctx, node)
+    elseif tag == "Ast.ExpCast" and node._interface_downcast then
+        return coder._code_interface_downcast(ctx, node, false)
     elseif tag == "Ast.ExpCast" and types.equals(node.exp._type, node._type) then
         return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast"
@@ -11323,6 +13620,12 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
     local hidden = strict and 1 or 0
     local dynamic_plans = options.dynamic_plans
     local strict_plans = options.strict_plans
+    local interface_method_index = options.interface_method_index
+    if interface_method_index ~= nil then
+        assert(not strict and typ._tag == "Type.Method"
+               and interface_method_index >= 0,
+            "invalid Interface Lua-entry dispatch configuration")
+    end
     if not strict then
         assert(type(dynamic_plans) == "table",
             "genuine Lua function entry lacks checker parameter plans")
@@ -11361,6 +13664,61 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         table.insert(stats, cvardecl(tlcontext, param, pname)
             .. " = " .. initval(param) .. ";")
         table.insert(stats, readfixed(param, pname, slot, i))
+    end
+    local call_entry = titan_entry
+    if interface_method_index ~= nil then
+        local interface = assert(types.registry[typ.fqtn],
+            "Interface method owner is absent from the type registry")
+        local registered_method =
+            interface.methods[interface_method_index + 1]
+        assert(interface._tag == "Type.Interface"
+               and registered_method
+               and registered_method.name == typ.name
+               and types.equals(
+                   types.method_function_type(registered_method),
+                   types.method_function_type(typ)),
+            "Interface Lua-entry method index is not canonical")
+        local payload_name =
+            "_titan_interface_method_" .. tostring(interface_method_index)
+        table.insert(stats, render([[
+            if (TITAN_UNLIKELY(
+                    _param_1->len % sizeof(TitanInterfaceMethod) != 0
+                    || _param_1->len / sizeof(TitanInterfaceMethod)
+                        != $METHOD_COUNT)) {
+                return luaL_error(L,
+                    "malformed internal Interface wrapper for %s", $IFACE);
+            }
+            TitanInterfaceMethod _titan_interface_stored =
+                ((TitanInterfaceMethod *)getudatamem(_param_1))[$INDEX];
+            if (TITAN_UNLIKELY(_titan_interface_stored == NULL)) {
+                return luaL_error(L,
+                    "uninitialized internal Interface method %s:%s",
+                    $IFACE, $METHOD);
+            }
+            $METHOD_DECL = titan_cast_func(
+                $METHOD_TYPE, _titan_interface_stored);
+            Udata *_titan_interface_concrete_module =
+                uvalue(&_param_1->uv[0].uv);
+            Udata *_titan_interface_concrete_self =
+                uvalue(&_param_1->uv[1].uv);
+        ]], {
+            METHOD_COUNT = c_integer_literal(#interface.methods),
+            IFACE = c_string_literal(interface.name),
+            METHOD = c_string_literal(typ.name),
+            INDEX = c_integer_literal(interface_method_index),
+            METHOD_DECL = function_sig(payload_name, typ, true),
+            METHOD_TYPE = function_sig("", typ, true),
+        }))
+        pnames = {
+            "L",
+            "_titan_interface_concrete_module",
+            "NULL",
+            "_titan_interface_concrete_self",
+        }
+        for i = 2, #params do
+            table.insert(pnames, "_param_" .. tostring(i))
+        end
+        call_entry = payload_name
     end
     -- Variadic: build the backing struct from the surplus Lua-stack args. Pinned
     -- after the fixed params and before the out-params in the native call. The
@@ -11477,12 +13835,12 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         if rettype then
             call = render("$DECL = $NAME($PARAMS);", {
                 DECL = cvardecl(tlcontext, rettype, "res"),
-                NAME = titan_entry,
+                NAME = call_entry,
                 PARAMS = table.concat(pnames, ", "),
             })
         else
             call = render("$NAME($PARAMS);", {
-                NAME = titan_entry,
+                NAME = call_entry,
                 PARAMS = table.concat(pnames, ", "),
             })
         end
@@ -11530,7 +13888,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         table.insert(stats, render([[
             $NAME($PARAMS);
         ]], {
-            NAME = titan_entry,
+            NAME = call_entry,
             PARAMS = table.concat(pnames, ", "),
         }))
     else
@@ -11547,7 +13905,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             _firstret++;
         ]], {
             DECL = cvardecl(tlcontext, rettype, "res"),
-            NAME = titan_entry,
+            NAME = call_entry,
             PARAMS = table.concat(pnames, ", "),
             SETSLOT = setboxed(tlcontext, rettype, "s2v(_firstret)", "res"),
             NRET = #typ.rettypes
@@ -12224,11 +14582,19 @@ end
 -- ordinary Type.Function value, callable through both paths and Lua-crossable.
 function codemethodref(ctx, node)
     local tlcontext = ctx.tlcontext
-    local mtype = node._method
+    local is_interface = node._interface_bound == true
+    local mtype = is_interface
+        and assert(node._interface_method) or node._method
     local ftype = node._type      -- Type.Function (self removed)
-    local nativename = bound_method_name(mtype)
-    local luaname = bound_method_luaname(mtype)
-    local strictname = coder._bound_method_strictname(mtype)
+    local nativename = is_interface
+        and coder._interface_bound_method_name(mtype)
+        or bound_method_name(mtype)
+    local luaname = is_interface
+        and coder._interface_bound_method_luaname(mtype)
+        or bound_method_luaname(mtype)
+    local strictname = is_interface
+        and coder._interface_bound_method_strictname(mtype)
+        or coder._bound_method_strictname(mtype)
     local mod, record = mtype.fqtn:match("^(.*)%.([^.]+)$")
 
     -- The bound closure's upvalue[0] must be the defining module's closure: `_mod`
@@ -12238,7 +14604,8 @@ function codemethodref(ctx, node)
     -- ctx.functions keyed by its mangled name.
     local modexpr = "_mod"
     if mod ~= ctx.module then
-        ctx.functions[mtype.fqtn .. ":bound:" .. mtype.name] = {
+        ctx.functions[mtype.fqtn .. (is_interface
+                and ":interface-bound:" or ":bound:") .. mtype.name] = {
             module = mod,
             record = record,
             name = mtype.name,
@@ -12563,10 +14930,11 @@ Udata *$INITNAME(lua_State *L) {
         $LOADGLOBALS
         $INITRECORDS
         $INITFUNCTAGS
+        $INITPAIRS
         $INITARRAYWRITERS
-        $INITVARS
         $FUNCS
         $INITNAMES
+        $INITVARS
         $CREATEMETA
         $MODULEINIT
         return _mod;
@@ -12579,6 +14947,8 @@ Udata *$INITNAME(lua_State *L) {
             $LOADMODULES2
             $LOADGLOBALS
             $INITFUNCTAGS
+            $INITPAIRS
+            $INITNAMES
         }
         return _mod;
     }
@@ -13079,6 +15449,268 @@ function coder._codeuniondec(ctx, code, initnominals, node)
     }))
 end
 
+function coder._code_interface_method_artifacts(
+        tlcontext, sigs, code, interface, method_node, index)
+    local method = assert(method_node._type)
+    assert(method._tag == "Type.Method"
+           and interface.methods[index + 1] == method,
+        "Interface method AST/descriptor order mismatch")
+    local ftype = types.method_function_type(method)
+    local luaname = coder._interface_method_luaname(method)
+    local nativename = coder._interface_bound_method_name(method)
+    local bound_luaname = coder._interface_bound_method_luaname(method)
+    local strictname = coder._interface_bound_method_strictname(method)
+    local payload_name = "_titan_interface_payload"
+    local rettype = method.rettypes[1]
+
+    -- The ordinary method entry belongs to the Interface owner and therefore
+    -- checks/coerces the public Interface signature with that owner's `_mod`.
+    -- Its final call is parameterized to read uv[0]/uv[1] and invoke the copied
+    -- payload slot directly with `_fn = NULL`.
+    table.insert(sigs, "static int " .. luaname .. "(lua_State *L);")
+    table.insert(code, genluaentry(
+        tlcontext, interface.name .. ":" .. method.name, "",
+        method, method_node.loc, luaname, {
+            dynamic_plans = method_node._lua_dynamic_plans,
+            dynamic_vararg_plan =
+                method_node._lua_vararg_dynamic_plan,
+            interface_method_index = index,
+        }))
+
+    local cparams = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
+    local callargs = {
+        "L",
+        "_titan_interface_concrete_module",
+        "NULL",
+        "_titan_interface_concrete_self",
+    }
+    for i, ptype in ipairs(method.params) do
+        local pname = "_bp_" .. tostring(i)
+        table.insert(cparams, cvardecl(tlcontext, ptype, pname))
+        table.insert(callargs, pname)
+    end
+    if method.varargtype then
+        table.insert(cparams,
+            varg_struct_name(method.varargtype) .. " *_varargs")
+        table.insert(cparams, "int _start")
+        table.insert(callargs, "_varargs")
+        table.insert(callargs, "_start")
+    end
+    for i = 2, #method.rettypes do
+        local oname = "_outparam_" .. tostring(i)
+        table.insert(cparams,
+            cpointerdecl(method.rettypes[i], oname))
+        table.insert(callargs, oname)
+    end
+    if method.flexrettype then
+        table.insert(cparams,
+            varg_struct_name(method.flexrettype) .. " *_flexout")
+        table.insert(cparams, "int _flexwant")
+        table.insert(callargs, "_flexout")
+        table.insert(callargs, "_flexwant")
+    end
+
+    local payload_call = render("$PAYLOAD($ARGS)", {
+        PAYLOAD = payload_name,
+        ARGS = table.concat(callargs, ", "),
+    })
+    local native_call = rettype
+        and ("return " .. payload_call .. ";")
+        or (payload_call .. ";\n        return;")
+    local nativesig = cfunctiondecl(
+        rettype, nativename, table.concat(cparams, ", "), false)
+
+    register_trace_name(tlcontext, nativename,
+        interface.name .. ":" .. method.name)
+    register_trace_name(tlcontext, strictname,
+        interface.name .. ":" .. method.name)
+
+    local strictbody = genluaentry(
+        tlcontext, interface.name .. ":" .. method.name,
+        nativename, ftype, method_node.loc, strictname, {
+            strict = true,
+            strict_name = strictname,
+            lua_entry = bound_luaname,
+            storage = "",
+            strict_plans = method_node._bound_strict_guard_plans,
+            strict_vararg_plan =
+                method_node._bound_strict_vararg_guard_plan,
+        })
+
+    table.insert(sigs, render([[
+        $NATIVE_SIG;
+        int $LUA_NAME(lua_State *L);
+        int $STRICT_NAME(lua_State *L);
+    ]], {
+        NATIVE_SIG = function_sig(nativename, ftype, false),
+        LUA_NAME = bound_luaname,
+        STRICT_NAME = strictname,
+    }))
+    table.insert(code, render([[
+        $NATIVE_SIG {
+            (void)_mod; /* Interface owner; payload receives concrete owner. */
+            if (TITAN_UNLIKELY(_fn == NULL || _fn->nupvalues < 6)) {
+                luaL_error(L, "invalid bound Interface method closure");
+            }
+            Udata *_titan_interface_wrapper =
+                uvalue(&_fn->upvalue[4]);
+            if (TITAN_UNLIKELY(
+                    _titan_interface_wrapper->len
+                        % sizeof(TitanInterfaceMethod) != 0
+                    || _titan_interface_wrapper->len
+                        / sizeof(TitanInterfaceMethod) != $METHOD_COUNT)) {
+                luaL_error(L, "malformed internal Interface wrapper for %s",
+                    $IFACE);
+            }
+            TitanInterfaceMethod _titan_interface_stored =
+                ((TitanInterfaceMethod *)getudatamem(
+                    _titan_interface_wrapper))[$INDEX];
+            if (TITAN_UNLIKELY(_titan_interface_stored == NULL)) {
+                luaL_error(L, "uninitialized internal Interface method %s:%s",
+                    $IFACE, $METHOD);
+            }
+            $PAYLOAD_DECL = titan_cast_func(
+                $PAYLOAD_TYPE, _titan_interface_stored);
+            Udata *_titan_interface_concrete_module =
+                uvalue(&_titan_interface_wrapper->uv[0].uv);
+            Udata *_titan_interface_concrete_self =
+                uvalue(&_titan_interface_wrapper->uv[1].uv);
+            $NATIVE_CALL
+        }
+
+        int $BOUND_LUA(lua_State *L) {
+            CClosure *_bound = clCvalue(s2v(L->ci->func.p));
+            if (TITAN_UNLIKELY(_bound->nupvalues < 6)) {
+                return luaL_error(L,
+                    "invalid bound Interface method closure");
+            }
+            titan_ensure_stack(L, 1);
+            setobj2s(L, L->top.p, &_bound->upvalue[4]);
+            L->top.p++;
+            lua_insert(L, 1);
+            return $INTERFACE_LUA(L);
+        }
+
+        $STRICT_BODY
+    ]], {
+        NATIVE_SIG = nativesig,
+        METHOD_COUNT = c_integer_literal(#interface.methods),
+        IFACE = c_string_literal(interface.name),
+        METHOD = c_string_literal(method.name),
+        INDEX = c_integer_literal(index),
+        PAYLOAD_DECL = function_sig(payload_name, method, true),
+        PAYLOAD_TYPE = function_sig("", method, true),
+        NATIVE_CALL = native_call,
+        BOUND_LUA = bound_luaname,
+        INTERFACE_LUA = luaname,
+        STRICT_BODY = strictbody,
+    }))
+
+    function_type_tag(tlcontext, ftype)
+end
+
+-- Interface declarations are type-only, but their owner module publishes one
+-- protected per-state metatable and all method/bound dispatch artifacts.
+function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
+    local interface = assert(node._type)
+    assert(interface._tag == "Type.Interface"
+           and types.validate_interface_descriptor(interface),
+        "malformed Interface declaration reached code generation")
+    assert(#node.methods == #interface.methods)
+
+    -- Allocate the owner's cached metatable slot even when no value of this
+    -- Interface is constructed in the declaring module. Importing consumers
+    -- recover the same registry metatable through type2metatable.
+    type2metatable(ctx, types.Nominal(interface.name))
+
+    local methodmap = {}
+    for index, method_node in ipairs(node.methods) do
+        local method = interface.methods[index]
+        coder._code_interface_method_artifacts(
+            ctx.tlcontext, sigs, code, interface, method_node, index - 1)
+        table.insert(methodmap, render([[
+            lua_pushliteral(L, $NAME);
+            titan_pushmodule(L, _mod);
+            lua_pushcclosure(L, $METHOD, 1);
+            lua_rawset(L, -3);
+        ]], {
+            NAME = c_string_literal(method.name),
+            METHOD = coder._interface_method_luaname(method),
+        }))
+    end
+
+    local cname = mangle_qn(interface.name)
+    local receiver_plan =
+        assert(node.methods[1]._lua_dynamic_plans[1],
+            "Interface receiver lacks its Lua boundary plan")
+    table.insert(code, render([[
+        static int __index_interface_$CNAME(lua_State *L) {
+            TValue *_interfaceslot = s2v(L->ci->func.p + 1);
+            CClosure *_func = clCvalue(s2v(L->ci->func.p));
+            Udata *_mod = uvalue(&_func->upvalue[1]);
+            Udata *_interface = NULL;
+            $CHECK_RECEIVER
+            (void)_interface;
+            TValue *_memberslot = s2v(L->ci->func.p + 2);
+            Table *_membermap = hvalue(&_func->upvalue[0]);
+            TValue _memberv;
+            lu_byte _membertag =
+                luaH_get(_membermap, _memberslot, &_memberv);
+            if (TITAN_LIKELY(!tagisempty(_membertag)
+                             && ttisCclosure(&_memberv))) {
+                setobj2s(L, L->top.p - 1, &_memberv);
+                return 1;
+            }
+            return luaL_error(L,
+                "%s:%d:%d: method '%s' not found in interface '%s'",
+                $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
+        }
+
+        static int __newindex_interface_$CNAME(lua_State *L) {
+            return luaL_error(L,
+                "%s:%d:%d: cannot assign member '%s' in interface '%s'",
+                $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
+        }
+    ]], {
+        CNAME = cname,
+        CHECK_RECEIVER = coder._dynamiccheckandget(
+            ctx, receiver_plan, types.Nominal(interface.name),
+            "_interface", "_interfaceslot", node.loc,
+            "Lua Interface receiver"),
+        FQTN = c_string_literal(interface.name),
+        FILE = c_string_literal(node.loc.filename),
+        LINE = c_integer_literal(node.loc.line),
+        COL = c_integer_literal(node.loc.col),
+    }))
+
+    table.insert(initnominals, render([[
+        {
+            luaL_newmetatable(L, "Titan interface $TYPE metatable");
+            const void *_mtp = lua_topointer(L, -1);
+            lua_pushliteral(L, "__metatable");
+            lua_pushliteral(L, "Titan interface $TYPE");
+            lua_rawset(L, -3);
+            lua_newtable(L);
+            $METHODMAP
+            lua_pushliteral(L, "__index");
+            lua_pushvalue(L, -2);
+            titan_pushmodule(L, _mod);
+            lua_pushcclosure(L, __index_interface_$CNAME, 2);
+            lua_rawset(L, -4);
+            lua_pushliteral(L, "__newindex");
+            lua_pushcfunction(L, __newindex_interface_$CNAME);
+            lua_rawset(L, -4);
+            lua_pop(L, 2);
+            lua_pushstring(L, "$TYPE");
+            lua_rawsetp(L, LUA_REGISTRYINDEX, _mtp);
+        }
+    ]], {
+        TYPE = interface.name,
+        CNAME = cname,
+        METHODMAP = table.concat(methodmap, "\n"),
+    }))
+end
+
 -- Distribute local state slots for the variables and
 -- imported modules of the current module,
 -- starting with exported variables in the order they appear;
@@ -13171,6 +15803,8 @@ function coder.generate(modname, ast, static_deps, abi)
         functag_count = 0,
         array_writer_list = {}, -- constructed Array element policies
         array_writer_count = 0,
+        interface_pairs = {}, -- canonical concrete/interface key -> exact pair
+        interface_pair_list = {}, -- pair entries in discovery order
         bound_luas = {},     -- mangled bound-Lua-trampoline name -> { module }
         bound_stricts = {},  -- mangled bound-strict-entry name -> { module }
         static_slots = {},   -- "fqtn.name" -> module upvalue slot of a static's closure
@@ -13262,6 +15896,9 @@ function coder.generate(modname, ast, static_deps, abi)
                 coderecorddec(initctx, code, initrecs, node)
             elseif tag == "Ast.TopLevelUnion" then
                 coder._codeuniondec(initctx, code, initrecs, node)
+            elseif tag == "Ast.TopLevelInterface" then
+                coder._codeinterfacedec(
+                    initctx, sigs, code, initrecs, node)
             end
         end
     end
@@ -13449,6 +16086,58 @@ function coder.generate(modname, ast, static_deps, abi)
     local array_writer_inits = {}
     coder._emit_array_writers(
         tlcontext, sigs, code, array_writer_inits)
+
+    -- Interface pair payloads are process-static function-pointer arrays.
+    -- Exact slots point at concrete methods; adjusted slots point at private
+    -- relation-free adapters emitted from checker-frozen action graphs. They
+    -- are filled only after imported native symbols have been recovered, on
+    -- both module-initialization branches, and before user initializers can
+    -- construct a wrapper. The wrapper copies the complete array by sizeof.
+    local interface_pair_inits = {}
+    local emitted_adapter_cap_assert = false
+    table.sort(tlcontext.interface_pair_list, function(left, right)
+        return util.bytewise_less(left.key, right.key)
+    end)
+    for _, pair in ipairs(tlcontext.interface_pair_list) do
+        for index, mapping in ipairs(pair.methods) do
+            if mapping.slot_kind == "adapter" then
+                if not emitted_adapter_cap_assert then
+                    table.insert(sigs, render([[
+                        typedef char $NAME[
+                            (TITAN_VARARG_MAX == 200) ? 1 : -1];
+                    ]], {
+                        NAME = tlcontext.prefix
+                            .. "interface_adapter_vararg_cap_must_match",
+                    }))
+                    emitted_adapter_cap_assert = true
+                end
+                local adapter_sig, adapter_body =
+                    coder._emit_interface_adapter(
+                        tlcontext, pair, index, mapping)
+                table.insert(sigs, adapter_sig)
+                table.insert(code, adapter_body)
+            end
+        end
+        table.insert(sigs, render([[
+            static TitanInterfaceMethod $ID[$COUNT];
+        ]], {
+            ID = pair.id,
+            COUNT = c_integer_literal(#pair.methods),
+        }))
+        for index, mapping in ipairs(pair.methods) do
+            local entry = mapping.slot_kind == "adapter"
+                and assert(pair.adapter_ids[index])
+                or method_name(mapping.concrete)
+            table.insert(interface_pair_inits, render([[
+                $ID[$INDEX] = titan_cast_func(
+                    TitanInterfaceMethod, $METHOD);
+            ]], {
+                ID = pair.id,
+                INDEX = c_integer_literal(index - 1),
+                METHOD = entry,
+            }))
+        end
+    end
 
     if #switch_get > 0 then
         table.insert(code, render([[
@@ -13649,6 +16338,7 @@ function coder.generate(modname, ast, static_deps, abi)
         LOADMODULES2 = #loadmods > 1 and table.concat(loadmods, "\n") or "",
         LOADGLOBALS = table.concat(loadglobals, "\n"),
         INITFUNCTAGS = table.concat(initfunctags, "\n"),
+        INITPAIRS = table.concat(interface_pair_inits, "\n"),
         INITARRAYWRITERS = table.concat(array_writer_inits, "\n"),
         INITVARS = table.concat(initvars, "\n"),
         INITRECORDS = table.concat(initrecs, "\n"),

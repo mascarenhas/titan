@@ -81,15 +81,15 @@ This is root discovery, not the previous policy of adding every
 find that exact suffix becomes `driver.INSTALLATION_ERROR` and stops
 compiler/toolchain use instead of silently mixing installations.
 
-The standard library consists of nine ordinary qualified logical modules:
-`titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.fs`,
-`titan.net`, `titan.os`, `titan.peg`, and `titan.string`. Most checkout sources
+The standard library consists of ten ordinary qualified logical modules:
+`titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
+`titan.fs`, `titan.net`, `titan.os`, `titan.peg`, and `titan.string`. Most checkout sources
 are `titan/<name>.titan`; `titan.uv`, `titan.peg`, and `titan.string` are folder
 ensembles. One `titanc` invocation links their independent objects and
 `titanlib.o` into the physical checkout provider pair `titan.so`/`titan.a`.
 The private namespaced LPegLabel archive follows `titanlib.o` as metadata-free
 payload; bundled mode then supplies the private libuv archive. Installation
-publishes both forms below `<root>/lib/titan/0.20/` and nine generated
+publishes both forms below `<root>/lib/titan/0.20/` and ten generated
 logical-module shims below
 `<root>/share/lua/5.5/titan/`. Titan imports discover each module through the
 preferred compiled-format pass; Lua requires use a generated shim and the DSO
@@ -101,10 +101,10 @@ aliases of uv-owned record types. The timer/fs/net/os modules also import uv
 directly for their low-level plumbing, so all five consumers share one Runtime
 and one canonical libuv provider image.
 
-For source convenience, the parser desugars the nine short standard-library
+For source convenience, the parser desugars the ten short standard-library
 imports before module resolution: `import "async"`, for example, places
 `titan.async` in the import AST exactly as `import "titan.async"` would. The same
-mapping applies to `coroutine`, `uv`, `timer`, `fs`, `net`, `os`, `peg`, and
+mapping applies to `coroutine`, `uv`, `timer`, `io`, `fs`, `net`, `os`, `peg`, and
 `string`; every other name is left unchanged. The driver, checker, code
 generator, and runtime thus
 see only the qualified module name. Each qualified name naturally produces its
@@ -137,7 +137,7 @@ as `options.source_roots`; each such module tries source first, even if a
 binary for it was cached by an earlier import in the same compiler process.
 If its source is absent, compilation fails rather than treating an existing
 binary as an empty build root. Imports reached from that root remain binary
-first. This is why one standard-library invocation can force all nine roots
+first. This is why one standard-library invocation can force all ten roots
 through source even when a bootstrap or prior combined provider pair is
 visible.
 Their internal imports resolve to the already selected source cache entries
@@ -283,6 +283,14 @@ member and interface, and returns only the requested key. Both paths evaluate
 the serialized type expression in the `types` constructor environment and
 require a canonical `Type.Module` for the logical name. See [the complete
 claim rules](multi-module-libraries.md#claim-and-terminal-error-states).
+
+The shared closed validator accepts Interfaces only as direct
+`Module.type_members`. It checks the owner/key, public locality, canonical
+nonempty ordered Method projection, parameter-name metadata, and every
+value-facing signature component before the checker registers those
+descriptors. DSO and archive paths therefore recover the same nominal
+Interface graph and reject malformed wrappers before any native symbol is
+trusted. See [Interfaces](interfaces.md#separate-compilation-and-schema-validation).
 
 Each source entry's `deps` stores direct dependencies that are already native
 inputs—source or selected static—regardless of which contributor declared
@@ -638,20 +646,20 @@ libraries](multi-module-libraries.md) documents logical grouping and DSO
 loading; [Static compiled modules](static-compiled-modules.md) documents the
 archive resolver, binding constraints, composition, and paired publication.
 
-The standard library uses the same generic path with all nine qualified roots
+The standard library uses the same generic path with all ten qualified roots
 in one command:
 
 ```sh
-titanc titan.coroutine titan.uv titan.async titan.timer titan.fs titan.net titan.os \
+titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net titan.os \
   titan.peg titan.string \
   -X titan-runtime/titanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a  # bundled mode
 ```
 
 The provider prefix is `titan`, so checkout output is `titan.so`, `titan.a`,
-and nine generated `titan/*.lua` shims. Each logical module retains its own
+and ten generated `titan/*.lua` shims. Each logical module retains its own
 `luaopen_titan_*`, `_init`, `_abi`, `_types`, registry module state, and
-initializer; `titanlib.o` supplies the tenth entry, `luaopen_titan`, and the
+initializer; `titanlib.o` supplies the eleventh entry, `luaopen_titan`, and the
 support table without adding an archive metadata key. The `titan.uv` folder
 still generates only `titan/uv/uv.c`/`.o`, and no contributor shim. The
 five-member LPegLabel archive is force-carried into both providers after
@@ -664,7 +672,7 @@ Make tracks every standard source explicitly, the compiler/runtime/support and
 embedded-format inputs, effective `CC`/`AR`/`RANLIB`, extra flags, and libuv
 configuration in a completion/config stamp. A missing `titan.so`, `titan.a`,
 generated shim, or Darwin dSYM invalidates the stamp. A warm invocation also
-rescans `titan.a` for the exact nine logical keys without changing pair
+rescans `titan.a` for the exact ten logical keys without changing pair
 mtimes. Exact child DSOs are removed as stale production outputs; the isolated
 delayed-callback and coroutine tests are the only supported exact-image
 variants.
@@ -680,9 +688,9 @@ deploys the compiler script/Lua modules but does not own a `titan` C module.
 The source-only post-install hook invokes the just-deployed `titanc` once in a
 private staging directory on the destination filesystem under the same
 effective native toolchain, extra flags, rocks root, runtime mode, and libuv
-policy. The publisher validates the ten Lua entries, nine logical protocols,
-exact nine-key archive metadata, three-way embedded/DSO/archive-backed
-ABI/types equality, nine shims, and Darwin dSYM. It backs up
+policy. The publisher validates the eleven Lua entries, ten logical protocols,
+exact ten-key archive metadata, three-way embedded/DSO/archive-backed
+ABI/types equality, ten shims, and Darwin dSYM. It backs up
 the active-0.20 public set and stale active-layout copies, commits shims/dSYM,
 then `titan.a`, and renames the validated DSO last. A caught or injected
 failure restores the prior complete pair, a legacy complete DSO/shim
@@ -813,7 +821,7 @@ contains exactly the dynamic loader/error runtime `titan.o`, coroutine shim
 `titan_coro.o`, and libuv callback shim `titan_uv.o`. Static-archive selection
 pulls in only referenced objects. Vendored `libbacktrace.a` is a separate link
 input. `titanlib.o` is also separate: it is the only input to the private
-support bootstrap and is passed once as shared native payload when the nine
+support bootstrap and is passed once as shared native payload when the ten
 standard logical modules are published in the full `titan.so`/`titan.a` pair.
 The private five-member LPegLabel archive follows it only in the standard
 provider payload and is not part of the runtime SDK.

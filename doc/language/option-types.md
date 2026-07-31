@@ -58,7 +58,7 @@ projection stays `value`, because `value` already includes nil.
 ## Syntax
 
 In a type annotation, `?` is a suffix on any simple type, including array
-and map types and (qualified) record or union names:
+and map types and (qualified) record, union, or Interface names:
 
 ```lua
 local a: integer?           = nil
@@ -68,6 +68,8 @@ local d: {string:integer}?  = nil      -- option of map
 local p: Point?             = nil      -- option of a record type
 local q: geom.Point?        = nil      -- imported record type
 local m: Message?           = nil      -- option of a union type
+local r: Reader?            = nil      -- option of an Interface type
+local s: api.Reader?        = nil      -- imported Interface type
 ```
 
 The suffix does not nest (`integer??` is a syntax error), and it cannot be
@@ -262,6 +264,27 @@ is present, and raises `expected integer but found nil` when the value is
 coercions perform. For a *defaulted* unwrap that never raises, use `or`
 instead (`xs[1] or 0`).
 
+### Interfaces and options
+
+The direct record/union-to-Interface wrapper coercion composes with Options
+through explicitly named plans:
+
+| Source | Target | Behavior |
+| --- | --- | --- |
+| satisfying concrete `R` | `I?` | construct a fresh `I` wrapper, then make it present |
+| satisfying `R?` | `I` | force non-nil, then construct a fresh `I` wrapper |
+| satisfying `R?` | `I?` | preserve nil; wrap a present `R` |
+| `I` | `I?` | ordinary Option introduction |
+| `I?` | `I` | ordinary checked force |
+| `value` | `I?` | preserve nil; a present value must already be an exact `I` wrapper |
+
+These plans do not make `R` and `I` gradually consistent and do not authorize
+general coercion lifting. Written casts are deliberately narrower:
+`I? as/is R` may downcast/test the present concrete value, and `I? as/is I`
+uses the ordinary exact force/test, but the other implicit combinations are
+not automatically written-castable. The complete matrix is in
+[Interfaces](interfaces.md#options).
+
 ## Arrays, maps, and `nil`
 
 Options are woven into the container types in three ways (details in
@@ -436,6 +459,12 @@ same recursive rule governs `value as/is T?`; in particular,
 `value is boolean?` is total. A wrong, non-nil value raises the usual
 boundary error (see [Lua interoperability](lua-interop.md)). A `T?` return
 value simply arrives in Lua as nil or as the value.
+
+For an Interface base `I`, “the dynamic conversion for `I`” means exact
+wrapper identity. Nil is accepted first for `I?`; a present existing `I`
+wrapper is accepted; and a bare record or union is rejected even if its static
+Titan type would satisfy `I`. Lua never performs structural implementation
+discovery or constructs an Interface wrapper.
 
 ```lua
 -- Titan (greet.titan)

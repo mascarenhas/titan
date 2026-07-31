@@ -190,9 +190,10 @@ One separate written conversion erases stable native identities to C
 `void *`. Every non-function C pointer keeps the ordinary C object-pointer
 conversion, while a C function pointer uses Titan's toolchain portability
 cast. A Titan Array or Map exposes its backing `Table *`; a record or Titan
-union exposes its full-userdata `Udata *`; and a function exposes the
-collectable GC object
-carried by its boxed `TValue`. A noncollectable function-typed value makes
+union, or Interface exposes its full-userdata `Udata *` (the Interface address
+is the wrapper, not its concrete value); and a function exposes the
+collectable GC object carried by its boxed `TValue`. A noncollectable
+function-typed value makes
 `is C-void-pointer` false and makes `as C-void-pointer` raise. Strings remain
 byte pointers and owned C objects remain payload pointers; neither switches to
 its enclosing GC object's identity. An arbitrary `value` likewise does not
@@ -208,7 +209,8 @@ free, or reallocate them.
 
 This identity conversion is the only Titan-union/C-aggregate relation. A
 Titan union is nominal tagged userdata, not a C `union`; neither it nor a
-Titan record can be structurally cast to a C `union` or `struct`.
+Titan record can be structurally cast to a C `union` or `struct`. An Interface
+likewise cannot be constructed from or cast to a C aggregate.
 
 An existing address coercion still handles a by-value C object passed to a
 pointer parameter. A mutable local or parameter may supply a mutable out

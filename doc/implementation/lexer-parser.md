@@ -178,6 +178,15 @@ table (`defs.get_loc` calls `location.from_pos`); since `loc` is the first
 field of every constructor in `ast.lua`, putting `P` first lands the location
 in the right positional argument with no extra plumbing.
 
+The top-level `interface` production commits to a nonempty sequence of
+bodyless `function` signatures and builds `Ast.TopLevelInterface` plus ordered
+`Ast.InterfaceMethod` children. It has dedicated labels for a local/nested or
+empty declaration, local methods, missing method names/parentheses/types,
+unexpected members, and a missing final `end`. `interface` is a Titan keyword,
+but `CNAME` still captures it in contextual C typedef, field/member, and
+prototype-parameter positions; this mirrors the other C-legal Titan keywords.
+See [Interfaces](interfaces.md#frontend-representation).
+
 ### Function result-shape carriers
 
 Fixed and flexible results are parsed separately. `resulttypelist` captures a

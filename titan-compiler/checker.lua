@@ -211,7 +211,8 @@ local function checktype(typ, loc, errors, seen)
         checktype(typ.values, loc, errors, seen)
     elseif tag == "Type.Option" then
         checktype(typ.base, loc, errors, seen)
-    elseif tag == "Type.Function" then
+    elseif tag == "Type.Function" or tag == "Type.Method"
+           or tag == "Type.StaticMethod" then
         for _, param in ipairs(typ.params) do
             checktype(param, loc, errors, seen)
         end
@@ -223,6 +224,10 @@ local function checktype(typ, loc, errors, seen)
         end
         if typ.flexrettype then
             checktype(typ.flexrettype, loc, errors, seen)
+        end
+    elseif tag == "Type.Interface" then
+        for _, method in ipairs(typ.methods or {}) do
+            checktype(method, loc, errors, seen)
         end
     end
 end
@@ -1272,6 +1277,1016 @@ local function visible_record_fields(record, st)
     return out
 end
 
+-- Interface implementation is deliberately authorized only at a concrete
+-- scalar cast site. The generic type relations know about nominal identities
+-- but do not resolve descriptors or decide member visibility; this policy
+-- callback supplies those checker-owned facts for one assignment/cast query.
+local function interface_relation_policy(st, options)
+    local policy = {}
+    for key, value in pairs(options or {}) do
+        policy[key] = value
+    end
+    policy.visibility = st.modname
+    policy.method_visible = function(method)
+        return is_nominal_member_visible_from(st, method)
+    end
+    policy.interface_coercion = function(source, target, received)
+        policy.interface_failure = false
+        local concrete = source._tag == "Type.Nominal"
+            and types.registry[source.fqtn] or nil
+        local interface = target._tag == "Type.Nominal"
+            and types.registry[target.fqtn] or nil
+        if not concrete
+           or (concrete._tag ~= "Type.Record"
+               and concrete._tag ~= "Type.Union")
+           or not interface
+           or interface._tag ~= "Type.Interface"
+           or not is_nominal_visible_from(st, source.fqtn) then
+            return false
+        end
+
+        local implementation, failure =
+            types.interface_implementation(
+                concrete, interface, received)
+        policy.interface_failure = failure or false
+        return implementation and implementation.methods or false
+    end
+    return policy
+end
+
+local function find_interface_wrapper(plan)
+    if type(plan) ~= "table" then return nil end
+    if plan.op == "interface_wrapper" then return plan end
+    return find_interface_wrapper(plan.coercion)
+        or find_interface_wrapper(plan.inner)
+end
+
+local interface_adapters = (function()
+
+local function interface_adapter_assert(condition, message)
+    if not condition then
+        error("invalid checker Interface adapter plan: " .. message, 2)
+    end
+end
+
+-- Copy one gradual guard into the checker-owned adapter graph. Keeping this
+-- graph independent from the relation result lets coder consume a closed,
+-- typed decision without consulting `types.gradual_guard` again.
+local function freeze_interface_guard(plan, target, seen)
+    interface_adapter_assert(
+        type(plan) == "table"
+            and plan.kind == "gradual_guard",
+        "component lacks a gradual guard")
+    interface_adapter_assert(
+        plan.target and types.equals(plan.target, target),
+        "gradual guard target does not match its component")
+
+    seen = seen or {}
+    local prior = seen[plan]
+    if prior then
+        interface_adapter_assert(
+            not prior.active,
+            "recursive gradual-guard cycle")
+        return prior.frozen
+    end
+
+    local frozen = {
+        kind = "gradual_guard",
+        op = plan.op,
+        target = target,
+    }
+    seen[plan] = { active = true, frozen = frozen }
+
+    local tag = target._tag
+    if tag == "Type.Array" then
+        interface_adapter_assert(
+            plan.op == "array" and plan.element,
+            "Array guard has the wrong shape")
+        frozen.element = freeze_interface_guard(
+            plan.element, target.elem, seen)
+    elseif tag == "Type.Map" then
+        interface_adapter_assert(
+            plan.op == "map" and plan.key and plan.value,
+            "Map guard has the wrong shape")
+        frozen.key = freeze_interface_guard(
+            plan.key, target.keys, seen)
+        frozen.value = freeze_interface_guard(
+            plan.value, target.values, seen)
+    elseif tag == "Type.Option" then
+        interface_adapter_assert(
+            plan.op == "option" and plan.inner,
+            "Option guard has the wrong shape")
+        frozen.inner = freeze_interface_guard(
+            plan.inner, target.base, seen)
+    elseif tag == "Type.Nominal"
+        or tag == "Type.Record"
+        or tag == "Type.Union" then
+        local name = target.fqtn or target.name
+        interface_adapter_assert(
+            plan.op == "nominal" and plan.name == name,
+            "nominal guard has the wrong identity")
+        frozen.name = name
+    else
+        local leaf_ops = {
+            ["Type.Integer"] = "integer",
+            ["Type.Float"] = "float",
+            ["Type.Boolean"] = "boolean",
+            ["Type.Nil"] = "nil",
+            ["Type.String"] = "string",
+            ["Type.Value"] = "value",
+            ["Type.Function"] = "callable",
+            ["Type.COwned"] = "c_owned",
+            ["Type.CInteger"] = "c_integer",
+            ["Type.CFloat"] = "c_float",
+        }
+        local expected = leaf_ops[tag]
+        if types.is_c_tvalue(target) then
+            expected = "c_tvalue"
+        end
+        interface_adapter_assert(
+            expected and plan.op == expected,
+            "guard has unsupported leaf " .. tostring(tag))
+    end
+
+    seen[plan].active = false
+    return frozen
+end
+
+local freeze_interface_callable
+
+local function interface_adapter_is_gc(typ)
+    local normalized = types.normalize(typ)
+    return normalized and types.is_gc(normalized) or false
+end
+
+local function interface_injection_may_relocate(typ)
+    typ = types.normalize(typ)
+    if not typ then return false end
+    if typ._tag == "Type.Array" then return true end
+    if typ._tag == "Type.Option" then
+        return interface_injection_may_relocate(typ.base)
+    end
+    return false
+end
+
+-- Normalize a callable component edge into the only operations an Interface
+-- adapter may execute. Ordinary coercions and representation-changing nested
+-- Interface construction are intentionally absent.
+local function freeze_interface_component(
+        adjustment, source, target, seen)
+    local normalized_source = types.normalize(source)
+    local normalized_target = types.normalize(target)
+    interface_adapter_assert(
+        type(adjustment) == "table",
+        "callable component lacks an adjustment")
+    interface_adapter_assert(
+        normalized_source and normalized_target
+            and adjustment.source and adjustment.target
+            and types.equals(
+                adjustment.source, normalized_source)
+            and types.equals(
+                adjustment.target, normalized_target),
+        "callable component endpoints do not match")
+    interface_adapter_assert(
+        not adjustment.interface_conversion,
+        "nested concrete-to-Interface conversion")
+
+    if adjustment.kind == "identity" then
+        return {
+            kind = "identity",
+            source = normalized_source,
+            target = normalized_target,
+            declared_source = source,
+            declared_target = target,
+            timing = "immediate",
+            may_raise = false,
+            may_relocate = false,
+        }
+    elseif adjustment.kind == "gradual_view" then
+        if adjustment.op == "inject" then
+            local may_relocate =
+                interface_injection_may_relocate(
+                    normalized_source)
+            interface_adapter_assert(
+                normalized_target._tag == "Type.Value"
+                    and adjustment.guard == nil,
+                "malformed gradual injection")
+            return {
+                kind = "gradual_inject",
+                source = normalized_source,
+                target = normalized_target,
+                declared_source = source,
+                declared_target = target,
+                timing = "immediate",
+                may_raise = may_relocate,
+                may_relocate = may_relocate,
+            }
+        end
+
+        interface_adapter_assert(
+            adjustment.op == "project"
+                or adjustment.op == "structural",
+            "unsupported gradual operation "
+                .. tostring(adjustment.op))
+        local delayed = adjustment.op == "structural"
+            and normalized_target._tag ~= "Type.Option"
+        return {
+            kind = "gradual_guard",
+            mode = adjustment.op,
+            source = normalized_source,
+            target = normalized_target,
+            declared_source = source,
+            declared_target = target,
+            guard = freeze_interface_guard(
+                adjustment.guard, normalized_target, {}),
+            timing = delayed and "delayed_observation"
+                or "immediate",
+            may_raise = not delayed,
+            -- Conservatively require a rebase after an immediate guard. A
+            -- particular leaf check may not allocate, but its checked helper
+            -- is allowed to do so without invalidating adapter stack aliases.
+            may_relocate = not delayed,
+        }
+    elseif adjustment.kind == "callable" then
+        return {
+            kind = "callable_view",
+            source = normalized_source,
+            target = normalized_target,
+            declared_source = source,
+            declared_target = target,
+            timing = "delayed_call",
+            may_raise = false,
+            may_relocate = false,
+            callable = freeze_interface_callable(
+                adjustment, normalized_source,
+                normalized_target, seen),
+        }
+    end
+
+    interface_adapter_assert(
+        adjustment.kind ~= "direct_coercion",
+        "ordinary component coercion is forbidden")
+    interface_adapter_assert(false,
+        "unknown component operation "
+            .. tostring(adjustment.kind))
+end
+
+local function adapter_action(kind, order, fields)
+    fields = fields or {}
+    fields.kind = kind
+    fields.order = order
+    fields.id = fields.phase .. ":" .. tostring(order)
+    return fields
+end
+
+local function component_action(
+        raw, kind, order, phase, source, target, seen, fields)
+    fields = fields or {}
+    fields.phase = phase
+    fields.source_type = source
+    fields.target_type = target
+    fields.source_gc = interface_adapter_is_gc(source)
+    fields.destination_gc =
+        interface_adapter_is_gc(target)
+    fields.operation = freeze_interface_component(
+        raw.adjustment, source, target, seen)
+    fields.rebase_after = fields.operation.may_relocate
+    return adapter_action(kind, order, fields)
+end
+
+-- Freeze one directional callable plan while preserving every action index and
+-- offset. This is structural elaboration only: it never asks any relation to
+-- prove a new edge.
+freeze_interface_callable = function(raw, source, target, seen)
+    interface_adapter_assert(
+        type(raw) == "table" and raw.kind == "callable",
+        "method adjustment is not callable")
+    interface_adapter_assert(
+        source._tag == "Type.Function"
+            and target._tag == "Type.Function"
+            and raw.source and raw.target
+            and types.equals(raw.source, source)
+            and types.equals(raw.target, target),
+        "callable plan has mismatched signatures")
+    interface_adapter_assert(
+        raw.exact == types.equals(source, target),
+        "callable exactness marker is wrong")
+    interface_adapter_assert(
+        not (source.vararg or target.vararg) or raw.exact,
+        "non-exact untyped C vararg adjustment")
+    interface_adapter_assert(
+        type(raw.arguments) == "table"
+            and type(raw.results) == "table",
+        "callable plan lacks ordered action lists")
+
+    seen = seen or {}
+    local prior = seen[raw]
+    if prior then
+        interface_adapter_assert(
+            not prior.active,
+            "recursive callable-plan cycle")
+        return prior.frozen
+    end
+
+    local frozen = {
+        kind = "interface_callable_actions",
+        source = source,
+        target = target,
+        exact = raw.exact,
+        arguments = {},
+        results = {},
+    }
+    seen[raw] = { active = true, frozen = frozen }
+
+    local argument_index = 0
+    local function argument(kind)
+        argument_index = argument_index + 1
+        local action = raw.arguments[argument_index]
+        interface_adapter_assert(
+            action and action.kind == kind,
+            "expected argument action " .. kind
+                .. " at " .. tostring(argument_index))
+        return action, argument_index
+    end
+
+    local shared = math.min(#source.params, #target.params)
+    for index = 1, shared do
+        local action, order = argument("argument")
+        interface_adapter_assert(
+            action.expected_index == index
+                and action.actual_index == index,
+            "shared argument indexes are not canonical")
+        frozen.arguments[order] = component_action(
+            action, "argument", order, "argument",
+            target.params[index], source.params[index], seen, {
+                expected_index = index,
+                actual_index = index,
+                source_kind = "interface_fixed",
+                destination_kind = "concrete_fixed",
+            })
+    end
+
+    for index = #target.params + 1, #source.params do
+        if target.varargtype then
+            local action, order =
+                argument("tail_or_nil_to_argument")
+            interface_adapter_assert(
+                action.actual_index == index
+                    and action.expected_tail_offset
+                        == index - #target.params,
+                "tail-to-fixed argument indexes are not canonical")
+            frozen.arguments[order] = component_action(
+                action, "tail_or_nil_to_argument", order, "argument",
+                target.varargtype, source.params[index], seen, {
+                    actual_index = index,
+                    expected_tail_offset =
+                        index - #target.params,
+                    source_kind = "interface_tail",
+                    source_open = true,
+                    destination_kind = "concrete_fixed",
+                    missing_arm = {
+                        kind = "nil_fill",
+                        admissible = true,
+                        target_type = source.params[index],
+                    },
+                    present_arm = "operation",
+                })
+        else
+            local action, order = argument("nil_fill")
+            interface_adapter_assert(
+                action.actual_index == index
+                    and action.adjustment == nil,
+                "nil-fill argument is malformed")
+            frozen.arguments[order] = adapter_action(
+                "nil_fill", order, {
+                    phase = "argument",
+                    actual_index = index,
+                    source_kind = "constant_nil",
+                    destination_kind = "concrete_fixed",
+                    source_type = types.Nil(),
+                    target_type = source.params[index],
+                    source_gc = false,
+                    destination_gc =
+                        interface_adapter_is_gc(
+                            source.params[index]),
+                    admissible = true,
+                    missing_arm = {
+                        kind = "nil_fill",
+                        admissible = true,
+                        target_type = source.params[index],
+                    },
+                    rebase_after = false,
+                })
+        end
+    end
+
+    for index = #source.params + 1, #target.params do
+        if source.varargtype then
+            local action, order = argument("argument_to_tail")
+            interface_adapter_assert(
+                action.expected_index == index,
+                "fixed-to-tail argument index is not canonical")
+            frozen.arguments[order] = component_action(
+                action, "argument_to_tail", order, "argument",
+                target.params[index], source.varargtype, seen, {
+                    expected_index = index,
+                    source_kind = "interface_fixed",
+                    destination_kind = "concrete_tail",
+                    destination_open = true,
+                })
+        else
+            local action, order = argument("ignore_argument")
+            interface_adapter_assert(
+                action.expected_index == index
+                    and action.adjustment == nil,
+                "ignored argument is malformed")
+            frozen.arguments[order] = adapter_action(
+                "ignore_argument", order, {
+                    phase = "argument",
+                    expected_index = index,
+                    source_kind = "interface_fixed",
+                    destination_kind = "discard",
+                    source_type = target.params[index],
+                    target_type = false,
+                    source_gc =
+                        interface_adapter_is_gc(
+                            target.params[index]),
+                    destination_gc = false,
+                    effect = "evaluate_and_discard",
+                    rebase_after = false,
+                })
+        end
+    end
+
+    if source.varargtype and target.varargtype then
+        local action, order = argument("tail_to_tail")
+        local consumed =
+            math.max(0, #source.params - #target.params)
+        interface_adapter_assert(
+            action.expected_tail_consumed == consumed,
+            "input tail offset is not canonical")
+        frozen.arguments[order] = component_action(
+            action, "tail_to_tail", order, "argument",
+            target.varargtype, source.varargtype, seen, {
+                expected_tail_consumed = consumed,
+                source_kind = "interface_tail",
+                source_open = true,
+                destination_kind = "concrete_tail",
+                destination_open = true,
+            })
+    elseif source.varargtype then
+        local action, order = argument("empty_tail")
+        interface_adapter_assert(
+            action.adjustment == nil,
+            "empty-tail action has an adjustment")
+        frozen.arguments[order] = adapter_action(
+            "empty_tail", order, {
+                phase = "argument",
+                source_kind = "empty",
+                destination_kind = "concrete_tail",
+                source_type = false,
+                target_type = source.varargtype,
+                source_gc = false,
+                destination_gc =
+                    interface_adapter_is_gc(
+                        source.varargtype),
+                destination_open = true,
+                count = 0,
+                rebase_after = false,
+            })
+    elseif target.varargtype then
+        local action, order = argument("ignore_tail")
+        local consumed =
+            math.max(0, #source.params - #target.params)
+        interface_adapter_assert(
+            action.expected_tail_consumed == consumed
+                and action.adjustment == nil,
+            "ignored-tail action is malformed")
+        frozen.arguments[order] = adapter_action(
+            "ignore_tail", order, {
+                phase = "argument",
+                expected_tail_consumed = consumed,
+                source_kind = "interface_tail",
+                source_open = true,
+                destination_kind = "discard",
+                source_type = target.varargtype,
+                target_type = false,
+                source_gc =
+                    interface_adapter_is_gc(
+                        target.varargtype),
+                destination_gc = false,
+                effect = "evaluate_run_and_discard",
+                rebase_after = false,
+            })
+    end
+    interface_adapter_assert(
+        argument_index == #raw.arguments,
+        "callable plan has extra argument actions")
+
+    local result_index = 0
+    local function result(kind)
+        result_index = result_index + 1
+        local action = raw.results[result_index]
+        interface_adapter_assert(
+            action and action.kind == kind,
+            "expected result action " .. kind
+                .. " at " .. tostring(result_index))
+        return action, result_index
+    end
+
+    for index, expected in ipairs(target.rettypes) do
+        local actual = source.rettypes[index]
+        if actual then
+            local action, order = result("result")
+            interface_adapter_assert(
+                action.actual_index == index
+                    and action.expected_index == index,
+                "fixed result indexes are not canonical")
+            frozen.results[order] = component_action(
+                action, "result", order, "result",
+                actual, expected, seen, {
+                    actual_index = index,
+                    expected_index = index,
+                    source_kind = "concrete_fixed",
+                    destination_kind = "interface_fixed",
+                })
+        else
+            interface_adapter_assert(
+                source.flexrettype,
+                "required result has no concrete source")
+            local optional = expected._tag == "Type.Option"
+            local kind = optional
+                and "flex_to_optional_result"
+                or "flex_to_result"
+            local action, order = result(kind)
+            local offset = index - #source.rettypes
+            interface_adapter_assert(
+                action.expected_index == index
+                    and action.actual_flex_offset == offset,
+                "flexible result indexes are not canonical")
+            interface_adapter_assert(
+                optional
+                    and (action.wrap_present == nil
+                         or action.wrap_present == true)
+                    or (not optional
+                        and action.wrap_present == nil),
+                "flexible result has invalid Option metadata")
+            local wraps = action.wrap_present == true
+            local operation_target =
+                wraps and expected.base or expected
+            local frozen_action = component_action(
+                action, kind, order, "result",
+                source.flexrettype, operation_target, seen, {
+                    expected_index = index,
+                    actual_flex_offset = offset,
+                    source_kind = "concrete_flex",
+                    source_open = true,
+                    destination_kind = "interface_fixed",
+                    target_type = expected,
+                    operation_target_type = operation_target,
+                    destination_gc =
+                        interface_adapter_is_gc(expected),
+                    missing_arm = {
+                        kind = optional and "nil_fill"
+                            or "raise_missing_result",
+                        target_type = expected,
+                    },
+                    present_arm = {
+                        kind = "operation",
+                        wrap_present = wraps,
+                        target_type = operation_target,
+                    },
+                    wrap_present = wraps,
+                })
+            -- The operation may target the Option base, but the adapter slot
+            -- and its destination root always carry the complete Interface
+            -- result type.
+            frozen_action.target_type = expected
+            frozen_action.destination_gc =
+                interface_adapter_is_gc(expected)
+            frozen.results[order] = frozen_action
+        end
+    end
+
+    for index = #target.rettypes + 1, #source.rettypes do
+        if target.flexrettype then
+            local action, order = result("result_to_flex")
+            local offset = index - #target.rettypes
+            interface_adapter_assert(
+                action.actual_index == index
+                    and action.expected_flex_offset == offset,
+                "fixed-to-flex result indexes are not canonical")
+            frozen.results[order] = component_action(
+                action, "result_to_flex", order, "result",
+                source.rettypes[index], target.flexrettype, seen, {
+                    actual_index = index,
+                    expected_flex_offset = offset,
+                    source_kind = "concrete_fixed",
+                    destination_kind = "interface_flex",
+                    destination_open = true,
+                })
+        else
+            local action, order = result("hide_result")
+            interface_adapter_assert(
+                action.actual_index == index
+                    and action.adjustment == nil,
+                "hidden result is malformed")
+            frozen.results[order] = adapter_action(
+                "hide_result", order, {
+                    phase = "result",
+                    actual_index = index,
+                    source_kind = "concrete_fixed",
+                    destination_kind = "discard",
+                    source_type = source.rettypes[index],
+                    target_type = false,
+                    source_gc =
+                        interface_adapter_is_gc(
+                            source.rettypes[index]),
+                    destination_gc = false,
+                    effect = "discard",
+                    rebase_after = false,
+                })
+        end
+    end
+
+    if source.flexrettype and target.flexrettype then
+        local action, order = result("flex_to_flex")
+        local consumed =
+            math.max(0, #target.rettypes - #source.rettypes)
+        interface_adapter_assert(
+            action.actual_flex_consumed == consumed,
+            "output flex offset is not canonical")
+        frozen.results[order] = component_action(
+            action, "flex_to_flex", order, "result",
+            source.flexrettype, target.flexrettype, seen, {
+                actual_flex_consumed = consumed,
+                source_kind = "concrete_flex",
+                source_open = true,
+                destination_kind = "interface_flex",
+                destination_open = true,
+            })
+    elseif source.flexrettype then
+        local action, order = result("hide_flex")
+        local consumed =
+            math.max(0, #target.rettypes - #source.rettypes)
+        interface_adapter_assert(
+            action.actual_flex_consumed == consumed
+                and action.adjustment == nil,
+            "hidden flex result is malformed")
+        frozen.results[order] = adapter_action(
+            "hide_flex", order, {
+                phase = "result",
+                actual_flex_consumed = consumed,
+                source_kind = "concrete_flex",
+                source_open = true,
+                destination_kind = "discard",
+                source_type = source.flexrettype,
+                target_type = false,
+                source_gc =
+                    interface_adapter_is_gc(
+                        source.flexrettype),
+                destination_gc = false,
+                effect = "discard_run",
+                rebase_after = false,
+            })
+    elseif target.flexrettype then
+        local action, order = result("end_flex")
+        interface_adapter_assert(
+            action.adjustment == nil,
+            "end-flex action has an adjustment")
+        frozen.results[order] = adapter_action(
+            "end_flex", order, {
+                phase = "result",
+                source_kind = "empty",
+                destination_kind = "interface_flex",
+                source_type = false,
+                target_type = target.flexrettype,
+                source_gc = false,
+                destination_gc =
+                    interface_adapter_is_gc(
+                        target.flexrettype),
+                destination_open = true,
+                count = 0,
+                rebase_after = false,
+            })
+    end
+    interface_adapter_assert(
+        result_index == #raw.results,
+        "callable plan has extra result actions")
+
+    seen[raw].active = false
+    return frozen
+end
+
+local function adapter_root_range(
+        id, phase, side, element_type, lifetime)
+    local present = element_type ~= nil
+        and element_type ~= false
+    local gc_bearing =
+        present and interface_adapter_is_gc(
+            element_type) or false
+    return {
+        kind = "open_root_range",
+        id = id,
+        phase = phase,
+        side = side,
+        present = present,
+        element_type = element_type or false,
+        gc_bearing = gc_bearing,
+        traced = gc_bearing,
+        storage = gc_bearing
+            and "parallel_lua_stack_range" or false,
+        dynamic_start = present and "run_start" or false,
+        dynamic_count = present and "run_count" or false,
+        retain_until = lifetime,
+        raw_storage_is_root = false,
+    }
+end
+
+local function adapter_fixed_roots(actions, side)
+    local roots = {}
+    local gc_field = side == "source"
+        and "source_gc" or "destination_gc"
+    local open_field = side == "source"
+        and "source_open" or "destination_open"
+    local type_field = side == "source"
+        and "source_type" or "target_type"
+    for _, action in ipairs(actions) do
+        if action[gc_field] and not action[open_field] then
+            local lifetime
+            if action.phase == "argument" then
+                lifetime = side == "source"
+                    and "all_arguments_converted"
+                    or "concrete_call_returns"
+            else
+                lifetime = side == "source"
+                    and "all_results_converted"
+                    or "interface_caller_handoff"
+            end
+            roots[#roots + 1] = {
+                action = action.id,
+                type = action[type_field],
+                storage = "lua_stack_slot",
+                retain_until = lifetime,
+            }
+        end
+    end
+    return roots
+end
+
+local function make_interface_adapter(
+        concrete, interface, mapping)
+    interface_adapter_assert(
+        mapping and mapping.required and mapping.concrete,
+        "method mapping lacks descriptors")
+    interface_adapter_assert(
+        mapping.index >= 0
+            and interface.methods[mapping.index + 1]
+                == mapping.required
+            and mapping.required.name == mapping.name
+            and mapping.concrete.fqtn == concrete.name,
+        "method mapping does not match its Interface slot")
+    interface_adapter_assert(
+        mapping.source and mapping.target
+            and mapping.source._tag == "Type.Function"
+            and mapping.target._tag == "Type.Function",
+        "method mapping lacks projected signatures")
+    interface_adapter_assert(
+        mapping.exact == types.equals(
+            mapping.source, mapping.target),
+        "method mapping exactness is inconsistent")
+
+    if mapping.exact then
+        mapping.slot_kind = "exact"
+        mapping.interface_adapter = nil
+        return nil
+    end
+
+    local actions = freeze_interface_callable(
+        mapping.adjustment, mapping.source, mapping.target, {})
+    local owner_module = nominal_module(concrete.name)
+    local adapter = {
+        kind = "interface_method_adapter",
+        slot = mapping.index,
+        slot_kind = "adapter",
+        name = mapping.name,
+        symbol_key = string.format(
+            "%s->%s#%d:%s",
+            concrete.name, interface.name,
+            mapping.index, mapping.name),
+        trace_name = string.format(
+            "%s:%s [adapter for %s:%s]",
+            interface.name, mapping.name,
+            concrete.name, mapping.name),
+        concrete_owner = concrete,
+        concrete_owner_module = owner_module,
+        concrete_method = mapping.concrete,
+        concrete_signature = mapping.source,
+        interface = interface,
+        interface_method = mapping.required,
+        -- The native adapter ABI is the Interface Method descriptor (hidden
+        -- L/module/closure/self included by function_sig). Its self-removed
+        -- callable projection is recorded separately.
+        native_signature = mapping.required,
+        interface_signature = mapping.target,
+        hidden_operands = {
+            concrete_owner_module = {
+                parameter = "_mod",
+                provenance = "interface_wrapper_uservalue_0",
+                owner = concrete,
+                module = owner_module,
+                forwards_unchanged = true,
+                emitter_module_is_forbidden = true,
+            },
+            closure = {
+                parameter = "_fn",
+                adapter_value = "NULL",
+                concrete_call_value = "NULL",
+            },
+            self = {
+                provenance = "interface_wrapper_uservalue_1",
+                type = types.Nominal(concrete.name),
+                forwards_unchanged = true,
+            },
+        },
+        arguments = actions.arguments,
+        results = actions.results,
+        callable = actions,
+        relation_free = true,
+        no_nested_interface_conversions = true,
+        uses_base_off = true,
+    }
+
+    adapter.rooting = {
+        raw_descriptors_are_roots = false,
+        raw_buffers_are_roots = false,
+        fixed = {
+            argument_source =
+                adapter_fixed_roots(adapter.arguments, "source"),
+            argument_destination =
+                adapter_fixed_roots(adapter.arguments, "destination"),
+            result_source =
+                adapter_fixed_roots(adapter.results, "source"),
+            result_destination =
+                adapter_fixed_roots(adapter.results, "destination"),
+        },
+        ranges = {
+            argument_source = adapter_root_range(
+                "argument_source", "argument", "source",
+                mapping.target.varargtype,
+                "all_arguments_converted"),
+            argument_destination = adapter_root_range(
+                "argument_destination", "argument", "destination",
+                mapping.source.varargtype,
+                "concrete_call_returns"),
+            result_source = adapter_root_range(
+                "result_source", "result", "source",
+                mapping.source.flexrettype,
+                "all_results_converted"),
+            result_destination = adapter_root_range(
+                "result_destination", "result", "destination",
+                mapping.target.flexrettype,
+                "interface_caller_handoff"),
+        },
+    }
+
+    local argument_rebases, result_rebases = {}, {}
+    for _, action in ipairs(adapter.arguments) do
+        if action.rebase_after then
+            argument_rebases[#argument_rebases + 1] = {
+                kind = "after_action",
+                action = action.id,
+                reason = "immediate_gradual_guard",
+            }
+        end
+    end
+    for _, action in ipairs(adapter.results) do
+        if action.rebase_after then
+            result_rebases[#result_rebases + 1] = {
+                kind = "after_action",
+                action = action.id,
+                reason = "immediate_gradual_guard",
+            }
+        end
+    end
+    adapter.rebase_points = {}
+    for _, point in ipairs(argument_rebases) do
+        adapter.rebase_points[#adapter.rebase_points + 1] = point
+    end
+    adapter.rebase_points[#adapter.rebase_points + 1] = {
+        kind = "after_native_call",
+        method = mapping.concrete,
+        reason = "concrete_call_may_relocate_stack",
+    }
+    for _, point in ipairs(result_rebases) do
+        adapter.rebase_points[#adapter.rebase_points + 1] = point
+    end
+
+    mapping.slot_kind = "adapter"
+    mapping.interface_adapter = adapter
+    return adapter
+end
+
+return {
+    make = make_interface_adapter,
+}
+
+end)()
+
+local function make_interface_conversion(source, target, adjustment)
+    local wrapper = find_interface_wrapper(adjustment)
+    if not wrapper then return nil end
+    local concrete = types.registry[wrapper.source.fqtn]
+    local interface = types.registry[wrapper.target.fqtn]
+    local exact = true
+    for _, mapping in ipairs(wrapper.methods or {}) do
+        interface_adapters.make(concrete, interface, mapping)
+        exact = exact and mapping.exact
+    end
+    local root = adjustment.coercion or adjustment
+    return {
+        kind = "interface_conversion",
+        source = source,
+        target = target,
+        concrete = concrete,
+        interface = interface,
+        concrete_type = wrapper.source,
+        interface_type = wrapper.target,
+        methods = wrapper.methods,
+        exact = exact,
+        option = root.op or "interface_wrapper",
+        source_optional = source._tag == "Type.Option",
+        target_optional = target._tag == "Type.Option",
+        nil_propagates = root.op == "option_map",
+        forces_source = root.op == "option_force",
+        wraps_present = root.op == "option_wrap",
+    }
+end
+
+local function checker_assignment_adjustment(source, target, st, options)
+    st = st or active_check_state
+    if not st then
+        return types.assignment_adjustment(source, target, options),
+            nil, nil
+    end
+    local policy = interface_relation_policy(st, options)
+    local adjustment =
+        types.assignment_adjustment(source, target, policy)
+    local conversion = adjustment
+        and make_interface_conversion(
+            source, target, adjustment)
+        or nil
+    if conversion then
+        adjustment.interface_conversion = conversion
+    end
+    return adjustment, conversion,
+        policy.interface_failure or nil
+end
+
+local function report_interface_failure(errors, loc, failure)
+    if not failure then return false end
+    local concrete = failure.concrete
+    local interface = failure.interface
+    if not concrete or not interface then return false end
+    local concrete_kind = concrete._tag == "Type.Union"
+        and "union" or "record"
+    local prefix = string.format(
+        "%s '%s' does not implement interface '%s'",
+        concrete_kind, concrete.name, interface.name)
+    if failure.reason == "missing" then
+        checker.typeerror(errors, loc,
+            "%s: method '%s' is missing",
+            prefix, failure.name)
+    elseif failure.reason == "not_method" then
+        checker.typeerror(errors, loc,
+            "%s: member '%s' is not a method",
+            prefix, failure.name)
+    elseif failure.reason == "inaccessible" then
+        checker.typeerror(errors, loc,
+            "%s: method '%s' is local to module '%s'",
+            prefix, failure.name,
+            nominal_module(failure.member.fqtn))
+    elseif failure.reason == "incompatible" then
+        checker.typeerror(errors, loc,
+            "%s: method '%s' has incompatible type '%s'; expected '%s'",
+            prefix, failure.name,
+            types.tostring(failure.concrete_type),
+            types.tostring(failure.required_type))
+    else
+        checker.typeerror(errors, loc,
+            "%s: interface implementation could not be validated",
+            prefix)
+    end
+    return true
+end
+
+local function interface_method_index(interface, name)
+    for index, method in ipairs(interface.methods or {}) do
+        if method.name == name then return index - 1 end
+    end
+    return nil
+end
+
 -- Converts an AST type declaration into a typechecker type
 --   node: AST node
 --   errors: list of compile-time errors
@@ -1318,10 +2333,13 @@ typefromnode = util.make_visitor({
                 node.name)
         end
         if mod and mod._type and mod._type._tag == "Type.Module" then
-            local alias = mod._type.type_members
+            local type_member = mod._type.type_members
                 and mod._type.type_members[node.name]
-            if alias then
-                return alias
+            if type_member then
+                if type_member._tag == "Type.Interface" then
+                    return types.Nominal(type_member.name)
+                end
+                return type_member
             end
             local fqtn = mod._type.name .. "." .. node.name
             local member = mod._type.members[node.name]
@@ -1643,10 +2661,19 @@ local function trycoerce(source, target, errors, use,
     end
 
     local adjustment = precomputed_adjustment
+    local interface_conversion =
+        adjustment and adjustment.interface_conversion or nil
+    local interface_failure
     if adjustment == nil then
-        adjustment = types.assignment_adjustment(source._type, target)
+        adjustment, interface_conversion, interface_failure =
+            checker_assignment_adjustment(
+                source._type, target, active_check_state)
     end
     if not adjustment then
+        if report_interface_failure(
+                errors, source.loc, interface_failure) then
+            return source, false, true
+        end
         -- A raw `value` cannot implicitly establish a C pointee type. Keep the
         -- old unsafe C-object probe for actual C address expressions only.
         if source._type._tag == "Type.Value" then
@@ -1677,6 +2704,7 @@ local function trycoerce(source, target, errors, use,
         local n = ast.ExpCast(source.loc, source, target)
         n._implicit_coercion = true
         n._adjustment = adjustment
+        n._interface_conversion = interface_conversion
         n._type = target
         return n, adjustment
     elseif adjustment.kind == "direct_coercion" then
@@ -1686,6 +2714,7 @@ local function trycoerce(source, target, errors, use,
         local n = ast.ExpCast(source.loc, source, target)
         n._implicit_coercion = true
         n._adjustment = adjustment
+        n._interface_conversion = interface_conversion
         n._type = target
         return n, adjustment
     else
@@ -2105,16 +3134,22 @@ local function adjust_explist(exps, demand, st, errors)
         and not demand.defer_open_check
         and (adjusted.open_source._tag ~= "Ast.ExpDots"
              or demand.open_coerce)
-    local open_adjustment = adjusted.open_source
-        and not demand.defer_open_check
-        and types.assignment_adjustment(
-            adjusted.open_type, adjusted.open_target, {
+    local open_adjustment, open_interface_conversion,
+        open_interface_failure
+    if adjusted.open_source and not demand.defer_open_check then
+        open_adjustment, open_interface_conversion,
+            open_interface_failure =
+            checker_assignment_adjustment(
+                adjusted.open_type, adjusted.open_target, st, {
                 -- Flexible call results are converted element-wise by their
                 -- sink. Preserve the input-`...` contract: forwarding a whole
                 -- descriptor does not silently lift a scalar coercion.
                 allow_coercion = allow_open_coercion and true or false,
             })
+    end
     adjusted.open_adjustment = open_adjustment or false
+    adjusted.open_interface_conversion =
+        open_interface_conversion or false
     if adjusted.open_source and not demand.defer_open_check then
         local open = adjusted.open_source._tag == "Ast.ExpDots"
             and adjusted.open_source._open_dots
@@ -2125,7 +3160,12 @@ local function adjust_explist(exps, demand, st, errors)
        and adjusted.open_type._tag ~= "Type.Invalid"
        and adjusted.open_target._tag ~= "Type.Invalid"
        and not open_adjustment then
-        if adjusted.open_source._tag == "Ast.ExpDots" then
+        if report_interface_failure(
+                errors, adjusted.open_source.loc,
+                open_interface_failure) then
+            -- The ordered implementation matcher already described the first
+            -- failing Interface method.
+        elseif adjusted.open_source._tag == "Ast.ExpDots" then
             checker.typeerror(errors, adjusted.open_source.loc,
                 "'...' element type %s is not compatible with the '...' element type %s of %s",
                 types.tostring(adjusted.open_type),
@@ -2321,10 +3361,16 @@ local function check_positional_constructor(node, st, errors, container_tag,
         local source = adjusted.open_type
         local container_name = container_tag == "Type.Array"
             and "array" or "positional map"
-        local open_adjustment = types.assignment_adjustment(source, etype)
+        local open_adjustment, open_interface_conversion,
+            open_interface_failure =
+            checker_assignment_adjustment(source, etype, st)
         if source._tag ~= "Type.Invalid"
            and not open_adjustment then
-            if adjusted.open_source._tag == "Ast.ExpDots" then
+            if report_interface_failure(
+                    errors, adjusted.open_source.loc,
+                    open_interface_failure) then
+                -- The matcher emitted the source-level Interface failure.
+            elseif adjusted.open_source._tag == "Ast.ExpDots" then
                 checker.typeerror(errors, adjusted.open_source.loc,
                     "'...' element type %s is not coerceable to %s element type %s",
                     types.tostring(source), container_name,
@@ -2338,6 +3384,8 @@ local function check_positional_constructor(node, st, errors, container_tag,
         end
         adjusted.open_target = etype
         adjusted.open_adjustment = open_adjustment or false
+        adjusted.open_interface_conversion =
+            open_interface_conversion or false
         if adjusted.open_source._tag == "Ast.ExpCall"
            and adjusted.open_source._open_results then
             adjusted.open_source._open_results.target_type = etype
@@ -3468,8 +4516,16 @@ checkvar = util.make_visitor({
     ["Ast.VarName"] = function(node, st, errors, _)
         local decl = st:find_symbol(node.name)
         if not decl then
-            node._type = invalid(errors, node.loc,
-                "variable '%s' not declared", node.name)
+            local interface = st.interface_declarations
+                and st.interface_declarations[node.name]
+            if interface then
+                node._type = invalid(errors, node.loc,
+                    "interface '%s' is a type and has no runtime value",
+                    node.name)
+            else
+                node._type = invalid(errors, node.loc,
+                    "variable '%s' not declared", node.name)
+            end
         else
             node._decl = decl
             node._type = decl._type
@@ -3545,6 +4601,12 @@ checkvar = util.make_visitor({
                 }
                 node._type = node._decl.type
                 node._ctype_namespace = true
+            elseif ltype._tag == "Type.Module" and mod.type_members
+                   and mod.type_members[node.name]
+                   and mod.type_members[node.name]._tag == "Type.Interface" then
+                node._type = invalid(errors, node.loc,
+                    "interface '%s' is a type and has no runtime value",
+                    node.name)
             elseif not mod.members[node.name] then
                 node._type = invalid(errors, node.loc,
                     "member '%s' not found inside module '%s'",
@@ -3601,6 +4663,10 @@ checkvar = util.make_visitor({
             elseif type._tag == "Type.Union" then
                 node._type = invalid(errors, node.loc,
                     "union value of type '%s' has no fields; use a case statement",
+                    ltype.fqtn)
+            elseif type._tag == "Type.Interface" then
+                node._type = invalid(errors, node.loc,
+                    "interface value of type '%s' has no fields; use an interface method",
                     ltype.fqtn)
             elseif type._tag ~= "Type.Record" then
                 node._type = invalid(errors, node.loc,
@@ -4369,6 +5435,36 @@ local function check_c_binary_operator(node, st, errors)
     end, {node.lhs, node.rhs})
 end
 
+local function interface_downcast_plan(source, target, st)
+    local source_nominal = source
+    local source_optional = false
+    if source_nominal._tag == "Type.Option" then
+        source_optional = true
+        source_nominal = source_nominal.base
+    end
+    if source_nominal._tag ~= "Type.Nominal"
+       or target._tag ~= "Type.Nominal" then
+        return nil
+    end
+    local interface = types.registry[source_nominal.fqtn]
+    local concrete = types.registry[target.fqtn]
+    if not interface or interface._tag ~= "Type.Interface"
+       or not concrete
+       or (concrete._tag ~= "Type.Record"
+           and concrete._tag ~= "Type.Union")
+       or not is_nominal_visible_from(st, target.fqtn) then
+        return nil
+    end
+    return {
+        kind = "interface_downcast",
+        source = source,
+        target = target,
+        interface = interface,
+        concrete = concrete,
+        source_optional = source_optional,
+    }
+end
+
 -- Check the source/target relation shared by a written `as` cast and its
 -- non-raising `is` predicate. Both constructs contextualize and check the
 -- operand exactly once, admit the same explicit C conversions, and carry the
@@ -4382,6 +5478,63 @@ local function check_explicit_cast_relation(node, st, errors)
     local source = node.exp._type
     local target = node.target
     local cast_plan = types.written_cast(source, target)
+    local interface_failure
+
+    -- Written concrete-to-Interface casts authorize only the direct scalar
+    -- pair. In particular, do not pass this policy to the first general query:
+    -- doing so would silently admit source/target Option lifting that Titan's
+    -- written cast table deliberately excludes.
+    if not cast_plan
+       and source._tag == "Type.Nominal"
+       and target._tag == "Type.Nominal" then
+        local concrete = types.registry[source.fqtn]
+        local interface = types.registry[target.fqtn]
+        if concrete
+           and (concrete._tag == "Type.Record"
+                or concrete._tag == "Type.Union")
+           and interface and interface._tag == "Type.Interface" then
+            local policy = interface_relation_policy(st)
+            cast_plan = types.written_cast(source, target, policy)
+            interface_failure = policy.interface_failure or nil
+            if cast_plan then
+                local conversion = make_interface_conversion(
+                    source, target, cast_plan)
+                cast_plan.interface_conversion = conversion
+                node._interface_conversion = conversion
+                if node._tag == "Ast.ExpIs" then
+                    node._interface_test = {
+                        kind = "interface_implementation_test",
+                        conversion = conversion,
+                        allocation_free = true,
+                    }
+                end
+            end
+        end
+    end
+
+    if not cast_plan then
+        local downcast = interface_downcast_plan(source, target, st)
+        if downcast then
+            node._interface_downcast = downcast
+            cast_plan = {
+                kind = "written_cast",
+                op = "interface_downcast",
+                source = source,
+                target = target,
+                interface = downcast.interface,
+                concrete = downcast.concrete,
+                source_optional = downcast.source_optional,
+                downcast = downcast,
+            }
+            if node._tag == "Ast.ExpIs" then
+                node._interface_test = {
+                    kind = "interface_downcast_test",
+                    downcast = downcast,
+                    allocation_free = true,
+                }
+            end
+        end
+    end
 
     if is_mutable_c_address_source(node.exp)
        and types.c_mutable_address_coerceable(source, target)
@@ -4409,6 +5562,12 @@ local function check_explicit_cast_relation(node, st, errors)
         node._written_cast_failed = true
         return target
     elseif not cast_plan then
+        if report_interface_failure(
+                errors, node.loc, interface_failure) then
+            node._written_cast_failed = true
+            node._written_cast = false
+            return target
+        end
         -- Unsafe object-pointer reinterpretation and mutable local address
         -- taking depend on expression shape and, for the former, the active C
         -- toolchain. They are deliberately absent from the type-only written
@@ -5222,10 +6381,13 @@ checkexp = util.make_visitor({
             if otype._tag == "Type.Nominal" and
                types.registry[otype.fqtn] and
                (types.registry[otype.fqtn]._tag == "Type.Record"
-                or types.registry[otype.fqtn]._tag == "Type.Union") then
+                or types.registry[otype.fqtn]._tag == "Type.Union"
+                or types.registry[otype.fqtn]._tag == "Type.Interface") then
                 local class = types.registry[otype.fqtn]
                 local owner_kind = class._tag == "Type.Record"
-                    and "record" or "union"
+                    and "record"
+                    or (class._tag == "Type.Union"
+                        and "union" or "interface")
                 local method_name_text = node.args.method
                 if not is_nominal_visible_from(st, otype.fqtn) then
                     node._type = invalid(errors, node.loc,
@@ -5276,6 +6438,13 @@ checkexp = util.make_visitor({
                             st, errors))
                 end
                 node._method = ftype
+                if class._tag == "Type.Interface" then
+                    node._interface = class
+                    node._interface_method = ftype
+                    node._interface_method_index =
+                        assert(interface_method_index(
+                            class, method_name_text))
+                end
                 annotate_call_results(node, ftype, demand, errors)
                 if node._type._tag == "Type.Void" and not node._voidok
                    and not demand.tail then
@@ -5464,10 +6633,13 @@ checkexp = util.make_visitor({
         elseif otype._tag == "Type.Nominal" and
            types.registry[otype.fqtn] and
            (types.registry[otype.fqtn]._tag == "Type.Record"
-            or types.registry[otype.fqtn]._tag == "Type.Union") then
+            or types.registry[otype.fqtn]._tag == "Type.Union"
+            or types.registry[otype.fqtn]._tag == "Type.Interface") then
             local class = types.registry[otype.fqtn]
             local owner_kind = class._tag == "Type.Record"
-                and "record" or "union"
+                and "record"
+                or (class._tag == "Type.Union"
+                    and "union" or "interface")
             local mtype = class.methods[node.name]
             if not is_nominal_visible_from(st, otype.fqtn) then
                 node._type = invalid(errors, node.loc,
@@ -5483,8 +6655,14 @@ checkexp = util.make_visitor({
                     class.name, node.name, nominal_module(class.name))
             else
                 node._method = mtype
-                node._type = types.Function(mtype.params, mtype.rettypes, false,
-                    mtype.varargtype, mtype.flexrettype)
+                node._type = types.method_function_type(mtype)
+                if class._tag == "Type.Interface" then
+                    node._interface = class
+                    node._interface_method = mtype
+                    node._interface_method_index =
+                        assert(interface_method_index(class, node.name))
+                    node._interface_bound = true
+                end
             end
         elseif otype._tag ~= "Type.Nominal" then
             node._type = invalid(errors, node.loc,
@@ -5793,6 +6971,12 @@ local function checkbodies(ast, st, errors)
                             variant.payload.loc or variant.loc, errors)
                     end
                 end
+            elseif node._tag == "Ast.TopLevelInterface" then
+                for _, method in ipairs(node.methods) do
+                    if method._type and not method._ignore then
+                        checktype(method._type, method.loc, errors)
+                    end
+                end
             elseif node._tag == "Ast.TopLevelTypeAlias" then
                 checktype(node._type, node.type.loc or node.loc, errors)
             end
@@ -5946,9 +7130,11 @@ local function toplevel_name(node)
         return node.localname
     elseif tag == "Ast.TopLevelVar" then
         return node.decl.name
-    elseif tag == "Ast.TopLevelTypeAlias" then
+    elseif tag == "Ast.TopLevelTypeAlias"
+           or tag == "Ast.TopLevelInterface" then
         -- Type aliases occupy a separate namespace and are deliberately absent
         -- from the ordinary top-level duplicate/value-symbol machinery.
+        -- Interfaces are likewise type-only declarations.
         return nil
     elseif tag == "Ast.TopLevelFunc" or
            tag == "Ast.TopLevelRecord" or
@@ -6161,6 +7347,64 @@ local toplevel_visitor = util.make_visitor({
 
     ["Ast.TopLevelTypeAlias"] = function(node, st, errors)
         resolve_type_alias(node, st, errors)
+    end,
+
+    ["Ast.TopLevelInterface"] = function(node, st, errors)
+        local fqtn = st.modname .. "." .. node.name
+        local methods = {}
+        local method_names = {}
+        if #node.methods == 0 then
+            checker.typeerror(errors, node.loc,
+                "interface '%s' must declare at least one method", node.name)
+            node._type = types.Invalid()
+            return
+        end
+
+        for _, method in ipairs(node.methods) do
+            if method_names[method.name] then
+                checker.typeerror(errors, method.loc,
+                    "redeclaration of method '%s' in interface '%s'",
+                    method.name, node.name)
+                method._ignore = true
+            else
+                method_names[method.name] = method
+                local ptypes, varargtype, paramnames =
+                    param_types(method.params, st, errors)
+                local fixed_index = 1
+                local param_names = {}
+                for _, param in ipairs(method.params) do
+                    if param.name == false then
+                        param._type = varargtype
+                    else
+                        param._type = ptypes[fixed_index]
+                        fixed_index = fixed_index + 1
+                        if param_names[param.name] then
+                            checker.typeerror(errors, param.loc,
+                                "duplicate parameter '%s' in interface method '%s:%s'",
+                                param.name, node.name, method.name)
+                        else
+                            param_names[param.name] = true
+                        end
+                    end
+                end
+
+                local rettypes = {}
+                for _, rettype in ipairs(method.rettypes) do
+                    table.insert(rettypes,
+                        typefromnode(rettype, st, errors))
+                end
+                local flexrettype =
+                    flexible_return_type(method, st, errors)
+                method._type = types.Method(
+                    fqtn, method.name, ptypes, rettypes,
+                    varargtype, flexrettype, paramnames)
+                annotate_lua_function_boundary(method)
+                table.insert(methods, method._type)
+            end
+        end
+
+        node._type = types.Interface(fqtn, methods)
+        types.registry[fqtn] = node._type
     end,
 
     ["Ast.TopLevelFunc"] = function(node, st, errors)
@@ -6394,11 +7638,12 @@ local toplevel_visitor = util.make_visitor({
     end,
 })
 
--- Collect aliases before the signature pass so aliases may be used by earlier
--- functions, variables, nominals, and other aliases. Record and union
--- declarations share the type namespace, so an alias with a nominal's name is
--- rejected; the nominal remains authoritative because it also owns a run-time
--- namespace and synthesized constructor(s).
+-- Collect type-only declarations before the signature pass so aliases may be
+-- used by earlier functions, variables, nominals, Interfaces, and other
+-- aliases. Records and unions own both the type and value namespaces, so they
+-- remain authoritative over a conflicting alias or Interface regardless of
+-- source order. Interfaces and aliases otherwise use first-declaration-wins in
+-- their shared type-only namespace.
 local function collect_type_aliases(ast, st, errors)
     local nominals = {}
     for _, node in ipairs(ast) do
@@ -6410,24 +7655,53 @@ local function collect_type_aliases(ast, st, errors)
         end
     end
 
+    st.interface_declarations = {}
+    local type_only = {}
     for _, node in ipairs(ast) do
-        if not node._ignore and node._tag == "Ast.TopLevelTypeAlias" then
+        if not node._ignore
+           and (node._tag == "Ast.TopLevelTypeAlias"
+                or node._tag == "Ast.TopLevelInterface") then
             local nominal = nominals[node.name]
-            local previous = st:find_type_alias(node.name)
+            local previous = type_only[node.name]
             if nominal then
                 local kind = nominal._tag == "Ast.TopLevelRecord"
                     and "record" or "union"
+                local subject = node._tag == "Ast.TopLevelInterface"
+                    and "interface" or "type alias"
                 checker.typeerror(errors, node.loc,
-                    "type alias '%s' conflicts with %s declared at %s",
-                    node.name, kind, location.format(nominal.loc))
+                    "%s '%s' conflicts with %s declared at %s",
+                    subject, node.name, kind, location.format(nominal.loc))
                 node._ignore = true
             elseif previous then
-                checker.typeerror(errors, node.loc,
-                    "duplicate type alias for %s, previous one at %s",
-                    node.name, location.format(previous.loc))
+                if node._tag == "Ast.TopLevelTypeAlias"
+                   and previous._tag == "Ast.TopLevelTypeAlias" then
+                    checker.typeerror(errors, node.loc,
+                        "duplicate type alias for %s, previous one at %s",
+                        node.name, location.format(previous.loc))
+                elseif node._tag == "Ast.TopLevelInterface"
+                       and previous._tag == "Ast.TopLevelInterface" then
+                    checker.typeerror(errors, node.loc,
+                        "duplicate interface '%s', previous one at %s",
+                        node.name, location.format(previous.loc))
+                else
+                    local subject = node._tag == "Ast.TopLevelInterface"
+                        and "interface" or "type alias"
+                    local previous_kind =
+                        previous._tag == "Ast.TopLevelInterface"
+                        and "interface" or "type alias"
+                    checker.typeerror(errors, node.loc,
+                        "%s '%s' conflicts with %s declared at %s",
+                        subject, node.name, previous_kind,
+                        location.format(previous.loc))
+                end
                 node._ignore = true
             else
-                st:add_type_alias(node.name, node)
+                type_only[node.name] = node
+                if node._tag == "Ast.TopLevelTypeAlias" then
+                    st:add_type_alias(node.name, node)
+                else
+                    st.interface_declarations[node.name] = node
+                end
             end
         end
     end
@@ -6535,6 +7809,13 @@ local function checktoplevel(ast, st, errors, loader)
         if not node._ignore
            and (node._tag == "Ast.TopLevelRecord"
                 or node._tag == "Ast.TopLevelUnion") then
+            visit_toplevel(node, st, errors, loader)
+        end
+    end
+
+    for _, node in ipairs(ast) do
+        if not node._ignore
+           and node._tag == "Ast.TopLevelInterface" then
             visit_toplevel(node, st, errors, loader)
         end
     end
@@ -6699,6 +7980,11 @@ local function register_referenced_nominals(
                     method, loader, seen, exposing_module, interface_seen)
             end
         end
+    elseif tag == "Type.Interface" then
+        for _, method in ipairs(t.methods or {}) do
+            register_referenced_nominals(
+                method, loader, seen, exposing_module, interface_seen)
+        end
     end
 end
 
@@ -6755,6 +8041,12 @@ local function first_local_nominal_type(typ, seen)
                 if found then return found end
             end
         end
+    elseif tag == "Type.Interface" then
+        if typ.islocal then return typ end
+        for _, method in ipairs(typ.methods or {}) do
+            local found = first_local_nominal_type(method, seen)
+            if found then return found end
+        end
     elseif tag == "Type.Array" then
         return first_local_nominal_type(typ.elem, seen)
     elseif tag == "Type.Map" then
@@ -6800,13 +8092,21 @@ function checker.register_module_interface(
     if interface_seen[interface_key] then return end
     interface_seen[interface_key] = true
 
+    -- Interfaces are type-only module entries. Register every direct
+    -- descriptor before traversing any signature so mutually referring
+    -- Interfaces have their complete nominal environment available.
+    for _, t in pairs(type_or_error.type_members or {}) do
+        if t and t._tag == "Type.Interface" then
+            types.registry[t.name] = t
+        end
+    end
     for _, member in ipairs(type_or_error.members) do
         -- Exported nominals arrive wrapped in a Type.ModuleMember; unwrap so
         -- the nominal type is registered for `.so`-only imports too
         -- (the source-import path registers it as a side effect of checking).
         local t = member.type or member
-        if t and (t._tag == "Type.Record" or t._tag == "Type.Union"
-                  or t._tag == "Type.Interface") then
+        if t and (t._tag == "Type.Record"
+                  or t._tag == "Type.Union") then
             types.registry[t.name] = t
         end
     end
@@ -6848,7 +8148,8 @@ local function makemoduletype(modname, modast)
                or tag == "Ast.TopLevelUnion" then
                 table.insert(members, types.ModuleMember(modname, tlnode.name,
                     tlnode._type, false))
-            elseif tag == "Ast.TopLevelTypeAlias" then
+            elseif tag == "Ast.TopLevelTypeAlias"
+                   or tag == "Ast.TopLevelInterface" then
                 type_members[tlnode.name] = tlnode._type
             end
         end
@@ -6877,6 +8178,9 @@ local function reject_exported_c_ffi_types(modname, modast, errors)
             elseif tag == "Ast.TopLevelTypeAlias" and not node.islocal then
                 reject_exported_c_ffi_type(modname, errors,
                     node.type.loc or node.loc, node._type)
+            elseif tag == "Ast.TopLevelInterface" then
+                reject_exported_c_ffi_type(
+                    modname, errors, node.loc, node._type)
             elseif tag == "Ast.TopLevelRecord" and not node.islocal then
                 for i, field in ipairs(node._type.fields) do
                     if not field.islocal then
@@ -6928,6 +8232,9 @@ local function reject_exported_local_nominal_types(modname, modast, errors)
             elseif tag == "Ast.TopLevelTypeAlias" and not node.islocal then
                 reject_exported_local_nominal_type(modname, errors,
                     node.type.loc or node.loc, node._type)
+            elseif tag == "Ast.TopLevelInterface" then
+                reject_exported_local_nominal_type(
+                    modname, errors, node.loc, node._type)
             elseif tag == "Ast.TopLevelRecord" and not node.islocal then
                 for i, field in ipairs(node._type.fields) do
                     if not field.islocal then

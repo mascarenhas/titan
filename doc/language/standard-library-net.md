@@ -42,6 +42,10 @@ function Server:close()
 `Connection` and `Server` are opaque nominal records. Applications cannot
 construct them or inspect their native handles.
 
+`Connection`'s `read`, `read_until`, `write`, and `close` shapes exactly
+satisfy all seven [`io` Interfaces](standard-library-io.md). `Server`
+incidentally satisfies `io.Closer` through its exact `close()` method.
+
 ## Connecting and listening
 
 `connect` resolves `host` asynchronously, considers IPv4 and IPv6 TCP

@@ -101,11 +101,12 @@ visitation order, not node order.
 order, reports later duplicates with the first node's full location, and marks
 them `_ignore`.
 
-`collect_type_aliases` enters every alias in a separate module-wide type
-namespace, chooses the first duplicate alias by AST order, and keeps a
-surviving record or union declaration authoritative over a same-named alias regardless
-of relative placement. This makes forward aliases available without creating
-value symbols. Lazy resolution stores the exact RHS type on the declaration
+`collect_type_aliases` enters aliases and Interface declarations in the
+separate module-wide type namespace. It chooses the first alias/Interface by
+AST order and keeps a surviving record or union authoritative over either
+same-named type-only declaration regardless of relative placement. This makes
+forward aliases and Interface spellings available without creating value
+symbols. Lazy alias resolution stores the exact RHS type on the declaration
 and detects cycles with a `resolving` state.
 
 `checktoplevel` then performs these stages:
@@ -122,8 +123,10 @@ and detects cycles with a `resolving` state.
    `current_toplevel_order` records the origin of each C declaration in its
    symbol-table history.
 4. Aliases are resolved, then every record and union is built and registered
-   in `types.registry`, then each synthesized constructor is attached to its
-   complete nominal namespace. Record fields and union payloads share
+   in `types.registry`. Interfaces are built next in declaration order, so all
+   nominal owners are available while their method signatures are checked.
+   Each synthesized constructor is then attached to its complete nominal
+   namespace. Record fields and union payloads share
    `types.has_tvalue_representation`: Titan function values are legal, while
    direct C aggregates, C arrays, direct C functions, and C function pointers
    are rejected.
@@ -163,12 +166,14 @@ After declaration and body checking, `makemoduletype` builds the module's
 interface by traversing the original AST order from the
 non-`islocal`, non-`_ignore`, non-import top levels (`TopLevelVar` →
 `Type.ModuleVariable`; `TopLevelFunc`/`TopLevelRecord`/`TopLevelUnion` →
-`Type.ModuleMember`). Public `TopLevelTypeAlias` nodes instead populate the
-module's separate `type_members` map with their resolved RHS types. Local
-aliases and local nominal members are left out of serialized public
-interfaces. Private union variants are omitted while retaining their absolute
-tags and the owner's total `nvariants`.
-See [Type aliases](type-aliases.md) for the resolution and interface details.
+`Type.ModuleMember`). Public `TopLevelTypeAlias` and `TopLevelInterface` nodes
+instead populate the module's separate `type_members` map with resolved RHS
+types and canonical Interface descriptors respectively. Interfaces have no
+run-time module member or public module-userdata slot. Local aliases and local
+nominal members are left out of serialized public interfaces. Private union
+variants are omitted while retaining their absolute tags and the owner's total
+`nvariants`. See [Type aliases](type-aliases.md) and
+[Interfaces](interfaces.md) for the resolution and publication details.
 
 `checker.has_main(ast)` is a post-check used by `titanc` to decide between
 building a paired library provider and a standalone executable: it looks for a
@@ -210,7 +215,7 @@ The retired `types.compatible`, `types.coerceable`, and
 `types.explicitly_coerceable` APIs have no checker callers.
 
 Conversion edges are deliberately not consistency leaves. Integer-to-float,
-`T`-to-`T?`, C numeric/address conversions, truthiness, and future
+`T`-to-`T?`, C numeric/address conversions, truthiness, and
 record/union-to-Interface wrapper construction can be direct coercions without
 making the corresponding Arrays, Maps, or callable components consistent.
 Conversely, an `integer`/`value` pair is consistent but still needs an
@@ -811,18 +816,17 @@ while checking a module variable, `symtab.find_symbol` masks later
 
 On success, the import node's `_type` is the returned `Type.Module`, and
 errors found while checking the dependency propagate into this module's
-error list. `checkimport` then walks both the value `members` and alias
-`type_members` namespaces and registers each
-imported nominal owner into `types.registry`: it unwraps the
-`Type.ModuleMember` wrapper and, when the underlying type is a `Type.Record`,
-`Type.Union` (or `Type.Interface`), stores it under its fqtn. This is what
-makes a record or union
+error list. `checkimport` first registers direct `Type.Interface` descriptors
+from `type_members`, then walks both namespaces and registers referenced
+nominal owners in `types.registry`. Value members unwrap their
+`Type.ModuleMember` wrapper; records and unions are stored under their fqtn.
+This is what makes a record, union, or Interface
 imported through a compiled interface — one with no `.titan` source to
 re-check — usable by nominal type. For a dependency *with* source the same
 registration also happens as a side effect of the dependency's own
 `checker.check`, which the loader runs recursively: the
-`TopLevelRecord`/`TopLevelUnion` visitors write into the process-global
-`types.registry`. A `Type.Nominal`
+`TopLevelRecord`/`TopLevelUnion`/`TopLevelInterface` visitors write into the
+process-global `types.registry`. A `Type.Nominal`
 carries *only* its fqtn string and
 resolves through the registry at every use, so the qualified type
 `geo.Point` (parsed as `Ast.TypeQualName`, converted by `typefromnode` to
@@ -916,8 +920,9 @@ interface.
 
 Two pieces of mutable state outlive a `checker.check` call, and any test or
 tool that checks more than one module (or the same module twice) must reset
-them: `types.registry`, the fqtn → `Type.Record`/`Type.Union` map (stale entries make
-nominal types from a previous run resolve in the next one), and
+them: `types.registry`, the fqtn → `Type.Record`/`Type.Union`/
+`Type.Interface` map (stale entries make nominal types from a previous run
+resolve in the next one), and
 `driver.imported`, the import cache, including any `CIRCULAR_MARK` sentinels
 left by a failed run. The suite's helpers do exactly this
 (`types.registry = {}` and `driver.imported = {}` at the top of

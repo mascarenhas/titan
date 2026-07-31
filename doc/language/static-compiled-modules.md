@@ -40,8 +40,9 @@ Lua-loader rules.
 
 Each logical module remains independent inside the two physical providers. It
 keeps its own module state, initializer, ABI entry, type entry, Lua entry, and
-nominal record/union identities. A folder module still produces one logical object
-and therefore one metadata entry; contributor filenames are not modules.
+nominal record/union/Interface identities. A folder module still produces one
+logical object and therefore one metadata entry; contributor filenames are not
+modules.
 
 When exactly one requested source root declares
 `main(args: {string}): integer`, `titanc` retains executable-only behavior. It
@@ -128,10 +129,12 @@ containers, duplicate logical keys, incompatible ABIs, invalid type
 interfaces, or disagreement between the embedded and callable forms before
 publishing or consuming an artifact.
 
-ABI 0.20 adds the two-user-value Array proxy and the fixed-brand/strict-trailer
-function-closure protocol. Its generated layout cannot be mixed with a 0.19
-provider, so archive metadata is rejected before native composition rather
-than adapted. ABI 0.19 added serialized union/variant schemas and the
+ABI 0.20 adds Interfaces, the two-user-value Array proxy, and the
+fixed-brand/strict-trailer function-closure protocol. Interface schemas,
+per-state nominal metatables, wrapper payloads, vtables, and method trampolines
+are part of the same compiled contract. Its generated layout cannot be mixed
+with a 0.19 provider, so archive metadata is rejected before native composition
+rather than adapted. ABI 0.19 added serialized union/variant schemas and the
 reconstructible public module prefix for first-class record/union statics; its
 generated userdata/tag contract could not be mixed with a 0.18 interface.
 ABI 0.18 previously required
@@ -142,11 +145,11 @@ backing/proxy contract even though `Array(...)` serialization and exact native
 pointer widths stayed unchanged. A separately installed 0.17 archive remains
 in its versioned directory but is rejected as a dependency.
 
-The 0.20 marker is shared with the forthcoming Interface cutover; Interfaces
-are not implemented by this relation/Array/function change. A relation-only
-review head rebuilds the existing nine-module standard provider for
-non-published validation, while final 0.20 publication waits for the Interface
-half under the same version. See
+Interface descriptors in ABI-0.20 metadata preserve nominal owner and
+declaration-order method signatures. A consumer can therefore validate and use
+an imported Interface without seeing a concrete implementation; concrete
+record/union-to-Interface wrapper construction remains a statically known
+direct coercion rather than dynamic provider discovery. See
 [Compiled compatibility](multi-module-libraries.md#compiled-compatibility).
 
 Selecting one logical key makes that archive a native link input. It does not
@@ -165,13 +168,20 @@ Code generated against a selected static provider calls its Titan entries
 directly. Code generated against a DSO loads the selected shared provider and
 resolves entries through its checked handle.
 
-There is one important transitive case. A compiled interface may expose a
-record or union owned by another logical module. If the selected archive physically
-carries that owner, the owner's methods and bound-method entries are direct
-too. If it does not, the archive's producer already chose a dynamic owner:
+There is one important transitive case. A compiled module interface may expose
+a record, union, or Interface owned by another logical module. If the selected
+archive physically carries that owner, the owner's methods and bound-method
+entries are direct too. If it does not, the archive's producer already chose a
+dynamic owner:
 the consumer recovers the owner's type without silently selecting a visible
 owner archive, initializes the exposing dependency, and resolves the owner's
 native entries from the process-global provider namespace.
+
+An Interface wrapper also strongly retains the concrete value's owning module
+state. Consequently a consumer that imports only the Interface owner may call a
+wrapper constructed by another module: the retained owner supplies the correct
+per-state concrete method context, whether that owner was selected statically
+or dynamically.
 
 Titan conservatively rejects a build that independently imports a source,
 archive, or DSO implementation of such a producer-dynamic owner. ABI and type
@@ -219,9 +229,8 @@ $ROCKS_TREE/lib/titan/0.20/titan.so
 $ROCKS_TREE/lib/titan/0.20/titan.a
 ```
 
-On the relation-only review head both contain the nine existing `titan.*`
-logical standard modules for non-published validation. The final coordinated
-ABI-0.20 image adds `titan.io` as the tenth logical module/key. The DSO also
+Both contain the ten `titan.*` logical standard modules, including `titan.io`,
+under ABI 0.20. The DSO also
 contains bare native `require "titan"` support, and the archive carries that
 support object without inventing a logical module named `titan`.
 

@@ -90,8 +90,14 @@ evaluates that expression with `types` as the constructor environment, and
 applies the same recursive `Type.Module` schema validation used for DSO
 metadata. That closed validation includes union/variant owner, tag,
 constructor, namespace, callable-name, and value-facing-wrapper invariants;
-`Type.Variant` is legal only in its owning union's variant list. The decoded
-module name and canonical logical `.so` filename must
+`Type.Variant` is legal only in its owning union's variant list. It also
+requires every direct `type_members` Interface to have the module/key-matching
+owner, a canonical nonempty declaration-order Method list/name map, dense
+unique fixed parameter names, and recursively valid value-facing signatures.
+Interface/Method descriptors, error-recovery/no-value markers, nested modules,
+C FFI descriptors, legacy wrappers, and unknown tags are rejected from
+arbitrary value positions. The decoded module name and canonical logical
+`.so` filename must
 match the key. An archive path is never stored in `Type.Module.file`.
 
 The empty environment is a declarative-artifact contract, not a hostile-code
@@ -312,6 +318,11 @@ executable. Exported-but-unused nominal types therefore do not force unrelated
 members out of an archive. Selecting the shallow standard `titan.a` also makes
 the probe validate `luaopen_titan` and its `_loadlib`/`_loadlibglobal` support
 table.
+
+For Interfaces, the use-site set includes the owner-exported native,
+coercive-Lua, and strict bound-method symbols. Concrete/Interface pair arrays
+and adjustment entries remain private to the source object that needs the
+conversion and add no archive protocol entry.
 
 ## Publication and installation
 

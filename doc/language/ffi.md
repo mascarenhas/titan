@@ -254,8 +254,8 @@ Allowed conversions include:
 * C arrays and counted owned C arrays to compatible C pointers;
 * any non-function C pointer to `void *`;
 * a C function pointer to C `void *` with a written cast;
-* a Titan Array, Map, record, union, or function value to C `void *` with a written
-  identity cast;
+* a Titan Array, Map, record, union, Interface, or function value to C
+  `void *` with a written identity cast;
 * non-pointer by-value C object expressions to compatible `const *T` pointers,
   materialized as the address of the C expression for the duration of the
   foreign call;
@@ -337,6 +337,7 @@ The explicit GC-identity cast exposes the native object address:
 * Arrays and Maps expose their backing `Table *`;
 * records expose their full-userdata `Udata *`;
 * unions expose their full-userdata `Udata *`;
+* Interfaces expose their wrapper full-userdata `Udata *`;
 * a function exposes the GC object carried by its boxed function value.
 
 The function case has a dynamic precondition because function-typed values
@@ -370,10 +371,10 @@ Every pointer produced by these conversions is borrowed. Titan keeps the
 source GC object rooted while the cast is evaluated and while later arguments
 for the same call are prepared, but storing or returning the C pointer does
 not extend the object's lifetime. Keep the original Titan value reachable for
-as long as C retains the pointer. The Array, Map, record, union, and function
-addresses are Lua/Titan runtime representations, not public payload layouts;
-code must not dereference, mutate, free, or reallocate them unless it is
-deliberately using the matching internal runtime contract.
+as long as C retains the pointer. The Array, Map, record, union, Interface, and
+function addresses are Lua/Titan runtime representations, not public payload
+layouts; code must not dereference, mutate, free, or reallocate them unless it
+is deliberately using the matching internal runtime contract.
 
 Mutable address coercions are intentionally limited to local variables and
 formal parameters that have C types, because C may write through the pointer:

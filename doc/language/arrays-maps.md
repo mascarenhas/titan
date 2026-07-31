@@ -11,7 +11,8 @@ because both contain indexed values. Gradual consistency descends only between
 the same container kind: `{value}` is consistent with `{integer}`, but neither
 is consistent with `{integer: value}`. This does not lift ordinary
 conversions: `{integer}` cannot be used as `{float}` merely because one
-integer can be converted to one float.
+integer can be converted to one float, and `{R}` cannot be used as `{I}`
+merely because record or union `R` directly satisfies Interface `I`.
 
 The distinction is visible at the Lua boundary. A Map is an ordinary Lua
 table. An Array has a private Lua table backing its fast native operations and
@@ -57,6 +58,9 @@ an actual Lua float, and a boolean slot an actual boolean; a typed read does
 not narrow an integral float, promote an integer, apply truthiness, introduce
 or force an Option, or assert a raw C pointer. It either produces `T` or raises
 before native code sees a value of the wrong representation.
+For an Interface element type, that strict guard requires an existing wrapper
+of the exact nominal Interface type; it never wraps a bare record or union
+found in the slot.
 
 The checker must be able to build that guard. If `T?` is not guardable, the
 indexing expression is rejected at compile time rather than compiled as an
@@ -245,11 +249,28 @@ local groups: {integer: {string}} = {}
 
 As for Arrays, the value type is de-optionized and a read has type `V?`.
 Map keys may be any Titan type except `nil` and option types. Arrays, Maps,
-records, unions, and other identity-bearing values can be keys. A union key
-uses the identity of the constructed union value, not its variant/payload
-contents. An Array key uses its
-canonical identity, so the same Array reaches the same entry across exact,
-`value`, and Lua paths.
+records, unions, Interfaces, and other identity-bearing values can be keys. A
+union key uses the identity of the constructed union value, not its
+variant/payload contents. An Array key uses its canonical identity, so the same
+Array reaches the same entry across exact, `value`, and Lua paths.
+
+An Interface key has the identity of its wrapper, not of the retained concrete
+value. For a value `r: R` where `R` satisfies `I`, every `R -> I` conversion
+constructs a fresh wrapper, so separately evaluating the concrete key for
+insertion and lookup normally uses two different keys:
+
+```titan
+local by_interface: {I: string} = {}
+by_interface[r] = "stored"       -- one fresh wrapper
+local missed? = by_interface[r]  -- another wrapper; normally nil
+
+local key: I = r
+by_interface[key] = "shared"
+local found? = by_interface[key] -- the same wrapper identity
+```
+
+Retain and reuse the Interface value when wrapper identity is intended to be
+the key. See [Interfaces](interfaces.md#no-container-or-callable-lifting).
 
 A keyed Map constructor writes every key in brackets:
 
@@ -316,6 +337,8 @@ tracking. A later typed read is therefore strict regardless of whether the
 slot came from exact Titan code, a Titan `{value}` view, or Lua. For example,
 a Lua float `2.0` stored into a `{string: integer}` Map raises when Titan reads
 it as `integer`; the read does not apply the integral-float dynamic coercion.
+Likewise, a bare record stored by Lua in a Map whose value view is an Interface
+raises on the later typed read rather than being wrapped.
 This asymmetry is deliberate: genuine-Lua function arguments and intercepted
 Array writes are dynamic boundaries, while raw Map mutation is followed only
 by a strict typed observation.
@@ -393,6 +416,8 @@ dynamic conversion cannot produce. Function arguments, exported
 module-variable writes, public record-field writes, and non-Titan Lua callable
 results use the exact same target rules; see the
 [normative boundary matrix](types.md#normative-boundary-matrix).
+For an Interface element type, the writer accepts only an existing exact
+Interface wrapper; a bare satisfying record or union from Lua is rejected.
 
 Writing nil is deletion and bypasses the writer entirely. If a non-nil
 conversion fails, capacity, deterministic length, and existing contents are

@@ -329,6 +329,14 @@ The `__index` entry first performs the same exact nominal metatable check used
 by other Lua entry wrappers. Methods therefore cannot be borrowed onto a
 different union or record userdata.
 
+Like a record, a union can directly satisfy an Interface when every required
+name resolves to a visible union method with an adjustable self-removed
+callable shape. Variants and union functions do not count as methods, even
+when their names collide with an Interface slot. The resulting wrapper retains
+the original union Udata in user value 1; a written Interface-to-union cast
+checks that payload's exact union metatable. No union tag or payload is exposed
+through Interface dispatch. See [Interfaces](interfaces.md).
+
 ## Serialized interfaces: ABI 0.19 origin and current 0.20 boundary
 
 `types.serialize` adds canonical schemas:
@@ -352,7 +360,9 @@ only as fields of a valid module/nominal schema; it does not make
 Recovered interfaces are treated as a closed descriptor language.
 Value-facing type graphs cannot smuggle wrapper descriptors such as
 `ModuleMember`, `Field`, `Method`, `StaticMethod`, or `Variant`; the latter is
-legal only in its owning union's variant list. Every callable descriptor's
+legal only in its owning union's variant list. Error-recovery/no-value markers,
+nested modules, C FFI descriptors, legacy wrappers, and unknown tags are not
+value types and are rejected by the same walk. Every callable descriptor's
 `paramnames`, when present, must be a dense, unique list exactly matching its
 fixed parameter arity. Every recovered module wrapper, public nominal,
 listed field or variant, and nominal callable must also be nonlocal: locality
@@ -364,7 +374,8 @@ and method namespaces before the interface can be used. Record validation
 requires public fields in increasing absolute-index order. An all-public
 record must carry `new`, whose parameter types and names exactly match those
 ordered fields; a record with omitted private fields instead omits that
-constructor.
+constructor. Field names remain disjoint from the record's static and method
+namespaces.
 
 ABI 0.19 also extends the reconstructible public prefix of every module
 userdata. Producers and importers allocate:
@@ -382,7 +393,8 @@ inventing another identity.
 
 The union schemas, userdata/tag protocol, and public-prefix change formed the
 ABI 0.19 compatibility boundary. ABI 0.20 retains those schemas and prefix
-unchanged while changing Array proxies and first-class function closures.
+unchanged while changing Array proxies and first-class function closures and
+adding Interface descriptors, wrappers, and bound-method symbols.
 `TITAN_VER` is now `0.20`, its suffix is `_0_20`, the versioned search variable
 is `TITAN_PATH_0_20`, the installed provider namespace is
 `lib/titan/0.20`, and the generated standard-library support namespace is

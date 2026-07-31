@@ -146,7 +146,7 @@ fixed arguments/results, ignored surplus, nil-filled positions, input-tail
 transfer, flexible-result projection, hidden results, and end-of-tail
 actions. Every ordinary aligned component may be identical, a gradual
 injection/projection/view, or another callable adjustment. Numeric
-conversion, `T`/`T?` conversion, C conversion, and future
+conversion, `T`/`T?` conversion, C conversion, and
 record/union-to-Interface wrapper construction are rejected as callable
 component matches.
 
@@ -212,7 +212,7 @@ The initial target matrix is:
 | Array | validate only the canonical outer Array representation |
 | Map | validate only the outer table representation |
 | Function | preserve the boxed value; invocation decides callability |
-| record/union | exact nominal metatable |
+| record/union/Interface | exact nominal metatable; an Interface requires an existing wrapper |
 | `T?` | preserve nil; otherwise recursively apply the dynamic plan for `T` |
 | C integer/float | explicit numeric/tag/range policy |
 | owned C userdata | exact owned metatable |
@@ -224,13 +224,14 @@ nil. The corresponding `is` predicate reports whether that same conversion
 would succeed without returning the converted value. It is not a separate
 tag-only implementation.
 
-The Interface-ready relation case accepts only an already constructed wrapper
+The Interface dynamic case accepts only an already constructed wrapper
 with the exact target Interface metatable (or nil for an optional target).
 It never discovers that a bare record/union implements the Interface and
 never constructs a wrapper after the concrete static owner and method mapping
 have been erased. Concrete record/union-to-Interface conversion remains one
-checker-planned direct outer coercion when the Interface feature is enabled;
-it is neither consistency nor structural subtyping.
+checker-planned direct outer coercion; it is neither consistency nor
+structural subtyping. The complete matcher, wrapper plan, and adjustment
+boundary are documented in [Interfaces](interfaces.md).
 
 ## Checked C scalar conversions
 

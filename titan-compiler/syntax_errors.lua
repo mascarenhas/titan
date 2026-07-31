@@ -78,6 +78,28 @@ local errors = {
 
    EndUnion = "Expected 'end' to close the union.",
 
+   LocalInterface = "Interfaces cannot be local.",
+
+   NestedInterface = "Interface declarations are only allowed at module top level.",
+
+   NameInterface = "Expected an interface name after 'interface'.",
+
+   MethodInterface = "Expected at least one method in interface declaration.",
+
+   LocalInterfaceMethod = "Interface methods cannot be local.",
+
+   NameInterfaceMethod = "Expected an interface method name after 'function'.",
+
+   LParInterfaceMethod = "Expected '(' for the interface method parameter list.",
+
+   RParInterfaceMethod = "Expected ')' to close the interface method parameter list.",
+
+   TypeInterfaceMethod = "Expected a type in interface method declaration.",
+
+   MemberInterface = "Expected a bodyless interface method declaration or 'end'.",
+
+   EndInterface = "Expected 'end' to close the interface.",
+
    NameImport = "Expected a name after 'local'.",
 
     --this label is not thrown in rule 'import' because rule 'toplevelvar'

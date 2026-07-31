@@ -84,14 +84,13 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h`, `titan_longjmp.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/{ffi,coro,uv}.h` | Namespaced portable FFI, coroutine, and libuv shim headers |
-| `$ROCKS_TREE/lib/titan/0.20/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus the independent `coroutine`, `uv`, `async`, `timer`, `fs`, `net`, `os`, `peg`, and `string` logical modules |
-| `$ROCKS_TREE/lib/titan/0.20/titan.a` | The self-describing static form of the same nine logical standard modules, plus native support, private LPegLabel payload, and bundled-libuv payload when that mode is selected |
-| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os,peg,string}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
+| `$ROCKS_TREE/lib/titan/0.20/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus the independent `coroutine`, `uv`, `async`, `timer`, `io`, `fs`, `net`, `os`, `peg`, and `string` logical modules |
+| `$ROCKS_TREE/lib/titan/0.20/titan.a` | The self-describing static form of the same ten logical standard modules, plus native support, private LPegLabel payload, and bundled-libuv payload when that mode is selected |
+| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,os,peg,string}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
 
-On this relation-only head, the nine-module pair and shims are clean-prefix
-validation artifacts, not a complete ABI-0.20 release. Interfaces v1 completes
-the same ABI with a tenth logical module/key/shim and an eleventh opener; the
-counts above will move together in that coordinated change.
+The ten-module pair and shims are the coordinated ABI-0.20 standard image:
+`titan.io` carries the type-only Interface vocabulary, and bare native support
+adds the eleventh DSO opener without adding a logical metadata key.
 
 Bundled-libuv installs also contain `$ROCKS_TREE/include/uv.h` and
 `$ROCKS_TREE/include/uv/`. The bundled `libuv.a` is a private build artifact:
@@ -222,7 +221,7 @@ The Titan-owned Lua's configured default `package.cpath` contains
 `$PREFIX/lib/titan/0.20/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
 template lets the generated `titan.*` loaders find the canonical provider; the
 second remains the root-discovery anchor. The default `package.path` finds all
-nine loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
+ten loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
 layout
 `ROCKS_TREE == PREFIX`, so `titanc` can use the first entry ending in
 `/lib/lua/5.5/?.so` to recover its Titan SDK/rocks root.
@@ -273,14 +272,13 @@ absent, the build atomically stages that bootstrap at
 `$ROCKS_TREE/lib/titan/0.20/titan.so` so the just-installed compiler can load
 its native support table; a repeated install preserves an already valid full
 image. After LuaRocks deploys the compiler, the source-only `post_install` hook
-invokes that `titanc` once for all nine current standard roots, with private
+invokes that `titanc` once for all ten current standard roots, with private
 LPegLabel payload between `titanlib.o` and any bundled libuv payload, stages
 the paired providers and generated loaders privately, validates them, and
-publishes them with rollback for clean relation-head testing, committing
+publishes them with rollback, committing
 `titan.a` before `titan.so` and using the DSO rename as the final commit point.
-That nine-module result is not a complete ABI-0.20 release without the
-coordinated Interfaces-v1 module. There is no separate Make install pass
-or pre-install hook. The provider, generated loaders, and SDK files remain
+There is no separate Make install pass or pre-install hook. The provider,
+generated loaders, and SDK files remain
 direct artifacts outside the rock manifest, so `luarocks remove titan` does
 not remove them. Titan does not provide binary rocks yet; packaging and
 uninstall ownership for these files will be revisited with a Titan
@@ -336,8 +334,8 @@ callable declaration. Logical source order continues to determine duplicate
 precedence, interface/member and module-slot ordering, module-variable
 initialization, and code generation.
 
-The standard-library short names (`coroutine`, `uv`, `async`, `timer`, `fs`,
-`net`, `os`, `peg`, and `string`) are parser sugar for the corresponding
+The standard-library short names (`coroutine`, `uv`, `async`, `timer`, `io`,
+`fs`, `net`, `os`, `peg`, and `string`) are parser sugar for the corresponding
 `titan.*` module
 names. Module resolution checks binary dependencies before source, so an
 ordinary `./titan/uv/uv.titan` folder cannot displace the installed compiled
@@ -347,8 +345,8 @@ a different module installation. Modules explicitly named on the `titanc`
 command line must come from source and use the folder-before-flat rule. Titan code uses the
 short imports, while Lua uses the
 qualified names `require "titan.coroutine"`, `require "titan.async"`,
-`require "titan.timer"`, `require "titan.fs"`, `require "titan.net"`, and
-`require "titan.os"`, plus `require "titan.peg"` and
+`require "titan.timer"`, `require "titan.io"`, `require "titan.fs"`,
+`require "titan.net"`, and `require "titan.os"`, plus `require "titan.peg"` and
 `require "titan.string"`. The private `titan.uv` logical module remains available
 for runtime plumbing and direct-libuv extensions. Lua's own `coroutine` and
 `os` modules remain unchanged.
@@ -357,14 +355,14 @@ The logical async chain remains `titan.coroutine -> titan.uv -> titan.async`,
 with `titan.timer`, `titan.fs`, `titan.net`, and `titan.os` built on the same
 private plumbing. `titan.peg` owns the typed parsing-expression surface and
 `titan.string` builds byte operations, formatting/packing, and regexes on it.
-Clean validation builds on this relation-only head pass all nine current roots
+The independent type-only `titan.io` module owns the standard Reader, Writer,
+and Closer Interface vocabulary. Clean validation builds pass all ten roots
 to one `titanc` invocation, so their source imports are statically resolved
 inside the paired `titan.so` and `titan.a` providers. Bundled mode carries
 libuv's objects into both forms; system mode keeps the pkg-config-selected
 library as a repeated final-link input. The private LPegLabel objects enter
-both forms in either libuv mode. Nine generated Lua loaders expose the
-qualified logical entries. The result is not released as complete ABI 0.20
-until Interfaces v1 adds its coordinated tenth module/key/shim.
+both forms in either libuv mode. Ten generated Lua loaders expose the
+qualified logical entries.
 Its source is the reviewed folder ensemble rooted at `titan/uv/uv.titan`, with
 `file.titan`, `os.titan`, `process.titan`, `runtime.titan`, `task.titan`, and
 `tcp.titan` as contributors. The main file is the shared prelude and sole
@@ -586,7 +584,7 @@ need the SDL2 development headers installed.
 `make clean` removes generated build and test artifacts (object files, generated
 C, compiled modules, coverage data), including nested `titan/uv/uv.c` and
 `titan/uv/uv.o`, the `titan/peg` and `titan/string` folder-main outputs, and
-the nine known generated standard-library loaders, while
+the ten known generated standard-library loaders, while
 keeping source files and downloaded dependency trees.
 `make distclean` additionally removes the downloaded Lua, LuaRocks,
 libbacktrace, and libuv source/build trees and release tarballs. Neither target
@@ -674,7 +672,5 @@ they are in the roadmap:
 * FFI with C, continued (Titan-function adapters for C callback ABIs,
   adopted-pointer lifetimes, and owned structs with flexible array members)
 * parametric polymorphism (via type erasure and boxed values)
-* nominal interfaces/protocols (Interfaces v1), structurally satisfied by
-  records and unions but represented by nominal wrappers at run time
 * Language server
 * ...Titan 1.0!

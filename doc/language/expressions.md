@@ -201,14 +201,19 @@ enumerated symmetric type pairs:
   any comparison with NaN is false, so `x ~= x` is true when `x` is NaN.
 * **Strings** compare by content (lexicographically for the relational
   operators), exactly as in Lua.
-* **Arrays, maps, records, unions, and function-typed values** compare by
-  identity. Consistent non-exact Array, Map, or Function views still share the
-  same boxed object; nominal records and unions require their exact type.
-  Arrays and nominal values use canonical userdata identities, and maps use
-  ordinary table identities. A Titan function has its stable canonical
-  `CClosure` identity, while a non-Titan Lua function, C function, or
-  `__call` value retains its own boxed identity. Metamethods are never
-  involved.
+* **Arrays, maps, records, unions, Interfaces, and function-typed values**
+  compare by identity. Consistent non-exact Array, Map, or Function views still
+  share the same boxed object; nominal records, unions, and Interfaces require
+  their exact type.
+  Arrays use canonical proxy identities, nominal values compare their userdata
+  identities, and maps use ordinary table identities. A Titan function has
+  its stable canonical `CClosure` identity, while a non-Titan Lua function, C
+  function, or `__call` value retains its own boxed identity. Metamethods are
+  never involved.
+  Each record/union-to-Interface conversion makes a fresh wrapper, so wrapper
+  equality is the identity of that conversion result. An Interface and its
+  concrete implementer are incomparable, as are two distinct nominal
+  Interfaces, even when their method sets match.
 * **Two `value`s** (or a `value` and a guardable type gradually consistent
   with it) compare with Lua's *raw* equality — `__eq` metamethods on tables
   that arrived from Lua are not consulted. Equality does not infer a separate
@@ -239,7 +244,7 @@ summarized in the type system's
 The relational operators accept two numbers (a mixed `integer`/`float`
 comparison compares mathematical values exactly, with *no* promotion of
 the integer to float — matching Lua) or two strings. Everything else — booleans,
-`value`, arrays, maps, records, unions, mixed types — is a compile-time error
+`value`, arrays, maps, records, unions, Interfaces, mixed types — is a compile-time error
 (`left/right hand side of relational expression is a ... instead of a
 number`, or `trying to use relational expression with ...`).
 
@@ -268,7 +273,7 @@ and the static type of the result depends on what the checker knows:
   `boolean`-annotated variable), both operands are implicitly converted
   to `boolean` and the result is `boolean`, whatever the operand types.
 * **Statically truthy/falsy left operand.** Integers, floats, strings,
-  arrays, maps, records and unions can never be falsy, so for these `a and b`
+  arrays, maps, records, unions, and Interfaces can never be falsy, so for these `a and b`
   has the type of `b`, and `a or b` the type of `a` (the right side is
   dead); a `nil` left operand flips both rules. At run time this is
   Lua's behavior: with two integers, `a and b` returns `b` and
@@ -327,7 +332,7 @@ A chain of `..` is flattened into a single n-ary concatenation, so
 `a .. b .. c .. d` allocates one result string, not three; when all
 operands are literals the compiler folds them into a single string
 constant at parse time. Concatenating anything else — booleans, `nil`,
-arrays, maps, records, unions — is a compile-time error
+arrays, maps, records, unions, Interfaces — is a compile-time error
 (`cannot concatenate with boolean value`, etc.), as is concatenating a
 `value` directly (`cannot concatenate with value of type 'value'` —
 cast it to `string` first). Option operands are implicitly unwrapped,
@@ -361,14 +366,17 @@ The cast expression `exp as type` converts a value to another type. It
 binds tighter than multiplication and all looser binary operators and does
 not chain (parenthesize for two steps). It explicitly requests a conversion
 admitted by Titan's **written-castable** relation. That includes identity,
-the named direct conversions that can also happen implicitly in a typed
-context, gradual injection/projection, and the explicitly enumerated FFI-only
-operations. It does not make arbitrary types related and it never searches
-for a chain of conversions.
+the selected named direct conversions that the written relation reuses,
+gradual injection/projection, and the explicitly enumerated FFI-only
+operations. It does not automatically admit every implicit composite plan,
+does not make arbitrary types related, and never searches for a chain of
+conversions.
 
 | From | To | Can fail at run time? |
 | --- | --- | --- |
-| a source with a direct coercion | that coercion's target | as specified by the coercion; for example, `integer -> float` is total and `float -> integer` can fail |
+| a source/target pair admitted by the ordinary written direct-coercion table | that written target | as specified by the coercion; for example, `integer -> float` is total and `float -> integer` can fail |
+| satisfying record or union `R` | Interface `I` | never — constructs a fresh wrapper |
+| Interface `I` | any visible concrete record or union `R` | yes — checks whether the wrapper retains that exact concrete type |
 | option `T?` | base `T` | yes — checked (raises on `nil`) |
 | any non-FFI type with a `TValue` representation (including options) | `value` | never |
 | `value` | any dynamically reifiable type (including options) | uses the broad dynamic rule; total for `boolean`, function, `value`, `boolean?`, and C `TValue` |
@@ -383,7 +391,7 @@ for a chain of conversions.
 | `string` | C `char *` or `void *` (FFI) | no |
 | non-function C pointer | C `void *` | no |
 | C function pointer | C `void *` | no — requires a written cast |
-| Array, Map, record, or union | C `void *` | no — exposes the native GC identity |
+| Array, Map, record, union, or Interface | C `void *` | no — exposes the native GC identity |
 | function | C `void *` | yes — raises if its boxed value is not collectable |
 | C integer or C float | `value` | yes when the exact C value does not fit its `lua_Integer` or `lua_Number` carrier |
 | ordinary C pointer or owned C userdata | `value` | never — ordinary pointers become lightuserdata; owned objects stay full userdata |
@@ -407,6 +415,16 @@ This is intentionally broader than an implicit `value -> T` projection or a
 typed Array/Map read, both of which use strict gradual guards and do not apply
 numeric conversion or truthiness. All boundary distinctions are normative in
 [the type-system matrix](types.md#normative-boundary-matrix).
+An Interface target is the deliberate exception where both strict projection
+and broad dynamic conversion have the same acceptance condition: the value
+must already contain a wrapper of that exact nominal Interface type. Neither
+operation discovers that a bare record or union satisfies the Interface.
+Written concrete/Interface casts have their own exact rows rather than
+inheriting every implicit Option composition. In particular, a satisfying
+`R as/is I` is admitted, but `R? as/is I`, `R as/is I?`, and `R? as/is I?`
+are not; `I? as/is R` is the explicit force-and-downcast/test, while target
+options such as `I as/is R?` and `I? as/is R?` are not admitted. See the
+complete [Interface Option matrix](interfaces.md#options).
 An option cast `o as T` unwraps the option, raising
 `expected T but found nil` when `o` is `nil` (the explicit form of the
 implicit option unwrap; see [option types](option-types.md)). The C rows belong
@@ -428,10 +446,13 @@ For the admitted casts that can fail, the test uses the same checks as `as`:
   corresponding cast. This includes C target ranges, `_Bool`'s 0/1
   restriction, finite/range checks for floating narrowing, and the same rule
   recursively beneath an Option.
-* Checked primitive targets, Maps, Arrays, records, unions, and owned-C targets use
+* Checked primitive targets, Maps, Arrays, records, unions, Interfaces, and owned-C targets use
   the same Lua tag or exact metatable identity as their casts. In particular,
   an ordinary Lua table is a Map, not an Array proxy, and distinct record
   types do not match.
+* `r is I` for a statically satisfying concrete record or union is always true
+  and allocates no wrapper. `i is R` tests the exact concrete value retained by
+  an Interface wrapper; distinct concrete nominal types do not match.
 * `o is T` for `o: T?` is false only when `o` is nil.
 * A C `char *` or `void *` tested as `string` is false only when the pointer
   is `NULL`.
@@ -457,7 +478,7 @@ results from non-Titan Lua callables cannot use this operation.
 
 GC-identity pointers are borrowed internal addresses. The cast roots its
 operand during evaluation and later argument setup, but retaining the pointer
-does not retain the Array, Map, record, union, or function. See
+does not retain the Array, Map, record, union, Interface, or function. See
 [the FFI lifetime rules](ffi.md#casts-and-coercions).
 
 ```lua
@@ -588,9 +609,11 @@ called directly — `arr[i](x)` works, raising cleanly if the slot is nil
 
 ## Calls in expressions
 
-Function calls, method calls and record/union-function calls are expressions, and
+Function calls, concrete or Interface method calls, and record/union-function
+calls are expressions, and
 so is calling a function value. The callable things are module-level
-functions (local or imported), record/union methods (`r:move(...)`), nominal
+functions (local or imported), record/union methods (`r:move(...)`), Interface
+methods (`reader:read(...)`), nominal
 functions (`Point.new(...)`, `Point.origin(...)`), and any function value held in a
 variable, parameter, field, or container slot.
 Function-value dispatch follows the three paths defined in

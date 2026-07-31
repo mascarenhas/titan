@@ -16,6 +16,7 @@ local types = typedecl("Type", {
         Map         = {"keys", "values"},
         Record      = {"name", "fields", "functions", "methods", "nfields"},
         Union       = {"name", "variants", "functions", "methods", "nvariants"},
+        Interface   = {"name", "methods"},
         Variant     = {"fqtn", "name", "payload", "index"},
         Nominal     = {"fqtn"},
         Field       = {"fqtn", "name", "type", "index"},
@@ -62,6 +63,150 @@ function types.Union(name, variants, functions, methods, nvariants)
         variants[variant.name] = variant
     end
     return raw_Union(name, variants, functions, methods, nvariants)
+end
+
+-- An interface's methods retain declaration order for their stable payload
+-- slots while also supporting namespace lookup by name. Unlike the legacy
+-- union constructor above, serialized Interface input is deliberately only a
+-- dense numeric list: accepting preexisting keyed decorations would let a
+-- hostile descriptor silently replace the canonical list-to-map projection.
+local raw_Interface = types.Interface
+
+local function interface_constructor_error(message)
+    error("invalid Interface methods: " .. message, 3)
+end
+
+local function validate_interface_constructor_input(name, methods)
+    if type(name) ~= "string" then
+        interface_constructor_error("owner name must be a string")
+    elseif type(methods) ~= "table" then
+        interface_constructor_error("expected a dense numeric list")
+    end
+
+    local count = 0
+    for key in pairs(methods) do
+        if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+            interface_constructor_error(
+                "input must contain numeric list keys only")
+        end
+        count = count + 1
+    end
+    if count == 0 then
+        interface_constructor_error("at least one method is required")
+    end
+
+    local names = {}
+    for index = 1, count do
+        local method = methods[index]
+        if method == nil then
+            interface_constructor_error("input list must be dense")
+        elseif type(method) ~= "table"
+           or method._tag ~= "Type.Method" then
+            interface_constructor_error(
+                "entry " .. index .. " is not a method descriptor")
+        elseif method.fqtn ~= name then
+            interface_constructor_error(
+                "method '" .. tostring(method.name) ..
+                "' belongs to a different owner")
+        elseif type(method.name) ~= "string" then
+            interface_constructor_error(
+                "entry " .. index .. " has no method name")
+        elseif names[method.name] then
+            interface_constructor_error(
+                "duplicate method '" .. method.name .. "'")
+        end
+        names[method.name] = true
+    end
+end
+
+function types.Interface(name, methods)
+    validate_interface_constructor_input(name, methods)
+    for _, method in ipairs(methods) do
+        methods[method.name] = method
+    end
+    return raw_Interface(name, methods)
+end
+
+-- Validate the canonical hybrid list/map after construction. This is kept
+-- public so the closed compiled-interface validator can reuse exactly the
+-- same identity and density checks instead of independently reconstructing
+-- the in-memory decoration.
+function types.validate_interface_descriptor(interface)
+    if type(interface) ~= "table"
+       or interface._tag ~= "Type.Interface" then
+        return nil, "descriptor is not an interface"
+    elseif type(interface.name) ~= "string" then
+        return nil, "interface owner name is not a string"
+    elseif type(interface.methods) ~= "table" then
+        return nil, "interface methods are not a table"
+    end
+
+    local numeric_count, numeric_max = 0, 0
+    for key in pairs(interface.methods) do
+        if type(key) == "number" then
+            if key < 1 or key % 1 ~= 0 then
+                return nil, "interface method list has a non-list index"
+            end
+            numeric_count = numeric_count + 1
+            numeric_max = math.max(numeric_max, key)
+        elseif type(key) ~= "string" then
+            return nil, "interface methods have an invalid derived key"
+        end
+    end
+    if numeric_count == 0 then
+        return nil, "interface method list is empty"
+    elseif numeric_count ~= numeric_max then
+        return nil, "interface method list is sparse"
+    end
+
+    local by_name = {}
+    for index = 1, numeric_count do
+        local method = interface.methods[index]
+        if type(method) ~= "table"
+           or method._tag ~= "Type.Method" then
+            return nil, "interface method " .. index ..
+                " is not a method descriptor"
+        elseif method.fqtn ~= interface.name then
+            return nil, "interface method '" .. tostring(method.name) ..
+                "' belongs to a different owner"
+        elseif type(method.name) ~= "string" then
+            return nil, "interface method " .. index .. " has no name"
+        elseif by_name[method.name] then
+            return nil, "interface method '" .. method.name ..
+                "' is duplicated"
+        end
+        by_name[method.name] = method
+    end
+
+    for name, method in pairs(by_name) do
+        if interface.methods[name] ~= method then
+            return nil, "interface method key '" .. name ..
+                "' does not reference its ordered descriptor"
+        end
+    end
+    for key in pairs(interface.methods) do
+        if type(key) == "string" and not by_name[key] then
+            return nil, "interface methods have extra derived key '" ..
+                key .. "'"
+        end
+    end
+    return interface
+end
+
+-- Project a declaration method to the callable value shape used by bound
+-- methods and Interface implementation matching. Parameter names remain on
+-- the declaration descriptor for named calls, but are not part of callable
+-- identity or adjustment.
+function types.method_function_type(method)
+    assert(type(method) == "table"
+        and method._tag == "Type.Method",
+        "expected a method descriptor")
+    return types.Function(
+        method.params,
+        method.rettypes,
+        false,
+        method.varargtype,
+        method.flexrettype)
 end
 
 -- Registry for nominal types
@@ -207,6 +352,13 @@ local function find_c_type(t, include_legacy, descend_function_values)
             end
             for _, method in pairs(typ.methods) do
                 local ctyp = not method.islocal and visit_type(method, seen)
+                if ctyp then return ctyp end
+            end
+        elseif tag == "Type.Interface" then
+            -- Declaration order is ABI-significant for Interfaces. Traverse
+            -- only the canonical dense list, not its duplicate name map.
+            for _, method in ipairs(typ.methods) do
+                local ctyp = visit_type(method, seen)
                 if ctyp then return ctyp end
             end
         elseif tag == "Type.Union" then
@@ -377,7 +529,6 @@ function types.is_gc(t)
            tag == "Type.Array" or
            tag == "Type.Map" or
            tag == "Type.Record" or
-           tag == "Type.Interface" or
            tag == "Type.Nominal" or
            tag == "Type.COwned" or
            (tag == "Type.Option" and types.is_gc(t.base))
@@ -646,11 +797,6 @@ function types.c_address_coerceable(source, target)
         return false
     end
 
-    if source._tag == "Type.Value" then
-        return target_pointee._tag == "Type.CVoid"
-            or types.is_c_tvalue(target_res.pointee)
-    end
-
     local source_res = resolved_c(source)
     if not (source_res and types.is_c(source)) then
         return false
@@ -806,7 +952,6 @@ function types.has_tvalue_representation(t, seen)
         or tag == "Type.Map"
         or tag == "Type.Value"
         or tag == "Type.Nominal"
-        or tag == "Type.Interface"
         or tag == "Type.Function"
         or (tag == "Type.Option"
             and types.has_tvalue_representation(t.base, seen))
@@ -1101,6 +1246,10 @@ end
 
 type_equals = function(t1, t2, seen)
     if t1 == t2 then
+        if type(t1) == "table"
+           and t1._tag == "Type.Interface" then
+            return types.validate_interface_descriptor(t1) ~= nil
+        end
         return true
     elseif type(t1) ~= "table" or type(t2) ~= "table" then
         return false
@@ -1193,6 +1342,11 @@ type_equals = function(t1, t2, seen)
            and same_value(t1.variants, t2.variants, seen)
            and same_value(t1.functions, t2.functions, seen)
            and same_value(t1.methods, t2.methods, seen)
+    elseif tag1 == "Type.Interface" then
+        return types.validate_interface_descriptor(t1) ~= nil
+           and types.validate_interface_descriptor(t2) ~= nil
+           and t1.name == t2.name
+           and same_list(t1.methods, t2.methods, seen)
     elseif tag1 == "Type.Method" or tag1 == "Type.StaticMethod" then
         return t1.fqtn == t2.fqtn
            and t1.name == t2.name
@@ -1256,7 +1410,6 @@ local function is_relation_nominal(typ)
     return tag == "Type.Nominal"
         or tag == "Type.Record"
         or tag == "Type.Union"
-        or tag == "Type.Interface"
 end
 
 local function nominal_name(typ)
@@ -1267,7 +1420,9 @@ local function relation_identity(left, right)
     left, right = normalized_pair(left, right)
     if not left or not right
        or left._tag == "Type.Variant"
-       or right._tag == "Type.Variant" then
+       or right._tag == "Type.Variant"
+       or left._tag == "Type.Interface"
+       or right._tag == "Type.Interface" then
         return false
     elseif is_relation_nominal(left) or is_relation_nominal(right) then
         return left._tag == right._tag
@@ -1294,7 +1449,7 @@ local function sound_guardable(typ, seen)
        or tag == "Type.Boolean" or tag == "Type.Nil"
        or tag == "Type.String" or tag == "Type.Value"
        or tag == "Type.Nominal" or tag == "Type.Record"
-       or tag == "Type.Union" or tag == "Type.Interface"
+       or tag == "Type.Union"
        or tag == "Type.COwned" or tag == "Type.CInteger"
        or tag == "Type.CFloat" or types.is_c_tvalue(typ) then
         ok = true
@@ -1859,6 +2014,148 @@ function types.callable_adjustment(source_actual, target_expected, policy)
         callable_seen = {},
         allow_partial_flex = policy.allow_partial_flex ~= false,
     })
+end
+
+local function interface_match_failure(
+        reason, concrete, interface, index, required, fields)
+    fields = fields or {}
+    fields.kind = "interface_mismatch"
+    fields.reason = reason
+    fields.concrete = concrete
+    fields.interface = interface
+    fields.index = index
+    fields.name = required and required.name or nil
+    fields.required = required
+    return false, fields
+end
+
+local function non_method_named(concrete, name)
+    if concrete.functions and concrete.functions[name] then
+        return concrete.functions[name]
+    end
+    for _, field in ipairs(concrete.fields or {}) do
+        if field.name == name then return field end
+    end
+    if concrete._tag == "Type.Union"
+       and concrete.variants and concrete.variants[name] then
+        return concrete.variants[name]
+    end
+    return nil
+end
+
+local function interface_method_visible(
+        method, concrete, policy)
+    if policy.method_visible then
+        return policy.method_visible(method, concrete, policy)
+            and true or false
+    end
+    if not method.islocal then return true end
+    local owner_module =
+        method.fqtn and method.fqtn:match("^(.*)%.[^.]+$")
+    return owner_module == policy.visibility
+end
+
+-- Check one concrete Record/Union descriptor against one Interface descriptor.
+-- This is intentionally not a general type relation: descriptor resolution is
+-- owned by the cast-site policy, the scan follows Interface declaration order,
+-- and aligned callable slots admit only exact/gradual component adjustment.
+function types.interface_implementation(concrete, interface, policy)
+    if type(concrete) ~= "table"
+       or (concrete._tag ~= "Type.Record"
+           and concrete._tag ~= "Type.Union") then
+        return interface_match_failure(
+            "invalid_concrete", concrete, interface)
+    elseif type(interface) ~= "table"
+       or interface._tag ~= "Type.Interface" then
+        return interface_match_failure(
+            "invalid_interface", concrete, interface)
+    end
+
+    local valid, validation_error =
+        types.validate_interface_descriptor(interface)
+    if not valid then
+        return interface_match_failure(
+            "invalid_interface", concrete, interface, nil, nil, {
+                detail = validation_error,
+            })
+    elseif type(concrete.methods) ~= "table" then
+        return interface_match_failure(
+            "invalid_concrete", concrete, interface)
+    elseif type(policy) ~= "table"
+       or (type(policy.method_visible) ~= "function"
+           and type(policy.visibility) ~= "string") then
+        return interface_match_failure(
+            "missing_visibility", concrete, interface)
+    end
+
+    local mappings = {}
+    local all_exact = true
+    for index, required in ipairs(interface.methods) do
+        local method = concrete.methods[required.name]
+        if method == nil then
+            local collision =
+                non_method_named(concrete, required.name)
+            if collision then
+                return interface_match_failure(
+                    "not_method", concrete, interface,
+                    index, required, { member = collision })
+            end
+            return interface_match_failure(
+                "missing", concrete, interface, index, required)
+        elseif type(method) ~= "table"
+           or method._tag ~= "Type.Method"
+           or method.fqtn ~= concrete.name then
+            return interface_match_failure(
+                "not_method", concrete, interface,
+                index, required, { member = method })
+        elseif not interface_method_visible(
+                method, concrete, policy) then
+            return interface_match_failure(
+                "inaccessible", concrete, interface,
+                index, required, { member = method })
+        end
+
+        local concrete_type =
+            types.method_function_type(method)
+        local required_type =
+            types.method_function_type(required)
+        local adjustment = types.callable_adjustment(
+            concrete_type, required_type, {
+                aligned_coercions = false,
+                allow_partial_flex =
+                    policy.allow_partial_flex ~= false,
+            })
+        if not adjustment then
+            return interface_match_failure(
+                "incompatible", concrete, interface,
+                index, required, {
+                    member = method,
+                    concrete_type = concrete_type,
+                    required_type = required_type,
+                })
+        end
+
+        local exact = types.equals(concrete_type, required_type)
+        all_exact = all_exact and exact
+        mappings[index] = {
+            index = index - 1,
+            name = required.name,
+            required = required,
+            concrete = method,
+            source = concrete_type,
+            target = required_type,
+            adjustment = adjustment,
+            exact = exact,
+        }
+    end
+
+    return {
+        kind = "interface_implementation",
+        concrete = concrete,
+        interface = interface,
+        methods = mappings,
+        exact = all_exact,
+    }
 end
 
 local function coercion_plan(op, source, target, fields)
@@ -2440,7 +2737,8 @@ function types.tostring(t)
             table.insert(out, ")")
         end
         return table.concat(out)
-    elseif tag == "Type.Record" or tag == "Type.Union" then
+    elseif tag == "Type.Record" or tag == "Type.Union"
+       or tag == "Type.Interface" then
         return t.name
     elseif tag == "Type.Variant" then
         return t.fqtn .. "." .. t.name
@@ -2745,6 +3043,19 @@ function types.serialize(t)
             "{" .. table.concat(methods, ",") .. "}" .. "," ..
             tostring(t.nvariants or #t.variants) ..
             ")"
+    elseif tag == "Type.Interface" then
+        local valid, validation_error =
+            types.validate_interface_descriptor(t)
+        if not valid then
+            error("cannot serialize malformed Interface descriptor: " ..
+                validation_error)
+        end
+        local methods = {}
+        for _, method in ipairs(t.methods) do
+            methods[#methods + 1] = types.serialize(method)
+        end
+        return "Interface(" .. string.format("%q", t.name) ..
+            ",{" .. table.concat(methods, ",") .. "})"
     elseif tag == "Type.Option" then
         return "Option(" .. types.serialize(t.base) .. ")"
     elseif tag == "Type.Integer"     then return "Integer()"

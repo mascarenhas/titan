@@ -215,7 +215,7 @@ A few details worth knowing:
   use a variable from an outer function it is not directly inside; the
   variable is threaded down through the intervening lambdas. Mutable
   captures stay shared all the way down; immutable ones are copied down.
-* **Captured strings, arrays, records, unions and other heap values** are captured
+* **Captured strings, arrays, records, unions, Interfaces, and other heap values** are captured
   and kept alive correctly across garbage collection, whether by value or
   shared-and-mutable.
 
@@ -316,10 +316,16 @@ end
 -- the returned value bumps c on each call: 1, 2, 3, …
 ```
 
-Two restrictions, both clean compile-time errors:
+An Interface method can be bound in the same way. The function value captures
+the Interface wrapper, uses the Interface method's self-removed type, and
+dispatches through that wrapper when called. Like every bound method value, it
+is positional-only after binding even though a direct Interface method call can
+use the Interface declaration's parameter names.
 
-* the receiver must be a record or union — `n:bump` on another type is a
-  receiver-type error;
+Restrictions are clean compile-time errors:
+
+* the receiver must be a record, union, or Interface — `n:bump` on another
+  type is a receiver-type error;
 * the method must exist on that nominal owner;
 * a **foreign (C) method** cannot be bound:
   `a foreign (C) method cannot be used as a first[-class value]`.
@@ -329,4 +335,5 @@ available only through a compiled `.so` or `.a` provider. See
 [Records](records.md#methods) for method declaration rules.
 Union methods use the same bound-reference path; unlike a record method they
 cannot access fields and must inspect `self` with `case`. See
-[Unions](unions.md).
+[Unions](unions.md). Interface dispatch and wrapper lifetime are described in
+[Interfaces](interfaces.md#calls-and-bound-methods).

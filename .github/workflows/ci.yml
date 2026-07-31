@@ -101,7 +101,7 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer fs net os peg string; do
+          for module in coroutine uv async timer io fs net os peg string; do
             rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           rm -f "$PREFIX/share/lua/5.5/titan.lua" \
@@ -561,7 +561,7 @@ jobs:
           static_archive="${provider%.so}.a"
           test -f "$provider" && test ! -L "$provider"
           test -f "$static_archive" && test ! -L "$static_archive"
-          for module in coroutine uv async timer fs net os peg string; do
+          for module in coroutine uv async timer io fs net os peg string; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           readelf -Ws .lua/bin/lua | grep __asan_

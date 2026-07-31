@@ -2,8 +2,9 @@
 
 # Exercise both installed standard-library provider forms under the bundled
 # and system libuv policies. Besides the ordinary Lua/API smokes, this proves
-# that titan.a matches titan.so and can run async/timer/fs/net/os plus
-# PEG/string behavior in a compiled Titan application while the dynamic
+# that titan.a matches titan.so and can load io and run
+# async/timer/fs/net/os plus PEG/string behavior in a compiled Titan
+# application while the dynamic
 # provider and generated shims are out of search reach. System mode
 # additionally exercises both the host's ordinary pkg-config setting and an
 # explicit static archive selection.
@@ -95,7 +96,7 @@ check_canonical_container() {
         test -f "$PROVIDER.dSYM/Contents/Resources/DWARF/titan.so"
     fi
 
-    for module in coroutine uv async timer fs net os peg string; do
+    for module in coroutine uv async timer io fs net os peg string; do
         local shim="$SHIM_ROOT/titan/$module.lua"
         test -f "$shim"
         test ! -L "$shim"
@@ -127,6 +128,7 @@ local expected = {
     ["titan.uv"] = true,
     ["titan.async"] = true,
     ["titan.timer"] = true,
+    ["titan.io"] = true,
     ["titan.fs"] = true,
     ["titan.net"] = true,
     ["titan.os"] = true,
@@ -409,12 +411,12 @@ run_mode_smoke() {
         env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
             TITAN_PATH_0_20="$titan_path" LUA_PATH="$lua_path" \
             LUA_CPATH="$lua_cpath" \
-            "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local peg = require "titan.peg"; local strings = require "titan.string"; local builtin_string = require "string"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); async.loop(); assert(task:join()); assert(peg.literal("peg"):match("peg") == 4); assert(strings.len("a\0b") == 3); local found = strings.match("regex42", "([0-9]+)"); assert(found and found:whole() == "42" and found:group(1) == "42"); assert(strings.find("a\0b", "\0b") == 2); assert(builtin_string == string); assert(type(async.version()) == "string"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
+            "$LUA" -e 'local builtin_io = require "io"; local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local titan_io = require "titan.io"; local fs = require "titan.fs"; local net = require "titan.net"; local peg = require "titan.peg"; local strings = require "titan.string"; local builtin_string = require "string"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); async.loop(); assert(task:join()); assert(peg.literal("peg"):match("peg") == 4); assert(strings.len("a\0b") == 3); local found = strings.match("regex42", "([0-9]+)"); assert(found and found:whole() == "42" and found:group(1) == "42"); assert(strings.find("a\0b", "\0b") == 2); assert(require "io" == builtin_io); assert(type(titan_io) == "userdata"); assert(builtin_string == string); assert(type(async.version()) == "string"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     else
         env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
             TITAN_PATH_0_20="$titan_path" LUA_PATH="$lua_path" \
             LUA_CPATH="$lua_cpath" \
-            "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local peg = require "titan.peg"; local strings = require "titan.string"; local builtin_string = require "string"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); async.loop(); assert(task:join() == "bundled"); assert(peg.literal("peg"):match("peg") == 4); assert(strings.len("a\0b") == 3); local found = strings.match("regex42", "([0-9]+)"); assert(found and found:whole() == "42" and found:group(1) == "42"); assert(strings.find("a\0b", "\0b") == 2); assert(builtin_string == string); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
+            "$LUA" -e 'local builtin_io = require "io"; local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local titan_io = require "titan.io"; local fs = require "titan.fs"; local net = require "titan.net"; local peg = require "titan.peg"; local strings = require "titan.string"; local builtin_string = require "string"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); async.loop(); assert(task:join() == "bundled"); assert(peg.literal("peg"):match("peg") == 4); assert(strings.len("a\0b") == 3); local found = strings.match("regex42", "([0-9]+)"); assert(found and found:whole() == "42" and found:group(1) == "42"); assert(strings.find("a\0b", "\0b") == 2); assert(require "io" == builtin_io); assert(type(titan_io) == "userdata"); assert(builtin_string == string); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     fi
 
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
@@ -438,6 +440,7 @@ build_and_run_static_titan() {
     cat >"$mode_dir/static_uv_smoke.titan" <<'TITAN'
 local async = import "async"
 local timer = import "timer"
+local titan_io = import "io"
 local fs = import "fs"
 local net = import "net"
 local system = import "os"
@@ -527,6 +530,20 @@ function main(args: {string}): integer
           process_status.code == 0 and not process_status.signal and
           process_status.signal_number == 0,
           "static process communicate changed payload or exit status")
+
+    local process = system.spawn(process_child, process_args)
+    local writer: titan_io.WriterCloser = process.stdin
+    local reader: titan_io.Reader = process.stdout
+    local error_reader: titan_io.Reader = process.stderr
+    writer:write(process_payload .. "\n")
+    writer:close()
+    check(reader:read_until("\n", true) == process_payload and
+          not reader:read() and not error_reader:read(),
+          "static process stream Interface dispatch changed payload")
+    local streamed_status = process:wait()
+    check(streamed_status.code == 0 and not streamed_status.signal and
+          streamed_status.signal_number == 0,
+          "static process stream Interface changed exit status")
     fs.unlink(marker)
   finally
     if original then

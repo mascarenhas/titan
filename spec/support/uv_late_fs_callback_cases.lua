@@ -1,7 +1,6 @@
 local LATE_FS_CASES = [[
     -- Runs only against the generated delayed-FS callback uv variant.
     local lua = foreign import "lua.h"
-    local fs = import "fs"
     local uv = import "uv"
 
     record YoungReason
@@ -15,10 +14,10 @@ local LATE_FS_CASES = [[
       if not condition then raise message end
     end
 
-    local function schedule_buffer_write(file: fs.File,
+    local function schedule_buffer_write(file: uv.uv_file,
                                          payload: string): uv.Task
       return uv._run(function (): value
-        return file:write(payload)
+        return uv._fs_write(file, payload)
       end)
     end
 
@@ -34,12 +33,12 @@ local LATE_FS_CASES = [[
 
     function schedule_cross_generation_graph(root: string): uv.Task
       return uv._run(function (): value
-        local file = fs.open(root .. "/cross-generation.dat", "w")
+        local file = uv._fs_open(root .. "/cross-generation.dat", "w")
         local ticker = uv._ticker(1000)
         local old_error_task = uv._run(function (): value
           uv._sleep(80)
           do
-            fs.stat(root .. "/missing-cross-generation-target")
+            uv._fs_stat(root .. "/missing-cross-generation-target")
           catch
             local failure = error as uv.Error
             check(failure.operation == "fs.stat" and failure.code < 0,
@@ -79,7 +78,7 @@ local LATE_FS_CASES = [[
               "old Task did not retain its young uv.Error")
 
         uv._ticker_close(ticker)
-        file:close()
+        uv._fs_close(file)
         return "cross-generation-graph-ok"
       end)
     end
@@ -89,7 +88,7 @@ local LATE_FS_CASES = [[
       uv.__test_delay_next_fs_callback(40)
 
       local target = uv._run(function (): value
-        fs.stat(path)
+        uv._fs_stat(path)
         fs_result_delivered = true
         return "late-result-must-not-win"
       end)
@@ -138,9 +137,9 @@ local LATE_FS_CASES = [[
       uv.__test_delay_next_fs_callback(40)
 
       local target = uv._run(function (): value
-        local file = fs.open(path, "w")
+        local file = uv._fs_open(path, "w")
         fs_open_result_delivered = true
-        file:close()
+        uv._fs_close(file)
         return "late-open-result-must-not-win"
       end)
 

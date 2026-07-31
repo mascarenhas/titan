@@ -336,6 +336,14 @@ not make whole function types symmetric or transitive. The resulting
 exact native function-pointer path. See
 [Type relations and boundary plans](type-relations-and-boundaries.md).
 
+Interface method satisfaction reuses this directional callable machinery.
+When a concrete method needs adjustment, the checker freezes the fixed/tail
+result run, hidden-surplus policy, roots, and stack rebases into the Interface
+adapter plan. The coder emits that plan under the Interface method's native
+signature; it never treats the direct concrete-to-Interface coercion as a
+structural result-component relation. See
+[Interfaces](interfaces.md#frozen-conversion-and-adapter-plans).
+
 ## Generated result runs and the native ABI
 
 The runtime already defines seven exact-layout descriptor families in
