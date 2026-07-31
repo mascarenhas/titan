@@ -342,6 +342,23 @@ return {
             assert.equal(TYPES, entry.types)
         end)
 
+        it("requires portable logical module components", function()
+            for _, name in ipairs({
+                "pkg", "pkg.mod", "pkg-name._part2",
+            }) do
+                assert.truthy(staticmetadata.valid_module_name(name), name)
+            end
+            for _, name in ipairs({
+                "", ".pkg", "pkg.", "pkg..mod", "1pkg", "-pkg",
+                "pkg.$line", "pkg space", "pkg/mod",
+            }) do
+                assert.falsy(staticmetadata.valid_module_name(name), name)
+                local payload, err = staticmetadata.render(name, ABI, TYPES)
+                assert.falsy(payload)
+                assert.match("invalid logical Titan module name", err, 1, true)
+            end
+        end)
+
         it("rejects canonical whitespace, ordering, and quoting variations", function()
             local variants = {
                 (PAYLOAD:gsub("return {", "return  {", 1)),

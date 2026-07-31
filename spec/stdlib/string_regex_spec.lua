@@ -57,6 +57,8 @@ describe("titan.string regex", function()
                 async_stdlib.read("titan/peg/" .. name .. ".titan"))
         end
         layout = async_stdlib.exact_layout(workspace)
+        async_stdlib.prepare_async_core(workspace, layout)
+        async_stdlib.prepare_gc(workspace, layout)
         async_stdlib.compile(workspace, "titan.peg", {
             layout = layout,
             cppflags = LPEGLABEL_CPPFLAGS,
@@ -110,6 +112,75 @@ describe("titan.string regex", function()
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
     end
+
+    it("iterates captures and deterministic regex split fields", function()
+        run([=[
+            local str = require "titan.string"
+
+            local words = str.matches("one two", "\\w+")
+            assert(words() == "one")
+            assert(words() == "two")
+            assert(words() == nil)
+
+            local assignments = str.matches(
+                "from=world,to=Lua", "(\\w+)=(\\w+)")
+            local k, v = assignments()
+            assert(k == "from" and v == "world")
+            k, v = assignments()
+            assert(k == "to" and v == "Lua")
+            assert(assignments() == nil)
+
+            -- A direct iterator call preserves an unmatched leading capture;
+            -- generic for necessarily treats that nil control result as end.
+            local optional = str.matches("b a", "(a)|(b)")
+            local first = table.pack(optional())
+            assert(first.n == 2 and first[1] == nil and first[2] == "b")
+            local second = table.pack(optional())
+            assert(second.n == 2 and second[1] == "a" and second[2] == nil)
+
+            local bytes = str.split("a\0b", nil)
+            assert(bytes() == "a")
+            assert(bytes() == "\0")
+            assert(bytes() == "b")
+            assert(bytes() == nil)
+            assert(str.split("", nil)() == nil)
+
+            local fields = str.split(",a,,b,", ",")
+            assert(fields() == "")
+            assert(fields() == "a")
+            assert(fields() == "")
+            assert(fields() == "b")
+            assert(fields() == "")
+            assert(fields() == nil)
+
+            local zero = str.split("ab", "")
+            assert(zero() == "")
+            assert(zero() == "a")
+            assert(zero() == "b")
+            assert(zero() == "")
+            assert(zero() == nil)
+
+            local captured = str.split("a1b22c", "(\\d+)")
+            assert(captured() == "a")
+            assert(captured() == "b")
+            assert(captured() == "c")
+            assert(captured() == nil)
+        ]=])
+    end)
+
+    it("keeps unmatched and participating empty capture spans distinct",
+    function()
+        run([=[
+            local str = require "titan.string"
+            local found = assert(str.match("", "(a)?()"))
+            assert(found:group_span(1) == nil)
+            local empty = assert(found:group_span(2))
+            assert(empty.first == 1 and empty.last == 0)
+            local values = table.pack(found:values())
+            assert(values.n == 2)
+            assert(values[1] == nil and values[2] == "")
+        ]=])
+    end)
 
     it("ports the pinned ta-regex 89-assertion behavior corpus",
     function()

@@ -514,7 +514,10 @@ have no type/declaration decorations to generate safely.
 escaping by `c_string_literal`); short strings are interned, so repeated
 evaluation of a short literal yields the same `TString*`. Without a
 `target` the result is anchored in a temp slot; with one, the local's
-own slot refresh anchors it.
+own slot refresh anchors it. `c_string_literal` emits a dollar byte as the C
+octal escape `\044`: generated fragments are recursively template-rendered,
+so this preserves the user byte without letting a following identifier become
+another `$NAME` substitution.
 
 **Concatenation** (`Ast.ExpConcat`) flattens n-ary `..` chains into one
 operation and never calls `luaV_concat`: the total length is precomputed,

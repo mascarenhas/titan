@@ -93,6 +93,7 @@ describe("titan.peg relabel", function()
                 async_stdlib.read("titan/peg/" .. name .. ".titan"))
         end
         layout = async_stdlib.exact_layout(workspace)
+        async_stdlib.prepare_gc(workspace, layout)
         async_stdlib.compile(workspace, "titan.peg", {
             layout = layout,
             cppflags = LPEGLABEL_CPPFLAGS,

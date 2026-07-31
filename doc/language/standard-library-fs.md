@@ -23,6 +23,12 @@ function File:close()
 function File:is_closed(): boolean
 
 function stat(path: string): Stat
+function lstat(path: string): Stat
+function tmpname(): string
+function tmpdir(): string
+function homedir(): string
+function pwd(): string
+function chdir(path: string)
 function mkdir(path: string)
 function unlink(path: string)
 function rmdir(path: string)
@@ -123,22 +129,28 @@ between Tasks must coordinate externally when it needs an uninterrupted
 delimiter read.
 
 `close()` immediately marks the File as closing. Operations already ahead of
-the close finish in order; later reads, writes, and flushes raise. Concurrent
-close callers share the same physical close request. `close()` is idempotent,
-including after the Runtime session has ended, and `is_closed()` reports
-whether physical close has completed. A read cannot bypass this logical-close
-state through bytes retained by an earlier delimiter read; close discards that
-facade excess even when the earlier read finishes while physical close is
-pending.
+the close finish in order; later reads, writes, and flushes raise while the
+physical close is pending. Once close reaches its terminal state, `read` and
+`read_until` return `nil` as ordinary Reader EOF, while `write` and `flush`
+continue to reject the closed File. Concurrent close callers share the same
+physical close request. `close()` is idempotent, including after the Runtime
+session has ended, and `is_closed()` reports whether physical close has
+completed. Terminal EOF and repeated close remain observable even from a
+later Runtime generation because they inspect only the wrapper's monotonic
+closed state; other operations retain the stale-generation error. A read
+cannot bypass logical close through bytes retained by an earlier delimiter
+read: close discards that facade excess even when the earlier read finishes
+while physical close is pending.
 
 Task cancellation does not abandon native lifetime work. An unsubmitted
 ordinary File operation is removed from its FIFO. For submitted work, the
 runtime requests cancellation where libuv supports it, suppresses a stale
 result after cancellation wins, and still consumes the completion callback.
-If a later `read()` in `read_until` raises, chunks returned by its earlier
-iterations are restored in order to the File's retained input before the error
-propagates. A currently pending native read retains the ordinary File-read
-cancellation semantics.
+If `read_until` raises after consuming bytes, including cancellation between
+an underlying read and committing those bytes to its result builder, all
+consumed bytes are restored in order to the File's retained input before the
+error propagates. A currently pending native read retains the ordinary
+File-read cancellation semantics.
 A Task cancelled while awaiting `close()` remains cleanup-shielded until the
 physical close callback and request cleanup finish. Cancellation remains
 sticky afterward: it is delivered at the next ordinary asynchronous operation,
@@ -155,11 +167,12 @@ because the operating system may already have reused that descriptor number.
 
 ## Whole-file helpers
 
-`read_file(path)` opens in `r` mode, uses `File:read()`'s 64-KiB default until
-EOF, and
-closes the File on both success and error. It does not trust `stat.size`: files
-may change while they are read. Chunk lengths are checked against Titan's
-integer/string limit before joining them with a balanced concatenation tree.
+`read_file(path)` opens in `r` mode, iterates the bound `File:read` method with
+its 64-KiB default until EOF, and closes the File on both success and error. It
+does not trust `stat.size`: files
+may change while they are read. Chunks accumulate in `string.StringWriter`,
+which checks their aggregate length against Titan's integer/string limit and
+joins them with one exact-size copy when drained.
 
 `write_file(path, data)` opens in `w` mode, writes the complete binary string,
 and closes the File on success or error.
@@ -181,12 +194,14 @@ record Stat
 end
 ```
 
-`kind` is `"file"`, `"directory"`, `"symlink"`, or `"other"`. The function
-uses `uv_fs_stat`, so **it follows symbolic links**: asking about an ordinary
-symlink reports the target's metadata and kind. There is no `lstat` operation
-in this version. `mode` is the platform mode bitset supplied by libuv; its
-numeric permission/type bits are host-specific. The two modification fields
-form one timestamp, with nanoseconds in the range 0 through 999,999,999.
+`kind` is `"file"`, `"directory"`, `"symlink"`, or `"other"`. `stat` uses
+`uv_fs_stat`, so **it follows symbolic links**: asking about an ordinary
+symlink reports the target's metadata and kind. `lstat` returns the same
+`Stat` shape but uses `uv_fs_lstat`, so asking about a symbolic link reports
+the link itself with `kind == "symlink"`. `mode` is the platform mode bitset
+supplied by libuv; its numeric permission/type bits are host-specific. The two
+modification fields form one timestamp, with nanoseconds in the range 0
+through 999,999,999.
 
 `mkdir(path)` requests mode `0777`, subject to the process umask. `unlink(path)`
 removes a file or symbolic link; it does not stand in for directory removal.
@@ -201,6 +216,35 @@ Paths are text arguments. Every path is copied into operation-owned,
 NUL-terminated storage and an embedded NUL is rejected instead of silently
 truncating it. File contents remain unrestricted binary strings.
 
+## Temporary files and working directory
+
+`tmpname()` atomically creates a unique empty regular file in the platform
+temporary directory and returns its path. The file remains present and belongs
+to the caller, which should eventually remove it with `unlink`. Titan closes
+the descriptor acquired by `uv_fs_mkstemp` before `tmpname` returns; the API
+does not return an open `File`.
+
+If a Task is cancelled after the native operation has created a file, Titan
+still consumes the callback and closes the acquired descriptor. The created
+path remains present even though the cancelled Task does not receive it. This
+avoids silently deleting a filesystem object that was successfully created;
+applications that need stronger transactional cleanup should create temporary
+files inside an application-owned directory.
+
+`tmpdir()` returns the platform temporary directory without creating a file or
+directory. `homedir()` returns the current user's home directory. They follow
+the same libuv platform and environment-variable rules as
+[`os.tmpdir()` and `os.homedir()`](standard-library-os.md#directories-and-host-identity),
+respectively. Both functions are synchronous and do not require an active
+async Task.
+
+`pwd()` returns the process working directory. `chdir(path)` changes that
+process-wide directory, so it affects relative paths used by every Task and by
+the embedding host. These two helpers are synchronous and do not require an
+active async Task. Coordinate `chdir` externally when Tasks can run
+concurrently, and restore the previous directory with `finally` when the
+change is temporary.
+
 ## Errors and current scope
 
 Libuv failures raise [`async.Error`](async-io.md#results-errors-and-cancellation).
@@ -208,6 +252,6 @@ Its `operation` identifies the failing action (for example, `fs.open` or
 `fs.rename`) and `subject` identifies the relevant path or File. The library
 does not print errors.
 
-This initial module does not provide random-access reads/writes, `lstat`,
+This module does not provide random-access reads/writes,
 permissions/ownership changes, links, filesystem watching, memory mapping, or
-synchronous filesystem calls.
+synchronous file-content operations.

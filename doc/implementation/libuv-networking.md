@@ -102,24 +102,35 @@ waiter, and initiates physical close. A
 later low-level read first joins and drains the entire completed queue, then
 returns sticky `nil` or repeatedly raises the stored error. With no data or
 terminal it only installs one waiter; it never starts or stops libuv. Explicit
-close stops the physical read, and Runtime teardown may discard queued chunks.
+close stops the physical read, discards its completed queue, and resumes a
+waiting reader with `nil`. Explicit close and Runtime teardown publish a
+sticky-EOF terminal before yielding and discard completed input; that terminal
+check precedes Runtime identity validation, so a retained closed ReaderCloser
+can report EOF in a later generation without touching native state.
 
 The `net` facade serializes both `read` and `read_until` through one reader
 lock. It keeps delimiter excess in stream order, implements optional delimiter
 chopping and terminal-tail delivery, and preserves accumulated bytes across
-cancellation. A narrow low-level identity predicate lets it recognize only the
-stream's stored sticky read error when returning a nonempty terminal tail;
-Task cancellation and unrelated exceptions are re-raised. There is no maximum
-or high-water mark: an unread peer can grow the GC-owned queue without bound.
+cancellation. Completed chunks accumulate in `string.StringWriter`, reusing
+the string module's checked builder and one-allocation drain. Because
+`StringWriter:write` yields before committing its argument, the current
+consumed chunk remains separate until the write returns; cancellation restores
+the drained builder followed by that pending chunk. A narrow low-level identity
+predicate lets the facade recognize only the stream's stored sticky read error
+when returning a nonempty terminal tail; Task cancellation and unrelated
+exceptions are re-raised. There is no maximum or high-water mark: an unread
+peer can grow the GC-owned queue without bound.
 
 Writes and shutdown use a per-Connection FIFO with one submitted request.
 Every write request owns its copied bytes through the callback. The first
 shutdown marks the source-level write side closed when queued, is submitted
 only after earlier writes, and remains cleanup-shielded through its callback;
-repeated calls are idempotent. Explicit close stops reads and rejects new
-output, but preserves the submitted request and queued FIFO work. It calls
-`uv_close` once only after that output drains, then waits until the close
-callback has released the handle root.
+repeated calls are idempotent. Explicit close clears the facade excess before
+and after its cleanup-shielded wait, stops reads, discards queued input and an
+in-flight delimiter builder, and rejects new output, but preserves the
+submitted request and queued FIFO work. It calls `uv_close` once only after
+that output drains, then waits until the close callback has released the
+handle root.
 
 Servers keep one accept waiter and a FIFO of already accepted Connections
 bounded by the listen backlog. Every incoming callback performs one

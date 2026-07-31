@@ -1,7 +1,3 @@
-local record GroupSpan
-  local span: Span?
-end
-
 local record RegexDiagnostic
   label: string
   message: string
@@ -49,10 +45,10 @@ local function regex_attempt(regex: Regex, subject: string,
   local captured = raw as {integer: value}
   local first = captured[1] as integer
   local after = captured[2] as integer
-  local groups: {GroupSpan} = {}
+  local groups: {Span} = {}
   local index = 1
   while index <= regex.capture_count do
-    groups[index] = captured[index + 2] as GroupSpan
+    groups[index] = captured[index + 2] as Span
     index = index + 1
   end
   return RegexMatch.new(

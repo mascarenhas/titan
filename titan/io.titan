@@ -1,3 +1,6 @@
+local os = import "os"
+local str = import "string"
+
 interface Reader
   function read(): string?
   function read_until(delimiter: string, chop: boolean?): string?
@@ -7,6 +10,8 @@ interface Writer
   function write(data: string)
 end
 
+-- Every later close call is safe. A successful or otherwise terminal close
+-- becomes a no-op; after a pre-commit failure, a concrete resource may retry.
 interface Closer
   function close()
 end
@@ -17,6 +22,7 @@ interface ReaderWriter
   function write(data: string)
 end
 
+-- After close reaches its terminal state, both read operations return nil.
 interface ReaderCloser
   function read(): string?
   function read_until(delimiter: string, chop: boolean?): string?
@@ -28,9 +34,100 @@ interface WriterCloser
   function close()
 end
 
+-- After close reaches its terminal state, both read operations return nil.
 interface ReaderWriterCloser
   function read(): string?
   function read_until(delimiter: string, chop: boolean?): string?
   function write(data: string)
   function close()
+end
+
+record InputOutputStream
+  local process: os.Process
+  local input: os.OutputStream
+  local output: os.InputStream
+  local status: os.ExitStatus?
+  local closed: boolean
+end
+
+function print(...: value)
+  local builder = str.writer()
+  local index = 1
+  while index <= #... do
+    local rendered = str.tostring(...[index])
+    local separator = ""
+    if index > 1 then separator = "\t" end
+    builder:write(separator .. rendered)
+    index = index + 1
+  end
+  builder:write("\n")
+  os.stdout:write(builder:drain())
+end
+
+local function close_reader(reader: ReaderCloser)
+  reader:close()
+end
+
+local function next_line(reader: ReaderCloser): string?
+  local line: string? = reader:read_until("\n", true)
+  if not line then reader:close() end
+  return line
+end
+
+function lines(reader: ReaderCloser):
+    ((ReaderCloser) -> string?, ReaderCloser, nil,
+     (ReaderCloser) -> ())
+  return next_line, reader, nil, close_reader
+end
+
+function InputOutputStream:read(): string?
+  if self.closed then return nil end
+  return self.output:read()
+end
+
+function InputOutputStream:read_until(delimiter: string,
+                                      chop: boolean?): string?
+  if self.closed then return nil end
+  return self.output:read_until(delimiter, chop)
+end
+
+function InputOutputStream:write(data: string)
+  self.input:write(data)
+end
+
+function InputOutputStream:wait(): os.ExitStatus
+  if self.status then return self.status as os.ExitStatus end
+  local status = self.process:wait()
+  self.status = status
+  return status
+end
+
+function InputOutputStream:close()
+  if self.closed then return end
+  self.input:close()
+  local process_cleanup_complete = false
+  do
+    if not self.status and self.process:is_running() then
+      self.process:kill("term")
+      self:wait()
+    end
+    process_cleanup_complete = true
+  finally
+    self.output:close()
+    if process_cleanup_complete then self.closed = true end
+  end
+end
+
+function popen(command: string): InputOutputStream
+  local process = os.spawn(
+    "/bin/sh", {"-c", command},
+    os.with_stdin, os.with_merged_output)
+  local input? = process.stdin
+  local output? = process.stdout
+  if not input or not output then
+    raise "internal popen spawn did not capture its streams"
+  end
+  return InputOutputStream.new(
+    process, input as os.OutputStream, output as os.InputStream,
+    nil, false)
 end

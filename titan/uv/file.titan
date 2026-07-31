@@ -12,6 +12,8 @@ local record FsConstants
   local rmdir: integer
   local rename: integer
   local list: integer
+  local lstat: integer
+  local tmpname: integer
   local internal_close: integer
   local close_wait: integer
   local file_open: integer
@@ -31,8 +33,10 @@ local FS = FsConstants.new {
   rmdir = 9,
   rename = 10,
   list = 11,
-  internal_close = 12,
-  close_wait = 13,
+  lstat = 12,
+  tmpname = 13,
+  internal_close = 14,
+  close_wait = 15,
   file_open = 1,
   file_closing = 2,
   file_closed = 3,
@@ -44,6 +48,11 @@ local record FsStatResult
   local mode: integer
   local modified_seconds: integer
   local modified_nanoseconds: integer
+end
+
+local record FsTmpResult
+  local file: uv_file
+  local path: string
 end
 
 local record FsOperation
@@ -175,6 +184,23 @@ function _fs_stat(path: string): (integer, string, integer, integer, integer)
   local result: FsStatResult = coroutine.yield(request, UV_TAG)
   return result.size, result.kind, result.mode,
          result.modified_seconds, result.modified_nanoseconds
+end
+
+function _fs_lstat(path: string): (integer, string, integer, integer, integer)
+  local request = new_fs_request(FS.lstat, path, nil, "")
+  local result: FsStatResult = coroutine.yield(request, UV_TAG)
+  return result.size, result.kind, result.mode,
+         result.modified_seconds, result.modified_nanoseconds
+end
+
+function _fs_tmpname(): string
+  local template = fs_tmpname_template()
+  local request = new_fs_request(FS.tmpname, template, nil, "")
+  local result: FsTmpResult = coroutine.yield(request, UV_TAG)
+  -- mkstemp returns an open descriptor. Reuse File's cleanup-shielded close
+  -- path so cancellation cannot escape between path delivery and close.
+  _fs_close(result.file)
+  return result.path
 end
 
 function _fs_mkdir(path: string)
@@ -355,6 +381,8 @@ end
 
 local function fs_operation_name(kind: integer): string
   if kind == FS.stat then return "fs.stat" end
+  if kind == FS.lstat then return "fs.lstat" end
+  if kind == FS.tmpname then return "fs.tmpname" end
   if kind == FS.open then return "fs.open" end
   if kind == FS.read then return "fs.read" end
   if kind == FS.write then return "fs.write" end
@@ -444,7 +472,8 @@ local function submit_fs_operation(operation: FsOperation):
   local second_path_data: *ffi.titan_ffi_char = nil
   local file_handle: libuv.uv_file = -1 as libuv.uv_file
   local buffer_handle: *libuv.uv_buf_t = nil
-  if kind == FS.stat or kind == FS.open or kind == FS.mkdir or
+  if kind == FS.stat or kind == FS.lstat or kind == FS.tmpname or
+     kind == FS.open or kind == FS.mkdir or
      kind == FS.unlink or kind == FS.rmdir or kind == FS.list then
     path_data = operation.path.bytes
   elseif kind == FS.rename then
@@ -472,6 +501,12 @@ local function submit_fs_operation(operation: FsOperation):
   if kind == FS.stat then
     status = libuv.uv_fs_stat(loop_handle, owner_handle, path_data,
                              shim.titan_uvshim_fs_cb)
+  elseif kind == FS.lstat then
+    status = libuv.uv_fs_lstat(loop_handle, owner_handle, path_data,
+                              shim.titan_uvshim_fs_cb)
+  elseif kind == FS.tmpname then
+    status = libuv.uv_fs_mkstemp(loop_handle, owner_handle, path_data,
+                                shim.titan_uvshim_fs_cb)
   elseif kind == FS.open then
     status = libuv.uv_fs_open {
       loop = loop_handle,
@@ -755,14 +790,19 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
   local operation = owner.metadata.operation
   local payload: value = nil
   local failure: Error? = nil
+  local acquired_path: string? = nil
   if result < 0 then
     failure = make_error(result, fs_operation_name(operation.kind),
                          fs_operation_subject(operation))
-  elseif operation.kind == FS.stat then
+  elseif operation.kind == FS.stat or operation.kind == FS.lstat then
     payload = extract_fs_stat(owner)
-  elseif operation.kind == FS.open then
+  elseif operation.kind == FS.open or operation.kind == FS.tmpname then
     -- The thin dispatcher recorded the returned descriptor before entering
     -- this allocating body, so even body-entry GC failure can be repaired.
+    if operation.kind == FS.tmpname then
+      acquired_path = libuv.uv_fs_get_path(
+          owner.handle as owned *libuv.uv_fs_t) as string
+    end
     payload = nil
   elseif operation.kind == FS.read then
     if result == 0 then
@@ -785,12 +825,18 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
   end
   clean_fs_owner(owner)
 
-  if operation.kind == FS.open and not failure then
-    local file = create_file(runtime, owner.metadata.acquired_file,
-                             fs_operation_subject(operation))
+  if (operation.kind == FS.open or operation.kind == FS.tmpname) and
+      not failure then
+    local subject = fs_operation_subject(operation)
+    if acquired_path then subject = acquired_path as string end
+    local file = create_file(runtime, owner.metadata.acquired_file, subject)
     owner.metadata.acquired_file = -1 as libuv.uv_file
     if fs_operation_deliverable(operation) then
-      payload = file
+      if operation.kind == FS.tmpname then
+        payload = FsTmpResult.new(file, acquired_path as string)
+      else
+        payload = file
+      end
     else
       queue_internal_close(file)
     end
@@ -862,7 +908,9 @@ end
 local function fs_dispatch(owner: uv_fs_t, _event_kind: integer,
                            result: integer, _size: libuv.size_t,
                            _pointer: ffi.titan_ffi_void_ptr)
-  if result >= 0 and owner.metadata.operation.kind == FS.open then
+  if result >= 0 and
+      (owner.metadata.operation.kind == FS.open or
+       owner.metadata.operation.kind == FS.tmpname) then
     owner.metadata.acquired_file = result as libuv.uv_file
   end
   fs_dispatch_body(owner, result)
@@ -950,8 +998,7 @@ local function repair_acquired_files(runtime: Runtime)
       local subject = "<late-open>"
       local actual_subject? = fs_operation_subject(operation)
       if actual_subject then subject = actual_subject end
-      local file = create_file(runtime, owner.metadata.acquired_file,
-                               subject)
+      local file = create_file(runtime, owner.metadata.acquired_file, subject)
       owner.metadata.acquired_file = -1 as libuv.uv_file
       queue_internal_close(file)
     end

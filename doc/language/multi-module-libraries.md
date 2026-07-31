@@ -63,7 +63,7 @@ their longest common sequence of complete components:
 | `foo.left foo.right` | `foo` | `foo.so`, `foo.a` |
 | `foo.bar.left foo.bar.right` | `foo.bar` | `foo/bar.so`, `foo/bar.a` |
 | `foo foo.bar` | `foo` | `foo.so`, `foo.a` |
-| all ten `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
+| all fourteen `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
 
 The comparison is component-based: `foo.bar` and `foo.baz` share `foo`, but
 `foo` and `foobar` share no module component. Unrelated roots are therefore an
@@ -271,7 +271,7 @@ legal in one program.
 
 ## The standard-library provider
 
-Titan's standard library is the ten-root production example of this model. One
+Titan's standard library is the fourteen-root production example of this model. One
 paired provider:
 
 ```text
@@ -281,7 +281,8 @@ $ROCKS_TREE/lib/titan/0.20/titan.a
 
 contains the native support entry plus the independent logical modules
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
-`titan.fs`, `titan.net`, `titan.os`, `titan.peg`, and `titan.string`. Their
+`titan.fs`, `titan.net`, `titan.os`, `titan.peg`, `titan.string`, `titan.math`,
+`titan.lua`, `titan.iter`, and `titan.gc`. Their
 generated logical loaders live at:
 
 ```text
@@ -295,6 +296,10 @@ $ROCKS_TREE/share/lua/5.5/titan/net.lua
 $ROCKS_TREE/share/lua/5.5/titan/os.lua
 $ROCKS_TREE/share/lua/5.5/titan/peg.lua
 $ROCKS_TREE/share/lua/5.5/titan/string.lua
+$ROCKS_TREE/share/lua/5.5/titan/math.lua
+$ROCKS_TREE/share/lua/5.5/titan/lua.lua
+$ROCKS_TREE/share/lua/5.5/titan/iter.lua
+$ROCKS_TREE/share/lua/5.5/titan/gc.lua
 ```
 
 The DSO is also the installation's one complete dynamic libuv provider; in

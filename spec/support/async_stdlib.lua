@@ -5,7 +5,7 @@ local M = {}
 local REPO = lfs.currentdir()
 local STANDARD_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "os",
-    "peg", "string",
+    "peg", "string", "math", "lua", "iter", "gc",
 }
 
 local function quote(word)
@@ -85,7 +85,7 @@ local function find_standard_layout()
     for _, layout in ipairs(layouts) do
         if valid_production_layout(layout) then return layout end
     end
-    error("async stdlib specs require the combined titan.so and all ten " ..
+    error("async stdlib specs require the combined titan.so and all fourteen " ..
           "generated titan/*.lua shims; run make stdlib first", 0)
 end
 M.standard_layout = find_standard_layout
@@ -209,6 +209,33 @@ function M.workspace(label)
     return path
 end
 
+-- Refresh only the copied runtime in an isolated spec workspace. This keeps
+-- focused source-variant builds independent of a concurrently stale or
+-- rebuilding checkout archive while preserving the shared Make-owned state.
+function M.refresh_private_runtime(workspace)
+    assert.truthy(type(workspace) == "string" and workspace ~= "",
+        "private runtime workspace must be a nonempty path")
+    assert.truthy(exists(workspace .. "/titan-runtime"),
+        "private runtime workspace is missing titan-runtime")
+    local input = assert(io.open(REPO .. "/Makefile", "rb"))
+    local makefile = assert(input:read("*a"))
+    assert.truthy(input:close())
+    local version = assert(makefile:match(
+        "LIBUV_VERSION%s*:=%s*([%w%.%-]+)"))
+    local command = table.concat({
+        "env CCACHE_DISABLE=1 make --no-print-directory -f",
+        quote(REPO .. "/Makefile"),
+        "TITAN_RUNTIME_LUA_SOURCE_PATH=" ..
+            quote(REPO .. "/lua-5.5.0/src"),
+        "LIBBT_DIR=" .. quote(REPO .. "/libbacktrace"),
+        "LIBUV_SRC_DIR=" .. quote(REPO .. "/libuv-v" .. version),
+        "LIBUV_BUILD_DIR=" .. quote(REPO .. "/libuv-build"),
+        "titan-runtime/libtitan.a",
+    }, " ")
+    local ok, _, output = run(command, workspace)
+    assert.truthy(ok, output)
+end
+
 function M.write_source(workspace, modname, source)
     local path = workspace .. "/src/" .. modname:gsub("%.", "/") ..
         ".titan"
@@ -264,6 +291,55 @@ function M.compile(workspace, modname, options)
     assert.truthy(ok, output)
 end
 
+-- Build the exact coroutine/uv/async dependency chain needed by source
+-- variants that now yield through the public async facade. Keeping this in
+-- one helper prevents PEG/string specs from silently falling back to the
+-- checkout's combined provider while TITAN_PATH_0_20 names a private root.
+function M.prepare_async_core(workspace, layout)
+    M.write_source(workspace, "titan.coroutine",
+        M.read("titan/coroutine.titan"))
+    for _, name in ipairs({
+        "uv", "runtime", "task", "file", "tcp", "process", "os",
+    }) do
+        M.write_source(workspace, "titan.uv." .. name,
+            M.read("titan/uv/" .. name .. ".titan"))
+    end
+    M.write_source(workspace, "titan.async",
+        M.read("titan/async.titan"))
+
+    M.compile(workspace, "titan.coroutine", {
+        layout = layout,
+        cppflags = "",
+    })
+    register_exact_provider(layout, "titan.coroutine")
+
+    local cppflags, ldflags, archive = host_libuv_config()
+    M.compile(workspace, "titan.uv", {
+        layout = layout,
+        cppflags = cppflags,
+        cflags = "-fno-strict-aliasing",
+        ldflags = archive .. " " .. ldflags,
+    })
+    register_exact_provider(layout, "titan.uv")
+
+    M.compile(workspace, "titan.async", {
+        layout = layout,
+        cppflags = "",
+    })
+    register_exact_provider(layout, "titan.async")
+end
+
+-- Build the exact GC facade used by standard modules that configure weak
+-- typed Maps without duplicating raw Lua-metatable operations.
+function M.prepare_gc(workspace, layout)
+    M.write_source(workspace, "titan.gc", M.read("titan/gc.titan"))
+    M.compile(workspace, "titan.gc", {
+        layout = layout,
+        cppflags = "",
+    })
+    register_exact_provider(layout, "titan.gc")
+end
+
 local function build_variant_workspace(transformer, options)
     options = options or {}
     assert.truthy(type(options) == "table",
@@ -273,6 +349,7 @@ local function build_variant_workspace(transformer, options)
     local build_facades = options.facades ~= false
     local workspace = M.workspace("variant")
     local built, variant_or_error = pcall(function()
+    M.refresh_private_runtime(workspace)
     assert.truthy(lfs.mkdir(workspace .. "/titan"))
     make_directory(workspace .. "/src/titan")
     local transformers

@@ -154,13 +154,18 @@ function _net_listen(host: string, port: integer,
 end
 
 function _net_read(tcp: uv_tcp_t): string?
-  local task = ordinary_task()
   local control = tcp.metadata
+  if control.server then raise "read from requires a Connection" end
+  -- Explicit close and Runtime teardown publish sticky EOF and discard the
+  -- queue before yielding or touching native state. That monotonic terminal
+  -- can therefore be observed without consulting the current Runtime.
+  if control.close_requested and
+      control.read_terminal == TCP_READ_EOF then return nil end
+  local task = ordinary_task()
   if control.runtime ~= task.runtime or
       control.generation ~= task.runtime.generation then
     raise "TCP resource belongs to a stale libuv Runtime"
   end
-  if control.server then raise "read from requires a Connection" end
   if #control.read_queue > 0 then
     local payload = queued_bytes_string(control.read_queue)
     control.read_queue = {}
@@ -170,7 +175,7 @@ function _net_read(tcp: uv_tcp_t): string?
   if control.read_terminal == TCP_READ_ERROR then raise control.read_error end
   if control.close_requested or control.lifecycle == TCP_CLOSING or
       control.lifecycle == TCP_CLOSED then
-    raise "cannot read from a closed Connection"
+    return nil
   end
   if control.read_waiter then
     raise "Connection already has a waiting reader"
@@ -267,12 +272,20 @@ function _net_accept(server: uv_tcp_t): uv_tcp_t
 end
 
 function _net_close(tcp: uv_tcp_t)
-  if tcp.metadata.lifecycle == TCP_CLOSED then return end
-  validate_tcp(tcp, "close", tcp.metadata.server, true)
+  local control = tcp.metadata
+  if not control.server then
+    -- Public close converts any prior read terminal into ReaderCloser EOF and
+    -- discards completed input before its first possible yield.
+    control.read_queue = {}
+    control.read_terminal = TCP_READ_EOF
+    control.read_error = nil
+  end
+  if control.lifecycle == TCP_CLOSED then return end
+  validate_tcp(tcp, "close", control.server, true)
   cleanup_begin()
   do
     local kind = NET_CLOSE
-    if tcp.metadata.close_requested then kind = NET_CLOSE_WAIT end
+    if control.close_requested then kind = NET_CLOSE_WAIT end
     local request = new_net_request {
       kind = kind,
       host = nil,
@@ -289,7 +302,9 @@ function _net_close(tcp: uv_tcp_t)
 end
 
 function _net_is_closed(tcp: uv_tcp_t): boolean
-  return tcp.metadata.lifecycle == TCP_CLOSED
+  local control = tcp.metadata
+  return control.close_requested and
+         control.read_terminal == TCP_READ_EOF
 end
 
 function _net_eof_error(operation: string, message: string,
@@ -1098,7 +1113,9 @@ local function request_tcp_close(tcp: uv_tcp_t)
   if control.server then
     stop_server_accept(tcp)
   else
-    stop_tcp_read(tcp, false)
+    -- Explicit close is a ReaderCloser terminal transition: discard completed
+    -- input rather than publishing it after close.
+    stop_tcp_read(tcp, true)
     local waiter? = control.read_waiter
     local epoch = control.read_epoch
     control.read_waiter = nil
@@ -1107,8 +1124,7 @@ local function request_tcp_close(tcp: uv_tcp_t)
       local task = waiter
       if task.state == TASK_WAITING and not task.cancel_requested and
           task.epoch == epoch then
-        schedule_task_drive(task, epoch, DRIVE_ERROR,
-                            "cannot read from a closed Connection", "", nil)
+        schedule_task_drive(task, epoch, DRIVE_RESUME, nil, "", nil)
       end
     end
   end
@@ -1632,6 +1648,8 @@ local function begin_tcp_shutdown(runtime: Runtime)
         close_accepted_queue(tcp)
       else
         stop_tcp_read(tcp, true)
+        to_shutdown.read_terminal = TCP_READ_EOF
+        to_shutdown.read_error = nil
       end
       start_tcp_close(tcp)
       if not to_shutdown.output_current then

@@ -74,13 +74,32 @@ record Task
   local observer_count: integer
   local cleanup_shield_depth: integer
   local cancel_fallback: boolean
-  local helper_group: HelperGroup?
-  local helper_kind: integer
   local main: boolean
 end
 
 function _run(func: () -> value): Task
   return run_internal(func, false)
+end
+
+-- Record a successful Runtime-wide exit transition, then unwind the caller
+-- through the ordinary cancellation path so its defer/finally cleanup runs.
+-- The first requester fixes the status; later requests made while cancellation
+-- cleanup is unwinding cannot replace it.
+function _os_exit(code: integer)
+  local requester = running_task()
+  local runtime = requester.runtime
+  if not runtime.exit_requested then
+    runtime.exit_requested = true
+    runtime.exit_code = code
+    local main? = runtime.main_task
+    if main and main.state == TASK_SUCCEEDED then
+      main.result = code
+    end
+  end
+  begin_exit_shutdown(runtime)
+  local cancellation? = requester.cancel_value
+  if cancellation then raise cancellation end
+  raise internal_error("exit.request.cancel")
 end
 
 function Task:status(): string
@@ -252,6 +271,7 @@ local function maybe_finish_session(runtime: Runtime)
     runtime.closing = true
     close_all_owners(runtime)
     close_all_signal_owners(runtime)
+    begin_parent_stdio_shutdown(runtime)
     begin_file_shutdown(runtime)
     begin_tcp_shutdown(runtime)
     begin_process_shutdown(runtime)
@@ -439,6 +459,13 @@ local function finish_task(task: Task, state: integer, result: value,
     return
   end
   local runtime = task.runtime
+  if state == TASK_CANCELLED and task.main and
+      runtime.exit_requested and not runtime.fatal then
+    state = TASK_SUCCEEDED
+    result = runtime.exit_code
+    err = nil
+    trace = ""
+  end
   task.operation = nil
   task.current_request = nil
   task.result = result
@@ -447,15 +474,7 @@ local function finish_task(task: Task, state: integer, result: value,
   task.state = state
   task.cancel_fallback = false
   task.cleanup_shield_depth = 0
-  local helper_group? = task.helper_group
-  local helper_kind = task.helper_kind
-  task.helper_group = nil
-  task.helper_kind = 0
   unlink_task(task)
-  if helper_group then
-    complete_helper(helper_group, helper_kind,
-                    result, err, trace)
-  end
   if state == TASK_FAILED and task.main then
     promote_fatal(runtime, err, trace)
   elseif state == TASK_CANCELLED and task.main then
@@ -561,9 +580,9 @@ local function detach_process_wait(task: Task, request: Request)
     operation.request = nil
     return
   end
-  local process = operation.process
-  local process_control = process.metadata
   if operation.kind == PROCESS_WAIT then
+    local process = operation.process
+    local process_control = process.metadata
     if process_control.wait_task == task and
         process_control.wait_epoch == request.generation then
       process_control.wait_task = nil
@@ -571,19 +590,17 @@ local function detach_process_wait(task: Task, request: Request)
     end
     return
   end
-  local pipe = operation.pipe
-  local pipe_control = pipe.metadata
-  if operation.kind == PROCESS_READ_STDOUT or
-      operation.kind == PROCESS_READ_STDERR then
-    if pipe_control.read_waiter == task and
-        pipe_control.read_epoch == request.generation then
-      pipe_control.read_waiter = nil
-      pipe_control.read_epoch = 0
+  local stream = operation.stream
+  if operation.kind == PROCESS_READ_STREAM then
+    if stream.read_waiter == task and
+        stream.read_epoch == request.generation then
+      stream.read_waiter = nil
+      stream.read_epoch = 0
     end
   elseif operation.kind == PROCESS_WRITE_STDIN and
          not operation.owner and operation.linked then
-    remove_pipe_output(pipe, operation)
-    advance_pipe_output(pipe, nil)
+    remove_stream_output(stream, operation)
+    advance_stream_output(stream, nil)
   end
 end
 
@@ -620,14 +637,6 @@ local function detach_wait(task: Task)
       detach_net_wait(task, request)
     elseif request.kind == REQUEST_PROCESS then
       detach_process_wait(task, request)
-    elseif request.kind == REQUEST_HELPER then
-      local group: HelperGroup = request.subject
-      if group.waiter == task and
-          group.waiter_epoch == request.generation then
-        group.waiter = nil
-        group.waiter_epoch = 0
-        group.waiter_all = false
-      end
     elseif request.kind == REQUEST_SIGNAL and owner ~= nil then
       local owner: uv_signal_t = owner
       if owner.metadata.task == task and
@@ -822,7 +831,7 @@ local function arm_request(task: Task, request: Request): DriveControl?
   elseif request.kind == REQUEST_PROCESS then
     return arm_process_request(task, request)
   else
-    return arm_helper_request(task, request)
+    raise internal_error("task.request.kind")
   end
 end
 
@@ -1066,10 +1075,9 @@ local function run_internal(func: () -> value, is_main: boolean): Task
     observer_count = 0,
     cleanup_shield_depth = 0,
     cancel_fallback = false,
-    helper_group = nil,
-    helper_kind = 0,
     main = is_main,
   }
+  if is_main then runtime.main_task = task end
   link_task(runtime, task)
 
   local owner, status = start_owner {
@@ -1132,6 +1140,28 @@ local function begin_fatal_shutdown(runtime: Runtime)
   close_all_signal_owners(runtime)
 end
 
+local function begin_exit_shutdown(runtime: Runtime)
+  runtime.closing = true
+  local task? = runtime.task_head
+  while task do
+    request_cancel(task, "os.exit requested")
+    task = task.next_task
+  end
+
+  -- Repeating Tickers and signal watchers are ambient owners rather than Task
+  -- cleanup. Stop them once the request is committed, but leave observation
+  -- timers live so a pre-existing or cleanup-time unobserved failure can still
+  -- become Runtime-fatal and override the requested status.
+  local owner? = runtime.timer_owner_head
+  while owner do
+    if owner.metadata.kind == OWNER_TICKER then
+      close_owner(owner)
+    end
+    owner = owner.metadata.next_owner
+  end
+  close_all_signal_owners(runtime)
+end
+
 local function retire_closed_owners(runtime: Runtime)
   local owner? = runtime.timer_owner_head
   while owner do
@@ -1151,8 +1181,10 @@ local function close_runtime(runtime: Runtime)
   repair_acquired_files(runtime)
   retire_aborted_net_requests(runtime)
   retire_aborted_process_requests(runtime)
+  begin_parent_stdio_shutdown(runtime)
   begin_file_shutdown(runtime)
   advance_file_shutdown(runtime)
+  advance_parent_stdio_shutdown(runtime)
   begin_tcp_shutdown(runtime)
   advance_tcp_shutdown(runtime)
   begin_process_shutdown(runtime)
@@ -1173,7 +1205,10 @@ local function close_runtime(runtime: Runtime)
         not not runtime.tcp_head or
         not not runtime.signal_owner_head or
         not not runtime.process_head or
-        not not runtime.process_request_head do
+        not not runtime.process_request_head or
+        not not runtime.parent_stdin or
+        not not runtime.parent_stdout or
+        not not runtime.parent_stderr do
     local alive = libuv.uv_run(loop_handle, libuv.UV_RUN_DEFAULT)
     retire_closed_owners(runtime)
     retire_closed_signal_owners(runtime)
@@ -1182,6 +1217,7 @@ local function close_runtime(runtime: Runtime)
     advance_file_shutdown(runtime)
     advance_tcp_shutdown(runtime)
     advance_process_shutdown(runtime)
+    advance_parent_stdio_shutdown(runtime)
     -- A callback may have called uv_stop or created a cleanup owner before it
     -- returned.  Re-close/re-run only from this outer driver safe point.
     close_all_owners(runtime)
@@ -1191,6 +1227,7 @@ local function close_runtime(runtime: Runtime)
     retire_fs_owners(runtime)
     advance_tcp_shutdown(runtime)
     advance_process_shutdown(runtime)
+    advance_parent_stdio_shutdown(runtime)
     if not not runtime.timer_owner_head or
         not not runtime.fs_pending_head or
         not not runtime.file_head or
@@ -1198,7 +1235,10 @@ local function close_runtime(runtime: Runtime)
         not not runtime.tcp_head or
         not not runtime.signal_owner_head or
         not not runtime.process_head or
-        not not runtime.process_request_head then
+        not not runtime.process_request_head or
+        not not runtime.parent_stdin or
+        not not runtime.parent_stdout or
+        not not runtime.parent_stderr then
       if alive == 0 then
         if not runtime.fatal then
           runtime.fatal = true
@@ -1227,7 +1267,10 @@ local function close_runtime(runtime: Runtime)
   if not runtime.file_head and not runtime.net_pending_head and
       not runtime.tcp_head and not runtime.signal_owner_head and
       not runtime.process_head and
-      not runtime.process_request_head then
+      not runtime.process_request_head and
+      not runtime.parent_stdin and
+      not runtime.parent_stdout and
+      not runtime.parent_stderr then
     active_runtime = nil
   end
 end

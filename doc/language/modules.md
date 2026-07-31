@@ -259,6 +259,11 @@ nesting does not exist).
 
 A module name is a dot-separated name like `foo`, `foo.bar`, or
 `foo.bar.baz`, mapped to a path by turning dots into directory separators.
+Each component begins with an ASCII letter or underscore and continues with
+ASCII letters, digits, underscores, or hyphens. Hyphens are valid in the
+logical and filesystem name; the native protocol mangles them to underscores
+and rejects any resulting symbol-prefix collision. Characters such as `$`
+are not module-name characters.
 Module `foo.bar` lives in flat source `foo/bar.titan`, folder source with main
 `foo/bar/bar.titan`, or a compiled provider whose metadata claims `foo.bar` — see
 [Where modules are found](#where-modules-are-found) below.
@@ -498,6 +503,10 @@ qualified names then follow the ordinary module lookup rules. Thus
 Titan's `titan.os` module without colliding with Lua's own `os` library, which
 is not importable as a Titan module. Likewise, `import "string"` selects
 Titan's module without replacing Lua's `string` table.
+
+The additional standard modules `titan.math`, `titan.lua`, `titan.iter`, and
+`titan.gc` use their qualified names in Titan source as well as Lua. They do
+not add parser sugar or replace Lua's bare standard-library names.
 
 Application scheduling uses `import "async"` (or Lua's
 `require "titan.async"`). `titan.uv` is the private Runtime/libuv plumbing

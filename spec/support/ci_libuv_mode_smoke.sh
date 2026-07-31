@@ -96,7 +96,7 @@ check_canonical_container() {
         test -f "$PROVIDER.dSYM/Contents/Resources/DWARF/titan.so"
     fi
 
-    for module in coroutine uv async timer io fs net os peg string; do
+    for module in coroutine uv async timer io fs net os peg string math lua iter gc; do
         local shim="$SHIM_ROOT/titan/$module.lua"
         test -f "$shim"
         test ! -L "$shim"
@@ -134,6 +134,10 @@ local expected = {
     ["titan.os"] = true,
     ["titan.peg"] = true,
     ["titan.string"] = true,
+    ["titan.math"] = true,
+    ["titan.lua"] = true,
+    ["titan.iter"] = true,
+    ["titan.gc"] = true,
 }
 local scanned, scan_error = metadata.scan_archive(archive, {
     expected_abi = driver.TITAN_VER,
@@ -407,17 +411,10 @@ run_mode_smoke() {
     local lua_path="$SHIM_ROOT/?.lua;$SHIM_ROOT/?/init.lua"
     local lua_cpath="$ABI_ROOT/?.so"
 
-    if [[ $mode == system ]]; then
-        env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_20="$titan_path" LUA_PATH="$lua_path" \
-            LUA_CPATH="$lua_cpath" \
-            "$LUA" -e 'local builtin_io = require "io"; local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local titan_io = require "titan.io"; local fs = require "titan.fs"; local net = require "titan.net"; local peg = require "titan.peg"; local strings = require "titan.string"; local builtin_string = require "string"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); async.loop(); assert(task:join()); assert(peg.literal("peg"):match("peg") == 4); assert(strings.len("a\0b") == 3); local found = strings.match("regex42", "([0-9]+)"); assert(found and found:whole() == "42" and found:group(1) == "42"); assert(strings.find("a\0b", "\0b") == 2); assert(require "io" == builtin_io); assert(type(titan_io) == "userdata"); assert(builtin_string == string); assert(type(async.version()) == "string"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
-    else
-        env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_20="$titan_path" LUA_PATH="$lua_path" \
-            LUA_CPATH="$lua_cpath" \
-            "$LUA" -e 'local builtin_io = require "io"; local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local titan_io = require "titan.io"; local fs = require "titan.fs"; local net = require "titan.net"; local peg = require "titan.peg"; local strings = require "titan.string"; local builtin_string = require "string"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); async.loop(); assert(task:join() == "bundled"); assert(peg.literal("peg"):match("peg") == 4); assert(strings.len("a\0b") == 3); local found = strings.match("regex42", "([0-9]+)"); assert(found and found:whole() == "42" and found:group(1) == "42"); assert(strings.find("a\0b", "\0b") == 2); assert(require "io" == builtin_io); assert(type(titan_io) == "userdata"); assert(builtin_string == string); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
-    fi
+    env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
+        TITAN_PATH_0_20="$titan_path" LUA_PATH="$lua_path" \
+        LUA_CPATH="$lua_cpath" \
+        "$LUA" spec/fixtures/libuv/stdlib_provider_smoke.lua "$mode"
 
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
         TITAN_PATH_0_20="$titan_path" LUA_PATH="$lua_path" \
@@ -444,11 +441,32 @@ local titan_io = import "io"
 local fs = import "fs"
 local net = import "net"
 local system = import "os"
-local peg = import "titan.peg"
-local strings = import "titan.string"
+local peg = import "peg"
+local strings = import "string"
+local math = import "titan.math"
+local lua = import "titan.lua"
+local iter = import "titan.iter"
+local gc = import "titan.gc"
 
 local function check(condition: boolean, message: string)
   if not condition then raise message end
+end
+
+local function check_parent_stream(query: () -> boolean,
+                                   operation: string)
+  do
+    local tty = query()
+    check(tty or not tty, "static parent stdio query failed")
+  catch
+    if error is async.Error then
+      local failure = error as async.Error
+      check(failure.name == "EINVAL" and
+            failure.operation == operation,
+            "static parent stdio rejection changed")
+    else
+      raise
+    end
+  end
 end
 
 local function listen_available(): (net.Server, integer)
@@ -486,12 +504,33 @@ function main(args: {string}): integer
           "static string byte behavior failed")
     local found = strings.match("static42", "([0-9]+)")
     check(found and
-          (found as strings.RegexMatch):group(1) == "42",
+          found:group(1) == "42",
           "static regex provider behavior failed")
     local literal_first, literal_last =
       strings.find("static\0string", "\0str")
     check(literal_first == 7 and literal_last == 10,
           "static literal string search failed")
+    check(math.sqrt(81.0) == 9.0 and
+          (math.tonumber("0xff") as integer) == 255,
+          "static math provider behavior failed")
+    local loaded: value =
+      lua.load("return 42", "=static-smoke", nil)()
+    check(loaded is integer and (loaded as integer) == 42,
+          "static Lua loader provider behavior failed")
+    local values: {string: integer} = {
+      ["left"] = 20,
+      ["right"] = 22,
+    }
+    local total = 0
+    for _key: string, item: integer in iter.pairs(values) do
+      total = total + item
+    end
+    check(total == 42, "static iterator provider behavior failed")
+    gc.pause()
+    check(gc.paused(), "static GC pause query failed")
+    gc.resume()
+    check(not gc.paused() and gc.count() > 0,
+          "static GC resume or count behavior failed")
 
     local server, port = listen_available()
     local peer = async.run(function (): value
@@ -522,19 +561,48 @@ function main(args: {string}): integer
     check(metadata.kind == "file" and metadata.size == 18,
           "static fs stat changed size or file classification")
 
+    check_parent_stream(
+      function (): boolean return system.stdin:is_tty() end,
+      "parent.stdin.classify")
+    check_parent_stream(
+      function (): boolean return system.stdout:is_tty() end,
+      "parent.stdout.classify")
+    check_parent_stream(
+      function (): boolean return system.stderr:is_tty() end,
+      "parent.stderr.classify")
+
+    local merged = titan_io.popen(
+      "printf 'static-process-stdout'; " ..
+      "printf 'static-process-stderr' >&2")
+    local merged_output = ""
+    for chunk in merged:read do
+      merged_output = merged_output .. chunk
+    end
+    local merged_status = merged:wait()
+    check(merged_output ==
+          "static-process-stdoutstatic-process-stderr" and
+          merged_status.code == 0 and not merged_status.signal and
+          merged_status.signal_number == 0,
+          "static io.popen changed merged output or exit status")
+    merged:close()
+
     local process_args: {string} = {"echo"}
     local process_payload = "static\0process\0payload"
-    local output, diagnostics, process_status =
-      system.communicate(process_child, process_args, process_payload)
-    check(output == process_payload and diagnostics == "" and
-          process_status.code == 0 and not process_status.signal and
-          process_status.signal_number == 0,
-          "static process communicate changed payload or exit status")
-
-    local process = system.spawn(process_child, process_args)
-    local writer: titan_io.WriterCloser = process.stdin
-    local reader: titan_io.Reader = process.stdout
-    local error_reader: titan_io.Reader = process.stderr
+    local process = system.spawn(
+      process_child, process_args,
+      system.with_stdin, system.with_stdout, system.with_stderr)
+    local process_input? = process.stdin
+    local process_output? = process.stdout
+    local process_diagnostics? = process.stderr
+    check(process_input and process_output and process_diagnostics,
+          "static captured process omitted a standard stream")
+    local writer: titan_io.WriterCloser =
+      process_input as system.OutputStream
+    local reader: titan_io.Reader = process_output as system.InputStream
+    local error_reader: titan_io.Reader =
+      process_diagnostics as system.InputStream
+    check(process:is_running(),
+          "static captured process exited before receiving stdin")
     writer:write(process_payload .. "\n")
     writer:close()
     check(reader:read_until("\n", true) == process_payload and
@@ -544,6 +612,8 @@ function main(args: {string}): integer
     check(streamed_status.code == 0 and not streamed_status.signal and
           streamed_status.signal_number == 0,
           "static process stream Interface changed exit status")
+    check(not process:is_running(),
+          "static process remained running after wait")
     fs.unlink(marker)
   finally
     if original then

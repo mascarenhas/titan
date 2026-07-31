@@ -510,13 +510,10 @@ function driver.titan_bin_path_entries(path, default_path)
 end
 
 local function module_components(modname)
-    if type(modname) ~= "string" or modname == "" then return {} end
+    if not staticmetadata.valid_module_name(modname) then return {} end
     local components = {}
     for component in modname:gmatch("[^.]+") do
         table.insert(components, component)
-    end
-    if #components == 0 or table.concat(components, ".") ~= modname then
-        return {}
     end
     return components
 end
@@ -709,12 +706,16 @@ end
 
 local validate_interface_type
 
-local function valid_qualified_nominal_name(name)
+local function valid_source_identifier(name)
     return type(name) == "string"
-       and name:find(".", 1, true) ~= nil
-       and name:sub(1, 1) ~= "."
-       and name:sub(-1) ~= "."
-       and name:find("..", 1, true) == nil
+       and name:match("^[A-Za-z_][A-Za-z0-9_]*$") ~= nil
+end
+
+local function valid_qualified_nominal_name(name)
+    if type(name) ~= "string" then return false end
+    local modname, nominal = name:match("^(.*)%.([A-Za-z_][A-Za-z0-9_]*)$")
+    return modname ~= nil and valid_source_identifier(nominal)
+       and staticmetadata.valid_module_name(modname)
 end
 
 local function validate_name_list(names, expected_length)
@@ -724,7 +725,7 @@ local function validate_name_list(names, expected_length)
     local seen = {}
     for index = 1, length do
         local name = names[index]
-        if type(name) ~= "string" or name == "" or seen[name] then
+        if not valid_source_identifier(name) or seen[name] then
             return nil
         end
         seen[name] = true
@@ -736,8 +737,7 @@ local function validate_callable_descriptor(callable, owner, kind, seen)
     if type(callable) ~= "table"
        or callable._tag ~= kind
        or callable.fqtn ~= owner.name
-       or type(callable.name) ~= "string"
-       or callable.name == ""
+       or not valid_source_identifier(callable.name)
        or callable.islocal
        or not dense_plain_list_length(callable.params)
        or not dense_plain_list_length(callable.rettypes)
@@ -774,7 +774,7 @@ local function validate_nominal_member_maps(owner, seen)
         return nil, "nominal member maps have an invalid schema"
     end
     for name, fn in pairs(owner.functions) do
-        if type(name) ~= "string" or name == ""
+        if not valid_source_identifier(name)
            or type(fn) ~= "table" or fn.name ~= name then
             return nil, "nominal function map has an invalid entry"
         end
@@ -783,7 +783,7 @@ local function validate_nominal_member_maps(owner, seen)
         if not ok then return nil, err end
     end
     for name, method in pairs(owner.methods) do
-        if type(name) ~= "string" or name == ""
+        if not valid_source_identifier(name)
            or type(method) ~= "table" or method.name ~= name then
             return nil, "nominal method map has an invalid entry"
         elseif owner.functions[name] then
@@ -813,7 +813,7 @@ local function validate_record_interface(record, context, seen)
     for _, field in ipairs(record.fields) do
         if type(field) ~= "table" or field._tag ~= "Type.Field"
            or field.fqtn ~= record.name
-           or type(field.name) ~= "string" or field.name == ""
+           or not valid_source_identifier(field.name)
            or field.islocal
            or type(field.index) ~= "number"
            or math.type(field.index) ~= "integer"
@@ -889,7 +889,7 @@ local function validate_union_interface(union, context, seen)
         if type(variant) ~= "table"
            or variant._tag ~= "Type.Variant"
            or variant.fqtn ~= union.name
-           or type(variant.name) ~= "string" or variant.name == ""
+           or not valid_source_identifier(variant.name)
            or variant.islocal
            or type(variant.index) ~= "number"
            or math.type(variant.index) ~= "integer"
@@ -1069,6 +1069,10 @@ validate_interface_type = function(typ, context, seen)
 end
 
 function driver.validate_module_interface(modtype, modname)
+    if not staticmetadata.valid_module_name(modname) then
+        return nil, "invalid logical Titan module name " ..
+            string.format("%q", modname)
+    end
     if type(modtype) ~= "table" or modtype._tag ~= "Type.Module"
        or modtype.islocal then
         return nil, "metadata did not deserialize to a Type.Module"
@@ -1108,8 +1112,8 @@ function driver.validate_module_interface(modtype, modname)
         if type(member) ~= "table" or
            (member._tag ~= "Type.ModuleMember" and
             member._tag ~= "Type.ModuleVariable") or
-           member.modname ~= modname or type(member.name) ~= "string" or
-           member.name == "" or member.islocal
+           member.modname ~= modname or
+           not valid_source_identifier(member.name) or member.islocal
            or type(member.type) ~= "table" or
            type(member.type._tag) ~= "string" then
             return nil, "module member " .. index .. " has an invalid schema"
@@ -1160,7 +1164,7 @@ function driver.validate_module_interface(modtype, modname)
         end
     end
     for name, member in pairs(modtype.type_members) do
-        if type(name) ~= "string" or name == "" or type(member) ~= "table" or
+        if not valid_source_identifier(name) or type(member) ~= "table" or
            type(member._tag) ~= "string" then
             return nil, "module type-member table has an invalid schema"
         end
@@ -1606,6 +1610,10 @@ function driver.defaultloader(static_deps, options)
     end
 
     local function loader(modname, request)
+        if not staticmetadata.valid_module_name(modname) then
+            return false, "invalid logical Titan module name " ..
+                string.format("%q", modname)
+        end
         if request and request.kind == "nominal-owner" then
             local contextual_ok, contextual_type, contextual_errors =
                 recover_contextual_owner(modname, request)
@@ -2225,6 +2233,10 @@ local function append_force_loaded_archives(args, archives)
 end
 
 function driver.compile(modname, ast, sourcef, static_deps, verbose)
+    if not staticmetadata.valid_module_name(modname) then
+        return nil, "invalid logical Titan module name " ..
+            string.format("%q", modname)
+    end
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"

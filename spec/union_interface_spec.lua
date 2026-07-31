@@ -190,6 +190,29 @@ describe("union module interfaces", function()
         assert.match("callable member has an invalid schema", err)
     end)
 
+    it("rejects names outside Titan's source and module grammars", function()
+        local module = types.Module("evil$line", {})
+        local ok, err =
+            driver.validate_module_interface(module, "evil$line")
+        assert.falsy(ok)
+        assert.match("invalid logical Titan module name", err, 1, true)
+
+        module = types.Module("sample", {
+            types.ModuleMember(
+                "sample", "$line", types.Integer(), false),
+        })
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("module member 1 has an invalid schema", err, 1, true)
+
+        local union
+        module, union = canonical_module()
+        union.functions.write.paramnames = { "$line" }
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("callable member has an invalid schema", err, 1, true)
+    end)
+
     it("rejects collisions in a decoded union member namespace", function()
         local module, union = canonical_module()
         union.methods.quit = types.Method(

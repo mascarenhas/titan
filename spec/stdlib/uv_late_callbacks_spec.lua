@@ -34,12 +34,8 @@ end
 
 local function read_all(connection: net.Connection): string
   local result = ""
-  local chunk: string? = connection:read()
-  while chunk do
-    local bytes = chunk as string
-    check(#bytes > 0, "Connection returned an empty non-EOF chunk")
-    result = result .. bytes
-    chunk = connection:read()
+  for chunk in connection:read do
+    result = result .. chunk
   end
   return result
 end
@@ -349,6 +345,7 @@ end
                     async_stdlib.read(
                         "titan/peg/" .. name .. ".titan"))
             end
+            async_stdlib.prepare_gc(workspace, layout)
             async_stdlib.compile(workspace, "titan.peg", {
                 layout = layout,
                 cppflags = LPEGLABEL_CPPFLAGS,

@@ -12,6 +12,10 @@ function loop()
   uv._loop()
 end
 
+function yield()
+  uv._yield()
+end
+
 function version(): string
   return uv._version()
 end

@@ -4,7 +4,7 @@ local lfs = require "lfs"
 
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "os",
-    "peg", "string",
+    "peg", "string", "math", "lua", "iter", "gc",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
 
@@ -485,7 +485,20 @@ describe("standalone-prefix source installation", function()
             "vendor/lpeglabel/testrelabelparser.lua",
             "vendor/lpeglabel/LICENSE",
             "vendor/lpeglabel/UPSTREAM.md",
+            "titan/coroutine.titan",
+            "titan/uv/uv.titan",
+            "titan/uv/file.titan",
+            "titan/uv/os.titan",
+            "titan/uv/process.titan",
+            "titan/uv/runtime.titan",
+            "titan/uv/task.titan",
+            "titan/uv/tcp.titan",
+            "titan/async.titan",
+            "titan/timer.titan",
             "titan/io.titan",
+            "titan/fs.titan",
+            "titan/net.titan",
+            "titan/os.titan",
             "titan/peg/peg.titan",
             "titan/peg/combinators.titan",
             "titan/peg/native.titan",
@@ -498,6 +511,10 @@ describe("standalone-prefix source installation", function()
             "titan/string/regex_api.titan",
             "titan/string/regex_compile.titan",
             "titan/string/regex_parser.titan",
+            "titan/math.titan",
+            "titan/lua.titan",
+            "titan/iter.titan",
+            "titan/gc.titan",
             "LICENSES/lpeglabel-LICENSE",
             "LICENSES/lpeg-LICENSE",
             "LICENSES/ta-regex-LICENSE",
@@ -724,6 +741,10 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             local titan_io = require "titan.io"
             local peg = require "titan.peg"
             local titan_string = require "titan.string"
+            local titan_math = require "titan.math"
+            local titan_lua = require "titan.lua"
+            local iter = require "titan.iter"
+            local gc = require "titan.gc"
             local builtin_string = require "string"
             -- Requiring only the public facade must initialize uv globally.
             -- The returned uv-owned Task resolves its methods transitively;
@@ -757,8 +778,13 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             assert(type(system) == "userdata")
             assert(type(peg) == "userdata")
             assert(type(titan_string) == "userdata")
+            assert(type(titan_math) == "userdata")
+            assert(type(titan_lua) == "userdata")
+            assert(type(iter) == "userdata")
+            assert(type(gc) == "userdata")
             assert(peg.literal("installed"):match("installed") == 10)
             assert(titan_string.len("installed\0string") == 16)
+            assert(titan_math.sqrt(81.0) == 9.0)
             assert(builtin_string == string)
             for name, module in pairs({
                 coroutine = coroutine,
@@ -771,6 +797,10 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 os = system,
                 peg = peg,
                 string = titan_string,
+                math = titan_math,
+                lua = titan_lua,
+                iter = iter,
+                gc = gc,
             }) do
                 local symbol = "luaopen_titan_" .. name
                 assert(package.searchpath("titan." .. name, package.path) ==

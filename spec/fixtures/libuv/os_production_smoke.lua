@@ -2,6 +2,7 @@ local mode = assert(arg[1], "expected libuv mode label")
 local process_child = arg[2]
 local builtin = require "os"
 local system = require "titan.os"
+local titan_io = require "titan.io"
 
 assert(type(builtin) == "table")
 assert(type(system) == "userdata")
@@ -46,7 +47,44 @@ if process_child then
     local payload = mode .. "\0titan.os.process"
     for _ = 1, 14 do payload = payload .. payload end
 
+    local function check_parent_stream(stream, descriptor)
+        local ok, result = pcall(stream.is_tty, stream)
+        if ok then
+            assert(type(result) == "boolean")
+        else
+            -- Noninteractive runners commonly attach stdin to /dev/null and
+            -- may redirect either output to a regular file. Process streams
+            -- intentionally admit only libuv pipe and TTY handles.
+            assert(type(result) == "userdata")
+            assert(result.code == -22)
+            assert(result.name == "EINVAL")
+            assert(result.operation ==
+                "parent." .. descriptor .. ".classify")
+        end
+    end
+
     local main = async.run(function()
+        check_parent_stream(system.stdin, "stdin")
+        check_parent_stream(system.stdout, "stdout")
+        check_parent_stream(system.stderr, "stderr")
+
+        local merged = titan_io.popen(
+            "printf '" .. mode .. "-stdout'; " ..
+            "printf '" .. mode .. "-stderr' >&2")
+        local merged_chunks = {}
+        while true do
+            local chunk = merged:read()
+            if chunk == nil then break end
+            merged_chunks[#merged_chunks + 1] = chunk
+        end
+        assert(table.concat(merged_chunks) ==
+            mode .. "-stdout" .. mode .. "-stderr")
+        local merged_status = merged:wait()
+        assert(merged_status.code == 0)
+        assert(merged_status.signal == nil)
+        assert(merged_status.signal_number == 0)
+        merged:close()
+
         -- Plain Lua tables are Maps, not Arrays. fs.list supplies a canonical
         -- {string} proxy that ordinary indexing can clear and refill.
         local process_args = fs.list(".")
@@ -57,19 +95,14 @@ if process_child then
         assert(#process_args == 0)
 
         process_args[1] = "echo"
-        local output, diagnostics, status =
-            system.communicate(process_child, process_args, payload)
-        assert(output == payload)
-        assert(diagnostics == "")
-        assert(status.code == 0)
-        assert(status.signal == nil)
-        assert(status.signal_number == 0)
-
-        process_args[1] = "echo"
-        local detached = system.spawn(process_child, process_args)
-        local writer = detached.stdin
-        local reader = detached.stdout
-        local error_reader = detached.stderr
+        local detached = system.spawn(
+            process_child, process_args,
+            system.with_stdin, system.with_stdout,
+            system.with_stderr)
+        assert(detached:is_running())
+        local writer = assert(detached.stdin)
+        local reader = assert(detached.stdout)
+        local error_reader = assert(detached.stderr)
         local weak = setmetatable({ process = detached }, { __mode = "v" })
         detached = nil
         collectgarbage("collect")
@@ -84,27 +117,32 @@ if process_child then
         process_args[1] = "exit"
         process_args[2] = "29"
         local exited = system.spawn(process_child, process_args)
-        exited.stdin:close()
-        assert(exited.stdout:read() == nil)
-        assert(exited.stderr:read() == nil)
+        assert(exited.stdin):close()
+        assert(assert(exited.stdout):read() == nil)
+        assert(assert(exited.stderr):read() == nil)
         local exit_status = exited:wait()
         assert(exit_status.code == 29)
         assert(exit_status.signal == nil)
         assert(exit_status.signal_number == 0)
+        assert(not exited:is_running())
 
         process_args[1] = "ready-wait"
         process_args[2] = nil
         local signalled = system.spawn(process_child, process_args)
-        signalled.stdin:close()
-        assert(signalled.stdout:read_until("\n") == "READY\n")
+        assert(signalled.stdin):close()
+        local signal_stdout = assert(signalled.stdout)
+        local signal_stderr = assert(signalled.stderr)
+        assert(signal_stdout:read_until("\n") == "READY\n")
+        assert(signalled:is_running())
         signalled:kill("term")
         local signal_status = signalled:wait()
         assert(signal_status.code == 0)
         assert(signal_status.signal == "term")
         assert(signal_status.signal_number > 0)
-        assert(signalled.stdout:read() == nil)
-        assert(signalled.stderr:read() == nil)
-        return output
+        assert(not signalled:is_running())
+        assert(signal_stdout:read() == nil)
+        assert(signal_stderr:read() == nil)
+        return payload
     end)
 
     async.loop()

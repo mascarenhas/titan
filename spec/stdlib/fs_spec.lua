@@ -1,10 +1,13 @@
 local fs_support = require "spec.support.fs_test_support"
+local async_stdlib = require "spec.support.async_stdlib"
+local lfs = require "lfs"
 
 local FS_CASES = [==[
 local fs = import "fs"
 local timer = import "timer"
 local async = import "async"
 local tio = import "io"
+local system = import "os"
 
 local retained_file: fs.File? = nil
 
@@ -40,10 +43,9 @@ function schedule_modes(root: string): async.Task
     file:close()
     file:close()
     check(file:is_closed(), "double close did not leave File closed")
-    expect_failure(function (): value
-      file:read(1)
-      return nil
-    end, "read after close succeeded")
+    check(not file:read(1), "read after close did not return EOF")
+    check(not file:read_until("never"),
+          "delimiter read after close did not return EOF")
     expect_failure(function (): value
       file:write("x")
       return nil
@@ -134,10 +136,11 @@ function schedule_binary(root: string, payload: string): async.Task
 
     local file = fs.open(path, "rb")
     local rebuilt = ""
-    while true do
-      local chunk: string? = file:read(4093)
-      if not chunk then break end
-      rebuilt = rebuilt .. (chunk as string)
+    local read_chunk = function (): string?
+      return file:read(4093)
+    end
+    for chunk in read_chunk do
+      rebuilt = rebuilt .. chunk
     end
     file:close()
     check(rebuilt == payload, "chunked read changed binary payload")
@@ -190,6 +193,35 @@ function schedule_delimited_reads(root: string, boundary_payload: string,
           "plain read did not consume the retained delimiter suffix")
     check(not file:read_until("--"),
           "empty EOF after retained excess did not return nil")
+    file:close()
+
+    local cancelled_path = root .. "/cancelled-builder.dat"
+    fs.write_file(cancelled_path, "selected|restored-after-cancel")
+    file = fs.open(cancelled_path, "r")
+    check(file:read_until("|") == "selected|",
+          "could not seed cancellation-test excess")
+    local cancelled_reader = async.run(function (): value
+      return file:read_until("delimiter-that-is-not-present")
+    end)
+    -- The excess-only File read is synchronous. The first wait therefore is
+    -- StringWriter:write's pre-commit yield, where the consumed chunk remains
+    -- pending and must be restored if cancellation wins.
+    while cancelled_reader:status() == "ready" do timer.yield() end
+    check(cancelled_reader:status() == "waiting",
+          "delimiter reader did not reach its builder yield")
+    cancelled_reader:cancel("cancel-builder-write")
+    local cancelled = false
+    do
+      cancelled_reader:join()
+    catch
+      local failure = error as async.Cancelled
+      check(failure.reason == "cancel-builder-write",
+            "builder-write cancellation reason changed")
+      cancelled = true
+    end
+    check(cancelled, "builder-write cancellation did not win")
+    check(file:read() == "restored-after-cancel",
+          "builder-write cancellation did not restore consumed excess")
     file:close()
 
     local binary_path = root .. "/binary-delimiter.dat"
@@ -271,10 +303,9 @@ function schedule_delimited_reads(root: string, boundary_payload: string,
     check(file:read_until("|") == "selected|",
           "could not seed excess before close")
     file:close()
-    expect_failure(function (): value
-      file:read()
-      return nil
-    end, "closed File served retained excess")
+    check(not file:read(), "closed File served retained excess")
+    check(not file:read_until("retained"),
+          "closed File delimiter read served retained excess")
 
     local readers_path = root .. "/concurrent-readers.dat"
     fs.write_file(readers_path, "abcd")
@@ -401,9 +432,167 @@ function schedule_symlink_stat(target: string, link: string): async.Task
     check(result.kind == "file",
           "stat did not follow a symlink to its regular-file target")
     check(result.size == 6, "stat returned the wrong symlink-target size")
+    local link_result = fs.lstat(link)
+    check(link_result.kind == "symlink",
+          "lstat did not report the symbolic link itself")
     fs.unlink(link)
     fs.unlink(target)
-    return "symlink-stat-ok"
+    return "symlink-stat-lstat-ok"
+  end)
+end
+
+local function restore_environment(name: string, original: string?)
+  if original then
+    system.setenv(name, original as string)
+  else
+    system.unsetenv(name)
+  end
+end
+
+function exercise_working_directory(alternate: string): string
+  local original = fs.pwd()
+  do
+    fs.chdir(alternate)
+    check(fs.pwd() == alternate,
+          "synchronous pwd did not observe fs.chdir")
+  finally
+    fs.chdir(original)
+  end
+  check(fs.pwd() == original,
+        "synchronous fs.chdir did not restore the original directory")
+  return "working-directory-ok"
+end
+
+function schedule_path_helpers(root: string): async.Task
+  return async.run(function (): value
+    local original_cwd = fs.pwd()
+    local alternate = root .. "/cwd"
+    local temp = root .. "/tmp"
+    fs.mkdir(alternate)
+    fs.mkdir(temp)
+
+    do
+      fs.chdir(alternate)
+      check(fs.pwd() == alternate,
+            "pwd did not observe fs.chdir")
+    finally
+      fs.chdir(original_cwd)
+    end
+    check(fs.pwd() == original_cwd,
+          "fs.chdir did not restore the original directory")
+
+    local original_tmp: string? = system.getenv("TMPDIR")
+    do
+      system.setenv("TMPDIR", temp)
+      local first = fs.tmpname()
+      local second = fs.tmpname()
+      check(first ~= second, "tmpname returned a duplicate path")
+      check(fs.lstat(first).kind == "file" and
+            fs.lstat(second).kind == "file",
+            "tmpname did not leave regular files in place")
+      fs.unlink(first)
+      fs.unlink(second)
+    finally
+      restore_environment("TMPDIR", original_tmp)
+    end
+
+    local lstat_failed = false
+    do
+      fs.lstat(root .. "/missing-lstat")
+    catch
+      local failure = error as async.Error
+      check(failure.operation == "fs.lstat",
+            "missing lstat reported the wrong operation")
+      lstat_failed = true
+    end
+    check(lstat_failed, "lstat accepted a missing path")
+
+    local chdir_failed = false
+    do
+      fs.chdir(root .. "/missing-chdir")
+    catch
+      local failure = error as async.Error
+      check(failure.operation == "fs.chdir",
+            "missing chdir reported the wrong operation")
+      chdir_failed = true
+    end
+    check(chdir_failed, "chdir accepted a missing path")
+
+    local nul_failed = false
+    do
+      fs.chdir(root .. "\0suffix")
+    catch
+      local failure = error as async.Error
+      check(failure.operation == "fs.chdir",
+            "NUL chdir reported the wrong operation")
+      nul_failed = true
+    end
+    check(nul_failed, "chdir accepted an embedded NUL")
+
+    local tmp_failed = false
+    original_tmp = system.getenv("TMPDIR")
+    do
+      system.setenv("TMPDIR", root .. "/missing-tmpdir")
+      do
+        fs.tmpname()
+      catch
+        local failure = error as async.Error
+        check(failure.operation == "fs.tmpname",
+              "failed tmpname reported the wrong operation")
+        tmp_failed = true
+      end
+    finally
+      restore_environment("TMPDIR", original_tmp)
+    end
+    check(tmp_failed, "tmpname accepted a missing temporary directory")
+
+    fs.rmdir(temp)
+    fs.rmdir(alternate)
+    return "path-helpers-ok"
+  end)
+end
+
+function schedule_cancelled_tmpnames(temp: string,
+                                     count: integer): async.Task
+  return async.run(function (): value
+    local original_tmp: string? = system.getenv("TMPDIR")
+    local cancelled = 0
+    do
+      system.setenv("TMPDIR", temp)
+      local tasks: {async.Task} = {}
+      for i = 1, count do
+        tasks[i] = async.run(function (): value
+          return fs.tmpname()
+        end)
+      end
+
+      -- The child zero timers run first and submit mkstemp requests. The
+      -- parent then cancels them before the filesystem callbacks are driven.
+      timer.yield()
+      for i = 1, count do
+        local task = tasks[i] as async.Task
+        task:cancel("tmpname-cancel")
+      end
+      for i = 1, count do
+        local task = tasks[i] as async.Task
+        do
+          local path = task:join() as string
+          -- A request that completed before cancellation still returns its
+          -- closed, caller-owned file and must not perturb the leak check.
+          fs.unlink(path)
+        catch
+          local failure = error as async.Cancelled
+          check(failure.reason == "tmpname-cancel",
+                "tmpname cancellation reason changed")
+          cancelled = cancelled + 1
+        end
+      end
+    finally
+      restore_environment("TMPDIR", original_tmp)
+    end
+    check(cancelled > 0,
+          "tmpname cancellation did not reach an in-flight request")
+    return cancelled
   end)
 end
 
@@ -460,6 +649,8 @@ function schedule_fifo_and_close(root: string): async.Task
     check(late:join() == "rejected", "operation after close was accepted")
     file:close()
     check(file:is_closed(), "FIFO File did not close")
+    check(not file:read_until(""),
+          "closed File validated a delimiter instead of returning EOF")
     check(fs.read_file(path) == "first-second-third",
           "File operations did not run in FIFO order")
     return "fifo-close-ok"
@@ -499,12 +690,11 @@ end
 
 function schedule_stale_file(file: fs.File): async.Task
   return async.run(function (): value
+    check(not file:read(1),
+          "terminal stale File read did not return EOF")
+    check(not file:read_until("never"),
+          "terminal stale File delimiter read did not return EOF")
     local failures = 0
-    do file:read(1) catch
-      check(error == "File belongs to a stale libuv Runtime",
-            "stale File read reported the wrong error")
-      failures = failures + 1
-    end
     do file:write("stale") catch
       check(error == "File belongs to a stale libuv Runtime",
             "stale File write reported the wrong error")
@@ -515,9 +705,65 @@ function schedule_stale_file(file: fs.File): async.Task
             "stale File flush reported the wrong error")
       failures = failures + 1
     end
-    check(failures == 3, "old-generation File accepted an operation")
+    check(failures == 2,
+          "old-generation File accepted a mutating operation")
     return "stale-file-rejected"
   end)
+end
+]==]
+
+local LATE_TMPNAME_CASES = [==[
+-- Runs only against the generated delayed-filesystem-callback uv variant.
+local uv = import "uv"
+
+local result_delivered = false
+
+local function check(condition: boolean, message: string)
+  if not condition then raise message end
+end
+
+function schedule_cancelled_successful_tmpname(): uv.Task
+  result_delivered = false
+  uv.__test_delay_next_fs_callback(40)
+
+  local target = uv._run(function (): value
+    local path = uv._fs_tmpname()
+    result_delivered = true
+    return path
+  end)
+  local canceller = uv._run(function (): value
+    while not uv.__test_fs_callback_is_delayed() do uv._yield() end
+    -- The native mkstemp callback has succeeded and created the path, but the
+    -- variant has not yet delivered that result to the waiting Task.
+    target:cancel("late-successful-tmpname-cancel")
+    return nil
+  end)
+
+  return uv._run(function (): value
+    canceller:join()
+    local caught = false
+    do
+      target:join()
+    catch
+      local cancelled = error as uv.Cancelled
+      check(cancelled.reason == "late-successful-tmpname-cancel",
+            "late successful-tmpname cancellation reason changed")
+      caught = true
+    end
+    check(caught and target:status() == "cancelled",
+          "late successful-tmpname cancellation did not win logically")
+
+    -- Keep the Runtime alive until delayed delivery has queued and completed
+    -- the acquired descriptor's internal close.
+    uv._sleep(60)
+    check(not result_delivered,
+          "cancelled successful tmpname published its path")
+    return "late-successful-tmpname-cancellation-ok"
+  end)
+end
+
+function loop()
+  uv._loop()
 end
 ]==]
 
@@ -595,8 +841,70 @@ assert(loop_ok, loop_error)
 assert(modes:join() == "modes-ok")
 assert(binary:join() == #payload)
 assert(paths:join() == "paths-ok")
-assert(symlink:join() == "symlink-stat-ok")
+assert(symlink:join() == "symlink-stat-lstat-ok")
 if permission then assert(permission:join() == "permission-error-ok") end
+]==])
+    end)
+
+    it("supports lstat, closed persistent tmpnames, pwd/chdir, and fs errors",
+    function()
+        run_lua("local root = " .. string.format("%q", root) .. [==[
+local async = require "titan.async"
+local lfs = require "lfs"
+local cases = require "fs_cases"
+
+local synchronous = root .. "/synchronous-cwd"
+assert(lfs.mkdir(synchronous))
+assert(cases.exercise_working_directory(synchronous) ==
+    "working-directory-ok")
+assert(lfs.rmdir(synchronous))
+
+local task = cases.schedule_path_helpers(root)
+async.loop()
+assert(task:join() == "path-helpers-ok")
+]==])
+    end)
+
+    it("closes descriptors acquired by cancelled tmpname requests", function()
+        run_lua("local root = " .. string.format("%q", root) .. [==[
+local lfs = require "lfs"
+local async = require "titan.async"
+local cases = require "fs_cases"
+
+local temp = root .. "/cancelled-tmpnames"
+assert(lfs.mkdir(temp))
+
+-- Warm one complete Runtime session before taking the descriptor baseline so
+-- lazy libuv/module initialization cannot masquerade as an fs descriptor.
+local warm = async.run(function() return "warm" end)
+async.loop()
+assert(warm:join() == "warm")
+
+local function descriptor_count()
+    local count = 0
+    for entry in lfs.dir("/dev/fd") do
+        if entry ~= "." and entry ~= ".." then count = count + 1 end
+    end
+    return count
+end
+
+local before = descriptor_count()
+local task = cases.schedule_cancelled_tmpnames(temp, 64)
+async.loop()
+assert(task:join() > 0)
+local after = descriptor_count()
+assert(after == before,
+    string.format("cancelled tmpname leaked descriptors: %d -> %d",
+        before, after))
+
+-- Successfully-created requests whose logical Tasks were cancelled retain
+-- their paths by contract; remove those test-owned files after the FD proof.
+for entry in lfs.dir(temp) do
+    if entry ~= "." and entry ~= ".." then
+        assert(os.remove(temp .. "/" .. entry))
+    end
+end
+assert(lfs.rmdir(temp))
 ]==])
     end)
 
@@ -646,6 +954,7 @@ local observer = async.run(function()
     assert(weak.file ~= nil, "pending File was not rooted")
     return true
 end)
+
 async.loop()
 assert(holder:join() == nil)
 assert(observer:join())
@@ -658,6 +967,10 @@ async.loop()
 local old_file = leaked_task:join()
 assert(old_file:is_closed(), "final-Task cleanup did not close idle File")
 old_file:close()
+assert(old_file:read() == nil,
+    "terminal File read required an active Runtime")
+assert(old_file:read_until("never") == nil,
+    "terminal File delimiter read required an active Runtime")
 
 local stale = cases.schedule_stale_file(old_file)
 local second = cases.schedule_second_session(root)
@@ -665,5 +978,128 @@ async.loop()
 assert(stale:join() == "stale-file-rejected")
 assert(second:join() == "session-two")
 ]==])
+    end)
+end)
+
+describe("fs portable location helpers", function()
+    local workspace
+    local root
+
+    setup(function()
+        workspace, root = fs_support.workspace("portable-locations")
+        async_stdlib.write_source(
+            workspace, "titan.fs", async_stdlib.read("titan/fs.titan"))
+        fs_support.compile(workspace, "titan.fs")
+    end)
+
+    teardown(function()
+        fs_support.cleanup(workspace)
+    end)
+
+    it("exposes libuv home and temporary directories without a Task",
+    function()
+        local source = "local expected = " .. string.format("%q", root) ..
+            [==[
+local fs = require "titan.fs"
+local system = require "titan.os"
+
+assert(type(fs) == "userdata")
+assert(fs.tmpdir() == expected)
+assert(fs.homedir() == expected)
+assert(fs.tmpdir() == system.tmpdir())
+assert(fs.homedir() == system.homedir())
+]==]
+        local ok, status, output = fs_support.run_lua_source(
+            workspace, source, {
+                exec_prefix = {
+                    "HOME=" .. root,
+                    "TMPDIR=" .. root,
+                },
+            })
+        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
+        assert.equals(0, status, output)
+    end)
+
+    it("retries libuv buffers for long home and temporary directories",
+    function()
+        local expected_home = root .. "/" .. string.rep("home", 70)
+        local expected_tmp = root .. "/" .. string.rep("temp", 70)
+        assert.is_true(#expected_home > 256)
+        assert.is_true(#expected_tmp > 256)
+        local source =
+            "local expected_home = " .. string.format("%q", expected_home) ..
+            "\nlocal expected_tmp = " .. string.format("%q", expected_tmp) ..
+            [==[
+local fs = require "titan.fs"
+
+assert(fs.homedir() == expected_home)
+assert(fs.tmpdir() == expected_tmp)
+]==]
+        local ok, status, output = fs_support.run_lua_source(
+            workspace, source, {
+                exec_prefix = {
+                    "HOME=" .. expected_home,
+                    "TMPDIR=" .. expected_tmp,
+                },
+            })
+        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
+        assert.equals(0, status, output)
+    end)
+end)
+
+describe("fs tmpname delayed-callback cancellation", function()
+    local workspace
+    local root
+    local temp
+    local layout
+
+    setup(function()
+        workspace, layout = async_stdlib.variant_workspace(
+            "spec/support/make_delayed_fs_callback_variant.lua", {
+                facades = false,
+            })
+        root = workspace .. "/data"
+        assert.truthy(lfs.mkdir(root))
+        temp = root .. "/tmp"
+        assert.truthy(lfs.mkdir(temp))
+        async_stdlib.write_source(
+            workspace, "fs_late_tmpname_cases", LATE_TMPNAME_CASES)
+        async_stdlib.compile(workspace, "fs_late_tmpname_cases", {
+            layout = layout,
+        })
+    end)
+
+    teardown(function()
+        async_stdlib.cleanup(workspace)
+    end)
+
+    it("keeps a path created before logical cancellation", function()
+        local source = [==[
+local lfs = require "lfs"
+local cases = require "fs_late_tmpname_cases"
+local task = cases.schedule_cancelled_successful_tmpname()
+cases.loop()
+assert(task:join() == "late-successful-tmpname-cancellation-ok")
+
+local temp = assert(os.getenv("TMPDIR"))
+local paths = {}
+for entry in lfs.dir(temp) do
+    if entry ~= "." and entry ~= ".." then
+        paths[#paths + 1] = temp .. "/" .. entry
+    end
+end
+assert(#paths == 1,
+    "cancelled successful tmpname did not retain exactly one path")
+assert(lfs.attributes(paths[1], "mode") == "file",
+    "cancelled successful tmpname did not retain a regular file")
+assert(os.remove(paths[1]))
+]==]
+        local ok, status, output = async_stdlib.run_lua_source(
+            workspace, source, {
+                layout = layout,
+                exec_prefix = { "TMPDIR=" .. temp },
+            })
+        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
+        assert.equals(0, status, output)
     end)
 end)

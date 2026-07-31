@@ -212,10 +212,10 @@ local TASK_CASES = [[
       local first: async.Task? = nil
       local second: async.Task? = nil
       first = async.run(function (): value
-        return (second as async.Task):join()
+        return second:join()
       end)
       second = async.run(function (): value
-        return (first as async.Task):join()
+        return first:join()
       end)
     end
 

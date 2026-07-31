@@ -77,7 +77,7 @@ function main(_args: {string}): integer
     raise "private PEG engine did not initialize"
   end
   local found = strings.match("ab-abx", "((a|b)+)-\\1x")
-  if not found or (found as strings.RegexMatch):group(1) ~= "ab" then
+  if not found or found:group(1) ~= "ab" then
     raise "regex backreference lost its continuation"
   end
   local first, last = strings.find("a\0b\0c", "\0b")

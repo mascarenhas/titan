@@ -1,0 +1,124 @@
+local lua = foreign import "lua.h"
+local cstddef = foreign import "stddef.h"
+local ffi = foreign import "titan/ffi.h"
+
+local function require_gc_result(result: ffi.titan_ffi_int): integer
+  if result < 0 then
+    raise "garbage collector operation is unavailable"
+  end
+  return result
+end
+
+local function set_weak_mode(map: {value: value}, mode: string)
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if lua.lua_checkstack(L, 4) == 0 then
+    raise "cannot reserve Lua stack for weak-map configuration"
+  end
+
+  ffi.lua_pushtvalue(L, map)
+  if lua.lua_getmetatable(L, -1) == 0 then
+    local metatable: {string: value} = {
+      ["__mode"] = mode,
+    }
+    ffi.lua_pushtvalue(L, metatable)
+    lua.lua_setmetatable(L, -2)
+  else
+    -- Preserve the exact existing metatable and change only its raw __mode
+    -- field. Raw assignment cannot invoke a metatable-of-metatable callback.
+    ffi.lua_pushtvalue(L, "__mode")
+    ffi.lua_pushtvalue(L, mode)
+    lua.lua_rawset(L, -3)
+  end
+end
+
+function weak(map: {value: value})
+  set_weak_mode(map, "v")
+end
+
+function ephemeron(map: {value: value})
+  set_weak_mode(map, "k")
+end
+
+function pause()
+  require_gc_result(lua.lua_gc(L, lua.LUA_GCSTOP))
+end
+
+function resume()
+  require_gc_result(lua.lua_gc(L, lua.LUA_GCRESTART))
+end
+
+function paused(): boolean
+  return require_gc_result(
+    lua.lua_gc(L, lua.LUA_GCISRUNNING)) == 0
+end
+
+function collect()
+  require_gc_result(lua.lua_gc(L, lua.LUA_GCCOLLECT))
+end
+
+function step(size: integer?): boolean
+  local amount = 0
+  if size then amount = size end
+  if amount < 0 then
+    raise "garbage collector step size must be non-negative"
+  end
+  return require_gc_result(lua.lua_gc(
+    L, lua.LUA_GCSTEP, amount as cstddef.size_t)) ~= 0
+end
+
+function incremental(): boolean
+  return require_gc_result(
+    lua.lua_gc(L, lua.LUA_GCINC)) == lua.LUA_GCINC
+end
+
+function generational(): boolean
+  return require_gc_result(
+    lua.lua_gc(L, lua.LUA_GCGEN)) == lua.LUA_GCGEN
+end
+
+function count(): integer
+  local kilobytes = require_gc_result(
+    lua.lua_gc(L, lua.LUA_GCCOUNT))
+  local remaining_bytes = require_gc_result(
+    lua.lua_gc(L, lua.LUA_GCCOUNTB))
+  return kilobytes * 1024 + remaining_bytes
+end
+
+local function parameter(which: ffi.titan_ffi_int,
+                         setting: integer?): integer
+  local configured = -1 as ffi.titan_ffi_int
+  if setting then
+    local supplied = setting as integer
+    if supplied < 0 or supplied > 100000 then
+      raise "garbage collector parameter must be between 0 and 100000"
+    end
+    configured = supplied as ffi.titan_ffi_int
+  end
+  return require_gc_result(lua.lua_gc(
+    L, lua.LUA_GCPARAM, which, configured))
+end
+
+function minormul(setting: integer?): integer
+  return parameter(lua.LUA_GCPMINORMUL, setting)
+end
+
+function majorminor(setting: integer?): integer
+  return parameter(lua.LUA_GCPMAJORMINOR, setting)
+end
+
+function minormajor(setting: integer?): integer
+  return parameter(lua.LUA_GCPMINORMAJOR, setting)
+end
+
+function pause_percent(setting: integer?): integer
+  return parameter(lua.LUA_GCPPAUSE, setting)
+end
+
+function stepmul(setting: integer?): integer
+  return parameter(lua.LUA_GCPSTEPMUL, setting)
+end
+
+function stepsize(setting: integer?): integer
+  return parameter(lua.LUA_GCPSTEPSIZE, setting)
+end

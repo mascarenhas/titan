@@ -12,17 +12,12 @@ local type FormatFactory = (string, string) -> FormatPartial
 
 local MAXIMUM_FORMAT_SPECIFICATION_BYTES = 22
 
-local record CoreStringBuilder
-  local chunks: {string}
-  local length: integer
-end
-
-local function new_string_builder(): CoreStringBuilder
+local function new_string_builder(): StringWriter
   local chunks: {string} = {}
-  return CoreStringBuilder.new(chunks, 0)
+  return StringWriter.new(chunks, 0)
 end
 
-local function builder_append(builder: CoreStringBuilder, text: string)
+local function builder_append(builder: StringWriter, text: string)
   local length = #text
   if length == 0 then return end
   local maximum = MAXIMUM_STRING_BYTES
@@ -33,7 +28,7 @@ local function builder_append(builder: CoreStringBuilder, text: string)
   builder.length = builder.length + length
 end
 
-local function builder_finish(builder: CoreStringBuilder): string
+local function builder_finish(builder: StringWriter): string
   if builder.length == 0 then return "" end
   local storage = ffi.titan_ffi_char.new_array(builder.length)
   local output = storage as *ffi.titan_ffi_char
@@ -289,7 +284,7 @@ local function locale_neutral_hex(number: lua.lua_Number): string
   return storage as string
 end
 
-local function append_quoted(builder: CoreStringBuilder, text: string)
+local function append_quoted(builder: StringWriter, text: string)
   builder_append(builder, "\"")
   local run = 1
   local index = 1

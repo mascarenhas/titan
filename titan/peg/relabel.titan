@@ -792,14 +792,7 @@ local function _relabel_refresh_locale()
   predefined["X"] = difference(any_byte, current.xdigit)
   _relabel_predefined = predefined
   local cache: {string: Pattern} = {}
-  local weak_values: {string: string} = {
-    ["__mode"] = "v",
-  }
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, cache)
-  ffi.lua_pushtvalue(L, weak_values)
-  lua.lua_setmetatable(L, -2)
+  gc.weak(cache as {value: value})
   _relabel_match_cache = cache
   _relabel_parser = _relabel_build_parser()
 end

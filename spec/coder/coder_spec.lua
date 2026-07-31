@@ -1254,6 +1254,10 @@ describe("Titan code generator", function()
             function binary_direct(): string
                 return "\0\0017\255"
             end
+            function dollar_templates(): (string, string)
+                local captured = "$local ${local}"
+                return captured, "$line ${line} $A0 plain$"
+            end
             function empty(): string
                 return ""
             end
@@ -1277,6 +1281,9 @@ describe("Titan code generator", function()
             assert(string.byte(b, 2) == 1)
             assert(string.byte(b, 3) == string.byte("7"))
             assert(string.byte(b, 4) == 255)
+            local first, second = titan_test.dollar_templates()
+            assert(first == "$local ${local}")
+            assert(second == "$line ${line} $A0 plain$")
             assert(titan_test.empty() == "")
         ]])
         assert.truthy(ok, err)
@@ -1691,6 +1698,21 @@ describe("Titan code generator", function()
         assert.truthy(ok, err)
     end)
 
+    it("rejects a template metacharacter in a logical module name", function()
+        local code = "function answer(): integer return 1 end"
+        local ast, err = parse(code)
+        assert.truthy(ast, err)
+        local _, errors = checker.check(
+            "dollar$line", ast, code, "dollar.titan")
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        local ok, generate_err = pcall(
+            coder.generate, "dollar$line", ast, {}, driver.TITAN_VER)
+        assert.falsy(ok)
+        assert.match(
+            "coder.generate requires a valid logical module name",
+            generate_err, 1, true)
+    end)
+
     it("loads C headers with foreign import", function ()
         local modules = {
             foo = [[
@@ -1744,6 +1766,50 @@ describe("Titan code generator", function()
         end)
         os.remove(header)
         if not ok then error(err, 0) end
+    end)
+
+    local function assert_dollar_foreign_header(
+            header_token, modname, macro, value)
+        local header = os.tmpname() .. "-" .. header_token
+        local f = assert(io.open(header, "w"))
+        f:write("#define " .. macro .. " " .. value .. "\n")
+        f:close()
+
+        local modules = {
+            [modname] = [[
+                local h = foreign import "]] .. header .. [["
+                function imported_value(): integer
+                    return h.]] .. macro .. [[
+                end
+            ]]
+        }
+        local ok, err = pcall(function()
+            local gok, gerr = generate_modules(modules, modname)
+            assert.truthy(gok, gerr)
+
+            local c = assert(io.open(modname .. ".c", "r"))
+            local csrc = c:read("*a")
+            c:close()
+            assert.match('#include "' .. header .. '"', csrc, 1, true)
+
+            local cok, cerr = call(modname,
+                "assert(" .. modname .. ".imported_value() == " .. value .. ")")
+            assert.truthy(cok, cerr)
+        end)
+        os.remove(header)
+        if not ok then error(err, 0) end
+    end
+
+    it("preserves $line in a foreign header name", function()
+        assert_dollar_foreign_header(
+            "$line", "ffi_dollar_line_header",
+            "TITAN_DOLLAR_LINE_HEADER", 71)
+    end)
+
+    it("preserves $HEADERNAME in a foreign header name", function()
+        assert_dollar_foreign_header(
+            "$HEADERNAME", "ffi_dollar_headername_header",
+            "TITAN_DOLLAR_HEADERNAME_HEADER", 73)
     end)
 
     it("runs TValue and void pointer FFI lowering paths", function()

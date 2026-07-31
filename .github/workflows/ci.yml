@@ -9,13 +9,14 @@ on:
 
 jobs:
   # Build and install the regular Linux tree once per workflow. Keep the
-  # compiler core, net/OS, and PEG/string groups on this warm standard runner.
+  # compiler core, net/OS, and PEG/string/math/Lua/iter/GC groups on this warm
+  # standard runner.
   # Two consumers restore the pristine tree instead of rebuilding dependencies:
   # one runs uv/timer/fs behavior, while the other runs the broad end-to-end,
   # measured C-FFI, and isolated static-provider coverage. Both runner labels
   # remain x86_64 Ubuntu 24.04, so the native artifact does not cross targets.
   prepare-linux:
-    name: regular (ubuntu-24.04, build+compiler-core+net-os+peg-string)
+    name: regular (ubuntu-24.04, build+compiler-core+net-os+peg-string-math-lua-iter-gc)
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -101,7 +102,7 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer io fs net os peg string; do
+          for module in coroutine uv async timer io fs net os peg string math lua iter gc; do
             rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           rm -f "$PREFIX/share/lua/5.5/titan.lua" \
@@ -197,7 +198,7 @@ jobs:
       # 30-minute timeout leaves room for host-load variance. Run the library
       # groups first so legacy compiler cleanup cannot make the serial packaging
       # gate rebuild the complete standard library again.
-      - name: Run serial, net/OS, and PEG/string library tests without coverage
+      - name: Run serial, net/OS, and PEG/string/math/Lua/iter/GC library tests without coverage
         # These tests compile disposable fixtures and alternate images. The
         # installed bundled provider packed above remains the optimized
         # production image, and macOS repeats the complete suite at -O2.
@@ -468,7 +469,8 @@ jobs:
 
       # Build one native argv/stdio child with the pinned bundled archive and
       # reuse it while smoke-testing both standard-library link modes. The OS
-      # smoke invokes this executable directly through os.spawn/communicate.
+      # smoke invokes this executable directly through os.spawn and also
+      # exercises the shell-oriented io.popen convenience separately.
       - name: Build child-process smoke fixture
         run: |
           process_smoke_dir="$RUNNER_TEMP/titan-process-smoke"
@@ -561,7 +563,7 @@ jobs:
           static_archive="${provider%.so}.a"
           test -f "$provider" && test ! -L "$provider"
           test -f "$static_archive" && test ! -L "$static_archive"
-          for module in coroutine uv async timer io fs net os peg string; do
+          for module in coroutine uv async timer io fs net os peg string math lua iter gc; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           readelf -Ws .lua/bin/lua | grep __asan_

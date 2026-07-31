@@ -1,8 +1,9 @@
 # String standard library
 
 The `string` standard module provides byte-oriented string operations,
-Lua-compatible formatting and binary packing, and a compiled regular-expression
-API. Titan imports the canonical module with `import "string"`; Lua uses
+Lua-compatible formatting and binary packing, yielding in-memory streams, and
+a compiled regular-expression API with convenience iterators. Titan imports
+the canonical module with `import "string"`; Lua uses
 `require "titan.string"`.
 
 ```titan
@@ -233,6 +234,42 @@ flexible tail accounts for the format-dependent remainder. Omitted or nil
 negative in range counts from the end. `#data + 1` is valid, while a larger
 positive position raises.
 
+## Yielding in-memory streams
+
+The module provides structurally typed in-memory implementations of the
+`io.ReaderCloser` and `io.WriterCloser` interfaces without importing `io`:
+
+```titan
+record StringReader
+record StringWriter
+
+function reader(contents: string): StringReader
+function StringReader:read(): string?
+function StringReader:read_until(delimiter: string,
+                                 chop: boolean?): string?
+function StringReader:close()
+
+function writer(): StringWriter
+function StringWriter:write(data: string)
+function StringWriter:drain(): string
+function StringWriter:close()
+```
+
+`reader` starts before the first byte. `read` returns the entire unread suffix,
+or nil at end of input. `read_until` returns through the first literal,
+binary-safe delimiter; a true `chop` omits that delimiter. If no delimiter
+remains, it returns the unread suffix, and the next call returns nil. An empty
+delimiter raises. Every read call yields one async scheduler turn before
+examining the cursor, including an EOF call.
+
+`writer` accumulates binary chunks with checked total-size arithmetic. Every
+`write`, including an empty write, yields one scheduler turn. `drain` joins the
+current chunks in linear time, clears both its chunks and aggregate length for
+reuse, and returns `""` when it was empty. `StringReader:close` discards any
+unread suffix, after which both read methods return nil; `StringWriter:close`
+is a no-op. Both are idempotent, making these records useful in generic code
+that always defers a closer.
+
 ## Compiled regular expressions
 
 Regexes operate on bytes. Character classes and word boundaries are ASCII;
@@ -298,6 +335,10 @@ function match(subject: string,
 function gmatch(subject: string,
                 expression: string,
                 init: integer?): () -> RegexMatch?
+function matches(subject: string,
+                 pattern: string): () -> (string?, ...: string?)
+function split(subject: string,
+               delimiter: string?): () -> string?
 function gsub(subject: string,
               expression: string,
               replacement: (string) -> string,
@@ -307,6 +348,20 @@ function gsub(subject: string,
 Top-level `match` is the cached source-expression form of `Regex:match` and
 performs the same leftmost search, returning the same typed record. Call
 `RegexMatch:values` when capture strings are the desired result.
+
+`matches` wraps `gmatch` and projects each accepted match with `values`: a
+pattern without captures yields the whole match, while a capturing pattern
+yields its captures. This direct tuple form has the ordinary generic-for
+limitation that an unmatched first capture is nil and therefore terminates a
+`for` loop; use `gmatch` and inspect its non-nil `RegexMatch` when the first
+capture can be optional. Direct calls to the returned iterator still preserve
+all capture slots.
+
+With a nil or omitted delimiter, `split` yields one byte at a time and yields
+nothing for an empty subject. A non-nil delimiter is a compiled regex: its
+captures are ignored, and leading, trailing, and adjacent delimiters produce
+empty fields. Zero-width delimiters use the same byte-progress rule as
+`gmatch`, so they cannot loop indefinitely.
 
 ### Initial positions and anchors
 

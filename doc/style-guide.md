@@ -1,0 +1,346 @@
+# Titan style guide
+
+This guide records conventions visible in Titan's current language, standard
+library, and compiler-facing modules. It complements the normative
+[language reference](language/index.md); when a style recommendation and a
+language rule seem to disagree, the reference and compiler behavior win.
+
+## Keep types specific
+
+Prefer the narrowest type that describes the operation. Use `value` at a
+genuine dynamic boundary, not as a substitute for designing a static API.
+Keep a checked conversion close to that boundary so the rest of the function
+works with ordinary Titan values.
+
+Use the nominal and structural forms for their distinct purposes:
+
+- a `record` gives fixed nominal data and methods;
+- a `union` gives a closed set of tagged alternatives;
+- an `Interface` gives a nominal behavioral view satisfied structurally at an
+  explicit conversion site;
+- an Array `{T}` gives positive integer positions and may contain holes; and
+- a Map `{K: V}` gives ordinary key/value lookup.
+
+Do not use an integer-keyed Map merely as an Array with a different spelling.
+The containers have different identities, representations, length rules, and
+Lua-boundary behavior. An Array's `#` is its highest present positive index,
+not an element count; code that permits interior holes must not iterate
+`1..#array` and silently assume every read is present.
+
+## Make absence visible where it is expected
+
+An indexed Array or Map read returns an option. An ordinary inferred local
+forces that option; a name marked with `?` preserves it:
+
+```titan
+function required_at(values: {string}, index: integer): string
+  local required = values[index] -- raises here if absent
+  return required
+end
+
+function optional_at(values: {string}, index: integer,
+                     default_value: string): string
+  local optional? = values[index]
+  return optional or default_value
+end
+```
+
+Use the first form when absence is an invariant violation and the second when
+it is part of normal control flow. Prefer `T?` to a sentinel value of type
+`T`, and handle the option near the lookup. Option coercions do not lift
+through containers or function types, so do not design an API that relies on
+`{T}` becoming `{T?}` or `() -> T` becoming `() -> T?`.
+
+A method receiver is also an automatic unwrap site. After handling the nil
+case, call the method on the optional directly instead of adding a cast whose
+only purpose is to force the receiver:
+
+```titan
+local strings = import "string"
+
+function whole_match(expression: strings.Regex,
+                     subject: string): string?
+  local found: strings.RegexMatch? = expression:match(subject)
+  if not found then return nil end
+  return found:whole()
+end
+```
+
+Write `found:whole()`, not `(found as strings.RegexMatch):whole()`. If the
+receiver is still nil, the call raises at that receiver boundary; an earlier
+guard makes the unwrap known-safe. The option examples in the
+[quick tour](quick-tour.md) are the documentation model for this spelling.
+
+## Distinguish fixed calls, variadic inputs, and flexible results
+
+Titan adjusts a fixed call to the declaration's fixed arity:
+
+- omitted positions are filled with nil and then type-checked;
+- surplus expressions are still evaluated from left to right, but their
+  values are discarded; and
+- an optional fixed parameter is written `T?`, not as an untyped default.
+
+Do not add a variadic tail merely to tolerate omitted or surplus arguments.
+Use `...: T` only when the callee semantically consumes every supplied tail
+value. Likewise, use a flexible return `(...: T)` only when the number of
+results is selected at run time.
+
+A finite consumer sees positions projected from a flexible tail as options.
+An open sink—the trailing arguments of a variadic call, a flexible return, or
+the final expression of a positional Array/integer-Map constructor—preserves
+the complete run. Only the final expression in an expression list expands;
+parenthesize a call when one result is intended.
+
+Prefer positional calls for short functions whose operands explain
+themselves. Use declaration-based named calls when several same-typed
+arguments are easy to transpose or when the names carry real meaning. Named
+calls are unavailable through arbitrary function values and for variadic
+functions, so do not make readability depend on names that disappear at the
+callable boundary.
+
+## Acquire, then defer the close
+
+Place cleanup immediately after successful acquisition:
+
+```titan
+local fs = import "fs"
+
+function first_chunk(path: string): string?
+  local file = fs.open(path, "r")
+  defer file:close()
+  return file:read()
+end
+```
+
+This keeps the acquisition and its ownership rule together, and it covers
+fallthrough, return, break, and error. Multiple defers run last-in-first-out.
+Use `defer do ... end` when one logical cleanup has several statements.
+
+The structural `io.Closer` Interface includes one lifetime rule: every later
+`close()` call is safe. A successful or terminal close becomes a no-op, while
+a pre-commit failure may retry. FIFO behavior, cancellation shielding,
+concurrent-call coalescing, and post-close reads or writes belong to the
+concrete resource rather than to the Interface.
+Prefer explicit close even when async Runtime shutdown would
+eventually release the native owner: an explicit close reports errors at the
+relevant call site and releases the resource earlier.
+
+Use `catch` to recover or add behavior. Use bare `raise` when the original
+error and traceback should continue. Remember that an error in `finally` or a
+deferred statement replaces the pending return, break, or error; cleanup is
+not an error-suppression mechanism.
+
+## Return generic iterators in tuple order
+
+The generic-`for` tuple is always:
+
+```text
+(iterator, state, initial control, close)
+```
+
+Missing positions are nil-filled. The iterator is required; state and initial
+control describe its calls; close is optional. The close function runs after
+normal exhaustion, `break`, `return`, or an error from the initial iterator
+call, a later iteration call, or the body. If it accepts one argument, Titan
+passes the state. Factory-expression evaluation happens before the tuple has
+supplied a close function and is therefore outside that cleanup region.
+
+Return the whole tuple from an iterator constructor rather than hiding
+ownership in an unrelated global. Prefer using the resource itself as state
+when the iterator and closer can operate on it directly:
+
+```titan
+local fs = import "fs"
+
+local function next_line(file: fs.File): string?
+  return file:read_until("\n", true)
+end
+
+local function close_file(file: fs.File)
+  file:close()
+end
+
+function lines(file: fs.File):
+    ((fs.File) -> string?, fs.File, nil, (fs.File) -> ())
+  return next_line, file, nil, close_file
+end
+```
+
+Use an option, `value`, or another nil-capable type for the iterator's first
+result. Generic iteration stops only on nil; false remains a real iteration
+value.
+
+Use the same rule for a nil-terminated Reader method. When the loop only calls
+`read`, handles each returned string, and stops at nil, write the operation as
+the iterator directly:
+
+```titan
+for chunk in reader:read do
+  output:write(chunk)
+end
+```
+
+Do not open-code that protocol with a primed optional and a `while` loop.
+Empty strings are iteration values and should be passed to the consumer; nil
+alone means EOF. Keep an explicit state machine when the operation must retain
+delimiter overlap, restore consumed input after cancellation, or distinguish
+a terminal error tail from ordinary EOF.
+
+## Reuse the standard string writer
+
+When a module already imports `string`, accumulate a result with
+`string.writer()` instead of defining a local chunk array plus a
+`join_chunks` helper or repeatedly concatenating a growing result. The writer
+centralizes string-size checks and linear-time assembly. Its `write` operation
+may yield before committing the argument, so an asynchronous reader that must
+restore consumed bytes on cancellation keeps the current uncommitted chunk
+separately until `write` succeeds.
+
+The string module's own builder implementation and low-level modules that
+cannot import `string` because of the dependency graph are implementation
+boundaries, not invitations to duplicate `join_chunks` in higher-level
+modules.
+
+## Capture parameters directly
+
+Nested functions capture parameters and `self` as ordinary lexical locals.
+Use those names directly in the closure; do not create a `rooted_subject`,
+`owner`, or similar copy whose only purpose is to keep the same value alive.
+The closure environment is already a GC root. Introduce an alias only when it
+represents a real snapshot or a different narrowed value, and name that
+semantic distinction rather than the rooting mechanism.
+
+## Treat async calls as ownership boundaries
+
+Application code should import the public `async` facade and the high-level
+`timer`, `fs`, `net`, and `os` modules. The low-level `uv` module is runtime
+plumbing, not the general application API.
+
+`async.run` schedules a Task and returns before its function runs. Observe
+spawned Tasks with `join` or an intentional cancellation policy so failures do
+not become unobserved session errors. Application code runs directly inside a
+libuv callback until it finishes or starts another asynchronous operation;
+use `async.yield()` when a CPU loop should explicitly cede a turn.
+
+Cancellation is often logical before it is physical. A native request,
+callback, buffer, descriptor, process, or stream owner must remain rooted
+until its terminal callback and cleanup complete, even when the waiting Task
+has been cancelled. Do not implement cancellation by dropping the last Titan
+reference or by allowing a Lua GC finalizer to race libuv. Follow the existing
+owner/control/request split in low-level modules and keep cleanup driven from
+the Runtime's outer safe points.
+
+For shell-command convenience, `io.popen` owns writable stdin and one readable
+stream that merges the child's stdout and stderr. Drain that output before
+`wait`; when input and output must progress together, schedule both directions
+concurrently. Use `os.spawn` instead when the program needs direct executable
+and argv control, separate stdout and stderr, or explicit capture/inheritance
+options. A full operating-system pipe is a normal backpressure condition, not
+a reason to make process I/O blocking.
+
+## Design one logical module before choosing its files
+
+Use a flat `pkg/name.titan` while one source remains coherent. When it becomes
+too large, a folder module uses `pkg/name/name.titan` as its canonical main
+and immediate sibling `.titan` files as contributors.
+
+Contributors are not submodules. They share one namespace, checker/codegen
+pass, initializer, artifact, and module identity. A top-level `local` is
+module-private, not file-private. Do not import an immediate contributor or
+name one as though it were `pkg.name.helper`.
+
+Keep the main source responsible for the canonical module entry and sole
+optional root initializer. Group public and private declarations with their
+real responsibility across contributors; the files are an organizational
+choice, not additional visibility boundaries. Do not use contributor basename
+order as an implicit dependency mechanism. Although the compiler combines
+contributors deterministically, function and nominal declarations are
+order-independent, while module-variable initializers have a deliberate
+earlier-import/earlier-variable frontier. Put imports and prerequisite module
+variables before a module variable that needs them.
+
+## Use canonical Titan imports and qualified Lua loads
+
+For the standard modules with parser-provided short-import sugar, Titan source
+uses the short canonical spelling:
+
+```titan
+local fs = import "fs"
+local strings = import "string"
+```
+
+Use an alias such as `strings` when the short name is also a type keyword.
+The short-name set is `coroutine`, `uv`, `async`, `timer`, `io`, `fs`, `net`,
+`os`, `peg`, and `string`. This rule applies inside standard-library sources
+too: spelling one of those imports as `"titan.fs"`, `"titan.io"`, or a
+similar qualified name is a style violation, not extra precision.
+Lua loads the same logical modules with qualified names:
+
+```lua
+local fs = require "titan.fs"
+local strings = require "titan.string"
+```
+
+This keeps Lua's standard `io`, `os`, `string`, and other global/module names
+unchanged. The `titan.math`, `titan.iter`, `titan.gc`, and `titan.lua` modules
+have no compiler short-import sugar, so their qualified names are the canonical
+Titan spellings as well as their Lua load names:
+
+```titan
+local math = import "titan.math"
+local iter = import "titan.iter"
+```
+
+Do not publish or document an unqualified Lua replacement for a standard Lua
+module.
+
+Application modules keep their own dotted identities in both languages:
+Titan imports `app.model`, and Lua requires `app.model`.
+
+## Keep Lua and C machinery behind narrow audited boundaries
+
+Public standard-library APIs should expose ordinary Titan types. Keep Lua API
+state, borrowed stack values, raw C pointers, local FFI records, and libuv
+controls inside the low-level module that owns their lifetime. Convert to a
+public record, union, Interface, Array, Map, option, string, or number before
+returning from that boundary.
+
+Ordinary C operations belong in Titan code behind `foreign import`. This
+includes calls to reviewed public libuv APIs: keep the operation, error
+translation, rooting, and ownership in the Titan wrapper rather than adding a
+C forwarding function. Reserve C shim code for callback ABI trampolines,
+opaque-layout normalization, or compile-time portability facts that Titan
+cannot express. For example, `titan/uv.h` may normalize both the presence and
+value of a platform constant, while Titan still invokes the corresponding
+ordinary C operation directly through the FFI. Keep every such shim narrow
+and namespaced. When libuv supplies an operation, prefer that reviewed portable
+API over either a POSIX-specific shortcut or a lower-level ISO C platform
+service; use the latter only where libuv has no equivalent, such as calendar
+conversion and locale selection.
+
+Code that calls the raw Lua API must preserve stack balance on every path and
+must not let a borrowed Lua pointer outlive its stack/rooting contract. Keep
+weak-Map policy behind `titan.gc.weak` and `titan.gc.ephemeron`; even stdlib
+modules with other audited Lua calls should not duplicate `__mode` metatable
+setup. Keep dynamic Lua execution and conversion centralized rather than
+scattering `lua_*` calls through otherwise typed modules. A boundary that can allocate,
+raise, yield, invoke user code, or run a callback deserves explicit review of
+its roots and cleanup behavior.
+
+Do not expose a private bundled native dependency as part of an application
+ABI. In particular, the bundled libuv and LPegLabel payloads belong to the
+combined standard provider; extensions follow the documented provider/import
+contract rather than embedding a second native copy.
+
+## Keep examples and documentation exact
+
+Examples should compile as written and use the same module identities that
+real programs use. Distinguish binary payloads from text paths, byte indices
+from Unicode concepts, direct executable spawning from shell execution, and a
+concrete resource's guarantees from an Interface's method shape.
+
+When a user-visible language feature changes, update both the language and
+implementation manuals. When a standard-library API changes, update its
+language chapter, relevant implementation chapter, type-schema fixture, and
+library tests together. Keep roadmap-only APIs visibly provisional; do not put
+guessed signatures in otherwise runnable documentation.

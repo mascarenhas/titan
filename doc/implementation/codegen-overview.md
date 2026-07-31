@@ -190,7 +190,10 @@ For a non-exact branded call, caller-side `codevaluecall` applies the strict
 result guards after this adapter has boxed the native results.
 
 Symbol names come from `mangle_qn` (`coder.lua`), which replaces `.` and
-`-` with `_`: module `foo.bar` yields `foo_bar_init`, `foo_bar_abi`,
+`-` with `_`. The driver has already restricted every logical component to
+`[A-Za-z_][A-Za-z0-9_-]*`, so this produces a portable C identifier rather
+than admitting arbitrary path or template bytes. Module `foo.bar` yields
+`foo_bar_init`, `foo_bar_abi`,
 `foo_bar_types` and
 `luaopen_foo_bar`; a function `f` in it becomes `foo_bar_f_titan` /
 `foo_bar_f_titanentry_lua` / `foo_bar_f_titanentry_strict`. An unbound method

@@ -1,0 +1,42 @@
+local lua = foreign import "lua.h"
+local ffi = foreign import "titan/ffi.h"
+
+-- Mirror Lua's next while keeping every temporary Lua-stack value rooted until
+-- it has been copied into Titan's traced value representation.
+function next(map: {value: value}, key: value): (value, value)
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if lua.lua_checkstack(L, 3) == 0 then
+    raise "cannot reserve Lua stack for map iteration"
+  end
+
+  ffi.lua_pushtvalue(L, map)
+  ffi.lua_pushtvalue(L, key)
+  if lua.lua_next(L, -2) == 0 then
+    return nil, nil
+  end
+
+  local next_key: value = ffi.lua_totvalue(L, -2)
+  local next_value: value = ffi.lua_totvalue(L, -1)
+  return next_key, next_value
+end
+
+function pairs(map: {value: value}):
+    (({value: value}, value) -> (value, value),
+     {value: value}, nil, nil)
+  return next, map, nil, nil
+end
+
+local function array_next(array: {value}, index: integer):
+    (integer?, value)
+  local next_index = index + 1
+  if next_index > #array then
+    return nil, nil
+  end
+  return next_index, array[next_index]
+end
+
+function ipairs(array: {value}):
+    (({value}, integer) -> (integer?, value), {value}, integer, nil)
+  return array_next, array, 0, nil
+end

@@ -1,0 +1,450 @@
+-- Mathematical semantics and xoshiro256** translated and adapted from
+-- src/lmathlib.c and numeric conversion from src/lobject.c/lbaselib.c in the
+-- immutable Lua 5.5.0 release:
+-- https://www.lua.org/ftp/lua-5.5.0.tar.gz
+-- Copyright (C) 1994-2025 Lua.org, PUC-Rio. MIT terms are reproduced in
+-- LICENSES/lua-LICENSE.
+local cmath = foreign import "math.h"
+local cstdlib = foreign import "stdlib.h"
+local ctime = foreign import "time.h"
+local cstdint = foreign import "stdint.h"
+local cstring = foreign import "string.h"
+local clocale = foreign import "locale.h"
+local climits = foreign import "limits.h"
+local ffi = foreign import "titan/ffi.h"
+
+pi: float = 3.141592653589793238462643383279502884
+huge: float = 1e999
+maxinteger: integer = 0
+mininteger: integer = 0
+
+local record RandomState
+  local first: integer
+  local second: integer
+  local third: integer
+  local fourth: integer
+end
+
+local random_state = RandomState.new(0, 0xff, 0, 0)
+
+local function rotate_left(word: integer, amount: integer): integer
+  return (word << amount) | (word >> (64 - amount))
+end
+
+local function next_random(): integer
+  local first = random_state.first
+  local second = random_state.second
+  local third = random_state.third ~ first
+  local fourth = random_state.fourth ~ second
+  local result = rotate_left(second * 5, 7) * 9
+  random_state.first = first ~ fourth
+  random_state.second = second ~ third
+  random_state.third = third ~ (second << 17)
+  random_state.fourth = rotate_left(fourth, 45)
+  return result
+end
+
+local function set_random_seed(first: integer, second: integer)
+  random_state.first = first
+  random_state.second = 0xff
+  random_state.third = second
+  random_state.fourth = 0
+  local discarded = 0
+  while discarded < 16 do
+    next_random()
+    discarded = discarded + 1
+  end
+end
+
+local function random_float(word: integer): float
+  -- A double has 53 significant binary digits.  Discard the low eleven bits
+  -- and scale the remaining unsigned value into [0, 1), exactly as Lua does.
+  return (word >> 11) * 1.1102230246251565e-16
+end
+
+function ult(left: integer, right: integer): boolean
+  -- Flipping the sign bit maps unsigned order onto ordinary signed order.
+  return (left ~ mininteger) < (right ~ mininteger)
+end
+
+local function project_random(word: integer, maximum: integer): integer
+  local mask = maximum
+  local shift = 1
+  while (mask & (mask + 1)) ~= 0 do
+    mask = mask | (mask >> shift)
+    shift = shift * 2
+  end
+  local projected = word & mask
+  while ult(maximum, projected) do
+    projected = next_random() & mask
+  end
+  return projected
+end
+
+function random(lower: integer?, upper: integer?): value
+  -- Draw before validating the interval, matching Lua's state advancement.
+  local word = next_random()
+  if not lower then
+    if upper then raise "random lower limit is required" end
+    return random_float(word)
+  end
+
+  local low = lower as integer
+  local high = low
+  if upper then
+    high = upper as integer
+  else
+    if low == 0 then return word end
+    high = low
+    low = 1
+  end
+  if low > high then raise "random interval is empty" end
+  return project_random(word, high - low) + low
+end
+
+function randomseed(first: integer?, second: integer?): (integer, integer)
+  local actual_first = 0
+  local actual_second = 0
+  if first then
+    actual_first = first as integer
+    if second then actual_second = second as integer end
+  else
+    if second then raise "randomseed first component is required" end
+    -- Lua promises only a weak attempt at an unpredictable default seed.  C's
+    -- wall-clock and process-CPU clocks supply that weak seed without Lua APIs.
+    actual_first = (ctime.time(nil) as integer) ~
+                   (ctime.clock() as integer)
+    actual_second = next_random()
+  end
+  set_random_seed(actual_first, actual_second)
+  return actual_first, actual_second
+end
+
+function abs(number: float): float
+  return cmath.fabs(number) as float
+end
+
+function acos(number: float): float
+  return cmath.acos(number) as float
+end
+
+function asin(number: float): float
+  return cmath.asin(number) as float
+end
+
+function atan(y: float, x: float?): float
+  local actual_x = 1.0
+  if x then actual_x = x as float end
+  return cmath.atan2(y, actual_x) as float
+end
+
+function ceil(number: float): float
+  return cmath.ceil(number) as float
+end
+
+function cos(number: float): float
+  return cmath.cos(number) as float
+end
+
+function deg(radians: float): float
+  return radians * (180.0 / pi)
+end
+
+function exp(number: float): float
+  return cmath.exp(number) as float
+end
+
+function floor(number: float): float
+  return cmath.floor(number) as float
+end
+
+function fmod(numerator: float, denominator: float): float
+  return cmath.fmod(numerator, denominator) as float
+end
+
+function frexp(number: float): (float, integer)
+  local exponent: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
+  local mantissa = cmath.frexp(number, exponent) as float
+  return mantissa, exponent as integer
+end
+
+function ldexp(mantissa: float, exponent: integer): float
+  return cmath.ldexp(
+    mantissa, exponent as ffi.titan_ffi_int) as float
+end
+
+function log(number: float, base: float?): float
+  if not base then return cmath.log(number) as float end
+  local actual_base = base as float
+  return (cmath.log(number) / cmath.log(actual_base)) as float
+end
+
+function log2(number: float): float
+  return cmath.log2(number) as float
+end
+
+function log10(number: float): float
+  return cmath.log10(number) as float
+end
+
+function max(first: float, ...: float): float
+  local result = first
+  local index = 1
+  while index <= #... do
+    local candidate = ...[index]
+    if result < candidate then result = candidate end
+    index = index + 1
+  end
+  return result
+end
+
+function min(first: float, ...: float): float
+  local result = first
+  local index = 1
+  while index <= #... do
+    local candidate = ...[index]
+    if candidate < result then result = candidate end
+    index = index + 1
+  end
+  return result
+end
+
+function modf(number: float): (float, float)
+  local integral: ffi.titan_ffi_double =
+    0.0 as ffi.titan_ffi_double
+  local fractional = cmath.modf(number, integral) as float
+  return integral as float, fractional
+end
+
+function rad(degrees: float): float
+  return degrees * (pi / 180.0)
+end
+
+function sin(number: float): float
+  return cmath.sin(number) as float
+end
+
+function sqrt(number: float): float
+  return cmath.sqrt(number) as float
+end
+
+function tan(number: float): float
+  return cmath.tan(number) as float
+end
+
+local function byte_at(text: string, index: integer): integer
+  local bytes = text as const *cstdint.uint8_t
+  return bytes[index - 1] as integer
+end
+
+local function space(byte: integer): boolean
+  return byte == 32 or (byte >= 9 and byte <= 13)
+end
+
+local function digit_value(byte: integer): integer
+  if byte >= 48 and byte <= 57 then return byte - 48 end
+  if byte >= 65 and byte <= 90 then return byte - 65 + 10 end
+  if byte >= 97 and byte <= 122 then return byte - 97 + 10 end
+  return -1
+end
+
+local function wrapping_integer(text: string, first: integer, last: integer,
+                                base: integer, negative: boolean): integer
+  local result = 0
+  local position = first
+  while position <= last do
+    result = result * base + digit_value(byte_at(text, position))
+    position = position + 1
+  end
+  if negative then return 0 - result end
+  return result
+end
+
+local function decimal_integer(text: string, first: integer, last: integer,
+                               negative: boolean): integer?
+  local result = 0
+  local position = first
+  if negative then
+    while position <= last do
+      local digit = digit_value(byte_at(text, position))
+      if result < -922337203685477580 or
+          (result == -922337203685477580 and digit > 8) then
+        return nil
+      end
+      result = result * 10 - digit
+      position = position + 1
+    end
+  else
+    while position <= last do
+      local digit = digit_value(byte_at(text, position))
+      if result > 922337203685477580 or
+          (result == 922337203685477580 and digit > 7) then
+        return nil
+      end
+      result = result * 10 + digit
+      position = position + 1
+    end
+  end
+  return result
+end
+
+local function parse_in_base(text: string, base: integer): value?
+  if base < 2 or base > 36 then raise "base out of range" end
+  local first = 1
+  local last = #text
+  while first <= last and space(byte_at(text, first)) do first = first + 1 end
+  while last >= first and space(byte_at(text, last)) do last = last - 1 end
+  local negative = false
+  if first <= last then
+    local sign = byte_at(text, first)
+    if sign == 43 or sign == 45 then
+      negative = sign == 45
+      first = first + 1
+    end
+  end
+  if first > last then return nil end
+  local position = first
+  while position <= last do
+    local digit = digit_value(byte_at(text, position))
+    if digit < 0 or digit >= base then return nil end
+    position = position + 1
+  end
+  return wrapping_integer(text, first, last, base, negative)
+end
+
+local function decimal_exponent(text: string, position: integer,
+                                last: integer): integer
+  if position <= last then
+    local sign = byte_at(text, position)
+    if sign == 43 or sign == 45 then position = position + 1 end
+  end
+  local first_digit = position
+  while position <= last do
+    local digit = digit_value(byte_at(text, position))
+    if digit < 0 or digit > 9 then break end
+    position = position + 1
+  end
+  if position == first_digit then return 0 end
+  return position
+end
+
+local function parsed_float(text: string,
+                            point_position: integer): float
+  -- Lua numerals always use '.', even when the active C locale uses another
+  -- decimal-point byte.  Translate the already length-bounded, fully validated
+  -- numeral before handing it to strtod.
+  if point_position == 0 then return cstdlib.strtod(text, nil) as float end
+  local convention = clocale.localeconv()
+  local decimal_point = convention.decimal_point
+  if not decimal_point or decimal_point[0] == 46 then
+    return cstdlib.strtod(text, nil) as float
+  end
+  local source = text as const *ffi.titan_ffi_char
+  local storage = ffi.titan_ffi_char.new_array(#text + 1)
+  local normalized = storage as *ffi.titan_ffi_char
+  cstring.memcpy(normalized, source, #text as cstring.size_t)
+  normalized[point_position - 1] = decimal_point[0]
+  normalized[#text] = 0
+  return cstdlib.strtod(normalized, nil) as float
+end
+
+local function parse_numeral(text: string): value?
+  local first = 1
+  local last = #text
+  while first <= last and space(byte_at(text, first)) do first = first + 1 end
+  while last >= first and space(byte_at(text, last)) do last = last - 1 end
+  local negative = false
+  if first <= last then
+    local sign = byte_at(text, first)
+    if sign == 43 or sign == 45 then
+      negative = sign == 45
+      first = first + 1
+    end
+  end
+  if first > last then return nil end
+
+  local hexadecimal = first + 1 <= last and byte_at(text, first) == 48 and
+    (byte_at(text, first + 1) == 88 or byte_at(text, first + 1) == 120)
+  local position = first
+  if hexadecimal then position = position + 2 end
+  local digits_begin = position
+  local digit_count = 0
+  local digit_base = 10
+  if hexadecimal then digit_base = 16 end
+  while position <= last do
+    local digit = digit_value(byte_at(text, position))
+    if digit < 0 or digit >= digit_base then break end
+    digit_count = digit_count + 1
+    position = position + 1
+  end
+
+  local has_point = false
+  local point_position = 0
+  if position <= last and byte_at(text, position) == 46 then
+    has_point = true
+    point_position = position
+    position = position + 1
+    while position <= last do
+      local digit = digit_value(byte_at(text, position))
+      if digit < 0 or digit >= digit_base then break end
+      digit_count = digit_count + 1
+      position = position + 1
+    end
+  end
+  if digit_count == 0 then return nil end
+
+  local has_exponent = false
+  if position <= last then
+    local marker = byte_at(text, position)
+    if (not hexadecimal and (marker == 69 or marker == 101)) or
+        (hexadecimal and (marker == 80 or marker == 112)) then
+      has_exponent = true
+      position = decimal_exponent(text, position + 1, last)
+      if position == 0 then return nil end
+    end
+  end
+  if position <= last then return nil end
+
+  if hexadecimal and not has_point and not has_exponent then
+    return wrapping_integer(
+      text, digits_begin, last, 16, negative)
+  elseif not hexadecimal and not has_point and not has_exponent then
+    local integer_result: integer? = decimal_integer(
+      text, digits_begin, last, negative)
+    if integer_result then return integer_result as integer end
+  end
+  return parsed_float(text, point_position)
+end
+
+function tonumber(candidate: value, base: integer?): value?
+  if base then
+    if not (candidate is string) then
+      raise "base conversion requires a string"
+    end
+    return parse_in_base(candidate as string, base as integer)
+  end
+  -- Returning a boxed number directly preserves its existing integer/float
+  -- representation without inspecting Lua's internal TValue tag.
+  if candidate is float then return candidate end
+  if candidate is string then return parse_numeral(candidate as string) end
+  return nil
+end
+
+function tointeger(candidate: value): integer?
+  if candidate is integer then return candidate as integer end
+  if candidate is string then
+    local parsed: value? = parse_numeral(candidate as string)
+    if parsed ~= nil and ((parsed as value) is integer) then
+      return (parsed as value) as integer
+    end
+  end
+  return nil
+end
+
+do
+  -- Foreign constants are not Titan constant expressions, so publish the
+  -- target's actual limits during the module's one-time initializer.
+  maxinteger = climits.LLONG_MAX as integer
+  mininteger = climits.LLONG_MIN as integer
+  randomseed()
+end

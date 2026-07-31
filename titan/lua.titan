@@ -1,0 +1,260 @@
+local lua = foreign import "lua.h"
+local lual = foreign import "lauxlib.h"
+local cstddef = foreign import "stddef.h"
+local ffi = foreign import "titan/ffi.h"
+
+local async = import "async"
+local fs = import "fs"
+local io = import "io"
+local str = import "string"
+
+local type LuaChunk = (...: value) -> (...: value)
+local type Searcher = (string) -> (value, value)
+local type Loader = (string, value) -> value
+
+-- A cooperative require may yield while expanding, probing, or reading Lua
+-- source candidates. A second load of that same logical name is an explicit
+-- error instead of a duplicate load or a hidden scheduler wait protocol.
+local loading: {string: boolean} = {}
+
+local function global_value(name: string): value
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if lua.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for global lookup"
+  end
+  lua.lua_getglobal(L, name)
+  return ffi.lua_totvalue(L, -1)
+end
+
+local function registry_map(name: string): {string: value}
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if lua.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for registry lookup"
+  end
+  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, name)
+  if lua.lua_type(L, -1) ~= lua.LUA_TTABLE then
+    raise "Lua registry entry '" .. name .. "' is not a table"
+  end
+  local result: value = ffi.lua_totvalue(L, -1)
+  return result as {string: value}
+end
+
+local function is_lua_function(candidate: value): boolean
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if lua.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for function test"
+  end
+  ffi.lua_pushtvalue(L, candidate)
+  return lua.lua_type(L, -1) == lua.LUA_TFUNCTION
+end
+
+function load(chunk: string, name: string?, env: value):
+    (...: value) -> (...: value)
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if lua.lua_checkstack(L, 2) == 0 then
+    raise "cannot reserve Lua stack for chunk loading"
+  end
+
+  local chunkname = chunk
+  if name then chunkname = name as string end
+  local status = lual.luaL_loadbufferx(
+    L, chunk, #chunk as cstddef.size_t, chunkname, nil)
+  if status ~= lua.LUA_OK then
+    local failure: value = ffi.lua_totvalue(L, -1)
+    raise failure
+  end
+
+  -- Nil and an omitted fixed argument are intentionally identical: leaving the
+  -- first upvalue alone preserves the ordinary global environment installed by
+  -- Lua's loader.
+  if env ~= nil then
+    ffi.lua_pushtvalue(L, env)
+    if not lua.lua_setupvalue(L, -2, 1) then
+      -- A binary chunk may not expose a first upvalue. lua_setupvalue leaves the
+      -- supplied value on the stack in that case.
+      lua.lua_settop(L, -2)
+    end
+  end
+
+  local callable: value = ffi.lua_totvalue(L, -1)
+  return callable as LuaChunk
+end
+
+function load_from_reader(reader: io.Reader, name: string?, env: value):
+    (...: value) -> (...: value)
+  local builder = str.writer()
+  for chunk in reader:read do
+    builder:write(chunk)
+  end
+  return load(builder:drain(), name, env)
+end
+
+local function replace_literal(subject: string, needle: string,
+                               replacement: string): string
+  local builder = str.writer()
+  local position = 1
+  while position <= #subject do
+    local found: integer? = str.find(subject, needle, position)
+    if not found then break end
+    local first = found as integer
+    if first > position then
+      builder:write(str.sub(subject, position, first - 1))
+    end
+    builder:write(replacement)
+    position = first + #needle
+  end
+  if position <= #subject then
+    builder:write(str.sub(subject, position))
+  end
+  return builder:drain()
+end
+
+local function open_source_candidate(filename: string): fs.File?
+  local opened: fs.File? = nil
+  do
+    opened = fs.open(filename, "r")
+  catch
+    -- Lua's source searcher treats every failure to open a candidate as a
+    -- non-match. Cancellation and non-filesystem errors still propagate.
+    if error is async.Error then return nil end
+    raise
+  end
+  return opened
+end
+
+local function source_search(modname: string, path: string):
+    (value, value, string)
+  local module_path = replace_literal(modname, ".", "/")
+  local messages = str.writer()
+  local position = 1
+  local finished = false
+
+  while not finished do
+    local separator: integer? = str.find(path, ";", position)
+    local template = ""
+    if separator then
+      local separator_position = separator as integer
+      template = str.sub(path, position, separator_position - 1)
+      position = separator_position + 1
+    else
+      template = str.sub(path, position)
+      finished = true
+    end
+
+    local filename = replace_literal(template, "?", module_path)
+    local maybe_file: fs.File? = open_source_candidate(filename)
+    if maybe_file then
+      local file = maybe_file as fs.File
+      defer file:close()
+      local loaded: LuaChunk? = nil
+      do
+        loaded = load_from_reader(file, "@" .. filename, nil)
+      catch
+        if error is async.Cancelled then raise end
+        raise "error loading module '" .. modname ..
+              "' from file '" .. filename .. "':\n\t" ..
+              str.tostring(error)
+      end
+      return loaded as LuaChunk, filename, ""
+    end
+
+    messages:write("\n\tno file '" .. filename .. "'")
+  end
+
+  return nil, nil, messages:drain()
+end
+
+local function call_searcher(candidate: value, modname: string):
+    (value, value, string)
+  local searcher = candidate as Searcher
+  local first, data = searcher(modname)
+  if is_lua_function(first) then return first, data, "" end
+  if first is string then
+    return nil, nil, "\n\t" .. (first as string)
+  end
+  return nil, nil, ""
+end
+
+local function find_loader(modname: string,
+                           searchers: {integer: value},
+                           path: string): (value, value)
+  local messages = str.writer()
+
+  -- Slot 1 is Lua's preload searcher and remains replaceable by a custom
+  -- searcher. Slot 2 is deliberately reserved for the asynchronous source pass
+  -- below; calling Lua's stock slot would synchronously open source files.
+  local preload: value = searchers[1]
+  if preload ~= nil then
+    local loader, data, failure = call_searcher(preload, modname)
+    if loader ~= nil then return loader, data end
+    if #failure > 0 then messages:write(failure) end
+  end
+
+  local source_loader, source_data, source_failure =
+    source_search(modname, path)
+  if source_loader ~= nil then return source_loader, source_data end
+  if #source_failure > 0 then messages:write(source_failure) end
+
+  local index = 3
+  while true do
+    local candidate: value = searchers[index]
+    if candidate == nil then break end
+    local loader, data, failure = call_searcher(candidate, modname)
+    if loader ~= nil then return loader, data end
+    if #failure > 0 then messages:write(failure) end
+    index = index + 1
+  end
+
+  raise "module '" .. modname .. "' not found:" .. messages:drain()
+end
+
+function require(modname: string): value
+  local loaded = registry_map(lual.LUA_LOADED_TABLE as string)
+  local cached: value = loaded[modname]
+  if cached then return cached end
+
+  if loading[modname] then
+    raise "module '" .. modname .. "' is already being loaded"
+  end
+  loading[modname] = true
+  defer loading[modname] = nil
+
+  local raw_package: value = global_value("package")
+  if not (raw_package is {string: value}) then
+    raise "global 'package' is not a table"
+  end
+  local package = raw_package as {string: value}
+  local raw_searchers: value = package["searchers"]
+  if not (raw_searchers is {integer: value}) then
+    raise "'package.searchers' must be a table"
+  end
+  local raw_path: value = package["path"]
+  if not (raw_path is string) then
+    raise "'package.path' must be a string"
+  end
+
+  local loader_value, loader_data = find_loader(
+    modname, raw_searchers as {integer: value}, raw_path as string)
+  local loader = loader_value as Loader
+  local result: value = loader(modname, loader_data)
+  if result ~= nil then loaded[modname] = result end
+
+  local installed: value = loaded[modname]
+  if installed == nil then
+    installed = true
+    loaded[modname] = installed
+  end
+  return installed
+end
+
+function dofile(filename: string, ...: value): (...: value)
+  local file = fs.open(filename, "r")
+  defer file:close()
+  local chunk: LuaChunk =
+    load_from_reader(file, "@" .. filename, nil)
+  return chunk(...)
+end

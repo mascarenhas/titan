@@ -6,6 +6,8 @@ local cstring = foreign import "string.h"
 local climits = foreign import "limits.h"
 local csignal = foreign import "signal.h"
 local cerrno = foreign import "errno.h"
+local cfcntl = foreign import "fcntl.h"
+local cunistd = foreign import "unistd.h"
 local coroutine = import "coroutine"
 
 -- The canonical folder main owns these ordinary foreign imports so every
@@ -43,7 +45,6 @@ local REQUEST_FS = 4
 local REQUEST_NET = 5
 local REQUEST_SIGNAL = 6
 local REQUEST_PROCESS = 7
-local REQUEST_HELPER = 8
 
 local NET_CONNECT = 1
 local NET_LISTEN = 2
@@ -89,17 +90,12 @@ local PIPE_OPEN = 2
 local PIPE_CLOSING = 3
 local PIPE_CLOSED = 4
 
-local PIPE_STDIN = 1
-local PIPE_STDOUT = 2
-local PIPE_STDERR = 3
-
 local PROCESS_SPAWN = 1
 local PROCESS_WAIT = 2
 local PROCESS_WRITE_STDIN = 3
-local PROCESS_CLOSE_STDIN = 4
-local PROCESS_READ_STDOUT = 5
-local PROCESS_READ_STDERR = 6
-local PROCESS_DISPOSE = 7
+local PROCESS_CLOSE_STREAM = 4
+local PROCESS_READ_STREAM = 5
+local PROCESS_CLOSE_SPAWN_CONFIG = 6
 
 local PROCESS_OWNER_ALLOCATED = 0
 local PROCESS_OWNER_SUBMITTED = 1
@@ -107,11 +103,6 @@ local PROCESS_OWNER_CALLBACK = 2
 local PROCESS_OWNER_RETIRED = 3
 
 local PROCESS_GRACE_MILLISECONDS = 5000
-
-local HELPER_STDOUT = 1
-local HELPER_STDERR = 2
-local HELPER_STDIN = 3
-local HELPER_WAIT = 4
 
 local FS_OWNER_ALLOCATED = 0
 local FS_OWNER_SUBMITTED = 1
