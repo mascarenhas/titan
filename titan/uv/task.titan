@@ -775,7 +775,13 @@ local function arm_request(task: Task, request: Request): DriveControl?
       enqueue_file_operation(file, operation)
       task.operation = operation
       task.state = TASK_WAITING
-      return submit_file_head(file, task)
+      local failure: Error? = submit_file_head(file, task)
+      if failure then
+        local cleanup_request: Request? = nil
+        if request.cleanup then cleanup_request = request end
+        return DriveControl.new(DRIVE_ERROR, failure, "", cleanup_request)
+      end
+      return nil
     end
 
     local owner, status = submit_fs_operation(operation)

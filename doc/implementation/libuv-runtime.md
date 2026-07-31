@@ -73,7 +73,7 @@ one module state inside the combined DSO:
 | `titan/uv/uv.titan` | shared imports, constants, module state, bootstrap, program-argument and inherited-`SIGPIPE` setup, and the sole root initializer; no record or public member |
 | `file.titan` | public `uv_file` and `_fs_*` API plus private FS constants, operations, controls, requests, File FIFO/ownership, callbacks, dispatch, and shutdown repair |
 | `os.titan` | public non-process `_os_*` API plus private signal specifications/controls/owners, one-shot callback retirement, and portable OS helpers |
-| `process.titan` | public `uv_process_t`, `_os_process_*`, and `_os_communicate` API plus private process/pipe controls, operations, requests, helper groups, child stdio callbacks, and forced shutdown |
+| `process.titan` | public `uv_process_t`/`uv_pipe_t`, `_os_process_*`, `_os_stream_*`, and `_os_communicate` API plus private process/pipe controls, operations, requests, helper groups, child stdio callbacks, and forced shutdown |
 | `runtime.titan` | public `Error`, `_loop`, and `_version` API plus private loop/Runtime and byte/text/buffer records, literal NUL scanning, trace preservation, allocation, and ownership helpers |
 | `task.titan` | public `Cancelled`, `uv_timer_t`, `Task`, Task methods, `_run`/`_sleep`/`_yield`, and ticker API plus private timer/drive/request/ticker records and coroutine driving |
 | `tcp.titan` | public `uv_tcp_t`, `_net_*`, and `_net_eof_error` API plus private address/operation/request/control/owner records, DNS/TCP queues, callbacks, and network teardown |
@@ -133,8 +133,11 @@ intentional logical API change. A 0.18 provider and runtime had to be built
 and distributed together. ABI 0.19 preserved that callback boundary while
 adding union/variant schemas and the public nominal-static slot prefix. ABI
 0.20 preserves it again while changing Array proxy and function-closure
-layouts. No cross-ABI migration is provided: use a clean 0.20 prefix and
-leave separately versioned 0.18/0.19 installations untouched.
+layouts, adding Interfaces, and exporting exact `uv_pipe_t` wrappers plus the
+process-stream bridge used by `titan.os`. The exact `titan_uv_types` fixture
+pins that intentional logical API change. No cross-ABI migration is provided:
+use a clean 0.20 prefix and leave separately versioned 0.18/0.19 installations
+untouched.
 
 The Makefile's explicit `UV_TITAN_SOURCES` list names all seven files inside
 the reviewed `STDLIB_TITAN_SOURCES` prerequisite set. It intentionally does
@@ -193,24 +196,27 @@ allocation count without separately storing a pointer and `value` root.
 
 Persistent file descriptors use a separate exported `uv_file` wrapper. Its
 first local field has the exact scalar C type `uv_file`, followed by local
-Runtime-generation, state, FIFO, root links, and retained read excess.
-`fs.File` contains that wrapper in its own single local field. Neither layer
+Runtime-generation, state, FIFO, and root links. `fs.File` contains that
+wrapper plus its high-level retained read excess in local fields. Neither layer
 boxes the descriptor as `value`, and neither constructor is available outside
 its declaring module. `fs.File` satisfies all seven `titan.io` Interfaces
-through the ordinary method adapter: zero-argument Interface reads nil-fill
-its optional `max_bytes`, and Interface writes discard the concrete byte-count
+through the ordinary method adapter: zero-argument Interface reads nil-fill its
+optional `max_bytes`, and Interface writes discard the concrete byte-count
 result.
 
-The process boundary uses the same pattern across four facade records. The
-exported `uv.uv_process_t` has an exact `owned *uv_process_t` local field.
+The process boundary uses the same pattern across its three public
+process/stream facade records. The exported `uv.uv_process_t` has an exact
+`owned *uv_process_t` local field.
 `os.Process` retains that handle privately and publishes `stdin:
-os.InputStream` plus `stdout`/`stderr: os.OutputStream`. Each stream retains the
-same exact handle in a local field; output streams additionally own their pipe
-selector, retained excess, and reader lock. This avoids a Process/stream cycle
-while keeping every facade unforgeable outside `titan.os`. Private
-`uv_pipe_t`, `uv_write_t`, and grace-timer records likewise retain exact native
-owners. `InputStream` structurally satisfies the exact `io.Writer`/`Closer`
-combinations, while `OutputStream` exactly satisfies `io.Reader`.
+os.OutputStream` plus `stdout`/`stderr: os.InputStream`. The exported
+`uv.uv_pipe_t` wraps each exact `owned *uv_pipe_t`; every stream facade retains
+its own pipe wrapper rather than duplicating the process handle. The pipe
+control identifies its role and retains the shared process control, so no
+facade discriminator or public Process/stream cycle is needed. Readable
+`InputStream` values additionally own retained excess and a reader lock.
+Private `uv_pipe_write_t` and grace-timer records likewise retain exact native
+owners. `InputStream` exactly satisfies `io.Reader`, while `OutputStream`
+structurally satisfies the exact `io.Writer`/`Closer` combinations.
 Homogeneous ownership links use their exact record type, with `T?` only where
 the link may be absent. `value` is reserved for opaque Lua roots, arbitrary
 task/error payloads, and genuinely heterogeneous owner slots. Native handles
@@ -312,32 +318,25 @@ lands behind work that was already waiting. If advancing a File encounters an
 immediate error for another Task, a task-specific zero timer delivers it rather
 than directly resuming an independent root from the current callback.
 
-Plain reads and delimiter reads share `uv_file`'s retained binary excess. The
-queue pump consults it only after the corresponding operation reaches the
-head; a later Task never bypasses older FIFO work. A plain read slices at most
-its requested count and completes without submitting or topping up from
-libuv. A delimiter read first consumes the complete excess and either
-completes there or retains the same head while submitting another native read.
-The owner-free completion path removes and advances the head before returning
-a `DriveControl` to the Task that just yielded, or schedules an ordinary
-task-drive owner for an already-waiting Task.
+There is no delimiter-specific filesystem request. The `fs` facade owns one
+retained binary `excess` string. `File:read` slices that excess without
+topping it up, otherwise it submits the ordinary `_fs_read` operation.
+`File:read_until` is high-level composition over repeated `File:read` calls
+and imports `titan.string` for binary-safe literal search and slicing.
+Completed chunks are joined as a balanced tree only when a result, EOF tail,
+or restoration is needed; the checked total prevents Titan-integer overflow
+before the final string allocation. A match prepends its suffix to the
+facade's excess. If a later read raises, already returned chunks are restored
+before the error propagates.
 
-Only a delimiter operation allocates an optional `FsReadUntilState`. It owns
-the delimiter, chop flag, one chunk Array, a checked total length, and the
-short suffix needed to detect a delimiter spanning native reads. Each native
-submission is 64 KiB. Completed chunks are joined as a balanced tree only
-when a result, EOF tail, or restoration is needed; no iteration rebuilds the
-complete prefix. The checked total prevents Titan-integer overflow before a
-final string allocation. A match splits the joined bytes once, publishes the
-selected prefix, and prepends the remainder to the File's excess.
-
-If cancellation wins, a native read fails, or a later submission is rejected,
-the operation joins and prepends every consumed chunk back to excess before
-propagating the cancellation or error. The same repair covers callback
-invariant failure and allocating queue-head work before any native owner
-exists. A successful plain read whose Task was cancelled after submission
-likewise moves its copied payload to excess. EOF itself is not stored as File
-state, so later growth remains observable.
+An excess-only facade read submits no uv operation. When native input is
+needed, each underlying read is a separate FIFO operation, so another Task's
+operation may run between delimiter-search iterations. Before serving excess,
+the facade calls the non-submitting `_fs_validate_read` bridge so cancellation,
+stale-generation, closing, and closed checks remain identical to an ordinary
+read. The uv layer retains only its existing per-request ordering and
+cancellation semantics; it has no `_fs_read_until`, delimiter state, or
+retained-excess branch.
 
 Close changes the File to `closing` before it yields and rejects later ordinary
 operations. The close request remains behind operations already in the FIFO;
@@ -346,6 +345,9 @@ invalidates the descriptor, marks the File closed, wakes other close waiters
 through task-specific callbacks, and removes the Runtime root. A failed close
 also invalidates the wrapper and reports that one error to the waiting Task, or
 to the Runtime for an internal shutdown close. It is never submitted again.
+The facade clears retained excess both before entering close and after close
+finishes, because an older delimiter read may complete and restore bytes while
+the low-level File is already closing.
 
 `stat` uses public `uv_fs_stat`, which follows symbolic links. Titan reads the
 public `uv_stat_t` size, mode, and modification fields directly and classifies
@@ -436,10 +438,10 @@ retained result to a waiter. An ordinary negative `uv_spawn` result owes no
 exit callback, but the initialized process and pipe handles are closed before
 the spawn error reaches user code.
 
-Stdin writes, exposed through `InputStream:write`, have a per-pipe FIFO of
+Stdin writes, exposed through `OutputStream:write`, have a per-pipe FIFO of
 logical operations. A submitted
 `uv_write_t`, its `uv_buf_t`, and copied binary payload remain rooted through
-the write callback even if their Task is cancelled. `InputStream:close`
+the write callback even if their Task is cancelled. `OutputStream:close`
 inserts a cleanup-shielded, monotonic close operation behind preceding writes
 and rejects new output immediately. Anonymous pipes do not support socket-style
 `uv_shutdown` on the supported Unix hosts, so the FIFO finishes by calling
@@ -450,6 +452,9 @@ GC-owned `{ByteChunk}` queue even with no waiter, with no high-water mark. A
 plain read drains its facade excess or the entire native queue, while a
 delimiter read retains bytes beyond its first delimiter. Both methods share
 that pipe's reader lock; stdout and stderr have independent locks.
+The facade validates the pipe's Runtime generation before returning retained
+excess, so a logical fast path cannot leak an old stream into a replacement
+Runtime.
 Cancellation clears only the matching waiter and leaves physical reading
 active. EOF stops and may close
 the output pipe while remaining sticky `nil`; another read failure initiates
@@ -529,14 +534,12 @@ Filesystem cancellation is family-aware. An unsubmitted File operation is
 unlinked from its FIFO. A submitted, non-cleanup request is passed to public
 `uv_cancel`; whether cancellation succeeds or is too late, the promised
 completion callback still owns physical cleanup and an obsolete normal result
-cannot resume the Task. File reads preserve physically consumed bytes in
-retained excess before logical cancellation is delivered. Filesystem close
-Requests are cleanup-shielded and are never physically abandoned. Releasing
-one cleanup shield does not immediately throw the saved cancellation:
-consecutive library cleanup calls may finish, after which the next ordinary
-await or Task return delivers it. A delayed close-wait wake carries the exact
-cleanup Request, so a later cancellation epoch cannot invalidate its only
-completion.
+cannot resume the Task. Filesystem close Requests are cleanup-shielded and are
+never physically abandoned. Releasing one cleanup shield does not immediately
+throw the saved cancellation: consecutive library cleanup calls may finish,
+after which the next ordinary await or Task return delivers it. A delayed
+close-wait wake carries the exact cleanup Request, so a later cancellation
+epoch cannot invalidate its only completion.
 
 Networking cancellation follows the same owner rule. Queued writes are
 unlinked, but an active `uv_write_t` remains rooted through its callback and
@@ -554,7 +557,7 @@ implementation](libuv-networking.md).
 Process cancellation is also logical where libuv still owes a callback. A
 queued stdin write can be unlinked; a submitted write remains rooted until its
 callback. Cancelling a wait clears only that waiter, so another Task may wait
-and later waits use the cached exit status. Cancelling `InputStream:close`
+and later waits use the cached exit status. Cancelling `OutputStream:close`
 cannot revoke the already-published FIFO close. Cancelling an output read likewise
 clears only that pipe's waiter and does not stop its continuous read.
 Cancelling `communicate` is handled by its HelperGroup cleanup path and does

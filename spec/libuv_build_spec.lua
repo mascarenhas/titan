@@ -1083,7 +1083,7 @@ describe("libuv Makefile configuration", function()
     it("pins current metadata for the seven pre-existing roots",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
-            assert.equal(7788, #expected.uv)
+            assert.equal(7953, #expected.uv)
 
             local support = require "titan"
             local container = installed_stdlib_container()
@@ -1140,10 +1140,10 @@ describe("libuv Makefile configuration", function()
     it("keeps every uv export with its semantic contributor", function()
         assert.same({}, public_declarations(UV_MAIN_SOURCE))
         assert.same({
-            "uv_file", "_fs_open", "_fs_read", "_fs_read_until",
-            "_fs_write", "_fs_flush", "_fs_is_closed", "_fs_close",
-            "_fs_stat", "_fs_mkdir", "_fs_unlink", "_fs_rmdir",
-            "_fs_rename", "_fs_list",
+            "uv_file", "_fs_open", "_fs_read", "_fs_write",
+            "_fs_flush", "_fs_is_closed", "_fs_validate_read",
+            "_fs_close", "_fs_stat", "_fs_mkdir", "_fs_unlink",
+            "_fs_rmdir", "_fs_rename", "_fs_list",
         }, public_declarations("titan/uv/file.titan"))
         assert.same({
             "_os_getenv", "_os_setenv", "_os_unsetenv", "_os_cwd",
@@ -1152,11 +1152,11 @@ describe("libuv Makefile configuration", function()
             "_os_signal_name",
         }, public_declarations("titan/uv/os.titan"))
         assert.same({
-            "uv_process_t", "_os_process_spawn", "_os_process_wait",
-            "_os_process_kill", "_os_process_write_stdin",
-            "_os_process_close_stdin", "_os_process_read_stdout",
-            "_os_process_read_stderr", "_os_process_read_error_is",
-            "_os_communicate",
+            "uv_pipe_t", "uv_process_t", "_os_process_spawn",
+            "_os_process_pipes", "_os_process_wait", "_os_process_kill",
+            "_os_stream_write", "_os_stream_close",
+            "_os_stream_read", "_os_stream_validate_read",
+            "_os_stream_read_error_is", "_os_communicate",
         }, public_declarations("titan/uv/process.titan"))
         assert.same({
             "Error", "Error.new", "_loop", "_version",
@@ -1242,8 +1242,8 @@ describe("libuv Makefile configuration", function()
         function()
             assert.same({}, local_record_declarations(UV_MAIN_SOURCE))
             assert.same({
-                "FsConstants", "FsStatResult", "FsReadUntilState",
-                "FsOperation", "FsControl", "uv_fs_t",
+                "FsConstants", "FsStatResult", "FsOperation",
+                "FsControl", "uv_fs_t",
             }, local_record_declarations("titan/uv/file.titan"))
             assert.same({
                 "SignalSpec", "SignalControl", "uv_signal_t",
@@ -1251,7 +1251,7 @@ describe("libuv Makefile configuration", function()
             assert.same({
                 "ProcessControl", "PipeControl", "ProcessOperation",
                 "ProcessRequestControl", "ProcessExitResult", "HelperGroup",
-                "uv_pipe_t", "uv_pipe_write_t", "uv_process_grace_t",
+                "uv_pipe_write_t", "uv_process_grace_t",
             }, local_record_declarations("titan/uv/process.titan"))
             assert.same({
                 "Loop", "Runtime", "ByteChunk", "Text", "Buffer",
@@ -2072,6 +2072,12 @@ fi
                 "fs.write_file(marker,",
                 "local metadata = fs.stat(marker)",
                 "system.communicate(process_child, process_args, process_payload)",
+                "local process = system.spawn(process_child, process_args)",
+                "local writer: titan_io.WriterCloser = process.stdin",
+                "local reader: titan_io.Reader = process.stdout",
+                "local error_reader: titan_io.Reader = process.stderr",
+                'writer:write(process_payload .. "\\n")',
+                'reader:read_until("\\n", true) == process_payload',
                 'net.connect("127.0.0.1", port)',
                 "system.exepath()",
                 '"$LIBUV_PKG_CONFIG" --static --libs libuv',

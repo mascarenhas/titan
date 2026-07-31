@@ -80,8 +80,8 @@ Satisfaction is structural at each coercion site; none of these records has an
 | --- | --- | --- |
 | `net.Connection` | all seven | exact |
 | `fs.File` | all seven | adjusted |
-| `os.InputStream` | `Writer`, `Closer`, `WriterCloser` | exact |
-| `os.OutputStream` | `Reader` | exact |
+| `os.InputStream` | `Reader` | exact |
+| `os.OutputStream` | `Writer`, `Closer`, `WriterCloser` | exact |
 | `net.Server` | `Closer` | exact |
 | `timer.Ticker` | `Closer` | exact |
 
@@ -96,11 +96,12 @@ otherwise exact. These ordinary callable adjustments make each `fs.File`
 wrapper adjusted; they do not make the record and Interface gradually
 consistent or lift the conversion through Arrays, Maps, or function types.
 
-`os.InputStream` is the writable stdin side of a spawned process. Its exact
-`write` and `close` methods satisfy the three writer/closer combinations.
-`os.OutputStream`, used by both stdout and stderr, has exact `read` and
-`read_until` methods and therefore satisfies `Reader`. Closing process input
-does not imply a close operation on either output stream.
+`os.InputStream`, used by child stdout and stderr, has exact `read` and
+`read_until` methods and therefore satisfies `Reader`. `os.OutputStream` is
+the writable side of child stdin; its exact `write` and `close` methods satisfy
+the three writer/closer combinations. These names describe the Titan caller's
+direction, not the child's descriptor name. Calling `process.stdin:close()`
+does not imply a close operation on either readable stream.
 
 `net.Server` and `timer.Ticker` satisfy `Closer` incidentally through their
 existing exact `close()` methods. The Interface does not imply that all

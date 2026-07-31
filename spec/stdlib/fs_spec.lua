@@ -173,8 +173,17 @@ function schedule_delimited_reads(root: string, boundary_payload: string,
     file = fs.open(retained_path, "r")
     check(file:read_until("--") == "alpha--",
           "delimiter read did not include its delimiter")
+    local excess_limit = false
+    do
+      file:read(4294967296)
+    catch
+      excess_limit =
+        error == "read size exceeds the portable libuv buffer limit"
+    end
+    check(excess_limit,
+          "retained excess bypassed the portable read-size limit")
     check(file:read(2) == "be",
-          "plain read exceeded its limit while consuming excess")
+          "failed oversized read changed retained excess")
     check(file:read_until("--", true) == "ta",
           "chopped delimiter read returned the wrong retained prefix")
     check(file:read() == "tail",
@@ -256,23 +265,16 @@ function schedule_delimited_reads(root: string, boundary_payload: string,
     check(fs.read_file(interface_path) == "interface-data|restX",
           "File interface result-discard write adapter failed")
 
-    local fifo_path = root .. "/read-until-fifo.dat"
-    fs.write_file(fifo_path, many_chunks)
-    file = fs.open(fifo_path, "r+")
-    local reader = async.run(function (): value
-      return file:read_until("|")
-    end)
-    local writer = async.run(function (): value
-      return file:write("|later")
-    end)
-    while reader:status() == "ready" or writer:status() == "ready" do
-      timer.yield()
-    end
-    check(reader:join() == many_chunks,
-          "queued write interleaved between delimiter-read submissions")
-    check((writer:join() as integer) == 6,
-          "write queued behind delimiter read failed")
+    local closed_excess_path = root .. "/closed-excess.dat"
+    fs.write_file(closed_excess_path, "selected|retained")
+    file = fs.open(closed_excess_path, "r")
+    check(file:read_until("|") == "selected|",
+          "could not seed excess before close")
     file:close()
+    expect_failure(function (): value
+      file:read()
+      return nil
+    end, "closed File served retained excess")
 
     local readers_path = root .. "/concurrent-readers.dat"
     fs.write_file(readers_path, "abcd")
@@ -286,6 +288,46 @@ function schedule_delimited_reads(root: string, boundary_payload: string,
     check(first_reader:join() == "ab" and second_reader:join() == "cd",
           "concurrent File readers did not follow FIFO order")
     file:close()
+
+    local close_race_path = root .. "/close-read-until-race.dat"
+    fs.write_file(close_race_path, many_chunks)
+    file = fs.open(close_race_path, "r")
+    local delimiter_reader = async.run(function (): value
+      local interrupted = false
+      do
+        file:read_until("delimiter-that-is-not-present")
+      catch
+        check(error == "cannot read from a closing File",
+              "read_until interrupted by close reported the wrong error")
+        interrupted = true
+      end
+      check(interrupted, "close did not interrupt a delimiter read")
+
+      local excess_rejected = false
+      do
+        file:read()
+      catch
+        check(error == "cannot read from a closing File",
+              "retained excess reported the wrong closing error")
+        excess_rejected = true
+      end
+      check(excess_rejected,
+            "retained excess bypassed the closing File state")
+      return "delimiter-close-rejected"
+    end)
+    while delimiter_reader:status() == "ready" do timer.yield() end
+    check(delimiter_reader:status() == "waiting",
+          "delimiter reader did not submit its first File read")
+    local delimiter_closer = async.run(function (): value
+      file:close()
+      return "delimiter-close-complete"
+    end)
+    while delimiter_closer:status() == "ready" do timer.yield() end
+    check(delimiter_reader:join() == "delimiter-close-rejected",
+          "delimiter reader did not observe logical close")
+    check(delimiter_closer:join() == "delimiter-close-complete",
+          "delimiter close did not complete")
+    check(file:is_closed(), "delimiter-race File did not physically close")
     return "delimited-reads-ok"
   end)
 end
@@ -559,7 +601,7 @@ if permission then assert(permission:join() == "permission-error-ok") end
     end)
 
     it("supports default and delimiter reads, retained excess, growth, " ..
-       "interfaces, and one logical FIFO operation",
+       "interfaces, and concurrent reads",
     function()
         run_lua("local root = " .. string.format("%q", root) .. [==[
 local async = require "titan.async"

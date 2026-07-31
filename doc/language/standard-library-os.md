@@ -94,19 +94,19 @@ record InputStream
 record OutputStream
 
 record Process
-  stdin: InputStream
-  stdout: OutputStream
-  stderr: OutputStream
+  stdin: OutputStream
+  stdout: InputStream
+  stderr: InputStream
 end
 
 function spawn(file: string, args: {string}): Process
 function Process:wait(): ExitStatus
 function Process:kill(signal: string)
-function InputStream:write(data: string)
-function InputStream:close()
-function OutputStream:read(): string?
-function OutputStream:read_until(delimiter: string,
-                                 chop: boolean?): string?
+function InputStream:read(): string?
+function InputStream:read_until(delimiter: string,
+                                chop: boolean?): string?
+function OutputStream:write(data: string)
+function OutputStream:close()
 ```
 
 Process operations are asynchronous and must run inside an async Task. A Titan
@@ -120,7 +120,10 @@ the current environment and working directory. File and argument strings are
 text and reject embedded NUL before any native resource is created.
 
 Every child has separate stdin, stdout, and stderr stream records in its three
-public fields. Pipe payloads are binary strings and preserve embedded NUL.
+public fields. Stream names describe the Titan caller's direction:
+`process.stdin` is an `OutputStream` because Titan writes to the child, while
+`process.stdout` and `process.stderr` are `InputStream` values because Titan
+reads from them. Pipe payloads are binary strings and preserve embedded NUL.
 Nonempty `process.stdin:write(data)` operations are FIFO across Tasks and
 return only after their native write callback; an empty write is a checked
 no-op. Cancelling a queued write removes it; cancelling a submitted write
@@ -136,10 +139,10 @@ pipe close. Closing the write-end pipe is what delivers EOF to the child;
 socket-style half-shutdown is not used. Programs whose child waits for input
 EOF must call it.
 
-`InputStream` satisfies the standard `io.Writer`, `io.Closer`, and
-`io.WriterCloser` Interfaces exactly. `OutputStream` satisfies `io.Reader`
-exactly. These are structural conversions at typed use sites; `Process`
-itself intentionally exposes only `wait` and `kill` methods.
+`InputStream` satisfies the standard `io.Reader` Interface exactly.
+`OutputStream` satisfies `io.Writer`, `io.Closer`, and `io.WriterCloser`
+exactly. These are structural conversions at typed use sites; `Process` itself
+intentionally exposes only `wait` and `kill` methods.
 
 Successful spawn initialization starts continuous reads on stdout and stderr.
 Each pipe retains GC-owned chunks even when no Task is waiting, with no maximum
@@ -174,6 +177,11 @@ and delimiter methods, so the two pipes can be drained concurrently but a
 second Task cannot enter either read method for the same pipe. Cancelling a
 waiting read detaches only its waiter; the physical read continues and another
 Task may read afterward.
+
+Every stream belongs to the libuv Runtime generation that spawned its child.
+After that Runtime has shut down, reads reject even if the `InputStream`
+facade retained excess, and writes or repeated closes reject as stale instead
+of observing the replacement Runtime.
 
 `wait` returns after the operating system has reaped the child. Only one Task
 may wait at a time; cancelling it does not kill the child, and a replacement

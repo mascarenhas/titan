@@ -65,6 +65,22 @@ if process_child then
         assert(status.signal == nil)
         assert(status.signal_number == 0)
 
+        process_args[1] = "echo"
+        local detached = system.spawn(process_child, process_args)
+        local writer = detached.stdin
+        local reader = detached.stdout
+        local error_reader = detached.stderr
+        local weak = setmetatable({ process = detached }, { __mode = "v" })
+        detached = nil
+        collectgarbage("collect")
+        collectgarbage("collect")
+        assert(weak.process == nil)
+        writer:write(payload)
+        writer:close()
+        assert(reader:read_until(payload) == payload)
+        assert(reader:read() == nil)
+        assert(error_reader:read() == nil)
+
         process_args[1] = "exit"
         process_args[2] = "29"
         local exited = system.spawn(process_child, process_args)

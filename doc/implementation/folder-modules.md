@@ -273,7 +273,9 @@ callable strict entries, Interface descriptors, and concrete/Interface pair
 obligations are collected only after the contributors have become one checked
 AST, then emitted once per logical module. Their module-private slots follow
 the same importer-reconstructible public prefix and never give a contributor a
-runtime identity.
+runtime identity. The `process.titan` contributor now also exports the exact
+`uv_pipe_t` wrapper and process-stream bridge used by `titan.os`; this changes
+the logical `titan.uv` schema, not contributor identity or composition.
 
 ## `titan.uv` dogfooding
 

@@ -110,26 +110,35 @@ end
 
 ## Ordering and closing
 
-Each File serializes its operations in one FIFO, even when several Tasks share
-it. Only one filesystem request for that File is submitted at a time. A
-multi-request partial write remains one logical FIFO operation. So does a
-`read_until` that needs several 64-KiB native reads: another read, write,
-flush, or close cannot interleave between its submissions.
+Each File serializes the operations it submits to uv in one FIFO, even when
+several Tasks share it. Only one filesystem request for that File is submitted
+at a time. A multi-request partial write remains one logical FIFO operation.
+A `read` satisfied entirely from facade-retained excess submits no request and
+returns immediately.
+
+`read_until` is high-level composition over repeated `read()` calls. Each
+underlying native read is a separate FIFO operation, so another Task's read,
+write, flush, or close may run between iterations. Code that shares one File
+between Tasks must coordinate externally when it needs an uninterrupted
+delimiter read.
 
 `close()` immediately marks the File as closing. Operations already ahead of
 the close finish in order; later reads, writes, and flushes raise. Concurrent
 close callers share the same physical close request. `close()` is idempotent,
 including after the Runtime session has ended, and `is_closed()` reports
-whether physical close has completed.
+whether physical close has completed. A read cannot bypass this logical-close
+state through bytes retained by an earlier delimiter read; close discards that
+facade excess even when the earlier read finishes while physical close is
+pending.
 
 Task cancellation does not abandon native lifetime work. An unsubmitted
 ordinary File operation is removed from its FIFO. For submitted work, the
 runtime requests cancellation where libuv supports it, suppresses a stale
 result after cancellation wins, and still consumes the completion callback.
-Bytes already consumed by a cancelled delimiter read are restored in order to
-the File's retained input. The same restoration happens when a later native
-submission or callback reports an error, so retrying does not silently skip
-the successfully read prefix.
+If a later `read()` in `read_until` raises, chunks returned by its earlier
+iterations are restored in order to the File's retained input before the error
+propagates. A currently pending native read retains the ordinary File-read
+cancellation semantics.
 A Task cancelled while awaiting `close()` remains cleanup-shielded until the
 physical close callback and request cleanup finish. Cancellation remains
 sticky afterward: it is delivered at the next ordinary asynchronous operation,

@@ -5,6 +5,7 @@ local PROCESS_CASES = [====[
 local lua = foreign import "lua.h"
 local os = import "os"
 local stream = import "io"
+local uv = import "uv"
 local timer = import "timer"
 local async = import "async"
 
@@ -20,6 +21,32 @@ local function expect_failure(func: () -> value, message: string)
     failed = true
   end
   check(failed, message)
+end
+
+local function expect_direction_failure(func: () -> value,
+                                        operation: string)
+  local failed = false
+  do
+    func()
+  catch
+    check(error == "Process stream has an incompatible direction",
+          operation .. " reported the wrong direction error")
+    failed = true
+  end
+  check(failed, operation .. " accepted the wrong stream direction")
+end
+
+local function expect_stale_stream(func: () -> value, operation: string)
+  local failed = false
+  do
+    func()
+  catch
+    check(error == "Process stream belongs to a stale libuv Runtime",
+          "stale " .. operation .. " reported the wrong error")
+    failed = true
+  end
+  check(failed,
+        "closed " .. operation .. " from an older Runtime was accepted")
 end
 
 local function expect_cancelled(task: async.Task, reason: string)
@@ -75,7 +102,8 @@ local function check_normal(status: os.ExitStatus, message: string)
 end
 
 -- Return only Interface views so the source Process record goes out of scope.
--- Each pipe record must retain the shared native process owner directly.
+-- Each facade retains its own pipe wrapper, whose control keeps the shared
+-- native process owner alive.
 local function spawn_pipe_views(
     child: string): (stream.WriterCloser, stream.Reader, stream.Reader)
   local process = os.spawn(child, { "echo" })
@@ -256,11 +284,11 @@ end
 
 function schedule_pipe_interfaces(child: string): async.Task
   return async.run(function (): value
-    local input, output, diagnostics = spawn_pipe_views(child)
+    local writer, output, diagnostics = spawn_pipe_views(child)
     lua.lua_gc(L, lua.LUA_GCGEN)
     lua.lua_gc(L, lua.LUA_GCCOLLECT)
-    input:write("interface\0pipes\n")
-    input:close()
+    writer:write("interface\0pipes\n")
+    writer:close()
     check(output:read_until("\n", true) == "interface\0pipes",
           "WriterCloser/Reader dispatch changed process pipe bytes")
     check(not output:read() and not diagnostics:read(),
@@ -283,6 +311,49 @@ function schedule_pipe_interfaces(child: string): async.Task
     check(status.code == 23 and not status.signal,
           "reassigned-pipe child exit status changed")
     return "pipe-interfaces-ok"
+  end)
+end
+
+function schedule_stream_direction_guards(child: string): async.Task
+  return async.run(function (): value
+    local process = uv._os_process_spawn(child, { "echo" })
+    local stdin, stdout, stderr = uv._os_process_pipes(process)
+
+    expect_direction_failure(function (): value
+      return uv._os_stream_read(stdin)
+    end, "read from stdin")
+    expect_direction_failure(function (): value
+      uv._os_stream_validate_read(stdin)
+      return nil
+    end, "read validation for stdin")
+    expect_direction_failure(function (): value
+      uv._os_stream_write(stdout, "")
+      return nil
+    end, "write to stdout")
+    expect_direction_failure(function (): value
+      uv._os_stream_close(stderr)
+      return nil
+    end, "close stderr as an output stream")
+
+    uv._os_stream_write(stdin, "direction\0guards\n")
+    uv._os_stream_close(stdin)
+    local output = ""
+    local chunk: string? = uv._os_stream_read(stdout)
+    while chunk do
+      output = output .. (chunk as string)
+      chunk = uv._os_stream_read(stdout)
+    end
+    local diagnostics = ""
+    chunk = uv._os_stream_read(stderr)
+    while chunk do
+      diagnostics = diagnostics .. (chunk as string)
+      chunk = uv._os_stream_read(stderr)
+    end
+    local code, signal_number = uv._os_process_wait(process)
+    check(output == "direction\0guards\n" and diagnostics == "" and
+          code == 0 and signal_number == 0,
+          "direction guards damaged normal stream cleanup")
+    return "stream-direction-guards-ok"
   end)
 end
 
@@ -572,8 +643,11 @@ function schedule_forced_runtime_shutdown(child: string,
     local process = os.spawn(child, { "ignore-term", pid_path })
     retained_process = process
     process.stdin:close()
-    check(process.stdout:read_until("\n") == "READY\n",
-          "TERM-resistant child did not publish its marker")
+    -- Let the complete marker reach the continuously drained native queue,
+    -- then retain a known facade suffix across Runtime shutdown.
+    timer.sleep(50)
+    check(process.stdout:read_until("R", true) == "",
+          "TERM-resistant child did not publish its marker prefix")
     -- No Task remains after this continuation. Runtime shutdown must TERM,
     -- wait through its private grace timer, KILL, reap, and close the process.
     return "forced-runtime-shutdown-ready"
@@ -582,9 +656,10 @@ end
 
 function schedule_stale_process_rejection(child: string): async.Task
   return async.run(function (): value
+    local process = retained_process as os.Process
     local caught = false
     do
-      (retained_process as os.Process):wait()
+      process:wait()
     catch
       check(error == "Process belongs to a stale libuv Runtime",
             "stale Process wait reported the wrong error")
@@ -592,6 +667,22 @@ function schedule_stale_process_rejection(child: string): async.Task
     end
     check(caught,
           "closed Process from an older Runtime generation was accepted")
+
+    expect_stale_stream(function (): value
+      process.stdin:write("")
+      return nil
+    end, "stdin write")
+    expect_stale_stream(function (): value
+      process.stdin:close()
+      return nil
+    end, "stdin close")
+    expect_stale_stream(function (): value
+      return process.stdout:read()
+    end, "stdout read")
+    expect_stale_stream(function (): value
+      return process.stderr:read()
+    end, "stderr read")
+
     retained_process = nil
     local output, diagnostics, status =
       os.communicate(child, { "echo" }, "new-generation")
@@ -604,6 +695,21 @@ end
 
 function retained_process_value(): os.Process?
   return retained_process
+end
+
+function retained_stdin_value(): os.OutputStream?
+  if not retained_process then return nil end
+  return (retained_process as os.Process).stdin
+end
+
+function retained_stdout_value(): os.InputStream?
+  if not retained_process then return nil end
+  return (retained_process as os.Process).stdout
+end
+
+function retained_stderr_value(): os.InputStream?
+  if not retained_process then return nil end
+  return (retained_process as os.Process).stderr
 end
 ]====]
 
@@ -691,6 +797,10 @@ local cases = require "os_process_cases"
 local task = assert(cases.schedule_pipe_interfaces(child))
 async.loop()
 assert(task:join() == "pipe-interfaces-ok")
+
+local guards = assert(cases.schedule_stream_direction_guards(child))
+async.loop()
+assert(guards:join() == "stream-direction-guards-ok")
 ]==])
     end)
 
@@ -760,6 +870,9 @@ assert(os.remove(pid_path))
 
 local weak = setmetatable({
     process = cases.retained_process_value(),
+    stdin = cases.retained_stdin_value(),
+    stdout = cases.retained_stdout_value(),
+    stderr = cases.retained_stderr_value(),
 }, { __mode = "v" })
 local stale = assert(cases.schedule_stale_process_rejection(child))
 async.loop()
@@ -767,6 +880,9 @@ assert(stale:join() == "stale-process-rejected")
 collectgarbage("collect")
 collectgarbage("collect")
 assert(weak.process == nil, "closed old-generation Process stayed rooted")
+assert(weak.stdin == nil, "closed old-generation stdin stayed rooted")
+assert(weak.stdout == nil, "closed old-generation stdout stayed rooted")
+assert(weak.stderr == nil, "closed old-generation stderr stayed rooted")
 ]==])
     end)
 end)

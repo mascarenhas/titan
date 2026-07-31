@@ -100,7 +100,7 @@ local record HelperGroup
   local canceling: boolean
 end
 
-local record uv_pipe_t
+record uv_pipe_t
   local handle?: owned *libuv.uv_pipe_t
   local main_thread: value
   local dispatcher: (uv_pipe_t, integer, integer, libuv.size_t,
@@ -129,9 +129,9 @@ local record uv_process_grace_t
   local buffer: nil
 end
 
--- Persistent process handles are the only process resource that crosses the
--- private os/uv bridge.  All native callback owners keep the same exact five
--- slots consumed by titan_uv.c.
+-- Persistent process and pipe handles cross the private os/uv bridge. All
+-- native callback owners keep the same exact five slots consumed by
+-- titan_uv.c.
 record uv_process_t
   local handle?: owned *libuv.uv_process_t
   local main_thread: value
@@ -144,6 +144,14 @@ end
 function _os_process_spawn(file: string, args: {string}): uv_process_t
   local request = new_process_spawn_request(file, args)
   return coroutine.yield(request, UV_TAG)
+end
+
+function _os_process_pipes(process: uv_process_t):
+                           (uv_pipe_t, uv_pipe_t, uv_pipe_t)
+  validate_process(process, "access streams for", true)
+  return process_pipe(process, PIPE_STDIN),
+         process_pipe(process, PIPE_STDOUT),
+         process_pipe(process, PIPE_STDERR)
 end
 
 function _os_process_wait(process: uv_process_t): (integer, integer)
@@ -174,11 +182,10 @@ function _os_process_kill(process: uv_process_t, signal: string)
   end
 end
 
-function _os_process_write_stdin(process: uv_process_t, data: string)
+function _os_stream_write(stream: uv_pipe_t, data: string)
   ordinary_task()
-  validate_process(process, "write to", false)
-  local pipe = process_pipe(process, PIPE_STDIN)
-  local control = pipe.metadata
+  validate_process_stream(stream, PIPE_STDIN, "write to", false)
+  local control = stream.metadata
   if control.shutdown_requested or control.write_shutdown or
       control.lifecycle == PIPE_CLOSING or
       control.lifecycle == PIPE_CLOSED then
@@ -192,17 +199,16 @@ function _os_process_write_stdin(process: uv_process_t, data: string)
   -- can detach a Task without invalidating submitted native storage.
   local bytes = copy_bytes(data)
   local request = new_process_request(PROCESS_WRITE_STDIN,
-      process, pipe, false)
+      process_stream_owner(stream), stream, false)
   local operation: ProcessOperation = request.subject
   operation.copied_bytes = bytes
   coroutine.yield(request, UV_TAG)
 end
 
-function _os_process_close_stdin(process: uv_process_t)
+function _os_stream_close(stream: uv_pipe_t)
   ordinary_task()
-  validate_process(process, "close stdin for", true)
-  local pipe = process_pipe(process, PIPE_STDIN)
-  local control = pipe.metadata
+  validate_process_stream(stream, PIPE_STDIN, "close", true)
+  local control = stream.metadata
   if control.shutdown_requested or control.write_shutdown or
       control.lifecycle == PIPE_CLOSING or
       control.lifecycle == PIPE_CLOSED then return end
@@ -211,7 +217,7 @@ function _os_process_close_stdin(process: uv_process_t)
     -- Construct the cleanup Request before publishing the monotonic flag.
     -- Once visible, cancellation cannot revoke the ordered pipe close.
     local request = new_process_request(PROCESS_CLOSE_STDIN,
-        process, pipe, true)
+        process_stream_owner(stream), stream, true)
     control.shutdown_requested = true
     coroutine.yield(request, UV_TAG)
   finally
@@ -219,19 +225,19 @@ function _os_process_close_stdin(process: uv_process_t)
   end
 end
 
-function _os_process_read_stdout(process: uv_process_t): string?
-  return process_read(process, PROCESS_READ_STDOUT)
+function _os_stream_read(stream: uv_pipe_t): string?
+  return process_read(stream)
 end
 
-function _os_process_read_stderr(process: uv_process_t): string?
-  return process_read(process, PROCESS_READ_STDERR)
+function _os_stream_validate_read(stream: uv_pipe_t)
+  ordinary_task()
+  validate_read_stream(stream)
 end
 
-function _os_process_read_error_is(process: uv_process_t,
-                                   stdout: boolean,
-                                   candidate: value): boolean
-  local pipe = process_pipe(process, stdout and PIPE_STDOUT or PIPE_STDERR)
-  local control = pipe.metadata
+function _os_stream_read_error_is(stream: uv_pipe_t,
+                                  candidate: value): boolean
+  validate_read_stream(stream)
+  local control = stream.metadata
   if control.read_terminal ~= TCP_READ_ERROR or not control.read_error then
     return false
   end
@@ -1470,6 +1476,39 @@ local function validate_process(process: uv_process_t,
   end
 end
 
+local function validate_process_stream(stream: uv_pipe_t,
+                                       expected_kind: integer,
+                                       operation: string,
+                                       allow_exited: boolean)
+  local runtime = current_runtime()
+  local control = stream.metadata
+  local process = control.process
+  if control.runtime ~= runtime or
+      process.generation ~= runtime.generation then
+    raise "Process stream belongs to a stale libuv Runtime"
+  end
+  if control.kind ~= expected_kind then
+    raise "Process stream has an incompatible direction"
+  end
+  if process.exit_seen and not allow_exited then
+    raise "cannot " .. operation .. " an exited Process"
+  end
+end
+
+local function validate_read_stream(stream: uv_pipe_t)
+  local kind = stream.metadata.kind
+  if kind ~= PIPE_STDOUT and kind ~= PIPE_STDERR then
+    raise "Process stream has an incompatible direction"
+  end
+  validate_process_stream(stream, kind, "read from", true)
+end
+
+local function process_stream_owner(stream: uv_pipe_t): uv_process_t
+  local process = stream.metadata.process.owner
+  if not process then raise "Process stream is no longer available" end
+  return process
+end
+
 local function process_pipe(process: uv_process_t,
                             kind: integer): uv_pipe_t
   local pipe: uv_pipe_t? = nil
@@ -1484,12 +1523,10 @@ local function process_pipe(process: uv_process_t,
   return pipe
 end
 
-local function process_read(process: uv_process_t, kind: integer): string?
+local function process_read(stream: uv_pipe_t): string?
   ordinary_task()
-  validate_process(process, "read from", true)
-  local pipe = process_pipe(process,
-      kind == PROCESS_READ_STDOUT and PIPE_STDOUT or PIPE_STDERR)
-  local control = pipe.metadata
+  validate_read_stream(stream)
+  local control = stream.metadata
   if #control.read_queue > 0 then
     local payload = queued_bytes_string(control.read_queue)
     control.read_queue = {}
@@ -1504,7 +1541,10 @@ local function process_read(process: uv_process_t, kind: integer): string?
   if control.read_waiter then
     raise "process pipe already has a waiting reader"
   end
-  local request = new_process_request(kind, process, pipe, false)
+  local kind = control.kind == PIPE_STDOUT and
+               PROCESS_READ_STDOUT or PROCESS_READ_STDERR
+  local request = new_process_request(
+      kind, process_stream_owner(stream), stream, false)
   return coroutine.yield(request, UV_TAG)
 end
 
@@ -1555,19 +1595,12 @@ end
 local function read_process_output(process: uv_process_t,
                                    stdout: boolean): string
   local chunks: {string} = {}
-  local chunk: string? = nil
-  if stdout then
-    chunk = _os_process_read_stdout(process)
-  else
-    chunk = _os_process_read_stderr(process)
-  end
+  local stream = process_pipe(
+      process, stdout and PIPE_STDOUT or PIPE_STDERR)
+  local chunk: string? = _os_stream_read(stream)
   while chunk do
     chunks[#chunks + 1] = chunk
-    if stdout then
-      chunk = _os_process_read_stdout(process)
-    else
-      chunk = _os_process_read_stderr(process)
-    end
+    chunk = _os_stream_read(stream)
   end
   -- Pairwise joining keeps total copying logarithmic in the number of chunks
   -- instead of repeatedly copying the complete prefix.
@@ -1599,10 +1632,11 @@ local function execute_helper(group: HelperGroup, kind: integer)
     elseif kind == HELPER_STDERR then
       payload = read_process_output(process, false)
     elseif kind == HELPER_STDIN then
+      local stream = process_pipe(process, PIPE_STDIN)
       if group.input then
-        _os_process_write_stdin(process, group.input)
+        _os_stream_write(stream, group.input)
       end
-      _os_process_close_stdin(process)
+      _os_stream_close(stream)
     else
       local code, signal_number = _os_process_wait(process)
       payload = ProcessExitResult.new(code, signal_number)

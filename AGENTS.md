@@ -407,8 +407,8 @@ of the `titan/uv/` source ensemble, with each transformer patching the owning
 contributors through unique per-file anchors. It builds the exact
 coroutine/uv DSOs once under a private root with no shallow `titan.so`; the DNS
 setup adds the complete exact PEG and string providers followed by exact
-async/timer/net facades, while the FS setup adds only the exact fs facade and
-calls uv scheduling primitives directly from its case module.
+async/timer/net facades, while the FS setup calls uv filesystem and scheduling
+primitives directly from its case module without adding a facade provider.
 The FS cases cover late
 cancellation, disposal of a late successful open, and cross-generation
 Runtime/File/Task/buffer/error rooting. The DNS cases capture the successful

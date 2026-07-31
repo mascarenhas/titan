@@ -530,6 +530,20 @@ function main(args: {string}): integer
           process_status.code == 0 and not process_status.signal and
           process_status.signal_number == 0,
           "static process communicate changed payload or exit status")
+
+    local process = system.spawn(process_child, process_args)
+    local writer: titan_io.WriterCloser = process.stdin
+    local reader: titan_io.Reader = process.stdout
+    local error_reader: titan_io.Reader = process.stderr
+    writer:write(process_payload .. "\n")
+    writer:close()
+    check(reader:read_until("\n", true) == process_payload and
+          not reader:read() and not error_reader:read(),
+          "static process stream Interface dispatch changed payload")
+    local streamed_status = process:wait()
+    check(streamed_status.code == 0 and not streamed_status.signal and
+          streamed_status.signal_number == 0,
+          "static process stream Interface changed exit status")
     fs.unlink(marker)
   finally
     if original then

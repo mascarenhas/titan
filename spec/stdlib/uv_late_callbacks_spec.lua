@@ -477,14 +477,6 @@ assert(task:join() == "rooted-retry-gc-ok")
 
     describe("filesystem cases", function()
         setup(function()
-            async_stdlib.write_source(workspace, "titan.fs",
-                async_stdlib.read(async_stdlib.repo .. "/titan/fs.titan"))
-            async_stdlib.compile(workspace, "titan.fs", {
-                layout = layout,
-                cppflags = "",
-            })
-            async_stdlib.register_exact_provider(layout, "titan.fs")
-
             async_stdlib.write_source(workspace, "uv_late_fs_callback_cases",
                 LATE_FS_CASES)
             async_stdlib.compile(workspace, "uv_late_fs_callback_cases", {
@@ -510,34 +502,6 @@ assert(task:join() == "rooted-retry-gc-ok")
             local task = cases.schedule_late_fs_cancellation(root)
             cases.loop()
             assert(task:join() == "late-fs-cancellation-ok")
-            ]==], root))
-        end)
-
-        it("restores retained and accumulated delimiter bytes after " ..
-           "cancellation",
-        function()
-            run(string.format([==[
-            local root = %q
-            local cases = require "uv_late_fs_callback_cases"
-            local remaining = string.rep("r", 4 * 65536 + 19)
-            local payload = "seed|" .. remaining
-            local task = cases.schedule_read_until_cancellation_restore(
-                root .. "/read-until-cancel.dat", payload, remaining)
-            cases.loop()
-            assert(task:join() == "read-until-cancellation-restore-ok")
-            ]==], root))
-        end)
-
-        it("restores accumulated delimiter bytes after resubmission error",
-        function()
-            run(string.format([==[
-            local root = %q
-            local cases = require "uv_late_fs_callback_cases"
-            local payload = string.rep("e", 4 * 65536 + 29)
-            local task = cases.schedule_read_until_error_restore(
-                root .. "/read-until-error.dat", payload)
-            cases.loop()
-            assert(task:join() == "read-until-error-restore-ok")
             ]==], root))
         end)
 

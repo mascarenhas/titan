@@ -76,19 +76,6 @@ local function _bytes_find(haystack: string,
   return -1
 end
 
--- Folder-local binary slice used by filesystem request bookkeeping. Lua
--- copies the selected bytes into the resulting string, so the result does not
--- retain the source string or any request-owned native buffer.
-local function _bytes_slice(data: string, offset: integer,
-                            length: integer): string
-  if offset < 0 or length < 0 or offset > #data or
-      length > #data - offset then
-    raise "byte slice is out of range"
-  end
-  local pointer = data as const *ffi.titan_ffi_char
-  return bytes_string(pointer + offset, length as libuv.size_t)
-end
-
 function _loop()
   if not on_main_thread() or coroutine.is_yieldable(UV_TAG) then
     raise "async.loop must be driven from the Lua main thread"
@@ -292,7 +279,7 @@ local function allocate_read_buffer(length: integer): Buffer
   return make_buffer(ffi.titan_ffi_char.new_array(length), 0, length)
 end
 
-local function bytes_string(bytes: const *ffi.titan_ffi_char,
+local function bytes_string(bytes: *ffi.titan_ffi_char,
                             length: libuv.size_t): string
   local top = lua.lua_gettop(L)
   defer lua.lua_settop(L, top)

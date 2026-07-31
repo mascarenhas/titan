@@ -1,7 +1,6 @@
 local LATE_FS_CASES = [[
     -- Runs only against the generated delayed-FS callback uv variant.
     local lua = foreign import "lua.h"
-    local fs = import "fs"
     local uv = import "uv"
 
     record YoungReason
@@ -15,10 +14,10 @@ local LATE_FS_CASES = [[
       if not condition then raise message end
     end
 
-    local function schedule_buffer_write(file: fs.File,
+    local function schedule_buffer_write(file: uv.uv_file,
                                          payload: string): uv.Task
       return uv._run(function (): value
-        return file:write(payload)
+        return uv._fs_write(file, payload)
       end)
     end
 
@@ -34,12 +33,12 @@ local LATE_FS_CASES = [[
 
     function schedule_cross_generation_graph(root: string): uv.Task
       return uv._run(function (): value
-        local file = fs.open(root .. "/cross-generation.dat", "w")
+        local file = uv._fs_open(root .. "/cross-generation.dat", "w")
         local ticker = uv._ticker(1000)
         local old_error_task = uv._run(function (): value
           uv._sleep(80)
           do
-            fs.stat(root .. "/missing-cross-generation-target")
+            uv._fs_stat(root .. "/missing-cross-generation-target")
           catch
             local failure = error as uv.Error
             check(failure.operation == "fs.stat" and failure.code < 0,
@@ -79,7 +78,7 @@ local LATE_FS_CASES = [[
               "old Task did not retain its young uv.Error")
 
         uv._ticker_close(ticker)
-        file:close()
+        uv._fs_close(file)
         return "cross-generation-graph-ok"
       end)
     end
@@ -89,7 +88,7 @@ local LATE_FS_CASES = [[
       uv.__test_delay_next_fs_callback(40)
 
       local target = uv._run(function (): value
-        fs.stat(path)
+        uv._fs_stat(path)
         fs_result_delivered = true
         return "late-result-must-not-win"
       end)
@@ -138,9 +137,9 @@ local LATE_FS_CASES = [[
       uv.__test_delay_next_fs_callback(40)
 
       local target = uv._run(function (): value
-        local file = fs.open(path, "w")
+        local file = uv._fs_open(path, "w")
         fs_open_result_delivered = true
-        file:close()
+        uv._fs_close(file)
         return "late-open-result-must-not-win"
       end)
 
@@ -172,77 +171,6 @@ local LATE_FS_CASES = [[
         check(not fs_open_result_delivered,
               "cancelled successful open published a File")
         return "late-successful-open-cancellation-ok"
-      end)
-    end
-
-    function schedule_read_until_cancellation_restore(
-        path: string,
-        payload: string,
-        remaining: string
-    ): uv.Task
-      return uv._run(function (): value
-        fs.write_file(path, payload)
-        local file = fs.open(path, "r")
-        check(file:read_until("|") == "seed|",
-              "could not seed retained delimiter excess")
-
-        uv.__test_delay_nth_fs_read_callback(2, 45)
-        local target = uv._run(function (): value
-          return file:read_until("missing-delimiter")
-        end)
-        local canceller = uv._run(function (): value
-          while not uv.__test_fs_callback_is_delayed() do
-            uv._yield()
-          end
-          target:cancel("cancel-accumulated-file-read")
-          return nil
-        end)
-
-        canceller:join()
-        local cancelled = false
-        do
-          target:join()
-        catch
-          local reason = error as uv.Cancelled
-          check(reason.reason == "cancel-accumulated-file-read",
-                "delimiter-read cancellation reason changed")
-          cancelled = true
-        end
-        check(cancelled and target:status() == "cancelled",
-              "delayed delimiter read did not finish cancelled")
-
-        -- Drain the delayed successful callback. It owns both the just-read
-        -- bytes and restoration of the earlier accumulated/excess prefix.
-        uv._sleep(60)
-        check(file:read_until("missing-delimiter") == remaining,
-              "cancelled delimiter read did not restore bytes in order")
-        file:close()
-        return "read-until-cancellation-restore-ok"
-      end)
-    end
-
-    function schedule_read_until_error_restore(
-        path: string,
-        payload: string
-    ): uv.Task
-      return uv._run(function (): value
-        fs.write_file(path, payload)
-        local file = fs.open(path, "r")
-        uv.__test_fail_nth_fs_read_submission(3)
-        local failed = false
-        do
-          file:read_until("missing-delimiter")
-        catch
-          local failure = error as uv.Error
-          check(failure.operation == "fs.read_until" and failure.code < 0,
-                "injected delimiter-read failure had the wrong identity")
-          failed = true
-        end
-        check(failed, "injected delimiter-read submission did not fail")
-        check(file:read_until("missing-delimiter") == payload,
-              "failed delimiter read did not restore its accumulated prefix")
-        file:close()
-        return "read-until-error-restore-ok"
       end)
     end
 ]]
