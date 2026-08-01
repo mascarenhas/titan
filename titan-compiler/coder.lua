@@ -3205,7 +3205,8 @@ local function spill_reload(ctx)
         .. table.concat(lines, "\n")
 end
 
-local function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]])
+local function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]],
+                      initializer --[[:string?]])
     -- Module-level Lua entry wrappers share the translation-unit context but
     -- may be emitted before any native body has needed a temporary. Treat that
     -- as the first allocation just like `fresh_lowering_name`; GC-bearing
@@ -3224,14 +3225,14 @@ local function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]])
             $DECL = $INIT;
         ]], {
             DECL = cvardecl(ctx, tmptype, tmpname),
-            INIT = initval(typ)
+            INIT = initializer or initval(typ)
         }), tmpname, slot
     else
         return render([[
             $DECL = $INIT;
         ]], {
             DECL = cvardecl(ctx, tmptype, tmpname),
-            INIT = initval(typ)
+            INIT = initializer or initval(typ)
         }), tmpname
     end
 end
@@ -5643,7 +5644,10 @@ end
 -- representability before the cast and before any destination mutation.
 function coder._code_checked_numeric_cast(
         ctx, source_type, target_type, source, loc, mode)
-    local csource, source_name = newtmp(ctx, source_type)
+    -- A function may return a const-qualified C typedef. Capture it in its
+    -- declaration so universal foreign-call materialization does not require
+    -- a later assignment to a read-only temporary.
+    local csource, source_name = newtmp(ctx, source_type, false, source)
     local ctarget, target_name = newtmp(ctx, target_type)
     local predicate_stats, predicate =
         coder._code_native_numeric_predicate(
@@ -5652,7 +5656,6 @@ function coder._code_checked_numeric_cast(
         coder._numeric_trait(source_type, target_type, target_type)
     return render([[
         $CSOURCE
-        $SOURCE_NAME = $SOURCE;
         $PREDICATE_STATS
         if (TITAN_UNLIKELY(!($PREDICATE))) {
             $THROW
@@ -5662,7 +5665,6 @@ function coder._code_checked_numeric_cast(
     ]], {
         CSOURCE = csource,
         SOURCE_NAME = source_name,
-        SOURCE = source,
         PREDICATE_STATS = predicate_stats,
         PREDICATE = predicate,
         THROW = coder._numeric_range_throw(
@@ -6318,8 +6320,7 @@ local function ordered_call_args(ctx, args, n)
     local freeze = {}
     local later_has_stats = false
     for i = n, 1, -1 do
-        -- Foreign scalar calls can remain bare C expressions (no setup
-        -- statements), so an AST call is effectful even when `stats` is empty.
+        -- Calls are effectful even when their generated setup is empty.
         local has_stats = coded[i].stats ~= "" or coded[i].contains_call
         freeze[i] = has_stats or later_has_stats
         later_has_stats = later_has_stats or has_stats
@@ -6373,7 +6374,8 @@ local function named_ordered_call_args(ctx, args, order)
     return stats, exps
 end
 
-local function newforeigntmp(ctx --[[:table]], typ --[[:table]])
+local function newforeigntmp(ctx --[[:table]], typ --[[:table]],
+                             initializer --[[:string?]])
     local tmp = ctx.tmp
     ctx.tmp = ctx.tmp + 1
     local tmpname = "_tmp_" .. tmp
@@ -6395,6 +6397,9 @@ local function newforeigntmp(ctx --[[:table]], typ --[[:table]])
         end
     else
         error("don't know how to convert foreign type "..types.tostring(typ))
+    end
+    if initializer then
+        finit = " = " .. initializer
     end
     return render([[
         $DECL$INIT;
@@ -8023,16 +8028,17 @@ local function foreigntonativeexp(ctx, exp, cexp, target)
 end
 
 local function finish_foreign_call(ctx, ret, prestats, ccall, poststats)
-    if #poststats == 0 then
-        return prestats, ccall
-    end
-
+    -- Foreign code can re-enter Lua or otherwise grow and relocate its stack.
+    -- Materialize the result before recovering `_base`, then perform any
+    -- post-call slot work only through the recovered pointer.
+    ctx.uses_base_off = true
     local ret_res = types.resolve_c_typedef(ret)
     local post = table.concat(poststats, "\n")
     if ret_res._tag == "Type.CVoid" then
         return render([[
             $PRESTATS
             $CCALL;
+            _base = restorestack(L, _base_off);
             $POST
         ]], {
             PRESTATS = prestats,
@@ -8041,17 +8047,15 @@ local function finish_foreign_call(ctx, ret, prestats, ccall, poststats)
         }), "((void)0)"
     end
 
-    local fdecl, fname = newforeigntmp(ctx, ret)
+    local fdecl, fname = newforeigntmp(ctx, ret, ccall)
     return render([[
         $PRESTATS
         $FDECL
-        $FNAME = $CCALL;
+        _base = restorestack(L, _base_off);
         $POST
     ]], {
         PRESTATS = prestats,
         FDECL = fdecl,
-        FNAME = fname,
-        CCALL = ccall,
         POST = post,
     }), fname
 end
@@ -14178,9 +14182,9 @@ local function codefuncdec(tlcontext, node)
     -- TITAN_RESERVED_NSLOTS so a catch's own slots are GC-scanned) now that the
     -- function-wide high-water mark is final.
     body = body:gsub("TITAN_RESERVED_NSLOTS", c_integer_literal(nslots))
-    -- A value-call (codevaluecall) can relocate the Lua stack, which would
-    -- dangle `_base`; such a function saves `_base` as an offset so it can be
-    -- recomputed after each value-call.
+    -- Calls and allocation/GC helpers can relocate the Lua stack and dangle
+    -- `_base`. Any lowering with such a rebase point sets `uses_base_off`, so
+    -- the function saves `_base` as an offset for recovery afterward.
     local baseoff = ctx.uses_base_off
         and "\n        ptrdiff_t _base_off = savestack(L, _base);" or ""
     -- Clean-exit restore foundation (#3): snapshot the errorjmp chain at function

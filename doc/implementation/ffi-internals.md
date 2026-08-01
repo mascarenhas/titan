@@ -585,6 +585,17 @@ raises a Lua error if the temporary is `NULL`, converts arguments through
 path before the direct C-module call path so `c.callback_value(...)` is treated
 as an indirect call when `callback_value` has a function pointer type.
 
+Every direct or function-pointer foreign call is conservatively treated as a
+possible Lua-stack relocation point. The coder materializes a non-`void`
+result, recovers the generated function's cached `_base` from `_base_off`, and
+only then performs post-call stack-slot anchoring or result conversion; `void`
+calls use the same recovery without a result temporary. This permits trusted
+runtime FFI functions to re-enter Lua or grow its heap stack without leaving
+later generated stack accesses pointed at the old allocation. It does not
+widen the public FFI safety boundary: arbitrary Lua C API stack effects,
+borrowed-pointer lifetimes, and nonlocal exits still require their existing
+operation-specific contracts.
+
 Generated includes use `node._include`:
 
 ```c
