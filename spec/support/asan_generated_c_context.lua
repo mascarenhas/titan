@@ -1,0 +1,813 @@
+local cdriver = require "c-parser.cdriver"
+local lfs = require "lfs"
+
+local M = {}
+
+-- This helper never guesses a physical C line from Titan-attributed DWARF.
+-- It preserves the exact tested provider and generated objects, then maps a
+-- relocation-safe ASan module offset through one verified function.  A shadow
+-- compile changes only line metadata; byte-identical target-function code is
+-- the proof that its relative address still names the original instruction.
+
+local function join(left, right)
+    if left:sub(-1) == "/" then return left .. right end
+    return left .. "/" .. right
+end
+
+local function dirname(path)
+    return path:match("^(.*)/[^/]*$") or "."
+end
+
+local function absolute(path)
+    if path:sub(1, 1) == "/" then return path end
+    return join(lfs.currentdir(), path)
+end
+
+local function file_mode(path)
+    return lfs.attributes(path, "mode")
+end
+
+local function mkdir_p(path)
+    if file_mode(path) == "directory" then return true end
+    local parent = dirname(path)
+    if parent ~= path then
+        local ok, err = mkdir_p(parent)
+        if not ok then return nil, err end
+    end
+    local ok, err = lfs.mkdir(path)
+    if ok or file_mode(path) == "directory" then return true end
+    return nil, err
+end
+
+local function read_file(path)
+    local file, err = io.open(path, "rb")
+    if not file then return nil, err end
+    local contents = file:read("*a")
+    local closed, close_err = file:close()
+    if not closed then return nil, close_err end
+    return contents
+end
+
+local function write_file(path, contents)
+    local ok, err = mkdir_p(dirname(path))
+    if not ok then return nil, err end
+    local file
+    file, err = io.open(path, "wb")
+    if not file then return nil, err end
+    local wrote
+    wrote, err = file:write(contents)
+    if not wrote then
+        file:close()
+        return nil, err
+    end
+    local closed, close_err = file:close()
+    if not closed then return nil, close_err end
+    return true
+end
+
+local function encode_argv(argv)
+    local output = {}
+    for _, word in ipairs(argv) do
+        if word:find("\0", 1, true) then
+            return nil, "compiler argument contains a NUL byte"
+        end
+        output[#output + 1] = word
+        output[#output + 1] = "\0"
+    end
+    return table.concat(output)
+end
+
+local function decode_argv(contents)
+    local argv = {}
+    for word in contents:gmatch("([^\0]*)\0") do argv[#argv + 1] = word end
+    if #argv == 0 or contents:sub(-1) ~= "\0" then
+        return nil, "invalid captured compiler argv"
+    end
+    return argv
+end
+
+local function copy_file(source, destination)
+    local input, err = io.open(source, "rb")
+    if not input then return nil, err end
+    local ok
+    ok, err = mkdir_p(dirname(destination))
+    if not ok then
+        input:close()
+        return nil, err
+    end
+    local output
+    output, err = io.open(destination, "wb")
+    if not output then
+        input:close()
+        return nil, err
+    end
+    while true do
+        local chunk = input:read(1024 * 1024)
+        if not chunk then break end
+        ok, err = output:write(chunk)
+        if not ok then
+            input:close()
+            output:close()
+            return nil, err
+        end
+    end
+    local input_ok, input_err = input:close()
+    local output_ok, output_err = output:close()
+    if not input_ok then return nil, input_err end
+    if not output_ok then return nil, output_err end
+    return true
+end
+
+local function sorted_entries(path)
+    local entries = {}
+    for entry in lfs.dir(path) do
+        if entry ~= "." and entry ~= ".." then
+            entries[#entries + 1] = entry
+        end
+    end
+    table.sort(entries)
+    return entries
+end
+
+local function discover_units(root, relative, units)
+    relative = relative or ""
+    units = units or {}
+    local directory = relative == "" and root or join(root, relative)
+    for _, entry in ipairs(sorted_entries(directory)) do
+        local rel = relative == "" and entry or join(relative, entry)
+        local path = join(root, rel)
+        local mode = file_mode(path)
+        if mode == "directory" then
+            discover_units(root, rel, units)
+        elseif mode == "file" and rel:match("%.c$") then
+            local object_rel = rel:gsub("%.c$", ".o")
+            local object = join(root, object_rel)
+            if file_mode(object) == "file" then
+                units[#units + 1] = {
+                    relative = rel,
+                    source = path,
+                    object = object,
+                }
+            end
+        end
+    end
+    return units
+end
+
+local function run_command(config, argv)
+    local runner = config.run_command or cdriver.capture_command
+    local result = runner(argv, { stderr_to_stdout = true })
+    if result and result.ok then return result.output or "" end
+    local diagnostic = result and (result.diagnostic or result.output)
+        or "command runner returned no result"
+    return nil, diagnostic
+end
+
+local function hex(value)
+    return string.format("0x%x", value)
+end
+
+function M.parse_frames(log)
+    local frames = {}
+    for line in (log .. "\n"):gmatch("([^\n]*)\n") do
+        local number = line:match("^%s*#(%d+)")
+        if number then
+            local module, offset
+            for candidate, candidate_offset in
+                line:gmatch("%(([^()]*)%+(0[xX][%da-fA-F]+)%)") do
+                module, offset = candidate, candidate_offset
+            end
+            if module and module ~= "" then
+                local build_id
+                for candidate in line:gmatch(
+                    "%(BuildId:%s*([%da-fA-F]+)%)") do
+                    build_id = candidate:lower()
+                end
+                frames[#frames + 1] = {
+                    number = tonumber(number),
+                    module = module,
+                    offset = assert(tonumber(offset)),
+                    build_id = build_id,
+                    text = line,
+                }
+            end
+        end
+    end
+    return frames
+end
+
+function M.parse_nm(output)
+    local symbols = {}
+    for line in (output .. "\n"):gmatch("([^\n]*)\n") do
+        local address, size, kind, name = line:match(
+            "^%s*([%da-fA-F]+)%s+([%da-fA-F]+)%s+(%S)%s+(.+)%s*$")
+        if address and kind:match("[tTwW]") then
+            symbols[#symbols + 1] = {
+                address = assert(tonumber("0x" .. address)),
+                size = assert(tonumber("0x" .. size)),
+                kind = kind,
+                name = name,
+            }
+        end
+    end
+    table.sort(symbols, function(left, right)
+        if left.address ~= right.address then
+            return left.address < right.address
+        end
+        return left.size < right.size
+    end)
+    return symbols
+end
+
+local function containing_symbol(symbols, address)
+    local found
+    for _, symbol in ipairs(symbols) do
+        if symbol.size > 0 and address >= symbol.address
+        and address < symbol.address + symbol.size then
+            if not found then
+                found = symbol
+            elseif symbol.address ~= found.address
+            or symbol.size ~= found.size then
+                return nil, "address lies in overlapping function symbols"
+            elseif symbol.name ~= found.name then
+                return nil, "address lies in aliased function symbols"
+            end
+        end
+    end
+    return found
+end
+
+local function named_symbol(symbols, name)
+    local found
+    for _, symbol in ipairs(symbols) do
+        if symbol.name == name and symbol.size > 0 then
+            if found then return nil, "symbol is not unique" end
+            found = symbol
+        end
+    end
+    if not found then return nil, "symbol is absent" end
+    return found
+end
+
+function M.strip_line_directives(source, original_path)
+    local escaped = original_path:gsub("\\", "\\\\"):gsub('"', '\\"')
+    local output = { '#line 1 "' .. escaped .. '"\n' }
+    local terminated = source:sub(-1) == "\n"
+    for line in (source .. "\n"):gmatch("([^\n]*)\n") do
+        local output_line = line
+        if output_line:match("^%s*#%s*line%s") then output_line = "" end
+        output[#output + 1] = output_line .. "\n"
+    end
+    if not terminated then
+        output[#output] = output[#output]:sub(1, -2)
+    end
+    return table.concat(output)
+end
+
+function M.source_context(source, line_number, radius)
+    radius = radius or 5
+    local lines = {}
+    for line in (source .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
+    end
+    if source:sub(-1) == "\n" then lines[#lines] = nil end
+    if line_number < 1 or line_number > #lines then
+        return nil, "line is outside the source"
+    end
+    local first = math.max(1, line_number - radius)
+    local last = math.min(#lines, line_number + radius)
+    local output = {}
+    for index = first, last do
+        output[#output + 1] = string.format("%s %7d | %s",
+            index == line_number and ">" or " ", index, lines[index])
+    end
+    return table.concat(output, "\n")
+end
+
+local function manifest_path(snapshot)
+    return join(snapshot, "manifest.txt")
+end
+
+function M.snapshot(snapshot, provider, source_root, runtime_provider,
+    display_root)
+    snapshot = absolute(snapshot)
+    provider = absolute(provider)
+    source_root = absolute(source_root)
+    runtime_provider = absolute(runtime_provider or provider)
+    display_root = absolute(display_root or source_root)
+    if file_mode(provider) ~= "file" then
+        return nil, "sanitizer provider is not a regular file: " .. provider
+    elseif file_mode(source_root) ~= "directory" then
+        return nil, "generated-C root is not a directory: " .. source_root
+    elseif file_mode(manifest_path(snapshot)) then
+        return nil, "sanitizer snapshot already exists: " .. snapshot
+    end
+
+    local units = discover_units(source_root)
+    if #units == 0 then
+        return nil, "generated-C root has no matching .c/.o pairs: " ..
+            source_root
+    end
+    local ok, err = mkdir_p(join(snapshot, "units"))
+    if not ok then return nil, err end
+    ok, err = copy_file(provider, join(snapshot, "provider.so"))
+    if not ok then return nil, err end
+    for _, unit in ipairs(units) do
+        ok, err = copy_file(unit.source,
+            join(join(snapshot, "units"), unit.relative))
+        if not ok then return nil, err end
+        ok, err = copy_file(unit.object,
+            join(join(snapshot, "units"), unit.relative:gsub("%.c$", ".o")))
+        if not ok then return nil, err end
+    end
+    -- Capture the compiler argv while rock-post-install's private stdlib flags
+    -- are still in the environment.  Reconstructing those flags after the
+    -- private stage has been deleted would make the shadow proof unreliable.
+    local driver = require "titan-compiler.driver"
+    local compile_argv
+    compile_argv, err = driver.generated_compile_prefix()
+    if not compile_argv then return nil, err end
+    local encoded
+    encoded, err = encode_argv(compile_argv)
+    if not encoded then return nil, err end
+    ok, err = write_file(join(snapshot, "compile-argv.bin"), encoded)
+    if not ok then return nil, err end
+
+    if runtime_provider:find("\n", 1, true)
+    or display_root:find("\n", 1, true) then
+        return nil, "snapshot paths may not contain newlines"
+    end
+    ok, err = write_file(manifest_path(snapshot), table.concat({
+        "version=1",
+        "provider=" .. runtime_provider,
+        "source_root=" .. display_root,
+        "units=" .. tostring(#units),
+        "",
+    }, "\n"))
+    if not ok then return nil, err end
+    return #units
+end
+
+local function read_snapshot(snapshot)
+    snapshot = absolute(snapshot)
+    local manifest, err = read_file(manifest_path(snapshot))
+    if not manifest then return nil, err end
+    local values = {}
+    for line in manifest:gmatch("([^\n]+)") do
+        local key, value = line:match("^([a-z_]+)=(.*)$")
+        if key then values[key] = value end
+    end
+    if values.version ~= "1" or not values.provider
+    or not values.source_root then
+        return nil, "invalid sanitizer snapshot manifest"
+    end
+    local provider = join(snapshot, "provider.so")
+    local units_root = join(snapshot, "units")
+    local compile_argv_file = join(snapshot, "compile-argv.bin")
+    if file_mode(provider) ~= "file"
+    or file_mode(units_root) ~= "directory"
+    or file_mode(compile_argv_file) ~= "file" then
+        return nil, "incomplete sanitizer snapshot"
+    end
+    local compile_argv
+    compile_argv, err = read_file(compile_argv_file)
+    if not compile_argv then return nil, err end
+    compile_argv, err = decode_argv(compile_argv)
+    if not compile_argv then return nil, err end
+    local units = discover_units(units_root)
+    if #units == 0 or tonumber(values.units) ~= #units then
+        return nil, "sanitizer snapshot unit manifest does not match its files"
+    end
+    return {
+        root = snapshot,
+        provider = provider,
+        original_provider = values.provider,
+        source_root = values.source_root,
+        units_root = units_root,
+        units = units,
+        compile_argv = compile_argv,
+    }
+end
+
+local function symbols_for(path, config)
+    config.symbol_cache = config.symbol_cache or {}
+    if config.symbol_cache[path] then return config.symbol_cache[path] end
+    local output, err = run_command(config, {
+        config.nm or "nm", "-anS", "--defined-only", path,
+    })
+    if not output then return nil, err end
+    local symbols = M.parse_nm(output)
+    config.symbol_cache[path] = symbols
+    return symbols
+end
+
+function M.parse_objdump_symbols(output)
+    local symbols = {}
+    for line in (output .. "\n"):gmatch("([^\n]*)\n") do
+        local address, section, size, name = line:match(
+            "^%s*([%da-fA-F]+)%s+%S+%s+F%s+(%S+)%s+" ..
+            "([%da-fA-F]+)%s+(.+)%s*$")
+        if address then
+            symbols[#symbols + 1] = {
+                address = assert(tonumber("0x" .. address)),
+                section = section,
+                size = assert(tonumber("0x" .. size)),
+                name = name,
+            }
+        end
+    end
+    return symbols
+end
+
+local function symbol_section(path, symbol, config)
+    config.objdump_symbol_cache = config.objdump_symbol_cache or {}
+    local symbols = config.objdump_symbol_cache[path]
+    if not symbols then
+        local output, err = run_command(config, {
+            config.objdump or "objdump", "-t", path,
+        })
+        if not output then return nil, err end
+        symbols = M.parse_objdump_symbols(output)
+        config.objdump_symbol_cache[path] = symbols
+    end
+    local section
+    for _, candidate in ipairs(symbols) do
+        if candidate.name == symbol.name
+        and candidate.address == symbol.address
+        and candidate.size == symbol.size then
+            if section and section ~= candidate.section then
+                return nil, "symbol appears in multiple object sections"
+            end
+            section = candidate.section
+        end
+    end
+    if not section then return nil, "objdump did not locate the symbol section" end
+    return section
+end
+
+local function provider_build_id(path, config)
+    if config.provider_build_id ~= nil then
+        return config.provider_build_id or nil
+    end
+    local output, err = run_command(config, {
+        config.readelf or "readelf", "-n", path,
+    })
+    if not output then return nil, err end
+    local build_id = output:match("Build ID:%s*([%da-fA-F]+)")
+    config.provider_build_id = build_id and build_id:lower() or false
+    return config.provider_build_id or nil
+end
+
+local function find_unit(snapshot, symbol_name, config)
+    local found, found_symbol
+    for _, unit in ipairs(snapshot.units) do
+        local symbols, err = symbols_for(unit.object, config)
+        if not symbols then return nil, nil, err end
+        local symbol, symbol_err = named_symbol(symbols, symbol_name)
+        if symbol then
+            if found then
+                return nil, nil, "more than one generated object defines " ..
+                    symbol_name
+            end
+            found, found_symbol = unit, symbol
+        elseif symbol_err ~= "symbol is absent" then
+            return nil, nil, symbol_err
+        end
+    end
+    if not found then
+        return nil, nil, "no generated object defines " .. symbol_name
+    end
+    return found, found_symbol
+end
+
+local function compile_prefix(config)
+    if config.compile_prefix then
+        local copy = {}
+        for index, word in ipairs(config.compile_prefix) do copy[index] = word end
+        return copy
+    end
+    local driver = require "titan-compiler.driver"
+    return driver.generated_compile_prefix()
+end
+
+local function dump_text(object, destination, config)
+    os.remove(destination)
+    local _, err = run_command(config, {
+        config.objcopy or "objcopy",
+        "--dump-section", ".text=" .. destination,
+        object,
+    })
+    if err then return nil, err end
+    return read_file(destination)
+end
+
+local function prepare_shadow(unit, snapshot, config)
+    config.shadow_cache = config.shadow_cache or {}
+    if config.shadow_cache[unit.source] then
+        return config.shadow_cache[unit.source]
+    end
+    config.shadow_count = (config.shadow_count or 0) + 1
+    local stem = join(config.work_dir,
+        "translation-unit-" .. tostring(config.shadow_count))
+    local shadow_source, shadow_object = stem .. ".c", stem .. ".o"
+    local source, err = read_file(unit.source)
+    if not source then return nil, err end
+    local label = join(snapshot.source_root, unit.relative)
+    local shadow = M.strip_line_directives(source, label)
+    local ok
+    ok, err = write_file(shadow_source, shadow)
+    if not ok then return nil, err end
+
+    local argv
+    argv, err = compile_prefix(config)
+    if not argv then return nil, err end
+    argv[#argv + 1] = "-c"
+    argv[#argv + 1] = shadow_source
+    argv[#argv + 1] = "-o"
+    argv[#argv + 1] = shadow_object
+    local _, compile_err = run_command(config, argv)
+    if compile_err then
+        return nil, "shadow compile failed: " .. compile_err
+    end
+
+    -- Debug metadata and sanitizer tables elsewhere in the translation unit
+    -- may legitimately differ.  The target function's executable bytes and
+    -- layout may not: those equalities are what make its relative offset safe
+    -- to reuse.
+    local original_text, original_text_err = dump_text(unit.object,
+        stem .. ".original.text", config)
+    if not original_text then return nil, original_text_err end
+    local shadow_text, shadow_text_err = dump_text(shadow_object,
+        stem .. ".shadow.text", config)
+    if not shadow_text then return nil, shadow_text_err end
+
+    local result = {
+        object = shadow_object,
+        source = source,
+        label = label,
+        original_text = original_text,
+        shadow_text = shadow_text,
+    }
+    config.shadow_cache[unit.source] = result
+    return result
+end
+
+local function shadow_for(unit, original_symbol, snapshot, config)
+    local shadow, err = prepare_shadow(unit, snapshot, config)
+    if not shadow then return nil, err end
+    local shadow_symbols
+    shadow_symbols, err = symbols_for(shadow.object, config)
+    if not shadow_symbols then return nil, err end
+    local shadow_symbol, symbol_err = named_symbol(shadow_symbols,
+        original_symbol.name)
+    if not shadow_symbol then return nil, symbol_err end
+    if shadow_symbol.address ~= original_symbol.address
+    or shadow_symbol.size ~= original_symbol.size then
+        return nil, "normal and shadow function layouts differ"
+    end
+    local original_section
+    original_section, err = symbol_section(unit.object, original_symbol, config)
+    if not original_section then return nil, err end
+    local shadow_section
+    shadow_section, err = symbol_section(shadow.object, shadow_symbol, config)
+    if not shadow_section then return nil, err end
+    if original_section ~= ".text" or shadow_section ~= ".text" then
+        return nil, "target function is not in the verified .text section"
+    end
+    local first = original_symbol.address + 1
+    local last = original_symbol.address + original_symbol.size
+    if last > #shadow.original_text or last > #shadow.shadow_text then
+        return nil, "target function lies outside the dumped .text section"
+    elseif shadow.original_text:sub(first, last) ~=
+        shadow.shadow_text:sub(first, last) then
+        return nil, "normal and shadow function bytes differ"
+    end
+    return shadow.object, shadow_symbol, shadow.source, shadow.label
+end
+
+local function addr2line(object, address, config, section)
+    local diagnostics = {}
+    if not section then
+        local candidates = config.symbolizer and { config.symbolizer }
+            or { "llvm-symbolizer-18", "llvm-symbolizer" }
+        for _, symbolizer in ipairs(candidates) do
+            local output, err = run_command(config, {
+                symbolizer, "--obj=" .. object, "--functions=none",
+                "--no-inlines", hex(address),
+            })
+            if output then
+                local path, line = output:match("^(.*):(%d+):%d+%s*$")
+                line = tonumber(line)
+                if path and path ~= "??" and line and line ~= 0 then
+                    return path, line
+                end
+                diagnostics[#diagnostics + 1] = symbolizer .. " returned " ..
+                    output:gsub("%s+$", "")
+            else
+                diagnostics[#diagnostics + 1] = symbolizer .. " failed: " ..
+                    tostring(err)
+            end
+        end
+    end
+
+    local argv = { config.addr2line or "addr2line" }
+    if section then
+        argv[#argv + 1] = "-j"
+        argv[#argv + 1] = section
+    end
+    argv[#argv + 1] = "-e"
+    argv[#argv + 1] = object
+    argv[#argv + 1] = hex(address)
+    local output, err = run_command(config, argv)
+    if output then
+        local path, line = output:match("([^\n]*):(%d+)%s*$")
+        line = tonumber(line)
+        if path and path ~= "??" and line and line ~= 0 then
+            return path, line
+        end
+        diagnostics[#diagnostics + 1] = "addr2line returned " ..
+            output:gsub("%s+$", "")
+    else
+        diagnostics[#diagnostics + 1] = "addr2line failed: " .. tostring(err)
+    end
+    return nil, table.concat(diagnostics, "; ")
+end
+
+local function direct_context(path, line, config)
+    if path:sub(1, 1) ~= "/" then path = absolute(path) end
+    if file_mode(path) ~= "file" then return nil end
+    local source = read_file(path)
+    if not source then return nil end
+    local context = M.source_context(source, line, config.context_radius)
+    if not context then return nil end
+    return path, context
+end
+
+local function map_frame(frame, snapshot, config)
+    local build_id, build_id_err = provider_build_id(snapshot.provider, config)
+    if build_id_err then return nil, build_id_err end
+    if build_id and frame.build_id ~= build_id then
+        return nil, frame.build_id
+            and "ASan frame BuildId does not match the saved provider"
+            or "ASan frame omitted the saved provider BuildId"
+    end
+    local provider_symbols, err = symbols_for(snapshot.provider, config)
+    if not provider_symbols then return nil, err end
+    local provider_symbol, symbol_err = containing_symbol(
+        provider_symbols, frame.offset)
+    if not provider_symbol then
+        return nil, symbol_err or
+            ("no provider function contains " .. hex(frame.offset))
+    end
+    local provider_section
+    provider_section, err = symbol_section(snapshot.provider,
+        provider_symbol, config)
+    if not provider_section then return nil, err end
+    if provider_section ~= ".text" then
+        return nil, "provider function is not in .text"
+    end
+    local delta = frame.offset - provider_symbol.address
+    local normal_path, normal_line = addr2line(snapshot.provider,
+        frame.offset, config)
+    local unit, original_symbol, unit_err = find_unit(snapshot,
+        provider_symbol.name, config)
+    if not unit then
+        if normal_path and not normal_path:match("%.titan$") then
+            local path, context = direct_context(normal_path, normal_line, config)
+            if path then
+                return {
+                    symbol = provider_symbol,
+                    delta = delta,
+                    normal_path = normal_path,
+                    normal_line = normal_line,
+                    generated_path = path,
+                    generated_line = normal_line,
+                    context = context,
+                    native = true,
+                }
+            end
+        end
+        return nil, unit_err
+    end
+    if provider_symbol.size ~= original_symbol.size then
+        return nil, "provider and generated-object function sizes differ"
+    elseif delta >= original_symbol.size then
+        return nil, "provider offset falls outside the generated function"
+    end
+
+    local shadow_object, shadow_symbol, source, label = shadow_for(
+        unit, original_symbol, snapshot, config)
+    if not shadow_object then return nil, shadow_symbol end
+    local generated_path, generated_line = addr2line(shadow_object,
+        shadow_symbol.address + delta, config, ".text")
+    if not generated_line then return nil, "shadow addr2line failed" end
+    if generated_path ~= label then
+        return nil, "shadow symbolization did not resolve to the saved " ..
+            "generated C"
+    end
+    local context, context_err = M.source_context(source, generated_line,
+        config.context_radius)
+    if not context then return nil, context_err end
+    return {
+        symbol = provider_symbol,
+        delta = delta,
+        normal_path = normal_path,
+        normal_line = normal_line,
+        generated_path = label,
+        generated_line = generated_line,
+        context = context,
+    }
+end
+
+function M.report_text(log, snapshot, config)
+    config = config or {}
+    config.compile_prefix = config.compile_prefix or snapshot.compile_argv
+    if not log:find("AddressSanitizer", 1, true) then return nil end
+    local frames = M.parse_frames(log)
+    local matching, seen = {}, {}
+    for _, frame in ipairs(frames) do
+        local key = frame.module .. "+" .. hex(frame.offset)
+        if frame.module == snapshot.original_provider and not seen[key] then
+            seen[key] = true
+            matching[#matching + 1] = frame
+        end
+    end
+    if #matching == 0 then
+        return "AddressSanitizer report has no relocation-safe frames for " ..
+            snapshot.original_provider
+    end
+
+    local output = {
+        "Titan generated-C context (verified against the saved sanitizer objects)",
+    }
+    local limit = config.max_frames or 6
+    for index = 1, math.min(#matching, limit) do
+        local frame = matching[index]
+        output[#output + 1] = ""
+        output[#output + 1] = frame.text
+        local mapped, err = map_frame(frame, snapshot, config)
+        if not mapped then
+            output[#output + 1] = "  generated-C context unavailable: " ..
+                tostring(err)
+        else
+            output[#output + 1] = string.format(
+                "  symbol: %s+0x%x", mapped.symbol.name, mapped.delta)
+            if mapped.normal_path and mapped.normal_line then
+                output[#output + 1] = string.format(
+                    "  normal DWARF attribution: %s:%d",
+                    mapped.normal_path, mapped.normal_line)
+            end
+            output[#output + 1] = string.format(
+                "  %s context: %s:%d",
+                mapped.native and "native C" or "generated C",
+                mapped.generated_path, mapped.generated_line)
+            output[#output + 1] = mapped.context
+        end
+    end
+    return table.concat(output, "\n")
+end
+
+local function log_files(path)
+    local mode = file_mode(path)
+    if mode == "file" then return { path } end
+    if mode ~= "directory" then return nil, "log path does not exist: " .. path end
+    local files = {}
+    for _, entry in ipairs(sorted_entries(path)) do
+        local candidate = join(path, entry)
+        if file_mode(candidate) == "file" and entry:match("%.log$") then
+            files[#files + 1] = candidate
+        end
+    end
+    return files
+end
+
+function M.report_logs(log_path, snapshot_path, config)
+    local snapshot, err = read_snapshot(snapshot_path)
+    if not snapshot then return nil, err end
+    config = config or {}
+    config.compile_prefix = config.compile_prefix or snapshot.compile_argv
+    config.work_dir = config.work_dir or join(snapshot.root, "shadow")
+    local ok
+    ok, err = mkdir_p(config.work_dir)
+    if not ok then return nil, err end
+    local files
+    files, err = log_files(absolute(log_path))
+    if not files then return nil, err end
+    local reports = {}
+    for _, path in ipairs(files) do
+        local log, read_err = read_file(path)
+        if not log then return nil, read_err end
+        local report = M.report_text(log, snapshot, config)
+        if report then
+            reports[#reports + 1] = "log: " .. path .. "\n" .. report
+        end
+    end
+    if #reports == 0 then
+        return "No AddressSanitizer report was captured; generated-C mapping skipped."
+    end
+    return table.concat(reports, "\n\n")
+end
+
+M._read_snapshot = read_snapshot
+
+return M

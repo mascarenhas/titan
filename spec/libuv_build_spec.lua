@@ -2189,6 +2189,7 @@ fi
                 "STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)",
                 "validate_archive()",
                 "STDLIB_INSTALL_STAGE       ?= $(CURDIR)",
+                "TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT ?=",
                 "install-stdlib: stdlib",
                 "install-stdlib publish-stdlib: " ..
                 "scripts/stdlib_installer.lua",
@@ -2216,6 +2217,36 @@ fi
             assert.truthy(stdlib_config:find(
                 "TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)",
                 1, true), stdlib_config)
+            local rock_post_install_start = assert(makefile:find(
+                "rock-post-install:", 1, true))
+            local rock_post_install_end = assert(makefile:find(
+                "\n# Compatibility name", rock_post_install_start, true))
+            local rock_post_install = makefile:sub(
+                rock_post_install_start, rock_post_install_end - 1)
+            for _, contract in ipairs({
+                "if test -n $(call make_shell_quote,$(strip " ..
+                    "$(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))); then",
+                '"$(CURDIR)/spec/support/' ..
+                    'ci_asan_generated_c_context.lua"',
+                "snapshot",
+                "$(call make_shell_quote,$(strip " ..
+                    "$(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT)))",
+                '"$$stage/titan.so" "$(CURDIR)/titan" ' ..
+                    '"$$abi_dir/titan.so"',
+                '"$(CURDIR)/titan"',
+            }) do
+                assert.truthy(rock_post_install:find(contract, 1, true),
+                    contract)
+            end
+            local diagnostic_snapshot = assert(rock_post_install:find(
+                '"$(CURDIR)/spec/support/' ..
+                    'ci_asan_generated_c_context.lua"', 1, true))
+            local publication = assert(rock_post_install:find(
+                '"$(ROCK_LUA)" -E "$(CURDIR)/scripts/' ..
+                    'stdlib_installer.lua"', diagnostic_snapshot, true))
+            assert.is_true(diagnostic_snapshot < publication,
+                "diagnostic snapshot must preserve the private stage " ..
+                "before publication")
             assert.falsy(makefile:find("-Wl,--whole-archive", 1, true), makefile)
             assert.falsy(makefile:find("-Wl,-force_load", 1, true), makefile)
             assert.falsy(makefile:find("rm -f *.a", 1, true), makefile)
@@ -2410,6 +2441,14 @@ fi
                     offset = start + #needle
                 end
             end
+            local function named_step(job, name)
+                local marker = "\n      - name: " .. name
+                local start = assert(job:find(marker, 1, true), name)
+                local finish = job:find(
+                    "\n      - name:", start + #marker, true)
+                    or (#job + 1)
+                return job:sub(start, finish - 1)
+            end
             local function assert_codecov_job(job, upload_name)
                 assert.equal(1, count_literal(job, "contents: read"), job)
                 assert.equal(1, count_literal(job, "id-token: write"), job)
@@ -2487,6 +2526,106 @@ fi
                 "runs-on: ubuntu-24.04"), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 "timeout-minutes: 30"), sanitizer_job)
+            local asan_options = assert(sanitizer_job:match(
+                '\n%s+ASAN_OPTIONS:%s+"([^"\n]+)"'))
+            assert.truthy(asan_options:find(
+                "stack_trace_format='    #%n %p %F %S (%m+%o) %b'",
+                1, true), asan_options)
+            assert.truthy(sanitizer_job:find(
+                "TITAN_SANITIZER_LOG_DIR=$RUNNER_TEMP/", 1, true),
+                sanitizer_job)
+            assert.truthy(sanitizer_job:find(
+                "TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT=$RUNNER_TEMP/", 1, true),
+                sanitizer_job)
+            assert.truthy(sanitizer_job:find(
+                "bash spec/support/ci_sanitizer_capture.sh", 1, true),
+                sanitizer_job)
+            assert.equal(1, count_literal(sanitizer_job,
+                "--filter-out='fs runtime covers modes, binary/NUL data'"),
+                sanitizer_job)
+            assert.equal(1, count_literal(sanitizer_job,
+                'cmp "$snapshot_provider" "$provider"'), sanitizer_job)
+            local capture_script =
+                "bash spec/support/ci_sanitizer_capture.sh"
+            for _, contract in ipairs({
+                {
+                    "Build sanitizer-enabled native dependencies",
+                    {
+                        "make lua",
+                        "make libbacktrace",
+                        "make libuv",
+                    },
+                },
+                {
+                    "Install LuaRocks for the sanitizer Lua",
+                    { "make luarocks" },
+                },
+                {
+                    "Activate the sanitizer Titan prefix",
+                    { '"$PREFIX/bin/luarocks" install' },
+                },
+                {
+                    "Build sanitizer-enabled Titan artifacts",
+                    { "luarocks make --force" },
+                },
+                {
+                    "Run dense Array runtime sanitizer gate",
+                    { ".lua/bin/busted" },
+                },
+                {
+                    "Run native async sanitizer gate (timer-fs)",
+                    { ".lua/bin/busted" },
+                },
+                {
+                    "Run native async sanitizer gate (core-uv)",
+                    { ".lua/bin/busted" },
+                },
+                {
+                    "Run coroutine transfer sanitizer gate",
+                    { ".lua/bin/busted" },
+                },
+                {
+                    "Run PEG/regex native sanitizer gate",
+                    {
+                        ".lua/bin/busted",
+                        "bash spec/support/ci_peg_string_" ..
+                            "sanitizer_smoke.sh",
+                    },
+                },
+                {
+                    "Build sanitizer child-process smoke fixture",
+                    { ".lua/bin/lua -e" },
+                },
+                {
+                    "Run sanitized net/OS production smokes",
+                    { ".lua/bin/lua spec/fixtures/libuv/" },
+                },
+            }) do
+                local step = named_step(sanitizer_job, contract[1])
+                local command_count = 0
+                for _, command in ipairs(contract[2]) do
+                    command_count = command_count +
+                        count_literal(step, command)
+                end
+                assert.is_true(command_count > 0, step)
+                assert.equal(command_count,
+                    count_literal(step, capture_script), step)
+            end
+            local diagnostic_step_start = assert(sanitizer_job:find(
+                "- name: Report generated C context for sanitizer failure",
+                1, true))
+            local diagnostic_step = sanitizer_job:sub(diagnostic_step_start)
+            for _, contract in ipairs({
+                "if: ${{ failure() && !cancelled() }}",
+                "continue-on-error: true",
+                '"$PREFIX/bin/lua" -E',
+                "spec/support/ci_asan_generated_c_context.lua report",
+                '"$TITAN_SANITIZER_LOG_DIR"',
+                '"$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT"',
+            }) do
+                assert.truthy(diagnostic_step:find(contract, 1, true),
+                    contract)
+            end
             assert.falsy(sanitizer_job:find(
                 "TITAN_NO_LINE_DIRECTIVES", 1, true), sanitizer_job)
             assert.falsy(sanitizer_job:find(

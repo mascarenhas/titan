@@ -36,6 +36,7 @@ while IFS= read -r test_file; do
             # insulation and compiler modules loaded by earlier specs.
             compiler_unit_tests+=("$test_file")
             ;;
+        spec/asan_generated_c_context_spec.lua | \
         spec/dense_array_runtime_spec.lua | \
         spec/stdlib/coroutine_spec.lua | \
         spec/stdlib/loadlibglobal_spec.lua | \

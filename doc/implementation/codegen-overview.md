@@ -223,6 +223,57 @@ before code generation, including collisions that cross a flattened
 module/member boundary; it does not wait for the linker to diagnose duplicate
 definitions.
 
+### Failure-only ASan generated-C mapping
+
+The Linux sanitizer workflow keeps normal Titan attribution on the code that
+it executes, but preserves an exact second view for a failed AddressSanitizer
+report. When the opt-in diagnostic snapshot is configured, `rock-post-install`
+copies the sanitized `titan.so` from the standard library's private destination
+stage, together with every matching generated `.c`/`.o` translation-unit pair
+from the source output paths used for that link, after `titanc` has completed
+and before publication removes that stage. The snapshot also records the
+canonical installed provider path and source display root plus the NUL-delimited
+argv returned by
+`driver.generated_compile_prefix()`. It therefore describes the precise
+provider and input objects from which that provider was linked, not a later
+rebuild.
+
+Each sanitizer gate runs once while its original combined output is captured.
+Only the workflow's failure-only diagnostic step reads those logs and the
+snapshot; it does not rerun the failing test, regenerate the standard library,
+or execute a second provider. For a numbered frame from the original ASan
+output, the mapper requires the relocation-safe
+`(<canonical-provider>+<module-offset>)` pair and, when the provider carries a
+BuildId, verifies the frame's BuildId against it. It locates the containing
+provider `.text` symbol, retains the byte delta within that function, and finds
+the one saved translation-unit object that defines the same nonempty function
+symbol.
+
+The mapper then builds one diagnostic shadow object on demand for that
+translation unit. It replaces each generated `#line` directive with a blank
+line, prepends a physical generated-C filename directive, and compiles the
+saved C with the exact captured compile-prefix argv plus the shadow input and
+output operands. The shadow is not linked or executed. Before using its DWARF,
+the mapper requires the original and shadow target functions' complete byte
+ranges within `.text` to be identical; it also verifies the provider, original
+object, and shadow function sizes, the original/shadow addresses, unique symbol
+ownership, and `.text` section membership. Other functions may carry different
+sanitizer source-location metadata without weakening this instruction-level
+proof. Only then does it apply the saved provider byte delta to the shadow
+symbol, ask `addr2line` to resolve that offset specifically within the
+relocatable object's `.text` section, require the injected saved-C pathname,
+and print numbered physical generated-C context. Missing module offsets, a
+required BuildId, symbol mismatches, overlapping or aliased functions, changed
+target code bytes, and other incomplete evidence make that frame unavailable
+rather than producing a speculative mapping.
+
+This recovery path deliberately leaves ordinary per-node `#line` directives
+enabled during the sanitizer run. Those directives preserve the logical Titan
+frames required by traceback tests and normal diagnostics; the verified shadow
+recovers physical generated-C lines after a failure without perturbing the
+failure or requiring it to reproduce. `TITAN_NO_LINE_DIRECTIVES=1` remains an
+isolated reproduction aid, not the complete sanitizer-suite policy.
+
 ## Three entry roles per first-class Titan function
 
 Every first-class Titan function has three entry roles:
