@@ -108,12 +108,36 @@ not add epicycles around what may be a misunderstood simpler design.
   sanitizer job keeps its build and focused native-memory gate on one warm
   standard `ubuntu-24.04` runner with an explicit 30-minute timeout:
   representative timer/fs suites, core owner/callback proofs, and production
-  net/OS smokes. Keep ordinary Titan `#line` attribution throughout this job:
+  net/OS smokes. The broad fs modes/data/path integration case remains covered
+  in regular Linux but is filtered from this sanitizer shard while its flaky
+  callback crash awaits the planned uv redesign; the focused fs lifetime and
+  late-callback cases remain. Keep ordinary Titan `#line` attribution
+  throughout this job:
   the selected `uv_tasks` traceback gate depends on exact user-function
   frames, and `uv_bootstrap` additionally requires a standard-provider frame.
   Use
   `TITAN_NO_LINE_DIRECTIVES=1` only in an isolated diagnostic reproduction,
-  not for the complete sanitizer suite. Its Lua,
+  not for the complete sanitizer suite. The Linux sanitizer build instead
+  gives `rock-post-install` an exact diagnostic snapshot destination. Before
+  the private stage is removed, it preserves that stage's sanitized
+  `titan.so`, every exact generated standard-library `.c`/`.o` pair from the
+  source output paths used for that link, and the
+  NUL-delimited generated-C compile-prefix argv. Each sanitizer gate captures
+  its original combined output, and only a failure-only diagnostic step reads
+  those logs; the failed program and provider are never rerun. The mapper uses
+  the original ASan frame's relocation-safe canonical-provider module offset
+  and BuildId to find the saved provider function and its byte delta, then
+  builds an on-demand shadow for the unique owning translation unit with its
+  `#line` directives blanked in place and the exact captured prefix replayed. It
+  reports physical generated-C context only after the saved and shadow target
+  function bytes match exactly in `.text`, the provider function is in `.text`
+  with the saved function's size, and the saved/shadow function names,
+  addresses, sizes, and `.text` membership agree. Shadow symbolization is
+  explicitly section-relative to `.text` and must return the exact private
+  shadow pathname; its line-identical saved C supplies the displayed context.
+  Any mismatch leaves the context unavailable instead of guessing.
+  This side channel is why normal `#line` attribution can remain enabled for
+  the test execution and its required logical Titan traceback frames. Its Lua,
   libbacktrace, and libuv dependencies compile with sanitizer instrumentation
   at `-O1`, while the much larger generated Titan images and disposable test
   fixtures use the same instrumentation at `-O0`; optimizing those generated

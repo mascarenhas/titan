@@ -264,6 +264,10 @@ TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua)
 # it is not part of an installed Titan tree.
 TITAN_INSTALL_TREE         := $(if $(strip $(ROCKS_TREE)),$(ROCKS_TREE),$(PREFIX))
 STDLIB_INSTALL_STAGE       ?= $(CURDIR)
+# CI may preserve the exact private-stage provider and its generated C/object
+# pairs for failure-only sanitizer symbolization before later tests can replace
+# those outputs. Ordinary builds leave this empty and pay no snapshot cost.
+TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT ?=
 TITAN_ABI_VERSION          := 0.20
 TITAN_STDLIB_ABI_DIR       ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)
 TITAN_CANONICAL_SUPPORT_SO ?= $(TITAN_STDLIB_ABI_DIR)/titan.so
@@ -1302,6 +1306,14 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS)
 	  $(call make_shell_quote,$(ROCK_TITANC)) --tree \
 	    $(call make_shell_quote,$(CURDIR)) $(STDLIB_ROOTS) \
 	    -X $(STDLIB_STAGED_EXTRA_OBJECTS); \
+	  if test -n $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))); then \
+	    "$(ROCK_LUA)" -E \
+	      "$(CURDIR)/spec/support/ci_asan_generated_c_context.lua" \
+	      snapshot \
+	      $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))) \
+	      "$$stage/titan.so" "$(CURDIR)/titan" "$$abi_dir/titan.so" \
+	      "$(CURDIR)/titan"; \
+	  fi; \
 	  "$(ROCK_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua" \
 	    "$$stage" "$$rocks_tree" ); \
 	trap - EXIT HUP INT TERM; \
