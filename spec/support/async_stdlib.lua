@@ -209,12 +209,15 @@ function M.workspace(label)
     return path
 end
 
--- Refresh only the copied runtime in an isolated spec workspace. This keeps
--- focused source-variant builds independent of a concurrently stale or
--- rebuilding checkout archive while preserving the shared Make-owned state.
-function M.refresh_private_runtime(workspace)
+-- Build the command that refreshes only the copied runtime in an isolated
+-- spec workspace. The shared dependency archives are prepared before these
+-- tests and remain read-only: independent Busted workers must not re-enter
+-- their FORCE-backed configuration recipes.
+function M.private_runtime_make_command(workspace, dry_run)
     assert.truthy(type(workspace) == "string" and workspace ~= "",
         "private runtime workspace must be a nonempty path")
+    assert.equals("boolean", type(dry_run),
+        "private runtime dry-run policy must be boolean")
     assert.truthy(exists(workspace .. "/titan-runtime"),
         "private runtime workspace is missing titan-runtime")
     local input = assert(io.open(REPO .. "/Makefile", "rb"))
@@ -222,9 +225,18 @@ function M.refresh_private_runtime(workspace)
     assert.truthy(input:close())
     local version = assert(makefile:match(
         "LIBUV_VERSION%s*:=%s*([%w%.%-]+)"))
+    local libbacktrace_archive =
+        REPO .. "/libbacktrace/.libs/libbacktrace.a"
+    local libuv_archive = REPO .. "/libuv-build/libuv.a"
+    assert.truthy(exists(libbacktrace_archive),
+        "run make libbacktrace first")
+    assert.truthy(exists(libuv_archive), "run make libuv first")
     local command = table.concat({
         "env CCACHE_DISABLE=1 make --no-print-directory -f",
         quote(REPO .. "/Makefile"),
+        dry_run and "--dry-run" or "",
+        "--old-file=" .. quote(libbacktrace_archive),
+        "--old-file=" .. quote(libuv_archive),
         "TITAN_RUNTIME_LUA_SOURCE_PATH=" ..
             quote(REPO .. "/lua-5.5.0/src"),
         "LIBBT_DIR=" .. quote(REPO .. "/libbacktrace"),
@@ -232,6 +244,14 @@ function M.refresh_private_runtime(workspace)
         "LIBUV_BUILD_DIR=" .. quote(REPO .. "/libuv-build"),
         "titan-runtime/libtitan.a",
     }, " ")
+    return command
+end
+
+-- Refresh only the copied runtime in an isolated spec workspace. This keeps
+-- focused source-variant builds independent while preserving all shared
+-- Make-owned dependency state.
+function M.refresh_private_runtime(workspace)
+    local command = M.private_runtime_make_command(workspace, false)
     local ok, _, output = run(command, workspace)
     assert.truthy(ok, output)
 end

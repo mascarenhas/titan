@@ -394,9 +394,9 @@ function schedule_accept_and_read_cancellation(first_port: integer): async.Task
     local read_waiter = async.run(function (): value
       return peer:read_until("\n", true)
     end)
-    -- The continuously drained prefix is already queued. The first wait is
-    -- therefore StringWriter:write's pre-commit yield, so cancellation must
-    -- restore the separate pending chunk rather than only the drained builder.
+    -- The continuously drained prefix is already queued. Its non-yielding
+    -- append is synchronous, then the following native read waits for more
+    -- bytes. Cancellation there must restore the accumulated builder.
     wait_until_started(read_waiter)
     expect_failure(function (): value
       peer:read()

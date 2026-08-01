@@ -212,7 +212,7 @@ function schedule_close_pending_read(): async.Task
     local delimited_diagnostics = required_input(
       delimited.stderr, "pending-delimiter stderr")
     -- Let the continuous native reader queue the prefix first. The delimiter
-    -- Task then suspends in StringWriter:write with that chunk still pending.
+    -- Task appends it synchronously, then suspends in the next native read.
     for _ = 1, 20 do async.yield() end
     local delimiter_reader = async.run(function (): value
       return delimited_output:read_until("\n")

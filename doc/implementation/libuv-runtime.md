@@ -341,15 +341,15 @@ retained binary `excess` string. `File:read` slices that excess without
 topping it up, otherwise it submits the ordinary `_fs_read` operation.
 `File:read_until` is high-level composition over repeated `File:read` calls
 and imports `titan.string` for binary-safe literal search and slicing.
-Completed chunks accumulate in `string.StringWriter`, reusing the standard
-string builder's checked total length and one-allocation drain. The facade's
-own checked total preserves its fs-specific length-limit diagnostic. Because a
-writer call yields before appending, `read_until` retains the current consumed
-chunk separately until the append commits. A match prepends its suffix to the
-facade's excess; if a later read, writer yield, or length check raises, the
-drained builder followed by that pending chunk is restored before the error
-propagates. `read_file` drives the bound `File:read` iterator with generic
-`for` and uses the same writer for its whole-file result.
+Completed chunks accumulate in a non-yielding `string.StringWriter`, reusing
+the standard string builder's checked total length and one-allocation drain.
+Native reads already provide the scheduling boundary. The facade's own checked
+total preserves its fs-specific length-limit diagnostic, and `read_until`
+retains the current consumed chunk separately until the append commits. A
+match prepends its suffix to the facade's excess; if a later read, append, or
+length check raises, the drained builder followed by that pending chunk is
+restored before the error propagates. `read_file` drives the bound `File:read`
+iterator with generic `for` and uses the same writer for its whole-file result.
 
 An excess-only facade read submits no uv operation. When native input is
 needed, each underlying read is a separate FIFO operation, so another Task's
@@ -581,11 +581,12 @@ GC-owned `{ByteChunk}` queue even with no waiter, with no high-water mark. A
 plain read drains its facade excess or the entire native queue, while a
 delimiter read retains bytes beyond its first delimiter. Both methods share
 that pipe's reader lock; stdout and stderr have independent locks. The
-delimiter facade accumulates complete chunks in `string.StringWriter`, reusing
-the standard string builder's checked total length and one-allocation drain.
-Because a writer call yields before appending, the facade retains the current
-consumed chunk separately until the append commits; cancellation restores the
-drained builder followed by that pending chunk to the stream excess.
+delimiter facade accumulates complete chunks in a non-yielding
+`string.StringWriter`, reusing the standard string builder's checked total
+length and one-allocation drain. Native pipe reads already provide the
+scheduling boundary. The facade retains the current consumed chunk separately
+until the append commits; an append error restores the drained builder followed
+by that pending chunk to the stream excess.
 The facade validates the stream's Runtime generation before returning retained
 excess, so a logical fast path cannot leak an old stream into a replacement
 Runtime.

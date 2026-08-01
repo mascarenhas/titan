@@ -278,10 +278,9 @@ re-entered on each iteration. The condition may be of any type, with Lua's
 truthiness rules — an option-typed condition (`while t[i] do`) tests
 whether the value is `nil`, and a numeric condition is always truthy
 (`while n do` does not exit when `n` reaches `0`, since `0` is truthy in
-Lua). (Note that comparing an option against `nil` with `==`/`~=` is itself
-a compile-time error — `trying to compare values of incomparable types:
-integer? and nil?` — so the `not`/`if` forms are the way to test for a
-missing element.)
+Lua). Comparing an option against `nil` with `==`/`~=` is also valid and is
+the exact presence test when a present base value may itself be falsy, as with
+`boolean?`.
 
 ## `repeat` / `until`
 

@@ -151,7 +151,7 @@ describe("titan.string", function()
         assert.equals(0, status, output)
     end
 
-    it("provides yielding in-memory ReaderCloser and WriterCloser streams",
+    it("provides configurable in-memory ReaderCloser and WriterCloser streams",
     function()
         run([[
             local async = require "titan.async"
@@ -231,6 +231,47 @@ describe("titan.string", function()
                 assert(writer:drain() == "reused")
                 writer:close()
                 writer:close()
+
+                phase = 9
+                local nil_policy_observer = async.run(function()
+                    assert(phase == 9)
+                    phase = 10
+                end)
+                local nil_policy_reader = str.reader("nil-policy", nil)
+                assert(nil_policy_reader:read_until("-", true) == "nil")
+                assert(phase == 10)
+                nil_policy_observer:join()
+
+                phase = 11
+                local true_policy_observer = async.run(function()
+                    assert(phase == 11)
+                    phase = 12
+                end)
+                local true_policy_writer = str.writer(true)
+                true_policy_writer:write("true-policy")
+                assert(phase == 12)
+                true_policy_observer:join()
+                assert(true_policy_writer:drain() == "true-policy")
+
+                phase = 13
+                local nonyielding_observer = async.run(function()
+                    assert(phase == 13)
+                    phase = 14
+                end)
+                local direct_reader = str.reader("direct\0reader", false)
+                assert(direct_reader:read_until("\0", true) == "direct")
+                assert(direct_reader:read() == "reader")
+                assert(direct_reader:read() == nil)
+                local direct_writer = str.writer(false)
+                direct_writer:write("")
+                direct_writer:write("direct\0")
+                direct_writer:write("writer")
+                assert(direct_writer:drain() == "direct\0writer")
+                assert(phase == 13)
+                async.yield()
+                assert(phase == 14)
+                nonyielding_observer:join()
+
                 assert(probe.interface_streams() == "interface\0stream")
                 return true
             end)

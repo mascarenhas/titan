@@ -6006,7 +6006,16 @@ checkexp = util.make_visitor({
         end
         local loc = node.loc
         if op == "==" or op == "~=" then
-            if tlhs._tag == "Type.Option" or trhs._tag == "Type.Option" then
+            if tlhs._tag == "Type.Option"
+               and trhs._tag == "Type.Nil" then
+                node.rhs = trycoerce(node.rhs, tlhs, errors)
+                trhs = node.rhs._type
+            elseif trhs._tag == "Type.Option"
+               and tlhs._tag == "Type.Nil" then
+                node.lhs = trycoerce(node.lhs, trhs, errors)
+                tlhs = node.lhs._type
+            elseif tlhs._tag == "Type.Option"
+               or trhs._tag == "Type.Option" then
                 node.lhs = trycoerce(node.lhs, optionize(tlhs), errors)
                 tlhs = node.lhs._type
                 node.rhs = trycoerce(node.rhs, optionize(trhs), errors)

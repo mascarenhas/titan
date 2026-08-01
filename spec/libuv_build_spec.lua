@@ -1,4 +1,5 @@
 local assert = require "luassert"
+local async_stdlib = require "spec.support.async_stdlib"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 local parser = require "titan-compiler.parser"
@@ -544,6 +545,34 @@ local function stdlib_command(output)
 end
 
 describe("libuv Makefile configuration", function()
+    it("keeps private runtime refreshes off shared dependency recipes",
+        function()
+            local workspace = async_stdlib.workspace("runtime-refresh")
+            local tested, test_error = pcall(function()
+                local command =
+                    async_stdlib.private_runtime_make_command(workspace, true)
+                local libbacktrace_archive = lfs.currentdir() ..
+                    "/libbacktrace/.libs/libbacktrace.a"
+                local libuv_archive =
+                    lfs.currentdir() .. "/libuv-build/libuv.a"
+                assert.truthy(command:find(
+                    "--old-file=" .. quote(libbacktrace_archive), 1, true),
+                    command)
+                assert.truthy(command:find(
+                    "--old-file=" .. quote(libuv_archive), 1, true),
+                    command)
+
+                local ok, _, output = async_stdlib.run(command, workspace)
+                assert.truthy(ok, output)
+                assert.falsy(output:find(
+                    "libbacktrace/.titan-build-config", 1, true), output)
+                assert.falsy(output:find(
+                    ".titan-libuv-build-config", 1, true), output)
+            end)
+            async_stdlib.cleanup(workspace)
+            if not tested then error(test_error, 0) end
+        end)
+
     it("keeps the reviewed uv source list equal to the folder ensemble",
         function()
             local listed = makefile_words("UV_TITAN_SOURCES")

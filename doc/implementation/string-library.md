@@ -434,15 +434,20 @@ adjacent empty fields.
 
 ## In-memory stream state
 
-`StringReader` retains only a string and one-based cursor. Its `read` and
-literal `read_until` methods call `async.yield()` before every result,
-including EOF, then update the cursor without retaining borrowed pointers.
-Delimiter search and slicing reuse the module's binary-safe `find` and `sub`.
+`StringReader` retains a string, one-based cursor, and construction-time
+`yielding` policy. Omitted or nil policy becomes true. Its `read` and literal
+`read_until` methods call `async.yield()` before every result, including EOF,
+only when that policy is true, then update the cursor without retaining
+borrowed pointers. Delimiter search and slicing reuse the module's binary-safe
+`find` and `sub`.
 
 `StringWriter` is the checked accumulator used by formatting, packing,
 substitution, and other bounded joins. The record itself stores rooted chunks
-plus their checked aggregate length. Each public `write` yields before
-appending; `drain` performs one exact-size allocation and copy, then replaces
+plus their checked aggregate length and the same construction-time yielding
+policy. Each public `write` yields before appending only when that policy is
+true. Internal formatting, packing, substitution, and literal rendering use a
+non-yielding writer because those synchronous producers own the complete
+operation. `drain` performs one exact-size allocation and copy, then replaces
 the chunk array and resets the length to zero. This avoids quadratic repeated
 concatenation while allowing the same writer to be reused after a drain.
 Neither close method owns a native resource. `StringReader:close` nevertheless

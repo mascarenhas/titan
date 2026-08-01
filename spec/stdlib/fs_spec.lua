@@ -203,25 +203,25 @@ function schedule_delimited_reads(root: string, boundary_payload: string,
     local cancelled_reader = async.run(function (): value
       return file:read_until("delimiter-that-is-not-present")
     end)
-    -- The excess-only File read is synchronous. The first wait therefore is
-    -- StringWriter:write's pre-commit yield, where the consumed chunk remains
-    -- pending and must be restored if cancellation wins.
+    -- The excess-only File read and its non-yielding append are synchronous.
+    -- The next native read waits at EOF; cancellation there must restore the
+    -- chunk already accumulated in the builder.
     while cancelled_reader:status() == "ready" do timer.yield() end
     check(cancelled_reader:status() == "waiting",
-          "delimiter reader did not reach its builder yield")
-    cancelled_reader:cancel("cancel-builder-write")
+          "delimiter reader did not reach its next native read")
+    cancelled_reader:cancel("cancel-delimiter-read")
     local cancelled = false
     do
       cancelled_reader:join()
     catch
       local failure = error as async.Cancelled
-      check(failure.reason == "cancel-builder-write",
-            "builder-write cancellation reason changed")
+      check(failure.reason == "cancel-delimiter-read",
+            "delimiter-read cancellation reason changed")
       cancelled = true
     end
-    check(cancelled, "builder-write cancellation did not win")
+    check(cancelled, "delimiter-read cancellation did not win")
     check(file:read() == "restored-after-cancel",
-          "builder-write cancellation did not restore consumed excess")
+          "delimiter-read cancellation did not restore consumed excess")
     file:close()
 
     local binary_path = root .. "/binary-delimiter.dat"

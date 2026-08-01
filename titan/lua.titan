@@ -86,7 +86,7 @@ end
 
 function load_from_reader(reader: io.Reader, name: string?, env: value):
     (...: value) -> (...: value)
-  local builder = str.writer()
+  local builder = str.writer(false)
   for chunk in reader:read do
     builder:write(chunk)
   end
@@ -95,7 +95,7 @@ end
 
 local function replace_literal(subject: string, needle: string,
                                replacement: string): string
-  local builder = str.writer()
+  local builder = str.writer(false)
   local position = 1
   while position <= #subject do
     local found: integer? = str.find(subject, needle, position)
@@ -129,7 +129,7 @@ end
 local function source_search(modname: string, path: string):
     (value, value, string)
   local module_path = replace_literal(modname, ".", "/")
-  local messages = str.writer()
+  local messages = str.writer(false)
   local position = 1
   local finished = false
 
@@ -182,7 +182,7 @@ end
 local function find_loader(modname: string,
                            searchers: {integer: value},
                            path: string): (value, value)
-  local messages = str.writer()
+  local messages = str.writer(false)
 
   -- Slot 1 is Lua's preload searcher and remains replaceable by a custom
   -- searcher. Slot 2 is deliberately reserved for the asynchronous source pass

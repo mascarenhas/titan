@@ -27,14 +27,17 @@ local async = import "async"
 
 record StringWriter
   local contents: string
+  local yielding: boolean
 end
 
-function writer(): StringWriter
-  return StringWriter.new("")
+function writer(yielding: boolean?): StringWriter
+  local actual_yielding = true
+  if yielding ~= nil then actual_yielding = yielding end
+  return StringWriter.new("", actual_yielding)
 end
 
 function StringWriter:write(data: string)
-  async.yield()
+  if self.yielding then async.yield() end
   self.contents = self.contents .. data
 end
 

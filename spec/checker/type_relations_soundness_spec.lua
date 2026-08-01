@@ -289,6 +289,47 @@ describe("type-relation soundness (checker)", function()
         assert.equal("consistent", returned[4]._comparison.op)
     end)
 
+    for _, op in ipairs({"==", "~="}) do
+        for _, expression in ipairs({
+            "candidate " .. op .. " nil",
+            "nil " .. op .. " candidate",
+        }) do
+            it("compares an option with nil using " .. expression, function()
+                local ok, err = run_checker([[
+                    function fn(candidate: boolean?): boolean
+                        return ]] .. expression .. [[
+                    end
+                ]])
+                assert.is_true(ok, err)
+            end)
+        end
+    end
+
+    it("lifts nil directly to the option type used by equality", function()
+        local ok, err, tree = run_checker([[
+            function fn(candidate: boolean?): boolean
+                return candidate == nil
+            end
+        ]])
+        assert.is_true(ok, err)
+        local comparison = tree[1].block.stats[1].exps[1]
+        assert.equal("Ast.ExpCast", comparison.rhs._tag)
+        assert.equal("Type.Option", comparison.rhs.target._tag)
+        assert.equal("Type.Boolean", comparison.rhs.target.base._tag)
+        assert.equal("Ast.ExpNil", comparison.rhs.exp._tag)
+        assert.equal("direct_coercion", comparison.rhs._adjustment.kind)
+        assert.equal("option_nil", comparison.rhs._adjustment.coercion.op)
+        assert.equal("identity", comparison._comparison.op)
+    end)
+
+    it("does not make a non-option boolean comparable with nil", function()
+        assert_rejected([[
+            function fn(candidate: boolean): boolean
+                return candidate == nil
+            end
+        ]], "trying to compare values of incomparable types")
+    end)
+
     it("admits distinct strict and explicitly dynamic value projections", function()
         local errors = check_errs([[
             local function identity(v: value): value

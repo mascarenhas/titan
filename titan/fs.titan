@@ -76,10 +76,10 @@ function File:read_until(delimiter: string,
     raise "read delimiter must not be empty"
   end
 
-  local builder = str.writer()
-  -- StringWriter:write yields before committing its argument. Keep the
-  -- current consumed chunk separately until that commit succeeds so an
-  -- error or cancellation can restore every byte to the File excess.
+  local builder = str.writer(false)
+  -- The native read is this producer's scheduling boundary. Keep the current
+  -- consumed chunk separately until the append succeeds so an append error
+  -- can restore every byte to the File excess.
   local pending = ""
   local total = 0
   local tail = ""
@@ -161,7 +161,7 @@ function read_file(path: string): string
   local file = open(path, "r")
   defer file:close()
 
-  local builder = str.writer()
+  local builder = str.writer(false)
   local total = 0
   for bytes in file:read do
     local length = #bytes

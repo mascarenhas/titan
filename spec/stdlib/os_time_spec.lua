@@ -5,8 +5,6 @@
 local assert = require "luassert"
 local async_stdlib = require "spec.support.async_stdlib"
 
-local REPO = async_stdlib.repo
-
 local function quote(word)
     return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
 end
@@ -99,7 +97,7 @@ function find(subject: string, needle: string,
   return nil, nil
 end
 
-function writer(): StringWriter
+function writer(_yielding: boolean?): StringWriter
   return StringWriter.new("")
 end
 
@@ -113,23 +111,6 @@ function StringWriter:drain(): string
   return result
 end
 ]]
-
-local function refresh_private_runtime(workspace)
-    local version = assert(async_stdlib.read("Makefile"):match(
-        "LIBUV_VERSION%s*:=%s*([%w%.%-]+)"))
-    local command = table.concat({
-        "env CCACHE_DISABLE=1 make --no-print-directory -f",
-        quote(REPO .. "/Makefile"),
-        "TITAN_RUNTIME_LUA_SOURCE_PATH=" ..
-            quote(REPO .. "/lua-5.5.0/src"),
-        "LIBBT_DIR=" .. quote(REPO .. "/libbacktrace"),
-        "LIBUV_SRC_DIR=" .. quote(REPO .. "/libuv-v" .. version),
-        "LIBUV_BUILD_DIR=" .. quote(REPO .. "/libuv-build"),
-        "titan-runtime/libtitan.a",
-    }, " ")
-    local ok, _, output = async_stdlib.run(command, workspace)
-    assert.truthy(ok, output)
-end
 
 local TYPED_PROBE = [[
 local system = import "os"
@@ -189,7 +170,7 @@ describe("titan.os synchronous time and locale", function()
 
     setup(function()
         workspace = async_stdlib.workspace("os-time")
-        refresh_private_runtime(workspace)
+        async_stdlib.refresh_private_runtime(workspace)
         layout = async_stdlib.exact_layout(workspace)
         async_stdlib.write_source(
             workspace, "titan.string", STRING_SUPPORT)

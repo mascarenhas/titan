@@ -222,15 +222,17 @@ enumerated symmetric type pairs:
 * **An option and its base type** can be compared: `s1 == s2` works for
   `s1: string?`, `s2: string`, and is false when `s1` is nil. See
   [option types](option-types.md).
+* **An option and `nil`** can be compared in either order. Nil is lifted
+  directly to the other operand's option type, so `candidate == nil` tests
+  absence and `candidate ~= nil` tests presence. This distinction matters for
+  `boolean?`, whose present `false` value is also falsy.
 
 Anything else is the compile-time error
-`trying to compare values of incomparable types: T1 and T2`. Notably,
-**comparing an option against the `nil` literal is rejected** — the
-idiomatic nil test in Titan is truthiness:
+`trying to compare values of incomparable types: T1 and T2`. Truthiness is a
+compact presence test when every present value of the option is truthy:
 
 ```lua
 function found(t: {integer}, i: integer): boolean
-    -- not (t[i] == nil): that is a compile-time error.
     if t[i] then return true else return false end
 end
 ```

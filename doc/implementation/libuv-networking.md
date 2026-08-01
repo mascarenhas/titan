@@ -111,11 +111,12 @@ can report EOF in a later generation without touching native state.
 The `net` facade serializes both `read` and `read_until` through one reader
 lock. It keeps delimiter excess in stream order, implements optional delimiter
 chopping and terminal-tail delivery, and preserves accumulated bytes across
-cancellation. Completed chunks accumulate in `string.StringWriter`, reusing
-the string module's checked builder and one-allocation drain. Because
-`StringWriter:write` yields before committing its argument, the current
-consumed chunk remains separate until the write returns; cancellation restores
-the drained builder followed by that pending chunk. A narrow low-level identity
+cancellation. Completed chunks accumulate in a non-yielding
+`string.StringWriter`, reusing the string module's checked builder and
+one-allocation drain. Native reads already provide the scheduling boundary.
+The current consumed chunk remains separate until its append succeeds; an
+append error restores the drained builder followed by that pending chunk. A
+narrow low-level identity
 predicate lets the facade recognize only the stream's stored sticky read error
 when returning a nonempty terminal tail; Task cancellation and unrelated
 exceptions are re-raised. There is no maximum or high-water mark: an unread

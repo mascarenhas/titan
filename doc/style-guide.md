@@ -51,6 +51,18 @@ it is part of normal control flow. Prefer `T?` to a sentinel value of type
 through containers or function types, so do not design an API that relies on
 `{T}` becoming `{T?}` or `() -> T` becoming `() -> T?`.
 
+Use `optional == nil` or `optional ~= nil` when presence must remain distinct
+from a falsy base value. A plain condition intentionally merges nil with a
+present `false` in `boolean?`; it is a presence test only when every present
+base value is truthy. Defaulting an optional boolean is therefore explicit:
+
+```titan
+local function enabled_by_default(enabled: boolean?): boolean
+  if enabled == nil then return true end
+  return enabled
+end
+```
+
 A method receiver is also an automatic unwrap site. After handling the nil
 case, call the method on the optional directly instead of adding a cast whose
 only purpose is to force the receiver:
@@ -189,11 +201,13 @@ a terminal error tail from ordinary EOF.
 ## Reuse the standard string writer
 
 When a module already imports `string`, accumulate a result with
-`string.writer()` instead of defining a local chunk array plus a
+`string.writer(false)` instead of defining a local chunk array plus a
 `join_chunks` helper or repeatedly concatenating a growing result. The writer
-centralizes string-size checks and linear-time assembly. Its `write` operation
-may yield before committing the argument, so an asynchronous reader that must
-restore consumed bytes on cancellation keeps the current uncommitted chunk
+centralizes string-size checks and linear-time assembly. Passing false is
+appropriate when the producer is synchronous or already yields at its real I/O
+boundary. Use the default yielding mode when the string-backed writer is meant
+to imitate an asynchronous stream. An asynchronous reader that must restore
+consumed bytes after an append error keeps the current uncommitted chunk
 separately until `write` succeeds.
 
 The string module's own builder implementation and low-level modules that

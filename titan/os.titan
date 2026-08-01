@@ -282,10 +282,10 @@ local function read_input_until(stream: InputStream, delimiter: string,
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
   begin_read(stream)
-  local builder = str.writer()
-  -- StringWriter:write yields before committing its argument. Keep the
-  -- current consumed chunk separately until that commit succeeds so
-  -- cancellation can restore every byte to the facade excess.
+  local builder = str.writer(false)
+  -- The native read is this producer's scheduling boundary. Keep the current
+  -- consumed chunk separately until the append succeeds so an append error
+  -- can restore every byte to the facade excess.
   local pending = ""
   local total = 0
   local tail = ""

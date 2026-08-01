@@ -34,10 +34,11 @@ upvalue's debug name.
 ## Reader and File ownership
 
 `load_from_reader` uses `Reader:read` directly as a generic-for iterator and
-passes every yielded chunk, including `""`, to `string.StringWriter`, the same
-checked accumulator used by the string library's formatting, packing, and
-substitution paths. Each write yields and checks aggregate growth; nonempty
-inputs are retained as traced Titan strings, while empty inputs add no storage.
+passes every yielded chunk, including `""`, to a non-yielding
+`string.StringWriter`, the same checked accumulator used by the string
+library's formatting, packing, and substitution paths. `Reader:read` owns the
+scheduling boundary. Each writer call checks aggregate growth; nonempty inputs
+are retained as traced Titan strings, while empty inputs add no storage.
 `drain` performs one exact-size allocation and copy after the Reader reports
 nil. The result is passed to `load`, with no borrowed Reader buffer or C
 pointer retained.
@@ -85,12 +86,13 @@ instead of converting it into an ordinary string failure.
 
 Literal module-name and `?` substitutions, Reader chunk loading, ordered
 source-miss diagnostics, and the final cross-searcher diagnostic accumulation
-all use `string.StringWriter`. This removes local chunk-array joins and
-incremental concatenation while retaining binary strings and encounter order.
-Each nonempty writer append is an ordinary cooperative yield; the module-level
-loading guard already spans those yields, so cancellation still clears it
-through `defer` and a concurrent same-name request cannot publish a duplicate
-load.
+all use non-yielding `string.StringWriter` instances. This removes local
+chunk-array joins and incremental concatenation while retaining binary strings
+and encounter order. Actual Reader and File operations remain the cooperative
+boundaries; pure substitution and diagnostic assembly do not create extra
+scheduler turns. The module-level loading guard spans every real I/O yield, so
+cancellation still clears it through `defer` and a concurrent same-name
+request cannot publish a duplicate load.
 
 Slot 2 is structurally reserved instead of identified by closure identity.
 This avoids comparing, capturing, or wrapping Lua's private built-in searcher:

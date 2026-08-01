@@ -60,8 +60,9 @@ string, including `""`, is the next exact chunk of Lua input, and nil is EOF.
 After EOF the collected bytes are compiled with the same name, environment,
 error, and flexible-call rules as `load`.
 
-Reader methods may yield, and each accepted chunk is appended through the
-yielding `titan.string` writer. The function must therefore run in an async
+Reader methods may yield; each accepted chunk is appended through a
+non-yielding `titan.string` writer so loading adds no scheduling boundary of
+its own. When the supplied Reader yields, the function must run in an async
 Task with the usual loop discipline. It never closes the Reader, whether
 reading or compilation succeeds or raises; ownership remains with the caller.
 

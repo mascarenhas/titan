@@ -29,7 +29,7 @@ record StringWriter
   local contents: string
 end
 
-function writer(): StringWriter
+function writer(_yielding: boolean?): StringWriter
   return StringWriter.new("")
 end
 

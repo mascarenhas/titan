@@ -39,11 +39,13 @@ end
 record StringReader
   local contents: string
   local position: integer
+  local yielding: boolean
 end
 
 record StringWriter
   local chunks: {string}
   local length: integer
+  local yielding: boolean
 end
 
 function len(subject: string): integer
@@ -193,12 +195,17 @@ function tostring(candidate: value): string
   return ffi.lua_totvalue(L, -1) as value
 end
 
-function reader(contents: string): StringReader
-  return StringReader.new(contents, 1)
+local function yielding_by_default(yielding: boolean?): boolean
+  if yielding == nil then return true end
+  return yielding
+end
+
+function reader(contents: string, yielding: boolean?): StringReader
+  return StringReader.new(contents, 1, yielding_by_default(yielding))
 end
 
 function StringReader:read(): string?
-  async.yield()
+  if self.yielding then async.yield() end
   if self.position > #self.contents then return nil end
   local result = sub(self.contents, self.position)
   self.position = #self.contents + 1
@@ -207,7 +214,7 @@ end
 
 function StringReader:read_until(delimiter: string,
                                  chop: boolean?): string?
-  async.yield()
+  if self.yielding then async.yield() end
   if self.position > #self.contents then return nil end
   if #delimiter == 0 then
     raise "read delimiter must not be empty"
@@ -235,12 +242,12 @@ function StringReader:close()
   self.position = 1
 end
 
-function writer(): StringWriter
-  return new_string_builder()
+function writer(yielding: boolean?): StringWriter
+  return new_string_builder(yielding_by_default(yielding))
 end
 
 function StringWriter:write(data: string)
-  async.yield()
+  if self.yielding then async.yield() end
   builder_append(self, data)
 end
 
@@ -293,7 +300,7 @@ function format(format_string: string, ...: value): string
   local captured = FORMAT_PATTERN:match(format_string)
   if captured == nil then raise "invalid conversion to 'format'" end
   local plan = captured as FormatPlan
-  local builder = new_string_builder()
+  local builder = new_string_builder(false)
   local argument = 1
   while argument <= #plan.partials do
     if argument > #... then
@@ -309,7 +316,7 @@ end
 
 function pack(format_string: string, ...: value): string
   local state = new_pack_state(format_string)
-  local builder = new_string_builder()
+  local builder = new_string_builder(false)
   local arguments: {value} = {...}
   local argument = 0
 
@@ -630,7 +637,7 @@ function Regex:gsub(subject: string,
 
   if limit <= 0 then return subject, 0 end
 
-  local builder = new_string_builder()
+  local builder = new_string_builder(false)
   local search = 1
   local copied = 1
   local previous_end = 0

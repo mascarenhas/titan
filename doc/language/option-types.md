@@ -122,9 +122,9 @@ A `T?` value is either a value of `T` or Lua's `nil` — there is no separate
 "none" wrapper. For most base types that means "the value, or absent"; for
 `boolean?` it makes a *three-state* type — `true`, `false`, or `nil` — whose
 three values are distinct (`x == false` is true only for `false`, and a
-plain truth test isolates `true`; comparing with a literal `nil` does not
-compile — see [Equality](#equality)), though in a condition both `false`
-and `nil` count as false.
+plain truth test isolates `true`; `x == nil` isolates absence — see
+[Equality](#equality)), though in a condition both `false` and `nil` count as
+false.
 
 *Implementation note:* a `T` value is stored unboxed in generated C (a
 `lua_Integer`, a string pointer, ...), but a `T?` is stored as a full
@@ -329,8 +329,11 @@ type of map key cannot be option type
 ## Equality
 
 `==` and `~=` accept options freely. When either side is an option, the
-checker wraps the *other* side into the option of its own type and compares
-at the option type (behavior fixed by PR #250), so all of these typecheck:
+checker wraps an ordinary other operand into the option of its own type and
+compares at the option type (behavior fixed by PR #250). A `nil` operand is
+instead wrapped directly into the existing option type: nil inhabits every
+option, and independently constructing `nil?` would lose that relationship.
+All of these typecheck:
 
 ```lua
 function eq(t: {string}, s: string): boolean
@@ -339,6 +342,10 @@ end
 
 function both(t1: {integer}, t2: {integer}): boolean
     return t1[1] ~= t2[1]     -- integer? ~= integer?
+end
+
+function missing(candidate: boolean?): boolean
+    return candidate == nil   -- true for nil, false for false and true
 end
 ```
 
@@ -357,11 +364,10 @@ the lifting above, `integer` with `float?` and vice versa) even though no
 numeric promotion is applied to the option; the run-time numeric equality
 just shown makes it behave as expected.
 
-The lifting also rules out the `nil` *literal* as a comparand: in
-`t[1] == nil` the right side is wrapped to `nil?`, and the comparison is
-the same **compile-time error**
-(`trying to compare values of incomparable types: integer? and nil?`).
-Test for nil-ness with a condition (`if t[1]`, `not t[1]`) instead.
+Use `candidate == nil` or `candidate ~= nil` when the option base can itself
+be falsy. In particular, a `boolean?` condition cannot distinguish its
+present `false` state from nil, while equality with nil can. Truthiness remains
+a compact presence test for options whose present values are always truthy.
 
 ## Defaulting with `or`, optionizing with `and`
 

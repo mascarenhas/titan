@@ -146,11 +146,10 @@ Task cancellation does not abandon native lifetime work. An unsubmitted
 ordinary File operation is removed from its FIFO. For submitted work, the
 runtime requests cancellation where libuv supports it, suppresses a stale
 result after cancellation wins, and still consumes the completion callback.
-If `read_until` raises after consuming bytes, including cancellation between
-an underlying read and committing those bytes to its result builder, all
-consumed bytes are restored in order to the File's retained input before the
-error propagates. A currently pending native read retains the ordinary
-File-read cancellation semantics.
+If `read_until` raises after consuming bytes—because an append fails or a
+later native read observes cancellation—all consumed bytes are restored in
+order to the File's retained input before the error propagates. A currently
+pending native read retains the ordinary File-read cancellation semantics.
 A Task cancelled while awaiting `close()` remains cleanup-shielded until the
 physical close callback and request cleanup finish. Cancellation remains
 sticky afterward: it is delivered at the next ordinary asynchronous operation,

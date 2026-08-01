@@ -12,9 +12,9 @@ local type FormatFactory = (string, string) -> FormatPartial
 
 local MAXIMUM_FORMAT_SPECIFICATION_BYTES = 22
 
-local function new_string_builder(): StringWriter
+local function new_string_builder(yielding: boolean): StringWriter
   local chunks: {string} = {}
-  return StringWriter.new(chunks, 0)
+  return StringWriter.new(chunks, 0, yielding)
 end
 
 local function builder_append(builder: StringWriter, text: string)
@@ -322,7 +322,7 @@ local function append_quoted(builder: StringWriter, text: string)
 end
 
 local function render_literal(candidate: value): string
-  local builder = new_string_builder()
+  local builder = new_string_builder(false)
   if candidate is string then
     append_quoted(builder, candidate as string)
   elseif candidate == nil then
