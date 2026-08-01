@@ -354,8 +354,10 @@ still one call:
    Both modes link `libtitan.a`; the driver never substitutes a direct
    `titan.o` link. The checkout freshness check covers `titan.c`,
    `titan_coro.c`, `titan_uv.c`, and their shim headers.
-2. `coder.generate(modname, ast, static_deps)` produces one C translation unit
-   as a string; `pretty.reindent_c` reformats it. The qualified `modname`
+2. `coder.generate(modname, ast, static_deps, abi,
+   emit_line_directives)` produces one C translation unit as a string plus its
+   direct-native-reference set; `pretty.reindent_c` reformats the string. The
+   qualified `modname`
    controls the native prefix, registry identity, `_init`, `_abi`, `_types`,
    and `luaopen_*` symbols consistently.
 3. The `.c` file is written **next to the flat source or folder main**:
@@ -610,7 +612,7 @@ normal module-init protocol.
 
 ```sh
 ./titanc [--print-ast] [-v|--verbose] [-u|--lua <luasrc>] \
-  [--static] \
+  [--static] [--no-line-directives] \
   [-t|--tree <srcroot>] [-l|--link lib1,lib2] \
   [-X|--extra-object obj.o...] <module>...
 ```
@@ -622,9 +624,17 @@ or more dot-separated module names. `--tree` overrides
 `liblua.a`, and `libtitan.a` remain a matched SDK. `-v` prints every `cc`
 command line, `--print-ast` dumps each module's
 AST after checking, `--static` swaps the compiled-provider passes to prefer
-self-describing archives before DSOs, `-l` passes extra system libraries to
-the linker, and
+self-describing archives before DSOs, `--no-line-directives` tells the coder
+to leave native diagnostics attributed to the generated C file instead of
+Titan source, `-l` passes extra system libraries to the linker, and
 `-X`/`--extra-object` appends one or more already-built native payloads.
+The environment setting `TITAN_NO_LINE_DIRECTIVES=1` applies the same policy
+to direct driver users and build automation. `driver.compile` passes the
+resolved policy explicitly to `coder.generate`; every generation resets the
+coder's emission policy, including when one Lua process alternates modes.
+Because the traceback builder recognizes ordinary native Titan frames through
+their Titan-attributed debug filenames, disabling directives can omit those
+frames from logical tracebacks. Entry boundaries may instead render as `[C]`.
 In library mode those payloads must be supported relocatable objects or
 regular archives: archives are force-carried into the DSO and flattened into
 the paired `.a`, while mixed payload retains CLI order in both forms.
@@ -1017,6 +1027,7 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `driver.INSTALL_PATHS` | `driver.installed_paths` | paths below `driver.TITAN_ROOT` | Holds `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua`, `titan_bin`, and `lua_cpath`; bundled `libuv.a` is deliberately not an installed SDK path. |
 | `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_20`, `TITAN_PATH`, or `.;<root>/lib/titan/0.20` in installed mode | Roots for root-major, shallow-to-exact compiled-provider search; checkout mode retains the legacy `/usr/local` fallback. |
 | `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Semicolon-separated roots searched for folder `P/B.titan` before flat `P.titan`, including contributor privacy checks. |
+| `TITAN_NO_LINE_DIRECTIVES` / `driver.EMIT_LINE_DIRECTIVES` | environment / `driver.lua` | unset / true | Exact environment value `1`, or `titanc --no-line-directives`, disables generated Titan `#line` directives for physical generated-C diagnostics; this can omit ordinary native Titan frames from logical tracebacks. |
 | `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from flat/folder source while all dependencies remain binary-first; selected source descriptors also provide `program_output`. |
 | `titan._loadlib` | `titanlib.c` / `driver.lua` | internal `RTLD_LAZY` + `RTLD_LOCAL` loader | Maps DSO candidates lazily for callable ABI/type interface recovery without initializing them or globalizing their symbols; archive candidates are parsed in-process instead. |
 | `titan._loadlibglobal` | `titanlib.c` / generated shims | internal canonical-path `RTLD_LAZY` + `RTLD_GLOBAL` loader | Maps or promotes a Lua-selected provider in a separate per-state cache and returns the requested logical `luaopen_*` entry. |

@@ -3,7 +3,8 @@
 The code generator is `titan-compiler/coder.lua`. Its single entry point is
 
 ```lua
-coder.generate(modname, ast, static_deps)  --> string (one C translation unit)
+coder.generate(modname, ast, static_deps, abi[, emit_line_directives])
+    --> string (one C translation unit), direct-native-reference set
 ```
 
 where `modname` is the dot-separated module name, `ast` is the module's
@@ -11,7 +12,9 @@ AST *after* `checker.check` has decorated and rewritten it, and
 `static_deps` is the driver's finalized direct-native name set. It contains
 every source module compiled into the invocation plus every logical module
 physically carried by a selected static provider; imports selected from DSOs
-are absent. `titanc` passes the resolver context's
+are absent. `abi` is the required compiled-module ABI string;
+`emit_line_directives` defaults to true when omitted. `titanc` passes the
+resolver context's
 `native_static_names`, after provenance and producer-binding constraints have
 been finalized, to every source module's code-generation pass. The return
 value is the complete text of one C translation unit. For a
@@ -133,6 +136,17 @@ translation unit or stamp expression fragments that may be embedded mid-line.
 The directive naturally changes filenames as root nodes and nested bodies from
 different contributors are emitted, so compiler diagnostics, DWARF, and
 libbacktrace frames identify the actual source file and line.
+
+When `coder.generate` receives a false line-directive policy, `emitline`
+returns no directives for that generation. The public
+`--no-line-directives` flag and `TITAN_NO_LINE_DIRECTIVES=1` build setting use
+this path so native diagnostics expose physical generated-C coordinates. The
+policy is reset at the start of every generation, preventing state from
+leaking between compiler calls in the same Lua process.
+The tradeoff is deliberate: traceback reconstruction uses Titan-attributed
+debug filenames to retain ordinary native Titan frames, so this diagnostic
+mode can omit them from logical traces even though the symbol-to-display-name
+registry is unchanged.
 
 A trimmed but real example (elisions marked `...`) — this module:
 

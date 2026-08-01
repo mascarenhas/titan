@@ -2181,6 +2181,10 @@ fi
                 "$(STDLIB_EMBEDDED_FORMAT_INPUTS)",
                 "AR=$(call make_shell_quote,$(AR))",
                 "RANLIB=$(call make_shell_quote,$(RANLIB))",
+                "TITAN_NO_LINE_DIRECTIVES ?=",
+                "export TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_CFLAGS " ..
+                "TITAN_EXTRA_LDFLAGS \\\n\tTITAN_NO_LINE_DIRECTIVES",
+                "TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)",
                 "for output in $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS)",
                 "STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)",
                 "validate_archive()",
@@ -2202,6 +2206,16 @@ fi
             }) do
                 assert.truthy(makefile:find(contract, 1, true), contract)
             end
+            local stdlib_config_start = assert(makefile:find(
+                "$(STDLIB_CONFIG_STAMP): FORCE", 1, true))
+            local stdlib_config_end = assert(makefile:find(
+                "\n$(STDLIB_COMPLETION_STAMP): FORCE",
+                stdlib_config_start, true))
+            local stdlib_config = makefile:sub(
+                stdlib_config_start, stdlib_config_end - 1)
+            assert.truthy(stdlib_config:find(
+                "TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)",
+                1, true), stdlib_config)
             assert.falsy(makefile:find("-Wl,--whole-archive", 1, true), makefile)
             assert.falsy(makefile:find("-Wl,-force_load", 1, true), makefile)
             assert.falsy(makefile:find("rm -f *.a", 1, true), makefile)
@@ -2421,7 +2435,13 @@ fi
             assert.equal(1, count_literal(heavy_job,
                 "needs: prepare-linux"), heavy_job)
             assert.equal(1, count_literal(library_job,
-                "runs-on: ubuntu-slim"), library_job)
+                "runs-on: ubuntu-24.04"), library_job)
+            assert.equal(1, count_literal(library_job,
+                "timeout-minutes: 30"), library_job)
+            assert.equal(1, count_literal(library_job,
+                "name: test (ubuntu-24.04, library-uv-fs)"), library_job)
+            assert.equal(0, count_literal(library_job, "ubuntu-slim"),
+                library_job)
             assert.equal(1, count_literal(heavy_job,
                 "runs-on: ubuntu-slim"), heavy_job)
             assert.equal(1, count_literal(library_job,
@@ -2467,6 +2487,10 @@ fi
                 "runs-on: ubuntu-24.04"), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 "timeout-minutes: 30"), sanitizer_job)
+            assert.falsy(sanitizer_job:find(
+                "TITAN_NO_LINE_DIRECTIVES", 1, true), sanitizer_job)
+            assert.falsy(sanitizer_job:find(
+                "--no-line-directives", 1, true), sanitizer_job)
             assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
         end)
 end)

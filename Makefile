@@ -151,7 +151,9 @@ LIBBT_CFLAGS  ?= -fPIC -g -O2
 TITAN_EXTRA_CPPFLAGS ?=
 TITAN_EXTRA_CFLAGS   ?=
 TITAN_EXTRA_LDFLAGS  ?=
-export TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_CFLAGS TITAN_EXTRA_LDFLAGS
+TITAN_NO_LINE_DIRECTIVES ?=
+export TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_CFLAGS TITAN_EXTRA_LDFLAGS \
+	TITAN_NO_LINE_DIRECTIVES
 # Quote one complete environment value for the recipe shell.  This preserves
 # embedded quotes in user flag strings so Titan's own argv parser sees them.
 make_shell_quote = '$(subst ','"'"',$(1))'
@@ -1141,6 +1143,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
 		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
 		$(call make_shell_quote,TITAN_EXTRA_LDFLAGS=$(TITAN_EXTRA_LDFLAGS)) \
+		$(call make_shell_quote,TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)) \
 		$(call make_shell_quote,LIBUV_MODE=$(LIBUV_MODE)) \
 		$(call make_shell_quote,LIBUV_VERSION=$(LIBUV_VERSION)) \
 		$(call make_shell_quote,STDLIB_UV_CPPFLAGS=$(STDLIB_UV_CPPFLAGS)) \

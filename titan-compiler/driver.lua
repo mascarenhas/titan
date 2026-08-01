@@ -142,6 +142,7 @@ driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
 driver.TITAN_SOURCE_PATH = "."
 driver.LUA_SOURCE_PATH = driver.INSTALLED and driver.INSTALL_PATHS and
     driver.INSTALL_PATHS.lua_source or "lua-5.5.0/src"
+driver.EMIT_LINE_DIRECTIVES = os.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.LIBBACKTRACE_PATH = "libbacktrace"
 driver.INCLUDE_PATH = driver.INSTALLED and driver.INSTALL_PATHS and
@@ -2242,7 +2243,8 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose)
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
     static_deps = static_deps or {}
     local code, native_references =
-        coder.generate(modname, ast, static_deps, driver.TITAN_VER)
+        coder.generate(modname, ast, static_deps, driver.TITAN_VER,
+            driver.EMIT_LINE_DIRECTIVES)
     code = pretty.reindent_c(code)
     local filename = sourcef:gsub("[.]titan$", "") .. ".c"
     local libname = sourcef:gsub("[.]titan$", "") .. ".o"

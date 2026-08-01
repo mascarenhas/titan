@@ -4,6 +4,10 @@ local cdeclarator = require "titan-compiler.cdeclarator"
 
 local coder = {
     _csemantics = require "titan-compiler.csemantics",
+    -- Generation-local policy stored on the module table because coder.lua is
+    -- already at Lua's top-level local-variable limit. coder.generate resets
+    -- it on every invocation before emitline can be reached.
+    _emit_line_directives = true,
 }
 
 -- Lua 5.5's CallInfo encodes finite result requests only through MAXRESULTS.
@@ -98,6 +102,7 @@ end
 -- indented (reindent_c re-indents it) since leading whitespace before a
 -- directive is legal C. Nodes without a `loc` (synthesized AST) emit nothing.
 local function emitline(node)
+    if not coder._emit_line_directives then return "" end
     local loc = node and node.loc
     if not loc or not loc.line or not loc.filename then return "" end
     return "#line " .. tostring(loc.line) .. " "
@@ -15787,7 +15792,11 @@ local function allocate_upvalues(tlcontext, ast)
     end
 end
 
-function coder.generate(modname, ast, static_deps, abi)
+function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
+    -- Omission preserves the historical default. Reset this before any
+    -- validation that may fail so a previous invocation's policy never leaks
+    -- into the next generation.
+    coder._emit_line_directives = emit_line_directives ~= false
     assert(type(abi) == "string" and abi ~= "",
         "coder.generate requires the compiled-module ABI")
     local staticmetadata = require "titan-compiler.staticmetadata"

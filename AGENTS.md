@@ -61,18 +61,20 @@ not add epicycles around what may be a misunderstood simpler design.
   dispatch.** Use `workflow_dispatch` as the **pre-merge check** with
   `gh workflow run ci.yml --ref <branch>`. Linux jobs are push-only and are not
   repeated by that macOS dispatch. The regular Linux flow uses one standard
-  `ubuntu-24.04` producer with an explicit 30-minute timeout plus two 1-core
-  `ubuntu-slim` consumers subject to that runner's hard 15-minute limit. The
+  `ubuntu-24.04` producer with an explicit 30-minute timeout plus two
+  consumers. The build-heavy uv/timer/fs consumer also uses standard
+  `ubuntu-24.04` with a 30-minute timeout; the compiler-heavy consumer uses
+  1-core `ubuntu-slim` and is subject to that runner's hard 15-minute limit. The
   producer runs the core compiler/language shard plus serial, net/OS, and
   PEG/string/math/Lua/iter/GC tests on its warm tree, and uploads a same-run,
-  full-tree tar artifact for the two parallel consumers. One consumer runs
-  the uv/timer/fs library group without coverage. The other runs the heavy
-  coverage shard:
+  full-tree tar artifact for the two parallel consumers. The standard consumer
+  runs the uv/timer/fs library group without coverage. The slim consumer runs
+  the heavy coverage shard:
   `coder_spec.lua`,
   `flexible_returns_spec.lua`, `cdriver_spec.lua`, every checker/coder
   `c_ffi*_spec.lua`, and the static-provider specs that require isolated Busted
   processes for direct coverage. The complete local `compiler` group remains
-  the union of both coverage shards. Both Linux runner labels remain x86_64
+  the union of both coverage shards. All Linux runner labels remain x86_64
   Ubuntu 24.04, so the prepared native tree crosses only the runner
   size/container boundary, never an OS, architecture, or object target. Each
   shard uploads its explicit report
@@ -106,7 +108,12 @@ not add epicycles around what may be a misunderstood simpler design.
   sanitizer job keeps its build and focused native-memory gate on one warm
   standard `ubuntu-24.04` runner with an explicit 30-minute timeout:
   representative timer/fs suites, core owner/callback proofs, and production
-  net/OS smokes. Its Lua,
+  net/OS smokes. Keep ordinary Titan `#line` attribution throughout this job:
+  the selected `uv_tasks` traceback gate depends on exact user-function
+  frames, and `uv_bootstrap` additionally requires a standard-provider frame.
+  Use
+  `TITAN_NO_LINE_DIRECTIVES=1` only in an isolated diagnostic reproduction,
+  not for the complete sanitizer suite. Its Lua,
   libbacktrace, and libuv dependencies compile with sanitizer instrumentation
   at `-O1`, while the much larger generated Titan images and disposable test
   fixtures use the same instrumentation at `-O0`; optimizing those generated
@@ -270,8 +277,9 @@ keeps their installed compiler snapshots and native SDKs independent and makes
 parallel isolated builds possible.
 
 Canonical full-suite validation must also start without ambient
-`ROCKS_TREE`, `TITAN_ROCKS_ROOT`, or `TITAN_EXTRA_CPPFLAGS`. Those variables
-change provider/root selection or every generated fixture's C preprocessing;
+`ROCKS_TREE`, `TITAN_ROCKS_ROOT`, `TITAN_EXTRA_CPPFLAGS`, or
+`TITAN_NO_LINE_DIRECTIVES`. Those variables change provider/root selection,
+every generated fixture's C preprocessing, or source-line attribution;
 `make test` deliberately clears Lua module-path overrides, but it does not
 erase these explicit build-policy inputs.
 
@@ -292,7 +300,8 @@ busted                                              # full test suite — MUST r
 busted spec/parser_spec.lua                         # single spec file
 busted spec/coder/coder_spec.lua --filter='for loop' # single test (Lua pattern on test name)
 
-./titanc [--print-ast] [-v] [--static] [--lua <luasrc>] [--tree <srcroot>] \
+./titanc [--print-ast] [-v] [--static] [--no-line-directives] \
+  [--lua <luasrc>] [--tree <srcroot>] \
   [-l lib1,lib2] [-X object...] <module>...
 ```
 
@@ -845,8 +854,8 @@ save and restore both together.
 
 ### Coder and driver (`coder.lua`, `pretty.lua`, `driver.lua`)
 
-`coder.generate(modname, ast, static_deps, abi)` produces one C translation
-unit as a string — no C AST, just `util.render` templates (`$VAR`
+`coder.generate(modname, ast, static_deps, abi, emit_line_directives)` produces
+one C translation unit as a string — no C AST, just `util.render` templates (`$VAR`
 substitution, recursive; error on missing keys). Key facts:
 
 - Whole-root AST passes use `ipairs` to preserve main/contributor declaration

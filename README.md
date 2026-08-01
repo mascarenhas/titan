@@ -297,7 +297,8 @@ runtime, ABI, and interoperation machinery.
 # Usage
 
 ```sh
-$ titanc [--print-ast] [--static] [--lua <path>] [--tree <path>] <module> [<module>]
+$ titanc [--print-ast] [--static] [--no-line-directives] \
+    [--lua <path>] [--tree <path>] <module> [<module>]
 ```
 
 The compiler takes a list of module names that you want to compile. Pass
@@ -548,9 +549,10 @@ commands, so a shell left over from an old `luarocks init` project cannot make
 the prefix tools load a different compiler snapshot. The supported workflow
 does not use `luarocks init`; avoid exporting those project-tree paths while
 working in a standalone Titan prefix. For canonical validation, also unset
-ambient `ROCKS_TREE`, `TITAN_ROCKS_ROOT`, and `TITAN_EXTRA_CPPFLAGS`: they are
-explicit build-policy inputs, so `make test` does not erase them, and they
-change provider/root selection or fixture preprocessing. To run the iterative
+ambient `ROCKS_TREE`, `TITAN_ROCKS_ROOT`, `TITAN_EXTRA_CPPFLAGS`, and
+`TITAN_NO_LINE_DIRECTIVES`: they are explicit build-policy inputs, so
+`make test` does not erase them, and they change provider/root selection,
+fixture preprocessing, or source-line attribution. To run the iterative
 development steps yourself:
 
 ```sh
@@ -613,6 +615,7 @@ when it is no longer needed.
         --print-ast                       Print the AST.
         -v, --verbose                     Print safely quoted effective compiler commands.
         --static                          Prefer static Titan archive providers.
+        --no-line-directives              Omit Titan source #line directives from generated C.
         --lua <path>                      Path to a Lua source/build tree (source checkouts only).
         --tree <path>                     Path to the source tree for Titan modules (default '.').
         -l, --link <lib1,lib2>            Add libraries to the final link.
@@ -625,6 +628,13 @@ ordinary dependencies; it does not request a system-linker static build and
 still permits DSO/source fallback. In library mode, `-X` object/archive
 payload enters both the shared and static output; in executable mode it keeps
 its established final-link role. `CC` selects the compiler.
+`--no-line-directives` leaves generated C attributed to its physical `.c`
+file and line numbers, which is useful when investigating native diagnostics
+such as sanitizer reports. The default keeps Titan source attribution.
+`TITAN_NO_LINE_DIRECTIVES=1` provides the same policy for build automation.
+Without Titan-attributed frames, logical tracebacks may omit native Titan
+functions or render a boundary as `[C]`; this mode is therefore unsuitable for
+normal builds or traceback validation.
 `TITAN_EXTRA_CPPFLAGS` carries append-only `-I`/`-D` arguments shared by
 C-FFI checking and generated compilation;
 `TITAN_EXTRA_CFLAGS` is compile-only; and ordered `TITAN_EXTRA_LDFLAGS` is

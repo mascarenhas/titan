@@ -384,7 +384,7 @@ The compiler driver is invoked with dot-separated *module names*, not
 file paths:
 
 ```sh
-titanc [--print-ast] [-v] [--static] [--lua <luasrc>] \
+titanc [--print-ast] [-v] [--static] [--no-line-directives] [--lua <luasrc>] \
   [--tree <srcroot>] [-l lib1,lib2] [-X object...] <module>...
 ```
 
@@ -401,6 +401,13 @@ titanc [--print-ast] [-v] [--static] [--lua <luasrc>] \
 * `--static` prefers self-describing Titan `.a` providers over `.so`
   providers for ordinary dependencies. It still permits DSO/source fallback
   and does not request a fully static system executable.
+* `--no-line-directives` omits Titan source `#line` directives from generated
+  C, so native compiler and sanitizer diagnostics use physical generated-C
+  coordinates. By default diagnostics are attributed to Titan source.
+  `TITAN_NO_LINE_DIRECTIVES=1` selects the same policy for build automation.
+  This diagnostic mode can omit native Titan functions from logical
+  tracebacks or render a boundary as `[C]`; do not use it for normal builds or
+  traceback validation.
 * `-X/--extra-object` adds native object/archive payload. Library mode carries
   it into both provider forms; executable mode uses it at final link.
 * `-v/--verbose` prints the C compiler command lines; `--print-ast`

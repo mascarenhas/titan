@@ -148,10 +148,11 @@ composition supplies the order but does not create a new visibility mechanism.
 
 ## One code-generation pass
 
-`coder.generate(M, combined_ast, static_deps)` still receives the same AST
-shape and emits one translation unit. Whole-root-list allocation and emission
-passes use `ipairs`, making the declared composition order explicit. Internal
-maps and sets whose order is immaterial may continue to use `pairs`.
+`coder.generate(M, combined_ast, static_deps, abi,
+emit_line_directives)` still receives the same AST shape and emits one
+translation unit. Whole-root-list allocation and emission passes use `ipairs`,
+making the declared composition order explicit. Internal maps and sets whose
+order is immaterial may continue to use `pairs`.
 
 Checker declaration staging never rearranges this list. Consequently duplicate
 precedence, ordered interface members, module slots, module-variable

@@ -11,10 +11,11 @@ jobs:
   # Build and install the regular Linux tree once per workflow. Keep the
   # compiler core, net/OS, and PEG/string/math/Lua/iter/GC groups on this warm
   # standard runner.
-  # Two consumers restore the pristine tree instead of rebuilding dependencies:
-  # one runs uv/timer/fs behavior, while the other runs the broad end-to-end,
-  # measured C-FFI, and isolated static-provider coverage. Both runner labels
-  # remain x86_64 Ubuntu 24.04, so the native artifact does not cross targets.
+  # Two consumers restore the pristine tree instead of rebuilding dependencies.
+  # The build-heavy uv/timer/fs behavior uses a standard runner with 30-minute
+  # headroom, while the broad end-to-end, measured C-FFI, and isolated
+  # static-provider coverage remains on the 1-core slim runner. Both labels are
+  # x86_64 Ubuntu 24.04, so the native artifact does not cross targets.
   prepare-linux:
     name: regular (ubuntu-24.04, build+compiler-core+net-os+peg-string-math-lua-iter-gc)
     if: github.event_name == 'push'
@@ -279,10 +280,11 @@ jobs:
           overwrite: true
 
   test-linux-library:
-    name: test (ubuntu-slim, library-uv-fs)
+    name: test (ubuntu-24.04, library-uv-fs)
     needs: prepare-linux
     if: github.event_name == 'push'
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
 
