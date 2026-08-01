@@ -24,10 +24,16 @@ local record Runtime
   local signal_owner_head: uv_signal_t?
   local process_head: ProcessControl?
   local process_request_head: ProcessRequestControl?
+  local parent_stdin: uv_stdio_t?
+  local parent_stdout: uv_stdio_t?
+  local parent_stderr: uv_stdio_t?
+  local main_task: Task?
   local task_head: Task?
   local running_task: Task?
   local in_loop: boolean
   local closing: boolean
+  local exit_requested: boolean
+  local exit_code: integer
   local fatal: boolean
   local fatal_error: value
   local fatal_traceback: string
@@ -103,16 +109,24 @@ function _loop()
   retire_fs_owners(runtime)
   repair_acquired_files(runtime)
   retire_aborted_net_requests(runtime)
+  advance_parent_stdio_shutdown(runtime)
 
-  if not runtime.fatal and runtime.task_head then
+  if not runtime.fatal and not runtime.exit_requested and
+      runtime.task_head then
     runtime.fatal = true
     runtime.closing = true
     runtime.fatal_error = "libuv loop became idle while Tasks were waiting"
     runtime.fatal_traceback = ""
   end
-  if runtime.fatal then
-    begin_fatal_shutdown(runtime)
+  if runtime.fatal or runtime.exit_requested then
+    if runtime.fatal then
+      begin_fatal_shutdown(runtime)
+    else
+      begin_exit_shutdown(runtime)
+    end
+    begin_parent_stdio_shutdown(runtime)
     advance_file_shutdown(runtime)
+    advance_parent_stdio_shutdown(runtime)
     begin_tcp_shutdown(runtime)
     advance_tcp_shutdown(runtime)
     begin_process_shutdown(runtime)
@@ -138,6 +152,9 @@ function _loop()
           -- impossible leftovers at the outer safe point so owner draining and
           -- uv_loop_close remain total.
           local invariant_error = internal_error("shutdown.deadlock")
+          if not runtime.fatal then
+            promote_fatal(runtime, invariant_error, "")
+          end
           local stranded? = runtime.task_head
           while stranded do
             local to_finish = stranded
@@ -154,6 +171,7 @@ function _loop()
         retire_aborted_net_requests(runtime)
         retire_aborted_process_requests(runtime)
         advance_file_shutdown(runtime)
+        advance_parent_stdio_shutdown(runtime)
         advance_tcp_shutdown(runtime)
         advance_process_shutdown(runtime)
         drive_cancel_fallbacks(runtime)
@@ -161,6 +179,7 @@ function _loop()
     end
   else
     advance_file_shutdown(runtime)
+    advance_parent_stdio_shutdown(runtime)
     advance_tcp_shutdown(runtime)
     advance_process_shutdown(runtime)
   end
@@ -345,6 +364,7 @@ local function check_alignment()
       libuv.uv_signal_t.alignof > ffi.TValue.alignof or
       libuv.uv_process_t.alignof > ffi.TValue.alignof or
       libuv.uv_pipe_t.alignof > ffi.TValue.alignof or
+      libuv.uv_tty_t.alignof > ffi.TValue.alignof or
       libuv.uv_buf_t.alignof > ffi.TValue.alignof or
       libuv.uv_dirent_t.alignof > ffi.TValue.alignof or
       shim.titan_uvshim_address.alignof > ffi.TValue.alignof then
@@ -376,10 +396,16 @@ local function new_runtime(): Runtime
     signal_owner_head = nil,
     process_head = nil,
     process_request_head = nil,
+    parent_stdin = nil,
+    parent_stdout = nil,
+    parent_stderr = nil,
+    main_task = nil,
     task_head = nil,
     running_task = nil,
     in_loop = false,
     closing = false,
+    exit_requested = false,
+    exit_code = 0,
     fatal = false,
     fatal_error = nil,
     fatal_traceback = "",

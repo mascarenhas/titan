@@ -275,16 +275,17 @@ negation of Titan's minimum integer.
 
 ## Stack, roots, callbacks, and errors
 
-Raw Lua C API use is confined to opening and validating the private engine,
-reading its registry metatable, and installing a weak-value metatable on the
-fresh `{string: Pattern}` Titan relabel cache Map created by each locale
-refresh. `lua_setmetatable` mutates that Map in place, after which the refresh
-assigns it directly to module state; no placeholder Map or `value` cast is
-involved. Replacing the cache is what prevents locale-dependent compiled
-sources from surviving `update_locale`. Each such helper snapshots `lua_gettop(L)`,
-transfers any surviving collectable to a traced Titan value, and restores the
-exact saved top with `defer`. The complete narrow allowlist is recorded in
-[Lua C API FFI follow-up](ffi-lua-api-followup.md).
+Raw Lua C API use is confined to opening and validating the private engine and
+reading its registry metatable. Each locale refresh creates its relabel cache
+as a typed `{string: Pattern}` Map, passes that same Map through the public
+`titan.gc.weak` boundary using one local `{value: value}` view, and then assigns
+it directly to module state. Replacing the cache is what prevents
+locale-dependent compiled sources from surviving `update_locale`; PEG no
+longer duplicates the raw metatable setup owned by `titan.gc`. Each remaining
+raw helper snapshots `lua_gettop(L)`, transfers any surviving collectable to a
+traced Titan value, and restores the exact saved top with `defer`. The complete
+narrow allowlist is recorded in [Lua C API FFI
+follow-up](ffi-lua-api-followup.md).
 
 Pattern construction, matching, and callbacks do not manually manipulate the
 Lua stack. They call precisely typed cached Lua callables through Titan's
@@ -403,16 +404,16 @@ libtitan-lpeglabel.a
 [bundled libuv.a]
 ```
 
-The source build invokes one compiler process for the ten logical roots:
+The source build invokes one compiler process for the fourteen logical roots:
 
 ```text
 titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs
-titan.net titan.os titan.peg titan.string
+titan.net titan.os titan.peg titan.string titan.math titan.lua titan.iter titan.gc
 ```
 
-The paired `titan.so`/`titan.a` has ten logical ABI/types protocols, ten
-archive metadata keys, and ten generated Lua shims. Bare native support adds
-an eleventh DSO opener. LPegLabel contributes no logical key: its five members are
+The paired `titan.so`/`titan.a` has fourteen logical ABI/types protocols,
+fourteen archive metadata keys, and fourteen generated Lua shims. Bare native
+support adds a fifteenth DSO opener. LPegLabel contributes no logical key: its five members are
 force-carried into both provider forms solely as private native payload.
 
 The archive and headers are not copied into `$ROCKS_TREE/lib` or
@@ -428,15 +429,15 @@ That compiler-owned dependency is independent of the vendored standard
 module: a deployed `titan.peg` pattern never dynamically links to or requires
 the external module.
 
-The generated providers are validated for exact symbols, ten metadata keys,
-all eleven Lua openers, and absence of an LPegLabel dynamic dependency. Isolation
+The generated providers are validated for exact symbols, fourteen metadata
+keys, all fifteen Lua openers, and absence of an LPegLabel dynamic dependency. Isolation
 tests load private and external engines in both orders, use both pattern
 families, vary their max-stack settings independently, and reject cross-engine
 patterns.
 
 Publication otherwise retains the canonical standard-library transaction:
 new or changed shims and dSYM are committed first, then `titan.a`, with
-`titan.so` renamed last. Current ten-module reinstall and caught-failure
+`titan.so` renamed last. Current fourteen-module reinstall and caught-failure
 rollback are supported. Titan remains a prototype; stale conflicting layouts
 and future ABI bumps are handled by cleaning the old installation and building
 a fresh versioned tree, not by adding cross-layout migration classifiers.

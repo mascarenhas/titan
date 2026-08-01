@@ -1780,7 +1780,11 @@ end
     end)
 
     it("rejects malformed module names without crashing", function()
-        local malformed = { "", ".", "titan.", ".titan", "titan..timer" }
+        local malformed = {
+            "", ".", "titan.", ".titan", "titan..timer",
+            "1titan", "-titan", "titan.$line", "titan timer",
+            "titan/timer",
+        }
         local source_roots = {}
         for _, name in ipairs(malformed) do source_roots[name] = true end
         local loader = driver.defaultloader({}, {
@@ -1791,8 +1795,16 @@ end
             local called, ok, message = pcall(loader, name)
             assert.truthy(called)
             assert.falsy(ok)
-            assert.equal("source module '" .. name .. "' not found", message)
+            assert.match(
+                "invalid logical Titan module name", message, 1, true)
         end
+
+        local called, plans, message = pcall(
+            driver.plan_module_shims,
+            "provider$line", { "module$line" })
+        assert.truthy(called)
+        assert.falsy(plans)
+        assert.match("invalid library provider name", message, 1, true)
     end)
 
     it("requires source for an explicit build root", function()

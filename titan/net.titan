@@ -30,15 +30,6 @@ local function check_listen_port(port: integer)
   end
 end
 
-local function join_chunks(chunks: {string}, first: integer,
-                           last: integer): string
-  if first > last then return "" end
-  if first == last then return chunks[first] as string end
-  local middle = first + (last - first) // 2
-  return join_chunks(chunks, first, middle) ..
-         join_chunks(chunks, middle + 1, last)
-end
-
 local function begin_read(connection: Connection)
   if connection.reading then
     raise "Connection already has a reader"
@@ -49,19 +40,16 @@ end
 -- This helper runs only while the public reader lock is held. It serves all
 -- retained excess first, then performs at most one middle-layer read.
 local function read_unlocked(connection: Connection): string?
+  if uv._net_is_closed(connection.handle) then
+    connection.excess = ""
+    return nil
+  end
   if #connection.excess > 0 then
     local result = connection.excess
     connection.excess = ""
     return result
   end
   return uv._net_read(connection.handle)
-end
-
-local function restore_chunks(connection: Connection, chunks: {string},
-                              count: integer)
-  if count > 0 then
-    connection.excess = join_chunks(chunks, 1, count) .. connection.excess
-  end
 end
 
 function connect(host: string, port: integer): Connection
@@ -91,11 +79,18 @@ end
 
 function Connection:read_until(delimiter: string,
                                chop: boolean?): string?
+  if uv._net_is_closed(self.handle) then
+    self.excess = ""
+    return nil
+  end
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
   begin_read(self)
-  local chunks: {string} = {}
-  local count = 0
+  local builder = str.writer(false)
+  -- The native read is this producer's scheduling boundary. Keep the current
+  -- consumed chunk separately until the append succeeds so an append error
+  -- can restore every byte to the facade excess.
+  local pending = ""
   local total = 0
   local tail = ""
   local result: string? = nil
@@ -116,19 +111,20 @@ function Connection:read_until(delimiter: string,
       end
 
       if terminal_error_tail then
-        result = join_chunks(chunks, 1, count)
+        result = builder:drain()
         finished = true
       elseif not maybe_chunk then
-        if total > 0 then result = join_chunks(chunks, 1, count) end
+        -- Explicit close discards even bytes already accumulated by this
+        -- in-flight delimiter read; natural EOF still returns its tail.
+        if total > 0 and not uv._net_is_closed(self.handle) then
+          result = builder:drain()
+        end
         finished = true
       else
         local chunk = maybe_chunk as string
-        if #chunk == 0 then
-          raise "network read returned an empty non-EOF chunk"
-        end
-
-        count = count + 1
-        chunks[count] = chunk
+        pending = chunk
+        builder:write(chunk)
+        pending = ""
         local boundary = tail .. chunk
         local match: integer? = str.find(boundary, delimiter)
         total = total + #chunk
@@ -137,7 +133,7 @@ function Connection:read_until(delimiter: string,
             total - #boundary + (match as integer) - 1 + #delimiter
           local result_end = match_end
           if chop then result_end = result_end - #delimiter end
-          local all = join_chunks(chunks, 1, count)
+          local all = builder:drain()
           local selected = str.sub(all, 1, result_end)
           local remaining = str.sub(all, match_end + 1)
           result = selected
@@ -151,7 +147,11 @@ function Connection:read_until(delimiter: string,
       end
     end
   catch
-    restore_chunks(self, chunks, count)
+    local restored = builder:drain()
+    if #pending > 0 then restored = restored .. pending end
+    if #restored > 0 then
+      self.excess = restored .. self.excess
+    end
     raise
   finally
     self.reading = false
@@ -168,7 +168,15 @@ function Connection:shutdown()
 end
 
 function Connection:close()
-  uv._net_close(self.handle)
+  -- A closed ReaderCloser is at EOF. Clear before yielding, then clear again
+  -- because a concurrent delimiter reader may have restored consumed bytes
+  -- while the physical close was completing.
+  self.excess = ""
+  do
+    uv._net_close(self.handle)
+  finally
+    self.excess = ""
+  end
 end
 
 function Server:accept(): Connection

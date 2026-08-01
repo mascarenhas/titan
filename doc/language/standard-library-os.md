@@ -1,8 +1,12 @@
 # Operating-system standard library
 
-The `os` standard module provides portable environment, path, process,
-one-shot signal, and child-process helpers backed by public libuv APIs. Titan
-imports its canonical short name:
+The `os` standard module provides portable clocks, calendars, locales,
+environment, path, process, graceful exit, one-shot signal, and child-process
+helpers. Its
+synchronous CPU/current-time queries and resource-owning operations use public
+libuv APIs; calendar conversion, formatting, differences, and locale selection
+use ISO C where libuv has no equivalent. Titan imports its canonical short
+name:
 
 ```titan
 local os = import "os"
@@ -13,6 +17,110 @@ qualified Lua name is deliberate: `require "os"` remains Lua's standard
 library table and is never replaced.
 
 The module currently supports Linux and macOS.
+
+## Clocks and time differences
+
+```titan
+function clock(): float
+function difftime(later: integer, earlier: integer): float
+```
+
+`clock` sums the portable libuv user and system CPU-usage clocks and returns
+seconds consumed by the program. It is not elapsed wall time. `difftime`
+returns `later - earlier` in seconds using the host's ISO C calendar-time
+representation. Titan timestamps are integers on the supported 64-bit Linux
+and macOS targets.
+
+## Calendar formatting and decomposition
+
+```titan
+record Date
+  year: integer
+  month: integer
+  day: integer
+  hour: integer
+  min: integer
+  sec: integer
+  wday: integer
+  yday: integer
+  isdst: boolean?
+end
+
+function date(format: string?, timestamp: integer?): value
+```
+
+`date` follows Lua 5.5's mixed result shape. Its declared result is `value`,
+but the actual result is restricted to two types: an ordinary `string` for a
+format string, or a `Date` record when the effective format is `"*t"`. Titan
+callers narrow the result explicitly:
+
+```titan
+local result = os.date("!*t", 0)
+if result is os.Date then
+  local epoch = result as os.Date
+  -- epoch.year == 1970
+end
+```
+
+The default format is `"%c"`, and an absent timestamp means the current time.
+A leading `!` selects UTC and is removed before interpreting the remainder;
+otherwise conversion uses local time. `"*t"` returns the calendar fields.
+`wday` uses 1 for Sunday through 7 for Saturday, and `yday` starts at 1.
+`isdst` is `nil` when the C library cannot determine daylight-saving status.
+Unlike Lua's general-purpose table result, `Date` is a nominal fixed-shape
+record; its public fields retain the ordinary record mutability rules.
+
+Other formats use the C99 `strftime` conversion set accepted by Lua 5.5,
+including the standard `E` and `O` modifiers. Invalid conversions raise before
+entering C. The output buffer grows automatically, so callers do not choose a
+capacity; a long repeated format is not truncated. Format strings are text and
+reject an embedded NUL.
+
+## Constructing timestamps
+
+```titan
+function time(year: integer?, month: integer?, day: integer?,
+              hour: integer?, min: integer?, sec: integer?,
+              isdst: boolean?): integer
+```
+
+With no arguments, `time` returns the current timestamp. When any calendar
+field is supplied, `year`, `month`, and `day` are required together. `hour`
+defaults to 12 (noon), while `min` and `sec` default to zero; absent `isdst`
+asks the C library to determine daylight-saving time. Fields may be outside
+their ordinary ranges and are normalized by the host calendar, as in Lua:
+
+```titan
+local noon = os.time { year = 2026, month = 7, day = 31 }
+local normalized = os.time {
+  year = 2026, month = 2, day = 30,
+  hour = 4, min = 5, sec = 6,
+}
+```
+
+Named arguments replace Lua's date-table input. There is consequently no input
+table to update with normalized fields; call `date("*t", timestamp)` when the
+normalized fields are needed. A field outside the host C `int` representation,
+or a timestamp the host cannot represent, raises an error.
+
+## Locale
+
+```titan
+function setlocale(locale: string?, category: string?): string?
+```
+
+The categories are `"all"` (the default), `"collate"`, `"ctype"`,
+`"monetary"`, `"numeric"`, and `"time"`. With `locale == nil`, `setlocale`
+queries the current selection. Otherwise it requests that locale and returns
+the selected name, or `nil` when the C library cannot satisfy the request.
+`""` asks for the implementation-defined native locale and `"C"` selects the
+portable C locale. Locale and category strings reject embedded NUL; unknown
+categories raise.
+
+Locale selection is process-global and the ISO C calendar/locale functions
+used here have process-global or static storage. They are not safe to race from
+multiple operating-system threads. Titan's v1 async callbacks execute serially
+on one loop thread; embedding hosts must provide the same exclusion.
 
 ## Environment
 
@@ -81,6 +189,30 @@ Signals are notifications rather than a queued history, so repeated standard
 signals may coalesce. While a watcher is active, libuv owns that process signal
 disposition; embedding code should not install a competing handler for it.
 
+## Graceful program exit
+
+```titan
+function exit(code: integer?)
+```
+
+`exit` requests successful shutdown of the complete async Runtime. An absent
+code means zero. The call may come from the main Task or a child Task; it exits
+the program rather than merely returning from or cancelling that Task.
+
+The request settles the other Tasks, runs their `defer` and `finally` cleanup,
+drains files, streams, requests, parent stdio, and child processes through
+their ordinary Runtime shutdown paths, and closes the event loop. A live child
+receives `term`, the ordinary grace interval, and then `kill` when necessary,
+and is reaped before shutdown completes. The generated standalone entrypoint
+then returns the requested status through its normal exit path. This is a
+distinct successful Runtime transition, not a fatal error and not a direct
+call to ISO C `exit`.
+
+`os.exit` does not accept Lua's boolean status or `close` flag. A Titan module
+loaded by Lua or another embedding does not own the host Lua state and never
+closes it; the embedding remains responsible for that state after Titan's
+Runtime has finished.
+
 ## Child processes
 
 ```titan
@@ -90,81 +222,180 @@ record ExitStatus
   signal_number: integer
 end
 
-record InputStream
-record OutputStream
+record SpawnConfig
+type SpawnOption = (SpawnConfig) -> integer
 
 record Process
-  stdin: OutputStream
-  stdout: InputStream
-  stderr: InputStream
+  stdin: OutputStream?
+  stdout: InputStream?
+  stderr: InputStream?
 end
 
-function spawn(file: string, args: {string}): Process
+function with_stdin(config: SpawnConfig): integer
+function with_stdout(config: SpawnConfig): integer
+function with_stderr(config: SpawnConfig): integer
+function with_parent_stdin(config: SpawnConfig): integer
+function with_parent_stdout(config: SpawnConfig): integer
+function with_parent_stderr(config: SpawnConfig): integer
+function with_merged_output(config: SpawnConfig): integer
+
+function spawn(file: string, args: {string},
+               ...: SpawnOption): Process
 function Process:wait(): ExitStatus
 function Process:kill(signal: string)
+function Process:is_running(): boolean
 function InputStream:read(): string?
 function InputStream:read_until(delimiter: string,
                                 chop: boolean?): string?
+function InputStream:close()
+function InputStream:is_tty(): boolean
 function OutputStream:write(data: string)
 function OutputStream:close()
+function OutputStream:is_tty(): boolean
 ```
 
-Process operations are asynchronous and must run inside an async Task. A Titan
-standalone program that imports `os` gets the automatic async bootstrap; a Lua
-host should call them from a function passed to `async.run`, then drive that Task
+Spawning, stream I/O, parent-stdio access, signalling, and waiting must run
+inside an async Task. `is_running` and `is_tty` do not yield, but still
+validate the current Runtime and resource generation. A Titan standalone
+program that imports `os` gets the automatic async bootstrap; a Lua host should
+call these APIs from a function passed to `async.run`, then drive that Task
 with `async.loop` after loading `require "titan.async"`.
+
+`InputStream` and `OutputStream` are ordinary records with private fields.
+They represent process standard streams only: the Titan process's own stdio
+and the parent-facing endpoints of captured child stdio. They are not unions
+of files, sockets, parent resources, and child resources. The private
+low-level handle is the tagged value, with pipe and TTY variants, so
+`is_tty()` reports the actual native handle kind rather than the stream's
+origin.
+
+### Declarative spawn configuration
 
 `spawn` starts `file` directly, without a shell. `args` contains the arguments
 after `argv[0]`; the library supplies `file` as `argv[0]`. The child inherits
 the current environment and working directory. File and argument strings are
 text and reject embedded NUL before any native resource is created.
 
-Every child has separate stdin, stdout, and stderr stream records in its three
-public fields. Stream names describe the Titan caller's direction:
-`process.stdin` is an `OutputStream` because Titan writes to the child, while
-`process.stdout` and `process.stderr` are `InputStream` values because Titan
-reads from them. Pipe payloads are binary strings and preserve embedded NUL.
-Nonempty `process.stdin:write(data)` operations are FIFO across Tasks and
-return only after their native write callback; an empty write is a checked
-no-op. Cancelling a queued write removes it; cancelling a submitted write
-consumes its eventual callback without killing the child. On Unix, loading
+With no options, all three child descriptors are captured. `spawn` constructs
+one opaque `SpawnConfig`, installs those three defaults, then calls every
+supplied `SpawnOption` from left to right. Each option returns a libuv-style
+status. `spawn` stops at the first negative result, cleans up the configuration,
+and raises the corresponding error without calling later options.
+
+`with_stdin`, `with_stdout`, and `with_stderr` prepare a new parent-facing
+pipe endpoint. The corresponding `with_parent_*` function classifies and
+prepares the current parent pipe or TTY for inheritance. A configurator does
+its native setup and validation when called, caches reusable candidates, and
+atomically selects its result. Later options win over conflicting earlier
+options, including a later choice that breaks an earlier merge. Repeating an
+option is harmless; initialized candidates are reused, and candidates not
+selected by the final configuration are closed without leaking or
+double-closing them. Callers may compose the supplied functions in their own
+integer-returning `SpawnOption` closures, but cannot construct or inspect a
+`SpawnConfig` directly.
+
+`with_merged_output` captures one output pipe and directs both child stdout
+and stderr into it. The resulting nonnil `process.stdout` and
+`process.stderr` fields contain the exact same `InputStream` value, not two
+facades over one native handle. They consequently share buffered excess and
+one-reader locking as well as native ownership.
+
+Each public Process endpoint is optional. A captured descriptor has a
+parent-side endpoint; an inherited descriptor does not, so its corresponding
+field is `nil`. Stream names describe the Titan caller's direction:
+`process.stdin`, when present, is an `OutputStream` because Titan writes to the
+child, while captured `process.stdout` and `process.stderr` are `InputStream`
+values because Titan reads from them. Pipe payloads are binary strings and
+preserve embedded NUL.
+
+For example, this inherits stdin and captures stdout and stderr separately;
+the unmarked locals force the captured endpoint options where they are
+required:
+
+```titan
+local process = os.spawn(
+  "/usr/bin/tool", {"--version"}, os.with_parent_stdin)
+local stdout = process.stdout
+local stderr = process.stderr
+```
+
+### Parent standard streams
+
+The module exports three mutable stream variables:
+
+- `os.stdin: InputStream` reads the parent process's descriptor 0;
+- `os.stdout: OutputStream` writes descriptor 1; and
+- `os.stderr: OutputStream` writes descriptor 2.
+
+These are stable high-level records rather than handles borrowed from the
+first event loop that touches them. Each operation resolves the current
+Runtime's lazily initialized pipe-or-TTY owner. A retained stream therefore
+rebinds safely after one `async.run`/`async.loop` generation ends and another
+begins, without returning buffered input from the previous generation.
+
+Process stdio supports TTY and named-pipe descriptors. A descriptor classified
+by libuv as a regular file, TCP socket, or another kind is rejected instead of
+turning `os.InputStream`/`OutputStream` into a `fs.File` or `net.Connection`
+variant. Those records independently implement the relevant structural `io`
+interfaces, but are not process-stream values. `is_tty()` checks the private
+handle's TTY/pipe tag; captured child endpoints are pipes and report false.
+
+The raw parent descriptors remain owned by the host process. Each Runtime owns
+one per-generation wrapper over a close-on-exec duplicate, whose teardown
+cannot close the original descriptor. A `with_parent_*` configurator passes
+that exact pipe or TTY handle to libuv with `UV_INHERIT_STREAM`; it does not
+create a second wrapper or transfer ownership to the child. Several children
+may inherit the same prepared parent stream.
+
+Closing any of the three stable parent stream facades is an idempotent no-op.
+It neither closes the Runtime-owned duplicate nor changes later operations on
+the facade; Runtime teardown alone retires that generation's wrapper. This is
+distinct from closing a captured child endpoint.
+
+`InputStream` satisfies the standard `io.Reader`, `io.Closer`, and
+`io.ReaderCloser` Interfaces exactly.
+`OutputStream` satisfies `io.Writer`, `io.Closer`, and `io.WriterCloser`
+exactly. These are structural conversions at typed use sites; neither the
+records' private ownership metadata nor the low-level handle union is part of
+any Interface.
+
+### Process stream I/O
+
+Nonempty writes to a captured `process.stdin` are FIFO across Tasks and return
+only after their native write callback; an empty write is a checked no-op.
+Cancelling a queued write removes it; cancelling a submitted write consumes
+its eventual callback without killing the child. On Unix, loading
 `titan.uv` changes a default `SIGPIPE` disposition to ignored so a child that
 closes stdin produces the ordinary libuv write error instead of terminating
 the parent process. An already ignored signal or an application-installed
 handler is preserved.
 
-`process.stdin:close()` is idempotent and ordered after earlier writes. Its
-first call immediately rejects later writes, then cleanup-shields the physical
-pipe close. Closing the write-end pipe is what delivers EOF to the child;
-socket-style half-shutdown is not used. Programs whose child waits for input
-EOF must call it.
+Closing a captured `process.stdin` is idempotent and ordered after earlier
+writes. Its first call immediately rejects later writes, then cleanup-shields
+the physical pipe close. Closing the write-end pipe is what delivers EOF to
+the child; socket-style half-shutdown is not used. Programs whose child waits
+for input EOF must call it.
 
-`InputStream` satisfies the standard `io.Reader` Interface exactly.
-`OutputStream` satisfies `io.Writer`, `io.Closer`, and `io.WriterCloser`
-exactly. These are structural conversions at typed use sites; `Process` itself
-intentionally exposes only `wait` and `kill` methods.
+Successful spawn initialization starts continuous reads on each captured
+output pipe. Each pipe retains GC-owned chunks even when no Task is waiting,
+with no maximum or high-water mark. This keeps draining the operating-system
+pipes but means an undrained child can make application memory use grow. If a
+selected read watcher cannot start, spawn initialization closes every selected
+pipe, terminates and reaps the child, closes its process handle, and reports
+the original failure instead of publishing a partially initialized Process.
 
-Successful spawn initialization starts continuous reads on stdout and stderr.
-Each pipe retains GC-owned chunks even when no Task is waiting, with no maximum
-or high-water mark. This keeps draining the operating-system pipes but means an
-undrained child can make application memory use grow. If either read watcher
-cannot start, spawn initialization closes all three pipes, terminates and reaps
-the child, closes its process handle, and reports the original failure instead
-of publishing a partially initialized Process.
+An `InputStream:read()` returns that stream's oldest facade excess first.
+Otherwise it returns all native chunks already queued when the low-level call
+is serviced, or waits for the next positive callback. A positive batch is
+nonempty, binary, and timing-dependent. EOF returns `nil` permanently. A read
+error closes that output pipe; after completed chunks have drained, the same
+or an equivalent `async.Error` is raised on every later read.
 
-`process.stdout:read()` and `process.stderr:read()` return that stream's oldest
-facade excess first. Otherwise they return all native chunks already queued
-when the low-level call is serviced, or wait for the next positive callback. A
-positive batch is nonempty, binary, and timing-dependent. EOF returns `nil`
-permanently. A read error closes that output pipe; after completed chunks have
-drained, the same or an equivalent `async.Error` is raised on every later
-read.
-
-`process.stdout:read_until(delimiter, chop)` and the corresponding
-`process.stderr` call reject an empty delimiter and consume through its first
-occurrence. With `chop` absent or false, an actual delimiter is included; with
-`chop == true`, it is omitted. A chopped delimiter at the start returns `""`,
-not EOF. Bytes after the delimiter remain retained for the next call.
+`InputStream:read_until(delimiter, chop)` rejects an empty delimiter and
+consumes through its first occurrence. With `chop` absent or false, an actual
+delimiter is included; with `chop == true`, it is omitted. A chopped delimiter
+at the start returns `""`, not EOF. Bytes after the delimiter remain retained
+for the next call.
 
 EOF after a nonempty unterminated tail returns that tail unchanged and becomes
 `nil` on later calls. A read error after such a tail likewise returns the tail
@@ -172,16 +403,30 @@ first, then raises persistently. A terminal tail never has a delimiter
 invented. Cancellation and unrelated errors are re-raised, and bytes already
 accumulated by a cancelled delimiter read remain retained.
 
-Stdout and stderr each have an independent reader lock shared by their plain
-and delimiter methods, so the two pipes can be drained concurrently but a
-second Task cannot enter either read method for the same pipe. Cancelling a
-waiting read detaches only its waiter; the physical read continues and another
-Task may read afterward.
+Separately captured stdout and stderr have independent reader locks shared by
+their plain and delimiter methods, so the two pipes can be drained
+concurrently. Merged output has one facade and therefore one lock. A second
+Task cannot enter either read method for the same stream. Cancelling a waiting
+read detaches only its waiter; the physical read continues and another Task
+may read afterward.
 
-Every stream belongs to the libuv Runtime generation that spawned its child.
-After that Runtime has shut down, reads reject even if the `InputStream`
-facade retained excess, and writes or repeated closes reject as stale instead
-of observing the replacement Runtime.
+Closing a captured `InputStream` is idempotent. It stops and closes that
+parent-side read pipe, discards facade excess, queued native input, and any
+partial delimiter read already in flight, wakes a blocking reader with `nil`,
+and makes later `read` and `read_until` calls
+return `nil`. It does not terminate or reap the child; closing the read end can
+instead make a child that continues writing observe its ordinary broken-pipe
+behavior. Closing parent `os.stdin` remains the no-op described above.
+
+Every process stream belongs to the libuv Runtime generation that spawned its
+child. After that Runtime has shut down, reads reject even if the
+`InputStream` facade retained excess, and writes reject as stale instead of
+observing the replacement Runtime. Any captured input or output stream that
+was already closed still accepts repeated `close()` calls as idempotent no-ops
+across that generation boundary. The default parent stdio records have the
+separate rebinding behavior described above.
+
+### Process lifecycle
 
 `wait` returns after the operating system has reaped the child. Only one Task
 may wait at a time; cancelling it does not kill the child, and a replacement
@@ -193,39 +438,27 @@ subset; an unknown signal has `signal == nil` but keeps its number.
 
 For a child that may produce output, drain stdout and stderr concurrently with
 stdin and `wait`; waiting first can deadlock when an operating-system pipe
-buffer fills. Use `communicate` when the four operations do not need separate
-application control.
+buffer fills.
 
 `kill` accepts `"hup"`, `"int"`, `"quit"`, `"term"`, `"usr1"`, `"usr2"`,
 and `"kill"`. Unknown names are rejected before libuv is called. Killing an
 already exited Process is a lifecycle error, so a recycled process identifier
 can never be targeted through an old wrapper.
 
+`is_running` is a side-effect-free observation of the retained process state.
+It becomes false once the exit callback has reported termination, but it does
+not reap the child and does not replace `wait`. Code that conditionally signals
+a Process can use it immediately before `kill`; neither operation yields
+between the observation and signal request.
+
 If a Runtime finishes while a child is still alive, shutdown sends `term`,
 allows a five-second grace period, then sends `kill` if necessary. The Runtime
 still waits for the exit callback and every process/pipe close callback; it
 does not leave a zombie.
 
-## Communicating without deadlock
-
-```titan
-function communicate(file: string, args: {string},
-                     input: string?): (string, string, ExitStatus)
-```
-
-`communicate` is the argv-based, popen-style convenience. It starts the child,
-drains stdout and stderr concurrently, writes `input` when it is non-`nil`,
-closes stdin, and returns both complete binary outputs with the exit status.
-`nil` means no input; `""` is valid empty input and still closes stdin.
-
-The reader, writer, and waiter helpers are observed before they can start. If
-one fails or the parent is cancelled, the library cancels its siblings,
-terminates and reaps the child, drains every callback under the cleanup shield,
-then reports the original failure. Large simultaneous stdin, stdout, and
-stderr traffic therefore cannot deadlock on a full pipe.
-
-There is no shell-string `popen`. To use shell syntax intentionally, spawn the
-desired shell explicitly and pass its arguments as an array.
+For the shell-command convenience API with writable stdin and one merged
+output stream, see [`io.popen`](standard-library-io.md#shell-commands).
+`os.spawn` remains the direct executable/argv API for separate stream control.
 
 ## Errors
 

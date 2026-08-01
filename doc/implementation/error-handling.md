@@ -85,6 +85,15 @@ call/raise sites whose native frames should point back to Titan source.
 The source file does not need to exist at run time: the filename and line
 are carried in the object file's debug information.
 
+`titanc --no-line-directives`, or `TITAN_NO_LINE_DIRECTIVES=1` for build
+automation, suppresses those directives so native diagnostics instead report
+the generated `.c` file and physical line. This is a diagnostic mode; the
+default remains Titan source attribution. The display-name registry itself is
+independent of the directives, but the traceback builder retains ordinary
+native Titan frames only when their debug filename identifies Titan source.
+With directives disabled, logical tracebacks may therefore omit those frames;
+an entry boundary can remain only as a hidden sentinel or render as `[C]`.
+
 libbacktrace reports C symbol names, which are mangled and cannot contain
 Titan punctuation such as `.` or `:`. Each module `_init` contributes a
 mapping from native C symbol name to display name in a shared registry

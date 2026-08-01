@@ -39,7 +39,10 @@ The include descriptor is later used by the coder. It records the original
 header name, the resolved parse path, an `include_kind` (`"quote"` or
 `"angle"`), and the include name to write in generated C. A relative header
 found beside the Titan source becomes `#include "name.h"`; a compiler-provided
-or system header becomes `#include <name.h>`; an absolute path is quoted.
+or system header becomes `#include <name.h>`; an absolute path is quoted. The
+coder splices these completed lines between separately rendered preamble
+halves, because a valid header spelling may contain `$identifier` and must
+remain opaque to the compiler's recursive template renderer.
 
 After the import pass, every module with a nonempty list of successful foreign
 imports builds one `cprobe.ModuleContext` from the complete ordered descriptor

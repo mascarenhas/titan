@@ -479,8 +479,9 @@ narrow float operands to `integer` with a run-time check; `..` converts
 numeric operands to strings; `not` — and `and`/`or` in a boolean
 context — coerce to `boolean`; `==`/`~=` box the non-`value` side only when
 the symmetric comparison plan authorizes that injection (raw C pointers are
-excluded, and a C scalar carrier check can raise), and lift each side to its own option type
-if either side is an option; and most operators (`#`, unary `-`,
+excluded, and a C scalar carrier check can raise), and lift each side to its
+own option type if either side is an option, except that a `nil` operand is
+lifted directly to the other operand's option type; and most operators (`#`, unary `-`,
 arithmetic, relational, concatenation, bitwise, indexing) implicitly
 unwrap an option operand with a run-time nil check. The complete
 operator semantics are in [Expressions](expressions.md).

@@ -543,12 +543,16 @@ local y? = arr[1]  -- y : integer?
 
 Equality keeps options rather than forcing them. In `==`/`~=`, if either side
 is an Option, each side is first lifted to the option of its own type (`s? ==
-s` lifts the right side to `string?`). The checker then calls the symmetric
-`types.comparable` classifier on that pair. A successful ComparisonPlan may
-carry a gradual injection when exactly one comparable operand is Value; only
+s` lifts the right side to `string?`). The exception is Nil opposite an
+Option: the Nil expression is coerced directly to that existing Option with
+the ordinary `option_nil` direct-coercion plan. This preserves nil as a boxed
+option value instead of constructing an incomparable `nil?`. The checker then
+calls the symmetric `types.comparable` classifier on the adjusted pair. A
+successful ComparisonPlan may carry a gradual injection when exactly one
+comparable operand is Value; only
 then is the other operand boxed for raw equality. The checker never uses a
-directional assignment or coercion to make an incomparable original pair
-comparable. Numbers are **not** promoted: a mixed Integer/Float pair (either
+directional assignment or coercion to make any other incomparable original
+pair comparable. Numbers are **not** promoted: a mixed Integer/Float pair (either
 order, and likewise two options over Integer/Float) is compared by
 mathematical value, exactly as Lua does. Any remaining incomparable pair
 errors, and the result is always Boolean.

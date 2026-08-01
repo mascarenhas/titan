@@ -42,12 +42,8 @@ end
 
 local function read_all(connection: net.Connection): string
   local result = ""
-  local chunk: string? = connection:read()
-  while chunk do
-    local bytes = chunk as string
-    check(#bytes > 0, "Connection returned an empty non-EOF chunk")
-    result = result .. bytes
-    chunk = connection:read()
+  for chunk in connection:read do
+    result = result .. chunk
   end
   return result
 end
@@ -246,9 +242,14 @@ function schedule_partial_and_excess(first_port: integer): async.Task
       third:write("cd")
       third:shutdown()
 
+      local fourth = server:accept()
+      fourth:write("kept\nDISCARDED")
+      fourth:shutdown()
+
       first:close()
       second:close()
       third:close()
+      fourth:close()
       return "partial-peer-ok"
     end)
 
@@ -278,6 +279,21 @@ function schedule_partial_and_excess(first_port: integer): async.Task
     check(not third:read_until("\n") and not third:read_until("\n", true),
           "terminal EOF after an unterminated tail was not sticky")
     third:close()
+
+    local fourth = net.connect("127.0.0.1", port)
+    check(fourth:read_until("\n", true) == "kept",
+          "pre-close delimiter read returned the wrong record")
+    fourth:close()
+    check(not fourth:read() and not fourth:read_until("\n"),
+          "closed Connection did not expose sticky EOF")
+    expect_failure(function (): value
+      fourth:write("after-close")
+      return nil
+    end, "closed Connection accepted a write")
+    expect_failure(function (): value
+      fourth:shutdown()
+      return nil
+    end, "closed Connection accepted shutdown")
 
     check(peer:join() == "partial-peer-ok",
           "partial peer Task returned the wrong result")
@@ -378,6 +394,9 @@ function schedule_accept_and_read_cancellation(first_port: integer): async.Task
     local read_waiter = async.run(function (): value
       return peer:read_until("\n", true)
     end)
+    -- The continuously drained prefix is already queued. Its non-yielding
+    -- append is synchronous, then the following native read waits for more
+    -- bytes. Cancellation there must restore the accumulated builder.
     wait_until_started(read_waiter)
     expect_failure(function (): value
       peer:read()
@@ -393,6 +412,34 @@ function schedule_accept_and_read_cancellation(first_port: integer): async.Task
     check(not peer:read(), "replacement reader did not reach EOF")
     client:close()
     peer:close()
+
+    local closing_client = net.connect("127.0.0.1", port)
+    local closing_peer = server:accept()
+    local close_reader = async.run(function (): value
+      return closing_peer:read()
+    end)
+    wait_until_started(close_reader)
+    closing_peer:close()
+    local close_result: string? = close_reader:join()
+    check(not close_result,
+          "Connection close did not wake its reader with EOF")
+    check(not closing_peer:read_until(""),
+          "closed Connection validated a delimiter instead of returning EOF")
+    closing_client:close()
+
+    local building_client = net.connect("127.0.0.1", port)
+    local building_peer = server:accept()
+    building_client:write("discarded-builder-prefix")
+    for _ = 1, 20 do timer.yield() end
+    local building_reader = async.run(function (): value
+      return building_peer:read_until("\n")
+    end)
+    wait_until_started(building_reader)
+    building_peer:close()
+    local building_result: string? = building_reader:join()
+    check(not building_result,
+          "Connection close published an in-flight delimiter tail")
+    building_client:close()
 
     local close_waiter = async.run(function (): value
       server:accept()
@@ -439,7 +486,7 @@ function schedule_bounded_accept_queue(first_port: integer): async.Task
       end)
     end
     for i = 1, 4 do
-      clients[i] = (connectors[i] as async.Task):join() as net.Connection
+      clients[i] = connectors[i]:join() as net.Connection
     end
     -- Let all four server-side connection notifications run before consuming
     -- the public accept queue. With backlog two, exactly two can remain queued;
@@ -459,7 +506,7 @@ function schedule_bounded_accept_queue(first_port: integer): async.Task
     expect_cancelled(third, "bounded-accept")
     first:close()
     second:close()
-    for i = 1, 4 do (clients[i] as net.Connection):close() end
+    for i = 1, 4 do clients[i]:close() end
     server:close()
     return "bounded-accept-ok"
   end)
@@ -547,12 +594,36 @@ end
 
 function schedule_stale_rejection(_first_port: integer): async.Task
   return async.run(function (): value
+    local connection = retained_connection as net.Connection
+    local server = retained_server as net.Server
+    -- Runtime shutdown already completed both native close transitions.
+    -- Closer idempotence keeps those terminal calls harmless in a later
+    -- generation. ReaderCloser EOF is likewise answerable from monotonic
+    -- terminal state without consulting the stale Runtime.
+    do
+      connection:close()
+      connection:close()
+    catch
+      raise "old-generation Connection repeat close raised"
+    end
+    do
+      server:close()
+      server:close()
+    catch
+      raise "old-generation Server repeat close raised"
+    end
+    check(not connection:read() and not connection:read_until("\n"),
+          "old-generation closed Connection did not expose sticky EOF")
     expect_failure(function (): value
-      (retained_connection as net.Connection):write("stale")
+      connection:write("stale")
       return nil
     end, "old-generation Connection was accepted")
     expect_failure(function (): value
-      (retained_server as net.Server):accept()
+      connection:shutdown()
+      return nil
+    end, "old-generation Connection shutdown was accepted")
+    expect_failure(function (): value
+      server:accept()
       return nil
     end, "old-generation Server was accepted")
     retained_connection = nil

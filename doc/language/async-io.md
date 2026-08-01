@@ -32,6 +32,7 @@ is:
 ```titan
 function run(func: () -> value): Task
 function loop()
+function yield()
 function Task:join(): value
 function Task:cancel(reason: value)
 function Task:status(): string
@@ -70,6 +71,11 @@ valid: it schedules an independent Task and returns without running it inline.
 After a session closes all native owners, a later `run`/`loop` pair creates a
 new private loop.
 
+`async.yield()` cedes one event-loop turn without waiting for an external
+resource. It is the general scheduler-fairness primitive; `timer.yield()` is a
+compatibility facade over the same private operation. Calling it outside a
+running Task raises just like every other Task suspension operation.
+
 ## Callback execution model
 
 The runtime deliberately follows libuv's callback model. A native libuv
@@ -85,7 +91,8 @@ When a Task yields a request, the dispatcher registers the next libuv callback
 and returns to libuv. That later callback resumes the same continuation. There
 is no extra Lua entry wrapper, protected C call, ready queue, or implicit
 fairness turn on this path. `timer.yield()` is the explicit way to cede one
-event-loop turn. CPU-heavy code that never performs an asynchronous operation
+event-loop turn; `async.yield()` is its general-purpose home. CPU-heavy code
+that never performs an asynchronous operation
 blocks the loop just as CPU-heavy code in a conventional callback would.
 
 Stream reads use this direct handoff without a ready queue: a positive read
@@ -130,16 +137,19 @@ of the main Task is reported.
 Resource cleanup is physically completed even after logical cancellation.
 The runtime closes and drains every remaining request/handle owner before
 `uv_loop_close`; it does not let a Lua-GC finalizer reclaim native storage
-before its terminal callback and cleanup. Persistent descriptor-close failure
-is the bounded exception: after retry exhaustion the idle loop is closed, the
-failed File and terminal Runtime remain rooted, and the saved error is reported
-instead of retrying forever or claiming that the descriptor closed.
+before its terminal callback and cleanup. A descriptor-close callback is
+terminal even when it reports an error: the wrapper reaches its closed state,
+the callback cleanup finishes, and the error is reported once. Titan does not
+retry a native descriptor close whose result is uncertain, because the
+operating system may already have reused that descriptor number.
 
 Filesystem cancellation distinguishes logical delivery from physical native
 lifetime. Cancelling a queued File operation removes it from that File's FIFO.
 A submitted request remains rooted through its callback even if `uv_cancel`
 cannot stop it in time, and its stale result is not delivered. File close is
-cleanup-shielded so cancellation is reinjected only after physical close.
+cleanup-shielded so cancellation is reinjected only after the terminal close
+callback and request cleanup. Repeated close calls remain safe after either a
+successful or an error-reporting terminal callback.
 
 Networking uses the same separation. A queued write can be removed, while
 cancelling an active write is logical: its native callback still owns cleanup
@@ -148,35 +158,61 @@ cleanup-shielded through its `uv_shutdown` callback; repeated calls are
 idempotent. Connected and accepted streams start reading during initialization
 and retain GC-owned chunks continuously, even without a waiter. Cancelling a
 read detaches only that waiter and leaves the physical read active; explicit
-close stops the read side, rejects new output or blocking read waits, and
-serializes the native handle close behind already submitted and queued FIFO
-output. Already completed read chunks remain drainable before closed-stream
-state is reported.
+close stops the read side, discards retained and queued input, wakes a blocking
+reader with `nil`, rejects new output, and serializes the native handle close
+behind already submitted and queued FIFO output. Later reads remain at EOF.
 
 Child-process stdio follows the same callback-ownership rule without treating
-an anonymous pipe like a socket. Cancelling a queued stdin write removes it;
-a submitted write remains rooted through its callback.
-`process.stdin:close()` is a cleanup-shielded FIFO close behind earlier writes
-and uses the pipe's `uv_close` callback, not `uv_shutdown`. Cancelling a process wait only frees
-that waiter: it does not signal the child, and another Task can wait for the
-retained exit status. Stdout and stderr begin continuous reads after successful
-spawn, use independent reader locks and queues, and likewise detach only a
-cancelled waiter while continuing to drain the pipe.
+an anonymous pipe like a socket. `os.spawn` applies its configurators in order;
+each prepares and validates a reusable native candidate, and the final
+configuration supplies the child streams. An inherited descriptor therefore
+has no newly created parent-facing Process endpoint and appears as `nil`, while
+the borrowed parent pipe or TTY remains owned by the current Runtime. Captured
+stdin writes use the ordinary FIFO: cancelling a queued write removes it, while
+a submitted write remains rooted through its callback. Closing captured stdin
+is cleanup-shielded behind earlier writes and uses the pipe's `uv_close`
+callback, not `uv_shutdown`.
 
-`os.communicate` owns four pre-observed helper Tasks for stdin, stdout, stderr,
-and exit. They run concurrently, so large bidirectional traffic cannot
-deadlock because one pipe filled before another was drained. On a helper error
-or parent cancellation, the runtime keeps the original error, cancels the
-other helpers, terminates and reaps the child, drains every native callback,
-and only then reports the error.
+Cancelling a process wait only frees that waiter: it does not signal the child,
+and another Task can wait for the retained exit status. Each separately
+captured output starts continuous reads after successful spawn and has its own
+reader lock and queue. Merged stdout/stderr instead has one native owner and
+the exact same high-level InputStream in both Process fields, so it also has
+one queue and reader lock. Cancelling any output read detaches only its waiter
+while physical reading continues. Explicitly closing a captured InputStream
+stops that pipe, discards its retained and queued input, wakes its reader with
+`nil`, and leaves the child lifecycle under `Process` control.
+
+Parent stdin, stdout, and stderr have independent borrowed controls owned by
+the current Runtime. The stable `os.stdin`, `os.stdout`, and `os.stderr`
+records resolve those controls lazily and rebind across sequential Runtime
+generations. Closing one of these stable parent facades is an idempotent no-op:
+it closes neither the Runtime's wrapper nor the host descriptor. A child that
+inherits a descriptor likewise cannot close the parent's owner.
+
+`io.popen` builds on the same process machinery with `/bin/sh -c`, captured
+stdin, and one merged output stream. Its `InputOutputStream` stores one output
+facade and an idempotent wait result. Closing it closes stdin, conditionally
+requests `term`, and waits for reaping. Applications still schedule input and
+output concurrently for large bidirectional traffic; the convenience does not
+make operating-system pipe capacity unbounded.
 
 If a Runtime closes with a live child, it sends `term`, waits up to five
 seconds, then sends `kill`. The loop still waits for the real exit and close
 callbacks, so shutdown does not leave a zombie or let process/pipe storage be
 collected early.
 
+`os.exit(code)` enters a distinct successful exit-request state from either
+the main Task or a child Task. It settles the other Tasks, runs their language
+cleanup, drains all native owners through the same shutdown path, and lets the
+generated standalone entrypoint return the requested status. It is not an
+unobserved Task failure and does not call ISO C `exit` around the Runtime. In
+an embedding it never closes the host Lua state.
+
 See the [filesystem standard library](standard-library-fs.md) and
 [TCP networking standard library](standard-library-net.md) for their public
 I/O APIs. The [operating-system standard library](standard-library-os.md)
-documents portable synchronous helpers, one-shot signal waits, child-process
-stdio, exit status, and `communicate` built on the same Runtime.
+documents portable synchronous helpers, one-shot signal waits, parent stdio,
+configurable child-process streams, exit status, and graceful program exit.
+The [I/O standard library](standard-library-io.md) documents `print`, line
+iteration, and shell-command `popen` on the same Runtime.

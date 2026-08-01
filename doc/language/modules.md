@@ -259,6 +259,11 @@ nesting does not exist).
 
 A module name is a dot-separated name like `foo`, `foo.bar`, or
 `foo.bar.baz`, mapped to a path by turning dots into directory separators.
+Each component begins with an ASCII letter or underscore and continues with
+ASCII letters, digits, underscores, or hyphens. Hyphens are valid in the
+logical and filesystem name; the native protocol mangles them to underscores
+and rejects any resulting symbol-prefix collision. Characters such as `$`
+are not module-name characters.
 Module `foo.bar` lives in flat source `foo/bar.titan`, folder source with main
 `foo/bar/bar.titan`, or a compiled provider whose metadata claims `foo.bar` — see
 [Where modules are found](#where-modules-are-found) below.
@@ -379,7 +384,7 @@ The compiler driver is invoked with dot-separated *module names*, not
 file paths:
 
 ```sh
-titanc [--print-ast] [-v] [--static] [--lua <luasrc>] \
+titanc [--print-ast] [-v] [--static] [--no-line-directives] [--lua <luasrc>] \
   [--tree <srcroot>] [-l lib1,lib2] [-X object...] <module>...
 ```
 
@@ -396,6 +401,13 @@ titanc [--print-ast] [-v] [--static] [--lua <luasrc>] \
 * `--static` prefers self-describing Titan `.a` providers over `.so`
   providers for ordinary dependencies. It still permits DSO/source fallback
   and does not request a fully static system executable.
+* `--no-line-directives` omits Titan source `#line` directives from generated
+  C, so native compiler and sanitizer diagnostics use physical generated-C
+  coordinates. By default diagnostics are attributed to Titan source.
+  `TITAN_NO_LINE_DIRECTIVES=1` selects the same policy for build automation.
+  This diagnostic mode can omit native Titan functions from logical
+  tracebacks or render a boundary as `[C]`; do not use it for normal builds or
+  traceback validation.
 * `-X/--extra-object` adds native object/archive payload. Library mode carries
   it into both provider forms; executable mode uses it at final link.
 * `-v/--verbose` prints the C compiler command lines; `--print-ast`
@@ -498,6 +510,10 @@ qualified names then follow the ordinary module lookup rules. Thus
 Titan's `titan.os` module without colliding with Lua's own `os` library, which
 is not importable as a Titan module. Likewise, `import "string"` selects
 Titan's module without replacing Lua's `string` table.
+
+The additional standard modules `titan.math`, `titan.lua`, `titan.iter`, and
+`titan.gc` use their qualified names in Titan source as well as Lua. They do
+not add parser sugar or replace Lua's bare standard-library names.
 
 Application scheduling uses `import "async"` (or Lua's
 `require "titan.async"`). `titan.uv` is the private Runtime/libuv plumbing

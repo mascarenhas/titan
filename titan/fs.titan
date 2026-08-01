@@ -34,25 +34,6 @@ local function validated_mode(mode: string): string
   raise "invalid file mode '" .. mode .. "'"
 end
 
--- Joining a chunk tree avoids the quadratic copying of repeatedly appending
--- to one ever-growing string. Delimiter search and slicing stay in this
--- high-level facade through titan.string.
-local function join_chunks(chunks: {string}, first: integer,
-                           last: integer): string
-  if first > last then return "" end
-  if first == last then return chunks[first] as string end
-  local middle = first + (last - first) // 2
-  return join_chunks(chunks, first, middle) ..
-         join_chunks(chunks, middle + 1, last)
-end
-
-local function restore_chunks(file: File, chunks: {string},
-                              count: integer)
-  if count > 0 then
-    file.excess = join_chunks(chunks, 1, count) .. file.excess
-  end
-end
-
 function open(path: string, mode: string): File
   return File.new(uv._fs_open(path, validated_mode(mode)), "")
 end
@@ -65,6 +46,12 @@ function File:read(max_bytes: integer?): string?
   end
   if requested > MAX_READ_BYTES then
     raise "read size exceeds the portable libuv buffer limit"
+  end
+  -- A terminal File is ordinary Reader EOF, including after its owning
+  -- Runtime has gone stale. This scalar state check touches no native owner.
+  if uv._fs_is_closed(self.handle) then
+    self.excess = ""
+    return nil
   end
   if #self.excess > 0 then
     -- Retained bytes do not submit a uv operation, but they must observe the
@@ -81,57 +68,59 @@ end
 
 function File:read_until(delimiter: string,
                          chop: boolean?): string?
+  if uv._fs_is_closed(self.handle) then
+    self.excess = ""
+    return nil
+  end
   if #delimiter == 0 then
     raise "read delimiter must not be empty"
   end
 
-  local chunks: {string} = {}
-  local count = 0
+  local builder = str.writer(false)
+  -- The native read is this producer's scheduling boundary. Keep the current
+  -- consumed chunk separately until the append succeeds so an append error
+  -- can restore every byte to the File excess.
+  local pending = ""
   local total = 0
   local tail = ""
   local result: string? = nil
-  local finished = false
+  local matched = false
   do
-    while not finished do
-      local maybe_chunk: string? = nil
-      maybe_chunk = self:read()
-      if not maybe_chunk then
-        if total > 0 then result = join_chunks(chunks, 1, count) end
-        finished = true
+    for chunk in self:read do
+      pending = chunk
+      if total > MAX_STRING_BYTES - #chunk then
+        raise "file read result exceeds Titan's string length limit"
+      end
+
+      builder:write(chunk)
+      pending = ""
+      local boundary = tail .. chunk
+      local match: integer? = str.find(boundary, delimiter)
+      total = total + #chunk
+      if match then
+        local match_end =
+          total - #boundary + (match as integer) - 1 + #delimiter
+        local result_end = match_end
+        if chop then result_end = result_end - #delimiter end
+        local all = builder:drain()
+        result = str.sub(all, 1, result_end)
+        self.excess =
+          str.sub(all, match_end + 1) .. self.excess
+        matched = true
+        break
       else
-        local chunk = maybe_chunk as string
-        if #chunk == 0 then
-          raise "file read returned an empty non-EOF chunk"
-        end
-
-        count = count + 1
-        chunks[count] = chunk
-        if total > MAX_STRING_BYTES - #chunk then
-          raise "file read result exceeds Titan's string length limit"
-        end
-
-        local boundary = tail .. chunk
-        local match: integer? = str.find(boundary, delimiter)
-        total = total + #chunk
-        if match then
-          local match_end =
-            total - #boundary + (match as integer) - 1 + #delimiter
-          local result_end = match_end
-          if chop then result_end = result_end - #delimiter end
-          local all = join_chunks(chunks, 1, count)
-          result = str.sub(all, 1, result_end)
-          self.excess =
-            str.sub(all, match_end + 1) .. self.excess
-          finished = true
-        else
-          local keep = #delimiter - 1
-          if keep > #boundary then keep = #boundary end
-          tail = str.sub(boundary, #boundary - keep + 1)
-        end
+        local keep = #delimiter - 1
+        if keep > #boundary then keep = #boundary end
+        tail = str.sub(boundary, #boundary - keep + 1)
       end
     end
+    if not matched and total > 0 then result = builder:drain() end
   catch
-    restore_chunks(self, chunks, count)
+    local restored = builder:drain()
+    if #pending > 0 then restored = restored .. pending end
+    if #restored > 0 then
+      self.excess = restored .. self.excess
+    end
     raise
   end
   return result
@@ -172,22 +161,17 @@ function read_file(path: string): string
   local file = open(path, "r")
   defer file:close()
 
-  local chunks: {string} = {}
-  local nchunks = 0
+  local builder = str.writer(false)
   local total = 0
-  while true do
-    local chunk: string? = file:read()
-    if not chunk then break end
-    local bytes = chunk as string
+  for bytes in file:read do
     local length = #bytes
     if total > MAX_STRING_BYTES - length then
       raise "file is too large to read into a string"
     end
     total = total + length
-    nchunks = nchunks + 1
-    chunks[nchunks] = bytes
+    builder:write(bytes)
   end
-  return join_chunks(chunks, 1, nchunks)
+  return builder:drain()
 end
 
 function write_file(path: string, data: string)
@@ -200,6 +184,32 @@ function stat(path: string): Stat
   local size, kind, mode, modified_seconds, modified_nanoseconds =
     uv._fs_stat(path)
   return Stat.new(size, kind, mode, modified_seconds, modified_nanoseconds)
+end
+
+function lstat(path: string): Stat
+  local size, kind, mode, modified_seconds, modified_nanoseconds =
+    uv._fs_lstat(path)
+  return Stat.new(size, kind, mode, modified_seconds, modified_nanoseconds)
+end
+
+function tmpname(): string
+  return uv._fs_tmpname()
+end
+
+function tmpdir(): string
+  return uv._os_tmpdir()
+end
+
+function homedir(): string
+  return uv._os_homedir()
+end
+
+function pwd(): string
+  return uv._fs_pwd()
+end
+
+function chdir(path: string)
+  uv._fs_chdir(path)
 end
 
 function mkdir(path: string)

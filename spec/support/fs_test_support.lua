@@ -6,6 +6,7 @@ local M = {}
 
 function M.workspace(label)
     local workspace = async_stdlib.workspace("fs-" .. label)
+    async_stdlib.refresh_private_runtime(workspace)
     local root = workspace .. "/data"
     assert.truthy(lfs.mkdir(root))
     return workspace, root

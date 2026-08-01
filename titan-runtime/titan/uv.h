@@ -1,6 +1,7 @@
 #ifndef TITAN_UV_H
 #define TITAN_UV_H
 
+#include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -19,6 +20,23 @@ typedef union titan_uvshim_address {
 
 /* Parser-visible pointer cell used for Titan/GC-owned argv vectors. */
 typedef char *titan_uvshim_char_ptr;
+
+/*
+ * The Titan FFI cannot refer conditionally to a host macro that may not exist.
+ * Normalize both its availability and value so Titan can select the
+ * F_DUPFD_CLOEXEC fast path without making the generated C non-portable.
+ */
+#ifdef F_DUPFD_CLOEXEC
+enum {
+  TITAN_UVSHIM_HAS_F_DUPFD_CLOEXEC = 1,
+  TITAN_UVSHIM_F_DUPFD_CLOEXEC = F_DUPFD_CLOEXEC
+};
+#else
+enum {
+  TITAN_UVSHIM_HAS_F_DUPFD_CLOEXEC = 0,
+  TITAN_UVSHIM_F_DUPFD_CLOEXEC = 0
+};
+#endif
 
 /*
  * Minimal libuv forward declarations for Titan's FFI. The standard uv module

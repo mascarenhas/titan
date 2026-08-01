@@ -3,7 +3,9 @@ local lual = foreign import "lauxlib.h"
 local ffi = foreign import "titan/ffi.h"
 local cstring = foreign import "string.h"
 local cctype = foreign import "ctype.h"
-local peg = import "titan.peg"
+local peg = import "peg"
+local async = import "async"
+local gc = import "titan.gc"
 
 -- The canonical folder main is the complete public surface. Contributors
 -- contain only module-local records, state, and shared helpers.
@@ -24,7 +26,7 @@ end
 record RegexMatch
   local subject: string
   local matched_span: Span
-  local groups: {GroupSpan}
+  local groups: {Span}
 end
 
 record Regex
@@ -32,6 +34,18 @@ record Regex
   local capture_count: integer
   local pattern: peg.Pattern
   local anchored_start: boolean
+end
+
+record StringReader
+  local contents: string
+  local position: integer
+  local yielding: boolean
+end
+
+record StringWriter
+  local chunks: {string}
+  local length: integer
+  local yielding: boolean
 end
 
 function len(subject: string): integer
@@ -181,6 +195,73 @@ function tostring(candidate: value): string
   return ffi.lua_totvalue(L, -1) as value
 end
 
+local function yielding_by_default(yielding: boolean?): boolean
+  if yielding == nil then return true end
+  return yielding
+end
+
+function reader(contents: string, yielding: boolean?): StringReader
+  return StringReader.new(contents, 1, yielding_by_default(yielding))
+end
+
+function StringReader:read(): string?
+  if self.yielding then async.yield() end
+  if self.position > #self.contents then return nil end
+  local result = sub(self.contents, self.position)
+  self.position = #self.contents + 1
+  return result
+end
+
+function StringReader:read_until(delimiter: string,
+                                 chop: boolean?): string?
+  if self.yielding then async.yield() end
+  if self.position > #self.contents then return nil end
+  if #delimiter == 0 then
+    raise "read delimiter must not be empty"
+  end
+
+  local first: integer?, last: integer? =
+    find(self.contents, delimiter, self.position)
+  if not first then
+    local result = sub(self.contents, self.position)
+    self.position = #self.contents + 1
+    return result
+  end
+
+  local delimiter_first = first as integer
+  local delimiter_last = last as integer
+  local result_last = delimiter_last
+  if chop then result_last = delimiter_first - 1 end
+  local result = sub(self.contents, self.position, result_last)
+  self.position = delimiter_last + 1
+  return result
+end
+
+function StringReader:close()
+  self.contents = ""
+  self.position = 1
+end
+
+function writer(yielding: boolean?): StringWriter
+  return new_string_builder(yielding_by_default(yielding))
+end
+
+function StringWriter:write(data: string)
+  if self.yielding then async.yield() end
+  builder_append(self, data)
+end
+
+function StringWriter:drain(): string
+  local result = builder_finish(self)
+  local chunks: {string} = {}
+  self.chunks = chunks
+  self.length = 0
+  return result
+end
+
+function StringWriter:close()
+end
+
 -- Search for a literal byte sequence and return one-based inclusive bounds.
 -- This is deliberately length-aware: embedded zero bytes are ordinary data.
 function find(subject: string, needle: string,
@@ -216,11 +297,10 @@ function find(subject: string, needle: string,
 end
 
 function format(format_string: string, ...: value): string
-  local pattern = FORMAT_PATTERN as peg.Pattern
-  local captured = pattern:match(format_string)
+  local captured = FORMAT_PATTERN:match(format_string)
   if captured == nil then raise "invalid conversion to 'format'" end
   local plan = captured as FormatPlan
-  local builder = new_string_builder()
+  local builder = new_string_builder(false)
   local argument = 1
   while argument <= #plan.partials do
     if argument > #... then
@@ -236,7 +316,7 @@ end
 
 function pack(format_string: string, ...: value): string
   local state = new_pack_state(format_string)
-  local builder = new_string_builder()
+  local builder = new_string_builder(false)
   local arguments: {value} = {...}
   local argument = 0
 
@@ -516,13 +596,11 @@ function Regex:gmatch(subject: string,
   local previous_end = 0
   local finished = overshoot
   local anchored = regex_is_start_anchored(self)
-  local owner = self
-  local rooted_subject = subject
 
   return function (): RegexMatch?
     while not finished do
       local found: RegexMatch? =
-        regex_find_from(owner, rooted_subject, current)
+        regex_find_from(self, subject, current)
       if not found then
         finished = true
         return nil
@@ -531,7 +609,7 @@ function Regex:gmatch(subject: string,
       local span = actual.matched_span
       local after = span.last + 1
       if span.last < span.first and after == previous_end then
-        if after > #rooted_subject then
+        if after > #subject then
           finished = true
           return nil
         end
@@ -559,7 +637,7 @@ function Regex:gsub(subject: string,
 
   if limit <= 0 then return subject, 0 end
 
-  local builder = new_string_builder()
+  local builder = new_string_builder(false)
   local search = 1
   local copied = 1
   local previous_end = 0
@@ -617,9 +695,8 @@ function RegexMatch:group_span(index: integer): Span?
   if index < 1 or index > #self.groups then
     raise "capture group index out of range"
   end
-  local stored: Span? = self.groups[index].span
-  if not stored then return nil end
-  local span = stored as Span
+  local span = self.groups[index] as Span
+  if span.first == 0 and span.last == -1 then return nil end
   return Span.new(span.first, span.last)
 end
 
@@ -652,6 +729,45 @@ function gmatch(subject: string, expression: string,
   return cached_regex(expression):gmatch(subject, init)
 end
 
+function matches(subject: string, pattern: string):
+                 () -> (string?, ...: string?)
+  local iterator = cached_regex(pattern):gmatch(subject, nil)
+  return function (): (string?, ...: string?)
+    local found: RegexMatch? = iterator()
+    if not found then return nil end
+    return found:values()
+  end
+end
+
+function split(subject: string, delimiter: string?): () -> string?
+  if not delimiter then
+    local position = 1
+    return function (): string?
+      if position > #subject then return nil end
+      local result = sub(subject, position, position)
+      position = position + 1
+      return result
+    end
+  end
+
+  local separator = cached_regex(delimiter)
+  local iterator = separator:gmatch(subject, nil)
+  local position = 1
+  local finished = false
+  return function (): string?
+    if finished then return nil end
+    local found: RegexMatch? = iterator()
+    if not found then
+      finished = true
+      return sub(subject, position)
+    end
+    local span = found:span()
+    local result = sub(subject, position, span.first - 1)
+    position = span.last + 1
+    return result
+  end
+end
+
 function gsub(subject: string, expression: string,
               replacement: (string) -> string,
               maximum: integer?): (string, integer)
@@ -667,12 +783,5 @@ do
   REGEX_WORD_BYTE_FLAGS = regex_byte_flags(REGEX_WORD_BYTES)
   REGEX_ALL_BYTES = regex_all_bytes()
   REGEX_PARSER = build_regex_parser()
-  local weak_values: {string: string} = {
-    ["__mode"] = "v",
-  }
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, _regex_cache)
-  ffi.lua_pushtvalue(L, weak_values)
-  lua.lua_setmetatable(L, -2)
+  gc.weak(_regex_cache as {value: value})
 end

@@ -1,8 +1,32 @@
 local uv = import "uv"
 local str = import "string"
+local ctime = foreign import "time.h"
+local clocale = foreign import "locale.h"
+local cstring = foreign import "string.h"
+local ffi = foreign import "titan/ffi.h"
 
--- Portable operating-system helpers. The low-level uv module owns every C
--- type and libuv call; this facade exposes only ordinary Titan values.
+-- Time/date behavior is translated and adapted from src/loslib.c in the
+-- immutable Lua 5.5.0 release:
+-- https://www.lua.org/ftp/lua-5.5.0.tar.gz
+-- Copyright (C) 1994-2025 Lua.org, PUC-Rio. MIT terms are reproduced in
+-- LICENSES/lua-LICENSE.
+
+-- Portable operating-system helpers. The low-level uv module owns native
+-- resources plus portable current/CPU clock queries. The ISO C surface above
+-- remains only for calendar, difference, formatting, and locale operations
+-- that libuv does not provide; this facade exposes ordinary Titan values.
+
+record Date
+  year: integer
+  month: integer
+  day: integer
+  hour: integer
+  min: integer
+  sec: integer
+  wday: integer
+  yday: integer
+  isdst: boolean?
+end
 
 record ExitStatus
   code: integer
@@ -10,60 +34,232 @@ record ExitStatus
   signal_number: integer
 end
 
+record SpawnConfig
+  local handle: uv.uv_spawn_config
+end
+
+type SpawnOption = (SpawnConfig) -> integer
+
 record InputStream
-  local handle: uv.uv_pipe_t
+  local handle: uv.uv_stdio_t?
+  local parent_descriptor: integer
+  local generation: integer
+  local process: uv.uv_process_t?
   local excess: string
   local reading: boolean
+  local closed: boolean
 end
 
 record OutputStream
-  local handle: uv.uv_pipe_t
+  local handle: uv.uv_stdio_t?
+  local parent_descriptor: integer
+  local generation: integer
+  local process: uv.uv_process_t?
 end
 
--- Exact private uv wrappers make each public process/stream record
--- unforgeable outside this module without converting its native handle
--- through value on every method call. Each stream retains its own pipe
--- handle, whose low-level control keeps the shared process state alive.
+-- These are process-stdio records: the Titan process's stable streams and
+-- captured parent-facing endpoints of spawned processes. Their uv wrapper
+-- contains the private pipe/TTY handle union; provenance and ownership remain
+-- ordinary metadata and never determine the native stream kind.
 record Process
   local handle: uv.uv_process_t
-  stdin: OutputStream
-  stdout: InputStream
-  stderr: InputStream
+  stdin: OutputStream?
+  stdout: InputStream?
+  stderr: InputStream?
 end
 
-local function join_chunks(chunks: {string}, first: integer,
-                           last: integer): string
-  if first > last then return "" end
-  if first == last then return chunks[first] as string end
-  local middle = first + (last - first) // 2
-  return join_chunks(chunks, first, middle) ..
-         join_chunks(chunks, middle + 1, last)
+stdin: InputStream = InputStream.new(nil, 0, 0, nil, "", false, false)
+stdout: OutputStream = OutputStream.new(nil, 1, 0, nil)
+stderr: OutputStream = OutputStream.new(nil, 2, 0, nil)
+
+local function byte_at(text: string, index: integer): integer
+  local bytes = text as const *ffi.titan_ffi_unsigned_char
+  return bytes[index - 1] as integer
+end
+
+local function reject_embedded_nul(text: string, subject: string)
+  local index = 1
+  while index <= #text do
+    if byte_at(text, index) == 0 then
+      raise subject .. " contains an embedded NUL"
+    end
+    index = index + 1
+  end
+end
+
+local function contains_conversion(options: string,
+                                   conversion: integer): boolean
+  local index = 1
+  while index <= #options do
+    if byte_at(options, index) == conversion then return true end
+    index = index + 1
+  end
+  return false
+end
+
+local function validate_date_format(format: string)
+  -- This is Lua 5.5's C99 conversion set. Keeping the validation here avoids
+  -- silently accepting host extensions that the corresponding Lua build
+  -- rejects before calling strftime.
+  local ordinary = "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%"
+  local after_e = "cCxXyY"
+  local after_o = "deHImMSuUVwWy"
+  local index = 1
+  while index <= #format do
+    if byte_at(format, index) == 37 then
+      index = index + 1
+      if index > #format then
+        raise "invalid conversion specifier '%'"
+      end
+      local conversion = byte_at(format, index)
+      if conversion == 69 or conversion == 79 then
+        local modifier = conversion
+        index = index + 1
+        if index > #format then
+          raise "invalid conversion specifier '%" ..
+                str.sub(format, index - 1) .. "'"
+        end
+        conversion = byte_at(format, index)
+        local choices = after_e
+        if modifier == 79 then choices = after_o end
+        if not contains_conversion(choices, conversion) then
+          raise "invalid conversion specifier '%" ..
+                str.sub(format, index - 1, index) .. "'"
+        end
+      elseif not contains_conversion(ordinary, conversion) then
+        raise "invalid conversion specifier '%" ..
+              str.sub(format, index, index) .. "'"
+      end
+    end
+    index = index + 1
+  end
+end
+
+local function formatted_date(format: string,
+                              calendar: *ctime.tm): string
+  if #format == 0 then return "" end
+  validate_date_format(format)
+
+  -- Lua renders each conversion into a 250-byte scratch fragment. A complete
+  -- result that every one of those fragments can represent is therefore
+  -- bounded by 250 bytes per format byte. Grow up to that compatibility
+  -- bound; zero at the bound means the valid format expanded to empty.
+  if #format > (9223372036854775807 - 1) // 250 then
+    raise "date result is too large"
+  end
+  local maximum = #format * 250 + 1
+  local capacity = 128
+  if maximum < capacity then maximum = capacity end
+
+  while true do
+    local buffer = ffi.titan_ffi_char.new_array(capacity)
+    local written = ctime.strftime(
+      buffer, capacity as cstring.size_t, format, calendar)
+    if written ~= 0 then
+      local length = written as integer
+      local result = ffi.titan_ffi_char.new_array(length)
+      cstring.memcpy(
+        result as *ffi.titan_ffi_char,
+        buffer as const *ffi.titan_ffi_char,
+        written as cstring.size_t)
+      return result as string
+    end
+    if capacity >= maximum then return "" end
+    if capacity > maximum // 2 then
+      capacity = maximum
+    else
+      capacity = capacity * 2
+    end
+  end
+  return ""
+end
+
+local function checked_time_field(number: integer, delta: integer,
+                                  name: string): ffi.titan_ffi_int
+  if number >= 0 then
+    if number > 2147483647 + delta then
+      raise "time field '" .. name .. "' is out of range"
+    end
+  elseif number < -2147483648 + delta then
+    raise "time field '" .. name .. "' is out of range"
+  end
+  return (number - delta) as ffi.titan_ffi_int
+end
+
+local function locale_category(name: string): ffi.titan_ffi_int
+  if name == "all" then return clocale.LC_ALL end
+  if name == "collate" then return clocale.LC_COLLATE end
+  if name == "ctype" then return clocale.LC_CTYPE end
+  if name == "monetary" then return clocale.LC_MONETARY end
+  if name == "numeric" then return clocale.LC_NUMERIC end
+  if name == "time" then return clocale.LC_TIME end
+  raise "invalid locale category '" .. name .. "'"
+end
+
+local function parent_stdio(descriptor: integer): uv.uv_stdio_t
+  if descriptor == 0 then return uv._os_parent_stdin() end
+  if descriptor == 1 then return uv._os_parent_stdout() end
+  if descriptor == 2 then return uv._os_parent_stderr() end
+  raise "internal parent stdio descriptor is invalid"
+end
+
+local function input_handle(stream: InputStream): uv.uv_stdio_t
+  if stream.parent_descriptor < 0 then
+    return stream.handle as uv.uv_stdio_t
+  end
+  local handle = parent_stdio(stream.parent_descriptor)
+  local generation = uv._os_stdio_generation(handle)
+  if stream.generation ~= generation then
+    stream.generation = generation
+    stream.excess = ""
+    stream.reading = false
+  end
+  stream.handle = handle
+  return handle
+end
+
+local function output_handle(stream: OutputStream): uv.uv_stdio_t
+  if stream.parent_descriptor < 0 then
+    return stream.handle as uv.uv_stdio_t
+  end
+  local handle = parent_stdio(stream.parent_descriptor)
+  stream.generation = uv._os_stdio_generation(handle)
+  stream.handle = handle
+  return handle
 end
 
 local function begin_read(stream: InputStream)
+  input_handle(stream)
   if stream.reading then
     raise "InputStream already has a reader"
   end
   stream.reading = true
 end
 
--- This helper runs only while the corresponding stdout/stderr reader lock is
--- held. Each output pipe has independent retained excess and native state.
+local function end_read(stream: InputStream)
+  stream.reading = false
+end
+
+-- This helper runs only while the corresponding reader lock is held. Separate
+-- streams retain independent excess; merged process output shares one facade.
 local function read_unlocked(stream: InputStream): string?
+  local handle = input_handle(stream)
   if #stream.excess > 0 then
-    uv._os_stream_validate_read(stream.handle)
+    uv._os_stdio_validate_read(handle)
     local result = stream.excess
     stream.excess = ""
     return result
   end
-  return uv._os_stream_read(stream.handle)
+  return uv._os_stdio_read(handle)
 end
 
-local function restore_chunks(stream: InputStream, chunks: {string},
-                              count: integer)
-  if count > 0 then
-    stream.excess = join_chunks(chunks, 1, count) .. stream.excess
-  end
+local function prepend_excess(stream: InputStream, prefix: string)
+  stream.excess = prefix .. stream.excess
+end
+
+local function read_error_is(stream: InputStream,
+                             candidate: value): boolean
+  return uv._os_stdio_read_error_is(input_handle(stream), candidate)
 end
 
 local function read_input(stream: InputStream): string?
@@ -71,8 +267,12 @@ local function read_input(stream: InputStream): string?
   local result: string? = nil
   do
     result = read_unlocked(stream)
+    -- Another Task can commit close while this read is suspended in uv.
+    -- Once that monotonic bit is visible, queued or late callback bytes belong
+    -- to the discarded side of the close boundary.
+    if stream.closed then result = nil end
   finally
-    stream.reading = false
+    end_read(stream)
   end
   return result
 end
@@ -82,8 +282,11 @@ local function read_input_until(stream: InputStream, delimiter: string,
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
   begin_read(stream)
-  local chunks: {string} = {}
-  local count = 0
+  local builder = str.writer(false)
+  -- The native read is this producer's scheduling boundary. Keep the current
+  -- consumed chunk separately until the append succeeds so an append error
+  -- can restore every byte to the facade excess.
+  local pending = ""
   local total = 0
   local tail = ""
   local result: string? = nil
@@ -95,56 +298,184 @@ local function read_input_until(stream: InputStream, delimiter: string,
       do
         maybe_chunk = read_unlocked(stream)
       catch
-        if total > 0 and
-            uv._os_stream_read_error_is(stream.handle, error) then
+        if stream.closed then
+          maybe_chunk = nil
+        elseif total > 0 and read_error_is(stream, error) then
           terminal_error_tail = true
         else
           raise
         end
       end
 
-      if terminal_error_tail then
-        result = join_chunks(chunks, 1, count)
+      if stream.closed then
+        builder:drain()
+        pending = ""
+        finished = true
+      elseif terminal_error_tail then
+        result = builder:drain()
         finished = true
       elseif not maybe_chunk then
-        if total > 0 then result = join_chunks(chunks, 1, count) end
+        if total > 0 then result = builder:drain() end
         finished = true
       else
         local chunk = maybe_chunk as string
-        if #chunk == 0 then
-          raise "process read returned an empty non-EOF chunk"
-        end
-
-        count = count + 1
-        chunks[count] = chunk
-        local boundary = tail .. chunk
-        local match: integer? = str.find(boundary, delimiter)
-        total = total + #chunk
-        if match then
-          local match_end =
-            total - #boundary + (match as integer) - 1 + #delimiter
-          local result_end = match_end
-          if chop then result_end = result_end - #delimiter end
-          local all = join_chunks(chunks, 1, count)
-          local selected = str.sub(all, 1, result_end)
-          local remaining = str.sub(all, match_end + 1)
-          result = selected
-          stream.excess = remaining .. stream.excess
+        pending = chunk
+        builder:write(chunk)
+        if stream.closed then
+          builder:drain()
+          pending = ""
           finished = true
         else
-          local keep = #delimiter - 1
-          if keep > #boundary then keep = #boundary end
-          tail = str.sub(boundary, #boundary - keep + 1)
+          pending = ""
+          local boundary = tail .. chunk
+          local match: integer? = str.find(boundary, delimiter)
+          total = total + #chunk
+          if match then
+            local match_end =
+              total - #boundary + (match as integer) - 1 + #delimiter
+            local result_end = match_end
+            if chop then result_end = result_end - #delimiter end
+            local all = builder:drain()
+            local selected = str.sub(all, 1, result_end)
+            local remaining = str.sub(all, match_end + 1)
+            result = selected
+            prepend_excess(stream, remaining)
+            finished = true
+          else
+            local keep = #delimiter - 1
+            if keep > #boundary then keep = #boundary end
+            tail = str.sub(boundary, #boundary - keep + 1)
+          end
         end
       end
     end
   catch
-    restore_chunks(stream, chunks, count)
+    local restored = builder:drain()
+    if #pending > 0 then restored = restored .. pending end
+    if not stream.closed and #restored > 0 then
+      prepend_excess(stream, restored)
+    end
     raise
   finally
-    stream.reading = false
+    end_read(stream)
   end
   return result
+end
+
+function clock(): float
+  return uv._os_clock()
+end
+
+function difftime(later: integer, earlier: integer): float
+  return ctime.difftime(
+    later as ctime.time_t,
+    earlier as ctime.time_t) as float
+end
+
+function date(format: string?, timestamp: integer?): value
+  local actual_format = "%c"
+  if format then actual_format = format as string end
+  reject_embedded_nul(actual_format, "date format")
+
+  local utc = false
+  if #actual_format > 0 and byte_at(actual_format, 1) == 33 then
+    utc = true
+    actual_format = str.sub(actual_format, 2)
+  end
+
+  local instant = uv._os_time() as ctime.time_t
+  if timestamp then
+    instant = (timestamp as integer) as ctime.time_t
+  end
+  local calendar = ctime.localtime(instant)
+  if utc then calendar = ctime.gmtime(instant) end
+  if not calendar then
+    raise "date result cannot be represented in this installation"
+  end
+
+  if actual_format == "*t" then
+    local isdst: boolean? = nil
+    if calendar.tm_isdst >= 0 then
+      isdst = calendar.tm_isdst ~= 0
+    end
+    return Date.new(
+      (calendar.tm_year as integer) + 1900,
+      (calendar.tm_mon as integer) + 1,
+      calendar.tm_mday as integer,
+      calendar.tm_hour as integer,
+      calendar.tm_min as integer,
+      calendar.tm_sec as integer,
+      (calendar.tm_wday as integer) + 1,
+      (calendar.tm_yday as integer) + 1,
+      isdst)
+  end
+  return formatted_date(actual_format, calendar)
+end
+
+function setlocale(locale: string?, category: string?): string?
+  local actual_category = "all"
+  if category then actual_category = category as string end
+  reject_embedded_nul(actual_category, "locale category")
+  local category_id = locale_category(actual_category)
+
+  local selected = clocale.setlocale(category_id, nil)
+  if locale then
+    local requested = locale as string
+    reject_embedded_nul(requested, "locale name")
+    selected = clocale.setlocale(category_id, requested)
+  end
+  if not selected then return nil end
+  return selected as string
+end
+
+function time(year: integer?, month: integer?, day: integer?,
+              hour: integer?, min: integer?, sec: integer?,
+              isdst: boolean?): integer
+  if not year and not month and not day then
+    if hour then
+      raise "time requires year, month, and day together"
+    end
+    if min then
+      raise "time requires year, month, and day together"
+    end
+    if sec then
+      raise "time requires year, month, and day together"
+    end
+    if isdst == true or isdst == false then
+      raise "time requires year, month, and day together"
+    end
+    return uv._os_time()
+  end
+  if not year or not month or not day then
+    raise "time requires year, month, and day together"
+  end
+
+  local actual_hour = 12
+  local actual_minute = 0
+  local actual_second = 0
+  if hour then actual_hour = hour as integer end
+  if min then actual_minute = min as integer end
+  if sec then actual_second = sec as integer end
+
+  local calendar: ctime.tm
+  calendar.tm_year = checked_time_field(year as integer, 1900, "year")
+  calendar.tm_mon = checked_time_field(month as integer, 1, "month")
+  calendar.tm_mday = checked_time_field(day as integer, 0, "day")
+  calendar.tm_hour = checked_time_field(actual_hour, 0, "hour")
+  calendar.tm_min = checked_time_field(actual_minute, 0, "min")
+  calendar.tm_sec = checked_time_field(actual_second, 0, "sec")
+  calendar.tm_isdst = -1 as ffi.titan_ffi_int
+  if isdst == false then
+    calendar.tm_isdst = 0 as ffi.titan_ffi_int
+  elseif isdst == true then
+    calendar.tm_isdst = 1 as ffi.titan_ffi_int
+  end
+
+  local instant = ctime.mktime(calendar)
+  if instant == (-1 as ctime.time_t) then
+    raise "time result cannot be represented in this installation"
+  end
+  return instant as integer
 end
 
 function getenv(name: string): string?
@@ -191,14 +522,91 @@ function ppid(): integer
   return uv._os_ppid()
 end
 
-function spawn(file: string, args: {string}): Process
-  local handle = uv._os_process_spawn(file, args)
-  local stdin, stdout, stderr = uv._os_process_pipes(handle)
-  return Process.new(
-    handle,
-    OutputStream.new(stdin),
-    InputStream.new(stdout, "", false),
-    InputStream.new(stderr, "", false))
+function with_stdin(config: SpawnConfig): integer
+  return uv._os_spawn_config_with_stdin(config.handle)
+end
+
+function with_stdout(config: SpawnConfig): integer
+  return uv._os_spawn_config_with_stdout(config.handle)
+end
+
+function with_stderr(config: SpawnConfig): integer
+  return uv._os_spawn_config_with_stderr(config.handle)
+end
+
+function with_parent_stdin(config: SpawnConfig): integer
+  return uv._os_spawn_config_with_parent_stdin(config.handle)
+end
+
+function with_parent_stdout(config: SpawnConfig): integer
+  return uv._os_spawn_config_with_parent_stdout(config.handle)
+end
+
+function with_parent_stderr(config: SpawnConfig): integer
+  return uv._os_spawn_config_with_parent_stderr(config.handle)
+end
+
+function with_merged_output(config: SpawnConfig): integer
+  return uv._os_spawn_config_with_merged_output(config.handle)
+end
+
+function spawn(file: string, args: {string},
+               ...: SpawnOption): Process
+  local config = SpawnConfig.new(uv._os_spawn_config_new())
+  local handle: uv.uv_process_t? = nil
+  do
+    local status = with_stdin(config)
+    if status >= 0 then status = with_stdout(config) end
+    if status >= 0 then status = with_stderr(config) end
+    local index = 1
+    while status >= 0 and index <= #... do
+      local option = ...[index]
+      status = option(config)
+      index = index + 1
+    end
+    if status < 0 then
+      uv._os_spawn_config_error(config.handle, status)
+    end
+    handle = uv._os_process_spawn_with_config(
+      file, args, config.handle)
+  catch
+    local saved_error = error
+    uv._os_spawn_config_close(config.handle)
+    raise saved_error
+  end
+  local process_handle = handle as uv.uv_process_t
+  local raw_stdin? = uv._os_process_stdin(process_handle)
+  local raw_stdout? = uv._os_process_stdout(process_handle)
+  local raw_stderr? = uv._os_process_stderr(process_handle)
+
+  local input: OutputStream? = nil
+  if raw_stdin then
+    local stdio = raw_stdin as uv.uv_stdio_t
+    input = OutputStream.new(
+      stdio, -1, uv._os_stdio_generation(stdio), process_handle)
+  end
+
+  local output: InputStream? = nil
+  if raw_stdout then
+    local stdio = raw_stdout as uv.uv_stdio_t
+    output = InputStream.new(
+      stdio, -1, uv._os_stdio_generation(stdio),
+      process_handle, "", false, false)
+  end
+
+  local diagnostics: InputStream? = nil
+  if raw_stderr then
+    if raw_stdout and raw_stderr == raw_stdout then
+      diagnostics = output
+    else
+      local stdio = raw_stderr as uv.uv_stdio_t
+      diagnostics = InputStream.new(
+        stdio, -1, uv._os_stdio_generation(stdio),
+        process_handle, "", false, false)
+    end
+  end
+
+  return Process.new(process_handle, input, output, diagnostics)
 end
 
 function Process:wait(): ExitStatus
@@ -211,30 +619,59 @@ function Process:kill(signal: string)
   uv._os_process_kill(self.handle, signal)
 end
 
+function Process:is_running(): boolean
+  return uv._os_process_is_running(self.handle)
+end
+
 function OutputStream:write(data: string)
-  uv._os_stream_write(self.handle, data)
+  uv._os_stdio_write(output_handle(self), data)
 end
 
 function OutputStream:close()
-  uv._os_stream_close(self.handle)
+  if self.parent_descriptor >= 0 then return end
+  uv._os_stdio_close(output_handle(self))
+end
+
+function OutputStream:is_tty(): boolean
+  return uv._os_stdio_is_tty(output_handle(self))
 end
 
 function InputStream:read(): string?
+  if self.closed then return nil end
   return read_input(self)
 end
 
 function InputStream:read_until(delimiter: string,
                                 chop: boolean?): string?
+  if self.closed then return nil end
   return read_input_until(self, delimiter, chop)
 end
 
-function communicate(file: string, args: {string},
-                     input: string?): (string, string, ExitStatus)
-  local stdout, stderr, code, signal_number =
-    uv._os_communicate(file, args, input)
-  return stdout, stderr,
-         ExitStatus.new(code, uv._os_signal_name(signal_number),
-                        signal_number)
+function InputStream:close()
+  -- Main-process stdin is a borrowed stable facade; closing it is a no-op.
+  if self.parent_descriptor >= 0 or self.closed then return end
+  local retained = self.excess
+  self.closed = true
+  self.excess = ""
+  do
+    uv._os_stdio_close(input_handle(self))
+  catch
+    -- Validation and request construction precede the low-level monotonic
+    -- close transition. Preserve retryability when one of those steps fails.
+    self.closed = false
+    self.excess = retained .. self.excess
+    raise
+  end
+end
+
+function InputStream:is_tty(): boolean
+  return uv._os_stdio_is_tty(input_handle(self))
+end
+
+function exit(code: integer?)
+  local actual_code = 0
+  if code then actual_code = code as integer end
+  uv._os_exit(actual_code)
 end
 
 function wait_signal(name: string): string

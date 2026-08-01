@@ -53,10 +53,15 @@ while IFS= read -r test_file; do
         spec/stdlib/fs*_spec.lua)
             library_uv_fs_tests+=("$test_file")
             ;;
+        spec/stdlib/io*_spec.lua | \
         spec/stdlib/net*_spec.lua | \
         spec/stdlib/os*_spec.lua)
             library_net_os_tests+=("$test_file")
             ;;
+        spec/stdlib/gc*_spec.lua | \
+        spec/stdlib/iter*_spec.lua | \
+        spec/stdlib/lua*_spec.lua | \
+        spec/stdlib/math*_spec.lua | \
         spec/stdlib/peg*_spec.lua | \
         spec/stdlib/string*_spec.lua)
             library_peg_string_tests+=("$test_file")
@@ -205,8 +210,8 @@ case "$group" in
         "$BUSTED" -o gtest -v "${library_net_os_tests[@]}"
         ;;
     library-peg-string)
-        echo "Running ${#library_peg_string_tests[@]} PEG/string spec files" \
-            "without LuaCov"
+        echo "Running ${#library_peg_string_tests[@]} " \
+            "PEG/string/math/Lua/iter/GC spec files without LuaCov"
         "$BUSTED" -o gtest -v "${library_peg_string_tests[@]}"
         ;;
     libraries)
@@ -257,9 +262,9 @@ case "$group" in
         cat "$net_os_log"
         if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::endgroup::"; fi
         if [[ ${GITHUB_ACTIONS:-} == true ]]; then
-            echo "::group::Library PEG/string worker"
+            echo "::group::Library PEG/string/math/Lua/iter/GC worker"
         else
-            echo "Library PEG/string worker"
+            echo "Library PEG/string/math/Lua/iter/GC worker"
         fi
         cat "$peg_string_log"
         if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::endgroup::"; fi

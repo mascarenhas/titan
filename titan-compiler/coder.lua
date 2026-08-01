@@ -4,6 +4,10 @@ local cdeclarator = require "titan-compiler.cdeclarator"
 
 local coder = {
     _csemantics = require "titan-compiler.csemantics",
+    -- Generation-local policy stored on the module table because coder.lua is
+    -- already at Lua's top-level local-variable limit. coder.generate resets
+    -- it on every invocation before emitline can be reached.
+    _emit_line_directives = true,
 }
 
 -- Lua 5.5's CallInfo encodes finite result requests only through MAXRESULTS.
@@ -27,6 +31,10 @@ local render = util.render
 local some_c_escape_sequences = {
     ["\\"] = "\\\\",
     ["\""] = "\\\"",
+    -- Generated fragments pass through util.render recursively. Keep a
+    -- literal dollar out of that template language even when user text is
+    -- followed by an identifier, while preserving the exact byte in C.
+    ["$"] = "\\044",
     ["?"] = "\\077",
     ["\0"] = "\\000",
     ["\a"] = "\\a",
@@ -94,6 +102,7 @@ end
 -- indented (reindent_c re-indents it) since leading whitespace before a
 -- directive is legal C. Nodes without a `loc` (synthesized AST) emit nothing.
 local function emitline(node)
+    if not coder._emit_line_directives then return "" end
     local loc = node and node.loc
     if not loc or not loc.line or not loc.filename then return "" end
     return "#line " .. tostring(loc.line) .. " "
@@ -15783,10 +15792,16 @@ local function allocate_upvalues(tlcontext, ast)
     end
 end
 
-function coder.generate(modname, ast, static_deps, abi)
+function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
+    -- Omission preserves the historical default. Reset this before any
+    -- validation that may fail so a previous invocation's policy never leaks
+    -- into the next generation.
+    coder._emit_line_directives = emit_line_directives ~= false
     assert(type(abi) == "string" and abi ~= "",
         "coder.generate requires the compiled-module ABI")
     local staticmetadata = require "titan-compiler.staticmetadata"
+    assert(staticmetadata.valid_module_name(modname),
+        "coder.generate requires a valid logical module name")
     local tlcontext = {
         module = modname,
         prefix = mangle_qn(modname) .. "_",
@@ -15878,18 +15893,16 @@ function coder.generate(modname, ast, static_deps, abi)
                 if node._include then
                     include_name = node._include.include_name
                     if node._include.include_kind == "quote" then
-                        include = [[#include "$HEADERNAME"]]
+                        include = '#include "' .. include_name .. '"'
                     else
-                        include = [[#include <$HEADERNAME>]]
+                        include = "#include <" .. include_name .. ">"
                     end
                 elseif node.headername:match("^/") then
-                    include = [[#include "$HEADERNAME"]]
+                    include = '#include "' .. include_name .. '"'
                 else
-                    include = [[#include <$HEADERNAME>]]
+                    include = "#include <" .. include_name .. ">"
                 end
-                table.insert(foreignimports, render(include, {
-                    HEADERNAME = include_name
-                }))
+                table.insert(foreignimports, include)
             elseif tag == "Ast.TopLevelVar" then
                 codevardec(initctx, initvars, switch_get, switch_set, gvar_map, node)
             elseif tag == "Ast.TopLevelRecord" then
@@ -16253,7 +16266,7 @@ function coder.generate(modname, ast, static_deps, abi)
 
     table.insert(code, render(modtypes, {
         TYPESNAME = tlcontext.prefix .. "types",
-        TYPES = string.format("%q", serialized_type),
+        TYPES = c_string_literal(serialized_type),
     }))
 
     table.insert(code, render(modabi, {
@@ -16365,15 +16378,24 @@ function coder.generate(modname, ast, static_deps, abi)
         INITNAME = tlcontext.prefix .. 'init',
     }))
 
-    local preamble = render(preamble, {
+    local preamble_substs = {
         FIXEDPREFIX =
             require("titan-compiler.cpreamble").fixed_prefix,
         AFTERFOREIGNIMPORTS =
             require("titan-compiler.cpreamble").after_foreign_imports,
         INCLUDES = table.concat(includes, "\n"),
         SIGS = table.concat(sigs, "\n"),
-        FOREIGNIMPORTS = table.concat(foreignimports, "\n"),
-    })
+    }
+    local foreignimports_begin, foreignimports_end =
+        preamble:find("$FOREIGNIMPORTS", 1, true)
+    assert(foreignimports_begin)
+    -- A valid C header name may contain `$identifier`. Splice these completed
+    -- include lines between the rendered template halves so util.render never
+    -- interprets header text as another template substitution.
+    local preamble =
+        render(preamble:sub(1, foreignimports_begin - 1), preamble_substs)
+        .. table.concat(foreignimports, "\n")
+        .. render(preamble:sub(foreignimports_end + 1), preamble_substs)
 
     -- Report the logical modules whose direct native entry points this
     -- generated object actually references. The standalone archive protocol

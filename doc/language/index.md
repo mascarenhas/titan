@@ -38,9 +38,12 @@ is translated to C — see the
 
 ## Reading guide
 
-Start with the [design philosophy](philosophy.md) if you want to know
-*why* Titan is shaped the way it is; start with the
-[type system](types.md) if you want to learn the language.
+For a runnable introduction, start with the [Titan quick tour](../quick-tour.md).
+Before contributing application or standard-library code, read the
+[style guide](../style-guide.md). Start with the
+[design philosophy](philosophy.md) if you want to know *why* Titan is shaped
+the way it is; after the tour, continue with the [type system](types.md) and
+use the chapters below for the normative language reference.
 
 | Chapter | Covers |
 | --- | --- |
@@ -68,13 +71,17 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, status, and Lua interop. |
 | [Asynchronous I/O and tasks](async-io.md) | The `async` Task scheduler, nonblocking `run`, explicit/automatic loop driving, direct callback continuation model, errors, joins, cancellation, and resource/process shutdown. |
-| [I/O Interfaces](standard-library-io.md) | The seven `Reader`/`Writer`/`Closer` Interface combinations and the standard records that satisfy them exactly or through callable adjustment. |
+| [I/O standard library](standard-library-io.md) | The seven `Reader`/`Writer`/`Closer` Interface combinations, standard-output `print`, ownership-safe line iteration, and shell-command `popen` with merged output. |
 | [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
+| [Mathematical standard library](standard-library-math.md) | Typed C99 numeric operations, Lua 5.5-compatible xoshiro256** random sequences, and length-bounded numeric conversion. |
 | [Filesystem standard library](standard-library-fs.md) | Binary file reads and writes, per-File FIFO ordering and close, whole-file helpers, metadata, and path operations. |
 | [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads and FIFO writes, shutdown, close, and cancellation. |
-| [Operating-system standard library](standard-library-os.md) | Portable environment, directory, identity, executable-path, one-shot signals, child processes with binary stdio, and deadlock-free `communicate`. |
+| [Operating-system standard library](standard-library-os.md) | Portable clocks and timestamps, ISO C calendars/locales, plus environment, parent stdio, signals, graceful exit, and configurable direct child processes. |
 | [PEG standard library](standard-library-peg.md) | Typed parsing-expression constructors and combinators, labeled failure/recovery, captures and callback timing, anchored pattern matching and leftmost search, locale controls, and relabel source notation. |
-| [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, fixed-call `tostring`, and compiled byte-regex matching, iteration, and substitution. |
+| [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, configurably yielding in-memory streams, and compiled byte-regex matching, capture iteration, splitting, and substitution. |
+| [Lua loading standard library](standard-library-lua.md) | Binary-safe chunk compilation, Reader and file loading, asynchronous Lua-source `require`, cache semantics, C/Titan loaders, and the custom-searcher policy. |
+| [Iteration standard library](standard-library-iter.md) | Lua-compatible Map traversal, corrected generic-for iterator tuples, and Array iteration that preserves inner nil elements. |
+| [Garbage-collection standard library](standard-library-gc.md) | Weak Maps and ephemerons, collector actions and mode switches, byte counts, and Lua 5.5 tuning parameters. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, limitations. |
 | [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, host-validated pointer conversions, zero-initialized automatic aggregates and fixed arrays, typed object-macro values, macro-projected fields, and target-correct C operators. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
@@ -170,12 +177,14 @@ Lua and `value` never discover an implementation from a bare record or union.
   out-of-band traceback: there is no exception class hierarchy and no
   chaining/cause mechanism. A new error in a catch or finally replaces the
   previous one ([error handling](error-handling.md)).
-* **Only a small standard library so far.** Titan includes stackful
-  `coroutine`, the libuv-backed `async` Task facade, the type-only `io`
-  Interface vocabulary, `timer`, asynchronous `fs` and `net`, portable `os`
-  helpers, typed PEG construction, and byte-oriented string/regex operations.
-  Qualified Lua names such as `titan.coroutine`, `titan.io`, `titan.async`,
-  `titan.peg`, and `titan.string` leave Lua's standard modules unchanged.
+* **Titan ships a focused standard library.** It includes stackful
+  `coroutine`; the libuv-backed `async` Task facade and `timer`; `io`
+  Interfaces plus printing, line iteration, and shell-process streams;
+  asynchronous `fs` and `net`; portable `os` helpers and direct child
+  processes; typed PEG construction; byte-oriented string/regex operations;
+  and the qualified `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc`
+  modules. Lua loads every standard module through its qualified `titan.*`
+  name, leaving Lua's own standard modules unchanged.
 
 The [README roadmap](../../README.md) lists where the language is headed;
 the [philosophy chapter](philosophy.md) explains the principles that order

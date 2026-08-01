@@ -386,8 +386,11 @@ assuming every statically admitted cast is total.
 
 `comparable(left, right)` is symmetric. It accepts identity, gradual
 consistency, mixed Titan integer/float equality, and recursive Option
-comparison. When exactly one comparable operand is `value`, the same plan
-also carries the required gradual injection so both operands reach the boxed
+comparison. Before classification, checker equality lifting turns Nil opposite
+an Option into that Option through the named `option_nil` coercion, so the
+classifier sees two same-representation option operands. When exactly one
+comparable operand is `value`, the same plan also carries the required gradual
+injection so both operands reach the boxed
 raw-equality representation. The checker classifies the original pair before
 applying that recorded injection. Ordering retains its separate numeric/string
 rules. Equality does not reuse directional callable assignment and therefore

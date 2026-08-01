@@ -26,28 +26,27 @@ generated object, and one `titan/string.lua` shim.
 The dependency direction is:
 
 ```text
-private namespaced LPegLabel archive
-                |
-                v
-           titan.peg
-                |
-                v
-          titan.string
-             /     \
-            v       v
-       titan.net  titan.os
+titan.coroutine --> titan.uv --> titan.async --> titan.string --> titan.net
+                                                   |
+                                                   `-----------> titan.os
+titan.gc ---------------------------------------> titan.string
+titan.gc --> titan.peg -------------------------> titan.string
+private namespaced LPegLabel archive ----------> titan.peg
 ```
 
 `titan.peg` does not import `titan.string`; its relabel implementation retains
-small private byte/diagnostic helpers to avoid a cycle. `titan.string` uses the
-typed PEG surface and never reaches the embedded engine through a private raw
-escape hatch. Both `titan.net` and `titan.os` dogfood the literal
+small private byte/diagnostic helpers to avoid a cycle. Both modules import the
+public `titan.gc` surface to configure their weak caches. `titan.string` uses
+the typed PEG surface and imports the public `titan.async` facade solely for
+the explicit fairness turn in its in-memory streams. It never reaches the
+embedded PEG engine or private uv scheduler through a raw escape hatch. Both
+`titan.net` and `titan.os` dogfood the literal
 `titan.string.find` and byte-preserving `titan.string.sub` operations. The
 isolated delayed-DNS fixture therefore constructs complete exact PEG and
 string providers before its exact net facade; production already places all
-ten logical modules and LPegLabel in one static bundle.
+fourteen logical modules and LPegLabel in one static bundle.
 
-The installed standard build requests ten roots in stable order:
+The installed standard build requests fourteen roots in stable order:
 
 ```text
 titan.coroutine
@@ -60,16 +59,21 @@ titan.net
 titan.os
 titan.peg
 titan.string
+titan.math
+titan.lua
+titan.iter
+titan.gc
 ```
 
-The request order preserves the previous nine roots' relative order, inserts
-the type-only `titan.io` root before its concrete stream users, and remains
+The request order preserves the previous ten roots' relative order, keeps
+`titan.io` before its concrete stream users, appends the four independent
+qualified modules, and remains
 non-topological. Recursive import loading resolves both the
 `titan.net`/`titan.os` to `titan.string` to `titan.peg` chains while those
 facades are processed.
 
-The paired `titan.so`/`titan.a` therefore contains ten logical protocols and
-ten archive metadata keys. The DSO exposes eleven Lua openers: bare
+The paired `titan.so`/`titan.a` therefore contains fourteen logical protocols
+and fourteen archive metadata keys. The DSO exposes fifteen Lua openers: bare
 `luaopen_titan` support plus one entry per logical module. The provider's
 metadata-free payload begins with `titanlib.o`, then the private
 `libtitan-lpeglabel.a`, then the bundled libuv archive when bundled mode is
@@ -370,10 +374,13 @@ capture/backtracking order retain the latest participating value.
 A compiled `Regex` stores the expression, capture count, traced `peg.Pattern`,
 and the parser's start-anchor bit. Search operations use that bit instead of
 reinterpreting the source expression. A `RegexMatch` stores the exact subject,
-its whole-match span, and a dense array of local `GroupSpan` wrappers. The
-wrapper is necessary because trailing nil elements do not contribute to a
-Titan Array's length. Each group slot therefore exists independently of
-whether that group participated.
+its whole-match span, and a dense Array of `Span` records. Trailing nil
+elements do not contribute to an Array's length, so an unmatched capture uses
+the private impossible span `(0, -1)`. Participating spans are one-based;
+participating empty captures retain their real `(n, n - 1)` position. Public
+accessors translate only the impossible sentinel back to nil and return fresh
+records, so every capture slot exists without collapsing empty and unmatched
+semantics.
 
 Match operations preserve byte offsets while callbacks may run and rederive
 raw pointers afterward. Public span accessors construct fresh records so a
@@ -385,6 +392,13 @@ string prefix because it returns either the whole match or at least the first
 capture before its genuinely variable tail. The typed `gmatch` iterator
 likewise returns a non-nil `RegexMatch`, avoiding a nil first capture becoming
 generic-for termination.
+
+The convenience `matches` closure deliberately performs the opposite
+projection: it calls the rooted `gmatch` closure, returns nil at exhaustion,
+and otherwise forwards `RegexMatch:values`. Consequently an unmatched first
+capture is visible as nil and has the language's ordinary generic-for
+termination meaning. This limitation is documented rather than hidden behind
+an extra public control value.
 
 Initial positions are normalized separately from the underlying PEG engine:
 zero and negative overshoot become 1, positive overshoot is immediate
@@ -411,15 +425,45 @@ zero-width candidate suppressed by the previous-end rule never calls it.
 Callback errors and wrong Lua return types propagate through the ordinary call
 and result-conversion machinery.
 
+`split` without a delimiter is a small cursor closure over one-byte `sub`
+calls. With a regex delimiter it roots the compiled regex, subject, gmatch
+iterator, and next field position. Delimiter captures are never projected.
+The gmatch previous-end rule provides finite byte progress for zero-width
+delimiters, while the separate field cursor preserves leading, trailing, and
+adjacent empty fields.
+
+## In-memory stream state
+
+`StringReader` retains a string, one-based cursor, and construction-time
+`yielding` policy. Omitted or nil policy becomes true. Its `read` and literal
+`read_until` methods call `async.yield()` before every result, including EOF,
+only when that policy is true, then update the cursor without retaining
+borrowed pointers. Delimiter search and slicing reuse the module's binary-safe
+`find` and `sub`.
+
+`StringWriter` is the checked accumulator used by formatting, packing,
+substitution, and other bounded joins. The record itself stores rooted chunks
+plus their checked aggregate length and the same construction-time yielding
+policy. Each public `write` yields before appending only when that policy is
+true. Internal formatting, packing, substitution, and literal rendering use a
+non-yielding writer because those synchronous producers own the complete
+operation. `drain` performs one exact-size allocation and copy, then replaces
+the chunk array and resets the length to zero. This avoids quadratic repeated
+concatenation while allowing the same writer to be reused after a drain.
+Neither close method owns a native resource. `StringReader:close` nevertheless
+discards its backing string and resets the cursor so it releases unread data
+promptly; subsequent reads return `nil`. `StringWriter:close` is a no-op.
+
 ## Roots, callbacks, and errors
 
 The regex cache has typed Map shape `{string: Regex}`; ordinary Map lookup
 produces `Regex?` for an absent key. Module state creates the cache directly
-at that type. Its initializer creates a typed `__mode = "v"` metatable, pushes
-those two existing Maps, and installs the metatable on the cache in place; it
-does not route the cache through `value` or recast it. Ordinary cache reads and
-writes remain typed Map operations. A live regex roots its PEG pattern,
-and a live iterator roots the regex, subject, and current position. During
+at that type. Its initializer passes the same table through the public
+`gc.weak` boundary, which installs weak-value mode while preserving an existing
+metatable. The cast to `{value: value}` is confined to that configuration call;
+ordinary cache reads and writes remain typed Map operations. A live regex
+roots its PEG pattern, and a live iterator roots the regex, subject, and
+current position. During
 synchronous `gsub`, the generated frame roots the regex, subject, replacement
 function, whole-match argument, and returned string across each callback. The
 PEG pattern's native uservalue graph roots constant captures, grammars,

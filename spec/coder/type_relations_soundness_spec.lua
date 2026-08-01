@@ -736,6 +736,38 @@ describe("type-relation soundness (end-to-end)", function()
         ]])
     end)
 
+    it("compares every boolean option state with nil", function()
+        run_coder([[
+            function is_nil(candidate: boolean?): boolean
+                return candidate == nil
+            end
+
+            function nil_is(candidate: boolean?): boolean
+                return nil == candidate
+            end
+
+            function is_present(candidate: boolean?): boolean
+                return candidate ~= nil
+            end
+
+            function nil_is_not(candidate: boolean?): boolean
+                return nil ~= candidate
+            end
+        ]], [[
+            assert(test.is_nil(nil))
+            assert(test.nil_is(nil))
+            assert(not test.is_present(nil))
+            assert(not test.nil_is_not(nil))
+
+            for _, candidate in ipairs({false, true}) do
+                assert(not test.is_nil(candidate))
+                assert(not test.nil_is(candidate))
+                assert(test.is_present(candidate))
+                assert(test.nil_is_not(candidate))
+            end
+        ]])
+    end)
+
     it("reads and dynamically writes C scalar container values", function()
         run_coder([[
             local ffi = foreign import "titan/ffi.h"

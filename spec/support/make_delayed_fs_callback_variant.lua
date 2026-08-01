@@ -85,12 +85,16 @@ local test_fs_delayed_result = 0
 ]==], "callback-control state")
 
 patch("file.titan", [==[
-  if result >= 0 and owner.metadata.operation.kind == FS.open then
+  if result >= 0 and
+      (owner.metadata.operation.kind == FS.open or
+       owner.metadata.operation.kind == FS.tmpname) then
     owner.metadata.acquired_file = result as libuv.uv_file
   end
   fs_dispatch_body(owner, result)
 ]==], [==[
-  if result >= 0 and owner.metadata.operation.kind == FS.open then
+  if result >= 0 and
+      (owner.metadata.operation.kind == FS.open or
+       owner.metadata.operation.kind == FS.tmpname) then
     owner.metadata.acquired_file = result as libuv.uv_file
   end
   if test_fs_delay > 0 then

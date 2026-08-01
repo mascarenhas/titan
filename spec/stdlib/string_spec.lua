@@ -22,7 +22,18 @@ local LUA = prefix and exists(prefix .. "/bin/lua")
     and prefix .. "/bin/lua" or "lua"
 
 local PROBE_SOURCE = [[
-local str = import "titan.string"
+local str = import "string"
+
+interface ReaderCloserShape
+  function read(): string?
+  function read_until(delimiter: string, chop: boolean?): string?
+  function close()
+end
+
+interface WriterCloserShape
+  function write(data: string)
+  function close()
+end
 
 local observed = ""
 
@@ -52,6 +63,19 @@ function format_accounting(): (string, string)
     str.format("%%:%s", mark("used"), mark("extra"))
   return rendered, observed
 end
+
+function interface_streams(): string
+  local concrete_writer = str.writer()
+  local writer: WriterCloserShape = concrete_writer
+  writer:write("interface\0stream")
+  writer:close()
+
+  local concrete_reader = str.reader(concrete_writer:drain())
+  local reader: ReaderCloserShape = concrete_reader
+  local result? = reader:read()
+  reader:close()
+  return result or ""
+end
 ]]
 
 describe("titan.string", function()
@@ -71,6 +95,8 @@ describe("titan.string", function()
                 async_stdlib.read("titan/peg/" .. name .. ".titan"))
         end
         layout = async_stdlib.exact_layout(workspace)
+        async_stdlib.prepare_async_core(workspace, layout)
+        async_stdlib.prepare_gc(workspace, layout)
         async_stdlib.compile(workspace, "titan.peg", {
             layout = layout,
             cppflags = LPEGLABEL_CPPFLAGS,
@@ -124,6 +150,135 @@ describe("titan.string", function()
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
     end
+
+    it("provides configurable in-memory ReaderCloser and WriterCloser streams",
+    function()
+        run([[
+            local async = require "titan.async"
+            local str = require "titan.string"
+            local probe = require "string_core_probe"
+            local phase = 0
+            local task = async.run(function()
+                local reader = str.reader("alpha\0beta\nlast")
+                phase = 1
+                local observer = async.run(function()
+                    assert(phase == 1)
+                    phase = 2
+                end)
+                assert(reader:read_until("\n", true) == "alpha\0beta")
+                assert(phase == 2)
+                observer:join()
+                assert(reader:read() == "last")
+
+                phase = 3
+                local eof_observer = async.run(function()
+                    assert(phase == 3)
+                    phase = 4
+                end)
+                assert(reader:read() == nil)
+                assert(phase == 4)
+                eof_observer:join()
+                reader:close()
+                reader:close()
+
+                local closed = str.reader("unread\0suffix")
+                closed:close()
+                closed:close()
+                assert(closed:read() == nil)
+                assert(closed:read_until("suffix", true) == nil)
+                assert(closed:read_until("", true) == nil)
+
+                local boundaries = str.reader("::a::::")
+                assert(boundaries:read_until("::", true) == "")
+                assert(boundaries:read_until("::", false) == "a::")
+                assert(boundaries:read_until("::", true) == "")
+                assert(boundaries:read_until("::", true) == nil)
+
+                local absent = str.reader("tail\0bytes")
+                local invalid = str.reader("still-open")
+                local delimiter_ok, delimiter_err =
+                    pcall(invalid.read_until, invalid, "", true)
+                assert(not delimiter_ok)
+                assert(tostring(delimiter_err):find(
+                    "delimiter must not be empty", 1, true), delimiter_err)
+                assert(absent:read_until("missing", false) == "tail\0bytes")
+                assert(absent:read_until("missing", true) == nil)
+                assert(absent:read_until("", true) == nil)
+
+                local writer = str.writer()
+                phase = 5
+                local empty_write_observer = async.run(function()
+                    assert(phase == 5)
+                    phase = 6
+                end)
+                writer:write("")
+                assert(phase == 6)
+                empty_write_observer:join()
+                assert(writer:drain() == "")
+
+                phase = 7
+                local write_observer = async.run(function()
+                    assert(phase == 7)
+                    phase = 8
+                end)
+                writer:write("left\0")
+                assert(phase == 8)
+                write_observer:join()
+                writer:write("right")
+                assert(writer:drain() == "left\0right")
+                assert(writer:drain() == "")
+                writer:write("reused")
+                assert(writer:drain() == "reused")
+                writer:close()
+                writer:close()
+
+                phase = 9
+                local nil_policy_observer = async.run(function()
+                    assert(phase == 9)
+                    phase = 10
+                end)
+                local nil_policy_reader = str.reader("nil-policy", nil)
+                assert(nil_policy_reader:read_until("-", true) == "nil")
+                assert(phase == 10)
+                nil_policy_observer:join()
+
+                phase = 11
+                local true_policy_observer = async.run(function()
+                    assert(phase == 11)
+                    phase = 12
+                end)
+                local true_policy_writer = str.writer(true)
+                true_policy_writer:write("true-policy")
+                assert(phase == 12)
+                true_policy_observer:join()
+                assert(true_policy_writer:drain() == "true-policy")
+
+                phase = 13
+                local nonyielding_observer = async.run(function()
+                    assert(phase == 13)
+                    phase = 14
+                end)
+                local direct_reader = str.reader("direct\0reader", false)
+                assert(direct_reader:read_until("\0", true) == "direct")
+                assert(direct_reader:read() == "reader")
+                assert(direct_reader:read() == nil)
+                local direct_writer = str.writer(false)
+                direct_writer:write("")
+                direct_writer:write("direct\0")
+                direct_writer:write("writer")
+                assert(direct_writer:drain() == "direct\0writer")
+                assert(phase == 13)
+                async.yield()
+                assert(phase == 14)
+                nonyielding_observer:join()
+
+                assert(probe.interface_streams() == "interface\0stream")
+                return true
+            end)
+            async.loop()
+            assert(task:join() == true)
+        ]])
+    end)
 
     it("matches Lua 5.5 byte operations over binary strings and indices",
     function()

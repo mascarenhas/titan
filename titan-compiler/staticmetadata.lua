@@ -83,8 +83,10 @@ local function valid_module_name(modname)
         return false
     end
     for _, component in ipairs(components) do
-        if component == "." or component == ".." or
-           component:find("[/\\%z]") then
+        -- Logical components must map to portable C protocol symbols after
+        -- the established dash-to-underscore mangling. In particular, never
+        -- admit util.render's `$identifier` metacharacter as module data.
+        if not component:match("^[A-Za-z_][A-Za-z0-9_-]*$") then
             return false
         end
     end

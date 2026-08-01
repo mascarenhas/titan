@@ -77,17 +77,19 @@ function _os_unsetenv(name: string)
 end
 
 function _os_cwd(): string
-  return os_sized_buffer(os_cwd_buffer,
-      OS_BUFFER_INITIAL as libuv.size_t,
-      os_error_from_status("os.cwd", nil))
+  return current_directory("os.cwd")
 end
 
 function _os_chdir(path: string)
-  local copied = copy_text(path, "os.chdir", path)
-  local status = libuv.uv_chdir(copied.bytes)
-  if status < 0 then
-    raise make_error(status, "os.chdir", path)
-  end
+  change_directory(path, "os.chdir")
+end
+
+function _fs_pwd(): string
+  return current_directory("fs.pwd")
+end
+
+function _fs_chdir(path: string)
+  change_directory(path, "fs.chdir")
 end
 
 function _os_homedir(): string
@@ -123,6 +125,23 @@ end
 
 function _os_ppid(): integer
   return libuv.uv_os_getppid()
+end
+
+function _os_clock(): float
+  local usage: libuv.uv_rusage_t
+  local status = libuv.uv_getrusage(usage)
+  if status < 0 then raise make_error(status, "os.clock", nil) end
+  return ((usage.ru_utime.tv_sec as integer) as float) +
+         ((usage.ru_utime.tv_usec as integer) as float) / 1000000.0 +
+         ((usage.ru_stime.tv_sec as integer) as float) +
+         ((usage.ru_stime.tv_usec as integer) as float) / 1000000.0
+end
+
+function _os_time(): integer
+  local current: libuv.uv_timeval64_t
+  local status = libuv.uv_gettimeofday(current)
+  if status < 0 then raise make_error(status, "os.current_time", nil) end
+  return current.tv_sec as integer
 end
 
 function _os_wait_signal(name: string): string
@@ -314,6 +333,29 @@ local function os_error_from_status(operation: string,
   return function (status: ffi.titan_ffi_int): Error
     return make_error(status, operation, subject)
   end
+end
+
+local function current_directory(operation: string): string
+  return os_sized_buffer(os_cwd_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status(operation, nil))
+end
+
+local function change_directory(path: string, operation: string)
+  local copied = copy_text(path, operation, path)
+  local status = libuv.uv_chdir(copied.bytes)
+  if status < 0 then
+    raise make_error(status, operation, path)
+  end
+end
+
+-- uv_fs_mkstemp requires a mutable-looking template ending in six X bytes;
+-- new_fs_request makes the operation-owned NUL-terminated copy before libuv
+-- sees it. Keep temp-directory failures under the public fs diagnostic.
+local function fs_tmpname_template(): string
+  return os_sized_buffer(os_tmpdir_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("fs.tmpname", nil)) .. "/titan-fs-XXXXXX"
 end
 
 -- Foreign C functions are not Titan closure values, so these tiny adapters

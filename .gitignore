@@ -46,6 +46,10 @@
 /titan/os.lua
 /titan/peg.lua
 /titan/string.lua
+/titan/math.lua
+/titan/lua.lua
+/titan/iter.lua
+/titan/gc.lua
 
 # Native runtime command-line configuration stamps
 /titan-runtime/.titan-*-build-config

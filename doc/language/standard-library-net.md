@@ -74,10 +74,11 @@ drains it can make memory use grow.
 returns all native chunks already queued when the low-level call is serviced,
 or waits for the next positive callback and returns that callback's nonempty
 binary string. Batch boundaries are therefore timing-dependent. It returns
-`nil` only at EOF. EOF is sticky: every later read also returns `nil`. A reset
-or other read error is sticky as well; after already completed chunks have
-been drained, every later read raises the same or an equivalent `async.Error`.
-A non-EOF read error also initiates physical Connection close.
+`nil` at EOF or after explicit close. Both states are sticky: every later read
+also returns `nil`. A reset or other read error is sticky as well; after
+already completed chunks have been drained, every later read raises the same
+or an equivalent `async.Error`. A non-EOF read error also initiates physical
+Connection close.
 
 `read_until(delimiter, chop)` requires a nonempty delimiter. It consumes
 through the first delimiter, which may span native chunks, and retains bytes
@@ -112,13 +113,17 @@ native request.
 
 `close` closes both directions and is idempotent. Concurrent callers wait for
 the same terminal close transition. For a Connection, it stops the continuous
-read and rejects new output or blocking read waits, but already completed read
-chunks remain ahead of the closed-stream error. Submitted and queued FIFO
-writes/shutdown keep their order; the native handle closes only after that
-output drains. Close waits for the required request and handle callbacks and
-returns only when the handle is safe to reclaim. A Connection or Server
-retained from an earlier completed loop session cannot be used in a later
-session.
+read, discards facade excess and queued native input, and wakes a blocking
+reader with `nil`; an in-flight delimiter reader also discards its accumulated
+tail, and later `read` and `read_until` calls remain at EOF. New output is
+rejected. Submitted and queued FIFO writes/shutdown keep their
+order; the native handle closes only after that output drains. Close waits for
+the required request and handle callbacks and returns only when the handle is
+safe to reclaim. Runtime shutdown likewise closes a Connection or Server left
+open by the application. A retained terminal value still accepts repeated
+`close()` calls as no-ops in a later session, and its reads return `nil`
+without consulting the stale Runtime; writes, shutdown, and accept reject the
+stale resource.
 
 Cancellation is logical first. A cancelled queued write is removed before
 submission. Cancelling an active write does not close a potentially shared

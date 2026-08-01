@@ -13,6 +13,8 @@ p:argument('module', 'Names of the modules to compile.'):args("+")
 p:flag('--print-ast', 'Print the AST.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
 p:flag('--static', 'Prefer static Titan archive providers.')
+p:flag('--no-line-directives',
+    'Omit source #line directives from generated C.')
 p:option('-u --lua', 'Path to Lua source tree (source checkouts only; installed compilers use their matching Lua SDK).')
 p:option('-t --tree', 'Root of the source tree, used for looking for source modules (defaults to ".").')
 p:option('-l --link', 'Comma-separated list of additional libraries to link into module.')
@@ -62,6 +64,7 @@ end
 
 driver.TITAN_SOURCE_PATH = args.tree or driver.TITAN_SOURCE_PATH
 driver.LUA_SOURCE_PATH = args.lua or driver.LUA_SOURCE_PATH
+if args.no_line_directives then driver.EMIT_LINE_DIRECTIVES = false end
 driver.configure_foreign_c()
 
 local errors = {}
