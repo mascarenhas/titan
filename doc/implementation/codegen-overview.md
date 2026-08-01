@@ -251,9 +251,10 @@ symbol.
 
 The mapper then builds one diagnostic shadow object on demand for that
 translation unit. It replaces each generated `#line` directive with a blank
-line, prepends a physical generated-C filename directive, and compiles the
-saved C with the exact captured compile-prefix argv plus the shadow input and
-output operands. The shadow is not linked or executed. Before using its DWARF,
+line, preserving every physical line number, and compiles that saved C at an
+exact private shadow pathname with the captured compile-prefix argv plus the
+shadow input and output operands. The shadow is not linked or executed. Before
+using its DWARF,
 the mapper requires the original and shadow target functions' complete byte
 ranges within `.text` to be identical; it also verifies the provider, original
 object, and shadow function sizes, the original/shadow addresses, unique symbol
@@ -261,8 +262,9 @@ ownership, and `.text` section membership. Other functions may carry different
 sanitizer source-location metadata without weakening this instruction-level
 proof. Only then does it apply the saved provider byte delta to the shadow
 symbol, ask `addr2line` to resolve that offset specifically within the
-relocatable object's `.text` section, require the injected saved-C pathname,
-and print numbered physical generated-C context. Missing module offsets, a
+relocatable object's `.text` section, require that it return the exact private
+shadow pathname, and print numbered context from the line-identical saved
+generated C under its original pathname. Missing module offsets, a
 required BuildId, symbol mismatches, overlapping or aliased functions, changed
 target code bytes, and other incomplete evidence make that frame unavailable
 rather than producing a speculative mapping.

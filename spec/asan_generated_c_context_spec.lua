@@ -149,17 +149,19 @@ describe("ASan generated-C context diagnostics", function()
         assert.equal("99", frames[2].build_id)
     end)
 
-    it("relabels a line-preserving shadow and clamps numbered context", function()
+    it("blanks line directives in place and clamps numbered context", function()
         local source = table.concat({
             "first",
             "  #line 90 \"input.titan\"",
             "target",
             "last",
         }, "\n")
-        local shadow = mapper.strip_line_directives(source, "/tmp/output.c")
-        assert.matches('^#line 1 "/tmp/output.c"\n', shadow)
+        local shadow = mapper.strip_line_directives(source)
         assert.falsy(shadow:find("input.titan", 1, true))
-        assert.equal(5, select(2, shadow:gsub("\n", "")) + 1)
+        assert.equal(4, select(2, shadow:gsub("\n", "")) + 1)
+        assert.equal("first\n\ntarget\nlast", shadow)
+        assert.equal("first\n\n", mapper.strip_line_directives(
+            "first\n#line 2 \"input.titan\"\n"))
         assert.equal(table.concat({
             "        1 | first",
             "        2 |   #line 90 \"input.titan\"",
@@ -287,7 +289,7 @@ describe("ASan generated-C context diagnostics", function()
                     run_command = wrong_shadow_path_runner,
                 })
             assert.truthy(wrong_shadow_path:find(
-                "shadow symbolization did not resolve to the saved generated C",
+                "shadow symbolization did not resolve to the verified shadow C",
                 1, true), wrong_shadow_path)
             assert.falsy(wrong_shadow_path:find(
                 "generated C context:", 1, true))

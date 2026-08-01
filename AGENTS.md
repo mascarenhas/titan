@@ -127,14 +127,15 @@ not add epicycles around what may be a misunderstood simpler design.
   those logs; the failed program and provider are never rerun. The mapper uses
   the original ASan frame's relocation-safe canonical-provider module offset
   and BuildId to find the saved provider function and its byte delta, then
-  builds an on-demand shadow for the unique owning translation unit with only
-  its `#line` directives removed and the exact captured prefix replayed. It
+  builds an on-demand shadow for the unique owning translation unit with its
+  `#line` directives blanked in place and the exact captured prefix replayed. It
   reports physical generated-C context only after the saved and shadow target
   function bytes match exactly in `.text`, the provider function is in `.text`
   with the saved function's size, and the saved/shadow function names,
   addresses, sizes, and `.text` membership agree. Shadow symbolization is
-  explicitly section-relative to `.text` and must return the injected saved-C
-  pathname; any mismatch leaves the context unavailable instead of guessing.
+  explicitly section-relative to `.text` and must return the exact private
+  shadow pathname; its line-identical saved C supplies the displayed context.
+  Any mismatch leaves the context unavailable instead of guessing.
   This side channel is why normal `#line` attribution can remain enabled for
   the test execution and its required logical Titan traceback frames. Its Lua,
   libbacktrace, and libuv dependencies compile with sanitizer instrumentation

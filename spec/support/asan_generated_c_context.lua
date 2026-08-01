@@ -249,16 +249,17 @@ local function named_symbol(symbols, name)
     return found
 end
 
-function M.strip_line_directives(source, original_path)
-    local escaped = original_path:gsub("\\", "\\\\"):gsub('"', '\\"')
-    local output = { '#line 1 "' .. escaped .. '"\n' }
+function M.strip_line_directives(source)
+    local output = {}
     local terminated = source:sub(-1) == "\n"
     for line in (source .. "\n"):gmatch("([^\n]*)\n") do
         local output_line = line
         if output_line:match("^%s*#%s*line%s") then output_line = "" end
         output[#output + 1] = output_line .. "\n"
     end
-    if not terminated then
+    if terminated then
+        output[#output] = nil
+    else
         output[#output] = output[#output]:sub(1, -2)
     end
     return table.concat(output)
@@ -513,7 +514,7 @@ local function prepare_shadow(unit, snapshot, config)
     local source, err = read_file(unit.source)
     if not source then return nil, err end
     local label = join(snapshot.source_root, unit.relative)
-    local shadow = M.strip_line_directives(source, label)
+    local shadow = M.strip_line_directives(source)
     local ok
     ok, err = write_file(shadow_source, shadow)
     if not ok then return nil, err end
@@ -544,6 +545,7 @@ local function prepare_shadow(unit, snapshot, config)
     local result = {
         object = shadow_object,
         source = source,
+        source_path = shadow_source,
         label = label,
         original_text = original_text,
         shadow_text = shadow_text,
@@ -582,7 +584,8 @@ local function shadow_for(unit, original_symbol, snapshot, config)
         shadow.shadow_text:sub(first, last) then
         return nil, "normal and shadow function bytes differ"
     end
-    return shadow.object, shadow_symbol, shadow.source, shadow.label
+    return shadow.object, shadow_symbol, shadow.source, shadow.label,
+        shadow.source_path
 end
 
 local function addr2line(object, address, config, section)
@@ -695,15 +698,16 @@ local function map_frame(frame, snapshot, config)
         return nil, "provider offset falls outside the generated function"
     end
 
-    local shadow_object, shadow_symbol, source, label = shadow_for(
+    local shadow_object, shadow_symbol, source, label, shadow_source
+    shadow_object, shadow_symbol, source, label, shadow_source = shadow_for(
         unit, original_symbol, snapshot, config)
     if not shadow_object then return nil, shadow_symbol end
     local generated_path, generated_line = addr2line(shadow_object,
         shadow_symbol.address + delta, config, ".text")
     if not generated_line then return nil, "shadow addr2line failed" end
-    if generated_path ~= label then
-        return nil, "shadow symbolization did not resolve to the saved " ..
-            "generated C"
+    if generated_path ~= shadow_source then
+        return nil, "shadow symbolization did not resolve to the verified " ..
+            "shadow C"
     end
     local context, context_err = M.source_context(source, generated_line,
         config.context_radius)
