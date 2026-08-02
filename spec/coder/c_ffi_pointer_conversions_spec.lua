@@ -218,10 +218,18 @@ describe("unsafe C object-pointer conversion code generation", function()
                 end
             ]])
 
-            assert.matches(
-                "((ffi_const_callback_pointer)"
-                    .. "(ffi_get_mutable_pointer()))",
-                csrc, 1, true)
+            local pointer_tmp = assert(csrc:match(
+                "ffi_mutable_callback_pointer (_tmp_%d+)"
+                    .. " = ffi_get_mutable_pointer%(%);"))
+            local capture = "ffi_mutable_callback_pointer " .. pointer_tmp
+                .. " = ffi_get_mutable_pointer();"
+            local capture_at = assert(csrc:find(capture, 1, true))
+            local rebase_at = assert(csrc:find(
+                "_base = restorestack(L, _base_off);",
+                capture_at + #capture, true))
+            local converted_call = "ffi_accept_const_pointer("
+                .. "((ffi_const_callback_pointer)(" .. pointer_tmp .. ")))"
+            assert(csrc:find(converted_call, rebase_at + 1, true))
 
             local ok, err = h.call("test", [[
                 assert(test.nested_callback_pointer() == 1)

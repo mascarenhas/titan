@@ -15,6 +15,15 @@ local function with_header(contents, fn)
     return table.unpack(results)
 end
 
+local function c_function_body(csrc, name)
+    return assert(csrc:match(
+        "[^\n]*" .. name .. "%b()%s*(%b{})"), name)
+end
+
+local function native_body(csrc, name)
+    return c_function_body(csrc, "test_" .. name .. "_titan")
+end
+
 local FIELD_PROJECTION_HEADER = [[
     typedef struct ffi_projection_inner {
         int leaf;
@@ -77,6 +86,8 @@ describe("C FFI code generation", function()
     after_each(function()
         os.remove("test.o")
         os.remove("test.so")
+        os.remove("test.a")
+        os.remove("test.lua")
         if not h.verbose then os.remove("test.c") end
         os.execute("rm -rf test.so.dSYM")
     end)
@@ -1268,6 +1279,107 @@ describe("C FFI code generation", function()
             ]], [[
                 assert(test.sum() == 23)
             ]])
+        end)
+    end)
+
+    it("rebases the Lua stack after direct and pointer foreign calls", function()
+        with_header([[
+            typedef struct TValue TValue;
+            typedef const int ffi_const_int;
+            typedef void (*ffi_void_callback)(void);
+            typedef ffi_const_int (*ffi_scalar_callback)(void);
+            typedef void (*ffi_value_callback)(TValue *);
+
+            static void ffi_direct_void(void) {}
+            static ffi_const_int ffi_direct_scalar(void) { return 42; }
+            static void ffi_touch_value(TValue *value) { (void)value; }
+
+            static ffi_void_callback ffi_void_pointer = ffi_direct_void;
+            static ffi_scalar_callback ffi_scalar_pointer =
+                ffi_direct_scalar;
+            static ffi_value_callback ffi_value_pointer = ffi_touch_value;
+        ]], function(header)
+            local csrc = h.compile_and_read_c([[
+                local c = foreign import "]] .. header .. [["
+
+                direct_init: integer = 0
+                pointer_init: integer = 0
+
+                function direct_void(): nil
+                    c.ffi_direct_void()
+                    return nil
+                end
+
+                function direct_scalar(): integer
+                    return c.ffi_direct_scalar() as integer
+                end
+
+                function pointer_void(): nil
+                    c.ffi_void_pointer()
+                    return nil
+                end
+
+                function pointer_scalar(): integer
+                    return c.ffi_scalar_pointer() as integer
+                end
+
+                function direct_anchor(): value
+                    local item: c.TValue = nil
+                    c.ffi_touch_value(item)
+                    return item
+                end
+
+                function pointer_anchor(): value
+                    local item: c.TValue = nil
+                    c.ffi_value_pointer(item)
+                    return item
+                end
+
+                do
+                    direct_init = c.ffi_direct_scalar() as integer
+                    pointer_init = c.ffi_scalar_pointer() as integer
+                end
+            ]])
+
+            local rebase = "_base = restorestack(L, _base_off);"
+            local function assert_rebased(name, call_pattern)
+                local body = native_body(csrc, name)
+                local saved = assert(body:find(
+                    "ptrdiff_t _base_off = savestack(L, _base);", 1, true),
+                    name)
+                local call = assert(body:find(call_pattern, saved))
+                local restored = assert(body:find(rebase, call, true))
+                assert.is_true(saved < call and call < restored, name)
+                return body, restored
+            end
+
+            assert_rebased("direct_void", "ffi_direct_void%(%)")
+            assert_rebased("direct_scalar", "ffi_direct_scalar%(%)")
+            assert_rebased("pointer_void", "_tmp_%d+%(%);")
+            assert_rebased("pointer_scalar", "= _tmp_%d+%(%);")
+
+            for _, case in ipairs({
+                { "direct_anchor", "ffi_touch_value%([^;]*%);" },
+                { "pointer_anchor", "_tmp_%d+%([^;]*%);" },
+            }) do
+                local body, restored = assert_rebased(case[1], case[2])
+                local anchored = assert(body:find(
+                    "restorestack(L, _base_off)", restored + #rebase, true))
+                assert.is_true(restored < anchored, case[1])
+            end
+
+            local init = c_function_body(
+                csrc, "test_titanentry_module_initializer")
+            local base = assert(init:find("StkId _base = L->top.p;", 1, true))
+            local baseoff = assert(init:find(
+                "ptrdiff_t _base_off = savestack(L, _base);", base, true))
+            local direct = assert(init:find("ffi_direct_scalar%(%)", baseoff))
+            local direct_rebase = assert(init:find(rebase, direct, true))
+            local pointer = assert(init:find("= _tmp_%d+%(%);", direct_rebase))
+            local pointer_rebase = assert(init:find(rebase, pointer, true))
+            assert.is_true(base < baseoff and baseoff < direct)
+            assert.is_true(direct < direct_rebase and direct_rebase < pointer)
+            assert.is_true(pointer < pointer_rebase)
         end)
     end)
 
