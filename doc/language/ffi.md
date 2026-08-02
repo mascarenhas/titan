@@ -85,8 +85,9 @@ GC-bearing, like Titan `value`.
 Foreign modules contain three categories of members:
 
 * C functions become callable members. This includes ordinary prototypes and
-  header-defined `static` functions. C variadic functions such as
-  `printf`/`snprintf` accept extra arguments after their fixed parameters.
+  header-defined function bodies, whether `static`, `extern inline`, or bare
+  `inline`. C variadic functions such as `printf`/`snprintf` accept extra
+  arguments after their fixed parameters.
 * C variables and supported object-like `#define` constants become C values.
   Recognized forms include integer-constant expressions, typed dereferenced
   accessors such as the common `errno` expansion, and fully expanded outer

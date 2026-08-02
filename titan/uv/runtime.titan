@@ -68,9 +68,7 @@ local function check_status(status: integer, operation: string,
 end
 
 local function contains_nul(source: string): boolean
-  if #source == 0 then return false end
-  local bytes = source as const *ffi.titan_ffi_unsigned_char
-  return cstring.memchr(bytes, 0, #source as cstring.size_t) ~= nil
+  return cstring.strlen(source) ~= (#source as cstring.size_t)
 end
 
 local function checked_text(source: string, operation: string,
