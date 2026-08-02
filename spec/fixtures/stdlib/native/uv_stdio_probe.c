@@ -152,6 +152,17 @@ static int setup_socket_stdout(void) {
   return 0;
 }
 
+static void make_raw(struct termios *attributes) {
+  attributes->c_iflag &=
+    ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
+  attributes->c_oflag &= ~OPOST;
+  attributes->c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+  attributes->c_cflag &= ~(CSIZE | PARENB);
+  attributes->c_cflag |= CS8;
+  attributes->c_cc[VMIN] = 1;
+  attributes->c_cc[VTIME] = 0;
+}
+
 static int setup_tty(int master_target) {
   struct termios attributes;
   char *slave_name;
@@ -171,7 +182,7 @@ static int setup_tty(int master_target) {
     goto error;
   if (tcgetattr(slave, &attributes) != 0)
     goto error;
-  cfmakeraw(&attributes);
+  make_raw(&attributes);
   if (tcsetattr(slave, TCSANOW, &attributes) != 0)
     goto error;
 

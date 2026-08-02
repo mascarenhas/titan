@@ -1,4 +1,5 @@
 local fs_support = require "spec.support.fs_test_support"
+local lfs = require "lfs"
 
 local FS_CASES = [==[
 local async = import "async"
@@ -157,6 +158,7 @@ function start_paths(root: string, target: string,
     fs.mkdir(tree)
     fs.mkdir(sub)
     fs.mkdir(cwd)
+    fs.write_file(cwd .. "/marker", "cwd")
     fs.write_file(first, "abc\0def")
 
     local info = fs.stat(first)
@@ -214,7 +216,11 @@ function start_paths(root: string, target: string,
     local original = fs.pwd()
     do
       fs.chdir(cwd)
-      check(fs.pwd() == cwd, "chdir did not change pwd")
+      local changed = fs.pwd()
+      check(changed ~= original and fs.read_file("marker") == "cwd",
+            "chdir did not select the requested directory")
+      check(fs.read_file(changed .. "/marker") == "cwd",
+            "pwd did not identify the current directory")
     finally
       fs.chdir(original)
     end
@@ -223,6 +229,7 @@ function start_paths(root: string, target: string,
     fs.unlink(link)
     fs.unlink(target)
     fs.unlink(renamed)
+    fs.unlink(cwd .. "/marker")
     fs.rmdir(sub)
     fs.rmdir(tree)
     fs.rmdir(cwd)
@@ -301,10 +308,12 @@ assert(cases.result() == %q, cases.result())
 
     it("covers metadata, path operations, locations, tmpname, and errors",
     function()
-        local target = root .. "/target.dat"
-        local link = root .. "/target-link"
+        local aliased_root = workspace .. "/data-alias"
+        assert.truthy(lfs.link(root, aliased_root, true))
+        local target = aliased_root .. "/target.dat"
+        local link = aliased_root .. "/target-link"
         local source = table.concat({
-            "local root = " .. string.format("%q", root),
+            "local root = " .. string.format("%q", aliased_root),
             "local target = root .. '/target.dat'",
             "local link = root .. '/target-link'",
             "local lfs = require 'lfs'",
@@ -317,8 +326,8 @@ assert(cases.result() == %q, cases.result())
         }, "\n")
         run(source, {
             exec_prefix = {
-                "HOME=" .. root,
-                "TMPDIR=" .. root,
+                "HOME=" .. aliased_root,
+                "TMPDIR=" .. aliased_root,
             },
         })
     end)
