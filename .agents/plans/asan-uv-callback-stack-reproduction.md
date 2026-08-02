@@ -19,11 +19,29 @@ before/after sanitizer reproduction.
 - Base/master head: `029228a19c646224bc50ae39480bb799246c924a`
 - PR #45 is merged into that base and supplies the generated-C diagnostic
   snapshots/reporting used by the reproduction.
-- The `_base` fix and focused generated-C regression are being published in a
-  new follow-up pull request from this branch.
+- Fix commit: `6a05d289c89f56ac7003e38ee592720a03c5decd`.
+- Draft follow-up PR: <https://github.com/mascarenhas/titan/pull/46>.
 - No callback-invariant diagnostic has been added.
-- No reproduction container has been created. A read-only `podman ps -a` was
-  the only Podman operation in the compacted conversation.
+- The persistent Ubuntu 24.04 reproduction container is
+  `titan-asan-ffi-20260801`; it retains separate unfixed and fixed generated-C
+  diagnostic snapshots.
+
+## Local before/after result
+
+The exact broad filesystem case reproduced the unfixed `master` failure on
+attempt 6, after five clean attempts. It reported the same invalid write
+address (`0x530000005a38`) and the same leading frames and source locations as
+the confirmed CI failure. The captured failing log is
+`unfixed-exact-6.log`; its SHA-256 is
+`3c3e2bfb2184cb3eda55ca6973018f3c2f91c4db75b7a398b062b53e1918d104`.
+
+The same container was then overlaid with the committed feature-branch tree.
+The source and installed copies of `titan-compiler/coder.lua` both had SHA-256
+`f49b317a06e19563d005746803399eb7158666a62249137615d079582afe1091`.
+After rebuilding and publishing a fresh sanitized standard provider, the exact
+formerly failing case passed 20 consecutive attempts without an ASan or UBSan
+report. Fixed attempt 6 was clean, directly crossing the point at which the
+unfixed sequence failed.
 
 Merged PR #45 adds generated-C diagnostic snapshots/reporting and parks the
 broad flaky filesystem sanitizer case with a `--filter-out`. Retain that work
@@ -343,19 +361,31 @@ preamble ordering.
 
 ## Validation and delivery
 
-After a confirmed local before/after result:
+Completed validation:
 
-- Run focused coder tests for foreign-call code generation.
+- `spec/coder/c_ffi_spec.lua`: 33 successes, 0 failures, 0 errors.
+- `spec/coder/c_ffi_pointer_conversions_spec.lua`: 6 successes, 0 failures,
+  0 errors in the prepared container after updating its affected generated-C
+  assertion.
+- Unfixed exact ASan case: 5 passes followed by the matching failure on
+  attempt 6.
+- Fixed exact ASan case: 20 consecutive passes in the rebuilt same container.
+- `git diff --check` passed before the fix commit.
+- The initial push CI passed the regular Linux, sanitizer, and library-uv/fs
+  jobs. Its compiler-heavy job exposed only the stale nested callback-pointer
+  generated-C assertion corrected above.
+- Final adversarial review found no concrete actionable issue.
+
+Remaining delivery checks:
+
 - Run `spec/stdlib/uv_native_handles_spec.lua` and
   `spec/libuv_build_spec.lua`.
-- Repeat the formerly failing ASan case several times in the same Ubuntu
-  container; then repeat the original timer/fs shard several times if time
-  permits.
+- Repeat the original timer/fs shard if ordinary Linux CI leaves a relevant
+  coverage gap.
 - Run the strongest practical ordinary Linux suite because compiler codegen is
   affected (`make test` is preferred when feasible).
 - Check the complete diff for exploratory changes; the maintainer explicitly
   asked that earlier speculative fixes remain undone.
-- Perform an adversarial review before the final PR update.
 - Open and update a new follow-up PR; PR #45 is already merged.
 - No ABI bump and no macOS run.
 
