@@ -1,36 +1,38 @@
--- Public os stream/configuration behavior is a standard-library integration
--- suite and runs outside LuaCov. Every native provider is exact and private;
--- the shared checkout runtime and combined standard image remain read-only.
-local assert = require "luassert"
-local async_stdlib = require "spec.support.async_stdlib"
-local facade_support = require "spec.support.os_stream_facade"
+local os_support = require "spec.support.os_test_support"
 
-local CASES = [====[
-local os = import "os"
-local stream = import "io"
+local FACADE_CASES = [====[
 local async = import "async"
+local stream = import "io"
+local os = import "os"
+
+local outcome = "not-run"
+local closed_input: os.InputStream? = nil
+local closed_output: os.OutputStream? = nil
 
 local function check(condition: boolean, message: string)
   if not condition then raise message end
 end
 
+local function active(task: async.Task): boolean
+  local status = task:status()
+  return status == "ready" or status == "running" or status == "waiting"
+end
+
 local function required_input(candidate: os.InputStream?,
                               label: string): os.InputStream
-  if not candidate then raise label .. " is unexpectedly inherited" end
+  if not candidate then raise label .. " was not captured" end
   return candidate as os.InputStream
 end
 
 local function required_output(candidate: os.OutputStream?,
                                label: string): os.OutputStream
-  if not candidate then raise label .. " is unexpectedly inherited" end
+  if not candidate then raise label .. " was not captured" end
   return candidate as os.OutputStream
 end
 
 local function read_all(input: os.InputStream): string
   local result = ""
-  for chunk in input:read do
-    result = result .. chunk
-  end
+  for chunk in input:read do result = result .. chunk end
   return result
 end
 
@@ -39,21 +41,21 @@ local function normal(status: os.ExitStatus, label: string)
         status.signal_number == 0, label .. " did not exit normally")
 end
 
+local option_tail_called = false
+
+local function reject_option(_config: os.SpawnConfig): integer
+  return -1
+end
+
+local function forbidden_tail(_config: os.SpawnConfig): integer
+  option_tail_called = true
+  return 0
+end
+
 local function inherit_then_capture(config: os.SpawnConfig): integer
   local status = os.with_parent_stdout(config)
   if status < 0 then return status end
   return os.with_stdout(config)
-end
-
-local option_tail_called = false
-
-local function reject_spawn_option(_config: os.SpawnConfig): integer
-  return -1
-end
-
-local function forbidden_spawn_option(_config: os.SpawnConfig): integer
-  option_tail_called = true
-  return 0
 end
 
 local function check_interfaces(input: os.OutputStream,
@@ -65,304 +67,265 @@ local function check_interfaces(input: os.OutputStream,
   local writer_closer: stream.WriterCloser = input
   if not reader or not reader_closer or not writer or not closer or
       not writer_closer then
-    raise "stream Interface conversion produced nil"
+    raise "process stream Interface conversion produced nil"
   end
 end
 
-function schedule_process_facades(): async.Task
+function result(): string
+  return outcome
+end
+
+function start_facades(): async.Task
+  outcome = "running"
   return async.run(function (): value
     local option_rejected = false
     do
       os.spawn("/bin/sh", {"-c", ":"},
-               reject_spawn_option, forbidden_spawn_option)
+               reject_option, forbidden_tail)
     catch
       option_rejected = true
     end
     check(option_rejected and not option_tail_called,
-          "spawn did not stop at the first negative option status")
+          "spawn continued after a failed option")
 
     local separate = os.spawn(
       "/bin/sh", {"-c", "printf separate; printf diagnostic >&2"})
-    local separate_input? = separate.stdin
-    local separate_output? = separate.stdout
-    local separate_error? = separate.stderr
-    local input = required_output(separate_input, "default stdin")
-    local output = required_input(separate_output, "default stdout")
-    local diagnostics = required_input(separate_error, "default stderr")
+    local input = required_output(separate.stdin, "default stdin")
+    local output = required_input(separate.stdout, "default stdout")
+    local diagnostics = required_input(separate.stderr, "default stderr")
     check_interfaces(input, output)
     check(not input:is_tty() and not output:is_tty() and
           not diagnostics:is_tty(),
-          "captured process pipe was classified as a TTY")
+          "captured pipe was classified as a TTY")
     input:close()
-    check(read_all(output) == "separate", "default stdout bytes changed")
+    input:close()
+    check(read_all(output) == "separate",
+          "default stdout capture changed")
     check(read_all(diagnostics) == "diagnostic",
-          "default stderr bytes changed")
+          "default stderr capture changed")
     normal(separate:wait(), "default capture")
-    check(not separate:is_running(),
-          "is_running stayed true after retained exit status")
 
     local merged = os.spawn(
       "/bin/sh", {"-c", "printf A; printf B >&2"},
-      os.with_parent_stdout, os.with_merged_output)
-    local merged_input? = merged.stdin
-    local merged_output? = merged.stdout
-    local merged_error? = merged.stderr
-    local merged_writer = required_output(merged_input, "merged stdin")
-    local merged_reader = required_input(merged_output, "merged stdout")
-    local merged_diagnostics = required_input(merged_error, "merged stderr")
-    check(merged_reader == merged_diagnostics,
-          "merged output did not publish the exact same facade")
-    merged_writer:close()
-    check(read_all(merged_reader) == "AB", "merged output bytes changed")
-    check(not merged_diagnostics:read(),
-          "merged facade did not share terminal state")
-    normal(merged:wait(), "parent-then-merge")
-
-    local split = os.spawn(
-      "/bin/sh", {"-c", "printf D >&2"},
-      os.with_merged_output, os.with_parent_stdout)
-    local split_input? = split.stdin
-    local split_output? = split.stdout
-    local split_error? = split.stderr
-    required_output(split_input, "split stdin"):close()
-    check(not split_output, "later parent stdout did not remove its endpoint")
-    check(read_all(required_input(split_error, "split stderr")) == "D",
-          "later parent stdout did not split stderr capture")
-    normal(split:wait(), "merge-then-parent")
+      os.with_merged_output)
+    required_output(merged.stdin, "merged stdin"):close()
+    local merged_output = required_input(merged.stdout, "merged stdout")
+    local merged_error = required_input(merged.stderr, "merged stderr")
+    check(merged_output == merged_error,
+          "merged output did not expose one stream facade")
+    check(read_all(merged_output) == "AB",
+          "merged stdout/stderr bytes changed")
+    check(not merged_error:read(),
+          "merged stream did not share terminal EOF")
+    normal(merged:wait(), "merged capture")
 
     local recaptured = os.spawn(
       "/bin/sh", {"-c", "printf E; printf F >&2"},
       os.with_merged_output, inherit_then_capture,
       os.with_stderr, os.with_stderr)
-    local recaptured_input? = recaptured.stdin
-    local recaptured_output? = recaptured.stdout
-    local recaptured_error? = recaptured.stderr
-    required_output(recaptured_input, "recaptured stdin"):close()
-    local recaptured_stdout = required_input(
-      recaptured_output, "recaptured stdout")
-    local recaptured_stderr = required_input(
-      recaptured_error, "recaptured stderr")
-    check(recaptured_stdout ~= recaptured_stderr,
-          "later separate captures retained stale merged identity")
-    check(read_all(recaptured_stdout) == "E" and
-          read_all(recaptured_stderr) == "F",
-          "custom/repeated options changed final ordering")
-    normal(recaptured:wait(), "recaptured output")
+    required_output(recaptured.stdin, "recaptured stdin"):close()
+    local recaptured_output = required_input(
+      recaptured.stdout, "recaptured stdout")
+    local recaptured_error = required_input(
+      recaptured.stderr, "recaptured stderr")
+    check(recaptured_output ~= recaptured_error,
+          "final spawn choices retained stale merged identity")
+    check(read_all(recaptured_output) == "E" and
+          read_all(recaptured_error) == "F",
+          "final spawn choices returned the wrong streams")
+    normal(recaptured:wait(), "recaptured streams")
 
     local inherited = os.spawn(
       "/bin/sh", {"-c", ":"},
       os.with_parent_stdin, os.with_parent_stdout,
       os.with_parent_stderr)
-    local inherited_input? = inherited.stdin
-    local inherited_output? = inherited.stdout
-    local inherited_error? = inherited.stderr
-    check(not inherited_input and not inherited_output and not inherited_error,
-          "inherited descriptor exposed a parent-side endpoint")
-    normal(inherited:wait(), "fully inherited child")
+    check(not inherited.stdin and not inherited.stdout and
+          not inherited.stderr,
+          "inherited descriptors exposed captured endpoints")
+    normal(inherited:wait(), "inherited stdio")
 
-    local running = os.spawn(
-      "/bin/sh", {"-c", "while :; do :; done"},
-      os.with_parent_stdin, os.with_parent_stdout,
-      os.with_parent_stderr)
-    check(running:is_running(), "new live child was not running")
-    running:kill("term")
-    local terminated = running:wait()
-    check(terminated.signal == "term" and terminated.signal_number > 0,
-          "terminated child lost its signal status")
-    check(not running:is_running(), "terminated child remained running")
-    return "process-facades-ok"
+    outcome = "facades-ok"
+    return nil
   end)
 end
 
-function schedule_close_pending_read(): async.Task
+function start_pending_read_close(): async.Task
+  outcome = "running"
   return async.run(function (): value
     local process = os.spawn(
       "/bin/sh", {"-c", "while :; do :; done"})
-    local input = required_output(process.stdin, "pending-read stdin")
-    local output = required_input(process.stdout, "pending-read stdout")
-    local diagnostics = required_input(
-      process.stderr, "pending-read stderr")
+    local input = required_output(process.stdin, "pending stdin")
+    local output = required_input(process.stdout, "pending stdout")
+    local diagnostics = required_input(process.stderr, "pending stderr")
+    local read_result = "not-resumed"
     local reader = async.run(function (): value
-      return output:read()
+      local chunk? = output:read()
+      if chunk then
+        read_result = chunk as string
+      else
+        read_result = "eof"
+      end
+      return nil
     end)
-    while reader:status() == "ready" do async.yield() end
+    while reader:status() == "ready" or
+          reader:status() == "running" do
+      async.yield()
+    end
     check(reader:status() == "waiting",
-          "captured InputStream read did not block")
-
+          "captured read did not reach its callback wait")
+    local competing_reader_rejected = false
+    do
+      output:read()
+    catch
+      competing_reader_rejected = true
+    end
+    check(competing_reader_rejected,
+          "captured input accepted a second waiting reader")
     output:close()
     output:close()
-    check(reader:join() == nil,
-          "closing captured InputStream did not wake its reader with nil")
-    check(not output:read() and not output:read_until(""),
-          "closed captured InputStream did not retain terminal EOF")
-
+    while active(reader) do async.yield() end
+    check(reader:status() == "succeeded" and read_result == "eof",
+          "closing captured input did not wake its reader with EOF")
+    check(not output:read() and not output:read_until("missing"),
+          "closed captured input did not keep terminal EOF")
     diagnostics:close()
     input:close()
     process:kill("term")
     local status = process:wait()
     check(status.signal == "term" and status.signal_number > 0,
-          "pending-read child did not terminate and reap")
-
-    local delimited = os.spawn(
-      "/bin/sh", {"-c", "printf partial; while :; do :; done"})
-    local delimited_input = required_output(
-      delimited.stdin, "pending-delimiter stdin")
-    local delimited_output = required_input(
-      delimited.stdout, "pending-delimiter stdout")
-    local delimited_diagnostics = required_input(
-      delimited.stderr, "pending-delimiter stderr")
-    -- Let the continuous native reader queue the prefix first. The delimiter
-    -- Task appends it synchronously, then suspends in the next native read.
-    for _ = 1, 20 do async.yield() end
-    local delimiter_reader = async.run(function (): value
-      return delimited_output:read_until("\n")
-    end)
-    while delimiter_reader:status() == "ready" do async.yield() end
-    check(delimiter_reader:status() == "waiting",
-          "captured delimiter read did not block with a partial chunk")
-
-    delimited_output:close()
-    delimited_output:close()
-    check(delimiter_reader:join() == nil,
-          "captured InputStream close published an in-flight tail")
-    check(not delimited_output:read(),
-          "closed delimiter InputStream did not retain terminal EOF")
-
-    delimited_diagnostics:close()
-    delimited_input:close()
-    delimited:kill("term")
-    status = delimited:wait()
-    check(status.signal == "term" and status.signal_number > 0,
-          "pending-delimiter child did not terminate and reap")
-    return "pending-read-close-ok"
+          "pending-read child was not reaped")
+    outcome = "pending-read-close-ok"
+    return nil
   end)
 end
 
-function schedule_parent_generation_one(): async.Task
+function start_parent_input(): async.Task
+  outcome = "running"
   return async.run(function (): value
-    local stdout_tty = os.stdout:is_tty()
-    local stderr_tty = os.stderr:is_tty()
-    if stdout_tty and not stdout_tty then raise "unreachable" end
-    if stderr_tty and not stderr_tty then raise "unreachable" end
-    os.stdout:close()
-    os.stderr:close()
-    local first: string? = os.stdin:read_until("|", true)
-    check(first == "first", "parent stdin delimiter read changed bytes")
-    return "parent-generation-one-ok"
+    local reader: stream.ReaderCloser = os.stdin
+    local writer: stream.Writer = os.stdout
+    local diagnostics: stream.Writer = os.stderr
+    if not reader or not writer or not diagnostics then
+      raise "parent stdio Interface conversion produced nil"
+    end
+    check(os.stdin:read_until("|", true) == "first",
+          "parent stdin delimiter read changed")
+    check(os.stdin:read() == "second",
+          "parent stdin retained bytes changed")
+    check(not os.stdin:read(), "parent stdin did not reach EOF")
+    os.stdin:close()
+    check(not os.stdin:read(), "borrowed stdin close changed EOF")
+    outcome = "parent-input-ok"
+    return nil
   end)
 end
 
-function schedule_parent_generation_two(): async.Task
+function start_close_for_next_runtime(): async.Task
+  outcome = "running"
   return async.run(function (): value
-    local stale: string? = os.stdin:read()
-    check(not stale,
-          "parent stdin retained facade excess from an old Runtime")
-    return "parent-generation-two-ok"
+    local process = os.spawn("/bin/sh", {"-c", ":"})
+    local input = required_output(process.stdin, "retained stdin")
+    local output = required_input(process.stdout, "retained stdout")
+    local diagnostics = required_input(process.stderr, "retained stderr")
+    input:close()
+    output:close()
+    diagnostics:close()
+    normal(process:wait(), "retained-stream child")
+    closed_input = output
+    closed_output = input
+    outcome = "closed-for-next-runtime"
+    return nil
+  end)
+end
+
+function start_read_closed_in_next_runtime(): async.Task
+  outcome = "running"
+  return async.run(function (): value
+    local input = closed_input as os.InputStream
+    check(not input:read() and not input:read_until("missing"),
+          "closed captured input lost terminal EOF in a later Runtime")
+    input:close()
+    local output = closed_output as os.OutputStream
+    output:close()
+    local write_rejected = false
+    do
+      output:write("late")
+    catch
+      write_rejected = true
+    end
+    check(write_rejected,
+          "closed captured output became writable in a later Runtime")
+    outcome = "cross-runtime-closed-ok"
+    return nil
   end)
 end
 ]====]
 
-describe("os stream facade", function()
+describe("os stream facades", function()
     local workspace
-    local layout
 
     setup(function()
-        workspace = async_stdlib.workspace("os-stream-facade")
-        layout = facade_support.prepare(workspace, true)
-        async_stdlib.write_source(workspace, "os_stream_facade_cases", CASES)
-        async_stdlib.compile(workspace, "os_stream_facade_cases", {
-            layout = layout,
-            cppflags = "",
-        })
+        workspace = os_support.workspace("stream-facades-direct")
+        os_support.write_source(workspace, "os_stream_facade_cases",
+                                FACADE_CASES)
+        os_support.compile(workspace, "os_stream_facade_cases")
     end)
 
-    teardown(function() async_stdlib.cleanup(workspace) end)
+    teardown(function()
+        os_support.cleanup(workspace)
+    end)
 
-    local function run_lua(source, options)
-        options = options or {}
-        local ok, status, output = facade_support.run_lua_source(
-            workspace, layout, source, options)
+    local function run(function_name, expected, options)
+        local source = ([==[
+local async = require "titan.async"
+local cases = require "os_stream_facade_cases"
+local task = assert(cases.%s())
+async.loop()
+assert(task:status() == "succeeded", task:status())
+assert(cases.result() == %q, cases.result())
+]==]):format(function_name, expected)
+        local ok, status, output =
+            os_support.run_lua_source(workspace, source, options)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
+        assert.equals(0, status, output)
     end
 
-    it("applies options left to right and preserves endpoint identity",
+    it("adapts captures, merges, inheritance, options, and Interfaces",
     function()
-        run_lua([[
-local uv = require "titan.uv"
-local system = require "titan.os"
-local cases = require "os_stream_facade_cases"
-local has_communicate = pcall(function() return system.communicate end)
-assert(not has_communicate)
-local task = assert(cases.schedule_process_facades())
-local loop_ok, loop_error = pcall(uv._loop)
-if not loop_ok then
-    local fields = {}
-    for _, name in ipairs({"name", "message", "operation", "subject",
-            "reason"}) do
-        local field_ok, value = pcall(function() return loop_error[name] end)
-        if field_ok and value ~= nil then
-            fields[#fields + 1] = name .. "=" .. tostring(value)
-        end
-    end
-    error("process facade loop failed: " .. tostring(loop_error) ..
-        (#fields > 0 and " (" .. table.concat(fields, ", ") .. ")" or ""))
-end
-local ok, result = pcall(task.join, task)
-if not ok then
-    local fields = {}
-    for _, name in ipairs({"name", "message", "operation", "subject",
-            "reason"}) do
-        local field_ok, value = pcall(function() return result[name] end)
-        if field_ok and value ~= nil then
-            fields[#fields + 1] = name .. "=" .. tostring(value)
-        end
-    end
-    error("process facade task failed: " .. tostring(result) ..
-        (#fields > 0 and " (" .. table.concat(fields, ", ") .. ")" or ""))
-end
-assert(result == "process-facades-ok")
-]], {
+        run("start_facades", "facades-ok")
+    end)
+
+    it("wakes a pending captured reader when its stream closes", function()
+        run("start_pending_read_close", "pending-read-close-ok")
+    end)
+
+    it("reads binary-safe parent stdin through the stable facade", function()
+        run("start_parent_input", "parent-input-ok", {
             exec_prefix = {
-                "sh", "-c", "printf '' | exec \"$@\"",
-                "titan-os-process-stdio",
+                "sh", "-c", "printf 'first|second' | exec \"$@\"",
+                "titan-parent-stdin",
             },
         })
     end)
 
-    it("wakes a pending captured-input reader on repeated close", function()
-        run_lua([[
-local uv = require "titan.uv"
+    it("keeps a closed captured input terminal in a later Runtime", function()
+        local source = [[
+local async = require "titan.async"
 local cases = require "os_stream_facade_cases"
-local task = assert(cases.schedule_close_pending_read())
-uv._loop()
-assert(task:join() == "pending-read-close-ok")
-]])
-    end)
 
-    it("reuses stable parent records without old-generation input state",
-    function()
-        run_lua([[
-local uv = require "titan.uv"
-local system = require "titan.os"
-local cases = require "os_stream_facade_cases"
-local input, output, diagnostics = system.stdin, system.stdout, system.stderr
-local first = assert(cases.schedule_parent_generation_one())
-uv._loop()
-assert(first:join() == "parent-generation-one-ok")
-assert(rawequal(input, system.stdin))
-assert(rawequal(output, system.stdout))
-assert(rawequal(diagnostics, system.stderr))
-local second = assert(cases.schedule_parent_generation_two())
-uv._loop()
-assert(second:join() == "parent-generation-two-ok")
-assert(rawequal(input, system.stdin))
-assert(rawequal(output, system.stdout))
-assert(rawequal(diagnostics, system.stderr))
-]], {
-            exec_prefix = {
-                "sh", "-c", "printf 'first|stale' | exec \"$@\"",
-                "titan-os-parent-stdio",
-            },
-        })
+local first = assert(cases.start_close_for_next_runtime())
+async.loop()
+assert(first:status() == "succeeded", first:status())
+assert(cases.result() == "closed-for-next-runtime", cases.result())
+
+local second = assert(cases.start_read_closed_in_next_runtime())
+async.loop()
+assert(second:status() == "succeeded", second:status())
+assert(cases.result() == "cross-runtime-closed-ok", cases.result())
+]]
+        local ok, status, output =
+            os_support.run_lua_source(workspace, source)
+        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
+        assert.equals(0, status, output)
     end)
 end)

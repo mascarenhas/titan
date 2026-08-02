@@ -452,21 +452,14 @@ local function check(condition: boolean, message: string)
   if not condition then raise message end
 end
 
-local function check_parent_stream(query: () -> boolean,
-                                   operation: string)
-  do
-    local tty = query()
-    check(tty or not tty, "static parent stdio query failed")
-  catch
-    if error is async.Error then
-      local failure = error as async.Error
-      check(failure.name == "EINVAL" and
-            failure.operation == operation,
-            "static parent stdio rejection changed")
-    else
-      raise
-    end
-  end
+local function active(task: async.Task): boolean
+  local status = task:status()
+  return status == "ready" or status == "running" or status == "waiting"
+end
+
+local function check_parent_stream(query: () -> boolean)
+  local tty = query()
+  check(tty or not tty, "static parent stdio query failed")
 end
 
 local function listen_available(): (net.Server, integer)
@@ -533,6 +526,7 @@ function main(args: {string}): integer
           "static GC resume or count behavior failed")
 
     local server, port = listen_available()
+    local peer_result = "not-run"
     local peer = async.run(function (): value
       local connection = server:accept()
       check(connection:read_until("\n") == "ping\n",
@@ -540,7 +534,8 @@ function main(args: {string}): integer
       connection:write("pong\n")
       connection:shutdown()
       connection:close()
-      return "peer-ready"
+      peer_result = "peer-ready"
+      return nil
     end)
 
     local connection = net.connect("127.0.0.1", port)
@@ -549,8 +544,9 @@ function main(args: {string}): integer
     check(connection:read_until("\n") == "pong\n",
           "static net client received the wrong payload")
     connection:close()
-    check(peer:join() == "peer-ready",
-          "static async peer returned the wrong result")
+    while active(peer) do timer.yield() end
+    check(peer:status() == "succeeded" and peer_result == "peer-ready",
+          "static async peer Task failed")
     server:close()
 
     timer.sleep(0)
@@ -562,14 +558,11 @@ function main(args: {string}): integer
           "static fs stat changed size or file classification")
 
     check_parent_stream(
-      function (): boolean return system.stdin:is_tty() end,
-      "parent.stdin.classify")
+      function (): boolean return system.stdin:is_tty() end)
     check_parent_stream(
-      function (): boolean return system.stdout:is_tty() end,
-      "parent.stdout.classify")
+      function (): boolean return system.stdout:is_tty() end)
     check_parent_stream(
-      function (): boolean return system.stderr:is_tty() end,
-      "parent.stderr.classify")
+      function (): boolean return system.stderr:is_tty() end)
 
     local merged = titan_io.popen(
       "printf 'static-process-stdout'; " ..

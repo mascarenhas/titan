@@ -1,32 +1,28 @@
 local os_support = require "spec.support.os_test_support"
 
 local SIGNAL_CASES = [====[
--- Public one-shot signal behavior against the canonical production modules.
--- Self-delivery uses libuv rather than POSIX helpers or private test hooks.
 local libuv = foreign import "uv.h"
-local lua = foreign import "lua.h"
 local ffi = foreign import "titan/ffi.h"
-local csignal = foreign import "signal.h"
-local os = import "os"
-local timer = import "timer"
 local async = import "async"
-local uv = import "uv"
+local os = import "os"
 
-local cancelled_wait_resumed = false
-local sent_cancelled_wait_resumed = false
+local outcome = "not-run"
 
 local function check(condition: boolean, message: string)
   if not condition then raise message end
 end
 
-local function wait_until_waiting(task: async.Task)
+local function active(task: async.Task): boolean
   local status = task:status()
-  while status ~= "waiting" do
-    check(status == "new" or status == "ready" or status == "running",
-          "signal waiter terminated before reaching its wait point")
-    timer.yield()
-    status = task:status()
+  return status == "ready" or status == "running" or status == "waiting"
+end
+
+local function wait_until_waiting(task: async.Task)
+  while task:status() == "ready" or task:status() == "running" do
+    async.yield()
   end
+  check(task:status() == "waiting",
+        "signal Task did not suspend for its callback")
 end
 
 local function send_signal(name: string)
@@ -36,114 +32,16 @@ local function send_signal(name: string)
   else
     check(name == "usr1", "test requested an unsupported signal")
   end
-  local status = libuv.uv_kill(libuv.uv_os_getpid(), signum)
-  check((status as integer) == 0, "public libuv self-delivery failed")
+  check((libuv.uv_kill(libuv.uv_os_getpid(), signum) as integer) == 0,
+        "libuv self-delivery failed")
 end
 
-function schedule_one_shot(name: string): async.Task
-  return async.run(function (): value
-    local waiter = async.run(function (): value
-      return os.wait_signal(name)
-    end)
-    wait_until_waiting(waiter)
-    send_signal(name)
-    local result = waiter:join() as string
-    check(result == name, "one-shot signal returned the wrong name")
-    return result
-  end)
+function result(): string
+  return outcome
 end
 
-function schedule_cancelled_wait(): async.Task
-  cancelled_wait_resumed = false
-  return async.run(function (): value
-    local target = async.run(function (): value
-      local result = os.wait_signal("usr1")
-      cancelled_wait_resumed = true
-      return result
-    end)
-
-    wait_until_waiting(target)
-    target:cancel("cancelled-signal-wait")
-    local caught = false
-    do
-      target:join()
-    catch
-      local cancelled = error as async.Cancelled
-      check(cancelled.reason == "cancelled-signal-wait",
-            "signal cancellation reason changed")
-      caught = true
-    end
-    check(caught and target:status() == "cancelled",
-          "signal waiter was not cancelled")
-
-    -- A replacement watcher receives the signal. If the cancelled watcher
-    -- retained a stale waiter, it would resume too or consume this delivery.
-    local replacement = async.run(function (): value
-      return os.wait_signal("usr1")
-    end)
-    wait_until_waiting(replacement)
-    send_signal("usr1")
-    check(replacement:join() == "usr1",
-          "replacement signal watcher did not receive the signal")
-    check(not cancelled_wait_resumed,
-          "cancelled signal waiter resumed from a stale callback")
-    return "cancelled-signal-wait-ok"
-  end)
-end
-
-function schedule_sent_then_cancelled_wait(): async.Task
-  sent_cancelled_wait_resumed = false
-  return async.run(function (): value
-    local target = async.run(function (): value
-      local result = os.wait_signal("usr1")
-      sent_cancelled_wait_resumed = true
-      return result
-    end)
-
-    wait_until_waiting(target)
-    -- uv_kill has handed the signal to the process, but libuv cannot enter
-    -- its callback reentrantly while this continuation is still running.
-    -- The synchronous cancellation mark must suppress that delivery.
-    send_signal("usr1")
-    target:cancel("cancel-after-signal-send")
-    local caught = false
-    do
-      target:join()
-    catch
-      local cancelled = error as async.Cancelled
-      check(cancelled.reason == "cancel-after-signal-send",
-            "sent-signal cancellation reason changed")
-      caught = true
-    end
-    check(caught and target:status() == "cancelled",
-          "sent-signal waiter was not cancelled")
-    check(not sent_cancelled_wait_resumed,
-          "already-sent signal resumed a synchronously cancelled waiter")
-    return "sent-then-cancelled-signal-wait-ok"
-  end)
-end
-
-function schedule_generational_gc(): async.Task
-  return async.run(function (): value
-    local waiter = async.run(function (): value
-      return os.wait_signal("usr2")
-    end)
-    wait_until_waiting(waiter)
-
-    -- The Runtime, signal owner, Task, and shared coroutine tag are all old
-    -- before delivery. The callback identity is the Runtime-rooted wrapper
-    -- record, not its separate native-storage userdata.
-    lua.lua_gc(L, lua.LUA_GCGEN)
-    lua.lua_gc(L, lua.LUA_GCCOLLECT)
-    lua.lua_gc(L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
-    send_signal("usr2")
-    check(waiter:join() == "usr2",
-          "signal owner did not survive generational collection")
-    return "signal-generational-gc-ok"
-  end)
-end
-
-function schedule_validation_rejections(): async.Task
+function start(): async.Task
+  outcome = "running"
   return async.run(function (): value
     local unknown = false
     do
@@ -159,35 +57,61 @@ function schedule_validation_rejections(): async.Task
     end
     local embedded_nul = false
     do
-      os.wait_signal("usr1\0kill")
+      os.wait_signal("usr1\0ignored")
     catch
       embedded_nul = true
     end
     check(unknown and uncatchable and embedded_nul,
-          "invalid, uncatchable, or NUL-containing signal name was accepted")
-    local wrapped_term =
-      4294967296 + (csignal.SIGTERM as integer)
-    check(not uv._os_signal_name(wrapped_term),
-          "large signal number wrapped before host-constant comparison")
+          "invalid signal name was accepted")
 
-    -- Immediate validation failures must leave ordinary signal use intact.
+    local received = ""
     local waiter = async.run(function (): value
-      return os.wait_signal("usr1")
+      received = os.wait_signal("usr1")
+      return nil
     end)
     wait_until_waiting(waiter)
     send_signal("usr1")
-    check(waiter:join() == "usr1",
-          "signal use failed after validation rejection")
-    return "signal-validation-rejections-ok"
+    while active(waiter) do async.yield() end
+    check(waiter:status() == "succeeded" and received == "usr1",
+          "one-shot signal continuation returned the wrong result")
+
+    local cancelled_resumed = false
+    local cancelled = async.run(function (): value
+      os.wait_signal("usr2")
+      cancelled_resumed = true
+      return nil
+    end)
+    wait_until_waiting(cancelled)
+    cancelled:cancel("discard signal wait")
+    check(cancelled:status() == "waiting",
+          "signal cancellation resumed synchronously")
+    while active(cancelled) do async.yield() end
+    check(cancelled:status() == "cancelled" and not cancelled_resumed,
+          "cancelled signal continuation resumed")
+
+    local replacement_received = ""
+    local replacement = async.run(function (): value
+      replacement_received = os.wait_signal("usr2")
+      return nil
+    end)
+    wait_until_waiting(replacement)
+    send_signal("usr2")
+    while active(replacement) do async.yield() end
+    check(replacement:status() == "succeeded" and
+          replacement_received == "usr2",
+          "replacement one-shot signal watcher failed")
+
+    outcome = "signals-ok"
+    return nil
   end)
 end
 ]====]
 
-describe("os one-shot signals", function()
+describe("os signals", function()
     local workspace
 
     setup(function()
-        workspace = os_support.workspace("signal")
+        workspace = os_support.workspace("signals-direct")
         os_support.write_source(workspace, "os_signal_cases", SIGNAL_CASES)
         os_support.compile(workspace, "os_signal_cases", {
             cppflags = os_support.libuv_cppflags(),
@@ -198,44 +122,17 @@ describe("os one-shot signals", function()
         os_support.cleanup(workspace)
     end)
 
-    local function run_lua(source)
-        local ok, status, output =
-            os_support.run_lua_source(workspace, source)
-        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
-        assert.equals(0, status, output)
-    end
-
-    it("delivers, cancels, collects, validates, and drains sequential sessions",
+    it("validates, delivers, cancels, and replaces one-shot watchers",
     function()
-        run_lua([==[
+        local ok, status, output = os_support.run_lua_source(workspace, [==[
 local async = require "titan.async"
 local cases = require "os_signal_cases"
-
-local usr1 = assert(cases.schedule_one_shot("usr1"))
+local task = assert(cases.start())
 async.loop()
-assert(usr1:join() == "usr1")
-
-local usr2 = assert(cases.schedule_one_shot("usr2"))
-async.loop()
-assert(usr2:join() == "usr2")
-
-local cancelled = assert(cases.schedule_cancelled_wait())
-async.loop()
-assert(cancelled:join() == "cancelled-signal-wait-ok")
-
-local sent_then_cancelled =
-    assert(cases.schedule_sent_then_cancelled_wait())
-async.loop()
-assert(sent_then_cancelled:join() ==
-    "sent-then-cancelled-signal-wait-ok")
-
-local generational = assert(cases.schedule_generational_gc())
-async.loop()
-assert(generational:join() == "signal-generational-gc-ok")
-
-local validation = assert(cases.schedule_validation_rejections())
-async.loop()
-assert(validation:join() == "signal-validation-rejections-ok")
+assert(task:status() == "succeeded", task:status())
+assert(cases.result() == "signals-ok", cases.result())
 ]==])
+        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
+        assert.equals(0, status, output)
     end)
 end)

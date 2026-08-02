@@ -1,114 +1,27 @@
--- Process, pipe, and request controls are deliberately separate from their
--- TCP counterparts.  They share callback shapes, not resource semantics.
-local record ProcessControl
+local process_fcntl = foreign import "fcntl.h"
+local process_unistd = foreign import "unistd.h"
+
+-- Stream reads are the one multi-shot operation in this contributor. A
+-- stream therefore buffers callback chunks and has at most one suspended
+-- reader. Every write independently owns one uv_write_t; libuv supplies the
+-- native stream ordering.
+local union StdioNative
+  pipe: owned *libuv.uv_pipe_t
+  tty: owned *libuv.uv_tty_t
+end
+
+record uv_stdio_t
+  local native: StdioNative
+  local alloc_callback: (uv_stdio_t, libuv.size_t,
+                         ffi.titan_ffi_void_ptr) -> ()
+  local read_callback: (uv_stdio_t, integer) -> ()
+  local buffer: Bytes?
   local runtime: Runtime
-  local generation: integer
-  local lifecycle: integer
-  local owner: uv_process_t?
-  local linked: boolean
-  local next_control: ProcessControl?
-  local previous_control: ProcessControl?
-  local stdin_pipe: uv_pipe_t?
-  local stdout_pipe: uv_pipe_t?
-  local stderr_pipe: uv_pipe_t?
-  local stdin_stdio: uv_stdio_t?
-  local stdout_stdio: uv_stdio_t?
-  local stderr_stdio: uv_stdio_t?
-  local spawn_config: SpawnConfigState?
-  local spawn_operation: ProcessOperation?
-  local pending_failure: Error?
-  local wait_task: Task?
-  local wait_epoch: integer
-  local exit_seen: boolean
-  local exit_status: integer
-  local term_signal: integer
-  local callback_aborted: boolean
-  local shutdown_started: boolean
-  local kill_sent: boolean
-  local grace_owner: uv_process_grace_t?
-  local grace_fired: boolean
-  local grace_callback_aborted: boolean
-end
-
-local record StreamControl
-  local runtime: Runtime
-  local generation: integer
-  local lifecycle: integer
-  local readable: boolean
-  local writable: boolean
-  local operation: string
-  local subject: string
-  local pipe_owner: uv_pipe_t?
-  local tty_owner: uv_tty_t?
-  local process: ProcessControl?
-  local parent: uv_stdio_t?
-  local callback_aborted: boolean
-  local read_active: boolean
-  local read_terminal: integer
-  local read_error: Error?
-  local read_waiter: Task?
-  local read_epoch: integer
-  local read_bytes: Bytes?
-  local read_queue: {ByteChunk}
-  local output_head: ProcessOperation?
-  local output_tail: ProcessOperation?
-  local output_current: ProcessOperation?
-  local close_waiter: ProcessOperation?
-  local shutdown_requested: boolean
-  local close_started: boolean
-end
-
-local union SpawnBinding
-  capture: uv_stdio_t
-  inherit: uv_stdio_t
-end
-
-local record SpawnSlot
-  local child: SpawnBinding
-  local parent: uv_stdio_t?
-end
-
-local record SpawnConfigState
-  local runtime: Runtime
-  local generation: integer
-  local process: uv_process_t
-  local consumed: boolean
-  local failure_status: integer
-  local failure_operation: string
-  local stdin_slot: SpawnSlot?
-  local stdout_slot: SpawnSlot?
-  local stderr_slot: SpawnSlot?
-  local stdin_candidate: uv_stdio_t?
-  local stdout_candidate: uv_stdio_t?
-  local stderr_candidate: uv_stdio_t?
-  local merged_parent_candidate: uv_stdio_t?
-  local merged_child_candidate: uv_stdio_t?
-end
-
-local record ProcessOperation
-  local kind: integer
-  local task: Task?
-  local request: Request?
-  local process: uv_process_t?
-  local stream: StreamControl?
-  local file: Text?
-  local arguments: {Text}?
-  local spawn_config: SpawnConfigState?
-  local copied_bytes: Bytes?
-  local prepared_buffer: Buffer?
-  local owner: uv_pipe_write_t?
-  local next_operation: ProcessOperation?
-  local previous_operation: ProcessOperation?
-  local linked: boolean
-end
-
-local record ProcessRequestControl
-  local runtime: Runtime
-  local lifecycle: integer
-  local owner: uv_pipe_write_t?
-  local operation: ProcessOperation
-  local next_control: ProcessRequestControl?
-  local previous_control: ProcessRequestControl?
+  local waiter: Task?
+  local chunks: {string}
+  local chunk_head: integer
+  local read_error: value
+  local root_index: integer
 end
 
 local record ProcessExitResult
@@ -116,2591 +29,955 @@ local record ProcessExitResult
   local signal_number: integer
 end
 
-record uv_pipe_t
-  local handle?: owned *libuv.uv_pipe_t
-  local main_thread: value
-  local dispatcher: (uv_pipe_t, integer, integer, libuv.size_t,
-                     ffi.titan_ffi_void_ptr) -> ()
-  local metadata: StreamControl
-  local buffer: nil
-end
-
-local record uv_tty_t
-  local handle?: owned *libuv.uv_tty_t
-  local main_thread: value
-  local dispatcher: (uv_tty_t, integer, integer, libuv.size_t,
-                     ffi.titan_ffi_void_ptr) -> ()
-  local metadata: StreamControl
-  local buffer: nil
-end
-
-local union StdioHandle
-  pipe: uv_pipe_t
-  tty: uv_tty_t
-end
-
-record uv_stdio_t
-  local stream: StdioHandle
+record uv_process_t
+  local handle: owned *libuv.uv_process_t
+  local exit_callback: (uv_process_t, integer, integer) -> ()
   local runtime: Runtime
-  local generation: integer
-  local readable: boolean
-  local writable: boolean
-  local process: ProcessControl?
-  local parent_descriptor: integer
+  local stdin: uv_stdio_t?
+  local stdout: uv_stdio_t?
+  local stderr: uv_stdio_t?
+  local waiter: Task?
+  local result: ProcessExitResult?
+  local root_index: integer
+end
+
+local record SpawnSlot
+  local child: uv_stdio_t
+  local parent: uv_stdio_t?
 end
 
 record uv_spawn_config
-  local state: SpawnConfigState
+  local runtime: Runtime
+  local options: owned *libuv.uv_process_options_t
+  local stdio: owned libuv.uv_stdio_container_t[]
+  local stdin: SpawnSlot?
+  local stdout: SpawnSlot?
+  local stderr: SpawnSlot?
+  local consumed: boolean
 end
 
-local record uv_pipe_write_t
-  local handle?: owned *libuv.uv_write_t
-  local main_thread: value
-  local dispatcher: (uv_pipe_write_t, integer, integer, libuv.size_t,
-                     ffi.titan_ffi_void_ptr) -> ()
-  local metadata: ProcessRequestControl
-  local buffer: Buffer?
+-- Yield payloads.  Each dispatch method is the small main-thread adapter for
+-- one callback-taking libuv operation.
+local record StreamReadCall
+  local stream: uv_stdio_t
 end
 
--- The process grace timer is intentionally not a generic Runtime timer.  It
--- is owned by one ProcessControl and is drained only by process shutdown.
-local record uv_process_grace_t
-  local handle?: owned *libuv.uv_timer_t
-  local main_thread: value
-  local dispatcher: (uv_process_grace_t, integer, integer, libuv.size_t,
-                     ffi.titan_ffi_void_ptr) -> ()
-  local metadata: ProcessControl
-  local buffer: nil
+local record StreamWriteCall
+  local stream: uv_stdio_t
+  local data: string
 end
 
--- Persistent process and pipe handles cross the private os/uv bridge. All
--- native callback owners keep the same exact five slots consumed by
--- titan_uv.c.
-record uv_process_t
-  local handle?: owned *libuv.uv_process_t
-  local main_thread: value
-  local dispatcher: (uv_process_t, integer, integer, libuv.size_t,
-                     ffi.titan_ffi_void_ptr) -> ()
-  local metadata: ProcessControl
-  local buffer: nil
+local record StreamCloseCall
+  local stream: uv_stdio_t
 end
 
-local function remember_spawn_config_failure(state: SpawnConfigState,
-                                             status: integer,
-                                             operation: string): integer
-  if status < 0 and state.failure_status >= 0 then
-    state.failure_status = status
-    state.failure_operation = operation
+local record ProcessWaitCall
+  local process: uv_process_t
+end
+
+local record uv_stream_write_t
+  local handle: owned *libuv.uv_write_t
+  local callback: (uv_stream_write_t, integer) -> ()
+  local data: string
+  local buffer: owned *libuv.uv_buf_t
+end
+
+-- os.stdin/out/err are stable facade records, but every Runtime owns fresh
+-- duplicated native handles. The facade compares the wrapper records
+-- themselves when rebinding to a newly initialized Runtime.
+local parent_runtime: Runtime? = nil
+local cached_parent_stdin: uv_stdio_t? = nil
+local cached_parent_stdout: uv_stdio_t? = nil
+local cached_parent_stderr: uv_stdio_t? = nil
+
+local function stream_native(stdio: uv_stdio_t): *libuv.uv_stream_t
+  case stdio.native
+  when pipe: native then
+    return (native as *libuv.uv_pipe_t) as *libuv.uv_stream_t
+  when tty: native then
+    return (native as *libuv.uv_tty_t) as *libuv.uv_stream_t
   end
-  return status
+  raise "invalid stdio native handle"
 end
 
-local function validate_spawn_config(state: SpawnConfigState): integer
-  local task = ordinary_task()
-  if state.failure_status < 0 then return state.failure_status end
-  if state.consumed or state.runtime ~= task.runtime or
-      state.generation ~= task.runtime.generation then
-    return libuv.UV_EINVAL
-  end
-  return 0
+local function stream_handle(stdio: uv_stdio_t): *libuv.uv_handle_t
+  return stream_native(stdio) as *libuv.uv_handle_t
 end
 
-local function validate_spawn_config_ready(
-    state: SpawnConfigState): integer
-  if not state.stdin_slot or not state.stdout_slot or
-      not state.stderr_slot then
-    return remember_spawn_config_failure(
-        state, libuv.UV_EINVAL, "process.spawn.config")
-  end
-  return 0
-end
-
-local function new_pipe_stdio(state: SpawnConfigState,
-                              pipe: uv_pipe_t,
-                              readable: boolean,
-                              writable: boolean): uv_stdio_t
-  return uv_stdio_t.new(
-      StdioHandle.pipe(pipe), state.runtime, state.generation,
-      readable, writable, state.process.metadata, -1)
-end
-
-local function stdio_pipe(stdio: uv_stdio_t): uv_pipe_t?
-  case stdio.stream
-  when pipe: pipe then return pipe
-  when tty then return nil
-  else
-    raise internal_error("stdio.handle.variant")
-  end
-end
-
-local function optional_stdio_pipe(stdio: uv_stdio_t?): uv_pipe_t?
-  if not stdio then return nil end
-  return stdio_pipe(stdio)
-end
-
-local function captured_spawn_slot(stdio: uv_stdio_t): SpawnSlot
-  return SpawnSlot.new(SpawnBinding.capture(stdio), stdio)
-end
-
-local function inherited_spawn_slot(stdio: uv_stdio_t): SpawnSlot
-  return SpawnSlot.new(SpawnBinding.inherit(stdio), nil)
-end
-
-local function spawn_binding_stdio(binding: SpawnBinding): uv_stdio_t
-  case binding
-  when capture: stdio then return stdio
-  when inherit: stdio then return stdio
-  else
-    raise internal_error("process.spawn.binding")
-  end
-end
-
-local function spawn_binding_is_capture(binding: SpawnBinding): boolean
-  case binding
-  when capture then return true
-  when inherit then return false
-  else
-    raise internal_error("process.spawn.binding")
-  end
-end
-
-local function spawn_output_is_merged(state: SpawnConfigState): boolean
-  local stdout? = state.stdout_slot
-  local merged? = state.merged_parent_candidate
-  if not stdout or not merged then return false end
-  return stdout == state.stderr_slot and stdout.parent == merged
-end
-
-local function ensure_spawn_stdin(state: SpawnConfigState): integer
-  if state.stdin_candidate then return 0 end
-  local pipe, _pointer = allocate_pipe_owner(
-      state.runtime, state.process.metadata, false, true,
-      "process.stdin", "Process stdin")
-  state.stdin_candidate = new_pipe_stdio(state, pipe, false, true)
-  local status = initialize_captured_pipe(state.runtime, pipe)
-  if status < 0 then
-    discard_stream_storage(pipe.metadata)
-    return remember_spawn_config_failure(
-        state, status, "process.stdin.init")
-  end
-  return 0
-end
-
-local function ensure_spawn_stdout(state: SpawnConfigState): integer
-  if state.stdout_candidate then return 0 end
-  local pipe, _pointer = allocate_pipe_owner(
-      state.runtime, state.process.metadata, true, false,
-      "process.stdout", "Process stdout")
-  state.stdout_candidate = new_pipe_stdio(state, pipe, true, false)
-  local status = initialize_captured_pipe(state.runtime, pipe)
-  if status < 0 then
-    discard_stream_storage(pipe.metadata)
-    return remember_spawn_config_failure(
-        state, status, "process.stdout.init")
-  end
-  return 0
-end
-
-local function ensure_spawn_stderr(state: SpawnConfigState): integer
-  if state.stderr_candidate then return 0 end
-  local pipe, _pointer = allocate_pipe_owner(
-      state.runtime, state.process.metadata, true, false,
-      "process.stderr", "Process stderr")
-  state.stderr_candidate = new_pipe_stdio(state, pipe, true, false)
-  local status = initialize_captured_pipe(state.runtime, pipe)
-  if status < 0 then
-    discard_stream_storage(pipe.metadata)
-    return remember_spawn_config_failure(
-        state, status, "process.stderr.init")
-  end
-  return 0
-end
-
-local function close_unadopted_spawn_descriptor(state: SpawnConfigState,
-                                                descriptor: libuv.uv_file,
-                                                subject: string)
-  if descriptor < 0 then return end
-  local status = close_descriptor(descriptor)
-  if status < 0 and not state.runtime.fatal then
-    promote_fatal(state.runtime,
-        make_error(status, "process.output.descriptor.close", subject), "")
-  end
-end
-
-local function ensure_spawn_merged_output(state: SpawnConfigState): integer
-  if state.merged_parent_candidate and
-      state.merged_child_candidate then return 0 end
-
-  local parent, _parent_pointer = allocate_pipe_owner(
-      state.runtime, state.process.metadata, true, false,
-      "process.output", "Process merged output")
-  local child, _child_pointer = allocate_pipe_owner(
-      state.runtime, state.process.metadata, false, false,
-      "process.output.child", "Process merged child output")
-  state.merged_parent_candidate =
-    new_pipe_stdio(state, parent, true, false)
-  state.merged_child_candidate =
-    new_pipe_stdio(state, child, false, true)
-
-  local status = initialize_captured_pipe(state.runtime, parent)
-  if status < 0 then
-    discard_stream_storage(parent.metadata)
-    discard_stream_storage(child.metadata)
-    return remember_spawn_config_failure(
-        state, status, "process.output.parent.init")
-  end
-  status = initialize_captured_pipe(state.runtime, child)
-  if status < 0 then
-    discard_stream_storage(child.metadata)
-    return remember_spawn_config_failure(
-        state, status, "process.output.child.init")
-  end
-
-  local descriptors: libuv.uv_file[2]
-  descriptors[0] = -1 as libuv.uv_file
-  descriptors[1] = -1 as libuv.uv_file
-  status = libuv.uv_pipe(descriptors, libuv.UV_NONBLOCK_PIPE, 0)
-  if status < 0 then
-    return remember_spawn_config_failure(
-        state, status, "process.output.pipe")
-  end
-
-  status = libuv.uv_pipe_open(
-      parent.handle as owned *libuv.uv_pipe_t, descriptors[0])
-  if status >= 0 then
-    descriptors[0] = -1 as libuv.uv_file
-    parent.metadata.lifecycle = PIPE_OPEN
-    status = libuv.uv_pipe_open(
-        child.handle as owned *libuv.uv_pipe_t, descriptors[1])
-    if status >= 0 then
-      descriptors[1] = -1 as libuv.uv_file
-      child.metadata.lifecycle = PIPE_OPEN
-      status = libuv.uv_stream_set_blocking(
-          stream_native_handle(child.metadata), 1)
-    end
-  end
-  close_unadopted_spawn_descriptor(
-      state, descriptors[0], "merged parent")
-  close_unadopted_spawn_descriptor(
-      state, descriptors[1], "merged child")
-  if status < 0 then
-    return remember_spawn_config_failure(
-        state, status, "process.output.open")
-  end
-  return 0
-end
-
-local function prepare_inherited_stdio(state: SpawnConfigState,
-                                       descriptor: integer,
-                                       readable: boolean,
-                                       writable: boolean):
-                                       (integer, uv_stdio_t?)
-  local prepared: uv_stdio_t? = nil
-  do
-    prepared = initialize_parent_stdio(
-        state.runtime, descriptor, readable, writable)
-  catch
-    if error is Error then
-      local failure = error as Error
-      return remember_spawn_config_failure(
-          state, failure.code, failure.operation), nil
-    end
-    raise
-  end
-  return 0, prepared
-end
-
-function _os_spawn_config_new(): uv_spawn_config
-  local task = ordinary_task()
-  local process, _process_pointer = allocate_process_owner(task.runtime)
-  local state: SpawnConfigState = {
-    runtime = task.runtime,
-    generation = task.runtime.generation,
-    process = process,
-    consumed = false,
-    failure_status = 0,
-    failure_operation = "",
-    stdin_slot = nil,
-    stdout_slot = nil,
-    stderr_slot = nil,
-    stdin_candidate = nil,
-    stdout_candidate = nil,
-    stderr_candidate = nil,
-    merged_parent_candidate = nil,
-    merged_child_candidate = nil,
-  }
-  process.metadata.spawn_config = state
-  return uv_spawn_config.new(state)
-end
-
-function _os_spawn_config_with_stdin(config: uv_spawn_config): integer
-  local state = config.state
-  local status = validate_spawn_config(state)
-  if status < 0 then return status end
-  status = ensure_spawn_stdin(state)
-  if status >= 0 then
-    state.stdin_slot = captured_spawn_slot(
-        state.stdin_candidate as uv_stdio_t)
-  end
-  return status
-end
-
-function _os_spawn_config_with_stdout(config: uv_spawn_config): integer
-  local state = config.state
-  local status = validate_spawn_config(state)
-  if status < 0 then return status end
-  local was_merged = spawn_output_is_merged(state)
-  status = ensure_spawn_stdout(state)
-  if status >= 0 and was_merged then
-    status = ensure_spawn_stderr(state)
-  end
-  if status >= 0 then
-    state.stdout_slot = captured_spawn_slot(
-        state.stdout_candidate as uv_stdio_t)
-    if was_merged then
-      state.stderr_slot = captured_spawn_slot(
-          state.stderr_candidate as uv_stdio_t)
-    end
-  end
-  return status
-end
-
-function _os_spawn_config_with_stderr(config: uv_spawn_config): integer
-  local state = config.state
-  local status = validate_spawn_config(state)
-  if status < 0 then return status end
-  local was_merged = spawn_output_is_merged(state)
-  if was_merged then
-    status = ensure_spawn_stdout(state)
-  end
-  if status >= 0 then status = ensure_spawn_stderr(state) end
-  if status >= 0 then
-    if was_merged then
-      state.stdout_slot = captured_spawn_slot(
-          state.stdout_candidate as uv_stdio_t)
-    end
-    state.stderr_slot = captured_spawn_slot(
-        state.stderr_candidate as uv_stdio_t)
-  end
-  return status
-end
-
-function _os_spawn_config_with_parent_stdin(
-    config: uv_spawn_config): integer
-  local state = config.state
-  local status = validate_spawn_config(state)
-  if status < 0 then return status end
-  local parent: uv_stdio_t? = nil
-  status, parent = prepare_inherited_stdio(state, 0, true, false)
-  if status >= 0 then
-    state.stdin_slot = inherited_spawn_slot(parent as uv_stdio_t)
-  end
-  return status
-end
-
-function _os_spawn_config_with_parent_stdout(
-    config: uv_spawn_config): integer
-  local state = config.state
-  local status = validate_spawn_config(state)
-  if status < 0 then return status end
-  local was_merged = spawn_output_is_merged(state)
-  local parent: uv_stdio_t? = nil
-  status, parent = prepare_inherited_stdio(state, 1, false, true)
-  if status >= 0 and was_merged then
-    status = ensure_spawn_stderr(state)
-  end
-  if status >= 0 then
-    state.stdout_slot = inherited_spawn_slot(parent as uv_stdio_t)
-    if was_merged then
-      state.stderr_slot = captured_spawn_slot(
-          state.stderr_candidate as uv_stdio_t)
-    end
-  end
-  return status
-end
-
-function _os_spawn_config_with_parent_stderr(
-    config: uv_spawn_config): integer
-  local state = config.state
-  local status = validate_spawn_config(state)
-  if status < 0 then return status end
-  local was_merged = spawn_output_is_merged(state)
-  local parent: uv_stdio_t? = nil
-  status, parent = prepare_inherited_stdio(state, 2, false, true)
-  if status >= 0 and was_merged then
-    status = ensure_spawn_stdout(state)
-  end
-  if status >= 0 then
-    if was_merged then
-      state.stdout_slot = captured_spawn_slot(
-          state.stdout_candidate as uv_stdio_t)
-    end
-    state.stderr_slot = inherited_spawn_slot(parent as uv_stdio_t)
-  end
-  return status
-end
-
-function _os_spawn_config_with_merged_output(
-    config: uv_spawn_config): integer
-  local state = config.state
-  local status = validate_spawn_config(state)
-  if status < 0 then return status end
-  status = ensure_spawn_merged_output(state)
-  if status >= 0 then
-    local child = state.merged_child_candidate as uv_stdio_t
-    local parent = state.merged_parent_candidate as uv_stdio_t
-    local merged = SpawnSlot.new(SpawnBinding.inherit(child), parent)
-    state.stdout_slot = merged
-    state.stderr_slot = merged
-  end
-  return status
-end
-
-function _os_spawn_config_close(config: uv_spawn_config)
-  local state = config.state
-  if state.consumed then return end
-  local task = running_task()
-  if state.runtime ~= task.runtime or
-      state.generation ~= task.runtime.generation then
-    raise "SpawnConfig belongs to a stale libuv Runtime"
-  end
-  cleanup_begin()
-  do
-    local request = new_spawn_config_close_request(state)
-    state.consumed = true
-    coroutine.yield(request, UV_TAG)
-  finally
-    cleanup_end()
-  end
-end
-
-function _os_spawn_config_error(config: uv_spawn_config, status: integer)
-  local operation = config.state.failure_operation
-  if #operation == 0 then operation = "process.spawn.option" end
-  _os_spawn_config_close(config)
-  raise make_error(status, operation, nil)
-end
-
-function _os_process_spawn_with_config(file: string, args: {string},
-                                       config: uv_spawn_config): uv_process_t
-  local state = config.state
-  local status = validate_spawn_config(state)
-  if status < 0 then
-    _os_spawn_config_error(config, status)
-  end
-  status = validate_spawn_config_ready(state)
-  if status < 0 then
-    _os_spawn_config_error(config, status)
-  end
-  local request = new_process_spawn_request(file, args, state)
-  state.consumed = true
-  return coroutine.yield(request, UV_TAG)
-end
-
-function _os_process_spawn(file: string, args: {string}): uv_process_t
-  local config = _os_spawn_config_new()
-  local status = _os_spawn_config_with_stdin(config)
-  if status >= 0 then status = _os_spawn_config_with_stdout(config) end
-  if status >= 0 then status = _os_spawn_config_with_stderr(config) end
-  if status < 0 then _os_spawn_config_error(config, status) end
-  return _os_process_spawn_with_config(file, args, config)
-end
-
-function _os_process_stdin(process: uv_process_t): uv_stdio_t?
-  validate_process(process, "access streams for", true)
-  return process.metadata.stdin_stdio
-end
-
-function _os_process_stdout(process: uv_process_t): uv_stdio_t?
-  validate_process(process, "access streams for", true)
-  return process.metadata.stdout_stdio
-end
-
-function _os_process_stderr(process: uv_process_t): uv_stdio_t?
-  validate_process(process, "access streams for", true)
-  return process.metadata.stderr_stdio
-end
-
-function _os_process_pipes(process: uv_process_t):
-                           (uv_pipe_t, uv_pipe_t, uv_pipe_t)
-  validate_process(process, "access streams for", true)
-  local stdin = process.metadata.stdin_pipe
-  local stdout = process.metadata.stdout_pipe
-  local stderr = process.metadata.stderr_pipe
-  if not stdin or not stdout or not stderr then
-    raise "Process does not capture every standard stream"
-  end
-  return stdin as uv_pipe_t, stdout as uv_pipe_t, stderr as uv_pipe_t
-end
-
-function _os_process_wait(process: uv_process_t): (integer, integer)
-  ordinary_task()
-  validate_process(process, "wait for", true)
-  local control = process.metadata
-  if control.wait_task then
-    raise "Process already has a waiting Task"
-  end
-  local request = new_process_request(PROCESS_WAIT, process, nil, false)
-  local result: ProcessExitResult = coroutine.yield(request, UV_TAG)
-  return result.code, result.signal_number
-end
-
-function _os_process_kill(process: uv_process_t, signal: string)
-  ordinary_task()
-  validate_process(process, "signal", false)
-  local validated = copy_text(signal, "process.kill", signal)
-  local signum = signal_number(validated.source)
-  if signum <= 0 then
-    raise "unsupported process signal name '" .. signal .. "'"
-  end
-  local status = libuv.uv_process_kill(
-      process.handle as owned *libuv.uv_process_t, signum)
-  if status < 0 and
-      status ~= libuv.UV_ESRCH then
-    raise make_error(status, "process.kill", signal)
-  end
-end
-
-function _os_process_is_running(process: uv_process_t): boolean
-  if process.metadata.exit_seen then return false end
-  ordinary_task()
-  validate_process(process, "inspect", true)
-  return not process.metadata.exit_seen
-end
-
-function _os_stream_write(stream: uv_pipe_t, data: string)
-  ordinary_task()
-  validate_process_stream(stream, false, true, "write to", false)
-  local control = stream.metadata
-  if control.shutdown_requested or control.close_started or
-      control.lifecycle == PIPE_CLOSING or
-      control.lifecycle == PIPE_CLOSED then
-    raise "cannot write after Process stdin close"
-  end
-  if #data == 0 then return end
-  if #data > climits.UINT_MAX then
-    raise "process stdin data exceeds the portable libuv buffer limit"
-  end
-  -- Writes own their bytes before entering the shared FIFO; later cancellation
-  -- can detach a Task without invalidating submitted native storage.
-  local bytes = copy_bytes(data)
-  local request = new_process_request(PROCESS_WRITE_STDIN,
-      process_stream_owner(stream), stream, false)
-  local operation: ProcessOperation = request.subject
-  operation.copied_bytes = bytes
-  coroutine.yield(request, UV_TAG)
-end
-
-function _os_stream_close(stream: uv_pipe_t)
-  local control = stream.metadata
-  -- Idempotence belongs to the public Closer contract. A terminal close must
-  -- remain a no-op even after its owning Runtime generation is stale.
-  if control.readable and
-      (control.shutdown_requested or control.close_started or
-       control.lifecycle == PIPE_CLOSING or
-       control.lifecycle == PIPE_CLOSED) then
-    control.read_queue = {}
-    control.read_bytes = nil
-    control.read_error = nil
-    control.read_terminal = TCP_READ_EOF
-    return
-  end
-  if control.shutdown_requested or control.close_started or
-      control.lifecycle == PIPE_CLOSING or
-      control.lifecycle == PIPE_CLOSED then return end
-  if control.readable then
-    validate_process_stream(stream, true, false, "close", true)
-  else
-    validate_process_stream(stream, false, true, "close", true)
-  end
-  cleanup_begin()
-  do
-    -- Like File and TCP close, admit cleanup even when cancellation is
-    -- already pending. The shield keeps the physical pipe close attached
-    -- until its callback before the saved cancellation resumes unwinding.
-    -- Construct the cleanup Request before publishing the monotonic flag.
-    -- Once visible, cancellation cannot revoke the ordered pipe close.
-    local request = new_process_request(PROCESS_CLOSE_STREAM,
-        process_stream_owner(stream), stream, true)
-    if control.readable then
-      control.read_queue = {}
-      control.read_bytes = nil
-      control.read_error = nil
-      control.read_terminal = TCP_READ_EOF
-    end
-    control.shutdown_requested = true
-    coroutine.yield(request, UV_TAG)
-  finally
-    cleanup_end()
-  end
-end
-
-function _os_stream_read(stream: uv_pipe_t): string?
-  return process_read(stream)
-end
-
-function _os_stream_validate_read(stream: uv_pipe_t)
-  ordinary_task()
-  validate_read_stream(stream)
-end
-
-function _os_stream_read_error_is(stream: uv_pipe_t,
-                                  candidate: value): boolean
-  validate_read_stream(stream)
-  local control = stream.metadata
-  if control.read_terminal ~= TCP_READ_ERROR or not control.read_error then
-    return false
-  end
-  return candidate == control.read_error
-end
-
-function _os_parent_stdin(): uv_stdio_t
-  local task = ordinary_task()
-  return initialize_parent_stdio(task.runtime, 0, true, false)
-end
-
-function _os_parent_stdout(): uv_stdio_t
-  local task = ordinary_task()
-  return initialize_parent_stdio(task.runtime, 1, false, true)
-end
-
-function _os_parent_stderr(): uv_stdio_t
-  local task = ordinary_task()
-  return initialize_parent_stdio(task.runtime, 2, false, true)
-end
-
-function _os_stdio_kind(stdio: uv_stdio_t): string
-  validate_stdio(stdio, false, false, "inspect", true)
-  case stdio.stream
-  when tty then return "tty"
-  when pipe then return "stream"
-  else
-    raise internal_error("stdio.handle.variant")
-  end
-end
-
-function _os_stdio_generation(stdio: uv_stdio_t): integer
-  validate_stdio(stdio, false, false, "inspect", true)
-  return stdio.generation
-end
-
-function _os_stdio_is_tty(stdio: uv_stdio_t): boolean
-  validate_stdio(stdio, false, false, "inspect", true)
-  case stdio.stream
-  when tty then return true
-  when pipe then return false
-  else
-    raise internal_error("stdio.handle.variant")
-  end
-end
-
-function _os_stdio_read(stdio: uv_stdio_t): string?
-  ordinary_task()
-  validate_stdio(stdio, true, false, "read from", true)
-  if stdio.process then
-    local pipe = stdio_pipe(stdio)
-    if not pipe then raise internal_error("process.stdio.not-pipe") end
-    return _os_stream_read(pipe)
-  end
-  return parent_stream_read(stdio)
-end
-
-function _os_stdio_validate_read(stdio: uv_stdio_t)
-  ordinary_task()
-  validate_stdio(stdio, true, false, "read from", true)
-  if stdio.process then
-    local pipe = stdio_pipe(stdio)
-    if not pipe then raise internal_error("process.stdio.not-pipe") end
-    _os_stream_validate_read(pipe)
-  end
-end
-
-function _os_stdio_read_error_is(stdio: uv_stdio_t,
-                                 candidate: value): boolean
-  validate_stdio(stdio, true, false, "read from", true)
-  if stdio.process then
-    local pipe = stdio_pipe(stdio)
-    if not pipe then return false end
-    return _os_stream_read_error_is(pipe, candidate)
-  end
-  local control = stdio_stream_control(stdio)
-  if control.read_terminal ~= TCP_READ_ERROR or not control.read_error then
-    return false
-  end
-  return candidate == control.read_error
-end
-
-function _os_stdio_write(stdio: uv_stdio_t, data: string)
-  ordinary_task()
-  validate_stdio(stdio, false, true, "write to", false)
-  if stdio.process then
-    local pipe = stdio_pipe(stdio)
-    if not pipe then raise internal_error("process.stdio.not-pipe") end
-    _os_stream_write(pipe, data)
-    return
-  end
-  if #data == 0 then return end
-  if #data > climits.UINT_MAX then
-    raise "stdio write data exceeds the portable libuv buffer limit"
-  end
-  local control = stdio_stream_control(stdio)
-  local bytes = copy_bytes(data)
-  local request = new_stdio_stream_request(
-      PROCESS_WRITE_STDIN, control)
-  local operation: ProcessOperation = request.subject
-  operation.copied_bytes = bytes
-  coroutine.yield(request, UV_TAG)
-end
-
-function _os_stdio_close(stdio: uv_stdio_t)
-  -- Main-process stdio is a borrowed stable facade; closing it is a no-op.
-  if not stdio.process then return end
-  local pipe = stdio_pipe(stdio)
-  if not pipe then raise internal_error("process.stdio.not-pipe") end
-  _os_stream_close(pipe)
-end
-
-local function new_process_control(runtime: Runtime): ProcessControl
-  local control: ProcessControl = {
-    runtime = runtime,
-    generation = runtime.generation,
-    lifecycle = PROCESS_ALLOCATED,
-    owner = nil,
-    linked = false,
-    next_control = nil,
-    previous_control = nil,
-    stdin_pipe = nil,
-    stdout_pipe = nil,
-    stderr_pipe = nil,
-    stdin_stdio = nil,
-    stdout_stdio = nil,
-    stderr_stdio = nil,
-    spawn_config = nil,
-    spawn_operation = nil,
-    pending_failure = nil,
-    wait_task = nil,
-    wait_epoch = 0,
-    exit_seen = false,
-    exit_status = 0,
-    term_signal = 0,
-    callback_aborted = false,
-    shutdown_started = false,
-    kill_sent = false,
-    grace_owner = nil,
-    grace_fired = false,
-    grace_callback_aborted = false,
-  }
-  return control
-end
-
-local function allocate_process_owner(runtime: Runtime):
-                                      (uv_process_t,
-                                       ffi.titan_ffi_void_ptr)
-  local handle = libuv.uv_process_t.new()
-  local control = new_process_control(runtime)
-  local owner: uv_process_t = {
-    handle = handle,
-    main_thread = main_thread,
-    dispatcher = process_dispatch,
-    metadata = control,
+local function new_stdio(
+    native: StdioNative,
+    alloc_callback: (uv_stdio_t, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> (),
+    read_callback: (uv_stdio_t, integer) -> (),
+    runtime: Runtime): uv_stdio_t
+  return uv_stdio_t.new {
+    native = native,
+    alloc_callback = alloc_callback,
+    read_callback = read_callback,
     buffer = nil,
-  }
-  -- The explicit cast anchors the wrapper while deriving its callback
-  -- navigation pointer, before ProcessControl publishes the owner.
-  local pointer = owner as ffi.titan_ffi_void_ptr
-  control.owner = owner
-  link_process_control(runtime, control)
-  return owner, pointer
-end
-
-local function new_stream_control(runtime: Runtime,
-                                  process: ProcessControl?,
-                                  readable: boolean,
-                                  writable: boolean,
-                                  operation: string,
-                                  subject: string): StreamControl
-  local control: StreamControl = {
     runtime = runtime,
-    generation = runtime.generation,
-    lifecycle = PIPE_ALLOCATED,
-    readable = readable,
-    writable = writable,
-    operation = operation,
-    subject = subject,
-    pipe_owner = nil,
-    tty_owner = nil,
-    process = process,
-    parent = nil,
-    callback_aborted = false,
-    read_active = false,
-    read_terminal = TCP_READ_OPEN,
+    waiter = nil,
+    chunks = {},
+    chunk_head = 1,
     read_error = nil,
-    read_waiter = nil,
-    read_epoch = 0,
-    read_bytes = nil,
-    read_queue = {},
-    output_head = nil,
-    output_tail = nil,
-    output_current = nil,
-    close_waiter = nil,
-    shutdown_requested = false,
-    close_started = false,
+    root_index = 0,
   }
-  return control
 end
 
-local function allocate_pipe_owner(runtime: Runtime,
-                                   process: ProcessControl?,
-                                   readable: boolean,
-                                   writable: boolean,
-                                   operation: string,
-                                   subject: string):
-                                   (uv_pipe_t,
-                                    ffi.titan_ffi_void_ptr)
-  local handle = libuv.uv_pipe_t.new()
-  local control = new_stream_control(
-      runtime, process, readable, writable, operation, subject)
-  local owner: uv_pipe_t = {
-    handle = handle,
-    main_thread = main_thread,
-    dispatcher = pipe_dispatch,
-    metadata = control,
-    buffer = nil,
-  }
-  local pointer = owner as ffi.titan_ffi_void_ptr
-  control.pipe_owner = owner
-  return owner, pointer
+local function validate_stdio(stdio: uv_stdio_t)
+  if stdio.runtime ~= running_task().runtime then
+    raise "stdio stream belongs to a different async Runtime"
+  end
 end
 
-local function allocate_tty_owner(runtime: Runtime,
-                                  readable: boolean,
-                                  writable: boolean,
-                                  operation: string,
-                                  subject: string):
-                                  (uv_tty_t,
-                                   ffi.titan_ffi_void_ptr)
-  local handle = libuv.uv_tty_t.new()
-  local control = new_stream_control(
-      runtime, nil, readable, writable, operation, subject)
-  local owner: uv_tty_t = {
-    handle = handle,
-    main_thread = main_thread,
-    dispatcher = tty_dispatch,
-    metadata = control,
-    buffer = nil,
-  }
-  local pointer = owner as ffi.titan_ffi_void_ptr
-  control.tty_owner = owner
-  return owner, pointer
+local function next_chunk(stdio: uv_stdio_t): string?
+  if stdio.chunk_head > #stdio.chunks then return nil end
+  local chunk = stdio.chunks[stdio.chunk_head]
+  stdio.chunks[stdio.chunk_head] = ""
+  stdio.chunk_head = stdio.chunk_head + 1
+  if stdio.chunk_head > #stdio.chunks then
+    stdio.chunks = {}
+    stdio.chunk_head = 1
+  end
+  return chunk
 end
 
-local function close_descriptor(descriptor: libuv.uv_file): integer
-  local request = libuv.uv_fs_t.new()
-  local status = libuv.uv_fs_close(nil, request, descriptor, nil)
-  libuv.uv_fs_req_cleanup(request)
-  return status
+local function stop_stream_read(stdio: uv_stdio_t)
+  libuv.uv_read_stop(stream_native(stdio))
 end
 
-local function duplicated_descriptor(descriptor: libuv.uv_file,
-                                     subject: string): libuv.uv_file
-  local duplicate = -1
-  if shim.TITAN_UVSHIM_HAS_F_DUPFD_CLOEXEC ~= 0 then
-    duplicate = cfcntl.fcntl(
-        descriptor, shim.TITAN_UVSHIM_F_DUPFD_CLOEXEC, 0)
-    while duplicate < 0 and cerrno.errno == cerrno.EINTR do
-      duplicate = cfcntl.fcntl(
-          descriptor, shim.TITAN_UVSHIM_F_DUPFD_CLOEXEC, 0)
-    end
-    if duplicate >= 0 then return duplicate as libuv.uv_file end
-    if cerrno.errno ~= cerrno.EINVAL then
-      raise make_error(libuv.uv_translate_sys_error(cerrno.errno),
-                       "stdio.duplicate", subject)
-    end
+local function close_stream_from_callback(stdio: uv_stdio_t)
+  local handle = stream_handle(stdio)
+  close_handle(stdio.runtime, handle, stdio,
+               stdio.root_index, nil, false, nil)
+  stdio.root_index = 0
+end
+
+local function stream_alloc(stdio: uv_stdio_t, size: libuv.size_t,
+                            pointer: ffi.titan_ffi_void_ptr)
+  local descriptor = pointer as *libuv.uv_buf_t
+  do
+    local bytes = ffi.titan_ffi_char.new_array(size as integer)
+    stdio.buffer = bytes
+    descriptor.base = bytes
+    descriptor.len = size
+  catch
+    -- A direct native callback cannot unwind through libuv. Return the zero
+    -- buffer that makes libuv invoke the paired read_cb, preserving the exact
+    -- allocation error for that Task boundary rather than inventing a status
+    -- or a recovery path.
+    stdio.buffer = nil
+    stdio.read_error = error
+    descriptor.base = nil
+    descriptor.len = 0
+  end
+end
+
+local function take_stream_waiter(stdio: uv_stdio_t): Task?
+  local waiter: Task? = stdio.waiter
+  stdio.waiter = nil
+  return waiter
+end
+
+local function fail_stream_callback(stdio: uv_stdio_t,
+                                    failure: value,
+                                    failure_traceback: string)
+  local waiter? = take_stream_waiter(stdio)
+  defer if waiter then
+    resume_task_from_callback(waiter as Task, true, failure)
+  else
+    report_task_error(failure, failure_traceback)
+  end
+  stdio.buffer = nil
+  stdio.read_error = failure
+  stop_stream_read(stdio)
+  close_stream_from_callback(stdio)
+catch
+  report_task_error(error, traceback)
+end
+
+local function deliver_stream_read(stdio: uv_stdio_t, result: integer)
+  local buffer? = stdio.buffer
+  stdio.buffer = nil
+
+  if not buffer and stdio.read_error ~= nil then
+    fail_stream_callback(stdio, stdio.read_error, "")
+    return
   end
 
-  duplicate = cunistd.dup(descriptor)
+  if result == 0 then return end
+  if result > 0 then
+    local bytes = buffer as Bytes
+    local payload = bytes_string(bytes, result)
+    local waiter? = take_stream_waiter(stdio)
+    if waiter then
+      resume_task_from_callback(waiter as Task, false, payload)
+    else
+      stdio.chunks[#stdio.chunks + 1] = payload
+    end
+    return
+  end
+
+  stop_stream_read(stdio)
+  local failed = false
+  local payload: value = nil
+  if result ~= libuv.UV_EOF then
+    failed = true
+    payload = make_error(result, "stdio.read", nil)
+    stdio.read_error = payload
+  end
+  close_stream_from_callback(stdio)
+  local waiter? = take_stream_waiter(stdio)
+  if waiter then
+    resume_task_from_callback(waiter as Task, failed, payload)
+  end
+end
+
+local function stream_read_callback(stdio: uv_stdio_t, result: integer)
+  deliver_stream_read(stdio, result)
+catch
+  fail_stream_callback(stdio, error, traceback)
+end
+
+local function start_stream_read(stdio: uv_stdio_t): integer
+  if libuv.uv_is_active(stream_handle(stdio)) ~= 0 then return 0 end
+  return libuv.uv_read_start(
+      stream_native(stdio), shim.titan_uvshim_alloc_cb,
+      shim.titan_uvshim_read_cb)
+end
+
+local function StreamReadCall:dispatch(task: Task): Immediate?
+  local state = self.stream
+  local chunk? = next_chunk(state)
+  if chunk then return immediate_ok(chunk) end
+  if state.read_error ~= nil then
+    return Immediate.new(true, state.read_error)
+  end
+  if libuv.uv_is_closing(stream_handle(state)) ~= 0 then
+    return immediate_ok(nil)
+  end
+  if state.waiter then
+    return Immediate.new(true, "stream already has a waiting reader")
+  end
+  local cancel_action: CancelAction = function ()
+    if state.waiter == task then
+      wake_task_next_turn(task, false, nil)
+      state.waiter = nil
+    end
+  end
+  local status = start_stream_read(state)
+  if status < 0 then
+    return immediate_error(status, "stdio.read.start", nil)
+  end
+  state.waiter = task
+  task.cancel_action = cancel_action
+  return nil
+end
+
+local function StreamWriteCall:dispatch(task: Task): Immediate?
+  local state = self.stream
+  if libuv.uv_is_closing(stream_handle(state)) ~= 0 then
+    return Immediate.new(true, "cannot write to a closed stream")
+  end
+  if #self.data == 0 then return immediate_ok(nil) end
+
+  local descriptor = libuv.uv_buf_t.new()
+  local bytes = self.data as const *ffi.titan_ffi_char
+  shim.titan_uvshim_buf_init_const(
+      descriptor, bytes, #self.data as libuv.size_t)
+  local request = libuv.uv_write_t.new()
+  local callback = function (_owner: uv_stream_write_t,
+                             result: integer)
+    if result < 0 then
+      resume_task_from_callback(
+          task, true, make_error(result, "stdio.write", nil))
+    else
+      resume_task_from_callback(task, false, nil)
+    end
+  catch
+    fail_task_at_callback_boundary(task, error, traceback)
+  end
+  local owner = uv_stream_write_t.new(
+      request, callback, self.data, descriptor)
+  task.pending = owner
+  local request_pointer: *libuv.uv_write_t = request
+  libuv.uv_req_set_data(request_pointer as *libuv.uv_req_t,
+                        owner as ffi.titan_ffi_void_ptr)
+  local status = libuv.uv_write {
+    req = request,
+    handle = stream_native(state),
+    bufs = owner.buffer,
+    nbufs = 1,
+    cb = shim.titan_uvshim_write_cb,
+  }
+  if status < 0 then
+    task.pending = nil
+    return immediate_error(status, "stdio.write", nil)
+  end
+  return nil
+end
+
+local function StreamCloseCall:dispatch(task: Task): Immediate?
+  local state = self.stream
+  local handle = stream_handle(state)
+  if libuv.uv_is_closing(handle) ~= 0 then
+    return immediate_ok(nil)
+  end
+  local reader? = state.waiter
+  if reader then
+    wake_task_next_turn(reader as Task, false, nil)
+    state.waiter = nil
+  end
+  state.read_error = nil
+  state.chunks = {}
+  state.chunk_head = 1
+
+  close_handle(state.runtime, handle, state,
+               state.root_index, task, false, nil)
+  state.root_index = 0
+  return nil
+end
+
+local function process_exit_callback(owner: uv_process_t,
+                                     exit_status: integer,
+                                     term_signal: integer)
+  local waiter: Task? = owner.waiter
+  local result: ProcessExitResult? = nil
+  do
+    result = ProcessExitResult.new(exit_status, term_signal)
+    owner.waiter = nil
+    owner.result = result
+    local native: *libuv.uv_process_t = owner.handle
+    close_handle(owner.runtime, native as *libuv.uv_handle_t,
+                 owner, owner.root_index, nil, false, nil)
+    owner.root_index = 0
+    if waiter then
+      resume_task_from_callback(
+          waiter as Task, false, result as ProcessExitResult)
+    end
+  catch
+    if waiter then
+      resume_task_from_callback(waiter as Task, true, error)
+    else
+      report_task_error(error, traceback)
+    end
+  end
+end
+
+local function ProcessWaitCall:dispatch(task: Task): Immediate?
+  local state = self.process
+  if state.result then return immediate_ok(state.result) end
+  if state.waiter then
+    return Immediate.new(true, "Process already has a waiting Task")
+  end
+  local cancel_action: CancelAction = function ()
+    if state.waiter == task then
+      wake_task_next_turn(task, false, nil)
+      state.waiter = nil
+    end
+  end
+  state.waiter = task
+  task.cancel_action = cancel_action
+  return nil
+end
+
+local function new_pipe_stdio(runtime: Runtime): (integer, uv_stdio_t?)
+  local native = libuv.uv_pipe_t.new()
+  local stdio = new_stdio(StdioNative.pipe(native),
+                          stream_alloc, stream_read_callback,
+                          runtime)
+  stdio.root_index = root_handle(runtime, stdio)
+  local status = libuv.uv_pipe_init(runtime.loop, native, 0)
+  if status < 0 then
+    unroot_handle(runtime, stdio.root_index)
+    stdio.root_index = 0
+    return status, nil
+  end
+  local native_pointer: *libuv.uv_pipe_t = native
+  libuv.uv_handle_set_data(native_pointer as *libuv.uv_handle_t,
+                           stdio as ffi.titan_ffi_void_ptr)
+  return 0, stdio
+end
+
+-- Spawn options own initialized streams before a Process is published. They
+-- have no waiter, so replacing or abandoning an option can start uv_close
+-- directly without suspending the configurator.
+local function discard_unpublished_stdio(stdio: uv_stdio_t?)
+  if not stdio then return end
+  local stream = stdio as uv_stdio_t
+  local handle = stream_handle(stream)
+  if libuv.uv_is_closing(handle) ~= 0 then return end
+  stream.chunks = {}
+  stream.chunk_head = 1
+  if stream.root_index > 0 then
+    close_handle(stream.runtime, handle, stream,
+                 stream.root_index, nil, false, nil)
+    stream.root_index = 0
+  end
+end
+
+local function start_captured_read(stdio: uv_stdio_t,
+                                   operation: string, file: string)
+  local status = start_stream_read(stdio)
+  if status >= 0 then return end
+  stdio.read_error = make_error(status, operation, file)
+  discard_unpublished_stdio(stdio)
+end
+
+local function duplicate_descriptor(
+    descriptor: libuv.uv_file): libuv.uv_file
+  local duplicate = process_unistd.dup(descriptor)
   while duplicate < 0 and cerrno.errno == cerrno.EINTR do
-    duplicate = cunistd.dup(descriptor)
+    duplicate = process_unistd.dup(descriptor)
   end
   if duplicate < 0 then
     raise make_error(libuv.uv_translate_sys_error(cerrno.errno),
-                     "stdio.duplicate", subject)
+                     "stdio.parent.duplicate", nil)
   end
-
-  local status = cfcntl.fcntl(duplicate, cfcntl.F_SETFD,
-                              cfcntl.FD_CLOEXEC)
+  local status = process_fcntl.fcntl(
+      duplicate, process_fcntl.F_SETFD, process_fcntl.FD_CLOEXEC)
   while status < 0 and cerrno.errno == cerrno.EINTR do
-    status = cfcntl.fcntl(duplicate, cfcntl.F_SETFD,
-                          cfcntl.FD_CLOEXEC)
+    status = process_fcntl.fcntl(
+        duplicate, process_fcntl.F_SETFD, process_fcntl.FD_CLOEXEC)
   end
   if status < 0 then
     local saved_errno = cerrno.errno
     close_descriptor(duplicate as libuv.uv_file)
     raise make_error(libuv.uv_translate_sys_error(saved_errno),
-                     "stdio.duplicate.cloexec", subject)
+                     "stdio.parent.duplicate.cloexec", nil)
   end
   return duplicate as libuv.uv_file
 end
 
-local function parent_stdio_subject(descriptor: integer): string
-  if descriptor == 0 then return "parent.stdin" end
-  if descriptor == 1 then return "parent.stdout" end
-  return "parent.stderr"
-end
-
-local function cached_parent_stdio(runtime: Runtime,
-                                   descriptor: integer): uv_stdio_t?
-  if descriptor == 0 then return runtime.parent_stdin end
-  if descriptor == 1 then return runtime.parent_stdout end
-  return runtime.parent_stderr
-end
-
-local function cache_parent_stdio(runtime: Runtime, descriptor: integer,
-                                  stdio: uv_stdio_t?)
-  if descriptor == 0 then
-    runtime.parent_stdin = stdio
-  elseif descriptor == 1 then
-    runtime.parent_stdout = stdio
-  else
-    runtime.parent_stderr = stdio
-  end
-end
-
-local function stdio_stream_control(stdio: uv_stdio_t): StreamControl
-  case stdio.stream
-  when pipe: pipe then return pipe.metadata
-  when tty: tty then return tty.metadata
-  else
-    raise internal_error("stdio.handle.variant")
-  end
-end
-
 local function initialize_parent_stdio(runtime: Runtime,
-                                       descriptor: integer,
-                                       readable: boolean,
-                                       writable: boolean): uv_stdio_t
-  local cached? = cached_parent_stdio(runtime, descriptor)
-  if cached then return cached end
+                                       descriptor: integer): uv_stdio_t
+  if parent_runtime ~= runtime then
+    parent_runtime = runtime
+    cached_parent_stdin = nil
+    cached_parent_stdout = nil
+    cached_parent_stderr = nil
+  end
+  local cached: uv_stdio_t? = cached_parent_stderr
+  if descriptor == 0 then
+    cached = cached_parent_stdin
+  elseif descriptor == 1 then
+    cached = cached_parent_stdout
+  end
+  if cached and libuv.uv_is_closing(
+      stream_handle(cached as uv_stdio_t)) == 0 then
+    return cached as uv_stdio_t
+  end
+  if descriptor == 0 then
+    cached_parent_stdin = nil
+  elseif descriptor == 1 then
+    cached_parent_stdout = nil
+  else
+    cached_parent_stderr = nil
+  end
 
-  local subject = parent_stdio_subject(descriptor)
   local guessed = libuv.uv_guess_handle(descriptor as libuv.uv_file)
-  if guessed ~= libuv.UV_TTY and guessed ~= libuv.UV_NAMED_PIPE then
-    raise make_error(
-        libuv.UV_EINVAL, subject .. ".classify", subject)
-  end
-
-  local duplicate = duplicated_descriptor(
-      descriptor as libuv.uv_file, subject)
-  local loop = runtime.loop.handle as owned *libuv.uv_loop_t
-  local status = 0
+  local duplicate = duplicate_descriptor(descriptor as libuv.uv_file)
+  defer close_descriptor(duplicate)
+  local stdio: uv_stdio_t? = nil
+  local keep = false
+  defer if not keep then discard_unpublished_stdio(stdio) end
   if guessed == libuv.UV_TTY then
-    local owner, pointer = allocate_tty_owner(
-        runtime, readable, writable, subject, subject)
-    local handle = owner.handle as owned *libuv.uv_tty_t
-    local tty_handle: *libuv.uv_tty_t = handle
-    status = libuv.uv_tty_init(
-        loop, handle, duplicate, readable and 1 or 0)
-    if status >= 0 then
-      libuv.uv_handle_set_data(
-          tty_handle as *libuv.uv_handle_t, pointer)
-      owner.metadata.lifecycle = PIPE_OPEN
-      local actual = libuv.uv_os_fd_t.new_array(1)
-      local fileno_status = libuv.uv_fileno(
-          tty_handle as *libuv.uv_handle_t, actual)
-      if fileno_status < 0 then
-        start_stream_close(owner.metadata)
-        raise make_error(fileno_status, "stdio.fileno", subject)
-      end
-      if (actual[0] as integer) ~= (duplicate as integer) then
-        local close_status = close_descriptor(duplicate)
-        if close_status < 0 then
-          start_stream_close(owner.metadata)
-          raise make_error(close_status, "stdio.duplicate.close", subject)
-        end
-      end
-      local stdio = uv_stdio_t.new(
-          StdioHandle.tty(owner), runtime, runtime.generation,
-          readable, writable, nil, descriptor)
-      owner.metadata.parent = stdio
-      cache_parent_stdio(runtime, descriptor, stdio)
-      return stdio
+    local native = libuv.uv_tty_t.new()
+    local owner = new_stdio(StdioNative.tty(native),
+                            stream_alloc, stream_read_callback,
+                            runtime)
+    owner.root_index = root_handle(runtime, owner)
+    local readable = 0
+    if descriptor == 0 then readable = 1 end
+    local status = libuv.uv_tty_init(
+        runtime.loop, native, duplicate, readable)
+    if status < 0 then
+      unroot_handle(runtime, owner.root_index)
+      owner.root_index = 0
+      raise make_error(status, "stdio.parent.init", nil)
     end
-    discard_stream_storage(owner.metadata)
-  else
-    local owner, pointer = allocate_pipe_owner(
-        runtime, nil, readable, writable, subject, subject)
-    local handle = owner.handle as owned *libuv.uv_pipe_t
-    local pipe_handle: *libuv.uv_pipe_t = handle
-    status = libuv.uv_pipe_init(loop, handle, 0)
-    if status >= 0 then
-      libuv.uv_handle_set_data(
-          pipe_handle as *libuv.uv_handle_t, pointer)
-      owner.metadata.lifecycle = PIPE_INITIALIZED
-      status = libuv.uv_pipe_open(handle, duplicate)
-      if status >= 0 then
-        -- Successful uv_pipe_open transfers the duplicate to the handle.
-        owner.metadata.lifecycle = PIPE_OPEN
-        local stdio = uv_stdio_t.new(
-            StdioHandle.pipe(owner), runtime, runtime.generation,
-            readable, writable, nil, descriptor)
-        owner.metadata.parent = stdio
-        cache_parent_stdio(runtime, descriptor, stdio)
-        return stdio
-      end
-      -- A rejected open leaves the descriptor with its caller. Closing the
-      -- initialized-but-empty handle does not close that descriptor.
-      start_stream_close(owner.metadata)
-    else
-      discard_stream_storage(owner.metadata)
+    local native_pointer: *libuv.uv_tty_t = native
+    libuv.uv_handle_set_data(native_pointer as *libuv.uv_handle_t,
+                             owner as ffi.titan_ffi_void_ptr)
+    stdio = owner
+
+    local actual = libuv.uv_os_fd_t.new_array(1)
+    status = libuv.uv_fileno(native_pointer as *libuv.uv_handle_t, actual)
+    check_status(status, "stdio.parent.fileno", nil)
+    if (actual[0] as integer) ~= (duplicate as integer) then
+      status = close_descriptor(duplicate)
+      check_status(status, "stdio.parent.duplicate.close", nil)
     end
-  end
-
-  local close_status = close_descriptor(duplicate)
-  if close_status < 0 then
-    promote_fatal(runtime,
-        make_error(close_status, "stdio.duplicate.close", subject), "")
-  end
-  raise make_error(status, subject .. ".init", subject)
-end
-
-local function stream_native_handle(control: StreamControl):
-                                    *libuv.uv_stream_t
-  if control.pipe_owner then
-    local owner = control.pipe_owner
-    local handle = owner.handle as owned *libuv.uv_pipe_t
-    local pipe_handle: *libuv.uv_pipe_t = handle
-    return pipe_handle as *libuv.uv_stream_t
-  elseif control.tty_owner then
-    local owner = control.tty_owner
-    local handle = owner.handle as owned *libuv.uv_tty_t
-    local tty_handle: *libuv.uv_tty_t = handle
-    return tty_handle as *libuv.uv_stream_t
-  end
-  raise internal_error("stream.native.missing-owner")
-end
-
-local function discard_stream_storage(control: StreamControl)
-  if control.lifecycle == PIPE_CLOSED then return end
-  control.lifecycle = PIPE_CLOSED
-  if control.pipe_owner then control.pipe_owner.handle = nil end
-  if control.tty_owner then control.tty_owner.handle = nil end
-  control.pipe_owner = nil
-  control.tty_owner = nil
-end
-
-local function start_stream_close(control: StreamControl)
-  if control.lifecycle == PIPE_CLOSED or
-      control.lifecycle == PIPE_CLOSING then return end
-  local stream_handle = stream_native_handle(control)
-  if control.read_active then
-    libuv.uv_read_stop(stream_handle)
-    control.read_active = false
-  end
-  control.read_bytes = nil
-  if control.lifecycle == PIPE_ALLOCATED then
-    discard_stream_storage(control)
-    return
-  end
-  control.lifecycle = PIPE_CLOSING
-  libuv.uv_close(stream_handle as *libuv.uv_handle_t,
-                 shim.titan_uvshim_close_cb)
-end
-
-local function start_pipe_close(pipe: uv_pipe_t)
-  start_stream_close(pipe.metadata)
-end
-
-local function discard_process_storage(process: uv_process_t)
-  local control = process.metadata
-  if control.lifecycle == PROCESS_CLOSED then return end
-  control.lifecycle = PROCESS_CLOSED
-  process.handle = nil
-  control.owner = nil
-end
-
-local function start_process_close(process: uv_process_t)
-  local control = process.metadata
-  if control.lifecycle == PROCESS_CLOSED or
-      control.lifecycle == PROCESS_CLOSING then return end
-  if control.lifecycle == PROCESS_ALLOCATED then
-    discard_process_storage(process)
-    return
-  end
-  control.lifecycle = PROCESS_CLOSING
-  local handle =
-    process.handle as owned *libuv.uv_process_t
-  local process_handle: *libuv.uv_process_t = handle
-  libuv.uv_close(process_handle as *libuv.uv_handle_t,
-                 shim.titan_uvshim_close_cb)
-end
-
-local function new_process_request_control(runtime: Runtime,
-                                           operation: ProcessOperation):
-                                           ProcessRequestControl
-  local control: ProcessRequestControl = {
-    runtime = runtime,
-    lifecycle = PROCESS_OWNER_ALLOCATED,
-    owner = nil,
-    operation = operation,
-    next_control = nil,
-    previous_control = nil,
-  }
-  return control
-end
-
-local function allocate_pipe_write_owner(runtime: Runtime,
-                                         operation: ProcessOperation):
-                                         (uv_pipe_write_t,
-                                          ffi.titan_ffi_void_ptr)
-  local handle = libuv.uv_write_t.new()
-  local control = new_process_request_control(runtime, operation)
-  local owner: uv_pipe_write_t = {
-    handle = handle,
-    main_thread = main_thread,
-    dispatcher = pipe_write_dispatch,
-    metadata = control,
-    buffer = operation.prepared_buffer,
-  }
-  local pointer = owner as ffi.titan_ffi_void_ptr
-  control.owner = owner
-  link_process_request(control)
-  return owner, pointer
-end
-
-local function retire_process_request(control: ProcessRequestControl)
-  if control.lifecycle == PROCESS_OWNER_RETIRED then return end
-  local owner? = control.owner
-  local operation = control.operation
-  if not owner then
-    unlink_process_request(control)
+    duplicate = -1 as libuv.uv_file
   else
-    local owner = owner
-    unlink_process_request(control)
-    owner.handle = nil
-    owner.buffer = nil
+    local status = 0
+    status, stdio = new_pipe_stdio(runtime)
+    check_status(status, "stdio.parent.init", nil)
+    status = libuv.uv_pipe_open(
+        stream_native(stdio as uv_stdio_t) as *libuv.uv_pipe_t, duplicate)
+    check_status(status, "stdio.parent.open", nil)
+    duplicate = -1 as libuv.uv_file
   end
-  if operation.owner == owner then operation.owner = nil end
-  control.owner = nil
-  control.lifecycle = PROCESS_OWNER_RETIRED
-end
 
-local function allocate_process_grace(control: ProcessControl):
-                                      (uv_process_grace_t,
-                                       ffi.titan_ffi_void_ptr)
-  local runtime = control.runtime
-  local handle = libuv.uv_timer_t.new()
-  local owner: uv_process_grace_t = {
-    handle = handle,
-    main_thread = main_thread,
-    dispatcher = process_grace_dispatch,
-    metadata = control,
-    buffer = nil,
-  }
-  local pointer = owner as ffi.titan_ffi_void_ptr
-  control.grace_owner = owner
-  return owner, pointer
-end
-
-local function close_process_grace(control: ProcessControl)
-  if not control.grace_owner then return end
-  local owner = control.grace_owner
-  if not owner.handle then return end
-  local handle =
-    owner.handle as owned *libuv.uv_timer_t
-  local timer_handle: *libuv.uv_timer_t = handle
-  if libuv.uv_is_closing(
-      timer_handle as const *libuv.uv_handle_t) == 0 then
-    libuv.uv_timer_stop(handle)
-    libuv.uv_close(
-        timer_handle as *libuv.uv_handle_t,
-        shim.titan_uvshim_close_cb)
+  local result = stdio as uv_stdio_t
+  if descriptor == 0 then
+    cached_parent_stdin = result
+  elseif descriptor == 1 then
+    cached_parent_stdout = result
+  else
+    cached_parent_stderr = result
   end
+  keep = true
+  return result
 end
 
-local function start_process_grace(control: ProcessControl): integer
-  if control.grace_owner then return 0 end
-  local owner, pointer = allocate_process_grace(control)
-  local handle =
-    owner.handle as owned *libuv.uv_timer_t
-  local status = libuv.uv_timer_init(
-      control.runtime.loop.handle as owned *libuv.uv_loop_t,
-      handle)
+local function validate_config(state: uv_spawn_config): integer
+  local task = running_task()
+  if state.consumed or state.runtime ~= task.runtime then
+    return libuv.UV_EINVAL
+  end
+  return 0
+end
+
+local function discard_slot(candidate: SpawnSlot?,
+                            keep_a: SpawnSlot?, keep_b: SpawnSlot?)
+  if not candidate or candidate == keep_a or candidate == keep_b then return end
+  local slot = candidate as SpawnSlot
+  if not slot.parent then return end
+  discard_unpublished_stdio(slot.child)
+  discard_unpublished_stdio(slot.parent)
+end
+
+local function bind_slot(state: uv_spawn_config, index: integer,
+                         slot: SpawnSlot, flags: integer)
+  state.stdio[index].flags = flags as libuv.uv_stdio_flags
+  state.stdio[index].data.stream = stream_native(slot.child)
+end
+
+local function configure_stdin(state: uv_spawn_config,
+                               slot: SpawnSlot, flags: integer)
+  local old? = state.stdin
+  state.stdin = slot
+  bind_slot(state, 0, slot, flags)
+  discard_slot(old, slot, nil)
+end
+
+local function configure_outputs(state: uv_spawn_config,
+                                 stdout: SpawnSlot?, stdout_flags: integer,
+                                 stderr: SpawnSlot?, stderr_flags: integer)
+  local old_stdout? = state.stdout
+  local old_stderr? = state.stderr
+  state.stdout = stdout
+  state.stderr = stderr
+  if stdout then bind_slot(state, 1, stdout as SpawnSlot, stdout_flags) end
+  if stderr then bind_slot(state, 2, stderr as SpawnSlot, stderr_flags) end
+  discard_slot(old_stdout, stdout, stderr)
+  discard_slot(old_stderr, stdout, stderr)
+end
+
+local function discard_config_streams(state: uv_spawn_config)
+  discard_slot(state.stdin, nil, nil)
+  discard_slot(state.stdout, nil, nil)
+  discard_slot(state.stderr, nil, nil)
+  state.stdin = nil
+  state.stdout = nil
+  state.stderr = nil
+end
+
+local function config_capture(
+    state: uv_spawn_config): (integer, SpawnSlot?)
+  local status, stream = new_pipe_stdio(state.runtime)
+  if status < 0 then return status, nil end
+  local captured = stream as uv_stdio_t
+  return 0, SpawnSlot.new(captured, captured)
+end
+
+local function prepare_inherited_stdio(state: uv_spawn_config,
+                                       descriptor: integer):
+                                       (integer, SpawnSlot?)
+  local prepared: uv_stdio_t? = nil
+  do
+    prepared = initialize_parent_stdio(state.runtime, descriptor)
+  catch
+    if error is Error then
+      local failure = error as Error
+      return failure.code, nil
+    end
+    raise
+  end
+  return 0, SpawnSlot.new(prepared as uv_stdio_t, nil)
+end
+
+local function config_merged_output(state: uv_spawn_config):
+                                    (integer, SpawnSlot?)
+  local status, parent? = new_pipe_stdio(state.runtime)
+  if status < 0 then return status, nil end
+  local parent_stream = parent as uv_stdio_t
+  local child: uv_stdio_t? = nil
+  status, child = new_pipe_stdio(state.runtime)
   if status < 0 then
-    control.grace_owner = nil
-    owner.handle = nil
-    return status
+    discard_unpublished_stdio(parent_stream)
+    return status, nil
   end
-  local timer_handle: *libuv.uv_timer_t = handle
-  libuv.uv_handle_set_data(
-      timer_handle as *libuv.uv_handle_t, pointer)
-  status = libuv.uv_timer_start {
-    handle = handle,
-    cb = shim.titan_uvshim_timer_cb,
-    timeout = PROCESS_GRACE_MILLISECONDS,
-    repeat = 0,
-  }
-  if status < 0 then
-    libuv.uv_close(
-        timer_handle as *libuv.uv_handle_t,
-        shim.titan_uvshim_close_cb)
+  local child_stream = child as uv_stdio_t
+  local keep = false
+  defer if not keep then
+    discard_unpublished_stdio(parent_stream)
+    discard_unpublished_stdio(child_stream)
   end
-  return status
+
+  local descriptors: libuv.uv_file[2]
+  descriptors[0] = -1 as libuv.uv_file
+  descriptors[1] = -1 as libuv.uv_file
+  defer do
+    close_descriptor(descriptors[0])
+    close_descriptor(descriptors[1])
+  end
+  status = libuv.uv_pipe(descriptors, libuv.UV_NONBLOCK_PIPE, 0)
+  if status < 0 then return status, nil end
+  status = libuv.uv_pipe_open(
+      stream_native(parent_stream) as *libuv.uv_pipe_t, descriptors[0])
+  if status < 0 then return status, nil end
+  descriptors[0] = -1 as libuv.uv_file
+  status = libuv.uv_pipe_open(
+      stream_native(child_stream) as *libuv.uv_pipe_t, descriptors[1])
+  if status < 0 then return status, nil end
+  descriptors[1] = -1 as libuv.uv_file
+  status = libuv.uv_stream_set_blocking(stream_native(child_stream), 1)
+  if status < 0 then return status, nil end
+  keep = true
+  return 0, SpawnSlot.new(child_stream, parent_stream)
 end
 
-local function make_process_operation(kind: integer, task: Task,
-                                      request: Request,
-                                      process: uv_process_t?,
-                                      stream: StreamControl?, file: Text?,
-                                      arguments: {Text}?,
-                                      spawn_config: SpawnConfigState?):
-                                      ProcessOperation
-  local operation: ProcessOperation = {
-    kind = kind,
-    task = task,
-    request = request,
-    process = process,
-    stream = stream,
-    file = file,
-    arguments = arguments,
-    spawn_config = spawn_config,
-    copied_bytes = nil,
-    prepared_buffer = nil,
-    owner = nil,
-    next_operation = nil,
-    previous_operation = nil,
-    linked = false,
-  }
-  return operation
-end
-
-local function new_process_request(kind: integer, process: uv_process_t,
-                                   pipe: uv_pipe_t?, cleanup: boolean): Request
-  local request: Request? = nil
-  if cleanup then
-    request = new_cleanup_request(REQUEST_PROCESS, nil, 0)
-  else
-    request = new_request(REQUEST_PROCESS, nil, 0)
-  end
-  local request = request
-  local stream: StreamControl? = nil
-  if pipe then stream = pipe.metadata end
-  local operation = make_process_operation {
-    kind = kind,
-    task = request.task,
-    request = request,
-    process = process,
-    stream = stream,
-    file = nil,
-    arguments = nil,
-    spawn_config = nil,
-  }
-  request.subject = operation
-  return request
-end
-
-local function new_stdio_stream_request(kind: integer,
-                                        control: StreamControl): Request
-  local request = new_request(REQUEST_PROCESS, nil, 0)
-  local operation = make_process_operation {
-    kind = kind,
-    task = request.task,
-    request = request,
-    process = nil,
-    stream = control,
-    file = nil,
-    arguments = nil,
-    spawn_config = nil,
-  }
-  request.subject = operation
-  return request
-end
-
-local function new_process_spawn_request(file: string,
-                                          args: {string},
-                                          config: SpawnConfigState): Request
-  if #file == 0 then raise "process executable must not be empty" end
-  local request = new_request(REQUEST_PROCESS, nil, 0)
-  -- Copy every text root before the prepared native owners are submitted.
-  local copied_file = copy_text(file, "process.spawn", file)
-  local copied_args: {Text} = {}
-  for index = 1, #args do
-    copied_args[index] = copy_text(
-        args[index], "process.spawn", args[index])
-  end
-  local operation = make_process_operation {
-    kind = PROCESS_SPAWN,
-    task = request.task,
-    request = request,
-    process = nil,
-    stream = nil,
-    file = copied_file,
-    arguments = copied_args,
-    spawn_config = config,
-  }
-  request.subject = operation
-  return request
-end
-
-local function new_spawn_config_close_request(
-    config: SpawnConfigState): Request
-  local request = new_cleanup_request(REQUEST_PROCESS, nil, 0)
-  local operation = make_process_operation {
-    kind = PROCESS_CLOSE_SPAWN_CONFIG,
-    task = request.task,
-    request = request,
-    process = nil,
-    stream = nil,
-    file = nil,
-    arguments = nil,
-    spawn_config = config,
-  }
-  request.subject = operation
-  return request
-end
-
-local function process_operation_deliverable(
-    operation: ProcessOperation): boolean
-  if not operation.task or not operation.request then return false end
-  local task = operation.task
-  local request = operation.request
-  if request.cleanup then
-    return task.state == TASK_WAITING and
-           task.current_request == request and task.cleanup_shield_depth > 0
-  end
-  return task.state == TASK_WAITING and task.current_request == request and
-         not task.cancel_requested and task.epoch == request.generation
-end
-
-local function enqueue_stream_output(control: StreamControl,
-                                     operation: ProcessOperation)
-  local previous? = control.output_tail
-  operation.previous_operation = previous
-  operation.next_operation = nil
-  if previous then
-    previous.next_operation = operation
-  else
-    control.output_head = operation
-  end
-  control.output_tail = operation
-  operation.linked = true
-end
-
-local function remove_stream_output(control: StreamControl,
-                                    operation: ProcessOperation)
-  if not operation.linked then return end
-  local previous? = operation.previous_operation
-  local next? = operation.next_operation
-  if previous then
-    previous.next_operation = next
-  else
-    control.output_head = next
-  end
-  if next then
-    next.previous_operation = previous
-  else
-    control.output_tail = previous
-  end
-  if control.output_current == operation then
-    control.output_current = nil
-  end
-  if control.close_waiter == operation then
-    control.close_waiter = nil
-  end
-  operation.previous_operation = nil
-  operation.next_operation = nil
-  operation.owner = nil
-  operation.prepared_buffer = nil
-  operation.linked = false
-end
-
-local function process_pipe_closed(pipe: uv_pipe_t?): boolean
-  if not pipe then return true end
-  local pipe = pipe
-  return pipe.metadata.lifecycle == PIPE_CLOSED and
-         not pipe.metadata.pipe_owner
-end
-
-local function spawn_config_pipes_closed(
-    config: SpawnConfigState?): boolean
-  if not config then return true end
-  local state = config
-  return process_pipe_closed(optional_stdio_pipe(state.stdin_candidate)) and
-         process_pipe_closed(optional_stdio_pipe(state.stdout_candidate)) and
-         process_pipe_closed(optional_stdio_pipe(state.stderr_candidate)) and
-         process_pipe_closed(
-             optional_stdio_pipe(state.merged_parent_candidate)) and
-         process_pipe_closed(
-             optional_stdio_pipe(state.merged_child_candidate))
-end
-
-local function close_spawn_config_candidate(candidate: uv_stdio_t?)
-  if not candidate then return end
-  local pipe? = stdio_pipe(candidate)
-  if pipe then start_pipe_close(pipe) end
-end
-
-local function close_spawn_config_pipes(config: SpawnConfigState?)
-  if not config then return end
-  local state = config
-  close_spawn_config_candidate(state.stdin_candidate)
-  close_spawn_config_candidate(state.stdout_candidate)
-  close_spawn_config_candidate(state.stderr_candidate)
-  close_spawn_config_candidate(state.merged_parent_candidate)
-  close_spawn_config_candidate(state.merged_child_candidate)
-end
-
-local function process_all_native_closed(control: ProcessControl): boolean
-  local process_retired = control.lifecycle == PROCESS_CLOSED
-  if process_retired and control.owner then
-    process_retired = not control.owner.handle
-  end
-  return process_retired and
-         process_pipe_closed(control.stdin_pipe) and
-         process_pipe_closed(control.stdout_pipe) and
-         process_pipe_closed(control.stderr_pipe) and
-         spawn_config_pipes_closed(control.spawn_config) and
-         not control.grace_owner
-end
-
-local function process_close_all_pipes(control: ProcessControl)
-  close_spawn_config_pipes(control.spawn_config)
-  if control.stdin_pipe then
-    start_pipe_close(control.stdin_pipe)
-  end
-  if control.stdout_pipe then
-    start_pipe_close(control.stdout_pipe)
-  end
-  if control.stderr_pipe then
-    start_pipe_close(control.stderr_pipe)
-  end
-end
-
-local function begin_one_process_shutdown(control: ProcessControl): integer
-  if control.shutdown_started or control.exit_seen or
-      control.lifecycle == PROCESS_CLOSED then return 0 end
-  control.shutdown_started = true
-  process_close_all_pipes(control)
-  local process = control.owner
-  local term = csignal.SIGTERM
-  local kill_status = libuv.uv_process_kill(
-      process.handle as owned *libuv.uv_process_t, term)
-  local grace_status = start_process_grace(control)
-  if grace_status < 0 and not control.exit_seen then
-    control.kill_sent = true
-    local kill = csignal.SIGKILL
-    local emergency_status = libuv.uv_process_kill(
-        process.handle as owned *libuv.uv_process_t, kill)
-    if emergency_status < 0 and
-        emergency_status ~= libuv.UV_ESRCH
-    then
-      return emergency_status
-    end
-  end
-  if kill_status < 0 and
-      kill_status ~= libuv.UV_ESRCH then
-    return kill_status
-  end
-  return grace_status
-end
-
-local function retire_unpublished_process(control: ProcessControl): Error?
-  if not process_all_native_closed(control) then return nil end
-  local operation? = control.spawn_operation
-  local failure? = control.pending_failure
-  control.spawn_operation = nil
-  control.pending_failure = nil
-  control.stdin_pipe = nil
-  control.stdout_pipe = nil
-  control.stderr_pipe = nil
-  control.stdin_stdio = nil
-  control.stdout_stdio = nil
-  control.stderr_stdio = nil
-  control.spawn_config = nil
-  unlink_process_control(control)
-  if operation then
-    local spawn = operation
-    spawn.process = nil
-    spawn.file = nil
-    spawn.arguments = nil
-    spawn.spawn_config = nil
-  end
-  return failure
-end
-
-local function initialize_captured_pipe(runtime: Runtime,
-                                        pipe: uv_pipe_t): integer
-  local handle = pipe.handle as owned *libuv.uv_pipe_t
-  local pipe_handle: *libuv.uv_pipe_t = handle
-  local status = libuv.uv_pipe_init(
-      runtime.loop.handle as owned *libuv.uv_loop_t, handle, 0)
-  if status >= 0 then
-    libuv.uv_handle_set_data(
-        pipe_handle as *libuv.uv_handle_t,
-        pipe as ffi.titan_ffi_void_ptr)
-    pipe.metadata.lifecycle = PIPE_INITIALIZED
-  end
-  return status
-end
-
-local function advance_stream_output(control: StreamControl,
-                                     inline_task: Task?): DriveControl?
-  if control.lifecycle == PIPE_CLOSING or
-      control.lifecycle == PIPE_CLOSED then
-    return nil
-  end
-  while not control.output_current and control.output_head do
-    local operation = control.output_head
-    local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
-    if operation.kind == PROCESS_WRITE_STDIN then
-      if not operation.prepared_buffer then
-        local bytes = operation.copied_bytes
-        operation.prepared_buffer = make_buffer(bytes, 0, #bytes)
-      end
-      local buffer = operation.prepared_buffer
-      local owner, pointer = allocate_pipe_write_owner(control.runtime,
-                                                       operation)
-      local owner_handle: *libuv.uv_write_t =
-        owner.handle as owned *libuv.uv_write_t
-      local stream_handle = stream_native_handle(control)
-      operation.owner = owner
-      control.output_current = operation
-      libuv.uv_req_set_data(owner_handle, pointer)
-      status = libuv.uv_write {
-        req = owner_handle,
-        handle = stream_handle,
-        bufs = buffer.handle,
-        nbufs = 1,
-        cb = shim.titan_uvshim_write_cb,
-      }
-      if status >= 0 then
-        owner.metadata.lifecycle = PROCESS_OWNER_SUBMITTED
-        operation.prepared_buffer = nil
-        return nil
-      end
-      retire_process_request(owner.metadata)
-      remove_stream_output(control, operation)
-      local failure = make_error(status, control.operation .. ".write", nil)
-      if operation.task and operation.request then
-        local task = operation.task
-        local request = operation.request
-        if inline_task == task and task.current_request == request and
-            task.epoch == request.generation then
-          task.current_request = nil
-          return DriveControl.new(DRIVE_ERROR, failure, "", nil)
-        elseif process_operation_deliverable(operation) then
-          schedule_task_drive(task, request.generation, DRIVE_ERROR,
-                              failure, "", nil)
-        end
-      else
-        promote_fatal(control.runtime, failure, "")
-        return nil
-      end
-    else
-      -- Writable anonymous pipes do not support socket-style shutdown on Unix
-      -- (libuv reports UV_ENOTSOCK). Reaching this sentinel proves every
-      -- accepted write callback has completed. Readable pipes have no output
-      -- ahead of the sentinel. In both directions portable uv_close is the
-      -- terminal operation.
-      remove_stream_output(control, operation)
-      control.close_waiter = operation
-      control.close_started = true
-      if control.readable then
-        local waiter? = control.read_waiter
-        local epoch = control.read_epoch
-        control.read_waiter = nil
-        control.read_epoch = 0
-        if waiter then
-          local task = waiter
-          if task.state == TASK_WAITING and not task.cancel_requested and
-              task.epoch == epoch then
-            schedule_task_drive(
-                task, epoch, DRIVE_RESUME, nil, "", nil)
-          end
-        end
-      end
-      start_stream_close(control)
-      return nil
-    end
-  end
-  return nil
-end
-
-local function arm_spawn_config_close(task: Task,
-                                      request: Request): DriveControl?
-  local operation: ProcessOperation = request.subject
-  local config = operation.spawn_config
-  local process = config.process
-  local process_control = process.metadata
-  process_control.spawn_operation = operation
-  operation.process = process
-  discard_process_storage(process)
-  process_close_all_pipes(process_control)
-  if process_all_native_closed(process_control) then
-    retire_unpublished_process(process_control)
-    task.current_request = nil
-    return DriveControl.new(DRIVE_RESUME, nil, "", nil)
-  end
-  task.operation = process
-  task.state = TASK_WAITING
-  return nil
-end
-
-local function spawn_stdio_native(stdio: uv_stdio_t): *libuv.uv_stream_t
-  return stream_native_handle(stdio_stream_control(stdio))
-end
-
-local function captured_parent_pipe(stdio: uv_stdio_t?): uv_pipe_t?
-  if not stdio then return nil end
-  return stdio_pipe(stdio)
-end
-
-local function mark_spawn_binding_open(binding: SpawnBinding)
-  if not spawn_binding_is_capture(binding) then return end
-  local stdio = spawn_binding_stdio(binding)
-  local pipe? = stdio_pipe(stdio)
-  if not pipe then raise internal_error("process.capture.not-pipe") end
-  pipe.metadata.lifecycle = PIPE_OPEN
-end
-
-local function close_inactive_spawn_candidate(candidate: uv_stdio_t?,
-                                               stdin: uv_stdio_t?,
-                                               stdout: uv_stdio_t?,
-                                               stderr: uv_stdio_t?)
-  if not candidate or candidate == stdin or candidate == stdout or
-      candidate == stderr then return end
-  close_spawn_config_candidate(candidate)
-end
-
-local function arm_process_spawn(task: Task,
-                                 request: Request): DriveControl?
-  local runtime = task.runtime
-  local operation: ProcessOperation = request.subject
-  local file = operation.file
-  local arguments = operation.arguments
-  local config = operation.spawn_config
-  local argument_count = #arguments + 1
-
-  local process = config.process
-  local process_pointer = process as ffi.titan_ffi_void_ptr
-  local process_control = process.metadata
-  process_control.spawn_operation = operation
-  operation.process = process
-
-  local stdin_slot = config.stdin_slot as SpawnSlot
-  local stdout_slot = config.stdout_slot as SpawnSlot
-  local stderr_slot = config.stderr_slot as SpawnSlot
-  local stdin_stdio? = stdin_slot.parent
-  local stdout_stdio? = stdout_slot.parent
-  local stderr_stdio? = stderr_slot.parent
-  local stdin_pipe? = captured_parent_pipe(stdin_stdio)
-  local stdout_pipe? = captured_parent_pipe(stdout_stdio)
-  local stderr_pipe? = captured_parent_pipe(stderr_stdio)
-  process_control.stdin_pipe = stdin_pipe
-  process_control.stdout_pipe = stdout_pipe
-  process_control.stderr_pipe = stderr_pipe
-  process_control.stdin_stdio = stdin_stdio
-  process_control.stdout_stdio = stdout_stdio
-  process_control.stderr_stdio = stderr_stdio
-
-  local loop_handle: *libuv.uv_loop_t =
-    runtime.loop.handle as owned *libuv.uv_loop_t
-  local process_handle: *libuv.uv_process_t =
-    process.handle as owned *libuv.uv_process_t
-  local argv = shim.titan_uvshim_char_ptr.new_array(argument_count + 1)
-  argv[0] = file.bytes
-  for index = 1, #arguments do
-    argv[index] = arguments[index].bytes
-  end
-  argv[argument_count] = nil
-
-  local options: libuv.uv_process_options_t
-  local stdio: libuv.uv_stdio_container_t[3]
-  local stdin_child = spawn_binding_stdio(stdin_slot.child)
-  if spawn_binding_is_capture(stdin_slot.child) then
-    stdio[0].flags = libuv.UV_CREATE_PIPE | libuv.UV_READABLE_PIPE
-    stdio[0].data.stream = spawn_stdio_native(stdin_child)
-  else
-    stdio[0].flags = libuv.UV_INHERIT_STREAM
-    stdio[0].data.stream = spawn_stdio_native(stdin_child)
-  end
-
-  local stdout_child = spawn_binding_stdio(stdout_slot.child)
-  if spawn_binding_is_capture(stdout_slot.child) then
-    stdio[1].flags = libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE
-    stdio[1].data.stream = spawn_stdio_native(stdout_child)
-  else
-    stdio[1].flags = libuv.UV_INHERIT_STREAM
-    stdio[1].data.stream = spawn_stdio_native(stdout_child)
-  end
-
-  local stderr_child = spawn_binding_stdio(stderr_slot.child)
-  if spawn_binding_is_capture(stderr_slot.child) then
-    stdio[2].flags = libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE
-    stdio[2].data.stream = spawn_stdio_native(stderr_child)
-  else
-    stdio[2].flags = libuv.UV_INHERIT_STREAM
-    stdio[2].data.stream = spawn_stdio_native(stderr_child)
-  end
-
+function _os_spawn_config_new(): uv_spawn_config
+  local task = running_task()
+  accepting_work(task.runtime, "configure a Process")
+  local options = libuv.uv_process_options_t.new()
+  local stdio = libuv.uv_stdio_container_t.new_array(3)
   options.exit_cb = shim.titan_uvshim_process_exit_cb
-  options.file = argv[0]
-  options.args = argv
-  options.env = nil
-  options.cwd = nil
   options.stdio_count = 3 as ffi.titan_ffi_int
   options.stdio = stdio
-  local spawn_status = libuv.uv_spawn(
-      loop_handle, process_handle, options)
-  libuv.uv_handle_set_data(process_handle, process_pointer)
-  process_control.lifecycle = PROCESS_SPAWNED
-
-  if spawn_status >= 0 then
-    mark_spawn_binding_open(stdin_slot.child)
-    mark_spawn_binding_open(stdout_slot.child)
-    mark_spawn_binding_open(stderr_slot.child)
-    close_inactive_spawn_candidate(
-        config.stdin_candidate, stdin_stdio, stdout_stdio, stderr_stdio)
-    close_inactive_spawn_candidate(
-        config.stdout_candidate, stdin_stdio, stdout_stdio, stderr_stdio)
-    close_inactive_spawn_candidate(
-        config.stderr_candidate, stdin_stdio, stdout_stdio, stderr_stdio)
-    close_inactive_spawn_candidate(
-        config.merged_parent_candidate, stdin_stdio, stdout_stdio,
-        stderr_stdio)
-    -- The merged child stream is passed in both child output slots, then the
-    -- parent's copy can be closed immediately after uv_spawn returns.
-    close_spawn_config_candidate(config.merged_child_candidate)
-
-    local read_status = 0
-    local read_operation = "process.output.read.start"
-    if stdout_pipe then
-      read_status = start_pipe_read(stdout_pipe)
-      read_operation = stdout_pipe.metadata.operation .. ".read.start"
-    end
-    if read_status >= 0 and stderr_pipe and stderr_pipe ~= stdout_pipe then
-      read_status = start_pipe_read(stderr_pipe)
-      read_operation = stderr_pipe.metadata.operation .. ".read.start"
-    end
-    if read_status >= 0 then
-      process_control.spawn_operation = nil
-      operation.process = nil
-      operation.file = nil
-      operation.arguments = nil
-      operation.spawn_config = nil
-      task.current_request = nil
-      return DriveControl.new(DRIVE_RESUME, process, "", nil)
-    end
-
-    -- A child exists, so a read-start rejection is not reportable until all
-    -- pipe owners are closed and the child has been terminated and reaped.
-    process_control.pending_failure = make_error(
-        read_status, read_operation, file.source)
-    process_close_all_pipes(process_control)
-    local shutdown_status = begin_one_process_shutdown(process_control)
-    if shutdown_status < 0 then
-      promote_fatal(runtime,
-          make_error(shutdown_status, "process.shutdown", file.source), "")
-    end
-    task.operation = process
-    task.state = TASK_WAITING
-    return nil
-  end
-
-  process_control.pending_failure = make_error(
-      spawn_status, "process.spawn", file.source)
-  process_close_all_pipes(process_control)
-  if process_control.lifecycle == PROCESS_ALLOCATED then
-    discard_process_storage(process)
-  else
-    -- Failed uv_spawn owes no exit callback.  Its process and initialized
-    -- pipe handles still owe the ordinary libuv close callbacks.
-    start_process_close(process)
-  end
-  if process_all_native_closed(process_control) then
-    local failure: Error? = retire_unpublished_process(process_control)
-    task.current_request = nil
-    return DriveControl.new(DRIVE_ERROR, failure, "", nil)
-  end
-  task.operation = process
-  task.state = TASK_WAITING
-  return nil
+  return uv_spawn_config.new {
+    runtime = task.runtime,
+    options = options,
+    stdio = stdio,
+    stdin = nil,
+    stdout = nil,
+    stderr = nil,
+    consumed = false,
+  }
 end
 
-local function arm_process_request(task: Task,
-                                   request: Request): DriveControl?
-  local operation: ProcessOperation = request.subject
-  if operation.kind == PROCESS_SPAWN then
-    return arm_process_spawn(task, request)
+function _os_spawn_config_with_stdin(config: uv_spawn_config): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  local slot: SpawnSlot? = nil
+  status, slot = config_capture(config)
+  if status >= 0 then
+    configure_stdin(config, slot as SpawnSlot,
+                    libuv.UV_CREATE_PIPE | libuv.UV_READABLE_PIPE)
   end
-  if operation.kind == PROCESS_CLOSE_SPAWN_CONFIG then
-    return arm_spawn_config_close(task, request)
-  end
-  if operation.kind == PROCESS_WAIT then
-    local process = operation.process
-    local process_control = process.metadata
-    if process_control.exit_seen and
-        process_control.lifecycle == PROCESS_CLOSED then
-      task.current_request = nil
-      return DriveControl.new(DRIVE_RESUME,
-          ProcessExitResult.new(process_control.exit_status,
-                                process_control.term_signal), "", nil)
-    end
-    process_control.wait_task = task
-    process_control.wait_epoch = request.generation
-    task.operation = process
-    task.state = TASK_WAITING
-    return nil
-  end
-
-  local stream = operation.stream
-  if operation.kind == PROCESS_READ_STREAM then
-    stream.read_waiter = task
-    stream.read_epoch = request.generation
-    task.operation = stream
-    task.state = TASK_WAITING
-    return nil
-  else
-    enqueue_stream_output(stream, operation)
-    task.operation = operation
-    task.state = TASK_WAITING
-    return advance_stream_output(stream, task)
-  end
-end
-
-local function start_stream_read(control: StreamControl): integer
-  local status = libuv.uv_read_start(
-      stream_native_handle(control),
-      shim.titan_uvshim_alloc_cb, shim.titan_uvshim_read_cb)
-  if status >= 0 then control.read_active = true end
   return status
 end
 
-local function start_pipe_read(pipe: uv_pipe_t): integer
-  return start_stream_read(pipe.metadata)
+local function configured_output_flags(slot: SpawnSlot): integer
+  if slot.parent then
+    return libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE
+  end
+  return libuv.UV_INHERIT_STREAM
 end
 
-local function finish_process_control(control: ProcessControl)
-  if not control.linked or not process_all_native_closed(control) then return end
-  if control.spawn_operation then
-    local operation? = control.spawn_operation
-    local failure? = control.pending_failure
-    retire_unpublished_process(control)
-    if operation then
-      local operation = operation
-      if process_operation_deliverable(operation) then
-        if operation.kind == PROCESS_CLOSE_SPAWN_CONFIG then
-          drive_task(operation.task, DRIVE_RESUME, nil, "")
-        elseif failure then
-          drive_task(operation.task, DRIVE_ERROR, failure, "")
-        else
-          drive_task(operation.task, DRIVE_ERROR,
-                     internal_error("process.spawn.missing-failure"), "")
-        end
-      end
-    end
-    return
+local function replace_output(config: uv_spawn_config, index: integer,
+                              slot: SpawnSlot, flags: integer): integer
+  local other? = config.stderr
+  if index == 2 then
+    other = config.stdout
   end
-  -- Successfully spawned wrappers retain their terminal PipeControls so
-  -- repeated EOF, read-error, stdin-close, and cached-wait queries remain
-  -- allocation-free.
-  control.owner = nil
-  if control.spawn_config then
-    control.spawn_config.consumed = true
+  local other_flags = 0
+  if other then
+    other_flags = configured_output_flags(other as SpawnSlot)
   end
-  control.spawn_config = nil
-  unlink_process_control(control)
-end
-
-local function deliver_process_waiter(control: ProcessControl)
-  local task? = control.wait_task
-  local epoch = control.wait_epoch
-  if task then
-    local task = task
-    if task.state == TASK_WAITING and not task.cancel_requested and
-        task.epoch == epoch then
-      local result = ProcessExitResult.new(control.exit_status,
-                                           control.term_signal)
-      control.wait_task = nil
-      control.wait_epoch = 0
-      drive_task(task, DRIVE_RESUME, result, "")
-      return
-    end
-  end
-  control.wait_task = nil
-  control.wait_epoch = 0
-end
-
-local function process_dispatch_body(owner: uv_process_t,
-                                     event_kind: integer)
-  local control = owner.metadata
-  local runtime = control.runtime
-  if event_kind == shim.TITAN_UV_EVENT_PROCESS_EXIT then
-    close_process_grace(control)
-    if control.stdin_pipe then
-      start_pipe_close(control.stdin_pipe)
-    end
-    -- A successful spawn is never closed before this exit callback.  Publish
-    -- the close transition before any eventual waiter continuation runs.
-    start_process_close(owner)
-    control.callback_aborted = false
-    return
-  elseif event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
-    owner.handle = nil
-    control.owner = owner
-    deliver_process_waiter(control)
-    control.callback_aborted = false
-    finish_process_control(control)
-    maybe_finish_session(runtime)
-    return
-  end
-end
-
--- The native trampoline calls this trusted Titan entry directly.  Exit/close
--- state is recorded before the allocating body; its trailing catch is the
--- sole longjmp fence and no protected Lua call is inserted in the hot path.
-local function process_dispatch(owner: uv_process_t, event_kind: integer,
-                                result: integer, size: libuv.size_t,
-                                _pointer: ffi.titan_ffi_void_ptr)
-  if event_kind == shim.TITAN_UV_EVENT_PROCESS_EXIT then
-    owner.metadata.exit_seen = true
-    owner.metadata.exit_status = result
-    owner.metadata.term_signal = size
-    owner.metadata.lifecycle = PROCESS_EXITED
-  elseif event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
-    owner.metadata.lifecycle = PROCESS_CLOSED
-  end
-  process_dispatch_body(owner, event_kind)
-catch
-  owner.metadata.callback_aborted = true
-  if not owner.metadata.runtime.fatal then
-    owner.metadata.runtime.fatal = true
-    owner.metadata.runtime.closing = true
-    owner.metadata.runtime.fatal_error = error
-    owner.metadata.runtime.fatal_traceback = traceback
-  end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle
-                as owned *libuv.uv_loop_t)
-  return
-end
-
-local function stream_alloc_dispatch(control: StreamControl,
-                                     size: libuv.size_t,
-                                     pointer: ffi.titan_ffi_void_ptr)
-  if control.read_bytes then
-    raise internal_error("process.read.alloc.pending")
-  end
-  local bytes = allocate_stream_bytes(size)
-  control.read_bytes = bytes
-  initialize_buffer(pointer, bytes, size)
-end
-
-local function stream_read_dispatch(control: StreamControl, result: integer)
-  if result == 0 then
-    control.read_bytes = nil
-    return
-  end
-  if control.readable and
-      (control.shutdown_requested or control.close_started) then
-    control.read_bytes = nil
-    return
-  end
-  local waiter? = control.read_waiter
-  local epoch = control.read_epoch
-  local bytes? = control.read_bytes
-  if result < 0 then
-    if control.read_active then
-      libuv.uv_read_stop(stream_native_handle(control))
-      control.read_active = false
-    end
-    control.read_bytes = nil
-    control.read_waiter = nil
-    control.read_epoch = 0
-    if result == libuv.UV_EOF then
-      control.read_terminal = TCP_READ_EOF
-      start_stream_close(control)
-      if waiter then
-        local task = waiter
-        if task.state == TASK_WAITING and not task.cancel_requested and
-            task.epoch == epoch then
-          drive_task(task, DRIVE_RESUME, nil, "")
-        end
-      end
-    else
-      control.read_terminal = TCP_READ_ERROR
-      local failure = make_error(
-          result, control.operation .. ".read", nil)
-      control.read_error = failure
-      start_stream_close(control)
-      if waiter then
-        local task = waiter
-        if task.state == TASK_WAITING and not task.cancel_requested and
-            task.epoch == epoch then
-          drive_task(task, DRIVE_ERROR, failure, "")
-        end
-      end
-    end
-    return
-  end
-
-  if not bytes then
-    raise internal_error("process.read.missing.allocation")
-  end
-  local bytes = bytes
-  if waiter then
-    local task = waiter
-    control.read_waiter = nil
-    control.read_epoch = 0
-    if task.state == TASK_WAITING and not task.cancel_requested and
-        task.epoch == epoch then
-      local payload = bytes_string(bytes, result)
-      control.read_bytes = nil
-      drive_task(task, DRIVE_RESUME, payload, "")
-      return
-    end
-  end
-  control.read_waiter = nil
-  control.read_epoch = 0
-  control.read_queue[#control.read_queue + 1] =
-    ByteChunk.new(bytes, result)
-  control.read_bytes = nil
-end
-
-local function finish_stream_close(control: StreamControl)
-  local runtime = control.runtime
-  if control.shutdown_requested and control.readable then
-    control.read_queue = {}
-    control.read_bytes = nil
-    control.read_error = nil
-    control.read_terminal = TCP_READ_EOF
-  end
-  local close? = control.close_waiter
-  while control.output_head do
-    local operation = control.output_head
-    remove_stream_output(control, operation)
-    if operation.kind == PROCESS_CLOSE_STREAM then
-      close = operation
-      control.close_waiter = operation
-    elseif process_operation_deliverable(operation) then
-      local failure = make_error(
-          libuv.UV_ECANCELED, control.operation .. ".write", nil)
-      drive_task(operation.task, DRIVE_ERROR, failure, "")
-    end
-  end
-  if control.pipe_owner then control.pipe_owner.handle = nil end
-  if control.tty_owner then control.tty_owner.handle = nil end
-  control.pipe_owner = nil
-  control.tty_owner = nil
-  control.callback_aborted = false
-  if control.process then finish_process_control(control.process) end
-  if control.parent then finish_parent_stdio_control(control.parent) end
-  maybe_finish_session(runtime)
-  if close then
-    local operation = close
-    control.close_waiter = nil
-    if process_operation_deliverable(operation) then
-      drive_task(operation.task, DRIVE_RESUME, nil, "")
-    end
-  end
-end
-
-local function pipe_dispatch_body(owner: uv_pipe_t, event_kind: integer,
-                                  result: integer, size: libuv.size_t,
-                                  pointer: ffi.titan_ffi_void_ptr)
-  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
-    finish_stream_close(owner.metadata)
-  elseif event_kind == shim.TITAN_UV_EVENT_STREAM_ALLOC then
-    stream_alloc_dispatch(owner.metadata, size, pointer)
-  elseif event_kind == shim.TITAN_UV_EVENT_STREAM_READ then
-    stream_read_dispatch(owner.metadata, result)
-  end
-end
-
-local function pipe_dispatch(owner: uv_pipe_t, event_kind: integer,
-                             result: integer, size: libuv.size_t,
-                             pointer: ffi.titan_ffi_void_ptr)
-  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
-    owner.metadata.lifecycle = PIPE_CLOSED
-  end
-  pipe_dispatch_body(owner, event_kind, result, size, pointer)
-catch
-  owner.metadata.callback_aborted = true
-  -- Preserve read_cb after an alloc failure so libuv can report UV_ENOBUFS
-  -- for the shim's NULL/zero descriptor before the read side is stopped.
-  if event_kind ~= shim.TITAN_UV_EVENT_STREAM_ALLOC and
-      owner.metadata.read_active and owner.handle then
-    libuv.uv_read_stop(stream_native_handle(owner.metadata))
-    owner.metadata.read_active = false
-  end
-  owner.metadata.read_bytes = nil
-  if not owner.metadata.runtime.fatal then
-    owner.metadata.runtime.fatal = true
-    owner.metadata.runtime.closing = true
-    owner.metadata.runtime.fatal_error = error
-    owner.metadata.runtime.fatal_traceback = traceback
-  end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle
-                as owned *libuv.uv_loop_t)
-  return
-end
-
-local function tty_dispatch_body(owner: uv_tty_t, event_kind: integer,
-                                 result: integer, size: libuv.size_t,
-                                 pointer: ffi.titan_ffi_void_ptr)
-  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
-    finish_stream_close(owner.metadata)
-  elseif event_kind == shim.TITAN_UV_EVENT_STREAM_ALLOC then
-    stream_alloc_dispatch(owner.metadata, size, pointer)
-  elseif event_kind == shim.TITAN_UV_EVENT_STREAM_READ then
-    stream_read_dispatch(owner.metadata, result)
-  end
-end
-
-local function tty_dispatch(owner: uv_tty_t, event_kind: integer,
-                            result: integer, size: libuv.size_t,
-                            pointer: ffi.titan_ffi_void_ptr)
-  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
-    owner.metadata.lifecycle = PIPE_CLOSED
-  end
-  tty_dispatch_body(owner, event_kind, result, size, pointer)
-catch
-  owner.metadata.callback_aborted = true
-  if event_kind ~= shim.TITAN_UV_EVENT_STREAM_ALLOC and
-      owner.metadata.read_active and owner.handle then
-    libuv.uv_read_stop(stream_native_handle(owner.metadata))
-    owner.metadata.read_active = false
-  end
-  owner.metadata.read_bytes = nil
-  if not owner.metadata.runtime.fatal then
-    owner.metadata.runtime.fatal = true
-    owner.metadata.runtime.closing = true
-    owner.metadata.runtime.fatal_error = error
-    owner.metadata.runtime.fatal_traceback = traceback
-  end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle
-                as owned *libuv.uv_loop_t)
-  return
-end
-
-local function complete_pipe_request(control: ProcessRequestControl,
-                                     result: integer)
-  control.lifecycle = PROCESS_OWNER_CALLBACK
-  local operation = control.operation
-  local stream = operation.stream
-  local failure: Error? = nil
-  if result < 0 then
-    failure = make_error(result, stream.operation .. ".write", nil)
-  end
-  remove_stream_output(stream, operation)
-  advance_stream_output(stream, nil)
-  if process_operation_deliverable(operation) then
-    if failure then
-      drive_task(operation.task, DRIVE_ERROR, failure, "")
-    else
-      drive_task(operation.task, DRIVE_RESUME, nil, "")
-    end
-  end
-  retire_process_request(control)
-end
-
-local function pipe_write_dispatch(owner: uv_pipe_write_t,
-                                   _event_kind: integer,
-                                   result: integer,
-                                   _size: libuv.size_t,
-                                   _pointer: ffi.titan_ffi_void_ptr)
-  complete_pipe_request(owner.metadata, result)
-catch
-  owner.metadata.lifecycle = PROCESS_OWNER_CALLBACK
-  if not owner.metadata.runtime.fatal then
-    owner.metadata.runtime.fatal = true
-    owner.metadata.runtime.closing = true
-    owner.metadata.runtime.fatal_error = error
-    owner.metadata.runtime.fatal_traceback = traceback
-  end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle
-                as owned *libuv.uv_loop_t)
-  return
-end
-
-local function process_grace_dispatch(owner: uv_process_grace_t,
-                                      event_kind: integer,
-                                      _result: integer,
-                                      _size: libuv.size_t,
-                                      _pointer: ffi.titan_ffi_void_ptr)
-  local control = owner.metadata
-  local runtime = control.runtime
-  if event_kind == shim.TITAN_UV_EVENT_TIMER then
-    control.grace_fired = true
-  end
-  if event_kind == shim.TITAN_UV_EVENT_TIMER then
-    local handle =
-      owner.handle as owned *libuv.uv_timer_t
-    local timer_handle: *libuv.uv_timer_t = handle
-    libuv.uv_timer_stop(handle)
-    if not control.exit_seen and not control.kill_sent then
-      local process = control.owner
-      local kill = csignal.SIGKILL
-      local status = libuv.uv_process_kill(
-          process.handle as owned *libuv.uv_process_t, kill)
-      if status < 0 and
-          status ~= libuv.UV_ESRCH then
-        raise make_error(status, "process.kill", "kill")
-      end
-      control.kill_sent = true
-    end
-    libuv.uv_close(
-        timer_handle as *libuv.uv_handle_t,
-        shim.titan_uvshim_close_cb)
-  elseif event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
-    control.grace_owner = nil
-    control.grace_callback_aborted = false
-    owner.handle = nil
-    finish_process_control(control)
-    maybe_finish_session(runtime)
-  end
-catch
-  owner.metadata.grace_callback_aborted = true
-  if event_kind == shim.TITAN_UV_EVENT_TIMER then
-    local handle =
-      owner.handle as owned *libuv.uv_timer_t
-    local timer_handle: *libuv.uv_timer_t = handle
-    libuv.uv_timer_stop(handle)
-    if not owner.metadata.exit_seen and not owner.metadata.kill_sent and
-        owner.metadata.owner then
-      local process = owner.metadata.owner
-      local kill = csignal.SIGKILL
-      local status = libuv.uv_process_kill(
-          process.handle as owned *libuv.uv_process_t, kill)
-      if status >= 0 or
-          status == libuv.UV_ESRCH then
-        owner.metadata.kill_sent = true
-      end
-    end
-    if libuv.uv_is_closing(
-        timer_handle as const *libuv.uv_handle_t) == 0 then
-      libuv.uv_close(
-          timer_handle as *libuv.uv_handle_t,
-          shim.titan_uvshim_close_cb)
-    end
-  elseif event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
-    owner.metadata.grace_owner = nil
-    owner.handle = nil
-  end
-  if not owner.metadata.runtime.fatal then
-    owner.metadata.runtime.fatal = true
-    owner.metadata.runtime.closing = true
-    owner.metadata.runtime.fatal_error = error
-    owner.metadata.runtime.fatal_traceback = traceback
-  end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle
-                as owned *libuv.uv_loop_t)
-  return
-end
-
-local function validate_process(process: uv_process_t,
-                                operation: string,
-                                allow_exited: boolean)
-  local runtime = current_runtime()
-  local control = process.metadata
-  if control.runtime ~= runtime or
-      control.generation ~= runtime.generation then
-    raise "Process belongs to a stale libuv Runtime"
-  end
-  if control.exit_seen and not allow_exited then
-    raise "cannot " .. operation .. " an exited Process"
-  end
-end
-
-local function validate_stdio(stdio: uv_stdio_t,
-                              require_read: boolean,
-                              require_write: boolean,
-                              operation: string,
-                              allow_exited: boolean)
-  local runtime = current_runtime()
-  if stdio.runtime ~= runtime or
-      stdio.generation ~= runtime.generation then
-    raise "stdio belongs to a stale libuv Runtime"
-  end
-  if (require_read and not stdio.readable) or
-      (require_write and not stdio.writable) then
-    raise "stdio has an incompatible direction"
-  end
-  local process? = stdio.process
-  if process then
-    if process.runtime ~= runtime or
-        process.generation ~= runtime.generation then
-      raise "Process stream belongs to a stale libuv Runtime"
-    end
-    if process.exit_seen and not allow_exited then
-      raise "cannot " .. operation .. " an exited Process"
-    end
-  elseif require_write then
-    local control = stdio_stream_control(stdio)
-    if control.lifecycle == PIPE_CLOSING or
-        control.lifecycle == PIPE_CLOSED then
-      raise "parent stdio stream is closed"
-    end
-  end
-end
-
-local function validate_process_stream(stream: uv_pipe_t,
-                                       require_read: boolean,
-                                       require_write: boolean,
-                                       operation: string,
-                                       allow_exited: boolean)
-  local runtime = current_runtime()
-  local control = stream.metadata
-  local process = control.process
-  if control.runtime ~= runtime or
-      control.generation ~= runtime.generation or not process or
-      process.generation ~= runtime.generation then
-    raise "Process stream belongs to a stale libuv Runtime"
-  end
-  if (require_read and not control.readable) or
-      (require_write and not control.writable) then
-    raise "Process stream has an incompatible direction"
-  end
-  if process.exit_seen and not allow_exited then
-    raise "cannot " .. operation .. " an exited Process"
-  end
-end
-
-local function validate_read_stream(stream: uv_pipe_t)
-  validate_process_stream(stream, true, false, "read from", true)
-end
-
-local function process_stream_owner(stream: uv_pipe_t): uv_process_t
-  local control = stream.metadata.process
-  if not control or not control.owner then
-    raise "Process stream is no longer available"
-  end
-  return control.owner
-end
-
-local function process_read(stream: uv_pipe_t): string?
-  ordinary_task()
-  validate_read_stream(stream)
-  local control = stream.metadata
-  if #control.read_queue > 0 then
-    local payload = queued_bytes_string(control.read_queue)
-    control.read_queue = {}
-    return payload
-  end
-  if control.read_terminal == TCP_READ_EOF then return nil end
-  if control.read_terminal == TCP_READ_ERROR then raise control.read_error end
-  if control.lifecycle == PIPE_CLOSING or
-      control.lifecycle == PIPE_CLOSED then
-    raise "cannot read from a closed Process pipe"
-  end
-  if control.read_waiter then
-    raise "process pipe already has a waiting reader"
-  end
-  local request = new_process_request(
-      PROCESS_READ_STREAM, process_stream_owner(stream), stream, false)
-  return coroutine.yield(request, UV_TAG)
-end
-
-local function parent_stream_read(stdio: uv_stdio_t): string?
-  local control = stdio_stream_control(stdio)
-  if #control.read_queue > 0 then
-    local payload = queued_bytes_string(control.read_queue)
-    control.read_queue = {}
-    return payload
-  end
-  if control.read_terminal == TCP_READ_EOF then return nil end
-  if control.read_terminal == TCP_READ_ERROR then raise control.read_error end
-  if control.read_waiter then
-    raise "parent stdio already has a waiting reader"
-  end
-  if not control.read_active then
-    local status = start_stream_read(control)
+  if config.stdout ~= nil and config.stdout == config.stderr then
+    local status = 0
+    status, other = config_capture(config)
     if status < 0 then
-      raise make_error(status, control.operation .. ".read.start", nil)
+      discard_slot(slot, nil, nil)
+      return status
     end
+    other_flags = libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE
   end
-  local request = new_stdio_stream_request(
-      PROCESS_READ_STREAM, control)
-  return coroutine.yield(request, UV_TAG)
+  if index == 1 then
+    configure_outputs(config, slot, flags,
+                      other, other_flags)
+  else
+    configure_outputs(config, other, other_flags, slot, flags)
+  end
+  return 0
 end
 
-local function retire_aborted_process_requests(runtime: Runtime)
-  local control? = runtime.process_request_head
-  while control do
-    local to_retire = control
-    control = to_retire.next_control
-    if to_retire.lifecycle == PROCESS_OWNER_CALLBACK or
-        to_retire.lifecycle == PROCESS_OWNER_ALLOCATED then
-      local operation = to_retire.operation
-      local stream = operation.stream
-      if operation.linked then remove_stream_output(stream, operation) end
-      advance_stream_output(stream, nil)
-      retire_process_request(to_retire)
-    end
-  end
+local function configure_captured_output(config: uv_spawn_config,
+                                         index: integer): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  local captured: SpawnSlot? = nil
+  status, captured = config_capture(config)
+  if status < 0 then return status end
+  return replace_output(
+      config, index, captured as SpawnSlot,
+      libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE)
 end
 
-local function begin_process_shutdown(runtime: Runtime)
-  local control? = runtime.process_head
-  while control do
-    if control.stdout_pipe then
-      control.stdout_pipe.metadata.read_queue = {}
-    end
-    if control.stderr_pipe then
-      control.stderr_pipe.metadata.read_queue = {}
-    end
-    if control.lifecycle == PROCESS_ALLOCATED then
-      if control.owner then
-        discard_process_storage(control.owner)
-      end
-      process_close_all_pipes(control)
-    elseif not control.exit_seen and
-           control.lifecycle == PROCESS_SPAWNED then
-      local status = begin_one_process_shutdown(control)
-      if status < 0 and not runtime.fatal then
-        promote_fatal(runtime,
-            make_error(status, "process.shutdown", nil), "")
-      end
-    elseif control.exit_seen and
-           control.lifecycle ~= PROCESS_CLOSING and
-           control.lifecycle ~= PROCESS_CLOSED and
-           control.owner then
-      start_process_close(control.owner)
-    end
-    if control.exit_seen then process_close_all_pipes(control) end
-    control = control.next_control
-  end
+function _os_spawn_config_with_stdout(config: uv_spawn_config): integer
+  return configure_captured_output(config, 1)
 end
 
-local function repair_aborted_grace(control: ProcessControl)
-  if not control.grace_callback_aborted or
-      not control.grace_owner then return end
-  local owner = control.grace_owner
-  if not owner.handle then
-    control.grace_owner = nil
-    control.grace_callback_aborted = false
-    return
-  end
-  if control.grace_fired then
-    local handle =
-      owner.handle as owned *libuv.uv_timer_t
-    local timer_handle: *libuv.uv_timer_t = handle
-    libuv.uv_timer_stop(handle)
-    if not control.exit_seen and not control.kill_sent and
-        control.owner then
-      local kill = csignal.SIGKILL
-      local status = libuv.uv_process_kill(
-          control.owner.handle as owned *libuv.uv_process_t,
-          kill)
-      if status >= 0 or
-          status == libuv.UV_ESRCH then
-        control.kill_sent = true
-      end
-    end
-    if libuv.uv_is_closing(
-        timer_handle as const *libuv.uv_handle_t) == 0 then
-      libuv.uv_close(
-          timer_handle as *libuv.uv_handle_t,
-          shim.titan_uvshim_close_cb)
-    end
-  end
+function _os_spawn_config_with_stderr(config: uv_spawn_config): integer
+  return configure_captured_output(config, 2)
 end
 
-local function finish_parent_stdio_control(stdio: uv_stdio_t)
-  local runtime = stdio.runtime
-  local descriptor = stdio.parent_descriptor
-  if cached_parent_stdio(runtime, descriptor) == stdio then
-    cache_parent_stdio(runtime, descriptor, nil)
+function _os_spawn_config_with_parent_stdin(
+    config: uv_spawn_config): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  local parent: SpawnSlot? = nil
+  status, parent = prepare_inherited_stdio(config, 0)
+  if status >= 0 then
+    configure_stdin(config, parent as SpawnSlot,
+                    libuv.UV_INHERIT_STREAM)
   end
+  return status
 end
 
-local function repair_aborted_stream(control: StreamControl)
-  local has_owner = not not control.pipe_owner
-  if control.tty_owner then has_owner = true end
-  if control.callback_aborted and
-      control.lifecycle == PIPE_CLOSED and has_owner then
-    finish_stream_close(control)
-    control.callback_aborted = false
+local function configure_parent_output(config: uv_spawn_config,
+                                       descriptor: integer): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  local parent: SpawnSlot? = nil
+  status, parent = prepare_inherited_stdio(config, descriptor)
+  if status < 0 then return status end
+  return replace_output(config, descriptor, parent as SpawnSlot,
+                        libuv.UV_INHERIT_STREAM)
+end
+
+function _os_spawn_config_with_parent_stdout(
+    config: uv_spawn_config): integer
+  return configure_parent_output(config, 1)
+end
+
+function _os_spawn_config_with_parent_stderr(
+    config: uv_spawn_config): integer
+  return configure_parent_output(config, 2)
+end
+
+function _os_spawn_config_with_merged_output(
+    config: uv_spawn_config): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  local merged: SpawnSlot? = nil
+  status, merged = config_merged_output(config)
+  if status >= 0 then
+    local slot = merged as SpawnSlot
+    configure_outputs(config, slot, libuv.UV_INHERIT_STREAM,
+                      slot, libuv.UV_INHERIT_STREAM)
   end
+  return status
 end
 
-local function repair_aborted_pipe(pipe: uv_pipe_t?)
-  if pipe then repair_aborted_stream(pipe.metadata) end
+function _os_spawn_config_close(config: uv_spawn_config)
+  if config.consumed then return end
+  local task = running_task()
+  if config.runtime ~= task.runtime then
+    raise "SpawnConfig belongs to a different async Runtime"
+  end
+  config.consumed = true
+  discard_config_streams(config)
 end
 
-local function repair_spawn_config(config: SpawnConfigState?)
-  if not config then return end
+function _os_spawn_config_error(config: uv_spawn_config, status: integer)
+  _os_spawn_config_close(config)
+  raise make_error(status, "process.spawn.config", nil)
+end
+
+local function new_process(runtime: Runtime): uv_process_t
+  local native = libuv.uv_process_t.new()
+  return uv_process_t.new {
+    handle = native,
+    exit_callback = process_exit_callback,
+    runtime = runtime,
+    stdin = nil,
+    stdout = nil,
+    stderr = nil,
+    waiter = nil,
+    result = nil,
+    root_index = 0,
+  }
+end
+
+function _os_process_spawn_with_config(file: string, args: {string},
+                                       config: uv_spawn_config): uv_process_t
   local state = config
-  repair_aborted_pipe(optional_stdio_pipe(state.stdin_candidate))
-  repair_aborted_pipe(optional_stdio_pipe(state.stdout_candidate))
-  repair_aborted_pipe(optional_stdio_pipe(state.stderr_candidate))
-  repair_aborted_pipe(optional_stdio_pipe(state.merged_parent_candidate))
-  repair_aborted_pipe(optional_stdio_pipe(state.merged_child_candidate))
-end
+  local status = validate_config(state)
+  if status < 0 then _os_spawn_config_error(config, status) end
+  if not state.stdin or not state.stdout or not state.stderr then
+    _os_spawn_config_error(config, libuv.UV_EINVAL)
+  end
+  accepting_work(state.runtime, "spawn a Process")
 
-local function repair_aborted_process(control: ProcessControl)
-  repair_aborted_grace(control)
-  repair_spawn_config(control.spawn_config)
-  repair_aborted_pipe(control.stdin_pipe)
-  repair_aborted_pipe(control.stdout_pipe)
-  repair_aborted_pipe(control.stderr_pipe)
-  if not control.callback_aborted or not control.owner then return end
-  local process = control.owner
-  if control.lifecycle == PROCESS_EXITED then
-    close_process_grace(control)
-    if control.stdin_pipe then
-      start_pipe_close(control.stdin_pipe)
+  if contains_nul(file) then
+    raise make_error(libuv.UV_EINVAL, "process.spawn.file", file)
+  end
+  local index = 1
+  while index <= #args do
+    if contains_nul(args[index]) then
+      raise make_error(
+          libuv.UV_EINVAL, "process.spawn.argument", args[index])
     end
-    start_process_close(process)
-    control.callback_aborted = false
-  elseif control.lifecycle == PROCESS_CLOSED then
-    process_dispatch_body(
-        process, shim.TITAN_UV_EVENT_HANDLE_CLOSE)
-    control.callback_aborted = false
+    index = index + 1
   end
-end
-
-local function begin_one_parent_stdio_shutdown(stdio: uv_stdio_t?)
-  if not stdio then return end
-  local control = stdio_stream_control(stdio)
-  control.shutdown_requested = true
-  control.read_queue = {}
-  control.read_bytes = nil
-  control.read_error = nil
-  control.read_terminal = TCP_READ_EOF
-  start_stream_close(control)
-end
-
-local function begin_parent_stdio_shutdown(runtime: Runtime)
-  begin_one_parent_stdio_shutdown(runtime.parent_stdin)
-  begin_one_parent_stdio_shutdown(runtime.parent_stdout)
-  begin_one_parent_stdio_shutdown(runtime.parent_stderr)
-end
-
-local function advance_one_parent_stdio_shutdown(stdio: uv_stdio_t?)
-  if not stdio then return end
-  local control = stdio_stream_control(stdio)
-  repair_aborted_stream(control)
-  if control.lifecycle == PIPE_CLOSED and
-      not control.pipe_owner and not control.tty_owner then
-    finish_parent_stdio_control(stdio)
-  end
-end
-
-local function advance_parent_stdio_shutdown(runtime: Runtime)
-  advance_one_parent_stdio_shutdown(runtime.parent_stdin)
-  advance_one_parent_stdio_shutdown(runtime.parent_stdout)
-  advance_one_parent_stdio_shutdown(runtime.parent_stderr)
-end
-
-local function advance_process_shutdown(runtime: Runtime)
-  retire_aborted_process_requests(runtime)
-  begin_process_shutdown(runtime)
-  local control? = runtime.process_head
-  while control do
-    local to_advance = control
-    control = to_advance.next_control
-    repair_aborted_process(to_advance)
-    if to_advance.linked and process_all_native_closed(to_advance) then
-      finish_process_control(to_advance)
+  local stdin? = (state.stdin as SpawnSlot).parent
+  local stdout? = (state.stdout as SpawnSlot).parent
+  local stderr? = (state.stderr as SpawnSlot).parent
+  local merged_child: uv_stdio_t? = nil
+  if state.stdout == state.stderr then
+    local slot = state.stdout as SpawnSlot
+    if slot.parent and slot.child ~= slot.parent then
+      merged_child = slot.child
     end
   end
+  local process = new_process(state.runtime)
+  local process_handle: *libuv.uv_process_t = process.handle
+  local argument_count = #args + 1
+  local argv = shim.titan_uvshim_char_ptr.new_array(argument_count + 1)
+  argv[0] = file
+  index = 1
+  while index <= #args do
+    argv[index] = args[index]
+    index = index + 1
+  end
+  argv[argument_count] = nil
+  state.options.file = file
+  state.options.args = argv
+  state.consumed = true
+  process.root_index = root_handle(state.runtime, process)
+  libuv.uv_handle_set_data(process_handle as *libuv.uv_handle_t,
+                           process as ffi.titan_ffi_void_ptr)
+  local spawn_status = libuv.uv_spawn(
+      state.runtime.loop, process_handle, state.options)
+
+  if spawn_status < 0 then
+    do
+      local handle = process_handle as *libuv.uv_handle_t
+      if loop_owns_handle(state.runtime, handle) then
+        local old_root_index = process.root_index
+        process.root_index = 0
+        await(Call.raw_close(
+            RawCloseCall.new(handle, process, old_root_index)))
+      else
+        unroot_handle(state.runtime, process.root_index)
+        process.root_index = 0
+      end
+    finally
+      discard_config_streams(state)
+    end
+    raise make_error(spawn_status, "process.spawn", file)
+  end
+
+  process.stdin = stdin
+  process.stdout = stdout
+  process.stderr = stderr
+  discard_unpublished_stdio(merged_child)
+
+  if stdout then
+    local output = stdout as uv_stdio_t
+    start_captured_read(output, "process.stdout.read.start", file)
+  end
+  if stderr and stderr ~= stdout then
+    local error_output = stderr as uv_stdio_t
+    start_captured_read(error_output,
+                        "process.stderr.read.start", file)
+  end
+  return process
+end
+
+local function validate_process(process: uv_process_t)
+  if process.runtime ~= running_task().runtime then
+    raise "Process belongs to a different async Runtime"
+  end
+end
+
+function _os_process_stdin(process: uv_process_t): uv_stdio_t?
+  validate_process(process)
+  return process.stdin
+end
+
+function _os_process_stdout(process: uv_process_t): uv_stdio_t?
+  validate_process(process)
+  return process.stdout
+end
+
+function _os_process_stderr(process: uv_process_t): uv_stdio_t?
+  validate_process(process)
+  return process.stderr
+end
+
+function _os_process_wait(process: uv_process_t): (integer, integer)
+  validate_process(process)
+  local result = await(Call.process_wait(
+      ProcessWaitCall.new(process))) as ProcessExitResult
+  return result.code, result.signal_number
+end
+
+function _os_process_kill(process: uv_process_t, signal: string)
+  validate_process(process)
+  local signum = signal_number(signal)
+  if signum <= 0 then
+    raise "unsupported process signal name '" .. signal .. "'"
+  end
+  if process.result then raise "cannot signal an exited Process" end
+  local status = libuv.uv_process_kill(process.handle, signum)
+  if status < 0 and status ~= libuv.UV_ESRCH then
+    raise make_error(status, "process.kill", signal)
+  end
+end
+
+function _os_process_is_running(process: uv_process_t): boolean
+  validate_process(process)
+  return process.result == nil
+end
+
+function _os_parent_stdin(): uv_stdio_t
+  return initialize_parent_stdio(running_task().runtime, 0)
+end
+
+function _os_parent_stdout(): uv_stdio_t
+  return initialize_parent_stdio(running_task().runtime, 1)
+end
+
+function _os_parent_stderr(): uv_stdio_t
+  return initialize_parent_stdio(running_task().runtime, 2)
+end
+
+function _os_stdio_is_tty(stdio: uv_stdio_t): boolean
+  validate_stdio(stdio)
+  local tty = false
+  case stdio.native
+  when pipe then tty = false
+  when tty then tty = true
+  end
+  return tty
+end
+
+function _os_stdio_read(stdio: uv_stdio_t): string?
+  validate_stdio(stdio)
+  return await(Call.stream_read(StreamReadCall.new(stdio)))
+end
+
+function _os_stdio_write(stdio: uv_stdio_t, data: string)
+  validate_stdio(stdio)
+  await(Call.stream_write(StreamWriteCall.new(stdio, data)))
+end
+
+function _os_stdio_close(stdio: uv_stdio_t)
+  validate_stdio(stdio)
+  await(Call.stream_close(StreamCloseCall.new(stdio)))
 end

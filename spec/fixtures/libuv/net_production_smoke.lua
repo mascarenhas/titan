@@ -10,6 +10,12 @@ local payload = mode .. "\0titan.net"
 local first_port = mode == "system" and 45000 or 45032
 local last_port = first_port + 31
 
+local function active(task)
+    local status = task:status()
+    return status == "ready" or status == "running" or status == "waiting"
+end
+
+local main_result
 local main = async.run(function()
     local server
     local port
@@ -29,6 +35,7 @@ local main = async.run(function()
     assert(server, "could not bind the loopback smoke range: " ..
         tostring(last_error))
 
+    local peer_result
     local peer_task = async.run(function()
         local peer = server:accept()
         local request = peer:read_until("\n", true)
@@ -36,7 +43,7 @@ local main = async.run(function()
         peer:write(request .. "\n")
         peer:shutdown()
         peer:close()
-        return request
+        peer_result = request
     end)
 
     local client = net.connect("127.0.0.1", port)
@@ -46,12 +53,15 @@ local main = async.run(function()
     client:shutdown()
     client:close()
 
-    assert(peer_task:join() == payload)
+    while active(peer_task) do timer.yield() end
+    assert(peer_task:status() == "succeeded")
+    assert(peer_result == payload)
 
     if mode == "sanitizer" then
         local seed = "owned-write\0buffer:"
         local repetitions = 512 * 1024
         local followup = "write-after-cancel\0ok"
+        local slow_peer_finished = false
         local slow_peer = async.run(function()
             local peer = server:accept()
             timer.sleep(100)
@@ -62,7 +72,7 @@ local main = async.run(function()
             peer:write(followup .. "\n")
             peer:shutdown()
             peer:close()
-            return true
+            slow_peer_finished = true
         end)
 
         local stress_client = net.connect("127.0.0.1", port)
@@ -81,22 +91,27 @@ local main = async.run(function()
             "large write did not remain physically pending")
         owned_payload = nil
         writer:cancel("sanitizer-inflight-write")
+        assert(writer:status() == "waiting",
+            "write cancellation resumed synchronously")
         collectgarbage("collect")
-        local joined = pcall(function() return writer:join() end)
-        assert(not joined and writer:status() == "cancelled")
+        while active(writer) do timer.yield() end
+        assert(writer:status() == "cancelled")
 
         assert(stress_client:read_until("\n", true) == "ready")
         stress_client:write(followup .. "\n")
         assert(stress_client:read_until("\n", true) == followup)
         stress_client:shutdown()
         stress_client:close()
-        assert(slow_peer:join())
+        while active(slow_peer) do timer.yield() end
+        assert(slow_peer:status() == "succeeded")
+        assert(slow_peer_finished)
         print("RESULT net production cancelled-write smoke sanitizer passed")
     end
 
     server:close()
-    return response
+    main_result = response
 end)
 
 async.loop()
-assert(main:join() == payload)
+assert(main:status() == "succeeded")
+assert(main_result == payload)

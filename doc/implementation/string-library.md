@@ -39,12 +39,12 @@ small private byte/diagnostic helpers to avoid a cycle. Both modules import the
 public `titan.gc` surface to configure their weak caches. `titan.string` uses
 the typed PEG surface and imports the public `titan.async` facade solely for
 the explicit fairness turn in its in-memory streams. It never reaches the
-embedded PEG engine or private uv scheduler through a raw escape hatch. Both
+embedded PEG engine or private uv continuation layer through a raw escape
+hatch. Both
 `titan.net` and `titan.os` dogfood the literal
-`titan.string.find` and byte-preserving `titan.string.sub` operations. The
-isolated delayed-DNS fixture therefore constructs complete exact PEG and
-string providers before its exact net facade; production already places all
-fourteen logical modules and LPegLabel in one static bundle.
+`titan.string.find` and byte-preserving `titan.string.sub` operations.
+Production places all fourteen logical modules and LPegLabel in one static
+bundle.
 
 The installed standard build requests fourteen roots in stable order:
 

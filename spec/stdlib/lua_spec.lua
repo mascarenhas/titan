@@ -203,6 +203,7 @@ assert(tostring(err):find("named-load", 1, true), err)
         run([[
 local async = require "titan.async"
 local probe = require "lua_probe"
+local completed = false
 local task = async.run(function()
     local values = table.pack(probe.reader_results())
     assert(values.n == 3)
@@ -210,10 +211,11 @@ local task = async.run(function()
         values[3] == "right")
 
     assert(probe.empty_reader_result() == "empty-chunks-ok")
-    return true
+    completed = true
 end)
 async.loop()
-assert(task:join() == true)
+assert(task:status() == "succeeded", task:status())
+assert(completed)
 ]])
     end)
 
@@ -245,6 +247,7 @@ write(%q, "return ...")
 write(%q, "error('runtime marker')")
 write(%q, "this is not Lua")
 
+local completed = false
 local task = async.run(function()
     local values = table.pack(tlua.dofile(%q, 4, nil, 6))
     assert(values.n == 3)
@@ -267,10 +270,11 @@ local task = async.run(function()
     assert(final_fds <= baseline_fds + 2,
         ("dofile leaked descriptors: %%d -> %%d"):format(
             baseline_fds, final_fds))
-    return true
+    completed = true
 end)
 async.loop()
-assert(task:join() == true)
+assert(task:status() == "succeeded", task:status())
+assert(completed)
 assert(os.remove(%q))
 assert(os.remove(%q))
 assert(os.remove(%q))
@@ -325,65 +329,76 @@ local function write(path, contents)
     assert(file:write(contents))
     assert(file:close())
 end
+local function active(task)
+    local status = task:status()
+    return status == "ready" or status == "running" or status == "waiting"
+end
 write(%q, "return { name = ..., filename = select(2, ...) }")
 write(%q, "return { loaded = true }")
 write(%q, "return { retried = true }")
 
 local phase = 0
-local source_task = async.run(function()
+local completed = false
+local coordinator = async.run(function()
     phase = 1
     local observer = async.run(function()
         assert(phase == 1)
         phase = 2
-        return true
     end)
     local result = tlua.require("lua_spec_source")
     assert(phase == 2)
-    observer:join()
+    assert(observer:status() == "succeeded", observer:status())
     assert(result.name == "lua_spec_source")
     assert(result.filename == %q)
     assert(tlua.require("lua_spec_source") == result)
-    return true
-end)
-async.loop()
-assert(source_task:join() == true)
 
-local first = async.run(function()
-    return tlua.require("lua_spec_concurrent")
-end)
-local second = async.run(function()
-    local ok, err = pcall(tlua.require, "lua_spec_concurrent")
-    assert(not ok)
-    return tostring(err)
-end)
-async.loop()
-assert(first:join().loaded == true)
-local duplicate = second:join()
-assert(duplicate:find("already being loaded", 1, true), duplicate)
+    local first_started = false
+    local first_loaded = false
+    local duplicate = ""
+    local first = async.run(function()
+        first_started = true
+        local loaded = tlua.require("lua_spec_concurrent")
+        first_loaded = loaded.loaded == true
+    end)
+    local second = async.run(function()
+        while not first_started do timer.yield() end
+        local ok, err = pcall(tlua.require, "lua_spec_concurrent")
+        assert(not ok)
+        duplicate = tostring(err)
+    end)
+    while active(first) or active(second) do timer.yield() end
+    assert(first:status() == "succeeded", first:status())
+    assert(second:status() == "succeeded", second:status())
+    assert(first_loaded)
+    assert(duplicate:find("already being loaded", 1, true), duplicate)
 
-local saved_path = package.path
-package.path = "/dev/zero"
-local cancelled = async.run(function()
-    return tlua.require("lua_spec_cancel_retry")
-end)
-local canceller = async.run(function()
-    timer.sleep(10)
-    cancelled:cancel("cancel-source-read")
-    return true
-end)
-async.loop()
-package.path = saved_path
-assert(canceller:join() == true)
-local cancel_ok, cancel_err = pcall(cancelled.join, cancelled)
-assert(not cancel_ok)
-assert(cancelled:status() == "cancelled", tostring(cancel_err))
-assert(cancel_err.reason == "cancel-source-read")
+    local saved_path = package.path
+    package.path = "/dev/zero"
+    local cancelled_started = false
+    local cancelled = async.run(function()
+        cancelled_started = true
+        tlua.require("lua_spec_cancel_retry")
+    end)
+    local canceller = async.run(function()
+        while not cancelled_started do timer.yield() end
+        timer.sleep(10)
+        assert(cancelled:status() == "waiting", cancelled:status())
+        cancelled:cancel("cancel-source-read")
+        assert(cancelled:status() == "waiting",
+            "filesystem cancellation resumed synchronously")
+    end)
+    while active(cancelled) or active(canceller) do timer.yield() end
+    package.path = saved_path
+    assert(canceller:status() == "succeeded", canceller:status())
+    assert(cancelled:status() == "cancelled", cancelled:status())
 
-local retry = async.run(function()
-    return tlua.require("lua_spec_cancel_retry")
+    local retry = tlua.require("lua_spec_cancel_retry")
+    assert(retry.retried == true)
+    completed = true
 end)
 async.loop()
-assert(retry:join().retried == true)
+assert(coordinator:status() == "succeeded", coordinator:status())
+assert(completed)
 assert(os.remove(%q))
 ]], source, concurrent, cancel_retry, source, cancel_retry))
     end)
@@ -393,6 +408,7 @@ assert(os.remove(%q))
 local async = require "titan.async"
 local tlua = require "titan.lua"
 
+local completed = false
 local task = async.run(function()
     local titan_module = tlua.require("lua_required_titan")
     assert(titan_module.answer() == 42)
@@ -417,10 +433,11 @@ local task = async.run(function()
     package.searchers[custom_index] = nil
     package.searchers[2] = source_slot
     assert(custom == "custom-result")
-    return true
+    completed = true
 end)
 async.loop()
-assert(task:join() == true)
+assert(task:status() == "succeeded", task:status())
+assert(completed)
 ]])
     end)
 
@@ -428,6 +445,7 @@ assert(task:join() == true)
         run([[
 local async = require "titan.async"
 local tlua = require "titan.lua"
+local completed = false
 local task = async.run(function()
     local saved_path = package.path
     local custom_index = #package.searchers + 1
@@ -451,10 +469,11 @@ local task = async.run(function()
         "init.lua'", 1, true))
     local custom = assert(message:find("custom diagnostic last", 1, true))
     assert(first < second and second < custom, message)
-    return true
+    completed = true
 end)
 async.loop()
-assert(task:join() == true)
+assert(task:status() == "succeeded", task:status())
+assert(completed)
 ]])
     end)
 end)

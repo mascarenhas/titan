@@ -1,171 +1,79 @@
 local libuv = foreign import "uv.h"
 local lua = foreign import "lua.h"
+local lual = foreign import "lauxlib.h"
 local ffi = foreign import "titan/ffi.h"
 local shim = foreign import "titan/uv.h"
 local cstring = foreign import "string.h"
-local climits = foreign import "limits.h"
+local cunistd = foreign import "unistd.h"
 local csignal = foreign import "signal.h"
 local cerrno = foreign import "errno.h"
-local cfcntl = foreign import "fcntl.h"
-local cunistd = foreign import "unistd.h"
 local coroutine = import "coroutine"
 
--- The canonical folder main owns these ordinary foreign imports so every
--- contributor uses the same C namespaces directly.
-
--- Private continuation runtime. Native pointers stay in exact local fields;
--- every callback is a direct call to timer_dispatch's native Titan entry.
-
-local OWNER_ALLOCATED = 0
-local OWNER_ACTIVE = 1
-local OWNER_CLOSING = 2
-local OWNER_CLOSED = 3
-
-local TASK_NEW = 0
-local TASK_READY = 1
-local TASK_RUNNING = 2
-local TASK_WAITING = 3
-local TASK_SUCCEEDED = 4
-local TASK_FAILED = 5
-local TASK_CANCELLED = 6
-
-local OWNER_START = 1
-local OWNER_SLEEP = 2
-local OWNER_CANCEL = 3
-local OWNER_JOIN_WAKE = 4
-local OWNER_OBSERVE = 5
-local OWNER_TICKER = 6
-local OWNER_TICKER_CLOSE_WAKE = 7
-local OWNER_TASK_DRIVE = 8
-
-local REQUEST_SLEEP = 1
-local REQUEST_JOIN = 2
-local REQUEST_TICK = 3
-local REQUEST_FS = 4
-local REQUEST_NET = 5
-local REQUEST_SIGNAL = 6
-local REQUEST_PROCESS = 7
-
-local NET_CONNECT = 1
-local NET_LISTEN = 2
-local NET_READ = 3
-local NET_WRITE = 4
-local NET_SHUTDOWN = 5
-local NET_ACCEPT = 6
-local NET_CLOSE = 7
-local NET_CLOSE_WAIT = 8
-
-local NET_OWNER_DNS = 1
-local NET_OWNER_CONNECT = 2
-local NET_OWNER_WRITE = 3
-local NET_OWNER_SHUTDOWN = 4
-
-local NET_OWNER_ALLOCATED = 0
-local NET_OWNER_SUBMITTED = 1
-local NET_OWNER_CALLBACK = 2
-local NET_OWNER_RETIRED = 3
-
-local OS_BUFFER_INITIAL = 256
-
-local TCP_ALLOCATED = 0
-local TCP_INITIALIZED = 1
-local TCP_CONNECTION = 2
-local TCP_SERVER = 3
-local TCP_CLOSING = 4
-local TCP_CLOSED = 5
-
-local TCP_READ_OPEN = 0
-local TCP_READ_EOF = 1
-local TCP_READ_ERROR = 2
-
-local PROCESS_ALLOCATED = 0
-local PROCESS_SPAWNED = 1
-local PROCESS_EXITED = 2
-local PROCESS_CLOSING = 3
-local PROCESS_CLOSED = 4
-
-local PIPE_ALLOCATED = 0
-local PIPE_INITIALIZED = 1
-local PIPE_OPEN = 2
-local PIPE_CLOSING = 3
-local PIPE_CLOSED = 4
-
-local PROCESS_SPAWN = 1
-local PROCESS_WAIT = 2
-local PROCESS_WRITE_STDIN = 3
-local PROCESS_CLOSE_STREAM = 4
-local PROCESS_READ_STREAM = 5
-local PROCESS_CLOSE_SPAWN_CONFIG = 6
-
-local PROCESS_OWNER_ALLOCATED = 0
-local PROCESS_OWNER_SUBMITTED = 1
-local PROCESS_OWNER_CALLBACK = 2
-local PROCESS_OWNER_RETIRED = 3
-
-local PROCESS_GRACE_MILLISECONDS = 5000
-
-local FS_OWNER_ALLOCATED = 0
-local FS_OWNER_SUBMITTED = 1
-local FS_OWNER_CALLBACK = 2
-local FS_OWNER_CLEANED = 3
-
-local DRIVE_RESUME = 1
-local DRIVE_ERROR = 2
-
--- A single tag identity belongs to this module instance and is shared by all
--- tasks and by every sequential Runtime session in the Lua state.
+-- titan.uv is deliberately a thin callback/continuation adapter. There is one
+-- tag identity per module instance and one outer uv_run driver per Runtime.
+-- A callback resumes a Task, receives its next Call, dispatches that one
+-- libuv operation, and returns to the non-reentrant event loop.
 local UV_TAG: value = {}
-local generation = 0
+local main_thread: *lua.lua_State = nil
 local active_runtime: Runtime? = nil
 local program_args_ready = false
 
-local main_thread: value = nil
+record Error
+  code: integer
+  name: string
+  message: string
+  operation: string
+  subject: string?
+end
+
+record Cancelled
+  reason: value
+end
 
 local function bootstrap(main_callable: ({string}) -> integer,
                          args: {string}): integer
+  local result = 1
   local task = run_internal(function (): value
-    return main_callable(args)
-  end, true)
+    result = main_callable(args)
+    return nil
+  end)
   _loop()
-  if task.state ~= TASK_SUCCEEDED then
-    raise_saved(task.error_value, task.error_traceback)
-  end
-  return task.result
+  if task.runtime.exit_requested then return task.runtime.exit_code end
+  if task.state == TASK_SUCCEEDED then return result end
+  -- An uncaught Task error has already been reported with its traceback. The
+  -- standalone bootstrap still needs a conventional unsuccessful exit code.
+  return 1
 end
 
--- A generated Titan entrypoint publishes its original argc/argv before it
--- loads any module. Keep uv_setup_args in this canonical provider image and
--- publish libuv's possibly replaced argv pointer back to the entrypoint.
+-- A generated entrypoint publishes its original argc/argv before loading any
+-- module. uv_setup_args may replace argv, so publish the configured pointer
+-- back to the entrypoint exactly once.
 local function setup_program_args(): boolean
   local top = lua.lua_gettop(L)
   defer lua.lua_settop(L, top)
   lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGC_KEY)
-  if lua.lua_type(L, -1) == lua.LUA_TNIL then
-    return false
-  end
+  if lua.lua_type(L, -1) == lua.LUA_TNIL then return false end
   local argc = lua.lua_tointegerx(L, -1, nil) as ffi.titan_ffi_int
   lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
   local argv = lua.lua_touserdata(L, -1) as *shim.titan_uvshim_char_ptr
   local configured = libuv.uv_setup_args(argc, argv)
-  lua.lua_pushlightuserdata(
-      L, configured as ffi.titan_ffi_void_ptr)
+  lua.lua_pushlightuserdata(L, configured as ffi.titan_ffi_void_ptr)
   lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
   return true
 end
 
+-- libuv reports closed-stream writes as errors only when SIGPIPE does not
+-- terminate the process first. Preserve inherited application policy and
+-- change only the default Unix disposition.
 local function ignore_sigpipe_if_default(): integer
   local current: csignal.sigaction
   if csignal.sigaction(csignal.SIGPIPE, nil, current) ~= 0 then
     return libuv.uv_translate_sys_error(cerrno.errno)
   end
-  if current.sa_handler ~= csignal.SIG_DFL then
-    return 0
-  end
+  if current.sa_handler ~= csignal.SIG_DFL then return 0 end
 
   local ignore: csignal.sigaction
   ignore.sa_handler = csignal.SIG_IGN
-  -- Mutable address coercions deliberately apply to locals, not subobjects.
-  -- Keep the mask portable across aggregate and scalar sigset_t definitions.
   local mask: csignal.sigset_t = ignore.sa_mask
   if csignal.sigemptyset(mask) ~= 0 then
     return libuv.uv_translate_sys_error(cerrno.errno)
@@ -178,13 +86,11 @@ local function ignore_sigpipe_if_default(): integer
 end
 
 do
-  local sigpipe_status =
-    ignore_sigpipe_if_default()
+  local sigpipe_status = ignore_sigpipe_if_default()
   if sigpipe_status < 0 then
     raise make_error(sigpipe_status, "runtime.sigpipe", nil)
   end
-  main_thread = main_thread_value()
-  check_alignment()
+  main_thread = main_thread_state()
   program_args_ready = setup_program_args()
   ffi.lua_pushtvalue(L, bootstrap)
   lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)

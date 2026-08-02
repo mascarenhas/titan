@@ -7,7 +7,6 @@ local str = import "string"
 record Connection
   local handle: uv.uv_tcp_t
   local excess: string
-  local reading: boolean
 end
 
 record Server
@@ -30,16 +29,7 @@ local function check_listen_port(port: integer)
   end
 end
 
-local function begin_read(connection: Connection)
-  if connection.reading then
-    raise "Connection already has a reader"
-  end
-  connection.reading = true
-end
-
--- This helper runs only while the public reader lock is held. It serves all
--- retained excess first, then performs at most one middle-layer read.
-local function read_unlocked(connection: Connection): string?
+local function read(connection: Connection): string?
   if uv._net_is_closed(connection.handle) then
     connection.excess = ""
     return nil
@@ -55,7 +45,7 @@ end
 function connect(host: string, port: integer): Connection
   check_host(host)
   check_connect_port(port)
-  return Connection.new(uv._net_connect(host, port), "", false)
+  return Connection.new(uv._net_connect(host, port), "")
 end
 
 function listen(host: string, port: integer,
@@ -67,14 +57,7 @@ function listen(host: string, port: integer,
 end
 
 function Connection:read(): string?
-  begin_read(self)
-  local result: string? = nil
-  do
-    result = read_unlocked(self)
-  finally
-    self.reading = false
-  end
-  return result
+  return read(self)
 end
 
 function Connection:read_until(delimiter: string,
@@ -85,78 +68,44 @@ function Connection:read_until(delimiter: string,
   end
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
-  begin_read(self)
   local builder = str.writer(false)
-  -- The native read is this producer's scheduling boundary. Keep the current
-  -- consumed chunk separately until the append succeeds so an append error
-  -- can restore every byte to the facade excess.
-  local pending = ""
-  local total = 0
   local tail = ""
-  local result: string? = nil
-  local finished = false
-  do
-    while not finished do
-      local maybe_chunk: string? = nil
-      local terminal_error_tail = false
-      do
-        maybe_chunk = read_unlocked(self)
-      catch
-        if total > 0 and
-            uv._net_read_error_is(self.handle, error) then
-          terminal_error_tail = true
-        else
-          raise
-        end
+  while true do
+    local chunk? = read(self)
+    if not chunk then
+      if #tail > 0 then builder:write(tail) end
+      local result = builder:drain()
+      if #result == 0 then return nil end
+      return result
+    end
+    local bytes = chunk as string
+    local boundary = bytes
+    if #tail > 0 then boundary = tail .. bytes end
+    local match: integer? = str.find(boundary, delimiter)
+    if match then
+      local match_first = match as integer
+      local match_end = match_first + #delimiter - 1
+      local result_end = match_end
+      if chop then result_end = match_first - 1 end
+      if result_end > 0 then
+        builder:write(str.sub(boundary, 1, result_end))
       end
-
-      if terminal_error_tail then
-        result = builder:drain()
-        finished = true
-      elseif not maybe_chunk then
-        -- Explicit close discards even bytes already accumulated by this
-        -- in-flight delimiter read; natural EOF still returns its tail.
-        if total > 0 and not uv._net_is_closed(self.handle) then
-          result = builder:drain()
-        end
-        finished = true
+      self.excess = str.sub(boundary, match_end + 1)
+      return builder:drain()
+    end
+    local keep = #delimiter - 1
+    if keep > #boundary then keep = #boundary end
+    local committed = #boundary - keep
+    if committed > 0 then
+      if committed == #boundary then
+        builder:write(boundary)
       else
-        local chunk = maybe_chunk as string
-        pending = chunk
-        builder:write(chunk)
-        pending = ""
-        local boundary = tail .. chunk
-        local match: integer? = str.find(boundary, delimiter)
-        total = total + #chunk
-        if match then
-          local match_end =
-            total - #boundary + (match as integer) - 1 + #delimiter
-          local result_end = match_end
-          if chop then result_end = result_end - #delimiter end
-          local all = builder:drain()
-          local selected = str.sub(all, 1, result_end)
-          local remaining = str.sub(all, match_end + 1)
-          result = selected
-          self.excess = remaining .. self.excess
-          finished = true
-        else
-          local keep = #delimiter - 1
-          if keep > #boundary then keep = #boundary end
-          tail = str.sub(boundary, #boundary - keep + 1)
-        end
+        builder:write(str.sub(boundary, 1, committed))
       end
     end
-  catch
-    local restored = builder:drain()
-    if #pending > 0 then restored = restored .. pending end
-    if #restored > 0 then
-      self.excess = restored .. self.excess
-    end
-    raise
-  finally
-    self.reading = false
+    tail = str.sub(boundary, committed + 1)
   end
-  return result
+  return nil
 end
 
 function Connection:write(data: string)
@@ -168,19 +117,12 @@ function Connection:shutdown()
 end
 
 function Connection:close()
-  -- A closed ReaderCloser is at EOF. Clear before yielding, then clear again
-  -- because a concurrent delimiter reader may have restored consumed bytes
-  -- while the physical close was completing.
   self.excess = ""
-  do
-    uv._net_close(self.handle)
-  finally
-    self.excess = ""
-  end
+  uv._net_close(self.handle)
 end
 
 function Server:accept(): Connection
-  return Connection.new(uv._net_accept(self.handle), "", false)
+  return Connection.new(uv._net_accept(self.handle), "")
 end
 
 function Server:close()

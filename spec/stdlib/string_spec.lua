@@ -158,26 +158,27 @@ describe("titan.string", function()
             local str = require "titan.string"
             local probe = require "string_core_probe"
             local phase = 0
+            local completed = false
+            local observers = {}
+            local function observe(expected, following)
+                local observer = async.run(function()
+                    assert(phase == expected)
+                    phase = following
+                end)
+                observers[#observers + 1] = observer
+            end
             local task = async.run(function()
                 local reader = str.reader("alpha\0beta\nlast")
                 phase = 1
-                local observer = async.run(function()
-                    assert(phase == 1)
-                    phase = 2
-                end)
+                observe(1, 2)
                 assert(reader:read_until("\n", true) == "alpha\0beta")
                 assert(phase == 2)
-                observer:join()
                 assert(reader:read() == "last")
 
                 phase = 3
-                local eof_observer = async.run(function()
-                    assert(phase == 3)
-                    phase = 4
-                end)
+                observe(3, 4)
                 assert(reader:read() == nil)
                 assert(phase == 4)
-                eof_observer:join()
                 reader:close()
                 reader:close()
 
@@ -207,23 +208,15 @@ describe("titan.string", function()
 
                 local writer = str.writer()
                 phase = 5
-                local empty_write_observer = async.run(function()
-                    assert(phase == 5)
-                    phase = 6
-                end)
+                observe(5, 6)
                 writer:write("")
                 assert(phase == 6)
-                empty_write_observer:join()
                 assert(writer:drain() == "")
 
                 phase = 7
-                local write_observer = async.run(function()
-                    assert(phase == 7)
-                    phase = 8
-                end)
+                observe(7, 8)
                 writer:write("left\0")
                 assert(phase == 8)
-                write_observer:join()
                 writer:write("right")
                 assert(writer:drain() == "left\0right")
                 assert(writer:drain() == "")
@@ -233,31 +226,20 @@ describe("titan.string", function()
                 writer:close()
 
                 phase = 9
-                local nil_policy_observer = async.run(function()
-                    assert(phase == 9)
-                    phase = 10
-                end)
+                observe(9, 10)
                 local nil_policy_reader = str.reader("nil-policy", nil)
                 assert(nil_policy_reader:read_until("-", true) == "nil")
                 assert(phase == 10)
-                nil_policy_observer:join()
 
                 phase = 11
-                local true_policy_observer = async.run(function()
-                    assert(phase == 11)
-                    phase = 12
-                end)
+                observe(11, 12)
                 local true_policy_writer = str.writer(true)
                 true_policy_writer:write("true-policy")
                 assert(phase == 12)
-                true_policy_observer:join()
                 assert(true_policy_writer:drain() == "true-policy")
 
                 phase = 13
-                local nonyielding_observer = async.run(function()
-                    assert(phase == 13)
-                    phase = 14
-                end)
+                observe(13, 14)
                 local direct_reader = str.reader("direct\0reader", false)
                 assert(direct_reader:read_until("\0", true) == "direct")
                 assert(direct_reader:read() == "reader")
@@ -270,13 +252,16 @@ describe("titan.string", function()
                 assert(phase == 13)
                 async.yield()
                 assert(phase == 14)
-                nonyielding_observer:join()
 
                 assert(probe.interface_streams() == "interface\0stream")
-                return true
+                completed = true
             end)
             async.loop()
-            assert(task:join() == true)
+            assert(task:status() == "succeeded", task:status())
+            assert(completed)
+            for _, observer in ipairs(observers) do
+                assert(observer:status() == "succeeded", observer:status())
+            end
         ]])
     end)
 

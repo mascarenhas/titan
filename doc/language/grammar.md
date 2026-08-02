@@ -318,8 +318,11 @@ local grid: {{float}} = {}                   -- array of arrays
 local ages: {string: integer} = {}           -- map
 ```
 
-The `?` suffix attaches only to `simpletype`, so there is no syntax for
-an optional function type: `((integer) -> integer)?` is a syntax error.
+The `?` suffix attaches only to `simpletype`, so it cannot be applied directly
+to a function type: `((integer) -> integer)?` is a syntax error. The type
+system does support options of functions; name the function type with an alias
+and suffix the name instead, for example `type F = (integer) -> integer`
+followed by `local f: F? = nil`.
 
 Function types are valid, checked types in any type position: functions
 are first-class values, so a function type may annotate a variable,

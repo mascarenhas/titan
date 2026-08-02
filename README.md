@@ -382,9 +382,9 @@ Its source is the reviewed folder ensemble rooted at `titan/uv/uv.titan`, with
 `file.titan`, `os.titan`, `process.titan`, `runtime.titan`, `task.titan`, and
 `tcp.titan` as contributors. The main file is the shared prelude and sole
 initializer, retaining the common imports, shared constants, module state, and
-bootstrap. Exported declarations, all private records, and the private `FS`
-constants instance live with their related contributor implementations. That
-deliberate member reorder is the compatibility boundary recorded for
+bootstrap. Exported declarations and private records live with their related
+contributor implementations. That deliberate member reorder is the
+compatibility boundary recorded for
 compiled-module ABI 0.15: at that historical boundary the files compiled to
 one `titan/uv.so`, never one image per contributor. ABI 0.16 keeps that folder
 as one logical object and loader, then links it with the other standard objects
@@ -462,13 +462,15 @@ explicitly:
 local async = require "titan.async"
 local timer = require "titan.timer"
 
+local result
 local task = async.run(function()
     timer.yield()
-    return "done"
+    result = "done"
 end)
 assert(task:status() == "ready") -- `run` has not executed it
 async.loop()
-assert(task:join() == "done")
+assert(task:status() == "succeeded")
+assert(result == "done")
 ```
 
 A libuv callback directly resumes its Titan Task and application code runs in

@@ -47,26 +47,15 @@ if process_child then
     local payload = mode .. "\0titan.os.process"
     for _ = 1, 14 do payload = payload .. payload end
 
-    local function check_parent_stream(stream, descriptor)
-        local ok, result = pcall(stream.is_tty, stream)
-        if ok then
-            assert(type(result) == "boolean")
-        else
-            -- Noninteractive runners commonly attach stdin to /dev/null and
-            -- may redirect either output to a regular file. Process streams
-            -- intentionally admit only libuv pipe and TTY handles.
-            assert(type(result) == "userdata")
-            assert(result.code == -22)
-            assert(result.name == "EINVAL")
-            assert(result.operation ==
-                "parent." .. descriptor .. ".classify")
-        end
+    local function check_parent_stream(stream)
+        assert(type(stream:is_tty()) == "boolean")
     end
 
+    local main_result
     local main = async.run(function()
-        check_parent_stream(system.stdin, "stdin")
-        check_parent_stream(system.stdout, "stdout")
-        check_parent_stream(system.stderr, "stderr")
+        check_parent_stream(system.stdin)
+        check_parent_stream(system.stdout)
+        check_parent_stream(system.stderr)
 
         local merged = titan_io.popen(
             "printf '" .. mode .. "-stdout'; " ..
@@ -142,11 +131,12 @@ if process_child then
         assert(not signalled:is_running())
         assert(signal_stdout:read() == nil)
         assert(signal_stderr:read() == nil)
-        return payload
+        main_result = payload
     end)
 
     async.loop()
-    assert(main:join() == payload)
+    assert(main:status() == "succeeded")
+    assert(main_result == payload)
     assert(require "os" == builtin)
     assert(package.loaded.os == builtin)
     assert(package.loaded["titan.os"] == system)

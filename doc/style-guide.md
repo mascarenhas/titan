@@ -133,9 +133,10 @@ The structural `io.Closer` Interface includes one lifetime rule: every later
 a pre-commit failure may retry. FIFO behavior, cancellation shielding,
 concurrent-call coalescing, and post-close reads or writes belong to the
 concrete resource rather than to the Interface.
-Prefer explicit close even when async Runtime shutdown would
-eventually release the native owner: an explicit close reports errors at the
-relevant call site and releases the resource earlier.
+Close resources explicitly so errors are reported at the relevant call site
+and ownership ends predictably. In particular, a File is an operating-system
+descriptor rather than a libuv loop handle; async Runtime shutdown does not
+close it on the application's behalf.
 
 Use `catch` to recover or add behavior. Use bare `raise` when the original
 error and traceback should continue. Remember that an error in `finally` or a
@@ -194,9 +195,9 @@ end
 
 Do not open-code that protocol with a primed optional and a `while` loop.
 Empty strings are iteration values and should be passed to the consumer; nil
-alone means EOF. Keep an explicit state machine when the operation must retain
-delimiter overlap, restore consumed input after cancellation, or distinguish
-a terminal error tail from ordinary EOF.
+alone means EOF. Keep an explicit state machine only for state the public
+operation actually promises, such as delimiter overlap and bytes retained
+after a successful match.
 
 ## Reuse the standard string writer
 
@@ -206,14 +207,13 @@ When a module already imports `string`, accumulate a result with
 centralizes string-size checks and linear-time assembly. Passing false is
 appropriate when the producer is synchronous or already yields at its real I/O
 boundary. Use the default yielding mode when the string-backed writer is meant
-to imitate an asynchronous stream. An asynchronous reader that must restore
-consumed bytes after an append error keeps the current uncommitted chunk
-separately until `write` succeeds.
+to imitate an asynchronous stream.
 
 The string module's own builder implementation and low-level modules that
 cannot import `string` because of the dependency graph are implementation
 boundaries, not invitations to duplicate `join_chunks` in higher-level
-modules.
+modules. Do not add cancellation rollback or terminal-tail bookkeeping unless
+the public API explicitly promises it.
 
 ## Capture parameters directly
 
@@ -231,18 +231,21 @@ Application code should import the public `async` facade and the high-level
 plumbing, not the general application API.
 
 `async.run` schedules a Task and returns before its function runs. Observe
-spawned Tasks with `join` or an intentional cancellation policy so failures do
-not become unobserved session errors. Application code runs directly inside a
+spawned Tasks through intentional shared state and `status`, or give them an
+intentional cancellation policy. An uncaught Task error is logged with its
+traceback and ends only that Task. Application code runs directly inside a
 libuv callback until it finishes or starts another asynchronous operation;
 use `async.yield()` when a CPU loop should explicitly cede a turn.
 
-Cancellation is often logical before it is physical. A native request,
-callback, buffer, descriptor, process, or stream owner must remain rooted
-until its terminal callback and cleanup complete, even when the waiting Task
-has been cancelled. Do not implement cancellation by dropping the last Titan
-reference or by allowing a Lua GC finalizer to race libuv. Follow the existing
-owner/control/request split in low-level modules and keep cleanup driven from
-the Runtime's outer safe points.
+Cancellation is often logical before it is physical. A callback owner and
+every GC value or native allocation it hands to libuv must remain rooted until
+the terminal callback and cleanup complete, even when the waiting Task has
+been cancelled. Do not implement cancellation by dropping the last Titan
+reference or by allowing a Lua GC finalizer to race libuv. Keep one traced
+request record per one-shot callback, and keep only buffered/latest state plus
+one waiter on a multi-shot handle. The callback resumes its continuation,
+dispatches the next yielded operation, and returns; no callback or Task may
+re-enter `uv_run`.
 
 For shell-command convenience, `io.popen` owns writable stdin and one readable
 stream that merges the child's stdout and stderr. Drain that output before

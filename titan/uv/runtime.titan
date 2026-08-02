@@ -1,674 +1,305 @@
-record Error
-  code: integer
-  name: string
-  message: string
-  operation: string
-  subject: string?
-end
-
-local record Loop
-  local handle?: owned *libuv.uv_loop_t
-end
-
--- Values are used only for opaque Lua roots and genuinely heterogeneous
--- payload/owner links.  Homogeneous recursive links retain their nominal
--- record types, and no native pointer is ever converted through value.
-local record Runtime
-  local loop: Loop
-  local generation: integer
-  local timer_owner_head: uv_timer_t?
-  local fs_pending_head: uv_fs_t?
-  local file_head: uv_file?
-  local net_pending_head: NetRequestControl?
-  local tcp_head: TcpControl?
-  local signal_owner_head: uv_signal_t?
-  local process_head: ProcessControl?
-  local process_request_head: ProcessRequestControl?
-  local parent_stdin: uv_stdio_t?
-  local parent_stdout: uv_stdio_t?
-  local parent_stderr: uv_stdio_t?
-  local main_task: Task?
-  local task_head: Task?
-  local running_task: Task?
-  local in_loop: boolean
-  local closing: boolean
-  local exit_requested: boolean
-  local exit_code: integer
-  local fatal: boolean
-  local fatal_error: value
-  local fatal_traceback: string
-  local pending_observations: integer
-end
-
 local type Bytes = owned ffi.titan_ffi_char[]
 
-local record ByteChunk
-  local bytes: Bytes
-  local length: integer
-end
-
-local record Text
-  local bytes: Bytes
-  local source: string
-end
-
 local record Buffer
-  local handle: owned *libuv.uv_buf_t
+  local descriptor: owned *libuv.uv_buf_t
   local bytes: Bytes
 end
 
-local function _bytes_find(haystack: string,
-                           needle: string): integer
-  local haystack_length = #haystack
-  local needle_length = #needle
-  if needle_length == 0 then return 0 end
-  if needle_length > haystack_length then return -1 end
+local record Immediate
+  local failed: boolean
+  local payload: value
+end
 
-  local haystack_pointer =
-    haystack as const *ffi.titan_ffi_char
-  local needle_pointer =
-    needle as const *ffi.titan_ffi_char
-  local offset = 0
-  while offset <= haystack_length - needle_length do
-    if haystack_pointer[offset] == needle_pointer[0] and
-        cstring.memcmp(
-          haystack_pointer + offset,
-          needle_pointer,
-          needle_length as cstring.size_t) == 0 then
-      return offset
-    end
-    offset = offset + 1
+local record Runtime
+  local loop: owned *libuv.uv_loop_t
+  local task_roots: {Task}
+  local next_task_root: integer
+  local handle_roots: {value}
+  local next_handle_root: integer
+  local current_task: Task?
+  local closing: boolean
+  local cleanup_done: boolean
+  local exit_requested: boolean
+  local exit_code: integer
+end
+
+-- The callback closure retains the native owner and optional suspended Task.
+-- The record itself contains only the root slot and the callback field at the
+-- native shim's common callback index.
+local record CloseOwner
+  local root_index: integer
+  local callback: (CloseOwner) -> ()
+end
+
+local record WalkOwner
+  local handle: ffi.titan_ffi_void_ptr
+  local callback: (WalkOwner, ffi.titan_ffi_void_ptr) -> ()
+end
+
+local function main_thread_state(): *lua.lua_State
+  local top = lua.lua_gettop(L)
+  lua.lua_rawgeti(L, lua.LUA_REGISTRYINDEX,
+                  lua.LUA_RIDX_MAINTHREAD as lua.lua_Integer)
+  local thread = lua.lua_tothread(L, -1)
+  lua.lua_settop(L, top)
+  if not thread then raise "Lua main thread is unavailable" end
+  return thread
+end
+
+local function make_error(code: integer, operation: string,
+                          subject: string?): Error
+  local status = code as ffi.titan_ffi_int
+  return Error.new(code, libuv.uv_err_name(status) as string,
+                   libuv.uv_strerror(status) as string, operation, subject)
+end
+
+local function immediate_ok(payload: value): Immediate
+  return Immediate.new(false, payload)
+end
+
+local function immediate_error(code: integer, operation: string,
+                               subject: string?): Immediate
+  return Immediate.new(true, make_error(code, operation, subject))
+end
+
+local function check_status(status: integer, operation: string,
+                            subject: string?)
+  if status < 0 then raise make_error(status, operation, subject) end
+end
+
+local function contains_nul(source: string): boolean
+  if #source == 0 then return false end
+  local bytes = source as const *ffi.titan_ffi_unsigned_char
+  return cstring.memchr(bytes, 0, #source as cstring.size_t) ~= nil
+end
+
+local function checked_text(source: string, operation: string,
+                            subject: string?): string
+  if contains_nul(source) then
+    raise make_error(libuv.UV_EINVAL, operation, subject)
   end
-  return -1
+  return source
+end
+
+local function bytes_string(bytes: Bytes, length: integer): string
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  lua.lua_pushlstring(L, bytes, length as libuv.size_t)
+  local result: value = ffi.lua_totvalue(L, -1)
+  return result as string
+end
+
+local function new_buffer(length: integer): Buffer
+  local bytes = ffi.titan_ffi_char.new_array(length)
+  local descriptor = libuv.uv_buf_t.new()
+  descriptor.base = bytes
+  descriptor.len = length as libuv.size_t
+  return Buffer.new(descriptor, bytes)
+end
+
+local function error_text(err: value): string
+  local text = "<error while rendering Task failure>"
+  do
+    local top = lua.lua_gettop(L)
+    defer lua.lua_settop(L, top)
+    ffi.lua_pushtvalue(L, err)
+    local rendered = lual.luaL_tolstring(L, -1, nil)
+    if rendered then
+      text = rendered as string
+    else
+      text = "<unprintable error>"
+    end
+  catch
+    -- Keep the conservative fallback already installed above.
+  end
+  return text
+end
+
+local function report_task_error(err: value, trace: string)
+  local text = "uncaught error in async Task: " .. error_text(err) .. "\n"
+  if #trace > 0 then
+    text = text .. "stack traceback:\n" .. trace .. "\n"
+  end
+  -- stderr is a macro on the supported C libraries and therefore is not a
+  -- portable FFI object. Descriptor 2 is the POSIX stderr boundary already
+  -- required by the libuv runtime.
+  local bytes = text as const *ffi.titan_ffi_char
+  local offset = 0
+  while offset < #text do
+    local written = cunistd.write(
+        2 as ffi.titan_ffi_int, bytes + offset,
+        (#text - offset) as cunistd.size_t)
+    if written < 0 then
+      if cerrno.errno == cerrno.EINTR then
+        -- Retry the same suffix.
+      else
+        return
+      end
+    elseif written == 0 then
+      return
+    else
+      offset = offset + (written as integer)
+    end
+  end
+end
+
+local function root_task(runtime: Runtime, task: Task): integer
+  local index = runtime.next_task_root
+  runtime.next_task_root = index + 1
+  runtime.task_roots[index] = task
+  return index
+end
+
+local function unroot_task(runtime: Runtime, index: integer)
+  if index > 0 then runtime.task_roots[index] = nil end
+end
+
+local function has_user_tasks(runtime: Runtime): boolean
+  local index = 1
+  while index < runtime.next_task_root do
+    local task? = runtime.task_roots[index]
+    if task and not (task as Task).cleanup then return true end
+    index = index + 1
+  end
+  return false
+end
+
+local function root_handle(runtime: Runtime, owner: value): integer
+  local index = runtime.next_handle_root
+  runtime.next_handle_root = index + 1
+  runtime.handle_roots[index] = owner
+  return index
+end
+
+local function unroot_handle(runtime: Runtime, index: integer)
+  if index > 0 then runtime.handle_roots[index] = nil end
+end
+
+local function running_task(): Task
+  local runtime? = active_runtime
+  if not runtime then raise "async Runtime is not active" end
+  local task? = (runtime as Runtime).current_task
+  if not task then
+    raise "asynchronous operation must be called from an async Task"
+  end
+  return task as Task
+end
+
+local function accepting_work(runtime: Runtime, operation: string)
+  if runtime.closing then
+    raise "cannot " .. operation .. " while async Runtime is shutting down"
+  end
+end
+
+local function new_runtime(): Runtime
+  local native = libuv.uv_loop_t.new()
+  -- Allocate every GC-owned Runtime field before uv_loop_init gives the native
+  -- loop resources that require an explicit uv_loop_close.
+  local runtime = Runtime.new {
+    loop = native,
+    task_roots = {},
+    next_task_root = 1,
+    handle_roots = {},
+    next_handle_root = 1,
+    current_task = nil,
+    closing = false,
+    cleanup_done = false,
+    exit_requested = false,
+    exit_code = 0,
+  }
+  check_status(libuv.uv_loop_init(native), "runtime.loop.init", nil)
+  libuv.uv_loop_set_data(native,
+                         main_thread as ffi.titan_ffi_void_ptr)
+  return runtime
+end
+
+local function ensure_runtime(): Runtime
+  local runtime? = active_runtime
+  if runtime then return runtime as Runtime end
+  local created = new_runtime()
+  active_runtime = created
+  return created
+end
+
+local function close_handle(runtime: Runtime, handle: *libuv.uv_handle_t,
+                            keepalive: value, old_root_index: integer,
+                            task: Task?, failed: boolean,
+                            payload: value)
+  local callback = function (owner: CloseOwner)
+    -- Capturing the native owner keeps its FFI handle alive through close_cb.
+    local _keepalive = keepalive
+    unroot_handle(runtime, owner.root_index)
+    if task then
+      resume_task_from_callback(task as Task, failed, payload)
+    end
+  end
+  local owner = CloseOwner.new(0, callback)
+  owner.root_index = root_handle(runtime, owner)
+  if old_root_index > 0 then unroot_handle(runtime, old_root_index) end
+  if task then
+    (task as Task).cancel_action = nil
+  end
+  libuv.uv_handle_set_data(handle, owner as ffi.titan_ffi_void_ptr)
+  libuv.uv_close(handle, shim.titan_uvshim_close_cb)
+end
+
+local function walk_callback(owner: WalkOwner,
+                             pointer: ffi.titan_ffi_void_ptr)
+  local handle = pointer as *libuv.uv_handle_t
+  -- Select at most one currently live handle. The cleanup Task submits its
+  -- close immediately, then walks again only after close_cb; no raw pointer is
+  -- retained across an unrelated event-loop turn.
+  if libuv.uv_is_closing(handle) == 0 then
+    if owner.handle == nil then owner.handle = pointer end
+  end
+end
+
+local function collect_handle(runtime: Runtime): ffi.titan_ffi_void_ptr
+  local owner = WalkOwner.new(nil, walk_callback)
+  libuv.uv_walk(runtime.loop, shim.titan_uvshim_walk_cb,
+                owner as ffi.titan_ffi_void_ptr)
+  return owner.handle
+end
+
+local function loop_owns_handle(runtime: Runtime,
+                                target: *libuv.uv_handle_t): boolean
+  local callback = function (owner: WalkOwner,
+                             pointer: ffi.titan_ffi_void_ptr)
+    if pointer == target then owner.handle = pointer end
+  end
+  local owner = WalkOwner.new(nil, callback)
+  libuv.uv_walk(runtime.loop, shim.titan_uvshim_walk_cb,
+                owner as ffi.titan_ffi_void_ptr)
+  return owner.handle ~= nil
 end
 
 function _loop()
-  if not on_main_thread() or coroutine.is_yieldable(UV_TAG) then
+  if L ~= main_thread then
     raise "async.loop must be driven from the Lua main thread"
   end
-  if not active_runtime then
-    return
-  end
+  local runtime? = active_runtime
+  if not runtime then return end
+  local runtime = runtime as Runtime
   if lua.lua_checkstack(L, lua.LUA_MINSTACK) == 0 then
-    raise "cannot reserve stack for libuv native callbacks"
+    raise "cannot reserve stack for libuv callbacks"
   end
-  local runtime = active_runtime
-  if not runtime.loop.handle then
-    raise_saved(runtime.fatal_error, runtime.fatal_traceback)
-  end
-  local loop_handle =
-    runtime.loop.handle as owned *libuv.uv_loop_t
-  if runtime.in_loop then
-    raise "async.loop is already active"
-  end
-  runtime.in_loop = true
-  libuv.uv_run(loop_handle, libuv.UV_RUN_DEFAULT)
-  runtime.in_loop = false
-  retire_closed_owners(runtime)
-  retire_closed_signal_owners(runtime)
-  retire_fs_owners(runtime)
-  repair_acquired_files(runtime)
-  retire_aborted_net_requests(runtime)
-  advance_parent_stdio_shutdown(runtime)
 
-  if not runtime.fatal and not runtime.exit_requested and
-      runtime.task_head then
-    runtime.fatal = true
-    runtime.closing = true
-    runtime.fatal_error = "libuv loop became idle while Tasks were waiting"
-    runtime.fatal_traceback = ""
+  libuv.uv_run(runtime.loop, libuv.UV_RUN_DEFAULT)
+
+  if has_user_tasks(runtime) then
+    raise "libuv loop became idle while async Tasks were waiting"
   end
-  if runtime.fatal or runtime.exit_requested then
-    if runtime.fatal then
-      begin_fatal_shutdown(runtime)
-    else
-      begin_exit_shutdown(runtime)
-    end
-    begin_parent_stdio_shutdown(runtime)
-    advance_file_shutdown(runtime)
-    advance_parent_stdio_shutdown(runtime)
-    begin_tcp_shutdown(runtime)
-    advance_tcp_shutdown(runtime)
-    begin_process_shutdown(runtime)
-    advance_process_shutdown(runtime)
-    drive_cancel_fallbacks(runtime)
-    while runtime.task_head do
-      if libuv.uv_loop_alive(loop_handle) == 0 then
-        -- No callback can make progress.  The only legal callback-less
-        -- cancellation delivery is this outer-driver fallback.
-        local task? = runtime.task_head
-        while task do
-          if task.cancel_requested and task.cleanup_shield_depth == 0 then
-            task.cancel_fallback = true
-          end
-          task = task.next_task
-        end
-        drive_cancel_fallbacks(runtime)
-        if runtime.task_head and
-            libuv.uv_loop_alive(loop_handle) == 0 then
-          -- A shielded Task without any live cleanup owner is an internal
-          -- deadlock, not a reason to return with a suspended root retained.
-          -- The first Runtime fatal remains authoritative; terminalize these
-          -- impossible leftovers at the outer safe point so owner draining and
-          -- uv_loop_close remain total.
-          local invariant_error = internal_error("shutdown.deadlock")
-          if not runtime.fatal then
-            promote_fatal(runtime, invariant_error, "")
-          end
-          local stranded? = runtime.task_head
-          while stranded do
-            local to_finish = stranded
-            stranded = to_finish.next_task
-            finish_task(to_finish, TASK_FAILED, nil, invariant_error, "")
-          end
-        end
-      else
-        libuv.uv_run(loop_handle, libuv.UV_RUN_DEFAULT)
-        retire_closed_owners(runtime)
-        retire_closed_signal_owners(runtime)
-        retire_fs_owners(runtime)
-        repair_acquired_files(runtime)
-        retire_aborted_net_requests(runtime)
-        retire_aborted_process_requests(runtime)
-        advance_file_shutdown(runtime)
-        advance_parent_stdio_shutdown(runtime)
-        advance_tcp_shutdown(runtime)
-        advance_process_shutdown(runtime)
-        drive_cancel_fallbacks(runtime)
-      end
-    end
-  else
-    advance_file_shutdown(runtime)
-    advance_parent_stdio_shutdown(runtime)
-    advance_tcp_shutdown(runtime)
-    advance_process_shutdown(runtime)
+  if not runtime.cleanup_done then
+    raise "async Runtime cleanup did not finish"
   end
-  close_runtime(runtime)
-  if runtime.fatal then
-    raise_saved(runtime.fatal_error, runtime.fatal_traceback)
-  end
+  check_status(libuv.uv_loop_close(runtime.loop),
+               "runtime.loop.close", nil)
+
+  runtime.task_roots = {}
+  runtime.handle_roots = {}
+  active_runtime = nil
 end
 
 function _version(): string
   return libuv.uv_version_string() as string
-end
-
-local function reinstall_trace(trace: string)
-  ffi.lua_pushtvalue(L, trace)
-  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
-  lua.lua_pushboolean(L, 1)
-  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
-end
-
-local function stash_trace_for_append(trace: string)
-  ffi.lua_pushtvalue(L, trace)
-  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
-end
-
-local function pop_trace_for_append(): string?
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
-  local trace: value = ffi.lua_totvalue(L, -1)
-  lua.lua_pushnil(L)
-  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
-  return trace
-end
-
-local function raise_joined(err: value, target_trace: string)
-  stash_trace_for_append(target_trace)
-  do
-    raise err
-  catch
-    local inner? = pop_trace_for_append()
-    if inner then
-      reinstall_trace(inner .. "\n" .. traceback)
-    end
-    raise error
-  end
-end
-
-local function raise_saved(err: value, trace: string)
-  if #trace > 0 then
-    reinstall_trace(trace)
-  end
-  raise err
-end
-
-local function main_thread_value(): value
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  lua.lua_rawgeti(L, lua.LUA_REGISTRYINDEX,
-                  lua.LUA_RIDX_MAINTHREAD as lua.lua_Integer)
-  local thread = ffi.lua_totvalue(L, -1)
-  return thread
-end
-
-local function on_main_thread(): boolean
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  local is_main = lua.lua_pushthread(L)
-  return is_main ~= 0
-end
-
-local function copy_text(source: string, operation: string,
-                         subject: string?): Text
-  local length = #source
-  if _bytes_find(source, "\0") >= 0 then
-    raise make_error(libuv.UV_EINVAL, operation, subject)
-  end
-  local bytes = ffi.titan_ffi_char.new_array(length + 1)
-  if length > 0 then
-    cstring.memcpy(bytes, source, length as cstring.size_t)
-  end
-  bytes[length] = 0 as ffi.titan_ffi_char
-  return Text.new(bytes, source)
-end
-
-local function copy_bytes(source: string): Bytes
-  local length = #source
-  local bytes = ffi.titan_ffi_char.new_array(length)
-  if length > 0 then
-    cstring.memcpy(bytes, source, length as cstring.size_t)
-  end
-  return bytes
-end
-
-local function initialize_buffer(memory: ffi.titan_ffi_void_ptr,
-                                 base: *ffi.titan_ffi_char,
-                                 length: libuv.size_t)
-  local buffer = memory as *libuv.uv_buf_t
-  buffer.base = base
-  buffer.len = length
-end
-
-local function make_buffer(bytes: Bytes, offset: integer,
-                           length: integer): Buffer
-  local handle = libuv.uv_buf_t.new()
-  local base: *ffi.titan_ffi_char = bytes
-  if offset > 0 then
-    base = base + offset
-  end
-  initialize_buffer(handle, base, length as libuv.size_t)
-  local buffer = Buffer.new(handle, bytes)
-  return buffer
-end
-
-local function allocate_read_buffer(length: integer): Buffer
-  return make_buffer(ffi.titan_ffi_char.new_array(length), 0, length)
-end
-
-local function bytes_string(bytes: *ffi.titan_ffi_char,
-                            length: libuv.size_t): string
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  lua.lua_pushlstring(L, bytes, length)
-  local result: value = ffi.lua_totvalue(L, -1)
-  return result
-end
-
--- libuv supplies the size for stream allocations. The Titan FFI array is a
--- GC-owned counted array, so retaining Bytes itself keeps its pointer valid.
-local function allocate_stream_bytes(size: libuv.size_t): Bytes
-  if size == 0 or size > climits.UINT_MAX then
-    raise internal_error("stream.alloc.size")
-  end
-  return ffi.titan_ffi_char.new_array(size as integer)
-end
-
-local function queued_bytes_string(queue: {ByteChunk}): string
-  local chunks: {string} = {}
-  for index = 1, #queue do
-    local chunk = queue[index]
-    chunks[index] =
-      bytes_string(chunk.bytes, chunk.length as libuv.size_t)
-  end
-  while #chunks > 1 do
-    local joined: {string} = {}
-    local index = 1
-    while index <= #chunks do
-      if index < #chunks then
-        joined[#joined + 1] = chunks[index] .. chunks[index + 1]
-      else
-        joined[#joined + 1] = chunks[index]
-      end
-      index = index + 2
-    end
-    chunks = joined
-  end
-  if #chunks == 0 then raise internal_error("stream.queue.empty") end
-  return chunks[1]
-end
-
-local function make_error(status: integer, operation: string,
-                          subject: string?): Error
-  local code = status as ffi.titan_ffi_int
-  return Error.new(status, libuv.uv_err_name(code) as string,
-                   libuv.uv_strerror(code) as string, operation, subject)
-end
-
-local function internal_error(operation: string): Error
-  return Error.new(-1, "EINTERNAL", "libuv Runtime invariant failed",
-                   operation, nil)
-end
-
-local function check_alignment()
-  if libuv.uv_loop_t.alignof > ffi.TValue.alignof or
-      libuv.uv_timer_t.alignof > ffi.TValue.alignof or
-      libuv.uv_fs_t.alignof > ffi.TValue.alignof or
-      libuv.uv_getaddrinfo_t.alignof > ffi.TValue.alignof or
-      libuv.uv_connect_t.alignof > ffi.TValue.alignof or
-      libuv.uv_write_t.alignof > ffi.TValue.alignof or
-      libuv.uv_shutdown_t.alignof > ffi.TValue.alignof or
-      libuv.uv_tcp_t.alignof > ffi.TValue.alignof or
-      libuv.uv_signal_t.alignof > ffi.TValue.alignof or
-      libuv.uv_process_t.alignof > ffi.TValue.alignof or
-      libuv.uv_pipe_t.alignof > ffi.TValue.alignof or
-      libuv.uv_tty_t.alignof > ffi.TValue.alignof or
-      libuv.uv_buf_t.alignof > ffi.TValue.alignof or
-      libuv.uv_dirent_t.alignof > ffi.TValue.alignof or
-      shim.titan_uvshim_address.alignof > ffi.TValue.alignof then
-    raise "libuv requires over-aligned storage on this target"
-  end
-end
-
-local function allocate_loop(): Loop
-  return Loop.new(libuv.uv_loop_t.new())
-end
-
-local function new_runtime(): Runtime
-  generation = generation + 1
-  local loop = allocate_loop()
-  local status =
-    libuv.uv_loop_init(loop.handle as owned *libuv.uv_loop_t)
-  if status < 0 then
-    loop.handle = nil
-    raise make_error(status, "loop.init", nil)
-  end
-  local runtime: Runtime = {
-    loop = loop,
-    generation = generation,
-    timer_owner_head = nil,
-    fs_pending_head = nil,
-    file_head = nil,
-    net_pending_head = nil,
-    tcp_head = nil,
-    signal_owner_head = nil,
-    process_head = nil,
-    process_request_head = nil,
-    parent_stdin = nil,
-    parent_stdout = nil,
-    parent_stderr = nil,
-    main_task = nil,
-    task_head = nil,
-    running_task = nil,
-    in_loop = false,
-    closing = false,
-    exit_requested = false,
-    exit_code = 0,
-    fatal = false,
-    fatal_error = nil,
-    fatal_traceback = "",
-    pending_observations = 0,
-  }
-  active_runtime = runtime
-  return runtime
-end
-
-local function current_runtime(): Runtime
-  if not active_runtime then
-    raise "no active libuv Runtime"
-  end
-  return active_runtime
-end
-
-local function ensure_runtime(): Runtime
-  if active_runtime then
-    local runtime = active_runtime
-    if runtime.closing then
-      raise "the libuv Runtime is shutting down"
-    end
-    return runtime
-  end
-  return new_runtime()
-end
-
-local function link_owner(runtime: Runtime, owner: uv_timer_t)
-  local previous? = runtime.timer_owner_head
-  owner.metadata.next_owner = previous
-  owner.metadata.previous_owner = nil
-  if previous then
-    previous.metadata.previous_owner = owner
-  end
-  runtime.timer_owner_head = owner
-end
-
-local function unlink_owner(owner: uv_timer_t)
-  local runtime = owner.metadata.runtime
-  local previous? = owner.metadata.previous_owner
-  local next? = owner.metadata.next_owner
-  if previous then
-    previous.metadata.next_owner = next
-  else
-    runtime.timer_owner_head = next
-  end
-  if next then
-    next.metadata.previous_owner = previous
-  end
-  owner.metadata.previous_owner = nil
-  owner.metadata.next_owner = nil
-end
-
-local function link_signal_owner(runtime: Runtime, owner: uv_signal_t)
-  local previous? = runtime.signal_owner_head
-  owner.metadata.next_owner = previous
-  owner.metadata.previous_owner = nil
-  if previous then
-    previous.metadata.previous_owner = owner
-  end
-  runtime.signal_owner_head = owner
-end
-
-local function unlink_signal_owner(owner: uv_signal_t)
-  local runtime = owner.metadata.runtime
-  local previous? = owner.metadata.previous_owner
-  local next? = owner.metadata.next_owner
-  if previous then
-    previous.metadata.next_owner = next
-  else
-    runtime.signal_owner_head = next
-  end
-  if next then
-    next.metadata.previous_owner = previous
-  end
-  owner.metadata.previous_owner = nil
-  owner.metadata.next_owner = nil
-end
-
-local function link_fs_owner(runtime: Runtime, owner: uv_fs_t)
-  local previous? = runtime.fs_pending_head
-  owner.metadata.next_owner = previous
-  owner.metadata.previous_owner = nil
-  if previous then
-    previous.metadata.previous_owner = owner
-  end
-  runtime.fs_pending_head = owner
-end
-
-local function unlink_fs_owner(owner: uv_fs_t)
-  local runtime = owner.metadata.runtime
-  local previous? = owner.metadata.previous_owner
-  local next? = owner.metadata.next_owner
-  if previous then
-    previous.metadata.next_owner = next
-  else
-    runtime.fs_pending_head = next
-  end
-  if next then
-    next.metadata.previous_owner = previous
-  end
-  owner.metadata.previous_owner = nil
-  owner.metadata.next_owner = nil
-end
-
-local function link_task(runtime: Runtime, task: Task)
-  local previous? = runtime.task_head
-  task.next_task = previous
-  task.previous_task = nil
-  if previous then
-    previous.previous_task = task
-  end
-  runtime.task_head = task
-end
-
-local function unlink_task(task: Task)
-  local runtime = task.runtime
-  local previous? = task.previous_task
-  local next? = task.next_task
-  if previous then
-    previous.next_task = next
-  else
-    runtime.task_head = next
-  end
-  if next then
-    next.previous_task = previous
-  end
-  task.previous_task = nil
-  task.next_task = nil
-end
-
-local function link_file(runtime: Runtime, file: uv_file)
-  local previous? = runtime.file_head
-  file.next_file = previous
-  file.previous_file = nil
-  if previous then
-    previous.previous_file = file
-  end
-  runtime.file_head = file
-end
-
-local function unlink_file(file: uv_file)
-  local runtime = file.runtime
-  local previous? = file.previous_file
-  local next? = file.next_file
-  if previous then
-    previous.next_file = next
-  else
-    runtime.file_head = next
-  end
-  if next then
-    next.previous_file = previous
-  end
-  file.previous_file = nil
-  file.next_file = nil
-end
-
-local function link_net_control(runtime: Runtime,
-                                control: NetRequestControl)
-  local previous? = runtime.net_pending_head
-  control.next_control = previous
-  control.previous_control = nil
-  if previous then
-    previous.previous_control = control
-  end
-  runtime.net_pending_head = control
-end
-
-local function unlink_net_control(control: NetRequestControl)
-  local runtime = control.runtime
-  local previous? = control.previous_control
-  local next? = control.next_control
-  if previous then
-    previous.next_control = next
-  else
-    runtime.net_pending_head = next
-  end
-  if next then
-    next.previous_control = previous
-  end
-  control.previous_control = nil
-  control.next_control = nil
-end
-
-local function link_tcp_control(runtime: Runtime, control: TcpControl)
-  local previous? = runtime.tcp_head
-  control.next_control = previous
-  control.previous_control = nil
-  if previous then
-    previous.previous_control = control
-  end
-  runtime.tcp_head = control
-end
-
-local function unlink_tcp_control(control: TcpControl)
-  local runtime = control.runtime
-  local previous? = control.previous_control
-  local next? = control.next_control
-  if previous then
-    previous.next_control = next
-  else
-    runtime.tcp_head = next
-  end
-  if next then
-    next.previous_control = previous
-  end
-  control.previous_control = nil
-  control.next_control = nil
-end
-
-local function link_process_control(runtime: Runtime,
-                                    control: ProcessControl)
-  local previous? = runtime.process_head
-  control.next_control = previous
-  control.previous_control = nil
-  if previous then
-    previous.previous_control = control
-  end
-  runtime.process_head = control
-  control.linked = true
-end
-
-local function unlink_process_control(control: ProcessControl)
-  if not control.linked then return end
-  local runtime = control.runtime
-  local previous? = control.previous_control
-  local next? = control.next_control
-  if previous then
-    previous.next_control = next
-  else
-    runtime.process_head = next
-  end
-  if next then
-    next.previous_control = previous
-  end
-  control.previous_control = nil
-  control.next_control = nil
-  control.linked = false
-end
-
-local function link_process_request(control: ProcessRequestControl)
-  local runtime = control.runtime
-  local previous? = runtime.process_request_head
-  control.next_control = previous
-  control.previous_control = nil
-  if previous then
-    previous.previous_control = control
-  end
-  runtime.process_request_head = control
-end
-
-local function unlink_process_request(control: ProcessRequestControl)
-  local runtime = control.runtime
-  local previous? = control.previous_control
-  local next? = control.next_control
-  if previous then
-    previous.next_control = next
-  else
-    runtime.process_request_head = next
-  end
-  if next then
-    next.previous_control = previous
-  end
-  control.previous_control = nil
-  control.next_control = nil
 end

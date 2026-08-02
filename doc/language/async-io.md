@@ -1,218 +1,190 @@
 # Asynchronous I/O and tasks
 
 Titan's public asynchronous scheduling API is the `async` module. Titan code
-imports it with:
+imports it with `local async = import "async"`; Lua uses
+`require "titan.async"`. The module supports Linux and macOS. Its private
+`titan.uv` provider adapts libuv callbacks to Titan coroutines; application
+code should import the public `async`, `timer`, `fs`, `net`, `io`, and `os`
+modules instead of `uv`.
 
-```titan
-local async = import "async"
-```
+On Unix, loading the provider changes a default `SIGPIPE` disposition to
+ignored so a closed stream produces an `async.Error` instead of terminating
+the process. An inherited ignored disposition or application-installed
+handler is preserved.
 
-Lua code loads the same canonical module identity with
-`require "titan.async"`. The qualified Lua name avoids collisions with Lua
-libraries. The module currently supports Linux and macOS. Its implementation
-forwards scheduling to the private `titan.uv` plumbing/provider module; user
-code should import `async`, not `uv`.
-
-On Unix, loading the module changes a default `SIGPIPE` disposition to ignored
-so a closed stream produces an `async.Error` instead of terminating the
-process.
-An inherited ignored disposition or application-installed handler is left
-unchanged. Embedders must serialize module initialization with their own
-process-wide signal-handler changes.
-
-## Scheduling and driving tasks
+## Scheduling and driving Tasks
 
 The facade re-exports `Task`, `Error`, and `Cancelled` as transparent,
-type-only aliases of the nominal records owned by the private provider. Titan
-code can therefore write `async.Task` in an annotation and call methods on a
-value of that type, but neither Titan expressions nor Lua see runtime members
-named `async.Task`, `async.Error`, or `async.Cancelled`. The callable interface
-is:
+type-only aliases of records owned by the private provider:
 
 ```titan
 function run(func: () -> value): Task
 function loop()
 function yield()
-function Task:join(): value
+function version(): string
+
 function Task:cancel(reason: value)
 function Task:status(): string
-function version(): string
 ```
 
-`async.run(func)` creates and roots a Task, registers its first zero-duration
-libuv timer, and returns. It does not call `func` before returning. The next
-event-loop callback starts the Task.
+`async.run(func)` creates and roots a Task, registers a zero-duration libuv
+timer, and returns without calling `func`. The timer callback starts the Task
+on a later event-loop turn. Calling `run` from another Task is valid and still
+does not run the new Task inline.
 
-A standalone Titan program that transitively imports an asynchronous module
-needs no wrapper around `main`. Import initialization installs a private
-bootstrap hook; the generated entrypoint schedules `main` as the main Task
-and drives the private event loop. Synchronous programs retain the ordinary
-direct `main` path.
+This initial direct-continuation runtime deliberately has no Task `join`
+operation. Coordinate Tasks through the resources and shared state owned by
+the application. A Task reports `"ready"`, `"running"`, `"waiting"`,
+`"succeeded"`, `"failed"`, or `"cancelled"` through `status()`.
 
-A Lua host schedules work explicitly and then calls `async.loop()`:
+A Lua host drives scheduled work explicitly:
 
 ```lua
 local async = require "titan.async"
 local timer = require "titan.timer"
 
+local result
 local task = async.run(function()
     timer.sleep(10)
-    return "done"
+    result = "done"
 end)
 
 assert(task:status() == "ready")
 async.loop()
-assert(task:join() == "done")
+assert(task:status() == "succeeded")
+assert(result == "done")
 ```
 
-`async.loop()` may run only on the Lua main thread and never from inside an
-async Task or an active loop callback. Calling `async.run` from a Task is
-valid: it schedules an independent Task and returns without running it inline.
-After a session closes all native owners, a later `run`/`loop` pair creates a
-new private loop.
+A standalone Titan program that transitively imports an asynchronous module
+needs no wrapper around `main`. Module initialization installs a private
+bootstrap hook; the generated entrypoint schedules `main` as a Task and drives
+the loop. The Runtime remains alive until every Task has finished, even if
+`main` finishes first.
 
 `async.yield()` cedes one event-loop turn without waiting for an external
-resource. It is the general scheduler-fairness primitive; `timer.yield()` is a
-compatibility facade over the same private operation. Calling it outside a
-running Task raises just like every other Task suspension operation.
+resource. `timer.yield()` is a facade over the same operation. Calling either
+outside a Task raises.
 
-## Callback execution model
+## The callback/continuation model
 
-The runtime deliberately follows libuv's callback model. A native libuv
-callback directly invokes the trusted Titan dispatcher through its native
-Titan entry. The dispatcher resumes the Task, and application code runs
-synchronously inside that callback until it:
+There is one non-reentrant event-loop driver. Only top-level `async.loop()` or
+the standalone bootstrap calls `uv_run`, and it does so from the Lua main
+thread. Libuv explicitly forbids calling `uv_run` from a callback; therefore
+no Task continuation, callback handler, or private dispatcher drives the loop.
 
-- finishes;
-- raises; or
-- starts another asynchronous operation and yields its private request.
+Every asynchronous turn has the same shape:
 
-When a Task yields a request, the dispatcher registers the next libuv callback
-and returns to libuv. That later callback resumes the same continuation. There
-is no extra Lua entry wrapper, protected C call, ready queue, or implicit
-fairness turn on this path. `timer.yield()` is the explicit way to cede one
-event-loop turn; `async.yield()` is its general-purpose home. CPU-heavy code
-that never performs an asynchronous operation
-blocks the loop just as CPU-heavy code in a conventional callback would.
+1. libuv invokes an operation's callback;
+2. the callback handler resumes the suspended Task with that operation's
+   result, or raises its error at the suspension point;
+3. the Task runs synchronously until it returns, raises, or calls another
+   asynchronous operation;
+4. that operation yields a private tagged union variant whose record contains
+   the corresponding libuv call parameters;
+5. the callback handler invokes that record's dispatcher, which performs any
+   synchronous preparation, submits the next callback-taking libuv function,
+   and returns; and
+6. the callback handler returns to libuv.
 
-Stream reads use this direct handoff without a ready queue: a positive read
-callback clears the current waiter and resumes its yielded call with the binary
-payload, while EOF resumes it with `nil` and an error is raised in that Task.
-The resumed continuation may install the next waiter before the callback
-returns. Callbacks that wake a different Task because another Task explicitly
-closed a stream use the scheduled-drive path instead of nesting a second Task
-drive.
+The next progress comes from a later loop turn. The sole exception is a
+negative synchronous submission result: libuv guarantees that no callback
+will follow, so the dispatcher immediately raises that error back into the
+same continuation before returning.
 
-All async Tasks in one Lua state use one private coroutine tag. An async yield
-can therefore cross nested Titan coroutines that use other tags and return
-control to the async scheduler.
+This is the logical equivalence at the center of the design: a coroutine
+yield/resume pair is a direct-style spelling of a callback whose body is the
+suspended coroutine's continuation. There is no ready queue and no central
+scheduler state machine. CPU-heavy Titan code that neither finishes nor
+yields blocks the loop just like CPU-heavy code in an ordinary callback.
 
-## Results, errors, and cancellation
+One-shot requests each own their native request, one suspended Task, and only
+the arguments libuv still borrows until the terminal callback. Multiple stream
+writes retain their original Titan strings and submit multiple `uv_write_t`
+requests; libuv supplies their native ordering. Titan does not duplicate that
+queue or copy the payload into another string.
 
-A Task reports `"new"`, `"ready"`, `"running"`, `"waiting"`,
-`"succeeded"`, `"failed"`, or `"cancelled"`. A completed Task retains its
-immutable result or error, so `status` and an already-resolved `join` remain
-usable after the loop closes. A live or pending Task cannot be joined from a
-different Runtime generation.
+Repeating timers, stream reads, listeners, and other multi-shot handles keep
+only their natural buffered state plus at most one waiter. A stream callback
+appends data when there is no reader; a ticker remembers that at least one tick
+occurred. A callback clears its waiter before resuming it, so the continuation
+may install the next waiter before that callback returns.
 
-`join()` waits when called from another live async Task. It returns the target's
-dynamic `value` result, or raises the target's original error while appending
-the join-site propagation traceback. Joining oneself raises.
+Allocation callbacks and `uv_walk` callbacks are direct plumbing callbacks,
+not coroutine-shaped calls. They update the owning record and return
+immediately. Because an allocation callback cannot unwind through libuv, an
+allocation exception is preserved for its required paired read callback,
+which raises it at the Task boundary (or logs it when no Task is waiting).
 
-Libuv failures are represented by the provider-owned record re-exported under
-the type-only name `async.Error`. Its fields are `code: integer`,
-`name: string`, `message: string`, `operation: string`, and
-`subject: string?`. The alias preserves the provider record's identity; it is
-not a second constructible record namespace.
+## Errors and cancellation
 
-Unobserved failed Tasks become session-fatal on the next event-loop turn,
-giving an already-scheduled joiner an opportunity to observe the failure.
-Cancellation is represented by the type-only `async.Cancelled` alias, whose
-`reason` field is the exact
-first value passed to `cancel`. Cancellation is sticky: catching it and
-attempting another ordinary asynchronous wait injects the same cancellation
-again. An unobserved cancelled non-main Task is not session-fatal; cancellation
-of the main Task is reported.
+Libuv failures use the provider-owned `async.Error` record:
 
-Resource cleanup is physically completed even after logical cancellation.
-The runtime closes and drains every remaining request/handle owner before
-`uv_loop_close`; it does not let a Lua-GC finalizer reclaim native storage
-before its terminal callback and cleanup. A descriptor-close callback is
-terminal even when it reports an error: the wrapper reaches its closed state,
-the callback cleanup finishes, and the error is reported once. Titan does not
-retry a native descriptor close whose result is uncertain, because the
-operating system may already have reused that descriptor number.
+```titan
+record Error
+  code: integer
+  name: string
+  message: string
+  operation: string
+  subject: string?
+end
+```
 
-Filesystem cancellation distinguishes logical delivery from physical native
-lifetime. Cancelling a queued File operation removes it from that File's FIFO.
-A submitted request remains rooted through its callback even if `uv_cancel`
-cannot stop it in time, and its stale result is not delivered. File close is
-cleanup-shielded so cancellation is reinjected only after the terminal close
-callback and request cleanup. Repeated close calls remain safe after either a
-successful or an error-reporting terminal callback.
+`operation` identifies the failed libuv-facing action. `subject` is optional
+diagnostic context; callers must not depend on a particular operation
+populating it.
 
-Networking uses the same separation. A queued write can be removed, while
-cancelling an active write is logical: its native callback still owns cleanup
-and cannot deliver the stale result. The first `Connection:shutdown()` is
-cleanup-shielded through its `uv_shutdown` callback; repeated calls are
-idempotent. Connected and accepted streams start reading during initialization
-and retain GC-owned chunks continuously, even without a waiter. Cancelling a
-read detaches only that waiter and leaves the physical read active; explicit
-close stops the read side, discards retained and queued input, wakes a blocking
-reader with `nil`, rejects new output, and serializes the native handle close
-behind already submitted and queued FIFO output. Later reads remain at EOF.
+An uncaught error terminates only the Task that raised it. The Runtime writes
+the error and its preserved Titan traceback to standard error, marks that Task
+`"failed"`, and returns to libuv. Other Tasks continue to run. A Task failure
+does not request program shutdown; ordinary shutdown begins only after no
+active Tasks remain.
 
-Child-process stdio follows the same callback-ownership rule without treating
-an anonymous pipe like a socket. `os.spawn` applies its configurators in order;
-each prepares and validates a reusable native candidate, and the final
-configuration supplies the child streams. An inherited descriptor therefore
-has no newly created parent-facing Process endpoint and appears as `nil`, while
-the borrowed parent pipe or TTY remains owned by the current Runtime. Captured
-stdin writes use the ordinary FIFO: cancelling a queued write removes it, while
-a submitted write remains rooted through its callback. Closing captured stdin
-is cleanup-shielded behind earlier writes and uses the pipe's `uv_close`
-callback, not `uv_shutdown`.
+`cancel(reason)` is sticky and preserves the first reason in an
+`async.Cancelled` record. An accepted one-shot request and its buffer storage
+remain alive and continue to their promised callback; that callback settles
+the cancelled continuation. Watchers whose event callback can be suppressed
+are stopped and closed, and their close callback performs the same job.
+Catching cancellation does not make later asynchronous waits uncancelled: the
+same cancellation is injected again at the next suspension boundary.
 
-Cancelling a process wait only frees that waiter: it does not signal the child,
-and another Task can wait for the retained exit status. Each separately
-captured output starts continuous reads after successful spawn and has its own
-reader lock and queue. Merged stdout/stderr instead has one native owner and
-the exact same high-level InputStream in both Process fields, so it also has
-one queue and reader lock. Cancelling any output read detaches only its waiter
-while physical reading continues. Explicitly closing a captured InputStream
-stops that pipe, discards its retained and queued input, wakes its reader with
-`nil`, and leaves the child lifecycle under `Process` control.
+## Resources and shutdown
 
-Parent stdin, stdout, and stderr have independent borrowed controls owned by
-the current Runtime. The stable `os.stdin`, `os.stdout`, and `os.stderr`
-records resolve those controls lazily and rebind across sequential Runtime
-generations. Closing one of these stable parent facades is an idempotent no-op:
-it closes neither the Runtime's wrapper nor the host descriptor. A child that
-inherits a descriptor likewise cannot close the parent's owner.
+Explicit resource close remains preferable: it reports errors at the relevant
+call site and releases native resources early. Close is idempotent at the
+public facades. A second concurrent waiter for a one-reader resource is
+rejected instead of creating a queue.
 
-`io.popen` builds on the same process machinery with `/bin/sh -c`, captured
-stdin, and one merged output stream. Its `InputOutputStream` stores one output
-facade and an idempotent wait result. Closing it closes stdin, conditionally
-requests `term`, and waits for reaping. Applications still schedule input and
-output concurrently for large bidirectional traffic; the convenience does not
-make operating-system pipe capacity unbounded.
+When the last Task finishes, the Runtime rejects creation of new handles and
+starts a private cleanup Task. It calls `uv_walk` to discover the loop's
+handles and closes each non-closing handle through the ordinary asynchronous
+`uv_close` callback path while the one outer event loop continues to run. A
+final `uv_loop_close` success is the proof that requests and handles were
+drained.
 
-If a Runtime closes with a live child, it sends `term`, waits up to five
-seconds, then sends `kill`. The loop still waits for the real exit and close
-callbacks, so shutdown does not leave a zombie or let process/pipe storage be
-collected early.
+A child-process watcher is an ordinary libuv handle during this traversal.
+Closing it retires the watcher; it does not signal, wait for, or reap the
+child, which may outlive the Runtime. Application code that owns a child's
+lifecycle must explicitly call `Process:kill` and/or `Process:wait` as needed
+before its Tasks finish.
 
-`os.exit(code)` enters a distinct successful exit-request state from either
-the main Task or a child Task. It settles the other Tasks, runs their language
-cleanup, drains all native owners through the same shutdown path, and lets the
-generated standalone entrypoint return the requested status. It is not an
-unobserved Task failure and does not call ISO C `exit` around the Runtime. In
-an embedding it never closes the host Lua state.
+A `uv_file` is an operating-system descriptor, not a libuv loop handle. The
+Runtime neither registers nor closes File wrappers during shutdown: application
+code owns explicit `File:close()`, and process teardown reclaims a descriptor
+that was deliberately left open.
 
-See the [filesystem standard library](standard-library-fs.md) and
-[TCP networking standard library](standard-library-net.md) for their public
-I/O APIs. The [operating-system standard library](standard-library-os.md)
-documents portable synchronous helpers, one-shot signal waits, parent stdio,
-configurable child-process streams, exit status, and graceful program exit.
-The [I/O standard library](standard-library-io.md) documents `print`, line
-iteration, and shell-command `popen` on the same Runtime.
+The Runtime keeps a sparse Task inventory and a sparse live-owner set for the
+C-to-Titan callback bridge. The former determines when the last Task has
+finished and lets `os.exit` cancel other Tasks; the latter exists only for GC
+reachability and is never traversed. Neither is a parallel libuv-resource
+list, scheduling queue, or source of shutdown traversal; libuv remains
+authoritative for its handle set.
+
+`os.exit(code)` requests successful program exit, cancels the remaining Tasks,
+runs the same cleanup path, and lets the generated entrypoint return the
+requested status. It does not call ISO C `exit` around an embedding's Lua
+state.
+
+See the [timer](standard-library-timer.md),
+[filesystem](standard-library-fs.md), [network](standard-library-net.md),
+[operating-system](standard-library-os.md), and
+[I/O](standard-library-io.md) chapters for their public APIs.

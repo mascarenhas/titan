@@ -163,7 +163,7 @@ function popen(command: string): InputOutputStream
 library's shell-string convenience, not an argv parser. Use `os.spawn` when an
 executable and arguments must be passed directly or stdout and stderr must
 remain separate. The command is text and rejects an embedded NUL before native
-resources are created.
+process creation.
 
 The child gets a captured stdin pipe and one captured pipe shared by stdout and
 stderr. `InputOutputStream:write` writes the child's stdin, while `read` and
@@ -178,14 +178,13 @@ retain the same representation documented by `os.Process:wait`.
 
 `close` is idempotent. Its first call closes stdin, requests `term` only when
 the child is still running, and waits for that termination when necessary.
-A final cleanup always closes the one merged InputStream and discards unread
-buffered output. The composite facade reaches its terminal closed state only
-after process cleanup completes. If cancellation or an error interrupts that
-cleanup, a later `close` retries the remaining process observation while the
-already-disposed output close is a no-op. If `wait` has already stored a
-status, `close` does not signal the exited child. A later `wait` returns the
-cached or already-retained process status; after output disposal, later `read`
-and `read_until` calls return nil.
+After stdin close succeeds, a final cleanup closes the one merged InputStream
+and discards unread buffered output even when signalling or waiting raises.
+The composite facade reaches its terminal closed state only after process
+cleanup completes, so a later `close` can retry work that did not reach that
+point. If `wait` has already stored a status, `close` does not signal the exited
+child. A later `wait` returns the cached or already-retained process status;
+after output disposal, later `read` and `read_until` calls return nil.
 
 For large bidirectional traffic, schedule writing and reading concurrently so
 neither operating-system pipe can fill while the other direction is waiting.

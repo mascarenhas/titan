@@ -391,11 +391,10 @@ reject 0.19 before any native value crosses that boundary. The transition
 uses a fresh/clean 0.20 prefix; there is no in-place 0.19 migration or retained
 historical cutover canary.
 
-Production and installed tests use the combined image. The delayed-filesystem
-callback variant is deliberately different: in an isolated root with no
-shallow `titan.so`, it builds exact `titan/coroutine.so`, `titan/uv.so`,
-`titan/async.so`, and `titan/timer.so`. Prefix search reaches those terminal
-candidates. The serial coroutine suite similarly isolates its exact test
-image or preserves and restores the complete production
-`titan.so`/`titan.a` pair, dSYM, and generated coroutine shim. These are
-fault-injection/test layouts, not an alternate production packaging model.
+Production, installed, and async standard-library behavior tests use the
+combined image; the uv redesign has no delayed-callback source variant or
+alternate exact-provider graph. The serial coroutine suite is the narrow
+exception: it isolates its exact test image or preserves and restores the
+complete production `titan.so`/`titan.a` pair, dSYM, and generated coroutine
+shim. That coroutine test layout is not an alternate production packaging
+model.

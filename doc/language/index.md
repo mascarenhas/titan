@@ -70,12 +70,12 @@ use the chapters below for the normative language reference.
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, status, and Lua interop. |
-| [Asynchronous I/O and tasks](async-io.md) | The `async` Task scheduler, nonblocking `run`, explicit/automatic loop driving, direct callback continuation model, errors, joins, cancellation, and resource/process shutdown. |
+| [Asynchronous I/O and tasks](async-io.md) | Nonblocking Tasks, explicit/automatic loop driving, the one-tag direct callback continuation model, Task-local errors, cancellation, explicit Files, and final libuv-handle cleanup. |
 | [I/O standard library](standard-library-io.md) | The seven `Reader`/`Writer`/`Closer` Interface combinations, standard-output `print`, ownership-safe line iteration, and shell-command `popen` with merged output. |
 | [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
 | [Mathematical standard library](standard-library-math.md) | Typed C99 numeric operations, Lua 5.5-compatible xoshiro256** random sequences, and length-bounded numeric conversion. |
-| [Filesystem standard library](standard-library-fs.md) | Binary file reads and writes, per-File FIFO ordering and close, whole-file helpers, metadata, and path operations. |
-| [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads and FIFO writes, shutdown, close, and cancellation. |
+| [Filesystem standard library](standard-library-fs.md) | Binary file reads and writes, explicit File concurrency and close, whole-file helpers, metadata, and path operations. |
+| [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads, libuv-ordered writes, shutdown, close, and cancellation. |
 | [Operating-system standard library](standard-library-os.md) | Portable clocks and timestamps, ISO C calendars/locales, plus environment, parent stdio, signals, graceful exit, and configurable direct child processes. |
 | [PEG standard library](standard-library-peg.md) | Typed parsing-expression constructors and combinators, labeled failure/recovery, captures and callback timing, anchored pattern matching and leftmost search, locale controls, and relabel source notation. |
 | [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, configurably yielding in-memory streams, and compiled byte-regex matching, capture iteration, splitting, and substitution. |

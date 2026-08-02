@@ -108,10 +108,9 @@ not add epicycles around what may be a misunderstood simpler design.
   sanitizer job keeps its build and focused native-memory gate on one warm
   standard `ubuntu-24.04` runner with an explicit 30-minute timeout:
   representative timer/fs suites, core owner/callback proofs, and production
-  net/OS smokes. The broad fs modes/data/path integration case remains covered
-  in regular Linux but is filtered from this sanitizer shard while its flaky
-  callback crash awaits the planned uv redesign; the focused fs lifetime and
-  late-callback cases remain. Keep ordinary Titan `#line` attribution
+  net/OS smokes. The redesigned timer/fs suites are small direct-continuation
+  behavior gates and run in full in this shard; there is no delayed-callback
+  source variant or sanitizer-only filter. Keep ordinary Titan `#line` attribution
   throughout this job:
   the selected `uv_tasks` traceback gate depends on exact user-function
   frames, and `uv_bootstrap` additionally requires a standard-provider frame.
@@ -435,30 +434,15 @@ teardown so a later packaging test does not rebuild the whole standard
 library.
 
 Async standard-library behavioral specs compile against the canonical
-production modules whenever public behavior can prove the contract. The one
-narrow exception is `spec/stdlib/uv_late_callbacks_spec.lua`. Its isolated
-flow normally applies `spec/support/make_delayed_dns_callback_variant.lua` and
-then `spec/support/make_delayed_fs_callback_variant.lua` to one complete copy
-of the `titan/uv/` source ensemble, with each transformer patching the owning
-contributors through unique per-file anchors. It builds the exact
-coroutine/uv DSOs once under a private root with no shallow `titan.so`; the DNS
-setup adds the exact GC facade plus complete exact PEG and string providers,
-followed by exact async/timer/net facades, while the FS setup calls uv filesystem and scheduling
-primitives directly from its case module without adding a facade provider.
-The FS cases cover late
-cancellation, disposal of a late successful open, and cross-generation
-Runtime/File/Task/buffer/error rooting. The DNS cases capture the successful
-borrowed result before logical dispatch, cleanup-shields only its delayed
-delivery owner through `close_all_owners`, and owns the release-counter,
-copy-fault, invalid-cell retry, port-format, and full/generational-GC hooks
-needed to prove exactly-once release and rooted address cells. Each behavior
-case still runs in a fresh Lua process, so the combined provider's test state
-does not cross cases. The sanitizer gate selects only the filesystem cases and
-sets validated `TITAN_TEST_UV_LATE_FS_ONLY=1`, which applies only the FS
-transformer and omits the unused GC/PEG/string and async/timer/net builds; the
-complete combined suite remains in regular Linux. Keep every such hook out of
-installed modules; this variant is not a general scheduler or fault-injection
-interface.
+production modules. Keep them centered on public callback-continuation
+behavior: one outer loop, captured Task outcomes, independent one-shot
+requests, one waiter plus buffered state for multi-shot handles, Task-local
+uncaught errors, and final Runtime cleanup. Do not recreate the retired
+`uv_states`/`uv_late_callbacks` source variants, delayed-callback transformers,
+generation fencing, join coverage, Titan-side operation queues, or reentrant
+loop scenarios. Cancellation coverage should prove that a detached waiter is
+woken by its own later libuv callback rather than synchronously from the Task
+that cancels it.
 
 `titanc` takes dot-separated **module names**, not file paths (dots map to
 directory separators under `--tree`, default `.`). For logical `M`, slash path
@@ -1287,10 +1271,15 @@ to recover an identity already represented by this cast.
 The current `titan.uv` sources import `UV_E*` enumerators directly and call public
 libuv operations directly, including process, stat, DNS traversal/release,
 bind, and connect submission. The retained native boundary is deliberately
-narrow: the fixed owner-slot dispatcher, the twelve plain-C callback
-trampolines declared by `titan-runtime/titan/uv.h`, shared fixed-owner
-declarations, and deliberately overprovisioned opaque normalized-address
-storage. The conditional inherited-`SIGPIPE` policy is implemented in
+narrow: the plain-C libuv-shaped callback trampolines declared by
+`titan-runtime/titan/uv.h`, one common helper that only extracts the Lua main
+state/module/native Titan entry, and deliberately overprovisioned opaque
+normalized-address storage, plus the tiny const-preserving `uv_buf_t`
+initializer used to root Titan write strings without copying them. Each
+trampoline selects and invokes its exact Titan callback handler; there is no
+generic dispatcher or event-kind argument.
+
+The conditional inherited-`SIGPIPE` policy is implemented in
 `titan/uv/uv.titan` through direct `signal.h`/`errno.h` FFI calls and
 `uv_translate_sys_error`. Operational
 libuv wrappers, including the old DNS/address helpers, must not return.
@@ -1300,14 +1289,52 @@ the compiled-module ABI-0.18 boundary rather than 0.17. ABI 0.19 preserves that
 native callback contract while adding union and public-slot changes; ABI 0.20
 preserves both while adding the Array-writer and strict function-closure
 protocols.
-Ordinary libuv handles, requests, buffers, and copied byte arrays are owned
-directly by source-level `owned *T`/`owned T[]` fields. The native dispatcher
-therefore uses exactly five userdata owner slots: owner, main thread,
-dispatcher, metadata, and buffer. The minicoro object remains the sole
-intentional custom `lua_newuserdatauv` allocation in the standard library.
-Records remain only where they add logical length, borrowed offsets, or
-asynchronous lifetime state; capacity-sized or NUL-terminated backing arrays
-must not be cast wholesale to strings when only a logical prefix is valid.
+
+Ordinary libuv handles, requests, read buffers, and normalized address arrays
+are owned directly by source-level `owned *T`/`owned T[]` fields. There is one
+module-instance coroutine tag for every uv Task; the yielded `Call` union, not
+the tag, selects the operation. A wrapper exists only to hide an unexportable
+FFI value and retain values required through its callbacks. Multi-shot handles
+may also carry their natural buffer/latest result and at most one waiter.
+One-shot request owners retain the native request and exact callback; the
+callback closure captures the suspended Task and borrowed arguments until
+completion. Writes retain the original Titan string and a `uv_buf_t`; do not
+allocate a duplicate payload string. Libuv copies
+asynchronous filesystem paths and DNS text during submission, while `uv_spawn`
+consumes file/argv synchronously, so keep originals rooted only for the actual
+borrow interval. A direct alloc callback cannot unwind an allocation exception
+through libuv: return the zero buffer, preserve the exact exception, and
+deliver it through the required paired read callback; do not add a recovery
+status or a defensive missing-alloc branch. Do not add `FooControl` layers,
+wrapper-on-wrapper state records, uniform nil-padded owner layouts, Task-side
+operation queues, or a second handle registry. The minicoro object remains the
+sole intentional custom `lua_newuserdatauv` allocation in the standard
+library. Capacity-sized
+backing arrays must not be cast wholesale to strings when only a logical
+prefix is valid.
+
+The Runtime's sparse `handle_roots` is only the C-to-Titan callback live-owner
+set and is never traversed. Its sparse `task_roots` is the intentional Task
+inventory: it determines when the last user Task finishes and lets `os.exit`
+cancel the others. The first `os.exit` request fixes the exit code and cancels
+every user Task, including its requester; that cancellation stays pending if
+user code catches it and is injected again before the next yielded operation
+can be dispatched. Do not reintroduce a parallel active-Task counter.
+
+Only top-level `async.loop` or the standalone bootstrap may call `uv_run`; the
+loop is non-reentrant, and a callback resumes one continuation, dispatches the
+next yielded operation, and returns. An uncaught error retires and logs only
+its Task; the task-root set decides whether it was the last user Task.
+
+Runtime cleanup discovers handles exclusively with `uv_walk` and closes them
+with `uv_close`. A `uv_file` is a process descriptor, crosses Runtime sessions,
+and is never registered for shutdown. Closing a `uv_process_t` watcher neither
+terminates nor reaps its child; child-lifecycle policy belongs above `titan.uv`.
+
+Spawn configuration owns the actual `uv_process_options_t` and stdio array;
+each option installs concrete streams immediately and returns status. Parent
+stdio inheritance always uses wrapped pipe/TTY streams with
+`UV_INHERIT_STREAM`, never `UV_INHERIT_FD`.
 
 ## Test suite notes
 

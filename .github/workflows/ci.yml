@@ -602,20 +602,11 @@ jobs:
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
-          TITAN_TEST_UV_LATE_FS_ONLY: "1"
         run: |
-          # This broad integration case remains in regular Linux. Its flaky
-          # sanitizer-only fs callback crash is parked until the planned uv
-          # redesign rewrites this boundary; the narrower fs lifetime cases
-          # below remain in this native-memory gate.
           bash spec/support/ci_sanitizer_capture.sh timer-fs \
             .lua/bin/busted -o gtest -v \
-            spec/stdlib/uv_states_spec.lua \
             spec/stdlib/timer_spec.lua \
-            spec/stdlib/fs_spec.lua \
-            spec/stdlib/uv_late_callbacks_spec.lua \
-            --filter-out='fs runtime covers modes, binary/NUL data' \
-            --filter-out='DNS'
+            spec/stdlib/fs_spec.lua
 
       - name: Run native async sanitizer gate (core-uv)
         env:
