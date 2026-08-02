@@ -2,6 +2,7 @@ local async_stdlib = require "spec.support.async_stdlib"
 
 local TASK_CASES = [[
     local async = import "async"
+    local coroutine = import "coroutine"
     local fs = import "fs"
     local timer = import "timer"
 
@@ -15,6 +16,7 @@ local TASK_CASES = [[
     local self_cancelled_body_finished = false
     local waiting_observed = false
     local cancellation_returned_while_waiting = false
+    local nested_result = "not-run"
 
     local function failed_origin(): value
       timer.yield()
@@ -121,6 +123,22 @@ local TASK_CASES = [[
         return nil
       end)
     end
+
+    function schedule_nested_timer(): async.Task
+      nested_result = "running"
+      return async.run(function (): value
+        local child = coroutine.create(function (_arg: value): value
+          timer.sleep(0)
+          return "nested-timer-ok"
+        end, "child")
+        nested_result = child:resume(nil) as string
+        return nil
+      end)
+    end
+
+    function nested_timer_result(): string
+      return nested_result
+    end
 ]]
 
 describe("async Task callback continuations", function()
@@ -180,5 +198,20 @@ describe("async Task callback continuations", function()
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.match("last-task-boom", output, 1, true)
         assert.match("stack traceback:", output, 1, true)
+    end)
+
+    it("routes the single uv tag through a nested user coroutine", function()
+        local ok, status, output = async_stdlib.run_lua_source(workspace, [[
+            local async = require "titan.async"
+            local behavior = require "uv_task_cases"
+
+            local task = behavior.schedule_nested_timer()
+            async.loop()
+            assert(task:status() == "succeeded", task:status())
+            assert(behavior.nested_timer_result() == "nested-timer-ok")
+        ]])
+
+        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
+        assert.equals(0, status, output)
     end)
 end)

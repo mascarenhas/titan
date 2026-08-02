@@ -1,8 +1,8 @@
 local type Bytes = owned ffi.titan_ffi_char[]
 
-local record Buffer
-  local descriptor: owned *libuv.uv_buf_t
-  local bytes: Bytes
+local record StreamWriteOwner
+  local handle: owned *libuv.uv_write_t
+  local callback: (StreamWriteOwner, integer) -> ()
 end
 
 local record Immediate
@@ -19,8 +19,7 @@ local record Runtime
   local current_task: Task?
   local closing: boolean
   local cleanup_done: boolean
-  local exit_requested: boolean
-  local exit_code: integer
+  local exit_code: integer?
 end
 
 -- The callback closure retains the native owner and optional suspended Task.
@@ -46,40 +45,38 @@ local function main_thread_state(): *lua.lua_State
   return thread
 end
 
-local function make_error(code: integer, operation: string,
-                          subject: string?): Error
+local function make_error(code: integer, operation: string): Error
   local status = code as ffi.titan_ffi_int
   return Error.new(code, libuv.uv_err_name(status) as string,
-                   libuv.uv_strerror(status) as string, operation, subject)
+                   libuv.uv_strerror(status) as string, operation)
 end
 
 local function immediate_ok(payload: value): Immediate
   return Immediate.new(false, payload)
 end
 
-local function immediate_error(code: integer, operation: string,
-                               subject: string?): Immediate
-  return Immediate.new(true, make_error(code, operation, subject))
+local function immediate_error(code: integer,
+                               operation: string): Immediate
+  return Immediate.new(true, make_error(code, operation))
 end
 
-local function check_status(status: integer, operation: string,
-                            subject: string?)
-  if status < 0 then raise make_error(status, operation, subject) end
+local function check_status(status: integer, operation: string)
+  if status < 0 then raise make_error(status, operation) end
 end
 
 local function contains_nul(source: string): boolean
   return cstring.strlen(source) ~= (#source as cstring.size_t)
 end
 
-local function checked_text(source: string, operation: string,
-                            subject: string?): string
+local function checked_text(source: string, operation: string): string
   if contains_nul(source) then
-    raise make_error(libuv.UV_EINVAL, operation, subject)
+    raise make_error(libuv.UV_EINVAL, operation)
   end
   return source
 end
 
-local function bytes_string(bytes: Bytes, length: integer): string
+local function bytes_string(bytes: const *ffi.titan_ffi_char,
+                            length: integer): string
   local top = lua.lua_gettop(L)
   defer lua.lua_settop(L, top)
   lua.lua_pushlstring(L, bytes, length as libuv.size_t)
@@ -87,12 +84,52 @@ local function bytes_string(bytes: Bytes, length: integer): string
   return result as string
 end
 
-local function new_buffer(length: integer): Buffer
-  local bytes = ffi.titan_ffi_char.new_array(length)
-  local descriptor = libuv.uv_buf_t.new()
-  descriptor.base = bytes
-  descriptor.len = length as libuv.size_t
-  return Buffer.new(descriptor, bytes)
+local function complete_status(task: Task, status: integer,
+                               operation: string)
+  if status < 0 then
+    resume_task_from_callback(
+        task, true, make_error(status, operation))
+  else
+    resume_task_from_callback(task, false, nil)
+  end
+catch
+  fail_task_at_callback_boundary(task, error, traceback)
+end
+
+local function submitted(task: Task, status: integer,
+                         operation: string): Immediate?
+  if status >= 0 then return nil end
+  task.pending = nil
+  return immediate_error(status, operation)
+end
+
+local function submit_stream_write(task: Task,
+                                    stream: *libuv.uv_stream_t,
+                                    data: string,
+                                    operation: string): Immediate?
+  local descriptor: libuv.uv_buf_t
+  local bytes = data as const *ffi.titan_ffi_char
+  shim.titan_uvshim_buf_init_const(
+      descriptor, bytes, #data as libuv.size_t)
+  local native = libuv.uv_write_t.new()
+  local callback = function (_owner: StreamWriteOwner, status: integer)
+    -- The closure is the request owner for bytes borrowed through write_cb.
+    local _data = data
+    complete_status(task, status, operation)
+  end
+  local owner = StreamWriteOwner.new(native, callback)
+  task.pending = owner
+  local request: *libuv.uv_write_t = native
+  libuv.uv_req_set_data(request as *libuv.uv_req_t,
+                        owner as ffi.titan_ffi_void_ptr)
+  local status = libuv.uv_write {
+    req = request,
+    handle = stream,
+    bufs = descriptor,
+    nbufs = 1,
+    cb = shim.titan_uvshim_write_cb,
+  }
+  return submitted(task, status, operation)
 end
 
 local function error_text(err: value): string
@@ -202,10 +239,9 @@ local function new_runtime(): Runtime
     current_task = nil,
     closing = false,
     cleanup_done = false,
-    exit_requested = false,
-    exit_code = 0,
+    exit_code = nil,
   }
-  check_status(libuv.uv_loop_init(native), "runtime.loop.init", nil)
+  check_status(libuv.uv_loop_init(native), "runtime.loop.init")
   libuv.uv_loop_set_data(native,
                          main_thread as ffi.titan_ffi_void_ptr)
   return runtime
@@ -221,14 +257,13 @@ end
 
 local function close_handle(runtime: Runtime, handle: *libuv.uv_handle_t,
                             keepalive: value, old_root_index: integer,
-                            task: Task?, failed: boolean,
-                            payload: value)
+                            task: Task?, payload: value)
   local callback = function (owner: CloseOwner)
     -- Capturing the native owner keeps its FFI handle alive through close_cb.
     local _keepalive = keepalive
     unroot_handle(runtime, owner.root_index)
     if task then
-      resume_task_from_callback(task as Task, failed, payload)
+      resume_task_from_callback(task as Task, false, payload)
     end
   end
   local owner = CloseOwner.new(0, callback)
@@ -291,7 +326,7 @@ function _loop()
     raise "async Runtime cleanup did not finish"
   end
   check_status(libuv.uv_loop_close(runtime.loop),
-               "runtime.loop.close", nil)
+               "runtime.loop.close")
 
   runtime.task_roots = {}
   runtime.handle_roots = {}

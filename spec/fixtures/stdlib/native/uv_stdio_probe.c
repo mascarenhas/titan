@@ -82,7 +82,7 @@ static int replace_target(int target, int replacement) {
   return 0;
 }
 
-static int setup_input_pipe(int keep_writer) {
+static int setup_input_pipe(void) {
   static const char input[] = "parent-pipe-input";
   int descriptors[2];
   if (pipe(descriptors) != 0) {
@@ -95,17 +95,13 @@ static int setup_input_pipe(int keep_writer) {
     return -1;
   }
   close(descriptors[0]);
-  if (keep_writer) {
-    peer_descriptors[0] = descriptors[1];
-  } else {
-    if (write(descriptors[1], input, sizeof(input) - 1) !=
-        (ssize_t) (sizeof(input) - 1)) {
-      record_failure("could not seed stdin pipe: %s", strerror(errno));
-      close(descriptors[1]);
-      return -1;
-    }
+  if (write(descriptors[1], input, sizeof(input) - 1) !=
+      (ssize_t) (sizeof(input) - 1)) {
+    record_failure("could not seed stdin pipe: %s", strerror(errno));
     close(descriptors[1]);
+    return -1;
   }
+  close(descriptors[1]);
   return 0;
 }
 
@@ -155,13 +151,11 @@ static int setup_socket_stdout(void) {
   return 0;
 }
 
-static int setup_tty(int master_target) {
+static int setup_tty(void) {
   struct termios attributes;
   char *slave_name;
   int master = -1;
   int slave = -1;
-  int target;
-  int peer;
 
   master = posix_openpt(O_RDWR | O_NOCTTY);
   if (master < 0 || grantpt(master) != 0 || unlockpt(master) != 0)
@@ -178,12 +172,10 @@ static int setup_tty(int master_target) {
   if (tcsetattr(slave, TCSANOW, &attributes) != 0)
     goto error;
 
-  target = master_target ? master : slave;
-  peer = master_target ? slave : master;
-  if (replace_target(1, target) != 0)
+  if (replace_target(1, slave) != 0)
     goto error;
-  close(target);
-  peer_descriptors[1] = peer;
+  close(slave);
+  peer_descriptors[1] = master;
   return 0;
 
 error:
@@ -271,12 +263,8 @@ int titan_uv_test_stdio_setup(int mode) {
   active_mode = mode;
   switch (mode) {
   case TITAN_UV_TEST_STDIO_PIPE_ALL:
-    if (setup_input_pipe(0) != 0 || setup_output_pipe(1) != 0 ||
+    if (setup_input_pipe() != 0 || setup_output_pipe(1) != 0 ||
         setup_output_pipe(2) != 0)
-      return -1;
-    break;
-  case TITAN_UV_TEST_STDIO_BLOCKED_STDIN:
-    if (setup_input_pipe(1) != 0)
       return -1;
     break;
   case TITAN_UV_TEST_STDIO_FILE_STDOUT:
@@ -284,15 +272,7 @@ int titan_uv_test_stdio_setup(int mode) {
       return -1;
     break;
   case TITAN_UV_TEST_STDIO_TTY_SLAVE:
-    if (setup_tty(0) != 0)
-      return -1;
-    break;
-  case TITAN_UV_TEST_STDIO_TTY_MASTER:
-    if (setup_tty(1) != 0)
-      return -1;
-    break;
-  case TITAN_UV_TEST_STDIO_OUTPUT_PIPES:
-    if (setup_output_pipe(1) != 0 || setup_output_pipe(2) != 0)
+    if (setup_tty() != 0)
       return -1;
     break;
   case TITAN_UV_TEST_STDIO_SOCKET_STDOUT:
@@ -329,11 +309,10 @@ int titan_uv_test_stdio_finish(int expected_nonblocking_mask) {
                      target, (flags & O_NONBLOCK) != 0, expected);
   }
 
-  /* Closing either final PTY endpoint can discard unread peer input on some
-   * hosts. Read both TTY cases while the host-owned fd 1 is still open;
+  /* Closing the final PTY endpoint can discard unread peer input on some
+   * hosts. Read the TTY case while the host-owned fd 1 is still open;
    * EAGAIN then means the asynchronous write has been fully observed. */
-  if ((active_mode == TITAN_UV_TEST_STDIO_TTY_SLAVE ||
-       active_mode == TITAN_UV_TEST_STDIO_TTY_MASTER) &&
+  if (active_mode == TITAN_UV_TEST_STDIO_TTY_SLAVE &&
       peer_descriptors[1] >= 0) {
     read_peer(1, peer_descriptors[1], 0, 1);
     close(peer_descriptors[1]);

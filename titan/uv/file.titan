@@ -8,11 +8,6 @@ local record FsStatResult
   local modified_nanoseconds: integer
 end
 
-local record FsTmpResult
-  local file: uv_file
-  local path: string
-end
-
 -- A uv_file is a process descriptor, not a Runtime-owned uv_handle_t.
 record uv_file
   local handle: libuv.uv_file
@@ -113,26 +108,14 @@ local function validate_file(file: uv_file)
   if file.handle < 0 then raise "File is closed" end
 end
 
--- Process descriptors are not loop-owned handles. This synchronous public
--- libuv operation is used only where no caller will receive the descriptor:
--- failed setup cleanup and a resource-producing fs callback abandoned by
--- cancellation.
+-- Process descriptors are not loop-owned handles. A negative value is the
+-- local no-descriptor sentinel used by deferred cleanup after ownership moves.
 local function close_descriptor(descriptor: libuv.uv_file): integer
   if descriptor < 0 then return 0 end
-  local request = libuv.uv_fs_t.new()
+  local request: libuv.uv_fs_t
   local status = libuv.uv_fs_close(nil, request, descriptor, nil)
   libuv.uv_fs_req_cleanup(request)
   return status
-end
-
-local function new_write_buffer(source: string,
-                                offset: integer): owned *libuv.uv_buf_t
-  local descriptor = libuv.uv_buf_t.new()
-  local bytes = source as const *ffi.titan_ffi_char
-  shim.titan_uvshim_buf_init_const(
-      descriptor, bytes + offset,
-      (#source - offset) as libuv.size_t)
-  return descriptor
 end
 
 local function new_fs_request(task: Task,
@@ -158,7 +141,7 @@ local function submitted_fs_request(task: Task, owner: uv_fs_t,
   if status < 0 then
     libuv.uv_fs_req_cleanup(owner.handle)
     task.pending = nil
-    return immediate_error(status, operation, nil)
+    return immediate_error(status, operation)
   end
   -- The one-shot request owns the continuation through its callback. Logical
   -- Task cancellation is delivered by that callback too; cancelling the
@@ -189,12 +172,12 @@ local function list_result(task: Task, owner: uv_fs_t,
                            result: integer,
                            keepalive: value): value
   local names: {string} = {}
-  local entry = libuv.uv_dirent_t.new()
+  local entry: libuv.uv_dirent_t
   while true do
     local status = libuv.uv_fs_scandir_next(owner.handle, entry)
     if status == libuv.UV_EOF then break end
     if status < 0 then
-      raise make_error(status, "fs.list", nil)
+      raise make_error(status, "fs.list")
     end
     names[#names + 1] = entry.name as string
   end
@@ -208,12 +191,18 @@ end
 
 local function open_result(task: Task, owner: uv_fs_t, result: integer,
                            keepalive: value): value
+  local descriptor = result as libuv.uv_file
+  local transferred = false
+  defer if not transferred then
+    check_status(close_descriptor(descriptor),
+                 "fs.open.abandon.close")
+  end
   if task.cancel_value then
-    check_status(close_descriptor(result as libuv.uv_file),
-                 "fs.open.cancel.close", nil)
     return nil
   end
-  return uv_file.new(result as libuv.uv_file)
+  local file = uv_file.new(descriptor)
+  transferred = true
+  return file
 end
 
 local function read_result(task: Task, owner: uv_fs_t, result: integer,
@@ -229,14 +218,13 @@ end
 
 local function tmpname_result(task: Task, owner: uv_fs_t, result: integer,
                               keepalive: value): value
+  local descriptor = result as libuv.uv_file
+  defer check_status(close_descriptor(descriptor),
+                     "fs.tmpname.close")
   if task.cancel_value then
-    check_status(close_descriptor(result as libuv.uv_file),
-                 "fs.tmpname.cancel.close", nil)
     return nil
   end
-  local path = libuv.uv_fs_get_path(owner.handle) as string
-  local file = uv_file.new(result as libuv.uv_file)
-  return FsTmpResult.new(file, path)
+  return libuv.uv_fs_get_path(owner.handle) as string
 end
 
 local function complete_fs(task: Task, owner: uv_fs_t, result: integer,
@@ -245,7 +233,7 @@ local function complete_fs(task: Task, owner: uv_fs_t, result: integer,
   local failed = false
   local payload: value = nil
   do
-    if result < 0 then raise make_error(result, operation, nil) end
+    if result < 0 then raise make_error(result, operation) end
     payload = success(task, owner, result, keepalive)
   catch
     failed = true
@@ -272,14 +260,17 @@ local function FsOpenCall:dispatch(task: Task): Immediate?
 end
 
 local function FsReadCall:dispatch(task: Task): Immediate?
-  local buffer = new_buffer(self.maximum)
+  local bytes = ffi.titan_ffi_char.new_array(self.maximum)
+  local descriptor: libuv.uv_buf_t
+  descriptor.base = bytes
+  descriptor.len = self.maximum as libuv.size_t
   local owner = new_fs_request(
-      task, "fs.read", buffer.bytes, read_result)
+      task, "fs.read", bytes, read_result)
   local status = libuv.uv_fs_read {
     loop = task.runtime.loop,
     req = owner.handle,
     file = self.file.handle,
-    bufs = buffer.descriptor,
+    bufs = descriptor,
     nbufs = 1,
     offset = -1,
     cb = shim.titan_uvshim_fs_cb,
@@ -288,14 +279,18 @@ local function FsReadCall:dispatch(task: Task): Immediate?
 end
 
 local function FsWriteCall:dispatch(task: Task): Immediate?
-  local buffer = new_write_buffer(self.data, self.offset)
+  local descriptor: libuv.uv_buf_t
+  local bytes = self.data as const *ffi.titan_ffi_char
+  shim.titan_uvshim_buf_init_const(
+      descriptor, bytes + self.offset,
+      (#self.data - self.offset) as libuv.size_t)
   local owner = new_fs_request(
       task, "fs.write", self.data, write_result)
   local status = libuv.uv_fs_write {
     loop = task.runtime.loop,
     req = owner.handle,
     file = self.file.handle,
-    bufs = buffer,
+    bufs = descriptor,
     nbufs = 1,
     offset = -1,
     cb = shim.titan_uvshim_fs_cb,
@@ -398,7 +393,7 @@ end
 
 function _fs_open(path: string, mode: string): uv_file
   return await(Call.fs_open(FsOpenCall.new(
-      checked_text(path, "fs.open", path), fs_open_flags(mode)))) as uv_file
+      checked_text(path, "fs.open"), fs_open_flags(mode)))) as uv_file
 end
 
 function _fs_read(file: uv_file, max_bytes: integer): string?
@@ -435,48 +430,46 @@ end
 
 function _fs_stat(path: string): (integer, string, integer, integer, integer)
   local result = await(Call.fs_stat(FsStatCall.new(
-      checked_text(path, "fs.stat", path)))) as FsStatResult
+      checked_text(path, "fs.stat")))) as FsStatResult
   return result.size, result.kind, result.mode,
          result.modified_seconds, result.modified_nanoseconds
 end
 
 function _fs_lstat(path: string): (integer, string, integer, integer, integer)
   local result = await(Call.fs_lstat(FsLstatCall.new(
-      checked_text(path, "fs.lstat", path)))) as FsStatResult
+      checked_text(path, "fs.lstat")))) as FsStatResult
   return result.size, result.kind, result.mode,
          result.modified_seconds, result.modified_nanoseconds
 end
 
 function _fs_tmpname(): string
   local template = fs_tmpname_template()
-  local result = await(Call.fs_tmpname(FsTmpnameCall.new(
-      checked_text(template, "fs.tmpname", template)))) as FsTmpResult
-  _fs_close(result.file)
-  return result.path
+  return await(Call.fs_tmpname(FsTmpnameCall.new(
+      checked_text(template, "fs.tmpname")))) as string
 end
 
 function _fs_mkdir(path: string)
   await(Call.fs_mkdir(FsMkdirCall.new(
-      checked_text(path, "fs.mkdir", path))))
+      checked_text(path, "fs.mkdir"))))
 end
 
 function _fs_unlink(path: string)
   await(Call.fs_unlink(FsUnlinkCall.new(
-      checked_text(path, "fs.unlink", path))))
+      checked_text(path, "fs.unlink"))))
 end
 
 function _fs_rmdir(path: string)
   await(Call.fs_rmdir(FsRmdirCall.new(
-      checked_text(path, "fs.rmdir", path))))
+      checked_text(path, "fs.rmdir"))))
 end
 
 function _fs_rename(from: string, to: string)
-  checked_text(from, "fs.rename", from)
-  checked_text(to, "fs.rename", to)
+  checked_text(from, "fs.rename")
+  checked_text(to, "fs.rename")
   await(Call.fs_rename(FsRenameCall.new(from, to)))
 end
 
 function _fs_list(path: string): {string}
   return await(Call.fs_list(FsListCall.new(
-      checked_text(path, "fs.list", path)))) as {string}
+      checked_text(path, "fs.list")))) as {string}
 end

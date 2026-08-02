@@ -98,11 +98,12 @@ end
 function start_processes(child: string): uv.Task
   outcome = "running"
   return uv._run(function (): value
-    local process = uv._os_process_spawn_with_config(
-      child, {"echo"}, default_config())
-    local stdin = required(uv._os_process_stdin(process), "stdin")
-    local stdout = required(uv._os_process_stdout(process), "stdout")
-    local stderr = required(uv._os_process_stderr(process), "stderr")
+    local process, raw_stdin?, raw_stdout?, raw_stderr? =
+      uv._os_process_spawn_with_config(
+        child, {"echo"}, default_config())
+    local stdin = required(raw_stdin, "stdin")
+    local stdout = required(raw_stdout, "stdout")
+    local stderr = required(raw_stderr, "stderr")
     local payload = "low\0level\nstream"
     uv._os_stdio_write(stdin, payload)
     uv._os_stdio_close(stdin)
@@ -116,19 +117,37 @@ function start_processes(child: string): uv.Task
     local merged_config = default_config()
     configured(uv._os_spawn_config_with_merged_output(merged_config),
                "merged output")
-    local merged = uv._os_process_spawn_with_config(
-      child, {"dual", "32"}, merged_config)
-    uv._os_stdio_close(required(uv._os_process_stdin(merged),
-                                "merged stdin"))
-    local merged_stdout = required(
-      uv._os_process_stdout(merged), "merged stdout")
-    local merged_stderr = required(
-      uv._os_process_stderr(merged), "merged stderr")
+    local merged, merged_stdin?, raw_merged_stdout?, raw_merged_stderr? =
+      uv._os_process_spawn_with_config(
+        child, {"dual", "32"}, merged_config)
+    uv._os_stdio_close(required(merged_stdin, "merged stdin"))
+    local merged_stdout = required(raw_merged_stdout, "merged stdout")
+    local merged_stderr = required(raw_merged_stderr, "merged stderr")
     check(merged_stdout == merged_stderr,
           "merged low-level output used two owners")
     check(#read_all(merged_stdout) == 64,
           "merged low-level output returned the wrong byte count")
     normal(merged, "merged low-level child")
+
+    local half_merged_config = default_config()
+    configured(uv._os_spawn_config_with_merged_output(half_merged_config),
+               "half-merged initial output")
+    configured(uv._os_spawn_config_with_stdout(half_merged_config),
+               "half-merged final stdout")
+    local half_merged, half_merged_stdin?, raw_half_stdout?,
+          raw_half_stderr? = uv._os_process_spawn_with_config(
+      child, {"early-output-exit"}, half_merged_config)
+    uv._os_stdio_close(required(half_merged_stdin, "half-merged stdin"))
+    local half_stdout = required(raw_half_stdout, "half-merged stdout")
+    local half_stderr = required(raw_half_stderr, "half-merged stderr")
+    check(half_stdout ~= half_stderr,
+          "replacing one merged output kept one shared owner")
+    check(read_all(half_stdout) == "early\0stdout" and
+          read_all(half_stderr) == "early\0stderr",
+          "half-merged output changed or retained the child endpoint")
+    local half_code, half_signal = uv._os_process_wait(half_merged)
+    check(half_code == 23 and half_signal == 0,
+          "half-merged process status changed")
 
     local separate_config = default_config()
     configured(uv._os_spawn_config_with_merged_output(separate_config),
@@ -137,14 +156,14 @@ function start_processes(child: string): uv.Task
                "final stdout capture")
     configured(uv._os_spawn_config_with_stderr(separate_config),
                "final stderr capture")
-    local separate = uv._os_process_spawn_with_config(
+    local separate, separate_stdin?, raw_separate_stdout?,
+          raw_separate_stderr? = uv._os_process_spawn_with_config(
       child, {"early-output-exit"}, separate_config)
-    uv._os_stdio_close(required(uv._os_process_stdin(separate),
-                                "separate stdin"))
+    uv._os_stdio_close(required(separate_stdin, "separate stdin"))
     local separate_stdout = required(
-      uv._os_process_stdout(separate), "separate stdout")
+      raw_separate_stdout, "separate stdout")
     local separate_stderr = required(
-      uv._os_process_stderr(separate), "separate stderr")
+      raw_separate_stderr, "separate stderr")
     check(separate_stdout ~= separate_stderr,
           "final separate captures retained merged identity")
     check(read_all(separate_stdout) == "early\0stdout" and
@@ -154,24 +173,37 @@ function start_processes(child: string): uv.Task
     check(code == 23 and signal_number == 0,
           "low-level process status changed")
 
-    local inherited_config = default_config()
-    configured(uv._os_spawn_config_with_parent_stdin(inherited_config),
-               "parent stdin")
-    configured(uv._os_spawn_config_with_parent_stdout(inherited_config),
-               "parent stdout")
-    configured(uv._os_spawn_config_with_parent_stderr(inherited_config),
-               "parent stderr")
-    local inherited = uv._os_process_spawn_with_config(
-      "/bin/sh", {"-c", ":"}, inherited_config)
-    check(not uv._os_process_stdin(inherited) and
-          not uv._os_process_stdout(inherited) and
-          not uv._os_process_stderr(inherited),
-          "inherited descriptors exposed captured endpoints")
-    normal(inherited, "inherited low-level child")
-
     outcome = "processes-ok"
     return nil
   end)
+end
+
+function start_parent_inheritance(): uv.Task
+  outcome = "running"
+  setup(probe.TITAN_UV_TEST_STDIO_PIPE_ALL)
+  return uv._run(function (): value
+    local config = default_config()
+    configured(uv._os_spawn_config_with_parent_stdin(config),
+               "parent stdin")
+    configured(uv._os_spawn_config_with_parent_stdout(config),
+               "parent stdout")
+    configured(uv._os_spawn_config_with_parent_stderr(config),
+               "parent stderr")
+    local process, inherited_stdin?, inherited_stdout?, inherited_stderr? =
+      uv._os_process_spawn_with_config(
+        "/bin/sh", {"-c", ":"}, config)
+    check(not inherited_stdin and not inherited_stdout and
+          not inherited_stderr,
+          "inherited descriptors exposed captured endpoints")
+    normal(process, "inherited low-level child")
+    outcome = "parent-inheritance-ready"
+    return nil
+  end)
+end
+
+function finish_parent_inheritance()
+  finish(0)
+  outcome = "parent-inheritance-ok"
 end
 
 function start_parent_pipes(): uv.Task
@@ -199,6 +231,38 @@ function finish_parent_pipes()
   check(output == "pipe-stdout" and diagnostics == "pipe-stderr",
         "parent pipe output changed")
   outcome = "parent-pipes-ok"
+end
+
+local function reject_parent_stdout(mode: integer,
+                                    expected: string): uv.Task
+  outcome = "running"
+  setup(mode)
+  return uv._run(function (): value
+    local before = probe.titan_uv_test_stdio_open_fd_count()
+    check(before >= 0, "could not count descriptors before rejection")
+    local config = uv._os_spawn_config_new()
+    local status = uv._os_spawn_config_with_parent_stdout(config)
+    uv._os_spawn_config_close(config)
+    check(status < 0, "unsupported parent stdout was accepted")
+    check(probe.titan_uv_test_stdio_open_fd_count() == before,
+          "parent stdout rejection leaked a descriptor")
+    outcome = expected
+    return nil
+  end)
+end
+
+function start_parent_file_rejection(): uv.Task
+  return reject_parent_stdout(probe.TITAN_UV_TEST_STDIO_FILE_STDOUT,
+                              "parent-file-rejected")
+end
+
+function start_parent_socket_rejection(): uv.Task
+  return reject_parent_stdout(probe.TITAN_UV_TEST_STDIO_SOCKET_STDOUT,
+                              "parent-socket-rejected")
+end
+
+function finish_parent_rejection()
+  finish(0)
 end
 
 function start_parent_tty(): uv.Task
@@ -282,8 +346,23 @@ assert(cases.result() == %q, cases.result())
                    "parent-pipes-ok")
     end)
 
+    it("inherits only prepared parent streams", function()
+        run_parent("start_parent_inheritance",
+                   "finish_parent_inheritance", "parent-inheritance-ok")
+    end)
+
     it("classifies and transfers a portable pseudo-terminal", function()
         run_parent("start_parent_tty", "finish_parent_tty",
                    "parent-tty-ok")
+    end)
+
+    it("rejects regular-file parent stdio without leaking", function()
+        run_parent("start_parent_file_rejection",
+                   "finish_parent_rejection", "parent-file-rejected")
+    end)
+
+    it("rejects socket parent stdio without leaking", function()
+        run_parent("start_parent_socket_rejection",
+                   "finish_parent_rejection", "parent-socket-rejected")
     end)
 end)

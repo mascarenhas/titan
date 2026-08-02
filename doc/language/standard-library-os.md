@@ -484,9 +484,7 @@ output stream, see [`io.popen`](standard-library-io.md#shell-commands).
 Libuv failures raise [`async.Error`](async-io.md#errors-and-cancellation)
 with an operation name identifying the failed helper. A platform
 `UV_ENOSYS` result is exposed as that error; the library does not silently
-fall back to a POSIX-specific implementation. The optional `subject` field is
-diagnostic context and callers must not depend on a particular operation
-populating it.
+fall back to a POSIX-specific implementation.
 
 Process and pipe setup, I/O, spawn, and signal failures use operation names
 that identify the failed transition. Immediate validation and asynchronous

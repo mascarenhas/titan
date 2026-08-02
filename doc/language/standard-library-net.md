@@ -136,10 +136,9 @@ accept waiter with an error.
 
 Immediate and asynchronous libuv failures raise the same provider-owned error
 record, re-exported under the type-only facade name `async.Error`. Its fields
-are `code: integer`, `name: string`, `message: string`, `operation: string`,
-and `subject: string?`; the alias is not a constructible `async.Error` runtime
-namespace. `subject` is optional context and networking operations do not
-promise to populate it.
+are `code: integer`, `name: string`, `message: string`, and
+`operation: string`; the alias is not a constructible `async.Error` runtime
+namespace.
 
 DNS errors use libuv's `EAI_*` names. EOF is normal for both `read` and
 `read_until`; an unterminated final batch is returned before sticky EOF.

@@ -137,10 +137,9 @@ function start_facades(): async.Task
 
     local inherited = os.spawn(
       "/bin/sh", {"-c", ":"},
-      os.with_parent_stdin, os.with_parent_stdout,
-      os.with_parent_stderr)
-    check(not inherited.stdin and not inherited.stdout and
-          not inherited.stderr,
+      os.with_parent_stdout, os.with_parent_stderr)
+    required_output(inherited.stdin, "inherited stdin"):close()
+    check(not inherited.stdout and not inherited.stderr,
           "inherited descriptors exposed captured endpoints")
     normal(inherited:wait(), "inherited stdio")
 

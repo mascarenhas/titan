@@ -19,6 +19,10 @@ The public `async`, `timer`, `fs`, `net`, `io`, and `os` modules expose
 ordinary Titan records and Interfaces. Native pointers, callback records, the
 yield union, and libuv controls stay private to `titan.uv`.
 
+Contributor recipes for adding single-shot callbacks, persistent multi-shot
+sources, and new handle types, together with the current binding-coverage
+snapshot, are in [Extending the libuv binding](libuv-extension-guide.md).
+
 ## The non-reentrant loop invariant
 
 Libuv specifies that `uv_run` is not reentrant and must not be called from a
@@ -39,9 +43,11 @@ accessed from those workers.
 ## Coroutine protocol
 
 All Tasks are Titan `coroutine.Coro` values with one private module-identity
-tag. A Task-to-runtime transfer is a local `Call` union. Every callback-taking
-libuv operation has one variant, and every variant carries one local record
-containing that C call's ordinary parameters. A callback-to-Task transfer is
+tag. A Task-to-runtime transfer is a local `Call` union. Every variant
+represents one suspension action and carries one local record containing its
+ordinary parameters. A one-shot variant normally submits one callback-taking
+call. A persistent source may already be active, so its wait variant instead
+consumes buffered state or installs one waiter. A callback-to-Task transfer is
 the operation's result value, or an injected `async.Error`; only operations
 with several result components need a private result record.
 
@@ -56,12 +62,13 @@ if Task yielded Call.variant(record): record:dispatch(Task)
 return from callback
 ```
 
-An operation dispatcher may perform direct synchronous libuv calls before it
-submits the one callback-taking call represented by its variant. After an
-accepted submission it returns immediately. A negative submission result is
-special because libuv guarantees the callback will not run; the trampoline
-injects the error immediately and lets the continuation yield its next call
-without recursive event-loop entry.
+For a one-shot operation, its dispatcher may perform direct synchronous libuv
+calls before it submits the callback-taking call. After an accepted submission
+it returns immediately. A documented negative submission result is special
+because the callback will not run; the trampoline injects the error immediately
+and lets the continuation yield its next call without recursive event-loop
+entry. A persistent-source dispatcher may instead consume buffered state or
+install one waiter without making a new native submission.
 
 `async.run` itself is primed by a zero-duration, non-repeating `uv_timer_t`.
 The timer callback resumes the new Task for the first time. `async.yield` uses
@@ -183,6 +190,12 @@ Merged output uses separate child-write and parent-read pipe handles, installs
 the child stream in both child entries, and exposes the same parent stream as
 both Process outputs.
 
+A successful spawn returns the native process wrapper and its three optional
+parent endpoints together. The public `os.Process` takes those streams
+immediately; the private `uv_process_t` does not duplicate them and retains
+only its callback-lived handle, Runtime, waiter, cached exit result, and root
+slot.
+
 Captured stdout and stderr begin draining after a successful spawn. Parent
 stdin remains lazy until the parent facade reads it, so merely preparing that
 stream for `UV_INHERIT_STREAM` does not consume the child's input. An
@@ -215,9 +228,9 @@ handle discovery; libuv's loop remains authoritative through `uv_walk`.
 Owned C objects and arrays provide stable native addresses. Automatic C
 aggregates are used only for synchronous calls whose pointers cannot escape.
 Titan strings are themselves stable while rooted: a stream or filesystem
-write owner retains the original string together with its `uv_buf_t` until the
-callback, without making a second payload copy. Libuv copies asynchronous
-filesystem paths and DNS text during submission; `uv_spawn` consumes its file
+write owner retains the original string until the callback, without making a
+second payload copy. Libuv copies the submitted `uv_buf_t`, asynchronous
+filesystem paths, and DNS text during submission; `uv_spawn` consumes its file
 and argv text synchronously. Titan validates text arguments for embedded NUL
 where required and keeps the originals reachable for every interval in which
 libuv borrows them. Binary buffers always use exact lengths and never depend
@@ -249,9 +262,11 @@ one Task synchronously inside another Task.
 The Runtime sets `closing` before cleanup, so dispatchers that create new
 handles fail. A private cleanup Task then uses the same continuation protocol:
 
-1. call `uv_walk` to select one non-closing handle;
-2. yield its ordinary `uv_close`, then repeat steps 1-2 until none remain; and
-3. return the `Call.shutdown_done` variant.
+1. yield one cleanup step;
+2. while that Task is suspended, synchronously call `uv_walk` to select one
+   non-closing handle and submit its ordinary `uv_close`;
+3. repeat after `close_cb` until a walk finds none; and
+4. return normally, which marks Runtime cleanup complete.
 
 The outer `uv_run` never stops during this sequence. It delivers outstanding
 request and close callbacks until the loop becomes idle. Only then does the

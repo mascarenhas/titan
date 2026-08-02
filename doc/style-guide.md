@@ -247,6 +247,17 @@ one waiter on a multi-shot handle. The callback resumes its continuation,
 dispatches the next yielded operation, and returns; no callback or Task may
 re-enter `uv_run`.
 
+Low-level contributors must classify a new libuv binding as synchronous,
+one-shot, or persistent multi-shot before adding state. Follow
+[Extending the libuv binding](implementation/libuv-extension-guide.md) for the
+owner, callback-shim, handle-lifecycle, test, and API-coverage checklists.
+Preserve the single coroutine tag and outer non-reentrant loop; do not add a
+scheduler, parallel or traversed handle inventory, operation queue, generation
+fence, or event-kind dispatcher merely to wrap another public `uv_*` function.
+Test additions through public behavior or standalone native fixtures; uv tests
+must not rewrite the binding's source text without an explicitly justified,
+maintainer-approved native-boundary exception.
+
 For shell-command convenience, `io.popen` owns writable stdin and one readable
 stream that merges the child's stdout and stderr. Drain that output before
 `wait`; when input and output must progress together, schedule both directions

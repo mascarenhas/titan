@@ -17,22 +17,13 @@ local record TickerCloseCall
   local ticker: uv_timer_t
 end
 
-local record WalkCall
+local record CleanupStepCall
 end
 
-local record WalkReply
-  local handle: ffi.titan_ffi_void_ptr
-end
-
-local record RawCloseCall
-  local handle: *libuv.uv_handle_t
-  local keepalive: value
-  local old_root_index: integer
-end
-
--- Every payload variant is one callback-taking libuv operation with its
--- ordinary parameters in a record. The case below is only a router; each
--- record owns its operation-specific dispatch method.
+-- Every operational payload variant is one Task suspension action with its
+-- ordinary parameters in a record. It may submit a callback-bearing operation
+-- or consume/install state on a persistent handle. The case below is only a
+-- router; each record owns its operation-specific dispatch method.
 local union Call
   turn: TurnCall
   sleep: SleepCall
@@ -66,10 +57,9 @@ local union Call
   stream_write: StreamWriteCall
   stream_close: StreamCloseCall
   process_wait: ProcessWaitCall
+  process_spawn_failure: ProcessSpawnFailureCall
 
-  walk: WalkCall
-  raw_close: RawCloseCall
-  shutdown_done
+  cleanup_step: CleanupStepCall
 end
 
 -- The callback closure retains the Task and result until this timer fires.
@@ -157,11 +147,9 @@ local function dispatch_call(task: Task, call: Call): Immediate?
   when stream_write: operation then return operation:dispatch(task)
   when stream_close: operation then return operation:dispatch(task)
   when process_wait: operation then return operation:dispatch(task)
+  when process_spawn_failure: operation then return operation:dispatch(task)
 
-  when walk: operation then return operation:dispatch(task)
-  when raw_close: operation then return operation:dispatch(task)
-  when shutdown_done then
-    raise "cleanup completion cannot be dispatched"
+  when cleanup_step: operation then return operation:dispatch(task)
   else
     raise "unknown libuv operation"
   end
@@ -174,14 +162,8 @@ local function retire_task(task: Task, state: string)
   unroot_task(task.runtime, task.root_index)
 end
 
-local function finish_cleanup_task(task: Task, result: value)
-  local call = result as Call
-  case call
-  when shutdown_done then
-    task.runtime.cleanup_done = true
-  else
-    raise "cleanup Task returned an invalid result"
-  end
+local function finish_cleanup_task(task: Task)
+  task.runtime.cleanup_done = true
   retire_task(task, TASK_SUCCEEDED)
 end
 
@@ -244,7 +226,7 @@ local function advance_task(task: Task, failed: boolean, payload: value)
     local status = task.root:status()
     if status == "dead" then
       if task.cleanup then
-        finish_cleanup_task(task, yielded)
+        finish_cleanup_task(task)
       else
         finish_user_task(task, TASK_SUCCEEDED, nil, "")
       end
@@ -324,7 +306,7 @@ local function activate_timer(runtime: Runtime,
   local status = libuv.uv_timer_init(runtime.loop, native)
   if status < 0 then
     unroot_handle(runtime, root_index)
-    raise make_error(status, "timer.init", nil)
+    raise make_error(status, "timer.init")
   end
   local timer_handle: *libuv.uv_timer_t = native
   libuv.uv_handle_set_data(
@@ -336,8 +318,8 @@ local function activate_timer(runtime: Runtime,
       repeat_time as libuv.uint64_t)
   if status < 0 then
     close_handle(runtime, timer_handle as *libuv.uv_handle_t,
-                 owner, root_index, nil, false, nil)
-    raise make_error(status, "timer.start", nil)
+                 owner, root_index, nil, nil)
+    raise make_error(status, "timer.start")
   end
   return root_index
 end
@@ -353,7 +335,7 @@ local function start_timer(task: Task, milliseconds: integer,
     local timer_handle: *libuv.uv_timer_t = owner.handle
     do
       close_handle(runtime, timer_handle as *libuv.uv_handle_t,
-                   owner, owner.root_index, nil, false, nil)
+                   owner, owner.root_index, nil, nil)
       owner.root_index = 0
     catch
       completion_failed = true
@@ -397,7 +379,7 @@ end
 
 local function SleepCall:dispatch(task: Task): Immediate?
   if self.milliseconds < 0 then
-    return immediate_error(libuv.UV_EINVAL, "timer.sleep", nil)
+    return immediate_error(libuv.UV_EINVAL, "timer.sleep")
   end
   -- Build the cancellation closure before libuv accepts the timer. Once
   -- uv_timer_start succeeds, dispatch performs only non-allocating installs.
@@ -408,7 +390,7 @@ local function SleepCall:dispatch(task: Task): Immediate?
     close_handle(task.runtime,
                  timer_handle as *libuv.uv_handle_t,
                  owner, owner.root_index,
-                 task, false, nil)
+                 task, nil)
   end
   timer = start_timer(task, self.milliseconds, false, nil)
   task.cancel_action = cancel_action
@@ -455,31 +437,22 @@ local function TickerCloseCall:dispatch(task: Task): Immediate?
   end
   close_handle(ticker.runtime,
                timer_handle as *libuv.uv_handle_t,
-               ticker, ticker.root_index, task, false, nil)
+               ticker, ticker.root_index, task, nil)
   ticker.root_index = 0
   return nil
 end
 
-local function WalkCall:dispatch(task: Task): Immediate?
-  return immediate_ok(WalkReply.new(collect_handle(task.runtime)))
-end
-
-local function RawCloseCall:dispatch(task: Task): Immediate?
-  close_handle(task.runtime, self.handle,
-               self.keepalive, self.old_root_index,
-               task, false, nil)
+local function CleanupStepCall:dispatch(task: Task): Immediate?
+  local pointer = collect_handle(task.runtime)
+  if pointer == nil then return immediate_ok(false) end
+  close_handle(task.runtime, pointer as *libuv.uv_handle_t,
+               nil, 0, task, true)
   return nil
 end
 
 local function cleanup_runtime(runtime: Runtime): value
-  while true do
-    local reply = await(Call.walk(WalkCall.new())) as WalkReply
-    local pointer = reply.handle
-    if pointer == nil then break end
-    await(Call.raw_close(
-        RawCloseCall.new(pointer as *libuv.uv_handle_t, nil, 0)))
-  end
-  return Call.shutdown_done()
+  while await(Call.cleanup_step(CleanupStepCall.new())) as boolean do end
+  return nil
 end
 
 local function begin_shutdown(runtime: Runtime)
@@ -544,8 +517,7 @@ end
 function _os_exit(code: integer)
   local task = running_task()
   local runtime = task.runtime
-  if not runtime.exit_requested then
-    runtime.exit_requested = true
+  if runtime.exit_code == nil then
     runtime.exit_code = code
   end
   local index = 1

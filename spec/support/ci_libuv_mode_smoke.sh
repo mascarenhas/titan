@@ -420,7 +420,9 @@ run_mode_smoke() {
         TITAN_PATH_0_20="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/net_production_smoke.lua "$mode"
-    env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
+    # The os facade intentionally supports only pipe and TTY parent streams;
+    # CI and noninteractive shells may otherwise supply a regular-file stdin.
+    printf '' | env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
         TITAN_PATH_0_20="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/os_production_smoke.lua "$mode" \
@@ -650,7 +652,7 @@ TITAN
 
     mv "$PROVIDER" "$PROVIDER_HIDDEN"
     mv "$SHIM_ROOT/titan" "$SHIMS_HIDDEN"
-    env \
+    printf '' | env \
         LUA_PATH="$mode_dir/no-lua/?.lua" \
         LUA_CPATH="$mode_dir/no-lua/?.so" \
         LUA_PATH_5_5="$mode_dir/no-lua/?.lua" \

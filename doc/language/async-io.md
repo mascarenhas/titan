@@ -125,13 +125,12 @@ record Error
   name: string
   message: string
   operation: string
-  subject: string?
 end
 ```
 
-`operation` identifies the failed libuv-facing action. `subject` is optional
-diagnostic context; callers must not depend on a particular operation
-populating it.
+`operation` identifies the failed libuv-facing action. The original path,
+host, signal, or other argument is not duplicated in every error record;
+callers already own that context when it matters.
 
 An uncaught error terminates only the Task that raised it. The Runtime writes
 the error and its preserved Titan traceback to standard error, marks that Task

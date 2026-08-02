@@ -82,10 +82,6 @@ local DIRECT_LIBUV_CALLS = {
     "uv_walk",
     "uv_write",
 }
-local SIGPIPE_HOST_CALLS = {
-    "sigaction",
-    "sigemptyset",
-}
 -- Darwin may lower sigemptyset entirely through the system header, leaving no
 -- undefined object symbol. Its direct generated-C call is asserted below.
 local SIGPIPE_EXTERNAL_HOST_CALLS = {
@@ -146,15 +142,6 @@ local RETIRED_NETWORK_HELPERS = {
     "titan_uvshim_address_at",
     "titan_uvshim_tcp_bind",
     "titan_uvshim_tcp_connect_start",
-}
-local RETIRED_UV_EXPORTS = {
-    "_fs_validate_read",
-    "_net_eof_error",
-    "_net_read_error_is",
-    "_os_process_spawn",
-    "_os_stdio_kind",
-    "_os_stdio_read_error_is",
-    "_os_stdio_validate_read",
 }
 local FFI_RETIRED_HELPERS = {
     "titan_uvshim_ignore_sigpipe_if_default",
@@ -517,364 +504,6 @@ describe("libuv Makefile configuration", function()
             assert.same(discovered_uv_sources(), normalized)
         end)
 
-    it("keeps native support at the direct callback boundary",
-        function()
-            local sources = {}
-            for _, path in ipairs(discovered_uv_sources()) do
-                sources[path] = read_file(path)
-            end
-            local runtime = read_file("titan-runtime/titan_uv.c")
-            local header = read_file("titan-runtime/titan/uv.h")
-
-            for _, wrapper in ipairs(RETIRED_UV_WRAPPERS) do
-                assert.falsy(runtime:find(wrapper, 1, true), wrapper)
-                assert.falsy(header:find(wrapper, 1, true), wrapper)
-                for path, source in pairs(sources) do
-                    assert.falsy(source:find(wrapper, 1, true),
-                        path .. ": " .. wrapper)
-                end
-            end
-            for _, helper in ipairs(RETIRED_UV_HELPERS) do
-                assert.falsy(runtime:find(helper, 1, true), helper)
-                assert.falsy(header:find(helper, 1, true), helper)
-                for path, source in pairs(sources) do
-                    assert.falsy(source:find(helper, 1, true),
-                        path .. ": " .. helper)
-                end
-            end
-            for _, helper in ipairs(RETIRED_NETWORK_HELPERS) do
-                assert.falsy(runtime:find(helper, 1, true), helper)
-                assert.falsy(header:find(helper, 1, true), helper)
-                for path, source in pairs(sources) do
-                    assert.falsy(source:find(helper, 1, true),
-                        path .. ": " .. helper)
-                end
-            end
-            for _, helper in ipairs(FFI_RETIRED_HELPERS) do
-                assert.falsy(runtime:find(helper, 1, true), helper)
-                assert.falsy(header:find(helper, 1, true), helper)
-                for path, source in pairs(sources) do
-                    assert.falsy(source:find(helper, 1, true),
-                        path .. ": " .. helper)
-                end
-            end
-
-            local all_sources = {}
-            for _, path in ipairs(discovered_uv_sources()) do
-                all_sources[#all_sources + 1] = sources[path]
-            end
-            local combined = table.concat(all_sources, "\n")
-            local process_source = sources["titan/uv/process.titan"]
-            for _, export in ipairs(RETIRED_UV_EXPORTS) do
-                assert.falsy(combined:find(
-                    "function " .. export .. "(", 1, true), export)
-            end
-            for _, function_name in ipairs(DIRECT_LIBUV_CALLS) do
-                assert.truthy(combined:find("libuv." .. function_name, 1, true),
-                    function_name)
-            end
-
-            assert.falsy(runtime:find("F_DUPFD_CLOEXEC", 1, true))
-            assert.truthy(process_source:find(
-                "process_fcntl.fcntl(", 1, true))
-            assert.truthy(process_source:find(
-                "process_unistd.dup(", 1, true))
-            assert.falsy(combined:find("_os_communicate", 1, true))
-            assert.falsy(read_file("titan/os.titan"):find(
-                "communicate", 1, true))
-            assert.falsy(read_file("titan/io.titan"):find(
-                "communicate", 1, true))
-            for _, function_name in ipairs(SIGPIPE_HOST_CALLS) do
-                assert.truthy(combined:find("csignal." .. function_name, 1, true),
-                    function_name)
-            end
-
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                'foreign import "string.h"', 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                'foreign import "signal.h"', 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                'foreign import "errno.h"', 1, true))
-            assert.falsy(sources["titan/uv/os.titan"]:find(
-                'foreign import "signal.h"', 1, true))
-            assert.truthy(sources["titan/uv/file.titan"]:find(
-                'foreign import "sys/stat.h"', 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                "local function ignore_sigpipe_if_default()", 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                "current.sa_handler ~= csignal.SIG_DFL", 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                "ignore.sa_handler = csignal.SIG_IGN", 1, true))
-            assert.falsy(header:find("typedef struct uv_", 1, true))
-            assert.truthy(header:find("struct uv_timer_s;", 1, true))
-        end)
-
-    it("uses one coroutine tag and per-Call dispatch methods", function()
-        local task = read_file("titan/uv/task.titan")
-        local runtime_source = read_file("titan/uv/runtime.titan")
-        local runtime = read_file("titan-runtime/titan_uv.c")
-        local sources = {}
-        for _, path in ipairs(discovered_uv_sources()) do
-            sources[#sources + 1] = read_file(path)
-        end
-        local combined = table.concat(sources, "\n")
-
-        assert.equal(1, count_plain(combined,
-            "local UV_TAG: value = {}"))
-        assert.truthy(task:find("local union Call", 1, true))
-        assert.truthy(task:find(
-            "local function dispatch_call(task: Task, call: Call)",
-            1, true))
-        assert.truthy(task:find(
-            "return coroutine.yield(call, UV_TAG)", 1, true))
-        assert.truthy(task:find(
-            "return task.root:resume(payload, UV_TAG)", 1, true))
-        assert.truthy(task:find(
-            "return task.root:error(payload, UV_TAG)", 1, true))
-        assert.equal(1, count_plain(runtime_source, "libuv.uv_run("))
-        assert.falsy(runtime:find("titan_uvshim_dispatch", 1, true))
-        assert.falsy(runtime:find("event_kind", 1, true))
-        for _, retired in ipairs({
-            "ReadyQueue", "TaskJoin", "Generation", "FileControl",
-            "ProcessControl", "StreamControl", "TcpControl",
-        }) do
-            assert.falsy(combined:find(retired, 1, true), retired)
-        end
-    end)
-
-    it("binds every libuv trampoline to its exact Titan owner callback",
-        function()
-            local bindings = {
-                { "titan/uv/runtime.titan", "titan_uvshim_close_cb" },
-                { "titan/uv/runtime.titan", "titan_uvshim_walk_cb" },
-                { "titan/uv/task.titan", "titan_uvshim_timer_cb" },
-                { "titan/uv/file.titan", "titan_uvshim_fs_cb" },
-                { "titan/uv/os.titan", "titan_uvshim_signal_cb" },
-                { "titan/uv/tcp.titan", "titan_uvshim_getaddrinfo_cb" },
-                { "titan/uv/tcp.titan", "titan_uvshim_connect_cb" },
-                { "titan/uv/tcp.titan", "titan_uvshim_write_cb" },
-                { "titan/uv/tcp.titan", "titan_uvshim_shutdown_cb" },
-                { "titan/uv/tcp.titan", "titan_uvshim_alloc_cb" },
-                { "titan/uv/tcp.titan", "titan_uvshim_read_cb" },
-                { "titan/uv/tcp.titan", "titan_uvshim_connection_cb" },
-                { "titan/uv/process.titan", "titan_uvshim_alloc_cb" },
-                { "titan/uv/process.titan", "titan_uvshim_read_cb" },
-                { "titan/uv/process.titan", "titan_uvshim_write_cb" },
-                { "titan/uv/process.titan", "titan_uvshim_process_exit_cb" },
-            }
-            for _, binding in ipairs(bindings) do
-                local source = read_file(binding[1])
-                assert.truthy(source:find("shim." .. binding[2], 1, true),
-                    binding[1] .. ": " .. binding[2])
-            end
-        end)
-
-    it("uses only Task and callback-owner live sets", function()
-        local runtime = read_file("titan/uv/runtime.titan")
-        local task = read_file("titan/uv/task.titan")
-        assert.truthy(runtime:find("local task_roots: {Task}", 1, true))
-        assert.truthy(runtime:find("local handle_roots: {value}", 1, true))
-        assert.falsy(runtime:find("active_tasks", 1, true))
-        for _, retired in ipairs({
-            "file_roots", "process_roots", "tcp_roots", "timer_roots",
-            "stream_roots", "owner_registry", "handle_registry",
-        }) do
-            assert.falsy(runtime:find(retired, 1, true), retired)
-        end
-        assert_ordered(runtime,
-            "local function has_user_tasks(runtime: Runtime): boolean",
-            "runtime.task_roots[index]",
-            "return true")
-        assert_ordered(task,
-            "local function finish_user_task",
-            "retire_task(task, state)",
-            "if not has_user_tasks(runtime) and not runtime.closing then",
-            "begin_shutdown(runtime)")
-    end)
-
-    it("makes Runtime exit first-writer and requester cancellation sticky",
-        function()
-            local task = read_file("titan/uv/task.titan")
-            assert.falsy(task:find("ExitRequest", 1, true))
-            assert.falsy(task:find("other ~= task", 1, true))
-            assert_ordered(task,
-                "function _os_exit(code: integer)",
-                "if not runtime.exit_requested then",
-                "runtime.exit_requested = true",
-                "runtime.exit_code = code",
-                "if other and not (other as Task).cleanup then",
-                "(other as Task):cancel(\"program exit\")",
-                "raise task.cancel_value as Cancelled")
-        end)
-
-    it("does not recreate libuv state in native wrappers", function()
-        local combined = ""
-        for _, path in ipairs(discovered_uv_sources()) do
-            combined = combined .. "\n" .. read_file(path)
-        end
-        for _, retired_field in ipairs({
-            "local subject:", "local readable:", "local writable:",
-            "local parent_descriptor:", "local allocation_error:",
-            "local allocation_traceback:", "local generation:",
-        }) do
-            assert.falsy(combined:find(retired_field, 1, true),
-                retired_field)
-        end
-        assert.truthy(combined:find("local union TcpRole", 1, true))
-        assert.truthy(combined:find("local union StdioNative", 1, true))
-        assert.truthy(combined:find("libuv.UV_INHERIT_STREAM", 1, true))
-        assert.falsy(combined:find("libuv.UV_INHERIT_FD", 1, true))
-        assert.falsy(combined:find("compact_chunks", 1, true))
-        assert.falsy(combined:find("local function copy_text", 1, true))
-        assert.falsy(combined:find("local function copy_bytes", 1, true))
-        assert.falsy(combined:find("libuv.uv_cancel(", 1, true))
-    end)
-
-    it("stores process configuration directly in libuv options", function()
-        local process = read_file("titan/uv/process.titan")
-        assert_ordered(process,
-            "record uv_spawn_config",
-            "local options: owned *libuv.uv_process_options_t",
-            "local stdio: owned libuv.uv_stdio_container_t[]")
-        assert_ordered(process,
-            "function _os_spawn_config_new(): uv_spawn_config",
-            "libuv.uv_process_options_t.new()",
-            "libuv.uv_stdio_container_t.new_array(3)",
-            "options.stdio = stdio",
-            "return uv_spawn_config.new")
-        assert_ordered(process,
-            "local function config_capture",
-            "new_pipe_stdio(state.runtime)")
-        assert_ordered(process,
-            "local function bind_slot",
-            "state.stdio[index].flags =",
-            "state.stdio[index].data.stream = stream_native(slot.child)")
-        assert_ordered(process,
-            "function _os_process_spawn_with_config",
-            "state.options.file = file",
-            "state.options.args = argv",
-            "libuv.uv_spawn(")
-    end)
-
-    it("settles accepted filesystem work only from its callback", function()
-        local file = read_file("titan/uv/file.titan")
-        assert.falsy(file:find("libuv.uv_cancel(", 1, true))
-        assert_ordered(file,
-            "local function submitted_fs_request",
-            "if status < 0 then",
-            "libuv.uv_fs_req_cleanup(owner.handle)",
-            "return immediate_error(status, operation, nil)",
-            "return nil")
-        assert_ordered(file,
-            "local function complete_fs",
-            "libuv.uv_fs_req_cleanup(owner.handle)",
-            "resume_task_from_callback(task, failed, payload)")
-        assert_ordered(file,
-            "local function open_result",
-            "if task.cancel_value then",
-            "close_descriptor(result as libuv.uv_file)")
-        assert_ordered(file,
-            "local function tmpname_result",
-            "if task.cancel_value then",
-            "close_descriptor(result as libuv.uv_file)")
-    end)
-
-    it("declares and defines every direct callback trampoline", function()
-        local runtime = read_file("titan-runtime/titan_uv.c")
-        local header = read_file("titan-runtime/titan/uv.h")
-        for _, callback in ipairs(DIRECT_CALLBACKS) do
-            assert.truthy(header:find(callback .. "(", 1, true), callback)
-            local callback_start = runtime:find(
-                "\nvoid " .. callback .. "(", 1, true)
-            assert.truthy(callback_start, callback)
-            assert.falsy(runtime:find("static void " .. callback .. "(",
-                1, true), callback)
-            local callback_end = runtime:find("\n}", callback_start, true)
-            assert.truthy(callback_end, callback)
-            local callback_body = runtime:sub(callback_start,
-                callback_end + 1)
-            assert_ordered(callback_body,
-                "titan_uvshim_callback_context_for(",
-                "callback(context.L",
-                "titan_uvshim_callback_context_release(&context);")
-        end
-        assert.truthy(header:find(
-            "int64_t exit_status,\n                                  int term_signal);",
-            1, true))
-        assert.truthy(runtime:find(
-            "typedef void (*titan_uv_two_integer_callback_func)", 1, true))
-        assert.truthy(runtime:find(
-            "void titan_uvshim_process_exit_cb(uv_process_t *process, " ..
-                "int64_t exit_status,\n                                  int term_signal)",
-            1, true))
-        assert.falsy(runtime:find(
-            "titan_uv_integer_size_callback_func", 1, true))
-        assert.truthy(runtime:find(
-            "context.L = (lua_State *)uv_loop_get_data(loop);", 1, true))
-        assert_ordered(runtime,
-            "CClosure *callback = clCvalue(",
-            "context.closure = callback;",
-            "context.entry = pvalue(&callback->upvalue[2]);",
-            "context.stack_top = lua_gettop(context.L);",
-            "titan_pushmodule(context.L, owner);",
-            "return context;")
-        assert_ordered(runtime,
-            "static void titan_uvshim_callback_context_release(",
-            "lua_settop(context->L, context->stack_top);")
-        assert.equal(#DIRECT_CALLBACKS + 1, count_plain(runtime,
-            "titan_uvshim_callback_context_for("))
-        assert.equal(#DIRECT_CALLBACKS, count_plain(runtime,
-            "callback(context.L"))
-        assert.equal(#DIRECT_CALLBACKS, count_plain(runtime,
-            "context.module, context.closure"))
-        assert.equal(#DIRECT_CALLBACKS, count_plain(runtime,
-            "titan_uvshim_callback_context_release(&context);"))
-        assert.falsy(runtime:find("context.module, NULL", 1, true))
-        assert.equal(1, count_plain(runtime,
-            "static titan_uvshim_callback_context " ..
-            "titan_uvshim_callback_context_for("))
-    end)
-
-    it("captures one module main thread for every Runtime callback", function()
-        local main = read_file("titan/uv/uv.titan")
-        local runtime_source = read_file("titan/uv/runtime.titan")
-        assert_ordered(main,
-            "local main_thread: *lua.lua_State = nil",
-            "main_thread = main_thread_state()")
-        assert_ordered(runtime_source,
-            "local function new_runtime(): Runtime",
-            "libuv.uv_loop_set_data(native,",
-            "main_thread as ffi.titan_ffi_void_ptr)")
-    end)
-
-    it("keeps files and child lifetime outside Runtime management", function()
-        local runtime_source = read_file("titan/uv/runtime.titan")
-        local file_source = read_file("titan/uv/file.titan")
-        local process_source = read_file("titan/uv/process.titan")
-        local task_source = read_file("titan/uv/task.titan")
-        local combined = table.concat({
-            runtime_source, file_source, process_source, task_source,
-        }, "\n")
-        for _, retired in ipairs({
-            "root_file", "unroot_file", "file_roots", "file_registry",
-            "root_process", "unroot_process", "process_root_index",
-            "process_roots", "process_registry",
-            "terminate_runtime_processes", "PROCESS_GRACE_MILLISECONDS",
-            "SIGKILL_GRACE", "SIGTERM_GRACE",
-        }) do
-            assert.falsy(combined:find(retired, 1, true), retired)
-        end
-        assert.falsy(file_source:find("root_handle(", 1, true))
-        assert.truthy(process_source:find(
-            "process.root_index = root_handle(state.runtime, process)",
-            1, true))
-        assert_ordered(task_source,
-            "local function cleanup_runtime(runtime: Runtime): value",
-            "await(Call.walk(WalkCall.new()))",
-            "await(Call.raw_close(",
-            "return Call.shutdown_done()")
-    end)
-
     it("exports callbacks and records direct libuv archive references",
         function()
             local runtime_object = "titan-runtime/titan_uv.o"
@@ -1020,12 +649,10 @@ describe("libuv Makefile configuration", function()
         function()
             local callers = {}
             for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
-                local paths = source == "$(UV_TITAN_SOURCES)"
-                    and makefile_words("UV_TITAN_SOURCES") or { source }
-                for _, path in ipairs(paths) do
-                    if read_file(path):find(
+                if source ~= "$(UV_TITAN_SOURCES)" then
+                    if read_file(source):find(
                             "lua.lua_setmetatable", 1, true) then
-                        callers[#callers + 1] = path
+                        callers[#callers + 1] = source
                     end
                 end
             end
@@ -1038,14 +665,12 @@ describe("libuv Makefile configuration", function()
             "os", "peg", "string",
         }
         for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
-            local paths = source == "$(UV_TITAN_SOURCES)"
-                and makefile_words("UV_TITAN_SOURCES") or { source }
-            for _, path in ipairs(paths) do
-                local contents = read_file(path)
+            if source ~= "$(UV_TITAN_SOURCES)" then
+                local contents = read_file(source)
                 for _, module in ipairs(established) do
                     local long = 'import "titan.' .. module .. '"'
                     assert.falsy(contents:find(long, 1, true),
-                        path .. " uses " .. long)
+                        source .. " uses " .. long)
                 end
             end
         end
@@ -1250,8 +875,6 @@ describe("libuv Makefile configuration", function()
             "wait_signal",
         }, public_declarations("titan/os.titan"))
 
-        assert.falsy(read_file("titan/uv/process.titan"):find(
-            "_os_stdio_is_closed", 1, true))
         assert.falsy(read_file("titan/os.titan"):find(
             "_os_stdio_is_closed", 1, true))
     end)

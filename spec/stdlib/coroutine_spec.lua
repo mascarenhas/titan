@@ -203,6 +203,10 @@ local function compile_coroutine_variant(root, source_root, source_path,
 end
 
 local function build_coroutine()
+    -- This is deliberately the sole stdlib source-rewrite exception. Public
+    -- behavior cannot place GC inside the native resume-to-transfer-root
+    -- window, so an isolated exact provider inserts that one deterministic
+    -- probe. Keep every anchor unique and keep the production provider intact.
     local source = read_file("titan/coroutine.titan")
     source = replace_once(source,
         "local runtime = mco.mco_runtime.new()\n",
@@ -234,6 +238,10 @@ end
 end
 
 local function build_checkstack_coroutine()
+    -- The same narrow exception applies here: the production boundary offers
+    -- no way to force lua_checkstack to fail after saving the exact stack top.
+    -- The isolated provider redirects only those Lua operations to a native
+    -- fixture; it is not a general source-transform testing pattern.
     local source = read_file("titan/coroutine.titan")
     source = replace_once(source,
         'local coro_native = foreign import "titan/coro.h"\n',

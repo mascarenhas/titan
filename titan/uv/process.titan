@@ -33,26 +33,27 @@ record uv_process_t
   local handle: owned *libuv.uv_process_t
   local exit_callback: (uv_process_t, integer, integer) -> ()
   local runtime: Runtime
-  local stdin: uv_stdio_t?
-  local stdout: uv_stdio_t?
-  local stderr: uv_stdio_t?
   local waiter: Task?
-  local result: ProcessExitResult?
+  local result: ProcessExitResult
   local root_index: integer
 end
 
-local record SpawnSlot
+local record MergedSpawnSlot
   local child: uv_stdio_t
-  local parent: uv_stdio_t?
+  local parent: uv_stdio_t
+end
+
+local union SpawnSlot
+  inherit: uv_stdio_t
+  capture: uv_stdio_t
+  merged: MergedSpawnSlot
 end
 
 record uv_spawn_config
   local runtime: Runtime
   local options: owned *libuv.uv_process_options_t
   local stdio: owned libuv.uv_stdio_container_t[]
-  local stdin: SpawnSlot?
-  local stdout: SpawnSlot?
-  local stderr: SpawnSlot?
+  local slots: {SpawnSlot}
   local consumed: boolean
 end
 
@@ -75,20 +76,15 @@ local record ProcessWaitCall
   local process: uv_process_t
 end
 
-local record uv_stream_write_t
-  local handle: owned *libuv.uv_write_t
-  local callback: (uv_stream_write_t, integer) -> ()
-  local data: string
-  local buffer: owned *libuv.uv_buf_t
+local record ProcessSpawnFailureCall
+  local process: uv_process_t
 end
 
 -- os.stdin/out/err are stable facade records, but every Runtime owns fresh
 -- duplicated native handles. The facade compares the wrapper records
 -- themselves when rebinding to a newly initialized Runtime.
 local parent_runtime: Runtime? = nil
-local cached_parent_stdin: uv_stdio_t? = nil
-local cached_parent_stdout: uv_stdio_t? = nil
-local cached_parent_stderr: uv_stdio_t? = nil
+local cached_parent_stdio: {uv_stdio_t} = {}
 
 local function stream_native(stdio: uv_stdio_t): *libuv.uv_stream_t
   case stdio.native
@@ -104,16 +100,37 @@ local function stream_handle(stdio: uv_stdio_t): *libuv.uv_handle_t
   return stream_native(stdio) as *libuv.uv_handle_t
 end
 
-local function new_stdio(
-    native: StdioNative,
-    alloc_callback: (uv_stdio_t, libuv.size_t,
-                     ffi.titan_ffi_void_ptr) -> (),
-    read_callback: (uv_stdio_t, integer) -> (),
-    runtime: Runtime): uv_stdio_t
+local function slot_child(slot: SpawnSlot): uv_stdio_t
+  case slot
+  when inherit: stream then return stream
+  when capture: stream then return stream
+  when merged: streams then return streams.child
+  end
+  raise "invalid spawn stdio slot"
+end
+
+local function slot_parent(slot: SpawnSlot): uv_stdio_t?
+  case slot
+  when inherit then return nil
+  when capture: stream then return stream
+  when merged: streams then return streams.parent
+  end
+  raise "invalid spawn stdio slot"
+end
+
+local function slot_merged_child(slot: SpawnSlot): uv_stdio_t?
+  case slot
+  when merged: streams then return streams.child
+  else return nil
+  end
+end
+
+local function new_stdio(native: StdioNative,
+                         runtime: Runtime): uv_stdio_t
   return uv_stdio_t.new {
     native = native,
-    alloc_callback = alloc_callback,
-    read_callback = read_callback,
+    alloc_callback = stream_alloc,
+    read_callback = stream_read_callback,
     buffer = nil,
     runtime = runtime,
     waiter = nil,
@@ -149,7 +166,7 @@ end
 local function close_stream_from_callback(stdio: uv_stdio_t)
   local handle = stream_handle(stdio)
   close_handle(stdio.runtime, handle, stdio,
-               stdio.root_index, nil, false, nil)
+               stdio.root_index, nil, nil)
   stdio.root_index = 0
 end
 
@@ -223,7 +240,7 @@ local function deliver_stream_read(stdio: uv_stdio_t, result: integer)
   local payload: value = nil
   if result ~= libuv.UV_EOF then
     failed = true
-    payload = make_error(result, "stdio.read", nil)
+    payload = make_error(result, "stdio.read")
     stdio.read_error = payload
   end
   close_stream_from_callback(stdio)
@@ -240,10 +257,11 @@ catch
 end
 
 local function start_stream_read(stdio: uv_stdio_t): integer
-  if libuv.uv_is_active(stream_handle(stdio)) ~= 0 then return 0 end
-  return libuv.uv_read_start(
+  local status = libuv.uv_read_start(
       stream_native(stdio), shim.titan_uvshim_alloc_cb,
       shim.titan_uvshim_read_cb)
+  if status == libuv.UV_EALREADY then return 0 end
+  return status
 end
 
 local function StreamReadCall:dispatch(task: Task): Immediate?
@@ -267,7 +285,7 @@ local function StreamReadCall:dispatch(task: Task): Immediate?
   end
   local status = start_stream_read(state)
   if status < 0 then
-    return immediate_error(status, "stdio.read.start", nil)
+    return immediate_error(status, "stdio.read.start")
   end
   state.waiter = task
   task.cancel_action = cancel_action
@@ -280,41 +298,8 @@ local function StreamWriteCall:dispatch(task: Task): Immediate?
     return Immediate.new(true, "cannot write to a closed stream")
   end
   if #self.data == 0 then return immediate_ok(nil) end
-
-  local descriptor = libuv.uv_buf_t.new()
-  local bytes = self.data as const *ffi.titan_ffi_char
-  shim.titan_uvshim_buf_init_const(
-      descriptor, bytes, #self.data as libuv.size_t)
-  local request = libuv.uv_write_t.new()
-  local callback = function (_owner: uv_stream_write_t,
-                             result: integer)
-    if result < 0 then
-      resume_task_from_callback(
-          task, true, make_error(result, "stdio.write", nil))
-    else
-      resume_task_from_callback(task, false, nil)
-    end
-  catch
-    fail_task_at_callback_boundary(task, error, traceback)
-  end
-  local owner = uv_stream_write_t.new(
-      request, callback, self.data, descriptor)
-  task.pending = owner
-  local request_pointer: *libuv.uv_write_t = request
-  libuv.uv_req_set_data(request_pointer as *libuv.uv_req_t,
-                        owner as ffi.titan_ffi_void_ptr)
-  local status = libuv.uv_write {
-    req = request,
-    handle = stream_native(state),
-    bufs = owner.buffer,
-    nbufs = 1,
-    cb = shim.titan_uvshim_write_cb,
-  }
-  if status < 0 then
-    task.pending = nil
-    return immediate_error(status, "stdio.write", nil)
-  end
-  return nil
+  return submit_stream_write(
+      task, stream_native(state), self.data, "stdio.write")
 end
 
 local function StreamCloseCall:dispatch(task: Task): Immediate?
@@ -333,7 +318,7 @@ local function StreamCloseCall:dispatch(task: Task): Immediate?
   state.chunk_head = 1
 
   close_handle(state.runtime, handle, state,
-               state.root_index, task, false, nil)
+               state.root_index, task, nil)
   state.root_index = 0
   return nil
 end
@@ -342,18 +327,16 @@ local function process_exit_callback(owner: uv_process_t,
                                      exit_status: integer,
                                      term_signal: integer)
   local waiter: Task? = owner.waiter
-  local result: ProcessExitResult? = nil
   do
-    result = ProcessExitResult.new(exit_status, term_signal)
     owner.waiter = nil
-    owner.result = result
+    owner.result.code = exit_status
+    owner.result.signal_number = term_signal
     local native: *libuv.uv_process_t = owner.handle
     close_handle(owner.runtime, native as *libuv.uv_handle_t,
-                 owner, owner.root_index, nil, false, nil)
+                 owner, owner.root_index, nil, nil)
     owner.root_index = 0
     if waiter then
-      resume_task_from_callback(
-          waiter as Task, false, result as ProcessExitResult)
+      resume_task_from_callback(waiter as Task, false, owner.result)
     end
   catch
     if waiter then
@@ -366,7 +349,10 @@ end
 
 local function ProcessWaitCall:dispatch(task: Task): Immediate?
   local state = self.process
-  if state.result then return immediate_ok(state.result) end
+  local native: *libuv.uv_process_t = state.handle
+  if libuv.uv_is_active(native as *libuv.uv_handle_t) == 0 then
+    return immediate_ok(state.result)
+  end
   if state.waiter then
     return Immediate.new(true, "Process already has a waiting Task")
   end
@@ -381,11 +367,29 @@ local function ProcessWaitCall:dispatch(task: Task): Immediate?
   return nil
 end
 
+-- A failed uv_spawn may or may not leave an initialized handle in the loop,
+-- depending on the platform and failure point. Walk only while the Task is
+-- suspended, then either await the required close or release the
+-- never-published owner immediately.
+local function ProcessSpawnFailureCall:dispatch(task: Task): Immediate?
+  local process = self.process
+  local runtime = process.runtime
+  local native: *libuv.uv_process_t = process.handle
+  local handle = native as *libuv.uv_handle_t
+  if loop_owns_handle(runtime, handle) then
+    close_handle(runtime, handle, process,
+                 process.root_index, task, nil)
+    process.root_index = 0
+    return nil
+  end
+  unroot_handle(runtime, process.root_index)
+  process.root_index = 0
+  return immediate_ok(nil)
+end
+
 local function new_pipe_stdio(runtime: Runtime): (integer, uv_stdio_t?)
   local native = libuv.uv_pipe_t.new()
-  local stdio = new_stdio(StdioNative.pipe(native),
-                          stream_alloc, stream_read_callback,
-                          runtime)
+  local stdio = new_stdio(StdioNative.pipe(native), runtime)
   stdio.root_index = root_handle(runtime, stdio)
   local status = libuv.uv_pipe_init(runtime.loop, native, 0)
   if status < 0 then
@@ -409,18 +413,16 @@ local function discard_unpublished_stdio(stdio: uv_stdio_t?)
   if libuv.uv_is_closing(handle) ~= 0 then return end
   stream.chunks = {}
   stream.chunk_head = 1
-  if stream.root_index > 0 then
-    close_handle(stream.runtime, handle, stream,
-                 stream.root_index, nil, false, nil)
-    stream.root_index = 0
-  end
+  close_handle(stream.runtime, handle, stream,
+               stream.root_index, nil, nil)
+  stream.root_index = 0
 end
 
 local function start_captured_read(stdio: uv_stdio_t,
-                                   operation: string, file: string)
+                                   operation: string)
   local status = start_stream_read(stdio)
   if status >= 0 then return end
-  stdio.read_error = make_error(status, operation, file)
+  stdio.read_error = make_error(status, operation)
   discard_unpublished_stdio(stdio)
 end
 
@@ -432,7 +434,7 @@ local function duplicate_descriptor(
   end
   if duplicate < 0 then
     raise make_error(libuv.uv_translate_sys_error(cerrno.errno),
-                     "stdio.parent.duplicate", nil)
+                     "stdio.parent.duplicate")
   end
   local status = process_fcntl.fcntl(
       duplicate, process_fcntl.F_SETFD, process_fcntl.FD_CLOEXEC)
@@ -444,7 +446,7 @@ local function duplicate_descriptor(
     local saved_errno = cerrno.errno
     close_descriptor(duplicate as libuv.uv_file)
     raise make_error(libuv.uv_translate_sys_error(saved_errno),
-                     "stdio.parent.duplicate.cloexec", nil)
+                     "stdio.parent.duplicate.cloexec")
   end
   return duplicate as libuv.uv_file
 end
@@ -453,29 +455,20 @@ local function initialize_parent_stdio(runtime: Runtime,
                                        descriptor: integer): uv_stdio_t
   if parent_runtime ~= runtime then
     parent_runtime = runtime
-    cached_parent_stdin = nil
-    cached_parent_stdout = nil
-    cached_parent_stderr = nil
+    cached_parent_stdio = {}
   end
-  local cached: uv_stdio_t? = cached_parent_stderr
-  if descriptor == 0 then
-    cached = cached_parent_stdin
-  elseif descriptor == 1 then
-    cached = cached_parent_stdout
-  end
+  local cache_index = descriptor + 1
+  local cached: uv_stdio_t? = cached_parent_stdio[cache_index]
   if cached and libuv.uv_is_closing(
       stream_handle(cached as uv_stdio_t)) == 0 then
     return cached as uv_stdio_t
   end
-  if descriptor == 0 then
-    cached_parent_stdin = nil
-  elseif descriptor == 1 then
-    cached_parent_stdout = nil
-  else
-    cached_parent_stderr = nil
-  end
+  cached_parent_stdio[cache_index] = nil
 
   local guessed = libuv.uv_guess_handle(descriptor as libuv.uv_file)
+  if guessed ~= libuv.UV_TTY and guessed ~= libuv.UV_NAMED_PIPE then
+    raise make_error(libuv.UV_ENOTSUP, "stdio.parent.kind")
+  end
   local duplicate = duplicate_descriptor(descriptor as libuv.uv_file)
   defer close_descriptor(duplicate)
   local stdio: uv_stdio_t? = nil
@@ -483,50 +476,41 @@ local function initialize_parent_stdio(runtime: Runtime,
   defer if not keep then discard_unpublished_stdio(stdio) end
   if guessed == libuv.UV_TTY then
     local native = libuv.uv_tty_t.new()
-    local owner = new_stdio(StdioNative.tty(native),
-                            stream_alloc, stream_read_callback,
-                            runtime)
+    local owner = new_stdio(StdioNative.tty(native), runtime)
     owner.root_index = root_handle(runtime, owner)
-    local readable = 0
-    if descriptor == 0 then readable = 1 end
     local status = libuv.uv_tty_init(
-        runtime.loop, native, duplicate, readable)
+        runtime.loop, native, duplicate, 0)
     if status < 0 then
       unroot_handle(runtime, owner.root_index)
       owner.root_index = 0
-      raise make_error(status, "stdio.parent.init", nil)
+      stdio = nil
+      raise make_error(status, "stdio.parent.init")
     end
     local native_pointer: *libuv.uv_tty_t = native
     libuv.uv_handle_set_data(native_pointer as *libuv.uv_handle_t,
                              owner as ffi.titan_ffi_void_ptr)
     stdio = owner
 
-    local actual = libuv.uv_os_fd_t.new_array(1)
+    local actual: libuv.uv_os_fd_t[1]
     status = libuv.uv_fileno(native_pointer as *libuv.uv_handle_t, actual)
-    check_status(status, "stdio.parent.fileno", nil)
+    check_status(status, "stdio.parent.fileno")
     if (actual[0] as integer) ~= (duplicate as integer) then
       status = close_descriptor(duplicate)
-      check_status(status, "stdio.parent.duplicate.close", nil)
+      check_status(status, "stdio.parent.duplicate.close")
     end
     duplicate = -1 as libuv.uv_file
   else
     local status = 0
     status, stdio = new_pipe_stdio(runtime)
-    check_status(status, "stdio.parent.init", nil)
+    check_status(status, "stdio.parent.init")
     status = libuv.uv_pipe_open(
         stream_native(stdio as uv_stdio_t) as *libuv.uv_pipe_t, duplicate)
-    check_status(status, "stdio.parent.open", nil)
+    check_status(status, "stdio.parent.open")
     duplicate = -1 as libuv.uv_file
   end
 
   local result = stdio as uv_stdio_t
-  if descriptor == 0 then
-    cached_parent_stdin = result
-  elseif descriptor == 1 then
-    cached_parent_stdout = result
-  else
-    cached_parent_stderr = result
-  end
+  cached_parent_stdio[cache_index] = result
   keep = true
   return result
 end
@@ -543,45 +527,49 @@ local function discard_slot(candidate: SpawnSlot?,
                             keep_a: SpawnSlot?, keep_b: SpawnSlot?)
   if not candidate or candidate == keep_a or candidate == keep_b then return end
   local slot = candidate as SpawnSlot
-  if not slot.parent then return end
-  discard_unpublished_stdio(slot.child)
-  discard_unpublished_stdio(slot.parent)
+  case slot
+  when inherit then
+    return
+  when capture: stream then
+    discard_unpublished_stdio(stream)
+  when merged: streams then
+    discard_unpublished_stdio(streams.child)
+    discard_unpublished_stdio(streams.parent)
+  end
 end
 
 local function bind_slot(state: uv_spawn_config, index: integer,
                          slot: SpawnSlot, flags: integer)
   state.stdio[index].flags = flags as libuv.uv_stdio_flags
-  state.stdio[index].data.stream = stream_native(slot.child)
+  state.stdio[index].data.stream = stream_native(slot_child(slot))
 end
 
-local function configure_stdin(state: uv_spawn_config,
-                               slot: SpawnSlot, flags: integer)
-  local old? = state.stdin
-  state.stdin = slot
-  bind_slot(state, 0, slot, flags)
-  discard_slot(old, slot, nil)
+local function config_slot(state: uv_spawn_config,
+                           descriptor: integer): SpawnSlot?
+  return state.slots[descriptor + 1]
 end
 
-local function configure_outputs(state: uv_spawn_config,
-                                 stdout: SpawnSlot?, stdout_flags: integer,
-                                 stderr: SpawnSlot?, stderr_flags: integer)
-  local old_stdout? = state.stdout
-  local old_stderr? = state.stderr
-  state.stdout = stdout
-  state.stderr = stderr
-  if stdout then bind_slot(state, 1, stdout as SpawnSlot, stdout_flags) end
-  if stderr then bind_slot(state, 2, stderr as SpawnSlot, stderr_flags) end
-  discard_slot(old_stdout, stdout, stderr)
-  discard_slot(old_stderr, stdout, stderr)
+local function configure_slot(state: uv_spawn_config,
+                              descriptor: integer,
+                              slot: SpawnSlot, flags: integer)
+  local old? = config_slot(state, descriptor)
+  state.slots[descriptor + 1] = slot
+  bind_slot(state, descriptor, slot, flags)
+  if old ~= config_slot(state, 0) and
+     old ~= config_slot(state, 1) and
+     old ~= config_slot(state, 2) then
+    discard_slot(old, nil, nil)
+  end
 end
 
 local function discard_config_streams(state: uv_spawn_config)
-  discard_slot(state.stdin, nil, nil)
-  discard_slot(state.stdout, nil, nil)
-  discard_slot(state.stderr, nil, nil)
-  state.stdin = nil
-  state.stdout = nil
-  state.stderr = nil
+  local stdin? = config_slot(state, 0)
+  local stdout? = config_slot(state, 1)
+  local stderr? = config_slot(state, 2)
+  state.slots = {}
+  discard_slot(stdin, stdout, stderr)
+  discard_slot(stdout, stderr, nil)
+  discard_slot(stderr, nil, nil)
 end
 
 local function config_capture(
@@ -589,7 +577,7 @@ local function config_capture(
   local status, stream = new_pipe_stdio(state.runtime)
   if status < 0 then return status, nil end
   local captured = stream as uv_stdio_t
-  return 0, SpawnSlot.new(captured, captured)
+  return 0, SpawnSlot.capture(captured)
 end
 
 local function prepare_inherited_stdio(state: uv_spawn_config,
@@ -605,7 +593,7 @@ local function prepare_inherited_stdio(state: uv_spawn_config,
     end
     raise
   end
-  return 0, SpawnSlot.new(prepared as uv_stdio_t, nil)
+  return 0, SpawnSlot.inherit(prepared as uv_stdio_t)
 end
 
 local function config_merged_output(state: uv_spawn_config):
@@ -646,7 +634,8 @@ local function config_merged_output(state: uv_spawn_config):
   status = libuv.uv_stream_set_blocking(stream_native(child_stream), 1)
   if status < 0 then return status, nil end
   keep = true
-  return 0, SpawnSlot.new(child_stream, parent_stream)
+  return 0, SpawnSlot.merged(
+      MergedSpawnSlot.new(child_stream, parent_stream))
 end
 
 function _os_spawn_config_new(): uv_spawn_config
@@ -661,112 +650,66 @@ function _os_spawn_config_new(): uv_spawn_config
     runtime = task.runtime,
     options = options,
     stdio = stdio,
-    stdin = nil,
-    stdout = nil,
-    stderr = nil,
+    slots = {},
     consumed = false,
   }
 end
 
-function _os_spawn_config_with_stdin(config: uv_spawn_config): integer
-  local status = validate_config(config)
-  if status < 0 then return status end
-  local slot: SpawnSlot? = nil
-  status, slot = config_capture(config)
-  if status >= 0 then
-    configure_stdin(config, slot as SpawnSlot,
-                    libuv.UV_CREATE_PIPE | libuv.UV_READABLE_PIPE)
-  end
-  return status
-end
-
-local function configured_output_flags(slot: SpawnSlot): integer
-  if slot.parent then
-    return libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE
-  end
-  return libuv.UV_INHERIT_STREAM
-end
-
-local function replace_output(config: uv_spawn_config, index: integer,
-                              slot: SpawnSlot, flags: integer): integer
-  local other? = config.stderr
-  if index == 2 then
-    other = config.stdout
-  end
-  local other_flags = 0
-  if other then
-    other_flags = configured_output_flags(other as SpawnSlot)
-  end
-  if config.stdout ~= nil and config.stdout == config.stderr then
-    local status = 0
-    status, other = config_capture(config)
-    if status < 0 then
-      discard_slot(slot, nil, nil)
-      return status
-    end
-    other_flags = libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE
-  end
-  if index == 1 then
-    configure_outputs(config, slot, flags,
-                      other, other_flags)
-  else
-    configure_outputs(config, other, other_flags, slot, flags)
-  end
-  return 0
-end
-
-local function configure_captured_output(config: uv_spawn_config,
-                                         index: integer): integer
+local function configure_capture(config: uv_spawn_config,
+                                 descriptor: integer): integer
   local status = validate_config(config)
   if status < 0 then return status end
   local captured: SpawnSlot? = nil
   status, captured = config_capture(config)
   if status < 0 then return status end
-  return replace_output(
-      config, index, captured as SpawnSlot,
-      libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE)
+  local slot = captured as SpawnSlot
+  if descriptor == 0 then
+    configure_slot(config, descriptor, slot,
+                   libuv.UV_CREATE_PIPE | libuv.UV_READABLE_PIPE)
+    return 0
+  end
+  configure_slot(config, descriptor, slot,
+                 libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE)
+  return 0
+end
+
+function _os_spawn_config_with_stdin(config: uv_spawn_config): integer
+  return configure_capture(config, 0)
 end
 
 function _os_spawn_config_with_stdout(config: uv_spawn_config): integer
-  return configure_captured_output(config, 1)
+  return configure_capture(config, 1)
 end
 
 function _os_spawn_config_with_stderr(config: uv_spawn_config): integer
-  return configure_captured_output(config, 2)
+  return configure_capture(config, 2)
 end
 
-function _os_spawn_config_with_parent_stdin(
-    config: uv_spawn_config): integer
-  local status = validate_config(config)
-  if status < 0 then return status end
-  local parent: SpawnSlot? = nil
-  status, parent = prepare_inherited_stdio(config, 0)
-  if status >= 0 then
-    configure_stdin(config, parent as SpawnSlot,
-                    libuv.UV_INHERIT_STREAM)
-  end
-  return status
-end
-
-local function configure_parent_output(config: uv_spawn_config,
-                                       descriptor: integer): integer
+local function configure_parent(config: uv_spawn_config,
+                                descriptor: integer): integer
   local status = validate_config(config)
   if status < 0 then return status end
   local parent: SpawnSlot? = nil
   status, parent = prepare_inherited_stdio(config, descriptor)
   if status < 0 then return status end
-  return replace_output(config, descriptor, parent as SpawnSlot,
-                        libuv.UV_INHERIT_STREAM)
+  local slot = parent as SpawnSlot
+  configure_slot(config, descriptor, slot, libuv.UV_INHERIT_STREAM)
+  return 0
+end
+
+function _os_spawn_config_with_parent_stdin(
+    config: uv_spawn_config): integer
+  return configure_parent(config, 0)
 end
 
 function _os_spawn_config_with_parent_stdout(
     config: uv_spawn_config): integer
-  return configure_parent_output(config, 1)
+  return configure_parent(config, 1)
 end
 
 function _os_spawn_config_with_parent_stderr(
     config: uv_spawn_config): integer
-  return configure_parent_output(config, 2)
+  return configure_parent(config, 2)
 end
 
 function _os_spawn_config_with_merged_output(
@@ -777,8 +720,8 @@ function _os_spawn_config_with_merged_output(
   status, merged = config_merged_output(config)
   if status >= 0 then
     local slot = merged as SpawnSlot
-    configure_outputs(config, slot, libuv.UV_INHERIT_STREAM,
-                      slot, libuv.UV_INHERIT_STREAM)
+    configure_slot(config, 1, slot, libuv.UV_INHERIT_STREAM)
+    configure_slot(config, 2, slot, libuv.UV_INHERIT_STREAM)
   end
   return status
 end
@@ -795,7 +738,7 @@ end
 
 function _os_spawn_config_error(config: uv_spawn_config, status: integer)
   _os_spawn_config_close(config)
-  raise make_error(status, "process.spawn.config", nil)
+  raise make_error(status, "process.spawn.config")
 end
 
 local function new_process(runtime: Runtime): uv_process_t
@@ -804,46 +747,45 @@ local function new_process(runtime: Runtime): uv_process_t
     handle = native,
     exit_callback = process_exit_callback,
     runtime = runtime,
-    stdin = nil,
-    stdout = nil,
-    stderr = nil,
     waiter = nil,
-    result = nil,
+    result = ProcessExitResult.new(0, 0),
     root_index = 0,
   }
 end
 
 function _os_process_spawn_with_config(file: string, args: {string},
-                                       config: uv_spawn_config): uv_process_t
+                                       config: uv_spawn_config):
+                                       (uv_process_t, uv_stdio_t?,
+                                        uv_stdio_t?, uv_stdio_t?)
   local state = config
   local status = validate_config(state)
   if status < 0 then _os_spawn_config_error(config, status) end
-  if not state.stdin or not state.stdout or not state.stderr then
+  local stdin_slot? = config_slot(state, 0)
+  local stdout_slot? = config_slot(state, 1)
+  local stderr_slot? = config_slot(state, 2)
+  if not stdin_slot or not stdout_slot or not stderr_slot then
     _os_spawn_config_error(config, libuv.UV_EINVAL)
   end
   accepting_work(state.runtime, "spawn a Process")
 
   if contains_nul(file) then
-    raise make_error(libuv.UV_EINVAL, "process.spawn.file", file)
+    raise make_error(libuv.UV_EINVAL, "process.spawn.file")
   end
   local index = 1
   while index <= #args do
     if contains_nul(args[index]) then
       raise make_error(
-          libuv.UV_EINVAL, "process.spawn.argument", args[index])
+          libuv.UV_EINVAL, "process.spawn.argument")
     end
     index = index + 1
   end
-  local stdin? = (state.stdin as SpawnSlot).parent
-  local stdout? = (state.stdout as SpawnSlot).parent
-  local stderr? = (state.stderr as SpawnSlot).parent
-  local merged_child: uv_stdio_t? = nil
-  if state.stdout == state.stderr then
-    local slot = state.stdout as SpawnSlot
-    if slot.parent and slot.child ~= slot.parent then
-      merged_child = slot.child
-    end
-  end
+  local stdin? = slot_parent(stdin_slot as SpawnSlot)
+  local stdout? = slot_parent(stdout_slot as SpawnSlot)
+  local stderr? = slot_parent(stderr_slot as SpawnSlot)
+  local stdout_merged_child? =
+      slot_merged_child(stdout_slot as SpawnSlot)
+  local stderr_merged_child? =
+      slot_merged_child(stderr_slot as SpawnSlot)
   local process = new_process(state.runtime)
   local process_handle: *libuv.uv_process_t = process.handle
   local argument_count = #args + 1
@@ -857,67 +799,46 @@ function _os_process_spawn_with_config(file: string, args: {string},
   argv[argument_count] = nil
   state.options.file = file
   state.options.args = argv
-  state.consumed = true
   process.root_index = root_handle(state.runtime, process)
-  libuv.uv_handle_set_data(process_handle as *libuv.uv_handle_t,
-                           process as ffi.titan_ffi_void_ptr)
+  state.consumed = true
   local spawn_status = libuv.uv_spawn(
       state.runtime.loop, process_handle, state.options)
 
   if spawn_status < 0 then
     do
-      local handle = process_handle as *libuv.uv_handle_t
-      if loop_owns_handle(state.runtime, handle) then
-        local old_root_index = process.root_index
-        process.root_index = 0
-        await(Call.raw_close(
-            RawCloseCall.new(handle, process, old_root_index)))
-      else
-        unroot_handle(state.runtime, process.root_index)
-        process.root_index = 0
-      end
+      await(Call.process_spawn_failure(
+          ProcessSpawnFailureCall.new(process)))
     finally
       discard_config_streams(state)
     end
-    raise make_error(spawn_status, "process.spawn", file)
+    raise make_error(spawn_status, "process.spawn")
   end
 
-  process.stdin = stdin
-  process.stdout = stdout
-  process.stderr = stderr
-  discard_unpublished_stdio(merged_child)
+  -- uv_spawn has now initialized the handle and the non-reentrant loop cannot
+  -- deliver exit_callback until control returns to uv_run.
+  libuv.uv_handle_set_data(process_handle as *libuv.uv_handle_t,
+                           process as ffi.titan_ffi_void_ptr)
+
+  state.slots = {}
+  discard_unpublished_stdio(stdout_merged_child)
+  discard_unpublished_stdio(stderr_merged_child)
 
   if stdout then
     local output = stdout as uv_stdio_t
-    start_captured_read(output, "process.stdout.read.start", file)
+    start_captured_read(output, "process.stdout.read.start")
   end
   if stderr and stderr ~= stdout then
     local error_output = stderr as uv_stdio_t
     start_captured_read(error_output,
-                        "process.stderr.read.start", file)
+                        "process.stderr.read.start")
   end
-  return process
+  return process, stdin, stdout, stderr
 end
 
 local function validate_process(process: uv_process_t)
   if process.runtime ~= running_task().runtime then
     raise "Process belongs to a different async Runtime"
   end
-end
-
-function _os_process_stdin(process: uv_process_t): uv_stdio_t?
-  validate_process(process)
-  return process.stdin
-end
-
-function _os_process_stdout(process: uv_process_t): uv_stdio_t?
-  validate_process(process)
-  return process.stdout
-end
-
-function _os_process_stderr(process: uv_process_t): uv_stdio_t?
-  validate_process(process)
-  return process.stderr
 end
 
 function _os_process_wait(process: uv_process_t): (integer, integer)
@@ -933,16 +854,20 @@ function _os_process_kill(process: uv_process_t, signal: string)
   if signum <= 0 then
     raise "unsupported process signal name '" .. signal .. "'"
   end
-  if process.result then raise "cannot signal an exited Process" end
+  local native: *libuv.uv_process_t = process.handle
+  if libuv.uv_is_active(native as *libuv.uv_handle_t) == 0 then
+    raise "cannot signal an exited Process"
+  end
   local status = libuv.uv_process_kill(process.handle, signum)
   if status < 0 and status ~= libuv.UV_ESRCH then
-    raise make_error(status, "process.kill", signal)
+    raise make_error(status, "process.kill")
   end
 end
 
 function _os_process_is_running(process: uv_process_t): boolean
   validate_process(process)
-  return process.result == nil
+  local native: *libuv.uv_process_t = process.handle
+  return libuv.uv_is_active(native as *libuv.uv_handle_t) ~= 0
 end
 
 function _os_parent_stdin(): uv_stdio_t
@@ -959,12 +884,10 @@ end
 
 function _os_stdio_is_tty(stdio: uv_stdio_t): boolean
   validate_stdio(stdio)
-  local tty = false
   case stdio.native
-  when pipe then tty = false
-  when tty then tty = true
+  when tty then return true
+  else return false
   end
-  return tty
 end
 
 function _os_stdio_read(stdio: uv_stdio_t): string?

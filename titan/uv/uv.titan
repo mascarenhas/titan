@@ -11,8 +11,9 @@ local coroutine = import "coroutine"
 
 -- titan.uv is deliberately a thin callback/continuation adapter. There is one
 -- tag identity per module instance and one outer uv_run driver per Runtime.
--- A callback resumes a Task, receives its next Call, dispatches that one
--- libuv operation, and returns to the non-reentrant event loop.
+-- A callback may buffer persistent state or resume a Task. A resumed Task can
+-- consume immediate outcomes until its next callback-bearing operation is
+-- accepted, then returns to the non-reentrant event loop.
 local UV_TAG: value = {}
 local main_thread: *lua.lua_State = nil
 local active_runtime: Runtime? = nil
@@ -23,7 +24,6 @@ record Error
   name: string
   message: string
   operation: string
-  subject: string?
 end
 
 record Cancelled
@@ -38,7 +38,8 @@ local function bootstrap(main_callable: ({string}) -> integer,
     return nil
   end)
   _loop()
-  if task.runtime.exit_requested then return task.runtime.exit_code end
+  local exit_code? = task.runtime.exit_code
+  if exit_code then return exit_code as integer end
   if task.state == TASK_SUCCEEDED then return result end
   -- An uncaught Task error has already been reported with its traceback. The
   -- standalone bootstrap still needs a conventional unsuccessful exit code.
@@ -88,7 +89,7 @@ end
 do
   local sigpipe_status = ignore_sigpipe_if_default()
   if sigpipe_status < 0 then
-    raise make_error(sigpipe_status, "runtime.sigpipe", nil)
+    raise make_error(sigpipe_status, "runtime.sigpipe")
   end
   main_thread = main_thread_state()
   program_args_ready = setup_program_args()

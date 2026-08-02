@@ -48,13 +48,6 @@ local record uv_connect_t
   local callback: (uv_connect_t, integer) -> ()
 end
 
-local record uv_write_t
-  local native: owned *libuv.uv_write_t
-  local callback: (uv_write_t, integer) -> ()
-  local data: string
-  local buffer: owned *libuv.uv_buf_t
-end
-
 local record uv_shutdown_t
   local native: owned *libuv.uv_shutdown_t
   local callback: (uv_shutdown_t, integer) -> ()
@@ -64,7 +57,6 @@ local record TcpConnectionState
   local reader: Task?
   local chunks: {string}
   local chunk_head: integer
-  local chunk_tail: integer
   local eof: boolean
   local read_error: value
   local buffer: Bytes?
@@ -121,15 +113,25 @@ local function server_state(tcp: uv_tcp_t): TcpServerState
   end
 end
 
-local function is_server(tcp: uv_tcp_t): boolean
+local function require_connection(tcp: uv_tcp_t,
+                                  operation: string): TcpConnectionState
   case tcp.role
-  when server then return true
-  else return false
+  when connection: state then return state
+  else raise operation .. " requires a Connection"
+  end
+end
+
+local function require_server(tcp: uv_tcp_t,
+                              operation: string): TcpServerState
+  case tcp.role
+  when server: state then return state
+  else raise operation .. " requires a Server"
   end
 end
 
 local function service_text(port: integer): string
-  local bytes = ffi.titan_ffi_char.new_array(5)
+  local storage: ffi.titan_ffi_char[5]
+  local bytes = storage as *ffi.titan_ffi_char
   local digits = "0123456789" as const *ffi.titan_ffi_char
   local divisor = 1
   while port // divisor >= 10 do divisor = divisor * 10 end
@@ -187,12 +189,11 @@ end
 local function take_chunk(tcp: uv_tcp_t): string
   local state = connection_state(tcp)
   local chunk = state.chunks[state.chunk_head]
-  state.chunks[state.chunk_head] = nil
+  state.chunks[state.chunk_head] = ""
   state.chunk_head = state.chunk_head + 1
-  if state.chunk_head > state.chunk_tail then
+  if state.chunk_head > #state.chunks then
     state.chunks = {}
     state.chunk_head = 1
-    state.chunk_tail = 0
   end
   return chunk
 end
@@ -240,22 +241,10 @@ local function resume_waiter(tcp: uv_tcp_t, failed: boolean,
   return true
 end
 
-local function validate_tcp(tcp: uv_tcp_t, operation: string,
-                            require_server: boolean)
+local function validate_tcp(tcp: uv_tcp_t, operation: string)
   local task = running_task()
   if tcp.runtime ~= task.runtime then
     raise "TCP resource belongs to a different async Runtime"
-  end
-  if is_server(tcp) ~= require_server then
-    if require_server then
-      raise operation .. " requires a Server"
-    else
-      raise operation .. " requires a Connection"
-    end
-  end
-  if require_server then
-    local failure = server_state(tcp).error
-    if failure ~= nil then raise failure end
   end
   if libuv.uv_is_closing(tcp_handle(tcp)) ~= 0 then
     raise "cannot " .. operation .. " a closed TCP resource"
@@ -264,7 +253,7 @@ end
 
 local function new_connection_role(): TcpRole
   return TcpRole.connection(TcpConnectionState.new(
-      nil, {}, 1, 0, false, nil, nil))
+      nil, {}, 1, false, nil, nil))
 end
 
 local function new_server_role(): TcpRole
@@ -288,7 +277,7 @@ local function new_tcp(runtime: Runtime, role: TcpRole): uv_tcp_t
   if status < 0 then
     unroot_handle(runtime, tcp.root_index)
     tcp.root_index = 0
-    raise make_error(status, "net.tcp.init", nil)
+    raise make_error(status, "net.tcp.init")
   end
   libuv.uv_handle_set_data(exact_native as *libuv.uv_handle_t,
                            tcp as ffi.titan_ffi_void_ptr)
@@ -307,11 +296,12 @@ local function begin_tcp_close(tcp: uv_tcp_t, closer: Task?): boolean
   if closer then
     local waiter? = current_waiter(tcp)
     if waiter then
-      if is_server(tcp) then
+      case tcp.role
+      when server then
         wake_task_next_turn(
             waiter as Task, true,
-            make_error(libuv.UV_ECANCELED, "net.accept", nil))
-      else
+            make_error(libuv.UV_ECANCELED, "net.accept"))
+      when connection then
         wake_task_next_turn(waiter as Task, false, nil)
       end
       take_waiter(tcp)
@@ -328,20 +318,9 @@ local function begin_tcp_close(tcp: uv_tcp_t, closer: Task?): boolean
   end
 
   close_handle(tcp.runtime, tcp_handle(tcp), tcp,
-               tcp.root_index, closer, false, nil)
+               tcp.root_index, closer, nil)
+  tcp.root_index = 0
   return true
-end
-
-local function complete_status(task: Task, status: integer,
-                               operation: string)
-  if status < 0 then
-    resume_task_from_callback(
-        task, true, make_error(status, operation, nil))
-  else
-    resume_task_from_callback(task, false, nil)
-  end
-catch
-  fail_task_at_callback_boundary(task, error, traceback)
 end
 
 local function fail_server(server: uv_tcp_t, failure: value)
@@ -357,18 +336,18 @@ local function complete_getaddrinfo(task: Task, status: integer,
   local failure: value = nil
   do
     if status < 0 then
-      failure = make_error(status, "net.resolve", nil)
+      failure = make_error(status, "net.resolve")
     else
       addresses = copy_addresses(result)
       if #(addresses as AddressList) == 0 then
         failure = make_error(libuv.UV_EADDRNOTAVAIL,
-                             "net.resolve", nil)
+                             "net.resolve")
       end
     end
   catch
     failure = error
   finally
-    if result ~= nil then libuv.uv_freeaddrinfo(result) end
+    libuv.uv_freeaddrinfo(result)
   end
 
   if failure ~= nil then
@@ -423,7 +402,7 @@ local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
       state.eof = true
       resume_waiter(tcp, false, nil)
     else
-      local failure = make_error(result, "net.read", nil)
+      local failure = make_error(result, "net.read")
       state.read_error = failure
       resume_waiter(tcp, true, failure)
     end
@@ -432,8 +411,7 @@ local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
 
   local chunk = bytes_string(bytes, result)
   if not resume_waiter(tcp, false, chunk) then
-    state.chunk_tail = state.chunk_tail + 1
-    state.chunks[state.chunk_tail] = chunk
+      state.chunks[#state.chunks + 1] = chunk
   end
 catch
   libuv.uv_read_stop(tcp_stream(tcp))
@@ -446,25 +424,22 @@ end
 local function tcp_connection_dispatch(server: uv_tcp_t, status: integer)
   if server.runtime.closing then return end
   local client: uv_tcp_t? = nil
-  local retained = false
   do
-    check_status(status, "net.accept", nil)
+    check_status(status, "net.accept")
     client = new_tcp(server.runtime, new_connection_role())
     local accepted = client as uv_tcp_t
     check_status(libuv.uv_accept(tcp_stream(server), tcp_stream(accepted)),
-                 "net.accept", nil)
+                 "net.accept")
     if not resume_waiter(server, false, accepted) then
       local state = server_state(server)
       state.accepted_tail = state.accepted_tail + 1
       state.accepted[state.accepted_tail] = accepted
     end
-    retained = true
+    client = nil
   catch
     fail_server(server, error)
   finally
-    if client and not retained then
-      begin_tcp_close(client as uv_tcp_t, nil)
-    end
+    if client then begin_tcp_close(client as uv_tcp_t, nil) end
   end
 catch
   local failure = error
@@ -474,17 +449,10 @@ catch
   end
 end
 
-local function submitted(task: Task, status: integer,
-                         operation: string): Immediate?
-  if status >= 0 then return nil end
-  task.pending = nil
-  return immediate_error(status, operation, nil)
-end
-
 local function GetaddrinfoCall:dispatch(task: Task): Immediate?
   local native = libuv.uv_getaddrinfo_t.new()
   local request: *libuv.uv_getaddrinfo_t = native
-  local hints = libuv.addrinfo.new()
+  local hints: libuv.addrinfo
   hints.ai_family = libuv.AF_UNSPEC
   hints.ai_socktype = libuv.SOCK_STREAM
   hints.ai_protocol = libuv.IPPROTO_TCP
@@ -533,7 +501,7 @@ end
 local function TcpReadCall:dispatch(task: Task): Immediate?
   local tcp = self.tcp
   local state = connection_state(tcp)
-  if state.chunk_head <= state.chunk_tail then
+  if state.chunk_head <= #state.chunks then
     return immediate_ok(take_chunk(tcp))
   end
   if state.read_error ~= nil then
@@ -549,11 +517,9 @@ local function TcpReadCall:dispatch(task: Task): Immediate?
       state.reader = nil
     end
   end
-  if libuv.uv_is_active(tcp_handle(tcp)) == 0 then
-    local status = start_tcp_read(tcp)
-    if status < 0 then
-      return immediate_error(status, "net.read.start", nil)
-    end
+  local status = start_tcp_read(tcp)
+  if status < 0 and status ~= libuv.UV_EALREADY then
+    return immediate_error(status, "net.read.start")
   end
 
   state.reader = task
@@ -562,28 +528,8 @@ local function TcpReadCall:dispatch(task: Task): Immediate?
 end
 
 local function TcpWriteCall:dispatch(task: Task): Immediate?
-  local descriptor = libuv.uv_buf_t.new()
-  local bytes = self.data as const *ffi.titan_ffi_char
-  shim.titan_uvshim_buf_init_const(
-      descriptor, bytes, #self.data as libuv.size_t)
-  local native = libuv.uv_write_t.new()
-  local request: *libuv.uv_write_t = native
-  local callback = function (_owner: uv_write_t, status: integer)
-    complete_status(task, status, "net.write")
-  end
-  local owner = uv_write_t.new(
-      native, callback, self.data, descriptor)
-  task.pending = owner
-  libuv.uv_req_set_data(request as *libuv.uv_req_t,
-                        owner as ffi.titan_ffi_void_ptr)
-  local status = libuv.uv_write {
-    req = request,
-    handle = tcp_stream(self.tcp),
-    bufs = owner.buffer,
-    nbufs = 1,
-    cb = shim.titan_uvshim_write_cb,
-  }
-  return submitted(task, status, "net.write")
+  return submit_stream_write(
+      task, tcp_stream(self.tcp), self.data, "net.write")
 end
 
 local function TcpShutdownCall:dispatch(task: Task): Immediate?
@@ -634,7 +580,7 @@ end
 local function resolve_addresses(host: string,
                                  port: integer): AddressList
   if contains_nul(host) then
-    raise make_error(libuv.UV_EINVAL, "net.resolve", nil)
+    raise make_error(libuv.UV_EINVAL, "net.resolve")
   end
   return await(Call.getaddrinfo(
       GetaddrinfoCall.new(host, service_text(port)))) as AddressList
@@ -667,11 +613,13 @@ function _net_connect(host: string, port: integer): uv_tcp_t
       if not connected then begin_tcp_close(tcp, nil) end
     end
     if connected then return tcp end
+    local cancelled? = task.cancel_value
+    if cancelled and last_failure == cancelled then raise last_failure end
     address_index = address_index + 1
   end
 
   if last_failure ~= nil then raise last_failure end
-  raise make_error(libuv.UV_EADDRNOTAVAIL, "net.connect", nil)
+  raise make_error(libuv.UV_EADDRNOTAVAIL, "net.connect")
 end
 
 function _net_listen(host: string, port: integer,
@@ -684,47 +632,38 @@ function _net_listen(host: string, port: integer,
   local task = running_task()
   accepting_work(task.runtime, "listen on TCP")
   local addresses = resolve_addresses(host, port)
-  local last_failure: value = nil
+  local last_status = libuv.UV_EADDRNOTAVAIL
 
   local address_index = 1
   while address_index <= #addresses do
     local tcp = new_tcp(task.runtime, new_server_role())
-    local listening = false
-    do
-      local native: *libuv.uv_tcp_t = tcp.native
-      local status = libuv.uv_tcp_bind(
-          native, address_at(addresses, address_index), 0)
-      if status >= 0 then
-        status = libuv.uv_listen(
-            tcp_stream(tcp), backlog as ffi.titan_ffi_int,
-            shim.titan_uvshim_connection_cb)
-      end
-      if status < 0 then
-        raise make_error(status, "net.listen", nil)
-      end
-      listening = true
-    catch
-      last_failure = error
-    finally
-      if not listening then begin_tcp_close(tcp, nil) end
+    local native: *libuv.uv_tcp_t = tcp.native
+    local status = libuv.uv_tcp_bind(
+        native, address_at(addresses, address_index), 0)
+    if status >= 0 then
+      status = libuv.uv_listen(
+          tcp_stream(tcp), backlog as ffi.titan_ffi_int,
+          shim.titan_uvshim_connection_cb)
     end
-    if listening then return tcp end
+    if status >= 0 then return tcp end
+    last_status = status
+    begin_tcp_close(tcp, nil)
     address_index = address_index + 1
   end
 
-  if last_failure ~= nil then raise last_failure end
-  raise make_error(libuv.UV_EADDRNOTAVAIL, "net.listen", nil)
+  raise make_error(last_status, "net.listen")
 end
 
 function _net_read(tcp: uv_tcp_t): string?
-  if is_server(tcp) then raise "read from requires a Connection" end
+  require_connection(tcp, "read from")
   if libuv.uv_is_closing(tcp_handle(tcp)) ~= 0 then return nil end
-  validate_tcp(tcp, "read from", false)
+  validate_tcp(tcp, "read from")
   return await(Call.tcp_read(TcpReadCall.new(tcp))) as string?
 end
 
 function _net_write(tcp: uv_tcp_t, data: string)
-  validate_tcp(tcp, "write to", false)
+  require_connection(tcp, "write to")
+  validate_tcp(tcp, "write to")
   if libuv.uv_is_writable(tcp_stream(tcp)) == 0 then
     raise "cannot write after Connection shutdown"
   end
@@ -734,19 +673,22 @@ function _net_write(tcp: uv_tcp_t, data: string)
 end
 
 function _net_shutdown(tcp: uv_tcp_t)
-  validate_tcp(tcp, "shut down", false)
+  require_connection(tcp, "shut down")
+  validate_tcp(tcp, "shut down")
   if libuv.uv_is_writable(tcp_stream(tcp)) == 0 then return end
   await(Call.tcp_shutdown(TcpShutdownCall.new(tcp)))
 end
 
 function _net_accept(server: uv_tcp_t): uv_tcp_t
-  validate_tcp(server, "accept on", true)
+  local state = require_server(server, "accept on")
+  if state.error ~= nil then raise state.error end
+  validate_tcp(server, "accept on")
   return await(Call.tcp_accept(TcpAcceptCall.new(server))) as uv_tcp_t
 end
 
 function _net_close(tcp: uv_tcp_t)
   if libuv.uv_is_closing(tcp_handle(tcp)) ~= 0 then return end
-  validate_tcp(tcp, "close", is_server(tcp))
+  validate_tcp(tcp, "close")
   await(Call.tcp_close(TcpCloseCall.new(tcp)))
 end
 

@@ -36,20 +36,24 @@ local function os_sized_buffer(
     uv_buffer_func: (*ffi.titan_ffi_char, *libuv.size_t) ->
                     ffi.titan_ffi_int,
     capacity: libuv.size_t,
-    operation: string, subject: string?): string?
-  local sizes = libuv.size_t.new_array(1)
-  local bytes = ffi.titan_ffi_char.new_array(capacity as integer)
-  sizes[0] = capacity
-  local status = uv_buffer_func(bytes, sizes)
-  if status >= 0 then
-    return bytes_string(bytes, sizes[0] as integer)
-  elseif status == libuv.UV_ENOBUFS then
-    return os_sized_buffer(uv_buffer_func, sizes[0], operation, subject)
-  elseif status == libuv.UV_ENOENT then
-    return nil
-  else
-    raise make_error(status, operation, subject)
+    operation: string): string?
+  local actual_capacity = capacity
+  while true do
+    local sizes: libuv.size_t[1]
+    local bytes = ffi.titan_ffi_char.new_array(actual_capacity as integer)
+    sizes[0] = actual_capacity
+    local status = uv_buffer_func(bytes, sizes)
+    if status >= 0 then
+      return bytes_string(bytes, sizes[0] as integer)
+    elseif status == libuv.UV_ENOBUFS then
+      actual_capacity = sizes[0]
+    elseif status == libuv.UV_ENOENT then
+      return nil
+    else
+      raise make_error(status, operation)
+    end
   end
+  return nil
 end
 
 local function os_cwd_buffer(bytes: *ffi.titan_ffi_char,
@@ -87,43 +91,43 @@ end
 local function current_directory(operation: string): string
   return os_sized_buffer(os_cwd_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
-      operation, nil) as string
+      operation) as string
 end
 
 local function change_directory(path: string, operation: string)
-  checked_text(path, operation, path)
+  checked_text(path, operation)
   local status = libuv.uv_chdir(path)
-  check_status(status, operation, path)
+  check_status(status, operation)
 end
 
 local function fs_tmpname_template(): string
   return (os_sized_buffer(os_tmpdir_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
-      "fs.tmpname", nil) as string) ..
+      "fs.tmpname") as string) ..
       "/titan-fs-XXXXXX"
 end
 
 function _os_getenv(name: string): string?
-  checked_text(name, "os.getenv", name)
+  checked_text(name, "os.getenv")
   local operation = function (bytes: *ffi.titan_ffi_char,
                               sizes: *libuv.size_t): ffi.titan_ffi_int
     return libuv.uv_os_getenv(name, bytes, sizes)
   end
   return os_sized_buffer(operation,
       OS_BUFFER_INITIAL as libuv.size_t,
-      "os.getenv", name)
+      "os.getenv")
 end
 
 function _os_setenv(name: string, contents: string)
-  checked_text(name, "os.setenv", name)
-  checked_text(contents, "os.setenv", name)
+  checked_text(name, "os.setenv")
+  checked_text(contents, "os.setenv")
   check_status(libuv.uv_os_setenv(name, contents),
-               "os.setenv", name)
+               "os.setenv")
 end
 
 function _os_unsetenv(name: string)
-  checked_text(name, "os.unsetenv", name)
-  check_status(libuv.uv_os_unsetenv(name), "os.unsetenv", name)
+  checked_text(name, "os.unsetenv")
+  check_status(libuv.uv_os_unsetenv(name), "os.unsetenv")
 end
 
 function _os_cwd(): string
@@ -145,19 +149,19 @@ end
 function _os_homedir(): string
   return os_sized_buffer(os_homedir_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
-      "os.homedir", nil) as string
+      "os.homedir") as string
 end
 
 function _os_tmpdir(): string
   return os_sized_buffer(os_tmpdir_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
-      "os.tmpdir", nil) as string
+      "os.tmpdir") as string
 end
 
 function _os_hostname(): string
   return os_sized_buffer(os_hostname_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
-      "os.hostname", nil) as string
+      "os.hostname") as string
 end
 
 function _os_exepath(): string
@@ -166,7 +170,7 @@ function _os_exepath(): string
   end
   return os_sized_buffer(os_exepath_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
-      "os.exepath", nil) as string
+      "os.exepath") as string
 end
 
 function _os_pid(): integer
@@ -180,7 +184,7 @@ end
 function _os_clock(): float
   local usage: libuv.uv_rusage_t
   local status = libuv.uv_getrusage(usage)
-  check_status(status, "os.clock", nil)
+  check_status(status, "os.clock")
   return ((usage.ru_utime.tv_sec as integer) as float) +
          ((usage.ru_utime.tv_usec as integer) as float) / 1000000.0 +
          ((usage.ru_stime.tv_sec as integer) as float) +
@@ -190,7 +194,7 @@ end
 function _os_time(): integer
   local current: libuv.uv_timeval64_t
   local status = libuv.uv_gettimeofday(current)
-  check_status(status, "os.current_time", nil)
+  check_status(status, "os.current_time")
   return current.tv_sec as integer
 end
 
@@ -203,7 +207,7 @@ local function SignalWaitCall:dispatch(task: Task): Immediate?
     close_handle(runtime,
                  signal_handle as *libuv.uv_handle_t,
                  owner, owner.root_index,
-                 task, false, signal_name(result) as string)
+                 task, signal_name(result) as string)
     owner.root_index = 0
   catch
     fail_task_at_callback_boundary(task, error, traceback)
@@ -214,7 +218,7 @@ local function SignalWaitCall:dispatch(task: Task): Immediate?
   if status < 0 then
     unroot_handle(runtime, owner.root_index)
     owner.root_index = 0
-    return immediate_error(status, "signal.init", nil)
+    return immediate_error(status, "signal.init")
   end
   local signal_handle: *libuv.uv_signal_t = native
   libuv.uv_handle_set_data(
@@ -223,7 +227,7 @@ local function SignalWaitCall:dispatch(task: Task): Immediate?
   local cancel_action: CancelAction = function ()
     close_handle(runtime, signal_handle as *libuv.uv_handle_t,
                  owner, owner.root_index,
-                 task, false, nil)
+                 task, nil)
     owner.root_index = 0
   end
   status = libuv.uv_signal_start_oneshot(
@@ -231,8 +235,9 @@ local function SignalWaitCall:dispatch(task: Task): Immediate?
       self.signum as ffi.titan_ffi_int)
   if status < 0 then
     close_handle(runtime, signal_handle as *libuv.uv_handle_t,
-                 owner, owner.root_index, nil, false, nil)
-    return immediate_error(status, "signal.start", nil)
+                 owner, owner.root_index, nil, nil)
+    owner.root_index = 0
+    return immediate_error(status, "signal.start")
   end
   task.cancel_action = cancel_action
   return nil

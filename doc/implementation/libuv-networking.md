@@ -3,6 +3,8 @@
 The public API and semantics are documented in the [TCP networking standard
 library](../language/standard-library-net.md). The common Task, callback, and
 shutdown protocol is documented in [Libuv runtime](libuv-runtime.md).
+Contributor recipes for adding callback operations and handle types are in
+[Extending the libuv binding](libuv-extension-guide.md).
 
 The public `net` facade contains no C FFI types. Each `Connection` or `Server`
 holds one opaque `uv.uv_tcp_t` wrapper, and only the private `uv` module can
@@ -13,10 +15,10 @@ registry, ready queue, or per-operation generation number.
 
 Each callback-taking libuv operation has one small Titan owner containing its
 native request and exact callback. That callback captures the suspended Task
-directly. A write owner additionally retains the original Titan string and its
-`uv_buf_t` through `write_cb`; it does not allocate a second payload string.
-DNS, connect, and shutdown need no diagnostic-subject copies or common control
-record.
+directly. A write owner additionally retains the original Titan string through
+`write_cb`; libuv copies the submitted `uv_buf_t`, and Titan does not allocate
+a second payload string.
+DNS, connect, and shutdown need no common control record.
 
 The persistent TCP owner is the multi-shot exception. A private union gives a
 connection and a server disjoint state: connections keep read buffering and

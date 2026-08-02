@@ -488,11 +488,8 @@ function spawn(file: string, args: {string},
   if status < 0 then
     uv._os_spawn_config_error(config.handle, status)
   end
-  local process_handle = uv._os_process_spawn_with_config(
-    file, args, config.handle)
-  local raw_stdin? = uv._os_process_stdin(process_handle)
-  local raw_stdout? = uv._os_process_stdout(process_handle)
-  local raw_stderr? = uv._os_process_stderr(process_handle)
+  local process_handle, raw_stdin?, raw_stdout?, raw_stderr? =
+    uv._os_process_spawn_with_config(file, args, config.handle)
 
   local input: OutputStream? = nil
   if raw_stdin then

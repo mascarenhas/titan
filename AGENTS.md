@@ -431,7 +431,13 @@ The serial `spec/stdlib/coroutine_spec.lua` suite temporarily exercises an
 isolated exact-provider path, but must restore the prepared runtime, complete
 production `titan.so`/`titan.a`/dSYM, generated coroutine shim, and mtimes in
 teardown so a later packaging test does not rebuild the whole standard
-library.
+library. It is the one surviving standard-library source-rewrite exception:
+one variant deterministically forces GC in the otherwise inaccessible native
+resume-to-transfer-root window, and a second interposes Lua stack operations
+to prove the otherwise inaccessible `lua_checkstack` failure path restores the
+exact stack. Both require unique anchors, build isolated coroutine providers,
+and must disappear if those boundaries become directly injectable. This
+exception does not authorize source rewriting in `titan.uv` tests.
 
 Async standard-library behavioral specs compile against the canonical
 production modules. Keep them centered on public callback-continuation
@@ -1298,8 +1304,8 @@ FFI value and retain values required through its callbacks. Multi-shot handles
 may also carry their natural buffer/latest result and at most one waiter.
 One-shot request owners retain the native request and exact callback; the
 callback closure captures the suspended Task and borrowed arguments until
-completion. Writes retain the original Titan string and a `uv_buf_t`; do not
-allocate a duplicate payload string. Libuv copies
+completion. Writes retain the original Titan string, while libuv copies the
+submitted `uv_buf_t`; do not allocate a duplicate payload string. Libuv copies
 asynchronous filesystem paths and DNS text during submission, while `uv_spawn`
 consumes file/argv synchronously, so keep originals rooted only for the actual
 borrow interval. A direct alloc callback cannot unwind an allocation exception
