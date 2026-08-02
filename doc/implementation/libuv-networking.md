@@ -1,206 +1,123 @@
 # Libuv DNS and TCP implementation
 
 The public API and semantics are documented in the [TCP networking standard
-library](../language/standard-library-net.md).
+library](../language/standard-library-net.md). The common Task, callback, and
+shutdown protocol is documented in [Libuv runtime](libuv-runtime.md).
+Contributor recipes for adding callback operations and handle types are in
+[Extending the libuv binding](libuv-extension-guide.md).
 
-The `net` facade contains no C FFI types. Each `Connection` or `Server` holds
-one local `uv.uv_tcp_t` record; the `uv` module alone can unwrap its local
-`owned *uv_tcp_t` field. Repeated calls therefore adjust the native owner
-directly to a pointer without allocating pointer-boxing userdata.
-The public `Connection` method shapes exactly satisfy all seven `titan.io`
-Interfaces, so those wrappers contain direct method entries; `Server:close`
-likewise gives an exact incidental `io.Closer` implementation.
+The public `net` facade contains no C FFI types. Each `Connection` or `Server`
+holds one opaque `uv.uv_tcp_t` wrapper, and only the private `uv` module can
+reach its native handle. There is no network control layer, Runtime network
+registry, ready queue, or per-operation generation number.
 
-## Ownership graph
+## Native owners and callbacks
 
-An active Runtime adds a pending networking-owner list and a TCP resource list
-to its existing task, timer, and filesystem graph. Request and handle storage
-is allocated as an owned FFI value with the complete imported libuv type's
-`.new()`, then kept alive directly by one exact Titan owner record. Libuv
-`data` points to that Titan owner record, not to the native allocation's
-owner userdata.
+Each callback-taking libuv operation has one small Titan owner containing its
+native request and exact callback. That callback captures the suspended Task
+directly. A write owner additionally retains the original Titan string through
+`write_cb`; libuv copies the submitted `uv_buf_t`, and Titan does not allocate
+a second payload string.
+DNS, connect, and shutdown need no common control record.
 
-Persistent `uv_tcp_t` owners and private DNS, connect, write, and shutdown
-owners keep the fixed five-slot callback layout used by `titan_uv.c`: owned
-native handle/request, main thread, dispatcher, metadata, and family buffer.
-Native callbacks recover the module-cached main thread and fixed dispatcher
-closure, obtain the module Udata from that closure, and call the dispatcher's
-Titan-native entry. They do not use a generated Lua entry or a second
-protected-call layer.
+The persistent TCP owner is the multi-shot exception. A private union gives a
+connection and a server disjoint state: connections keep read buffering and
+one reader, while servers keep accepted clients and one accept waiter. Libuv's
+handle queries remain authoritative for live close and write-side state.
 
-## DNS extraction
+Each plain-C callback shim follows its libuv callback shape. A small common C
+helper obtains the loop's captured main `lua_State *`, the exact callback
+closure, its module Udata, and its native Titan entry. The particular shim
+then passes that closure as the hidden `_fn`, casts and calls the exact entry,
+and supplies the owner plus its actual callback parameters. There is no
+event-kind argument and no common event dispatcher. The record layout that
+supports this private bridge is an implementation detail, not an owner shape
+to reproduce elsewhere.
 
-Host text has an operation-owned NUL-terminated copy. `tcp.titan` formats the
-validated port in a zeroed six-byte automatic C array and builds a zeroed
-`addrinfo` hint with `AF_UNSPEC`, `SOCK_STREAM`, `IPPROTO_TCP`, and
-`AI_NUMERICSERV`. It roots and publishes the request owner, installs its data,
-then calls public `uv_getaddrinfo` with the native callback trampoline. Libuv
-copies the automatic node, service, and hints inputs during that call.
+## DNS extraction and connection attempts
 
-The result walker uses the complete named `addrinfo`, `sockaddr`, and
-`sockaddr_storage` tags imported from the host `uv.h` closure. It accepts only
-IPv4/IPv6 entries with a non-null address whose length fits the host's exact
-`sockaddr_storage`, then copies them in resolver order into a typed, zeroed,
-GC-owned array of opaque `titan_uvshim_address` cells. `AddressList` is a local
-alias of `owned shim.titan_uvshim_address[]`, so the operation roots that
-counted owner before the borrowed chain is released and uses `#addresses` as
-the number of usable cells. Static assertions in the native runtime guarantee
-that each opaque cell is large and aligned enough; Titan never interprets its
-bytes.
+Host text is checked for an embedded NUL, and the decimal port is built as a
+Titan string. `uv_getaddrinfo` receives an `AF_UNSPEC`, `SOCK_STREAM`,
+`IPPROTO_TCP`, `AI_NUMERICSERV` hint and copies those text arguments during
+submission. Its result chain is borrowed only for the callback.
 
-The C callback passes libuv's borrowed `addrinfo` pointer directly to the
-trusted Titan dispatcher. The dispatcher first copies usable addresses, then
-calls public `uv_freeaddrinfo` directly before it drives a Task or starts a
-socket attempt. Its trailing emergency catch performs the same direct release
-when needed. No continuation observes or retains the borrowed pointer, and
-each non-null result has one release path.
+The callback accepts IPv4 and IPv6 entries whose addresses fit the opaque
+`titan_uvshim_address` cell, copies them in resolver order into a GC-owned
+array, and calls `uv_freeaddrinfo` before resuming the Task. No continuation
+retains a pointer into libuv's result chain. The opaque cell is aligned and
+large enough for `sockaddr_storage`; Titan never interprets its bytes except
+to pass one selected cell back to libuv as `const sockaddr *`.
 
-Connect and listen allocate a fresh TCP handle for every address attempt. A
-failed initialized candidate is closed and drained before the next attempt.
-Cancellation closes an unpublished candidate and waits for both request and
-close callbacks; late success is never published. While the owned address
-array remains rooted, Titan derives the selected cell, explicitly converts its
-bytes to `const struct sockaddr *`, and calls public `uv_tcp_bind` or
-`uv_tcp_connect`. Connect computes that pointer before publishing its request
-owner, installs request data, and then submits with the native connect callback.
+Connect and listen try copied addresses in resolver order. Each attempt owns a
+fresh TCP handle. Failure initiates that candidate's ordinary `uv_close`
+before the continuation moves to the next address; the close callback may run
+later. A successful outgoing or accepted connection starts its read watcher
+lazily when its first read is dispatched.
 
-## Stream callbacks
+## Multi-shot reads and accepts
 
-An outgoing Connection calls `uv_read_start` after connect succeeds and before
-it is published. An accepted Connection starts reading after `uv_accept` and
-before it is delivered to a waiter or placed in the accepted-client queue; a
-queue-full candidate is closed without starting. A synchronous start failure
-closes the unpublished Connection and fails the connect or accept operation.
-Once initialized, the read watcher remains active with or without a waiter.
+The allocation callback receives libuv's `uv_buf_t` destination. The Titan
+handler allocates a GC-owned byte array, stores it as the TCP owner's current
+buffer, and fills that descriptor. A direct C callback cannot unwind an
+allocation exception through libuv, so failure returns a zero buffer and
+preserves that exact exception for the required paired read callback. The
+read callback still trusts libuv's alloc/read pairing: it transports that
+exception to the waiter, or logs it and stops an unwaited read, without a
+second recovery status or a defensive missing-allocation branch.
 
-The C allocation callback is a thin native-Titan dispatch. It initializes
-libuv's supplied `uv_buf_t` to `{ NULL, 0 }`, then the Titan dispatcher creates
-a fresh `ffi.titan_ffi_char.new_array(suggested_size)`, roots that owner
-as the Connection's current allocation, and writes its raw pointer and size to
-the descriptor. The descriptor belongs to libuv; it is not the bytes' owner.
-On supported Unix libuv pairs each allocation with its read callback before
-requesting another for that stream, although one watcher dispatch can repeat
-that pair. A POLLHUP-only EOF callback can have no preceding allocation, so
-terminal handling accepts an empty current-allocation slot.
+For an ordinary allocation, the read callback clears the field and either
+delivers the logical prefix to the one waiting Task or appends the resulting
+string to the owner's buffered chunks. Zero-length notifications deliver
+nothing. EOF and errors stop reading and set sticky terminal read state before
+resuming a waiter.
 
-`Bytes` is the counted character-owner type itself. Without a waiter, a
-positive read callback pairs the current owner with `nread` in a `ByteChunk`
-and moves that chunk into the Connection's queue; queued allocations are not
-reused. With a waiter, the callback instead converts exactly that logical
-prefix to one binary string, without including unused capacity. It snapshots
-and clears the waiter and epoch before `drive_task`, clears the current root
-only after the bytes are queued or converted, and passes the string directly
-to the yielded read. The resumed Task may install a replacement waiter before
-the callback returns. A zero-length callback clears the current allocation and
-delivers nothing.
+A low-level read returns the oldest buffered chunk, otherwise returns sticky
+EOF or error, otherwise installs one waiter. A second waiter is rejected. The
+public facade implements delimiter reads by repeatedly calling that primitive
+and retains only bytes after a matched delimiter. It does not add a reader-lock
+record, cancellation rollback, or special error-tail identity. There is
+deliberately no buffer high-water mark in this initial API.
 
-EOF and non-EOF read errors clear any current allocation, stop reading, and
-record a sticky terminal before driving arbitrary code. EOF directly resumes a
-waiter with `nil` but leaves the TCP write side open. Another error stores the
-uv-owned `Error` record (publicly `async.Error`), raises it directly in a
-waiter, and initiates physical close. A
-later low-level read first joins and drains the entire completed queue, then
-returns sticky `nil` or repeatedly raises the stored error. With no data or
-terminal it only installs one waiter; it never starts or stops libuv. Explicit
-close stops the physical read, discards its completed queue, and resumes a
-waiting reader with `nil`. Explicit close and Runtime teardown publish a
-sticky-EOF terminal before yielding and discard completed input; that terminal
-check precedes Runtime identity validation, so a retained closed ReaderCloser
-can report EOF in a later generation without touching native state.
+A listener similarly keeps at most one accept waiter plus already accepted
+clients. Each connection callback accepts exactly one client and either
+resumes the waiter or buffers the client. That client's read watcher remains
+lazy. Closing the server closes buffered clients as well.
 
-The `net` facade serializes both `read` and `read_until` through one reader
-lock. It keeps delimiter excess in stream order, implements optional delimiter
-chopping and terminal-tail delivery, and preserves accumulated bytes across
-cancellation. Completed chunks accumulate in a non-yielding
-`string.StringWriter`, reusing the string module's checked builder and
-one-allocation drain. Native reads already provide the scheduling boundary.
-The current consumed chunk remains separate until its append succeeds; an
-append error restores the drained builder followed by that pending chunk. A
-narrow low-level identity
-predicate lets the facade recognize only the stream's stored sticky read error
-when returning a nonempty terminal tail; Task cancellation and unrelated
-exceptions are re-raised. There is no maximum or high-water mark: an unread
-peer can grow the GC-owned queue without bound.
+These arrays buffer results from genuinely multi-shot callbacks; they are not
+operation queues or a scheduler. Writes need no Titan queue: every call
+submits its own `uv_write_t`, and libuv supplies stream write ordering.
 
-Writes and shutdown use a per-Connection FIFO with one submitted request.
-Every write request owns its copied bytes through the callback. The first
-shutdown marks the source-level write side closed when queued, is submitted
-only after earlier writes, and remains cleanup-shielded through its callback;
-repeated calls are idempotent. Explicit close clears the facade excess before
-and after its cleanup-shielded wait, stops reads, discards queued input and an
-in-flight delimiter builder, and rejects new output, but preserves the
-submitted request and queued FIFO work. It calls `uv_close` once only after
-that output drains, then waits until the close callback has released the
-handle root.
+## Cancellation, shutdown, and close
 
-Servers keep one accept waiter and a FIFO of already accepted Connections
-bounded by the listen backlog. Every incoming callback performs one
-`uv_accept`. A full queue closes that new client and keeps the listener active.
-If an accepted client's read watcher cannot start, the candidate is closed and
-the failure is delivered to the accept waiter or retained through the server's
-terminal accept-error path.
+Cancellation of DNS, connect, write, or shutdown does not release its owner
+early. The native callback still performs cleanup, and the Task's next resume
+injects its sticky cancellation. Cancelling a read or accept only detaches the
+matching waiter from the shared multi-shot handle. A private zero-duration
+timer wakes that Task on a later loop turn, preserving the non-reentrant
+callback model while the TCP watcher remains active.
 
-## Cancellation and shutdown
+`Connection:shutdown` submits one `uv_shutdown_t`; libuv's writable-state
+query makes later calls no-ops once the write side is shut down.
+`Connection:close` and `Server:close` submit one `uv_close`; libuv stops the
+handle's active watcher and its handle state answers later close checks. The
+closer is that callback's sole continuation. Any reader or acceptor detached
+by explicit close is woken by an independent zero timer rather than being
+resumed synchronously or attached to the close callback.
 
-Task cancellation increments the existing operation epoch synchronously. DNS
-uses `uv_cancel` but retains its request until callback. Connect closes its
-unpublished handle. Read cancellation clears only the matching waiter and
-epoch; continuous reading and buffering remain active. A queued write is
-unlinked, while cancellation of an active write is logical because libuv
-cannot cancel it and a shared Connection must remain open. The first shutdown
-and every explicit close waiter are cleanup-shielded through their terminal
-callbacks.
+Final Runtime cleanup does not traverse a Titan networking registry. Its
+cleanup Task discovers the remaining `uv_tcp_t` handles through `uv_walk` and
+closes them through the same callback protocol. GC root tables only keep
+native owners live until callbacks; they are not the source of traversal.
 
-Runtime shutdown first cancels DNS and unpublished acquisitions, then stops
-reads and retires queued operations, then closes Servers, accepted queues, and
-Connections. This forced teardown is distinct from explicit close, which
-preserves FIFO output. The Runtime does not release a request before its
-completion callback or a handle before its close callback. Both networking
-root lists must be empty before `uv_loop_close`.
+## Portable native boundary
 
-## Portable shim boundary
+Titan calls the public libuv request, stream, handle, and request-data APIs
+directly through the host's `uv.h`. The C support layer contains the
+libuv-shaped callback shims, the opaque normalized-address cell, and one tiny
+helper that initializes a `uv_buf_t` from rooted const string bytes. There is
+no POSIX socket, read, write, poll, or resolver fallback.
 
-The owning Titan contributors call public libuv base-handle and base-request
-APIs directly; the C FFI emits host-validated conversions from concrete libuv
-pointers. The native runtime retains only the fixed owner dispatcher and
-plain-C callback trampolines. The shared header describes the fixed owner
-protocol and deliberately overprovisioned opaque address storage consumed by
-both sides. DNS submission, result filtering/copying/release, address
-selection, bind, connect, stream operations, close, and the narrow inherited
-`SIGPIPE` policy all run directly from Titan through public host/libuv
-declarations. There is no POSIX socket, read, write, or poll fallback.
-
-The callback dispatcher adds one opaque pointer argument for the DNS callback's
-temporary `addrinfo` payload. The pointer is never converted to a Titan
-`value`; it is converted once to a typed borrowed pointer and stored in the
-request control before any allocating callback body runs. Callbacks without a
-pointer payload pass NULL. Host address-family, socket, protocol, and resolver
-constants come from the same production `uv.h` import as the corresponding
-fields.
-
-## Verification
-
-Compiler tests cover the language mechanisms used by the opaque wrappers;
-standard-library behavior is tested separately without compiler coverage.
-Loopback tests probe a bounded range of explicit ports through the public
-listen API. They cover IPv4, optional IPv6, resolver fallback, binary and NUL
-data, split delimiters, excess restoration,
-FIFO writes, repeated and concurrent shutdown/close, bounded accepts,
-exclusive waiters, continuous background buffering, cancellation that leaves
-the watcher active, sticky EOF, delimiter terminal tails, leaked-resource
-shutdown, and sequential Runtime generations.
-
-The isolated DNS source variant delays logical delivery after capturing a
-successful borrowed result, injects a copy failure, observes the decimal
-formatter, optionally prefixes one invalid opaque candidate, and counts the
-direct `uv_freeaddrinfo` call. It deterministically covers cancellation,
-shutdown, exactly-once release, no stale resume, generational/full GC, and the
-failed-candidate close-before-retry window without putting a timing hook in the
-installed module. Generated-source and archive-symbol checks keep callback
-references and result release on their direct native boundaries. Regular Linux
-and the one pre-merge macOS run exercise that variant. The focused Linux
-ASan/UBSan gate instead uses the
-production DNS/TCP smoke, including a delayed reader that keeps a large
-`uv_write_t` pending across Task cancellation, coroutine unwind, forced GC,
-exact binary delivery, and a follow-up write. Manual macOS CI also repeats the
-normal linkage checks.
+Compiler tests cover the FFI and callback mechanisms. The focused
+standard-library suite, run outside LuaCov, covers binary listen/connect/
+accept/read/write/EOF behavior, endpoint validation, and closing a server with
+a pending accept. Runtime cleanup has a separate native-handle behavior gate.

@@ -154,7 +154,8 @@ through the same normal compiler path.
 * bitfields store `bitfield`, `width` and `anonymous`;
 * flexible array members are marked with `flexible_array = true`;
 * function-pointer typedefs are represented as `functionptr` CTypes;
-* header-defined `static` functions are imported like ordinary C functions;
+* header-defined functions are imported like ordinary C functions regardless
+  of whether their storage form is `static`, `extern inline`, or bare `inline`;
 * function declarators preserve `paramstyle` (`prototype` versus C old-style)
   and an eligible complete list of fixed-parameter spellings;
 * simple enum values, including typedef-enum values, are stored on the enum

@@ -48,37 +48,34 @@ incidentally satisfies `io.Closer` through its exact `close()` method.
 
 ## Connecting and listening
 
-`connect` resolves `host` asynchronously, considers IPv4 and IPv6 TCP
-addresses in resolver order, and closes each failed candidate before trying
-the next. It accepts ports `1..65535`.
+`connect` resolves `host` asynchronously and considers IPv4 and IPv6 TCP
+addresses in resolver order. A failed candidate has its ordinary asynchronous
+close initiated before the next address is tried; connection fallback does not
+wait for that close callback. It accepts ports `1..65535`.
 
 `listen` resolves and binds `host`, then starts a TCP listener. Its port may be
 `0` to request an ephemeral operating-system port, although this initial API
 does not expose the selected address or port. `backlog` must be positive and
-also sets the maximum number of already accepted Connections retained in the
-library's user-space accept queue.
+is passed directly to libuv's listener.
 
 Hosts are text and cannot contain an embedded NUL. Socket payloads are binary
 and may contain any byte, including NUL.
 
 ## Reading
 
-A Connection starts its libuv read watcher as part of successful connection or
-accept initialization. It keeps reading and retaining GC-owned chunks even
-when no Task is waiting. This avoids leaving peer data in the kernel merely
-because application code is temporarily busy, but the retained application
-buffer has no size limit: a peer that produces data faster than the program
-drains it can make memory use grow.
+A Connection starts its libuv read watcher lazily on the first `read` or
+`read_until`. Once started, it keeps reading and retaining GC-owned chunks even
+when no Task is waiting. The retained application buffer has no size limit, so
+a peer that produces data faster than the program drains it can make memory
+use grow.
 
-`read()` returns the facade's oldest retained excess first. Otherwise it
-returns all native chunks already queued when the low-level call is serviced,
-or waits for the next positive callback and returns that callback's nonempty
-binary string. Batch boundaries are therefore timing-dependent. It returns
-`nil` at EOF or after explicit close. Both states are sticky: every later read
-also returns `nil`. A reset or other read error is sticky as well; after
-already completed chunks have been drained, every later read raises the same
-or an equivalent `async.Error`. A non-EOF read error also initiates physical
-Connection close.
+`read()` returns the facade's retained delimiter excess first. Otherwise it
+returns the oldest native chunk already buffered, or waits for the next
+positive callback and returns that callback's nonempty binary string. Chunk
+boundaries are timing-dependent. It returns `nil` at EOF or after explicit
+close, and later reads remain at EOF. A reset or other read error stops the
+watcher and remains stored; after earlier buffered chunks have been drained,
+later reads raise that error until the Connection is closed.
 
 `read_until(delimiter, chop)` requires a nonempty delimiter. It consumes
 through the first delimiter, which may span native chunks, and retains bytes
@@ -87,68 +84,60 @@ includes an actual delimiter. With `chop == true`, the delimiter is omitted;
 if it occurs at the start, `""` is a valid result distinct from EOF `nil`.
 
 EOF after a nonempty unterminated tail returns that tail unchanged, then later
-calls return sticky `nil`. A read error after such a tail likewise returns the
-tail unchanged, then the stored error is raised by every later read. No
-delimiter is invented for a terminal tail. With no tail, EOF returns `nil` and
-an error raises immediately.
+calls return sticky `nil`. With no tail, EOF returns `nil`. Errors and
+cancellation propagate normally; a delimiter read is composition over several
+low-level reads and does not roll already consumed bytes back into the
+Connection.
 
-`read` and `read_until` share one per-Connection reader lock. A second Task
-cannot enter either method while another reader owns that lock. Cancelling a
-waiting reader detaches only that waiter; it does not stop the physical read or
-close the shared Connection, and another Task may read afterward. Bytes
-accumulated by a cancelled delimiter read remain retained for the replacement
-reader.
+The low-level stream has at most one suspended reader. A second Task that tries
+to wait on the same Connection is rejected; no separate facade lock or queue is
+added. Cancelling a waiting reader detaches only that waiter, wakes it through
+its own later timer callback, and leaves the physical read watcher and shared
+Connection available to another Task.
 
 ## Writing, shutdown, and close
 
-Writes are FIFO per Connection. `write` returns only after libuv's callback,
-and the complete binary input remains rooted until then. An empty write still
-checks that the Connection and its write side are usable.
+Writes are ordered per Connection by libuv itself. Titan submits one
+`uv_write_t` per call instead of maintaining another queue. `write` returns
+only after that request's callback, and the complete binary input remains
+rooted until then. An empty write still checks that the Connection and its
+write side are usable.
 
-`shutdown` is ordered after earlier writes. Requesting it immediately rejects
-later writes. The first call is cleanup-shielded until the physical
-`uv_shutdown` callback, then leaves the read side open until EOF, error, or
-`close`. Repeated shutdown calls are idempotent and do not enqueue another
-native request.
+`shutdown` uses libuv's `uv_shutdown`, which completes after earlier writes,
+then leaves the read side open until EOF, error, or `close`. Repeated shutdown
+calls are idempotent.
 
-`close` closes both directions and is idempotent. Concurrent callers wait for
-the same terminal close transition. For a Connection, it stops the continuous
-read, discards facade excess and queued native input, and wakes a blocking
-reader with `nil`; an in-flight delimiter reader also discards its accumulated
-tail, and later `read` and `read_until` calls remain at EOF. New output is
-rejected. Submitted and queued FIFO writes/shutdown keep their
-order; the native handle closes only after that output drains. Close waits for
-the required request and handle callbacks and returns only when the handle is
-safe to reclaim. Runtime shutdown likewise closes a Connection or Server left
-open by the application. A retained terminal value still accepts repeated
-`close()` calls as no-ops in a later session, and its reads return `nil`
-without consulting the stale Runtime; writes, shutdown, and accept reject the
-stale resource.
+`close` closes both directions and is idempotent. For a Connection, it stops
+the continuous read, discards facade excess and queued native input, and wakes
+a blocking low-level reader with `nil` on a later loop turn. Later `read` and
+`read_until` calls remain at EOF, and new output is rejected. Libuv settles any
+already submitted stream requests through their terminal callbacks while the
+native handle closes. Runtime shutdown likewise closes a Connection or Server
+left open by the application.
 
-Cancellation is logical first. A cancelled queued write is removed before
-submission. Cancelling an active write does not close a potentially shared
-Connection; its eventual callback only cleans storage and the Task receives
-the provider-owned cancellation record whose type-only facade name is
-`async.Cancelled`. Close and the first shutdown are shielded through their
-terminal native callbacks before sticky cancellation is delivered.
+Cancellation never releases an active write request or its bytes early. Its
+terminal callback performs native cleanup, and the Task receives the
+provider-owned cancellation record whose type-only facade name is
+`async.Cancelled`.
 
 ## Accepting
 
 `accept` waits for the next Connection or takes the oldest already accepted
-Connection from the bounded queue. Only one Task may wait in `accept` at a
+Connection retained by the Server. Only one Task may wait in `accept` at a
 time. Cancelling that waiter leaves the Server listening.
 
 Every incoming notification is accepted into a fresh GC-owned TCP handle. If
-no Task is waiting and the bounded queue is full, the new client is immediately
-closed; the Server stays active. `Server:close` closes queued clients and wakes
-an accept waiter with an error.
+no Task is waiting, that Connection remains buffered until a later `accept`;
+this initial API has no application-level buffer limit beyond the listen
+backlog supplied to libuv. `Server:close` closes buffered clients and wakes an
+accept waiter with an error.
 
 ## Errors
 
 Immediate and asynchronous libuv failures raise the same provider-owned error
 record, re-exported under the type-only facade name `async.Error`. Its fields
-are `code: integer`, `name: string`, `message: string`, `operation: string`,
-and `subject: string?`; the alias is not a constructible `async.Error` runtime
+are `code: integer`, `name: string`, `message: string`, and
+`operation: string`; the alias is not a constructible `async.Error` runtime
 namespace.
 
 DNS errors use libuv's `EAI_*` names. EOF is normal for both `read` and
@@ -169,8 +158,7 @@ function client(): value
 end
 
 function main(args: {string}): integer
-  local task = async.run(client)
-  task:join()
+  async.run(client)
   return 0
 end
 ```

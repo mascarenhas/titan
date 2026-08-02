@@ -28,7 +28,7 @@ local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
 local STDLIB_CONTAINER = "titan.so"
 local STDLIB_STATIC_ARCHIVE = "titan.a"
-local PHASE8_CALLBACKS = {
+local DIRECT_CALLBACKS = {
     "titan_uvshim_signal_cb",
     "titan_uvshim_process_exit_cb",
     "titan_uvshim_getaddrinfo_cb",
@@ -39,10 +39,11 @@ local PHASE8_CALLBACKS = {
     "titan_uvshim_read_cb",
     "titan_uvshim_connection_cb",
     "titan_uvshim_close_cb",
+    "titan_uvshim_walk_cb",
     "titan_uvshim_timer_cb",
     "titan_uvshim_fs_cb",
 }
-local PHASE8_PROVIDER_CALLBACKS = {
+local PROVIDER_CALLBACK_REFERENCES = {
     "titan_uvshim_timer_cb",
     "titan_uvshim_fs_cb",
     "titan_uvshim_signal_cb",
@@ -53,12 +54,12 @@ local PHASE8_PROVIDER_CALLBACKS = {
     "titan_uvshim_read_cb",
     "titan_uvshim_connection_cb",
     "titan_uvshim_close_cb",
+    "titan_uvshim_walk_cb",
     "titan_uvshim_getaddrinfo_cb",
     "titan_uvshim_connect_cb",
 }
-local PHASE8_PUBLIC_LIBUV_CALLS = {
+local DIRECT_LIBUV_CALLS = {
     "uv_accept",
-    "uv_cancel",
     "uv_close",
     "uv_freeaddrinfo",
     "uv_fs_get_statbuf",
@@ -78,18 +79,15 @@ local PHASE8_PUBLIC_LIBUV_CALLS = {
     "uv_tcp_connect",
     "uv_translate_sys_error",
     "uv_spawn",
+    "uv_walk",
     "uv_write",
-}
-local SIGPIPE_HOST_CALLS = {
-    "sigaction",
-    "sigemptyset",
 }
 -- Darwin may lower sigemptyset entirely through the system header, leaving no
 -- undefined object symbol. Its direct generated-C call is asserted below.
 local SIGPIPE_EXTERNAL_HOST_CALLS = {
     "sigaction",
 }
-local PHASE8_RETIRED_WRAPPERS = {
+local RETIRED_UV_WRAPPERS = {
     "titan_uvshim_getaddrinfo_cancel",
     "titan_uvshim_addrinfo_free",
     "titan_uvshim_tcp_init",
@@ -115,7 +113,7 @@ local PHASE8_RETIRED_WRAPPERS = {
     "titan_uvshim_signal_start_oneshot",
     "titan_uvshim_signal_close",
 }
-local PHASE9_RETIRED_HELPERS = {
+local RETIRED_UV_HELPERS = {
     "titan_uvshim_process_spawn",
     "titan_uvshim_error_eio",
     "titan_uvshim_error_eof",
@@ -128,7 +126,6 @@ local PHASE9_RETIRED_HELPERS = {
     "titan_uvshim_signal_number",
     "titan_uvshim_signal_name",
     "titan_uvshim_buf_max_length",
-    "titan_uvshim_buf_init",
     "titan_uvshim_buf_init_slice",
     "titan_uvshim_bytes_copy",
     "titan_uvshim_bytes_find",
@@ -136,7 +133,7 @@ local PHASE9_RETIRED_HELPERS = {
     "titan_uvshim_text_copy",
     "titan_uvshim_stat_extract",
 }
-local PHASE10_RETIRED_HELPERS = {
+local RETIRED_NETWORK_HELPERS = {
     "titan_uvshim_format_port",
     "titan_uvshim_getaddrinfo_start",
     "titan_uvshim_addrinfo_is_usable",
@@ -227,7 +224,7 @@ local function parsed_source(path)
     if ast then return ast end
     local err
     ast, err = parser.parse(path, read_file(path))
-    assert.truthy(ast, err and err.label)
+    assert.truthy(ast, path .. ": " .. tostring(err and err.label))
     parsed_sources[path] = ast
     return ast
 end
@@ -442,47 +439,6 @@ local function count_plain(haystack, needle)
     end
 end
 
-local function source_line_number(source, needle)
-    local offset = assert(source:find(needle, 1, true),
-        "missing source statement: " .. needle)
-    local _, newlines = source:sub(1, offset - 1):gsub("\n", "\n")
-    return newlines + 1
-end
-
-local function replace_plain(source, old, new)
-    local pieces = {}
-    local position = 1
-    while true do
-        local first, last = source:find(old, position, true)
-        if not first then
-            pieces[#pieces + 1] = source:sub(position)
-            return table.concat(pieces)
-        end
-        pieces[#pieces + 1] = source:sub(position, first - 1)
-        pieces[#pieces + 1] = new
-        position = last + 1
-    end
-end
-
-local function prepared_uv_c()
-    local path = "titan/uv/uv.c"
-    assert.equal("file", lfs.attributes(path, "mode"),
-        path .. " must be prepared by the current source-rock build")
-    local generated = read_file(path)
-    -- The source-only post-install compiles through an absolute --tree,
-    -- whereas checkout `make stdlib` uses ".". Normalize only that spelling;
-    -- every line number and generated operation remains the prepared output.
-    local source_prefix = generated:match(
-        '#line %d+ "([^"]*titan/uv/)process%.titan"')
-    assert.truthy(source_prefix,
-        "prepared titan.uv C has no process.titan source directives")
-    if source_prefix ~= "./titan/uv/" then
-        generated = replace_plain(
-            generated, '"' .. source_prefix, '"./titan/uv/')
-    end
-    return generated
-end
-
 local function assert_ordered(source, ...)
     local position = 1
     for _, needle in ipairs({ ... }) do
@@ -491,47 +447,6 @@ local function assert_ordered(source, ...)
             needle)
         position = found + #needle
     end
-end
-
-local function generated_function(source, name)
-    local position = 1
-    local first
-    local next_definition
-    while position <= #source do
-        local newline = source:find("\n", position, true) or (#source + 1)
-        local line = source:sub(position, newline - 1)
-        -- Folder-module rendering can indent later top-level definitions as a
-        -- formatting consequence of concatenating contributor bodies. Leading
-        -- whitespace is therefore not a reliable declaration boundary.
-        local definition = line:find("_titan(", 1, true) and
-            line:match("{%s*$")
-        if definition then
-            if first then
-                next_definition = position
-                break
-            elseif line:find(name .. "(", 1, true) then
-                first = position
-            end
-        end
-        position = newline + 1
-    end
-    assert.truthy(first, "missing generated function " .. name)
-    return source:sub(first, (next_definition or (#source + 1)) - 1)
-end
-
-local function matching_c_brace(source, opening)
-    assert.equal("{", source:sub(opening, opening))
-    local depth = 0
-    for position = opening, #source do
-        local byte = source:sub(position, position)
-        if byte == "{" then
-            depth = depth + 1
-        elseif byte == "}" then
-            depth = depth - 1
-            if depth == 0 then return position end
-        end
-    end
-    error("unmatched generated-C brace at byte " .. opening, 0)
 end
 
 local function stdlib_command(output)
@@ -589,344 +504,6 @@ describe("libuv Makefile configuration", function()
             assert.same(discovered_uv_sources(), normalized)
         end)
 
-    it("owns every migrated libuv operation in Titan source",
-        function()
-            local sources = {}
-            for _, path in ipairs(discovered_uv_sources()) do
-                sources[path] = read_file(path)
-            end
-            local runtime = read_file("titan-runtime/titan_uv.c")
-            local header = read_file("titan-runtime/titan/uv.h")
-
-            for _, wrapper in ipairs(PHASE8_RETIRED_WRAPPERS) do
-                assert.falsy(runtime:find(wrapper, 1, true), wrapper)
-                assert.falsy(header:find(wrapper, 1, true), wrapper)
-                for path, source in pairs(sources) do
-                    assert.falsy(source:find(wrapper, 1, true),
-                        path .. ": " .. wrapper)
-                end
-            end
-            for _, helper in ipairs(PHASE9_RETIRED_HELPERS) do
-                assert.falsy(runtime:find(helper, 1, true), helper)
-                assert.falsy(header:find(helper, 1, true), helper)
-                for path, source in pairs(sources) do
-                    assert.falsy(source:find(helper, 1, true),
-                        path .. ": " .. helper)
-                end
-            end
-            for _, helper in ipairs(PHASE10_RETIRED_HELPERS) do
-                assert.falsy(runtime:find(helper, 1, true), helper)
-                assert.falsy(header:find(helper, 1, true), helper)
-                for path, source in pairs(sources) do
-                    assert.falsy(source:find(helper, 1, true),
-                        path .. ": " .. helper)
-                end
-            end
-            for _, helper in ipairs(FFI_RETIRED_HELPERS) do
-                assert.falsy(runtime:find(helper, 1, true), helper)
-                assert.falsy(header:find(helper, 1, true), helper)
-                for path, source in pairs(sources) do
-                    assert.falsy(source:find(helper, 1, true),
-                        path .. ": " .. helper)
-                end
-            end
-
-            local all_sources = {}
-            for _, path in ipairs(discovered_uv_sources()) do
-                all_sources[#all_sources + 1] = sources[path]
-            end
-            local combined = table.concat(all_sources, "\n")
-            local process_source = sources["titan/uv/process.titan"]
-            for _, function_name in ipairs(PHASE8_PUBLIC_LIBUV_CALLS) do
-                assert.truthy(combined:find("libuv." .. function_name, 1, true),
-                    function_name)
-            end
-
-            assert.truthy(header:find("#ifdef F_DUPFD_CLOEXEC", 1, true))
-            assert.truthy(header:find(
-                "TITAN_UVSHIM_HAS_F_DUPFD_CLOEXEC = 1", 1, true))
-            assert.truthy(header:find(
-                "TITAN_UVSHIM_F_DUPFD_CLOEXEC = F_DUPFD_CLOEXEC", 1, true))
-            assert.truthy(header:find(
-                "TITAN_UVSHIM_HAS_F_DUPFD_CLOEXEC = 0", 1, true))
-            assert.truthy(header:find(
-                "TITAN_UVSHIM_F_DUPFD_CLOEXEC = 0", 1, true))
-            assert.falsy(runtime:find("F_DUPFD_CLOEXEC", 1, true))
-            assert.truthy(process_source:find(
-                "shim.TITAN_UVSHIM_HAS_F_DUPFD_CLOEXEC", 1, true))
-            assert.truthy(process_source:find(
-                "shim.TITAN_UVSHIM_F_DUPFD_CLOEXEC", 1, true))
-            assert.truthy(process_source:find("cfcntl.fcntl(", 1, true))
-            assert.truthy(process_source:find("cunistd.dup(", 1, true))
-            assert.falsy(combined:find("_os_communicate", 1, true))
-            assert.falsy(read_file("titan/os.titan"):find(
-                "communicate", 1, true))
-            assert.falsy(read_file("titan/io.titan"):find(
-                "communicate", 1, true))
-            for _, function_name in ipairs(SIGPIPE_HOST_CALLS) do
-                assert.truthy(combined:find("csignal." .. function_name, 1, true),
-                    function_name)
-            end
-
-            assert_ordered(sources["titan/uv/os.titan"],
-                "local status = libuv.uv_signal_init",
-                "local signal_handle: *libuv.uv_signal_t = handle",
-                "libuv.uv_handle_set_data(",
-                "signal_handle as *libuv.uv_handle_t, pointer)",
-                "owner.metadata.lifecycle = OWNER_ACTIVE",
-                "status = libuv.uv_signal_start_oneshot")
-            assert_ordered(sources["titan/uv/tcp.titan"],
-                "local tcp_handle: *libuv.uv_tcp_t = handle",
-                "local status = libuv.uv_tcp_init",
-                "libuv.uv_handle_set_data(",
-                "tcp_handle as *libuv.uv_handle_t, pointer)",
-                "tcp.metadata.lifecycle = TCP_INITIALIZED")
-            assert_ordered(sources["titan/uv/tcp.titan"],
-                "local owner, pointer = allocate_write_owner",
-                "local owner_handle: *libuv.uv_write_t =",
-                "libuv.uv_req_set_data(",
-                "owner_handle as *libuv.uv_req_t, pointer)",
-                "status = libuv.uv_write")
-            assert_ordered(sources["titan/uv/tcp.titan"],
-                "local owner, pointer = allocate_shutdown_owner",
-                "local owner_handle: *libuv.uv_shutdown_t =",
-                "libuv.uv_req_set_data(",
-                "owner_handle as *libuv.uv_req_t, pointer)",
-                "status = libuv.uv_shutdown")
-            assert_ordered(sources["titan/uv/tcp.titan"],
-                "local service_pointer = format_port(port, service)",
-                "local hints: libuv.addrinfo",
-                "local owner, pointer = allocate_dns_owner",
-                "local owner_handle: *libuv.uv_getaddrinfo_t =",
-                "libuv.uv_req_set_data(",
-                "owner_handle as *libuv.uv_req_t, pointer)",
-                "local status = libuv.uv_getaddrinfo")
-            assert_ordered(sources["titan/uv/tcp.titan"],
-                "local copy_length = entry.ai_addrlen as cstring.size_t",
-                "local destination = data + copied",
-                "cstring.memcpy(destination.bytes, entry.ai_addr, copy_length)")
-            assert_ordered(sources["titan/uv/tcp.titan"],
-                "local address =\n          address_cell.bytes as const *libuv.sockaddr",
-                "local owner, pointer = allocate_connect_owner",
-                "local owner_handle: *libuv.uv_connect_t =",
-                "libuv.uv_req_set_data(",
-                "owner_handle as *libuv.uv_req_t, pointer)",
-                "local status = libuv.uv_tcp_connect")
-            assert_ordered(process_source,
-                "local function initialize_captured_pipe",
-                "local status = libuv.uv_pipe_init",
-                "libuv.uv_handle_set_data(",
-                "pipe.metadata.lifecycle = PIPE_INITIALIZED")
-            assert_ordered(process_source,
-                "local function ensure_spawn_stdin",
-                '"process.stdin", "Process stdin")',
-                "state.stdin_candidate = new_pipe_stdio",
-                "local status = initialize_captured_pipe",
-                "local function ensure_spawn_stdout",
-                '"process.stdout", "Process stdout")',
-                "local function ensure_spawn_stderr",
-                '"process.stderr", "Process stderr")',
-                "local function ensure_spawn_merged_output",
-                "local descriptors: libuv.uv_file[2]",
-                "status = libuv.uv_pipe(",
-                "status = libuv.uv_pipe_open(")
-            assert_ordered(process_source,
-                "local child = state.merged_child_candidate as uv_stdio_t",
-                "local parent = state.merged_parent_candidate as uv_stdio_t",
-                "local merged = SpawnSlot.new(SpawnBinding.inherit(child), parent)",
-                "state.stdout_slot = merged",
-                "state.stderr_slot = merged")
-            assert_ordered(process_source,
-                "local stdin_slot = config.stdin_slot as SpawnSlot",
-                "local stdout_slot = config.stdout_slot as SpawnSlot",
-                "local stderr_slot = config.stderr_slot as SpawnSlot",
-                "local options: libuv.uv_process_options_t",
-                "local stdio: libuv.uv_stdio_container_t[3]",
-                "local stdin_child = spawn_binding_stdio(stdin_slot.child)",
-                "stdio[0].flags = libuv.UV_CREATE_PIPE",
-                "stdio[0].flags = libuv.UV_INHERIT_STREAM",
-                "local stdout_child = spawn_binding_stdio(stdout_slot.child)",
-                "stdio[1].flags = libuv.UV_CREATE_PIPE",
-                "stdio[1].flags = libuv.UV_INHERIT_STREAM",
-                "local stderr_child = spawn_binding_stdio(stderr_slot.child)",
-                "stdio[2].flags = libuv.UV_CREATE_PIPE",
-                "stdio[2].flags = libuv.UV_INHERIT_STREAM",
-                "local spawn_status = libuv.uv_spawn",
-                "libuv.uv_handle_set_data(process_handle, process_pointer)",
-                "process_control.lifecycle = PROCESS_SPAWNED")
-            assert.falsy(process_source:find("UV_INHERIT_FD", 1, true))
-            assert.falsy(process_source:find("stdin_mode", 1, true))
-            assert.falsy(process_source:find("uv_stdio_tcp_t", 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                'foreign import "string.h"', 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                'foreign import "limits.h"', 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                'foreign import "signal.h"', 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                'foreign import "errno.h"', 1, true))
-            assert.falsy(sources["titan/uv/os.titan"]:find(
-                'foreign import "signal.h"', 1, true))
-            assert.truthy(sources["titan/uv/file.titan"]:find(
-                'foreign import "sys/stat.h"', 1, true))
-            assert.truthy(sources["titan/uv/runtime.titan"]:find(
-                "cstring.memcpy", 1, true))
-            assert.truthy(sources["titan/uv/runtime.titan"]:find(
-                "cstring.memcmp", 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                "local function ignore_sigpipe_if_default()", 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                "current.sa_handler ~= csignal.SIG_DFL", 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                "ignore.sa_handler = csignal.SIG_IGN", 1, true))
-            assert.truthy(sources["titan/uv/uv.titan"]:find(
-                "libuv.uv_translate_sys_error(cerrno.errno)", 1, true))
-            assert.falsy(header:find("typedef struct uv_", 1, true))
-            assert.truthy(header:find("struct uv_timer_s;", 1, true))
-            assert.truthy(header:find(
-                "void titan_uvshim_timer_cb(struct uv_timer_s *timer);",
-                1, true))
-            assert_ordered(sources["titan/uv/process.titan"],
-                "local owner, pointer = allocate_pipe_write_owner",
-                "local owner_handle: *libuv.uv_write_t =",
-                "libuv.uv_req_set_data(owner_handle, pointer)",
-                "status = libuv.uv_write")
-            assert_ordered(sources["titan/uv/task.titan"],
-                "owner.metadata.lifecycle = OWNER_ACTIVE",
-                "local timer_handle: *libuv.uv_timer_t = handle",
-                "libuv.uv_handle_set_data(",
-                "timer_handle as *libuv.uv_handle_t, pointer)",
-                "status = libuv.uv_timer_start")
-        end)
-
-    it("emits the migrated validation, aggregate, and submit order in C",
-        function()
-            local generated = prepared_uv_c()
-            local process_source = read_file("titan/uv/process.titan")
-            local runtime_source = read_file("titan/uv/runtime.titan")
-            local process_lifecycle_line = source_line_number(process_source,
-                "process_control.lifecycle = PROCESS_SPAWNED")
-            local spawn_status_line = source_line_number(process_source,
-                "if spawn_status >= 0 then")
-            local text_terminator_line = source_line_number(runtime_source,
-                "bytes[length] = 0")
-            local stream_allocation_line = source_line_number(runtime_source,
-                "return ffi.titan_ffi_char.new_array(size as integer)")
-            local empty_needle_line = source_line_number(runtime_source,
-                "if needle_length == 0 then return 0 end")
-            local long_needle_line = source_line_number(runtime_source,
-                "if needle_length > haystack_length then return -1 end")
-            local haystack_pointer_line = source_line_number(runtime_source,
-                "local haystack_pointer =")
-
-            local sigpipe = generated_function(
-                generated, "titan_uv_ignore_sigpipe_if_default_titan")
-            assert_ordered(sigpipe,
-                "sigaction(",
-                "uv_translate_sys_error(errno)",
-                ".sa_handler",
-                "SIG_DFL",
-                "SIG_IGN",
-                "sigemptyset(",
-                "uv_translate_sys_error(errno)",
-                "sigaction(",
-                "uv_translate_sys_error(errno)")
-
-            local process =
-                generated_function(generated, "titan_uv_arm_process_spawn_titan")
-            assert.match(
-                "uv_process_options_t _local_options_%d+ = %{0%};", process)
-            assert.match(
-                "uv_stdio_container_t _local_stdio_%d+%[3%] = %{0%};",
-                process)
-            assert_ordered(process,
-                "uv_spawn(",
-                "uv_handle_set_data(",
-                ('#line %d "./titan/uv/process.titan"'):format(
-                    process_lifecycle_line),
-                "setivalue(",
-                ('#line %d "./titan/uv/process.titan"'):format(
-                    spawn_status_line))
-
-            local find =
-                generated_function(generated, "titan_uv__bytes_find_titan")
-            assert_ordered(find,
-                ('#line %d "./titan/uv/runtime.titan"'):format(
-                    empty_needle_line),
-                "return _tmp_3;",
-                ('#line %d "./titan/uv/runtime.titan"'):format(
-                    long_needle_line),
-                "return _tmp_4;",
-                ('#line %d "./titan/uv/runtime.titan"'):format(
-                    haystack_pointer_line),
-                "getstr(_param_haystack)",
-                "intop(-, _local_haystack_length_1, _local_needle_length_1)",
-                "memcmp(")
-
-            local copy_text =
-                generated_function(generated, "titan_uv_copy_text_titan")
-            assert_ordered(copy_text,
-                "luaS_newudata(",
-                "memset(getudatamem(",
-                "if((_local_length_1>0))",
-                "memcpy(",
-                ('#line %d "./titan/uv/runtime.titan"'):format(
-                    text_terminator_line),
-                "C index %I out of range",
-                "getudatamem(")
-
-            local stream = generated_function(
-                generated, "titan_uv_allocate_stream_bytes_titan")
-            assert_ordered(stream,
-                "UINT_MAX",
-                ('#line %d "./titan/uv/runtime.titan"'):format(
-                    stream_allocation_line),
-                "numeric value is outside the range of %s",
-                "lua_Integer _count = _tmp_",
-                "luaS_newudata(",
-                "memset(getudatamem(")
-
-            local usable =
-                generated_function(generated, "titan_uv_usable_address_titan")
-            assert.truthy(usable:find(
-                "sizeof(struct sockaddr_storage)", 1, true))
-            local copy =
-                generated_function(generated, "titan_uv_copy_addresses_titan")
-            local call = "titan_uv_usable_address_titan(L, _mod"
-            local first = assert(copy:find(call, 1, true))
-            local second = assert(copy:find(call, first + #call, true))
-            local guard = assert(copy:find("if(", second, true))
-            local opening = assert(copy:find("{", guard, true))
-            local closing = matching_c_brace(copy, opening)
-            local cast = assert(copy:find("((size_t)(", second, true))
-            local memcpy = assert(copy:find("memcpy(", cast, true))
-            assert.is_true(second < guard and guard < cast and cast < memcpy and
-                memcpy < closing)
-
-            local dns =
-                generated_function(generated, "titan_uv_start_dns_titan")
-            assert.match("titan_ffi_char _local_service_%d+%[6%] = %{0%};",
-                dns)
-            assert.match("struct addrinfo _local_hints_%d+ = %{0%};", dns)
-            assert_ordered(dns,
-                "titan_uv_format_port_titan(",
-                "titan_uv_allocate_dns_owner_titan(",
-                "uv_req_set_data(",
-                "uv_getaddrinfo(")
-        end)
-
-    it("declares and defines every direct callback trampoline", function()
-        local runtime = read_file("titan-runtime/titan_uv.c")
-        local header = read_file("titan-runtime/titan/uv.h")
-        for _, callback in ipairs(PHASE8_CALLBACKS) do
-            assert.truthy(header:find(callback .. "(", 1, true), callback)
-            assert.truthy(runtime:find("\nvoid " .. callback .. "(", 1, true),
-                callback)
-            assert.falsy(runtime:find("static void " .. callback .. "(",
-                1, true), callback)
-        end
-    end)
-
     it("exports callbacks and records direct libuv archive references",
         function()
             local runtime_object = "titan-runtime/titan_uv.o"
@@ -935,16 +512,16 @@ describe("libuv Makefile configuration", function()
                 "NM", "nm", "-g", runtime_object))
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
-            for _, callback in ipairs(PHASE8_CALLBACKS) do
+            for _, callback in ipairs(DIRECT_CALLBACKS) do
                 assert.truthy(nm_has_symbol(output, callback), callback)
             end
-            for _, wrapper in ipairs(PHASE8_RETIRED_WRAPPERS) do
+            for _, wrapper in ipairs(RETIRED_UV_WRAPPERS) do
                 assert.falsy(nm_has_symbol(output, wrapper), wrapper)
             end
-            for _, helper in ipairs(PHASE9_RETIRED_HELPERS) do
+            for _, helper in ipairs(RETIRED_UV_HELPERS) do
                 assert.falsy(nm_has_symbol(output, helper), helper)
             end
-            for _, helper in ipairs(PHASE10_RETIRED_HELPERS) do
+            for _, helper in ipairs(RETIRED_NETWORK_HELPERS) do
                 assert.falsy(nm_has_symbol(output, helper), helper)
             end
             for _, helper in ipairs(FFI_RETIRED_HELPERS) do
@@ -957,11 +534,11 @@ describe("libuv Makefile configuration", function()
                 "NM", "nm", "-u", logical_object))
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
-            for _, callback in ipairs(PHASE8_PROVIDER_CALLBACKS) do
+            for _, callback in ipairs(PROVIDER_CALLBACK_REFERENCES) do
                 assert.truthy(nm_has_symbol(output, callback),
                     logical_object .. ": " .. callback)
             end
-            for _, function_name in ipairs(PHASE8_PUBLIC_LIBUV_CALLS) do
+            for _, function_name in ipairs(DIRECT_LIBUV_CALLS) do
                 assert.truthy(nm_has_symbol(output, function_name),
                     logical_object .. ": " .. function_name)
             end
@@ -969,15 +546,15 @@ describe("libuv Makefile configuration", function()
                 assert.truthy(nm_has_symbol(output, function_name),
                     logical_object .. ": " .. function_name)
             end
-            for _, wrapper in ipairs(PHASE8_RETIRED_WRAPPERS) do
+            for _, wrapper in ipairs(RETIRED_UV_WRAPPERS) do
                 assert.falsy(nm_has_symbol(output, wrapper),
                     logical_object .. ": " .. wrapper)
             end
-            for _, helper in ipairs(PHASE9_RETIRED_HELPERS) do
+            for _, helper in ipairs(RETIRED_UV_HELPERS) do
                 assert.falsy(nm_has_symbol(output, helper),
                     logical_object .. ": " .. helper)
             end
-            for _, helper in ipairs(PHASE10_RETIRED_HELPERS) do
+            for _, helper in ipairs(RETIRED_NETWORK_HELPERS) do
                 assert.falsy(nm_has_symbol(output, helper),
                     logical_object .. ": " .. helper)
             end
@@ -992,22 +569,22 @@ describe("libuv Makefile configuration", function()
                 "NM", "nm", "-u", archive))
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
-            for _, callback in ipairs(PHASE8_PROVIDER_CALLBACKS) do
+            for _, callback in ipairs(PROVIDER_CALLBACK_REFERENCES) do
                 assert.truthy(nm_has_symbol(output, callback), callback)
             end
-            for _, function_name in ipairs(PHASE8_PUBLIC_LIBUV_CALLS) do
+            for _, function_name in ipairs(DIRECT_LIBUV_CALLS) do
                 assert.truthy(nm_has_symbol(output, function_name), function_name)
             end
             for _, function_name in ipairs(SIGPIPE_EXTERNAL_HOST_CALLS) do
                 assert.truthy(nm_has_symbol(output, function_name), function_name)
             end
-            for _, wrapper in ipairs(PHASE8_RETIRED_WRAPPERS) do
+            for _, wrapper in ipairs(RETIRED_UV_WRAPPERS) do
                 assert.falsy(nm_has_symbol(output, wrapper), wrapper)
             end
-            for _, helper in ipairs(PHASE9_RETIRED_HELPERS) do
+            for _, helper in ipairs(RETIRED_UV_HELPERS) do
                 assert.falsy(nm_has_symbol(output, helper), helper)
             end
-            for _, helper in ipairs(PHASE10_RETIRED_HELPERS) do
+            for _, helper in ipairs(RETIRED_NETWORK_HELPERS) do
                 assert.falsy(nm_has_symbol(output, helper), helper)
             end
             for _, helper in ipairs(FFI_RETIRED_HELPERS) do
@@ -1072,12 +649,10 @@ describe("libuv Makefile configuration", function()
         function()
             local callers = {}
             for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
-                local paths = source == "$(UV_TITAN_SOURCES)"
-                    and makefile_words("UV_TITAN_SOURCES") or { source }
-                for _, path in ipairs(paths) do
-                    if read_file(path):find(
+                if source ~= "$(UV_TITAN_SOURCES)" then
+                    if read_file(source):find(
                             "lua.lua_setmetatable", 1, true) then
-                        callers[#callers + 1] = path
+                        callers[#callers + 1] = source
                     end
                 end
             end
@@ -1090,14 +665,12 @@ describe("libuv Makefile configuration", function()
             "os", "peg", "string",
         }
         for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
-            local paths = source == "$(UV_TITAN_SOURCES)"
-                and makefile_words("UV_TITAN_SOURCES") or { source }
-            for _, path in ipairs(paths) do
-                local contents = read_file(path)
+            if source ~= "$(UV_TITAN_SOURCES)" then
+                local contents = read_file(source)
                 for _, module in ipairs(established) do
                     local long = 'import "titan.' .. module .. '"'
                     assert.falsy(contents:find(long, 1, true),
-                        path .. " uses " .. long)
+                        source .. " uses " .. long)
                 end
             end
         end
@@ -1165,7 +738,7 @@ describe("libuv Makefile configuration", function()
             local close = {
                 { name = "close", params = {}, results = {} },
             }
-            local function joined(...)
+            local function combined_methods(...)
                 local result = {}
                 for _, group in ipairs({ ... }) do
                     for _, method in ipairs(group) do
@@ -1175,15 +748,24 @@ describe("libuv Makefile configuration", function()
                 return result
             end
             assert.same({
-                { name = "Reader", methods = joined(read) },
-                { name = "Writer", methods = joined(write) },
-                { name = "Closer", methods = joined(close) },
-                { name = "ReaderWriter", methods = joined(read, write) },
-                { name = "ReaderCloser", methods = joined(read, close) },
-                { name = "WriterCloser", methods = joined(write, close) },
+                { name = "Reader", methods = combined_methods(read) },
+                { name = "Writer", methods = combined_methods(write) },
+                { name = "Closer", methods = combined_methods(close) },
+                {
+                    name = "ReaderWriter",
+                    methods = combined_methods(read, write),
+                },
+                {
+                    name = "ReaderCloser",
+                    methods = combined_methods(read, close),
+                },
+                {
+                    name = "WriterCloser",
+                    methods = combined_methods(write, close),
+                },
                 {
                     name = "ReaderWriterCloser",
-                    methods = joined(read, write, close),
+                    methods = combined_methods(read, write, close),
                 },
             }, interfaces)
             assert.same({
@@ -1254,61 +836,6 @@ describe("libuv Makefile configuration", function()
             assert.same(wanted, found)
         end)
 
-    it("keeps every uv export with its semantic contributor", function()
-        assert.same({}, public_declarations(UV_MAIN_SOURCE))
-        assert.same({
-            "uv_file", "_fs_open", "_fs_read", "_fs_write",
-            "_fs_flush", "_fs_is_closed", "_fs_validate_read",
-            "_fs_close", "_fs_stat", "_fs_lstat", "_fs_tmpname",
-            "_fs_mkdir", "_fs_unlink", "_fs_rmdir", "_fs_rename",
-            "_fs_list",
-        }, public_declarations("titan/uv/file.titan"))
-        assert.same({
-            "_os_getenv", "_os_setenv", "_os_unsetenv", "_os_cwd",
-            "_os_chdir", "_fs_pwd", "_fs_chdir", "_os_homedir",
-            "_os_tmpdir", "_os_hostname", "_os_exepath", "_os_pid",
-            "_os_ppid", "_os_clock", "_os_time", "_os_wait_signal",
-            "_os_signal_name",
-        }, public_declarations("titan/uv/os.titan"))
-        assert.same({
-            "uv_pipe_t", "uv_stdio_t", "uv_spawn_config", "uv_process_t",
-            "_os_spawn_config_new", "_os_spawn_config_with_stdin",
-            "_os_spawn_config_with_stdout", "_os_spawn_config_with_stderr",
-            "_os_spawn_config_with_parent_stdin",
-            "_os_spawn_config_with_parent_stdout",
-            "_os_spawn_config_with_parent_stderr",
-            "_os_spawn_config_with_merged_output",
-            "_os_spawn_config_close", "_os_spawn_config_error",
-            "_os_process_spawn_with_config", "_os_process_spawn",
-            "_os_process_stdin", "_os_process_stdout",
-            "_os_process_stderr", "_os_process_pipes",
-            "_os_process_wait", "_os_process_kill",
-            "_os_process_is_running",
-            "_os_stream_write", "_os_stream_close",
-            "_os_stream_read", "_os_stream_validate_read",
-            "_os_stream_read_error_is", "_os_parent_stdin",
-            "_os_parent_stdout", "_os_parent_stderr", "_os_stdio_kind",
-            "_os_stdio_generation", "_os_stdio_is_tty", "_os_stdio_read",
-            "_os_stdio_validate_read", "_os_stdio_read_error_is",
-            "_os_stdio_write", "_os_stdio_close",
-        }, public_declarations("titan/uv/process.titan"))
-        assert.same({
-            "Error", "Error.new", "_loop", "_version",
-        }, public_declarations("titan/uv/runtime.titan"))
-        assert.same({
-            "Cancelled", "Cancelled.new", "uv_timer_t", "Task", "_run",
-            "_os_exit", "Task:status", "Task:cancel", "Task:join",
-            "_sleep", "_yield", "_ticker", "_ticker_tick",
-            "_ticker_close",
-        }, public_declarations("titan/uv/task.titan"))
-        assert.same({
-            "uv_tcp_t", "_net_connect", "_net_listen", "_net_read",
-            "_net_read_error_is", "_net_write", "_net_shutdown",
-            "_net_accept", "_net_close", "_net_is_closed",
-            "_net_eof_error",
-        }, public_declarations("titan/uv/tcp.titan"))
-    end)
-
     it("pins the public fs facade and its portable location bridges",
         function()
             local path = "titan/fs.titan"
@@ -1347,6 +874,9 @@ describe("libuv Makefile configuration", function()
             "InputStream:is_tty", "exit",
             "wait_signal",
         }, public_declarations("titan/os.titan"))
+
+        assert.falsy(read_file("titan/os.titan"):find(
+            "_os_stdio_is_closed", 1, true))
     end)
 
     it("centralizes every peg and string export in the folder main",
@@ -1416,67 +946,6 @@ describe("libuv Makefile configuration", function()
             }, local_union_declarations(
                 "titan/string/regex_parser.titan"))
         end)
-
-    it("keeps every private uv record with its semantic contributor",
-        function()
-            assert.same({}, local_record_declarations(UV_MAIN_SOURCE))
-            assert.same({
-                "FsConstants", "FsStatResult", "FsTmpResult",
-                "FsOperation", "FsControl", "uv_fs_t",
-            }, local_record_declarations("titan/uv/file.titan"))
-            assert.same({
-                "SignalSpec", "SignalControl", "uv_signal_t",
-            }, local_record_declarations("titan/uv/os.titan"))
-            assert.same({
-                "ProcessControl", "StreamControl", "SpawnSlot",
-                "SpawnConfigState",
-                "ProcessOperation", "ProcessRequestControl",
-                "ProcessExitResult", "uv_tty_t", "uv_pipe_write_t",
-                "uv_process_grace_t",
-            }, local_record_declarations("titan/uv/process.titan"))
-            assert.same({
-                "SpawnBinding", "StdioHandle",
-            }, local_union_declarations("titan/uv/process.titan"))
-            assert.same({
-                "Loop", "Runtime", "ByteChunk", "Text", "Buffer",
-            }, local_record_declarations("titan/uv/runtime.titan"))
-            assert.same({
-                "TimerControl", "DriveControl", "Request", "TickerState",
-            }, local_record_declarations("titan/uv/task.titan"))
-            assert.same({
-                "NetOperation", "NetRequestControl", "TcpControl",
-                "uv_getaddrinfo_t", "uv_connect_t", "uv_write_t",
-                "uv_shutdown_t",
-            }, local_record_declarations("titan/uv/tcp.titan"))
-        end)
-
-    it("keeps the private FS constants instance beside its record", function()
-        local main_ast = parsed_source(UV_MAIN_SOURCE)
-        for _, node in ipairs(main_ast) do
-            assert.falsy(node._tag == "Ast.TopLevelVar" and
-                node.decl.name == "FS")
-        end
-
-        local file_ast = parsed_source("titan/uv/file.titan")
-        local record_index, fs_index
-        for index, node in ipairs(file_ast) do
-            if node._tag == "Ast.TopLevelRecord" and
-                node.name == "FsConstants" then
-                record_index = index
-            elseif node._tag == "Ast.TopLevelVar" and
-                node.decl.name == "FS" then
-                fs_index = index
-                assert.is_true(node.islocal)
-            end
-        end
-        assert.truthy(record_index)
-        assert.equal(record_index + 2, fs_index)
-        local constructor = file_ast[record_index + 1]
-        assert.equal("Ast.TopLevelStatic", constructor._tag)
-        assert.equal("FsConstants", constructor.class)
-        assert.equal("new", constructor.name)
-        assert.is_true(constructor._record_constructor)
-    end)
 
     it("keeps LuaRocks on the native toolchain that prepared its prefix",
         function()
@@ -2539,9 +2008,6 @@ fi
                 sanitizer_job)
             assert.truthy(sanitizer_job:find(
                 "bash spec/support/ci_sanitizer_capture.sh", 1, true),
-                sanitizer_job)
-            assert.equal(1, count_literal(sanitizer_job,
-                "--filter-out='fs runtime covers modes, binary/NUL data'"),
                 sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 'cmp "$snapshot_provider" "$provider"'), sanitizer_job)

@@ -73,10 +73,17 @@ local s: api.Reader?        = nil      -- imported Interface type
 ```
 
 The suffix does not nest (`integer??` is a syntax error), and it cannot be
-applied to a whole function type — there is no syntax for "optional
-function" (see [Limitations](#limitations)). Writing `value?` is accepted
-but means exactly `value`: the `value` type already contains `nil`, so
-optionizing it changes nothing.
+applied directly to a whole function type because function types are not
+simple types in this grammar. Name the function type with an alias and apply
+the suffix to that name instead:
+
+```titan
+local type Handler = (string) -> boolean
+local handler: Handler? = nil
+```
+
+Writing `value?` is accepted but means exactly `value`: the `value` type
+already contains `nil`, so optionizing it changes nothing.
 
 Container reads and finite flexible-result projections can nevertheless
 produce a may-be-absent function value internally. Consuming it as a function
@@ -499,9 +506,10 @@ distinctions are centralized in the
 Beyond the notes already made above, the current prototype has these known
 rough edges:
 
-* **Option function types cannot be written.** `?` suffixes simple types
-  only, and there is no parenthesized type syntax to attach it to a
-  function type. An option of a function type still *arises* implicitly —
-  indexing an array or map whose element type is a function yields one, and
-  calling through it auto-unwraps (see [above](#unwrapping-is-checked)) —
-  but it cannot be spelled in an annotation.
+* **A direct function type cannot take `?`.** `?` suffixes simple types only,
+  and there is no parenthesized type syntax to attach it directly to a
+  function type. The type system does support options of function types:
+  give the function type an alias and write `Alias?`. Such an option can also
+  arise implicitly when indexing an array or map whose element type is a
+  function; calling through it auto-unwraps (see
+  [above](#unwrapping-is-checked)).

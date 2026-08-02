@@ -11,20 +11,25 @@ local h = require 'spec.support.helpers'
 local run_coder = h.run_coder
 
 local function captured_lambda_source(count)
-    local declarations, terms = {}, {}
+    -- Keep each capture use shallow: this is a closure-capacity test, not a
+    -- stress test for a C compiler's recursive handling of one huge expression.
+    local declarations, additions = {}, {}
     for i = 1, count do
         declarations[#declarations + 1] =
             string.format("local capture_%03d: integer = %d", i, i)
-        terms[#terms + 1] = string.format("capture_%03d", i)
+        additions[#additions + 1] =
+            string.format("total = total + capture_%03d", i)
     end
     return string.format([[
         function make(): (() -> integer)
             %s
             return function(): integer
-                return %s
+                local total: integer = 0
+                %s
+                return total
             end
         end
-    ]], table.concat(declarations, "\n"), table.concat(terms, " + "))
+    ]], table.concat(declarations, "\n"), table.concat(additions, "\n"))
 end
 
 describe("closures (end-to-end)", function()

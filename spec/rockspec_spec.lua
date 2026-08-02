@@ -749,12 +749,14 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             -- Requiring only the public facade must initialize uv globally.
             -- The returned uv-owned Task resolves its methods transitively;
             -- consumers do not import or require uv just to call them.
+            local transitive_result
             local transitive = async.run(function()
                 timer.yield()
-                return "transitive"
+                transitive_result = "transitive"
             end)
             async.loop()
-            assert(transitive:join() == "transitive")
+            assert(transitive:status() == "succeeded")
+            assert(transitive_result == "transitive")
 
             local uv = require "titan.uv"
             local fs = require "titan.fs"
@@ -815,22 +817,26 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             assert(require "io" == builtin_io)
             assert(require "os" == builtin_os)
             assert(system.pid() > 0)
+            local installed_result
             local task = async.run(function()
                 local inner = coroutine.create(function()
                     timer.yield()
                     return "installed"
                 end, {})
-                return inner:resume(nil, nil)
+                installed_result = inner:resume(nil, nil)
             end)
             async.loop()
-            assert(task:join() == "installed")
+            assert(task:status() == "succeeded")
+            assert(installed_result == "installed")
 
+            local direct_result
             local direct = async.run(function()
                 timer.yield()
-                return "direct"
+                direct_result = "direct"
             end)
             async.loop()
-            assert(direct:join() == "direct")
+            assert(direct:status() == "succeeded")
+            assert(direct_result == "direct")
         ]], STDLIB_PROVIDER, STDLIB_SHIMDIR)
         ok, output, why, code = run(clean_environment({
             LUA, "-e", runtime_program,

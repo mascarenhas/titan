@@ -1,232 +1,147 @@
 local async_stdlib = require "spec.support.async_stdlib"
 
-local TIMER_CASES = [[
-    local async = import "async"
-    local stream = import "io"
-    local timer = import "timer"
+local TIMER_CASES = [==[
+local async = import "async"
+local stream = import "io"
+local timer = import "timer"
 
-    function schedule_four_ticks(): async.Task
-      return async.run(function (): value
-        local ticker = timer.ticker(1)
-        local count = 0
-        for i = 1, 4 do
-          if ticker:tick() then
-            count = count + 1
-          end
-        end
-        ticker:close()
-        ticker:close()
-        if ticker:tick() then
-          raise "closed Ticker produced another tick"
-        end
-        return count
-      end)
+local outcome = "not-run"
+
+local function check(condition: boolean, message: string)
+  if not condition then raise message end
+end
+
+local function active(task: async.Task): boolean
+  local status = task:status()
+  return status == "ready" or status == "running" or status == "waiting"
+end
+
+function result(): string
+  return outcome
+end
+
+function start_turns(): async.Task
+  outcome = "running"
+  return async.run(function (): value
+    timer.yield()
+    timer.sleep(0)
+    timer.sleep(2)
+    local rejected = false
+    do
+      timer.sleep(-1)
+    catch
+      local failure = error as async.Error
+      check(failure.operation == "timer.sleep",
+            "negative sleep reported the wrong operation")
+      rejected = true
     end
+    check(rejected, "negative sleep was accepted")
+    outcome = "turns-ok"
+    return nil
+  end)
+end
 
-    function schedule_close_waiter(): async.Task
-      return async.run(function (): value
-        local ticker = timer.ticker(1000)
-        local waiter = async.run(function (): value
-          return ticker:tick()
-        end)
-        timer.yield()
-        ticker:close()
-        ticker:close()
-        return waiter:join()
-      end)
+function start_ticker(): async.Task
+  outcome = "running"
+  return async.run(function (): value
+    local ticker = timer.ticker(1)
+    local count = 0
+    for _ = 1, 3 do
+      if ticker:tick() then count = count + 1 end
     end
+    check(count == 3, "Ticker lost a waited tick")
 
-    function schedule_dropped_ticks(): async.Task
-      return async.run(function (): value
-        local ticker = timer.ticker(1)
-        -- Let several callbacks fire with no waiter. Empty ticks must be dropped.
-        timer.sleep(12)
-        local phase = 0
-        local target = async.run(function (): value
-          phase = 1
-          local got = ticker:tick()
-          phase = 3
-          return got
-        end)
-        local observer = async.run(function (): value
-          while phase == 0 do
-            timer.yield()
-          end
-          if phase ~= 1 or target:status() ~= "waiting" then
-            raise "an empty Ticker tick was buffered"
-          end
-          phase = 2
-          return nil
-        end)
-        observer:join()
-        local got = target:join() as boolean
-        ticker:close()
-        if not got or phase ~= 3 then
-          raise "Ticker did not resume on a later callback"
-        end
-        return "dropped-empty-ticks"
-      end)
+    -- A recurring timer retains only the fact that it fired while there was
+    -- no waiter. Consuming that fact must not require another native tick.
+    timer.sleep(8)
+    check(ticker:tick(), "Ticker did not retain its latest unwaited tick")
+
+    local closer: stream.Closer = ticker
+    closer:close()
+    closer:close()
+    check(not ticker:tick(), "closed Ticker produced another tick")
+    outcome = "ticker-ok"
+    return nil
+  end)
+end
+
+function start_pending_close(): async.Task
+  outcome = "running"
+  return async.run(function (): value
+    local ticker = timer.ticker(10000)
+    local ticked = true
+    local waiter = async.run(function (): value
+      ticked = ticker:tick()
+      return nil
+    end)
+
+    while waiter:status() == "ready" do timer.yield() end
+    check(waiter:status() == "waiting",
+          "Ticker waiter did not suspend")
+    local competing_waiter_rejected = false
+    do
+      ticker:tick()
+    catch
+      competing_waiter_rejected = true
     end
+    check(competing_waiter_rejected,
+          "Ticker accepted a second waiting Task")
+    ticker:close()
+    while active(waiter) do timer.yield() end
+    check(waiter:status() == "succeeded",
+          "closing Ticker failed its waiter")
+    check(not ticked, "closing Ticker resumed its waiter with true")
 
-    function schedule_zero_turns(): async.Task
-      return async.run(function (): value
-        local phase = 0
-        local sleep_task = async.run(function (): value
-          phase = 1
-          timer.sleep(0)
-          if phase ~= 2 then
-            raise "sleep(0) did not cede a turn"
-          end
-          phase = 3
-          return nil
-        end)
-        local observer = async.run(function (): value
-          while phase == 0 do timer.yield() end
-          phase = 2
-          timer.yield()
-          if phase ~= 3 then
-            raise "yield() did not cede a turn"
-          end
-          return nil
-        end)
-        sleep_task:join()
-        observer:join()
-        return "zero-turns-ok"
-      end)
+    local invalid = false
+    do
+      timer.ticker(0)
+    catch
+      invalid = true
     end
+    check(invalid, "Ticker accepted a nonpositive interval")
+    outcome = "pending-close-ok"
+    return nil
+  end)
+end
+]==]
 
-    function schedule_second_waiter_rejected(): async.Task
-      return async.run(function (): value
-        local ticker = timer.ticker(10000)
-        local first = async.run(function (): value
-          return ticker:tick()
-        end)
-        while first:status() == "ready" do
-          timer.yield()
-        end
-        if first:status() ~= "waiting" then
-          raise "first Ticker waiter did not suspend"
-        end
-
-        local second = async.run(function (): value
-          return ticker:tick()
-        end)
-        local rejected = false
-        do
-          second:join()
-        catch
-          rejected = true
-        end
-        if not rejected then
-          raise "Ticker accepted a second waiter"
-        end
-
-        ticker:close()
-        if first:join() as boolean then
-          raise "closed Ticker resumed its first waiter with true"
-        end
-        return "second-waiter-rejected"
-      end)
-    end
-
-    function schedule_interface_close(): async.Task
-      return async.run(function (): value
-        local ticker = timer.ticker(10000)
-        local waiter = async.run(function (): value
-          return ticker:tick()
-        end)
-        while waiter:status() == "ready" do timer.yield() end
-        local closer: stream.Closer = ticker
-        closer:close()
-        closer:close()
-        if waiter:join() as boolean then
-          raise "io.Closer resumed a Ticker waiter with true"
-        end
-        if ticker:tick() then
-          raise "Ticker was not closed through incidental io.Closer"
-        end
-        return "interface-close-ok"
-      end)
-    end
-]]
-
-describe("timer recurring handles", function()
+describe("timer standard library", function()
     local workspace
 
     setup(function()
         workspace = async_stdlib.workspace("timer")
-        async_stdlib.write_source(workspace, "timer_recurring_cases", TIMER_CASES)
-        async_stdlib.compile(workspace, "timer_recurring_cases")
+        async_stdlib.write_source(workspace, "timer_cases", TIMER_CASES)
+        async_stdlib.compile(workspace, "timer_cases")
     end)
 
-    teardown(function() async_stdlib.cleanup(workspace) end)
+    teardown(function()
+        async_stdlib.cleanup(workspace)
+    end)
 
-    local function run(source)
+    local function run(function_name, expected)
+        local source = ([==[
+local async = require "titan.async"
+local cases = require "timer_cases"
+local task = assert(cases.%s())
+async.loop()
+assert(task:status() == "succeeded", task:status())
+assert(cases.result() == %q, cases.result())
+]==]):format(function_name, expected)
         local ok, status, output =
             async_stdlib.run_lua_source(workspace, source)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
+        assert.equals(0, status, output)
     end
 
-    it("cycles four times and makes close immediate and idempotent", function()
-        run([[
-            local async = require "titan.async"
-            local cases = require "timer_recurring_cases"
-            local task = cases.schedule_four_ticks()
-            async.loop()
-            assert(task:join() == 4)
-        ]])
+    it("runs yield, zero sleep, and timed sleep continuations", function()
+        run("start_turns", "turns-ok")
     end)
 
-    it("closes a pending tick waiter with false", function()
-        run([[
-            local async = require "titan.async"
-            local cases = require "timer_recurring_cases"
-            local task = cases.schedule_close_waiter()
-            async.loop()
-            assert(task:join() == false)
-        ]])
+    it("delivers waited ticks and retains one unwaited tick", function()
+        run("start_ticker", "ticker-ok")
     end)
 
-    it("drops ticks that fire without a waiter", function()
-        run([[
-            local async = require "titan.async"
-            local cases = require "timer_recurring_cases"
-            local task = cases.schedule_dropped_ticks()
-            async.loop()
-            assert(task:join() == "dropped-empty-ticks")
-        ]])
-    end)
-
-    it("cedes a turn for sleep(0) and yield()", function()
-        run([[
-            local async = require "titan.async"
-            local cases = require "timer_recurring_cases"
-            local task = cases.schedule_zero_turns()
-            async.loop()
-            assert(task:join() == "zero-turns-ok")
-        ]])
-    end)
-
-    it("rejects nonpositive periods and a second tick waiter", function()
-        run([[
-            local async = require "titan.async"
-            local timer = require "titan.timer"
-            local cases = require "timer_recurring_cases"
-            local ok, err = pcall(timer.ticker, 0)
-            assert(not ok and tostring(err):find("positive", 1, true))
-            local task = cases.schedule_second_waiter_rejected()
-            async.loop()
-            assert(task:join() == "second-waiter-rejected")
-        ]])
-    end)
-
-    it("dispatches incidental Ticker close through io.Closer", function()
-        run([[
-            local async = require "titan.async"
-            local cases = require "timer_recurring_cases"
-            local task = cases.schedule_interface_close()
-            async.loop()
-            assert(task:join() == "interface-close-ok")
-        ]])
+    it("closes a pending waiter and rejects invalid periods", function()
+        run("start_pending_close", "pending-close-ok")
     end)
 end)

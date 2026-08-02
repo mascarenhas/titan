@@ -1,4 +1,3 @@
-#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -10,102 +9,218 @@
 #include "titan.h"
 #include "titan/uv.h"
 
-typedef void (*titan_uv_dispatch_func)(lua_State *L, Udata *_mod, CClosure *_fn,
-                                       Udata *owner, lua_Integer event_kind,
-                                       lua_Integer result, size_t size,
-                                       void *pointer);
+typedef void (*titan_uv_noarg_callback_func)(lua_State *L, Udata *_mod,
+                                             CClosure *_fn, Udata *owner);
+typedef void (*titan_uv_integer_callback_func)(lua_State *L, Udata *_mod,
+                                               CClosure *_fn, Udata *owner,
+                                               lua_Integer result);
+typedef void (*titan_uv_two_integer_callback_func)(lua_State *L, Udata *_mod,
+                                                   CClosure *_fn,
+                                                   Udata *owner,
+                                                   lua_Integer first,
+                                                   lua_Integer second);
+typedef void (*titan_uv_size_pointer_callback_func)(lua_State *L, Udata *_mod,
+                                                    CClosure *_fn,
+                                                    Udata *owner, size_t size,
+                                                    void *pointer);
+typedef void (*titan_uv_integer_pointer_callback_func)(lua_State *L,
+                                                       Udata *_mod,
+                                                       CClosure *_fn,
+                                                       Udata *owner,
+                                                       lua_Integer result,
+                                                       void *pointer);
+typedef void (*titan_uv_pointer_callback_func)(lua_State *L, Udata *_mod,
+                                               CClosure *_fn, Udata *owner,
+                                               void *pointer);
+
+typedef struct titan_uvshim_callback_context {
+  lua_State *L;
+  Udata *module;
+  CClosure *closure;
+  void *entry;
+  int stack_top;
+} titan_uvshim_callback_context;
 
 /*
- * The Runtime-owned owner/resource graph strongly roots owner while libuv can
- * call us.  Its fixed five-slot layout places the main thread and dispatcher
- * at the indices below; those fields are trusted in exactly the same way as
- * the fixed coroutine-owner fields read by titan_coro_entry.
+ * Titan strongly roots each request/handle continuation record while libuv
+ * can call us. The owning Runtime stores its stable Lua main thread once in
+ * uv_loop_t data. This helper only extracts the common callback context; each
+ * libuv-shaped trampoline below invokes its own exact Titan callback handler.
  */
-static void titan_uvshim_dispatch(Udata *owner, lua_Integer event_kind,
-                                  lua_Integer result, size_t size,
-                                  void *pointer) {
-  lua_State *L = thvalue(&owner->uv[TITAN_UV_OWNER_MAIN_THREAD_C_INDEX].uv);
-  CClosure *dispatcher =
-      clCvalue(&owner->uv[TITAN_UV_OWNER_DISPATCHER_C_INDEX].uv);
-  Udata *M = uvalue(&dispatcher->upvalue[0]);
-  titan_uv_dispatch_func dispatch =
-      titan_cast_func(titan_uv_dispatch_func, pvalue(&dispatcher->upvalue[2]));
+static titan_uvshim_callback_context titan_uvshim_callback_context_for(
+    uv_loop_t *loop, Udata *owner, size_t callback_index) {
+  titan_uvshim_callback_context context;
+  CClosure *callback = clCvalue(&owner->uv[callback_index].uv);
 
-  /* Direct native Titan entry: the trusted dispatcher owns its outer catch. */
-  dispatch(L, M, NULL, owner, event_kind, result, size, pointer);
+  context.L = (lua_State *)uv_loop_get_data(loop);
+  context.module = uvalue(&callback->upvalue[0]);
+  context.closure = callback;
+  context.entry = pvalue(&callback->upvalue[2]);
+  context.stack_top = lua_gettop(context.L);
+  /* Direct Titan callers must stack-root GC arguments. In particular, a
+   * one-shot callback may clear the Task's request root while it resumes, and
+   * close_cb removes its handle root before resuming its waiter. */
+  titan_pushmodule(context.L, owner);
+  return context;
+}
+
+static void titan_uvshim_callback_context_release(
+    titan_uvshim_callback_context *context) {
+  lua_settop(context->L, context->stack_top);
+}
+
+void titan_uvshim_buf_init_const(uv_buf_t *buf, const char *base, size_t len) {
+  buf->base = (char *)base;
+  buf->len = len;
 }
 
 void titan_uvshim_signal_cb(uv_signal_t *signal, int signum) {
   Udata *owner = (Udata *)uv_handle_get_data((uv_handle_t *)signal);
-  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_SIGNAL, signum, 0, NULL);
+  titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
+      uv_handle_get_loop((uv_handle_t *)signal), owner,
+      TITAN_UV_PRIMARY_CALLBACK_C_INDEX);
+  titan_uv_integer_callback_func callback = titan_cast_func(
+      titan_uv_integer_callback_func, context.entry);
+  callback(context.L, context.module, context.closure, owner, signum);
+  titan_uvshim_callback_context_release(&context);
 }
 
 void titan_uvshim_process_exit_cb(uv_process_t *process, int64_t exit_status,
                                   int term_signal) {
   Udata *owner = (Udata *)uv_handle_get_data((uv_handle_t *)process);
-  size_t signal_size;
+  titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
+      uv_handle_get_loop((uv_handle_t *)process), owner,
+      TITAN_UV_PRIMARY_CALLBACK_C_INDEX);
+  titan_uv_two_integer_callback_func callback = titan_cast_func(
+      titan_uv_two_integer_callback_func, context.entry);
 
-  assert(term_signal >= 0);
-  signal_size = (size_t)term_signal;
-  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_PROCESS_EXIT,
-                        (lua_Integer)exit_status, signal_size, NULL);
+  callback(context.L, context.module, context.closure, owner,
+           (lua_Integer)exit_status, (lua_Integer)term_signal);
+  titan_uvshim_callback_context_release(&context);
 }
 
 void titan_uvshim_getaddrinfo_cb(uv_getaddrinfo_t *req, int status,
                                  struct addrinfo *result) {
   Udata *owner = (Udata *)uv_req_get_data((uv_req_t *)req);
-  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_GETADDRINFO, status, 0, result);
+  titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
+      req->loop, owner, TITAN_UV_PRIMARY_CALLBACK_C_INDEX);
+  titan_uv_integer_pointer_callback_func callback = titan_cast_func(
+      titan_uv_integer_pointer_callback_func, context.entry);
+  callback(context.L, context.module, context.closure, owner, status, result);
+  titan_uvshim_callback_context_release(&context);
 }
 
 void titan_uvshim_connect_cb(uv_connect_t *req, int status) {
   Udata *owner = (Udata *)uv_req_get_data((uv_req_t *)req);
-  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_CONNECT, status, 0, NULL);
+  titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
+      uv_handle_get_loop((uv_handle_t *)req->handle), owner,
+      TITAN_UV_PRIMARY_CALLBACK_C_INDEX);
+  titan_uv_integer_callback_func callback = titan_cast_func(
+      titan_uv_integer_callback_func, context.entry);
+  callback(context.L, context.module, context.closure, owner, status);
+  titan_uvshim_callback_context_release(&context);
 }
 
 void titan_uvshim_write_cb(uv_write_t *req, int status) {
   Udata *owner = (Udata *)uv_req_get_data((uv_req_t *)req);
-  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_WRITE, status, 0, NULL);
+  titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
+      uv_handle_get_loop((uv_handle_t *)req->handle), owner,
+      TITAN_UV_PRIMARY_CALLBACK_C_INDEX);
+  titan_uv_integer_callback_func callback = titan_cast_func(
+      titan_uv_integer_callback_func, context.entry);
+  callback(context.L, context.module, context.closure, owner, status);
+  titan_uvshim_callback_context_release(&context);
 }
 
 void titan_uvshim_shutdown_cb(uv_shutdown_t *req, int status) {
   Udata *owner = (Udata *)uv_req_get_data((uv_req_t *)req);
-  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_SHUTDOWN, status, 0, NULL);
+  titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
+      uv_handle_get_loop((uv_handle_t *)req->handle), owner,
+      TITAN_UV_PRIMARY_CALLBACK_C_INDEX);
+  titan_uv_integer_callback_func callback = titan_cast_func(
+      titan_uv_integer_callback_func, context.entry);
+  callback(context.L, context.module, context.closure, owner, status);
+  titan_uvshim_callback_context_release(&context);
 }
 
 void titan_uvshim_alloc_cb(uv_handle_t *handle, size_t suggested_size,
                            uv_buf_t *buf) {
   Udata *owner = (Udata *)uv_handle_get_data(handle);
-  assert(buf != NULL);
-  *buf = uv_buf_init(NULL, 0);
-  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_STREAM_ALLOC, 0, suggested_size,
-                        buf);
+  titan_uvshim_callback_context context;
+  titan_uv_size_pointer_callback_func callback;
+
+  context = titan_uvshim_callback_context_for(
+      uv_handle_get_loop(handle), owner, TITAN_UV_PRIMARY_CALLBACK_C_INDEX);
+  callback = titan_cast_func(titan_uv_size_pointer_callback_func,
+                             context.entry);
+  callback(context.L, context.module, context.closure, owner, suggested_size,
+           buf);
+  titan_uvshim_callback_context_release(&context);
 }
 
 void titan_uvshim_read_cb(uv_stream_t *stream, ssize_t nread,
                           const uv_buf_t *buf) {
   Udata *owner = (Udata *)uv_handle_get_data((uv_handle_t *)stream);
+  titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
+      uv_handle_get_loop((uv_handle_t *)stream), owner,
+      TITAN_UV_READ_CALLBACK_C_INDEX);
+  titan_uv_integer_callback_func callback = titan_cast_func(
+      titan_uv_integer_callback_func, context.entry);
   (void)buf;
-  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_STREAM_READ, (lua_Integer)nread,
-                        0, NULL);
+  callback(context.L, context.module, context.closure, owner,
+           (lua_Integer)nread);
+  titan_uvshim_callback_context_release(&context);
 }
 
 void titan_uvshim_connection_cb(uv_stream_t *server, int status) {
   Udata *owner = (Udata *)uv_handle_get_data((uv_handle_t *)server);
-  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_CONNECTION, status, 0, NULL);
+  titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
+      uv_handle_get_loop((uv_handle_t *)server), owner,
+      TITAN_UV_CONNECTION_CALLBACK_C_INDEX);
+  titan_uv_integer_callback_func callback = titan_cast_func(
+      titan_uv_integer_callback_func, context.entry);
+  callback(context.L, context.module, context.closure, owner, status);
+  titan_uvshim_callback_context_release(&context);
 }
 
 void titan_uvshim_timer_cb(uv_timer_t *timer) {
   Udata *owner = (Udata *)uv_handle_get_data((uv_handle_t *)timer);
-  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_TIMER, 0, 0, NULL);
+  titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
+      uv_handle_get_loop((uv_handle_t *)timer), owner,
+      TITAN_UV_PRIMARY_CALLBACK_C_INDEX);
+  titan_uv_noarg_callback_func callback = titan_cast_func(
+      titan_uv_noarg_callback_func, context.entry);
+  callback(context.L, context.module, context.closure, owner);
+  titan_uvshim_callback_context_release(&context);
 }
 
 void titan_uvshim_close_cb(uv_handle_t *handle) {
   Udata *owner = (Udata *)uv_handle_get_data(handle);
-  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_HANDLE_CLOSE, 0, 0, NULL);
+  titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
+      uv_handle_get_loop(handle), owner, TITAN_UV_PRIMARY_CALLBACK_C_INDEX);
+  titan_uv_noarg_callback_func callback = titan_cast_func(
+      titan_uv_noarg_callback_func, context.entry);
+  callback(context.L, context.module, context.closure, owner);
+  titan_uvshim_callback_context_release(&context);
+}
+
+void titan_uvshim_walk_cb(uv_handle_t *handle, void *arg) {
+  Udata *owner = (Udata *)arg;
+  titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
+      uv_handle_get_loop(handle), owner, TITAN_UV_PRIMARY_CALLBACK_C_INDEX);
+  titan_uv_pointer_callback_func callback = titan_cast_func(
+      titan_uv_pointer_callback_func, context.entry);
+  callback(context.L, context.module, context.closure, owner, handle);
+  titan_uvshim_callback_context_release(&context);
 }
 
 void titan_uvshim_fs_cb(uv_fs_t *req) {
   Udata *owner = (Udata *)uv_req_get_data((uv_req_t *)req);
   lua_Integer result = (lua_Integer)uv_fs_get_result(req);
-  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_FS, result, 0, NULL);
+  titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
+      req->loop, owner, TITAN_UV_PRIMARY_CALLBACK_C_INDEX);
+  titan_uv_integer_callback_func callback = titan_cast_func(
+      titan_uv_integer_callback_func, context.entry);
+  callback(context.L, context.module, context.closure, owner, result);
+  titan_uvshim_callback_context_release(&context);
 }

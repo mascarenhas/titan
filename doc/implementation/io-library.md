@@ -93,17 +93,13 @@ another buffer or dispatch layer. `wait` calls `Process:wait` only while the
 cached status is nil, stores the complete normal-or-signal result, and returns
 that same status on later calls.
 
-`close` first checks only a successfully completed close bit. It then performs
-the idempotent stdin close, sends `term` only if `Process:is_running` still
-observes a live child, and calls the caching `wait` when it requested that
-termination. A `finally` then closes the one merged InputStream and sets the
-facade's completed-close bit only when process cleanup reached its commit
-point. The output close always runs, so descendant references cannot keep
-unread process output buffered after `InputOutputStream:close` returns or
-raises. Cancellation or an error before the commit leaves a later composite
-close able to retry process cleanup; the already-disposed output close is then
-an idempotent no-op. A later `wait` uses either the facade cache or the
-Process's retained exit status.
+`close` first checks only a successfully completed close bit. It closes stdin,
+sends `term` only if `Process:is_running` still observes a live child, and
+calls the caching `wait` when it requested that termination. After stdin close
+succeeds, a `finally` closes the one merged InputStream even if signalling or
+waiting raises. The completed bit is set only after process cleanup succeeds,
+so a later call can retry whatever did not reach that point. A later `wait`
+uses either the facade cache or the Process's retained exit status.
 
 The focused non-LuaCov suite in `spec/stdlib/io_spec.lua` compiles an exact
 private `titan.io` provider. Instrumented string and output providers prove
@@ -115,10 +111,10 @@ errors, a retryable raising closer, and repeated manual close-function calls.
 Normal exits reach one terminal physical close; successful EOF gets a harmless
 idempotent repeat, while a close error gets one finalizer retry.
 
-`spec/stdlib/io_process_spec.lua` instead builds the exact coroutine/uv/async,
-string, os, and io provider chain in a private workspace. It covers structural
-Interface conversion, interactive merged output, large concurrently drained
-duplex traffic, cached normal and signal results, idempotent close, running
-child termination/reaping, and retry after a cancelled close. The sibling
-`os_stream_facade_spec.lua` owns the direct spawn-option, optional-endpoint,
-merged-facade, stable parent-stream, TTY-query, and Runtime-generation cases.
+`spec/stdlib/io_process_spec.lua` compiles small consumers against the
+canonical coroutine/uv/async, string, os, and io modules. It covers structural
+Interface conversion, interactive merged output, binary delimiter reads,
+retained exit status, idempotent close, and explicit running-child
+termination/reaping. The sibling `os_stream_facade_spec.lua` owns direct spawn
+configuration, optional endpoints, merged-facade identity, parent stdin,
+TTY-query, Interface conversion, and close-time wakeup of a pending reader.

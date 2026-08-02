@@ -103,7 +103,7 @@ preferred compiled-format pass; Lua requires use a generated shim and the DSO
 form.
 
 `titan.uv` is the private Runtime and native-provider layer. `titan.async`
-imports it and exposes the public scheduler facade, including transparent
+imports it and exposes the public asynchronous facade, including transparent
 aliases of uv-owned record types. The timer/fs/net/os modules also import uv
 directly for their low-level plumbing, so all five consumers share one Runtime
 and one canonical libuv provider image.
@@ -692,8 +692,7 @@ configuration in a completion/config stamp. A missing `titan.so`, `titan.a`,
 generated shim, or Darwin dSYM invalidates the stamp. A warm invocation also
 rescans `titan.a` for the exact fourteen logical keys without changing pair
 mtimes. Exact child DSOs are removed as stale production outputs; the isolated
-delayed-callback and coroutine tests are the only supported exact-image
-variants.
+coroutine test is the only supported exact-image variant.
 
 The source rock retains a two-stage bootstrap. `make titan` builds
 `libtitan.a`, the SDK, and a distinct support-only image at

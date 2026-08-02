@@ -1,11 +1,7 @@
 local uv = import "uv"
 local str = import "string"
 
--- Fixed-size reads keep whole-file helpers independent of stat metadata. The
--- uv middle layer may return a shorter chunk and returns nil only at EOF.
 local READ_CHUNK_BYTES = 64 * 1024
-local MAX_READ_BYTES = 4294967295
-local MAX_STRING_BYTES = 9223372036854775807
 
 record File
   local handle: uv.uv_file
@@ -20,22 +16,8 @@ record Stat
   modified_nanoseconds: integer
 end
 
--- Validate at the public boundary so a bad mode has a stable fs diagnostic.
--- uv repeats this validation, then maps the mode only through UV_FS_O_*.
-local function validated_mode(mode: string): string
-  if mode == "r" or mode == "rb" or
-      mode == "w" or mode == "wb" or
-      mode == "a" or mode == "ab" or
-      mode == "r+" or mode == "r+b" or mode == "rb+" or
-      mode == "w+" or mode == "w+b" or mode == "wb+" or
-      mode == "a+" or mode == "a+b" or mode == "ab+" then
-    return mode
-  end
-  raise "invalid file mode '" .. mode .. "'"
-end
-
 function open(path: string, mode: string): File
-  return File.new(uv._fs_open(path, validated_mode(mode)), "")
+  return File.new(uv._fs_open(path, mode), "")
 end
 
 function File:read(max_bytes: integer?): string?
@@ -44,19 +26,11 @@ function File:read(max_bytes: integer?): string?
   if requested <= 0 then
     raise "file read size must be positive"
   end
-  if requested > MAX_READ_BYTES then
-    raise "read size exceeds the portable libuv buffer limit"
-  end
-  -- A terminal File is ordinary Reader EOF, including after its owning
-  -- Runtime has gone stale. This scalar state check touches no native owner.
   if uv._fs_is_closed(self.handle) then
     self.excess = ""
     return nil
   end
   if #self.excess > 0 then
-    -- Retained bytes do not submit a uv operation, but they must observe the
-    -- same cancellation and File lifecycle checks as an ordinary read.
-    uv._fs_validate_read(self.handle)
     local length = requested
     if length > #self.excess then length = #self.excess end
     local result = str.sub(self.excess, 1, length)
@@ -77,63 +51,42 @@ function File:read_until(delimiter: string,
   end
 
   local builder = str.writer(false)
-  -- The native read is this producer's scheduling boundary. Keep the current
-  -- consumed chunk separately until the append succeeds so an append error
-  -- can restore every byte to the File excess.
-  local pending = ""
-  local total = 0
   local tail = ""
-  local result: string? = nil
-  local matched = false
-  do
-    for chunk in self:read do
-      pending = chunk
-      if total > MAX_STRING_BYTES - #chunk then
-        raise "file read result exceeds Titan's string length limit"
+  for chunk in self:read do
+    local boundary = chunk
+    if #tail > 0 then boundary = tail .. chunk end
+    local match: integer? = str.find(boundary, delimiter)
+    if match then
+      local match_first = match as integer
+      local match_end = match_first + #delimiter - 1
+      local result_end = match_end
+      if chop then result_end = match_first - 1 end
+      if result_end > 0 then
+        builder:write(str.sub(boundary, 1, result_end))
       end
-
-      builder:write(chunk)
-      pending = ""
-      local boundary = tail .. chunk
-      local match: integer? = str.find(boundary, delimiter)
-      total = total + #chunk
-      if match then
-        local match_end =
-          total - #boundary + (match as integer) - 1 + #delimiter
-        local result_end = match_end
-        if chop then result_end = result_end - #delimiter end
-        local all = builder:drain()
-        result = str.sub(all, 1, result_end)
-        self.excess =
-          str.sub(all, match_end + 1) .. self.excess
-        matched = true
-        break
+      self.excess = str.sub(boundary, match_end + 1)
+      return builder:drain()
+    end
+    local keep = #delimiter - 1
+    if keep > #boundary then keep = #boundary end
+    local committed = #boundary - keep
+    if committed > 0 then
+      if committed == #boundary then
+        builder:write(boundary)
       else
-        local keep = #delimiter - 1
-        if keep > #boundary then keep = #boundary end
-        tail = str.sub(boundary, #boundary - keep + 1)
+        builder:write(str.sub(boundary, 1, committed))
       end
     end
-    if not matched and total > 0 then result = builder:drain() end
-  catch
-    local restored = builder:drain()
-    if #pending > 0 then restored = restored .. pending end
-    if #restored > 0 then
-      self.excess = restored .. self.excess
-    end
-    raise
+    tail = str.sub(boundary, committed + 1)
   end
+  if #tail > 0 then builder:write(tail) end
+  local result = builder:drain()
+  if #result == 0 then return nil end
   return result
 end
 
 function File:write(data: string): integer
-  local written = uv._fs_write(self.handle, data)
-  -- One uv logical write owns all of its partial native submissions, so it
-  -- cannot interleave with the next FIFO operation.
-  if written ~= #data then
-    raise "filesystem write completed without consuming the full input"
-  end
-  return written
+  return uv._fs_write(self.handle, data)
 end
 
 function File:flush()
@@ -141,16 +94,8 @@ function File:flush()
 end
 
 function File:close()
-  -- The uv layer coalesces close waiters and cleanup-shields physical close.
-  -- Clear before yielding so no later facade read can observe old excess,
-  -- then clear again because an earlier queued read_until may finish while
-  -- the low-level File is closing and restore or retain its consumed bytes.
   self.excess = ""
-  do
-    uv._fs_close(self.handle)
-  finally
-    self.excess = ""
-  end
+  uv._fs_close(self.handle)
 end
 
 function File:is_closed(): boolean
@@ -162,13 +107,7 @@ function read_file(path: string): string
   defer file:close()
 
   local builder = str.writer(false)
-  local total = 0
   for bytes in file:read do
-    local length = #bytes
-    if total > MAX_STRING_BYTES - length then
-      raise "file is too large to read into a string"
-    end
-    total = total + length
     builder:write(bytes)
   end
   return builder:drain()

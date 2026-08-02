@@ -45,17 +45,16 @@ standalone program does not need to import `async` explicitly.
 ## Recurring tickers
 
 `ticker(milliseconds)` requires a strictly positive interval and returns an
-opaque `Ticker`. Its native `uv_timer_t` wrapper is stored in one local
-record field; callers cannot construct, forge, or extract it.
+opaque `Ticker`; callers cannot construct, forge, or extract its native timer.
 
 `tick()` waits for the next firing and returns `true`. Only one Task may
-wait on a Ticker at a time. Firings with no waiter are dropped rather than
-buffered, so calling `tick()` after missing several intervals still waits for
-a later firing.
+wait on a Ticker at a time. A firing with no waiter records one pending tick;
+later firings replace that same pending state rather than accumulating a
+count. The next `tick()` consumes it immediately, so several missed intervals
+coalesce into one result.
 
 `close()` is idempotent. It stops and closes the native timer, wakes a current
 waiter with `false`, and makes every later `tick()` return `false`.
-Callbacks that arrive after close perform cleanup only.
 
 ```titan
 local timer = import "timer"

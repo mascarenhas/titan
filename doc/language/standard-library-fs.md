@@ -66,14 +66,14 @@ macOS because Titan file payloads are already binary. Any other mode raises.
 Files created by `open` request permissions `0666`, subject to the process
 umask.
 
-The returned `File` is opaque. Its exact native descriptor is stored once in a
-local record field, so callers cannot construct, forge, or extract it.
+The returned `File` is an opaque wrapper around an operating-system descriptor;
+callers cannot construct, forge, or extract that descriptor.
 
 `read(max_bytes)` uses 64 KiB when `max_bytes` is omitted or `nil`. An
-explicit size must be positive and no larger than libuv's portable native
-buffer bound. It returns at most that many bytes, possibly fewer, and returns
-`nil` only when no bytes are available at end of file. Reads use the File's
-current position; there is no random-access offset API in this version.
+explicit size must be positive. It returns at most that many bytes, possibly
+fewer, and returns `nil` only when no bytes are available at end of file.
+Allocation failure raises normally. Reads use the File's current position;
+there is no random-access offset API in this version.
 
 A delimiter read may have already retained bytes beyond its result. A plain
 `read(max_bytes)` consumes at most `max_bytes` from those bytes and returns
@@ -114,55 +114,49 @@ function replace(path: string, data: string)
 end
 ```
 
-## Ordering and closing
+## Concurrency and closing
 
-Each File serializes the operations it submits to uv in one FIFO, even when
-several Tasks share it. Only one filesystem request for that File is submitted
-at a time. A multi-request partial write remains one logical FIFO operation.
-A `read` satisfied entirely from facade-retained excess submits no request and
-returns immediately.
+Each File operation submits its own libuv filesystem request. Libuv runs those
+requests as independent thread-pool jobs and does not promise per-descriptor
+ordering. Tasks that share one File must therefore coordinate externally when
+operation order matters. A `read` satisfied entirely from facade-retained
+excess submits no request and returns immediately.
 
 `read_until` is high-level composition over repeated `read()` calls. Each
-underlying native read is a separate FIFO operation, so another Task's read,
+underlying native read is a separate operation, so another Task's read,
 write, flush, or close may run between iterations. Code that shares one File
 between Tasks must coordinate externally when it needs an uninterrupted
 delimiter read.
 
-`close()` immediately marks the File as closing. Operations already ahead of
-the close finish in order; later reads, writes, and flushes raise while the
-physical close is pending. Once close reaches its terminal state, `read` and
-`read_until` return `nil` as ordinary Reader EOF, while `write` and `flush`
-continue to reject the closed File. Concurrent close callers share the same
-physical close request. `close()` is idempotent, including after the Runtime
-session has ended, and `is_closed()` reports whether physical close has
-completed. Terminal EOF and repeated close remain observable even from a
-later Runtime generation because they inspect only the wrapper's monotonic
-closed state; other operations retain the stale-generation error. A read
-cannot bypass logical close through bytes retained by an earlier delimiter
-read: close discards that facade excess even when the earlier read finishes
-while physical close is pending.
+`close()` submits an ordinary libuv filesystem close and consumes the wrapper's
+descriptor once libuv accepts it. After that point `read` and `read_until`
+return `nil` as ordinary Reader EOF, while `write` and `flush` reject the
+closed File. Repeated close is idempotent, `is_closed()` reports that terminal
+state, and close discards facade-retained delimiter excess. If another
+filesystem request is already using the descriptor, its result follows the
+host/libuv ordering; Titan does not add an active-operation counter or close
+queue. Coordinate close with other File operations when that distinction
+matters.
 
-Task cancellation does not abandon native lifetime work. An unsubmitted
-ordinary File operation is removed from its FIFO. For submitted work, the
-runtime requests cancellation where libuv supports it, suppresses a stale
-result after cancellation wins, and still consumes the completion callback.
-If `read_until` raises after consuming bytes—because an append fails or a
-later native read observes cancellation—all consumed bytes are restored in
-order to the File's retained input before the error propagates. A currently
+Task cancellation does not abandon or suppress accepted native work. The
+runtime still consumes the terminal callback before releasing the request and
+buffers, and only then injects sticky cancellation into the Task. If a
+cancelled `open` succeeds, the runtime closes the descriptor that was never
+delivered to the caller.
+`read_until` is ordinary composition rather than a transaction: if it raises,
+bytes already consumed by its earlier reads are not restored. A currently
 pending native read retains the ordinary File-read cancellation semantics.
-A Task cancelled while awaiting `close()` remains cleanup-shielded until the
-physical close callback and request cleanup finish. Cancellation remains
-sticky afterward: it is delivered at the next ordinary asynchronous operation,
-or makes the Task terminally cancelled when it returns. This lets a `finally`
-block close several Files in sequence instead of being interrupted after its
-first physical close.
+Cancellation remains sticky after the callback: it is delivered at the next
+ordinary asynchronous operation or makes the Task terminally cancelled when it
+returns.
 
-When the final Task ends, session shutdown closes any File that application
-code left open. Explicit close is still preferred because it reports errors at
-the relevant call site and releases the descriptor earlier. A native close
-callback is terminal even when it reports an error: the File wrapper is marked
-closed and the error is reported once. The runtime never retries a failed close,
-because the operating system may already have reused that descriptor number.
+Application code owns `File:close()`. A File is an operating-system descriptor,
+not a libuv loop handle, so async Runtime shutdown neither tracks nor closes a
+File left open. Such a descriptor remains open until application code closes
+it or operating-system process teardown reclaims it. Once libuv accepts a
+close submission, the File wrapper is terminal even if the callback reports an
+error. The runtime reports that error once and never retries the close, because
+the operating system may already have reused that descriptor number.
 
 ## Whole-file helpers
 
@@ -211,9 +205,9 @@ filesystem rename operation.
 the native scandir request is cleaned up. Titan does not specify their order;
 sort them in application code when order matters.
 
-Paths are text arguments. Every path is copied into operation-owned,
-NUL-terminated storage and an embedded NUL is rejected instead of silently
-truncating it. File contents remain unrestricted binary strings.
+Paths are text arguments. An embedded NUL is rejected instead of silently
+truncating it; libuv copies paths for accepted asynchronous filesystem
+requests. File contents remain unrestricted binary strings.
 
 ## Temporary files and working directory
 
@@ -223,12 +217,12 @@ to the caller, which should eventually remove it with `unlink`. Titan closes
 the descriptor acquired by `uv_fs_mkstemp` before `tmpname` returns; the API
 does not return an open `File`.
 
-If a Task is cancelled after the native operation has created a file, Titan
-still consumes the callback and closes the acquired descriptor. The created
-path remains present even though the cancelled Task does not receive it. This
-avoids silently deleting a filesystem object that was successfully created;
-applications that need stronger transactional cleanup should create temporary
-files inside an application-owned directory.
+Like every accepted filesystem request, temporary-file creation keeps its
+native request alive until the callback even when its Task is cancelled. A
+successful cancelled operation closes the descriptor that `uv_fs_mkstemp`
+returned before delivering cancellation, but it does not unlink the path: the
+operation is not transactional. Applications that need stronger cleanup
+should create temporary files inside an application-owned directory.
 
 `tmpdir()` returns the platform temporary directory without creating a file or
 directory. `homedir()` returns the current user's home directory. They follow
@@ -246,10 +240,9 @@ change is temporary.
 
 ## Errors and current scope
 
-Libuv failures raise [`async.Error`](async-io.md#results-errors-and-cancellation).
+Libuv failures raise [`async.Error`](async-io.md#errors-and-cancellation).
 Its `operation` identifies the failing action (for example, `fs.open` or
-`fs.rename`) and `subject` identifies the relevant path or File. The library
-does not print errors.
+`fs.rename`). The library does not print errors.
 
 This module does not provide random-access reads/writes,
 permissions/ownership changes, links, filesystem watching, memory mapping, or

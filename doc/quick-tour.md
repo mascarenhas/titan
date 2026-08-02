@@ -260,8 +260,8 @@ its post-close read/write and cancellation behavior.
 
 ## Tasks and asynchronous work
 
-The public scheduler is `async`; `timer`, `fs`, `net`, and `os` build on the
-same Runtime. In a standalone program the event loop is driven
+The public asynchronous facade is `async`; `timer`, `fs`, `net`, and `os`
+build on the same Runtime. In a standalone program the event loop is driven
 automatically:
 
 ```titan
@@ -269,22 +269,18 @@ local async = import "async"
 local timer = import "timer"
 
 function main(args: {string}): integer
-  local left = async.run(function (): value
+  local results: {string: string} = {}
+  async.run(function (): value
     timer.sleep(5)
-    return "left"
+    results["left"] = "ready"
   end)
-  local right = async.run(function (): value
+  async.run(function (): value
     async.yield()
-    return "right"
+    results["right"] = "ready"
   end)
-
-  local left_result = left:join() as string
-  local right_result = right:join() as string
-  if left_result == "left" and right_result == "right" then
-    return 0
-  else
-    return 1
-  end
+  -- The standalone Runtime stays alive until both Tasks finish, even though
+  -- main itself returns first.
+  return 0
 end
 ```
 
@@ -296,23 +292,27 @@ titanc concurrent
 `async.run` schedules a Task but does not run it inline. A Task executes in a
 libuv callback until it finishes, raises, or starts another asynchronous
 operation and yields. `async.yield()` is an explicit fairness turn; CPU-heavy
-code that never yields blocks the loop. Join spawned Tasks so their results or
-errors are observed, and close resources explicitly even though Runtime
-shutdown also drains their native owners.
+code that never yields blocks the loop. An uncaught Task error is logged with
+its traceback and ends only that Task; the other Tasks continue. Close
+resources explicitly. Runtime shutdown drains and closes its libuv handles,
+but closing a process watcher does not terminate or reap its child, and raw
+File descriptors remain caller-owned.
 
-A Lua host drives the same scheduler explicitly and uses qualified module
+A Lua host drives the same Runtime explicitly and uses qualified module
 names:
 
 ```lua
 local async = require "titan.async"
 local timer = require "titan.timer"
 
+local result
 local task = async.run(function()
-  timer.sleep(5)
-  return "done"
+    timer.sleep(5)
+    result = "done"
 end)
 async.loop()
-assert(task:join() == "done")
+assert(task:status() == "succeeded")
+assert(result == "done")
 ```
 
 ## Files, strings, PEGs, and generic iteration

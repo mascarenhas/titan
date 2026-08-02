@@ -1,1276 +1,532 @@
-record Cancelled
-  reason: value
+local TASK_SUCCEEDED = "succeeded"
+
+local type CancelAction = () -> ()
+
+local record TurnCall
 end
 
-local record TimerControl
-  local runtime: Runtime
-  local lifecycle: integer
-  local kind: integer
-  local task: Task?
-  local peer: value
-  local epoch: integer
-  local next_owner: uv_timer_t?
-  local previous_owner: uv_timer_t?
-end
-
-local record DriveControl
-  local mode: integer
-  local payload: value
-  local trace: string
-  local cleanup_request: Request?
-end
-
-local record Request
-  local kind: integer
-  local generation: integer
-  local task: Task
-  local subject: value
+local record SleepCall
   local milliseconds: integer
-  local cleanup: boolean
 end
 
-local record TickerState
-  local runtime: Runtime
-  local generation: integer
-  local open: boolean
-  local owner: uv_timer_t?
-  local waiter: Task?
-  local waiter_epoch: integer
+local record TickerTickCall
+  local ticker: uv_timer_t
 end
 
--- Fixed five-slot owner layout consumed by titan_uv.c. Metadata roots each
--- operation/control graph; families that submit separate native I/O storage
--- retain it in the final slot only while libuv may consume it. Stream controls
--- instead keep their current GC-owned Bytes allocation in their metadata.
+local record TickerCloseCall
+  local ticker: uv_timer_t
+end
+
+local record CleanupStepCall
+end
+
+-- Every operational payload variant is one Task suspension action with its
+-- ordinary parameters in a record. It may submit a callback-bearing operation
+-- or consume/install state on a persistent handle. The case below is only a
+-- router; each record owns its operation-specific dispatch method.
+local union Call
+  turn: TurnCall
+  sleep: SleepCall
+  ticker_tick: TickerTickCall
+  ticker_close: TickerCloseCall
+
+  fs_open: FsOpenCall
+  fs_read: FsReadCall
+  fs_write: FsWriteCall
+  fs_flush: FsFlushCall
+  fs_close: FsCloseCall
+  fs_stat: FsStatCall
+  fs_lstat: FsLstatCall
+  fs_tmpname: FsTmpnameCall
+  fs_mkdir: FsMkdirCall
+  fs_unlink: FsUnlinkCall
+  fs_rmdir: FsRmdirCall
+  fs_rename: FsRenameCall
+  fs_list: FsListCall
+
+  getaddrinfo: GetaddrinfoCall
+  tcp_connect: TcpConnectCall
+  tcp_read: TcpReadCall
+  tcp_write: TcpWriteCall
+  tcp_shutdown: TcpShutdownCall
+  tcp_close: TcpCloseCall
+  tcp_accept: TcpAcceptCall
+
+  signal_wait: SignalWaitCall
+  stream_read: StreamReadCall
+  stream_write: StreamWriteCall
+  stream_close: StreamCloseCall
+  process_wait: ProcessWaitCall
+  process_spawn_failure: ProcessSpawnFailureCall
+
+  cleanup_step: CleanupStepCall
+end
+
+-- The callback closure retains the Task and result until this timer fires.
+local record TimerOwner
+  local handle: owned *libuv.uv_timer_t
+  local callback: (TimerOwner) -> ()
+  local root_index: integer
+end
+
+-- A repeating timer retains only its latest tick and at most one waiter.
 record uv_timer_t
-  local handle?: owned *libuv.uv_timer_t
-  local main_thread: value
-  local dispatcher: (uv_timer_t, integer, integer, libuv.size_t,
-                     ffi.titan_ffi_void_ptr) -> ()
-  local metadata: TimerControl
-  local buffer: nil
+  local handle: owned *libuv.uv_timer_t
+  local callback: (uv_timer_t) -> ()
+  local runtime: Runtime
+  local waiting: Task?
+  local fired: boolean
+  local root_index: integer
 end
 
 record Task
   local root: coroutine.Coro
   local runtime: Runtime
-  local generation: integer
-  local state: integer
-  local epoch: integer
-  local result: value
-  local error_value: value
-  local error_traceback: string
-  local cancel_requested: boolean
+  local state: string
   local cancel_value: Cancelled?
-  local operation: value
-  local current_request: Request?
-  local joiner_head: Task?
-  local join_next: Task?
-  local join_previous: Task?
-  local joining_target: Task?
-  local next_task: Task?
-  local previous_task: Task?
-  local permanently_observed: boolean
-  local observer_count: integer
-  local cleanup_shield_depth: integer
-  local cancel_fallback: boolean
-  local main: boolean
+  local cancel_action: CancelAction?
+  local pending: value
+  local root_index: integer
+  local cleanup: boolean
 end
 
-function _run(func: () -> value): Task
-  return run_internal(func, false)
-end
-
--- Record a successful Runtime-wide exit transition, then unwind the caller
--- through the ordinary cancellation path so its defer/finally cleanup runs.
--- The first requester fixes the status; later requests made while cancellation
--- cleanup is unwinding cannot replace it.
-function _os_exit(code: integer)
-  local requester = running_task()
-  local runtime = requester.runtime
-  if not runtime.exit_requested then
-    runtime.exit_requested = true
-    runtime.exit_code = code
-    local main? = runtime.main_task
-    if main and main.state == TASK_SUCCEEDED then
-      main.result = code
-    end
-  end
-  begin_exit_shutdown(runtime)
-  local cancellation? = requester.cancel_value
-  if cancellation then raise cancellation end
-  raise internal_error("exit.request.cancel")
+local function terminal(state: string): boolean
+  return state == TASK_SUCCEEDED or state == "failed" or
+         state == "cancelled"
 end
 
 function Task:status(): string
-  if self.state == TASK_NEW then return "new" end
-  if self.state == TASK_READY then return "ready" end
-  if self.state == TASK_RUNNING then return "running" end
-  if self.state == TASK_WAITING then return "waiting" end
-  if self.state == TASK_SUCCEEDED then return "succeeded" end
-  if self.state == TASK_FAILED then return "failed" end
-  return "cancelled"
+  return self.state
 end
 
 function Task:cancel(reason: value)
-  request_cancel(self, reason)
+  if terminal(self.state) or self.cleanup or self.cancel_value then return end
+  local actual = reason
+  if actual == nil then actual = "cancelled" end
+  self.cancel_value = Cancelled.new(actual)
+  local action? = self.cancel_action
+  if action then (action as CancelAction)() end
 end
 
-function Task:join(): value
-  if self.state == TASK_SUCCEEDED then
-    self.permanently_observed = true
-    return self.result
-  elseif self.state == TASK_FAILED or self.state == TASK_CANCELLED then
-    self.permanently_observed = true
-    raise_joined(self.error_value, self.error_traceback)
-  end
+local function await(call: Call): value
+  running_task()
+  return coroutine.yield(call, UV_TAG)
+end
 
-  local task = running_task()
-  if task == self then
-    raise "a Task cannot join itself"
+local function dispatch_call(task: Task, call: Call): Immediate?
+  case call
+  when turn: operation then return operation:dispatch(task)
+  when sleep: operation then return operation:dispatch(task)
+  when ticker_tick: operation then return operation:dispatch(task)
+  when ticker_close: operation then return operation:dispatch(task)
+
+  when fs_open: operation then return operation:dispatch(task)
+  when fs_read: operation then return operation:dispatch(task)
+  when fs_write: operation then return operation:dispatch(task)
+  when fs_flush: operation then return operation:dispatch(task)
+  when fs_close: operation then return operation:dispatch(task)
+  when fs_stat: operation then return operation:dispatch(task)
+  when fs_lstat: operation then return operation:dispatch(task)
+  when fs_tmpname: operation then return operation:dispatch(task)
+  when fs_mkdir: operation then return operation:dispatch(task)
+  when fs_unlink: operation then return operation:dispatch(task)
+  when fs_rmdir: operation then return operation:dispatch(task)
+  when fs_rename: operation then return operation:dispatch(task)
+  when fs_list: operation then return operation:dispatch(task)
+
+  when getaddrinfo: operation then return operation:dispatch(task)
+  when tcp_connect: operation then return operation:dispatch(task)
+  when tcp_read: operation then return operation:dispatch(task)
+  when tcp_write: operation then return operation:dispatch(task)
+  when tcp_shutdown: operation then return operation:dispatch(task)
+  when tcp_close: operation then return operation:dispatch(task)
+  when tcp_accept: operation then return operation:dispatch(task)
+
+  when signal_wait: operation then return operation:dispatch(task)
+  when stream_read: operation then return operation:dispatch(task)
+  when stream_write: operation then return operation:dispatch(task)
+  when stream_close: operation then return operation:dispatch(task)
+  when process_wait: operation then return operation:dispatch(task)
+  when process_spawn_failure: operation then return operation:dispatch(task)
+
+  when cleanup_step: operation then return operation:dispatch(task)
+  else
+    raise "unknown libuv operation"
   end
-  if task.runtime ~= self.runtime or task.generation ~= self.generation then
-    raise "cannot join a Task from another libuv Runtime"
+end
+
+local function retire_task(task: Task, state: string)
+  task.state = state
+  task.pending = nil
+  task.cancel_action = nil
+  unroot_task(task.runtime, task.root_index)
+end
+
+local function finish_cleanup_task(task: Task)
+  task.runtime.cleanup_done = true
+  retire_task(task, TASK_SUCCEEDED)
+end
+
+local function fail_cleanup_task(task: Task, err: value, trace: string)
+  retire_task(task, "failed")
+  report_task_error(err, trace)
+end
+
+local function finish_user_task(task: Task, state: string,
+                                err: value, trace: string)
+  local runtime = task.runtime
+  retire_task(task, state)
+
+  if not has_user_tasks(runtime) and not runtime.closing then
+    begin_shutdown(runtime)
   end
-  local request = new_request(REQUEST_JOIN, self, 0)
-  do
-    return coroutine.yield(request, UV_TAG)
-  catch
-    local target_trace? = pop_trace_for_append()
-    if target_trace then
-      reinstall_trace(target_trace .. "\n" .. traceback)
+  if state == "failed" then report_task_error(err, trace) end
+end
+
+-- The callback continuation trampoline. It may consume several immediate
+-- synchronous failures, but an accepted libuv submission always returns from
+-- here so the callback itself can return to the event loop.
+local function resume_root(task: Task, failed: boolean,
+                           payload: value): value
+  task.runtime.current_task = task
+  defer task.runtime.current_task = nil
+  if failed then return task.root:error(payload, UV_TAG) end
+  return task.root:resume(payload, UV_TAG)
+end
+
+local function advance_task(task: Task, failed: boolean, payload: value)
+  local next_failed = failed
+  local next_payload = payload
+
+  while true do
+    local cancellation? = task.cancel_value
+    if cancellation and not task.cleanup then
+      next_failed = true
+      next_payload = cancellation
     end
-    raise error
+
+    task.state = "running"
+    local yielded: value = nil
+    do
+      yielded = resume_root(task, next_failed, next_payload)
+    catch
+      if task.cleanup then
+        fail_cleanup_task(task, error, traceback)
+      else
+        local cancelled? = task.cancel_value
+        if cancelled and error == cancelled then
+          finish_user_task(task, "cancelled", error, traceback)
+        else
+          finish_user_task(task, "failed", error, traceback)
+        end
+      end
+      return
+    end
+
+    local status = task.root:status()
+    if status == "dead" then
+      if task.cleanup then
+        finish_cleanup_task(task)
+      else
+        finish_user_task(task, TASK_SUCCEEDED, nil, "")
+      end
+      return
+    end
+    if status ~= "suspended" then
+      finish_user_task(task, "failed",
+                       "invalid async coroutine state", "")
+      return
+    end
+
+    cancellation = task.cancel_value
+    if cancellation and not task.cleanup then
+      next_failed = true
+      next_payload = cancellation
+    else
+      task.state = "waiting"
+      local call = yielded as Call
+      do
+        local immediate? = dispatch_call(task, call)
+        if not immediate then return end
+        local completion = immediate as Immediate
+        next_failed = completion.failed
+        next_payload = completion.payload
+      catch
+        next_failed = true
+        next_payload = error
+      end
+    end
   end
 end
 
-function _sleep(milliseconds: integer)
-  if milliseconds < 0 then
-    raise "sleep duration must not be negative"
+-- An error raised while a native callback is preparing or resuming its
+-- continuation belongs to that Task. Retiring it here keeps an unrelated Task
+-- running and lets the task-root set decide whether shutdown should begin.
+local function fail_task_at_callback_boundary(task: Task, err: value,
+                                               trace: string)
+  if terminal(task.state) then
+    report_task_error(err, trace)
+  elseif task.cleanup then
+    fail_cleanup_task(task, err, trace)
+  else
+    finish_user_task(task, "failed", err, trace)
   end
-  local request = new_request(REQUEST_SLEEP, nil, milliseconds)
-  coroutine.yield(request, UV_TAG)
+end
+
+local function resume_task_from_callback(task: Task, failed: boolean,
+                                         payload: value)
+  task.pending = nil
+  task.cancel_action = nil
+  do
+    advance_task(task, failed, payload)
+  catch
+    fail_task_at_callback_boundary(task, error, traceback)
+  end
+end
+
+local function ticker_callback(ticker: uv_timer_t)
+  local waiter? = ticker.waiting
+  if waiter then
+    ticker.waiting = nil
+    resume_task_from_callback(waiter as Task, false, true)
+  else
+    ticker.fired = true
+  end
+end
+
+local function activate_timer(runtime: Runtime,
+                              native: owned *libuv.uv_timer_t,
+                              owner: value,
+                              owner_pointer: ffi.titan_ffi_void_ptr,
+                              milliseconds: integer,
+                              repeat_time: integer): integer
+  -- Root the native storage before init links the handle into the loop. If
+  -- reserving the root fails, libuv has not seen the handle yet.
+  local root_index = root_handle(runtime, owner)
+  local status = libuv.uv_timer_init(runtime.loop, native)
+  if status < 0 then
+    unroot_handle(runtime, root_index)
+    raise make_error(status, "timer.init")
+  end
+  local timer_handle: *libuv.uv_timer_t = native
+  libuv.uv_handle_set_data(
+      timer_handle as *libuv.uv_handle_t,
+      owner_pointer)
+  status = libuv.uv_timer_start(
+      native, shim.titan_uvshim_timer_cb,
+      milliseconds as libuv.uint64_t,
+      repeat_time as libuv.uint64_t)
+  if status < 0 then
+    close_handle(runtime, timer_handle as *libuv.uv_handle_t,
+                 owner, root_index, nil, nil)
+    raise make_error(status, "timer.start")
+  end
+  return root_index
+end
+
+local function start_timer(task: Task, milliseconds: integer,
+                           failed: boolean,
+                           payload: value): TimerOwner
+  local runtime = task.runtime
+  local native = libuv.uv_timer_t.new()
+  local callback = function (owner: TimerOwner)
+    local completion_failed = failed
+    local completion_payload = payload
+    local timer_handle: *libuv.uv_timer_t = owner.handle
+    do
+      close_handle(runtime, timer_handle as *libuv.uv_handle_t,
+                   owner, owner.root_index, nil, nil)
+      owner.root_index = 0
+    catch
+      completion_failed = true
+      completion_payload = error
+    end
+    resume_task_from_callback(
+        task, completion_failed, completion_payload)
+  end
+  local owner = TimerOwner.new(native, callback, 0)
+  owner.root_index = activate_timer(
+      runtime, native, owner, owner as ffi.titan_ffi_void_ptr,
+      milliseconds, 0)
+  return owner
+end
+
+local function start_ticker(task: Task,
+                            milliseconds: integer): uv_timer_t
+  local runtime = task.runtime
+  local native = libuv.uv_timer_t.new()
+  local ticker = uv_timer_t.new(native, ticker_callback, runtime,
+                                nil, false, 0)
+  ticker.root_index = activate_timer(
+      runtime, native, ticker, ticker as ffi.titan_ffi_void_ptr,
+      milliseconds, milliseconds)
+  return ticker
+end
+
+-- Detaching a waiter from a shared multi-shot handle must not resume it inside
+-- the Task that requested cancellation or close. A private zero timer gives
+-- that Task its own ordinary callback on the next event-loop turn.
+local function wake_task_next_turn(task: Task, failed: boolean,
+                                   payload: value)
+  start_timer(task, 0, failed, payload)
+  task.cancel_action = nil
+end
+
+local function TurnCall:dispatch(task: Task): Immediate?
+  start_timer(task, 0, false, nil)
+  return nil
+end
+
+local function SleepCall:dispatch(task: Task): Immediate?
+  if self.milliseconds < 0 then
+    return immediate_error(libuv.UV_EINVAL, "timer.sleep")
+  end
+  -- Build the cancellation closure before libuv accepts the timer. Once
+  -- uv_timer_start succeeds, dispatch performs only non-allocating installs.
+  local timer: TimerOwner? = nil
+  local cancel_action: CancelAction = function ()
+    local owner = timer as TimerOwner
+    local timer_handle: *libuv.uv_timer_t = owner.handle
+    close_handle(task.runtime,
+                 timer_handle as *libuv.uv_handle_t,
+                 owner, owner.root_index,
+                 task, nil)
+  end
+  timer = start_timer(task, self.milliseconds, false, nil)
+  task.cancel_action = cancel_action
+  return nil
+end
+
+local function ticker_open_for(ticker: uv_timer_t,
+                               task: Task): boolean
+  if ticker.runtime ~= task.runtime then return false end
+  local timer_handle: *libuv.uv_timer_t = ticker.handle
+  return libuv.uv_is_closing(
+      timer_handle as *libuv.uv_handle_t) == 0
+end
+
+local function TickerTickCall:dispatch(task: Task): Immediate?
+  local ticker = self.ticker
+  if not ticker_open_for(ticker, task) then return immediate_ok(false) end
+  if ticker.fired then
+    ticker.fired = false
+    return immediate_ok(true)
+  end
+  if ticker.waiting then
+    return Immediate.new(true, "Ticker already has a waiting Task")
+  end
+  local cancel_action: CancelAction = function ()
+    if ticker.waiting == task then
+      wake_task_next_turn(task, false, nil)
+      ticker.waiting = nil
+    end
+  end
+  ticker.waiting = task
+  task.cancel_action = cancel_action
+  return nil
+end
+
+local function TickerCloseCall:dispatch(task: Task): Immediate?
+  local ticker = self.ticker
+  if not ticker_open_for(ticker, task) then return immediate_ok(nil) end
+  local timer_handle: *libuv.uv_timer_t = ticker.handle
+  local waiter? = ticker.waiting
+  if waiter then
+    wake_task_next_turn(waiter as Task, false, false)
+    ticker.waiting = nil
+  end
+  close_handle(ticker.runtime,
+               timer_handle as *libuv.uv_handle_t,
+               ticker, ticker.root_index, task, nil)
+  ticker.root_index = 0
+  return nil
+end
+
+local function CleanupStepCall:dispatch(task: Task): Immediate?
+  local pointer = collect_handle(task.runtime)
+  if pointer == nil then return immediate_ok(false) end
+  close_handle(task.runtime, pointer as *libuv.uv_handle_t,
+               nil, 0, task, true)
+  return nil
+end
+
+local function cleanup_runtime(runtime: Runtime): value
+  while await(Call.cleanup_step(CleanupStepCall.new())) as boolean do end
+  return nil
+end
+
+local function begin_shutdown(runtime: Runtime)
+  runtime.closing = true
+  local root = coroutine.create(function (_arg: value): value
+    return cleanup_runtime(runtime)
+  end, UV_TAG)
+  local task = Task.new(root, runtime, "ready",
+                        nil, nil, nil, 0, true)
+  task.root_index = root_task(runtime, task)
+  start_timer(task, 0, false, nil)
+end
+
+local function run_internal(func: () -> value): Task
+  local runtime = ensure_runtime()
+  accepting_work(runtime, "start a Task")
+  local root = coroutine.create(function (_arg: value): value
+    return func()
+  end, UV_TAG)
+  local task = Task.new(root, runtime, "ready",
+                        nil, nil, nil, 0, false)
+  task.root_index = root_task(runtime, task)
+
+  do
+    start_timer(task, 0, false, nil)
+  catch
+    finish_user_task(task, "failed", error, traceback)
+    raise
+  end
+  return task
+end
+
+function _run(func: () -> value): Task
+  return run_internal(func)
 end
 
 function _yield()
-  _sleep(0)
+  await(Call.turn(TurnCall.new()))
+end
+
+function _sleep(milliseconds: integer)
+  await(Call.sleep(SleepCall.new(milliseconds)))
 end
 
 function _ticker(milliseconds: integer): uv_timer_t
   if milliseconds <= 0 then
-    raise "Ticker interval must be positive"
+    raise "ticker interval must be positive"
   end
   local task = running_task()
-  if task.cancel_requested then
-    raise task.cancel_value
-  end
-  if task.runtime.closing then
-    raise "the libuv Runtime is shutting down"
-  end
-  local runtime = task.runtime
-  local state: TickerState = {
-    runtime = runtime,
-    generation = runtime.generation,
-    open = true,
-    owner = nil,
-    waiter = nil,
-    waiter_epoch = 0,
-  }
-  local owner, status = start_owner {
-    runtime = runtime,
-    kind = OWNER_TICKER,
-    task = nil,
-    peer = state,
-    epoch = 0,
-    timeout = milliseconds,
-    repeat_time = milliseconds,
-  }
-  state.owner = owner
-  if status < 0 then
-    state.open = false
-    raise make_error(status, "ticker.start", nil)
-  end
-  return owner
+  accepting_work(task.runtime, "create a Ticker")
+  return start_ticker(task, milliseconds)
 end
 
-function _ticker_tick(owner: uv_timer_t): boolean
-  local state = ticker_state(owner)
-  if not state.open then
-    return false
-  end
-  -- The loop is serial: checking before the yield makes a second waiter a
-  -- normal Task error instead of letting it reach arm_request as an internal
-  -- dispatcher invariant failure.
-  if state.waiter then
-    raise "Ticker already has a waiting Task"
-  end
-  local request = new_request(REQUEST_TICK, owner, 0)
-  return coroutine.yield(request, UV_TAG)
+function _ticker_tick(ticker: uv_timer_t): boolean
+  return await(Call.ticker_tick(TickerTickCall.new(ticker))) as boolean
 end
 
-function _ticker_close(owner: uv_timer_t)
-  local state = ticker_state(owner)
-  if not state.open then
-    return
-  end
-  if state.generation ~= state.runtime.generation then
-    raise "Ticker belongs to a stale libuv Runtime"
-  end
-  state.open = false
-  close_owner(owner)
-  if state.waiter then
-    local task = state.waiter
-    local epoch = state.waiter_epoch
-    state.waiter = nil
-    state.waiter_epoch = 0
-    local wake, status = start_owner {
-      runtime = state.runtime,
-      kind = OWNER_TICKER_CLOSE_WAKE,
-      task = task,
-      peer = owner,
-      epoch = epoch,
-      timeout = 0,
-      repeat_time = 0,
-    }
-    if status < 0 then
-      promote_fatal(state.runtime,
-                    make_error(status, "ticker.close.wake", nil), "")
-    else
-      task.operation = wake
-    end
-  end
+function _ticker_close(ticker: uv_timer_t)
+  await(Call.ticker_close(TickerCloseCall.new(ticker)))
 end
 
-local function close_owner(owner: uv_timer_t)
-  if owner.metadata.lifecycle == OWNER_ACTIVE then
-    if owner.metadata.kind == OWNER_TICKER then
-      local state: TickerState = owner.metadata.peer
-      state.open = false
-    end
-    local handle =
-      owner.handle as owned *libuv.uv_timer_t
-    local timer_handle: *libuv.uv_timer_t = handle
-    libuv.uv_timer_stop(handle)
-    owner.metadata.lifecycle = OWNER_CLOSING
-    libuv.uv_close(
-        timer_handle as *libuv.uv_handle_t,
-        shim.titan_uvshim_close_cb)
-  end
-end
-
-local function close_all_owners(runtime: Runtime)
-  local owner? = runtime.timer_owner_head
-  while owner do
-    close_owner(owner)
-    owner = owner.metadata.next_owner
-  end
-end
-
-local function maybe_finish_session(runtime: Runtime)
-  if not runtime.task_head and runtime.pending_observations == 0 then
-    runtime.closing = true
-    close_all_owners(runtime)
-    close_all_signal_owners(runtime)
-    begin_parent_stdio_shutdown(runtime)
-    begin_file_shutdown(runtime)
-    begin_tcp_shutdown(runtime)
-    begin_process_shutdown(runtime)
-  end
-end
-
-local function allocate_owner(runtime: Runtime, kind: integer, task: Task?,
-                              peer: value, epoch: integer):
-                              (uv_timer_t, ffi.titan_ffi_void_ptr)
-  local handle = libuv.uv_timer_t.new()
-  local metadata = TimerControl.new {
-    runtime = runtime,
-    lifecycle = OWNER_ALLOCATED,
-    kind = kind,
-    task = task,
-    peer = peer,
-    epoch = epoch,
-  }
-  local owner: uv_timer_t = {
-    handle = handle,
-    main_thread = main_thread,
-    dispatcher = timer_dispatch,
-    metadata = metadata,
-    buffer = nil,
-  }
-  -- The explicit cast anchors the wrapper while deriving callback navigation
-  -- before link_owner's entry GC check.
-  local pointer = owner as ffi.titan_ffi_void_ptr
-  link_owner(runtime, owner)
-  return owner, pointer
-end
-
-local function start_owner(runtime: Runtime, kind: integer, task: Task?,
-                           peer: value, epoch: integer,
-                           timeout: integer, repeat_time: integer):
-                           (uv_timer_t, integer)
-  local owner, pointer = allocate_owner(runtime, kind, task, peer, epoch)
-  local handle =
-    owner.handle as owned *libuv.uv_timer_t
-  local status = libuv.uv_timer_init(
-      runtime.loop.handle as owned *libuv.uv_loop_t, handle)
-  if status < 0 then
-    -- Keep synchronous rejection cleanup in this already-reserved frame.
-    -- Calling unlink_owner here would enter another Titan function after the
-    -- owner was published, opening an emergency GC/stack-growth longjmp gap.
-    local previous? = owner.metadata.previous_owner
-    local next? = owner.metadata.next_owner
-    if previous then
-      previous.metadata.next_owner = next
-    else
-      runtime.timer_owner_head = next
-    end
-    if next then
-      next.metadata.previous_owner = previous
-    end
-    owner.metadata.previous_owner = nil
-    owner.metadata.next_owner = nil
-    owner.handle = nil
-    owner.metadata.lifecycle = OWNER_CLOSED
-    return owner, status
-  end
-  owner.metadata.lifecycle = OWNER_ACTIVE
-  local timer_handle: *libuv.uv_timer_t = handle
-  libuv.uv_handle_set_data(
-      timer_handle as *libuv.uv_handle_t, pointer)
-  status = libuv.uv_timer_start {
-    handle = handle,
-    cb = shim.titan_uvshim_timer_cb,
-    timeout = timeout,
-    repeat = repeat_time,
-  }
-  if status < 0 then
-    -- As above, do not cross a fresh Titan function prologue after libuv owns
-    -- an initialized handle. The Ticker caller rolls back its public `open`
-    -- state immediately after this native owner transition returns.
-    libuv.uv_timer_stop(handle)
-    owner.metadata.lifecycle = OWNER_CLOSING
-    libuv.uv_close(
-        timer_handle as *libuv.uv_handle_t,
-        shim.titan_uvshim_close_cb)
-  end
-  return owner, status
-end
-
-local function terminal(state: integer): boolean
-  return state == TASK_SUCCEEDED or state == TASK_FAILED or
-         state == TASK_CANCELLED
-end
-
-local function promote_fatal(runtime: Runtime, err: value, trace: string)
-  if not runtime.fatal then
-    runtime.fatal = true
-    -- Prevent the remainder of this callback from admitting ordinary work.
-    -- Cleanup requests remain legal while the outer driver drains the session.
-    runtime.closing = true
-    runtime.fatal_error = err
-    runtime.fatal_traceback = trace
-    libuv.uv_stop(
-        runtime.loop.handle as owned *libuv.uv_loop_t)
-  end
-end
-
-local function remove_joiner(task: Task)
-  local target? = task.joining_target
-  if not target then
-    return
-  end
-  local target = target
-  local previous? = task.join_previous
-  local next? = task.join_next
-  if previous then
-    previous.join_next = next
-  else
-    target.joiner_head = next
-  end
-  if next then
-    next.join_previous = previous
-  end
-  task.join_previous = nil
-  task.join_next = nil
-  task.joining_target = nil
-  target.observer_count = target.observer_count - 1
-  if target.observer_count < 0 then
-    raise "Task observer count became negative"
-  end
-end
-
-local function add_joiner(target: Task, task: Task)
-  local previous? = target.joiner_head
-  task.joining_target = target
-  task.join_previous = nil
-  task.join_next = previous
-  if previous then
-    previous.join_previous = task
-  end
-  target.joiner_head = task
-  target.observer_count = target.observer_count + 1
-end
-
-local function schedule_observation(task: Task)
-  local runtime = task.runtime
-  runtime.pending_observations = runtime.pending_observations + 1
-  local owner, status = start_owner {
-    runtime = runtime,
-    kind = OWNER_OBSERVE,
-    task = task,
-    peer = nil,
-    epoch = task.epoch,
-    timeout = 0,
-    repeat_time = 0,
-  }
-  if status < 0 then
-    if owner.metadata.lifecycle == OWNER_CLOSED then
-      runtime.pending_observations = runtime.pending_observations - 1
-    end
-    promote_fatal(runtime, make_error(status, "task.observe", nil), "")
-  end
-end
-
-local function wake_joiners(task: Task)
-  local joiner? = task.joiner_head
-  while joiner do
-    local owner, status = start_owner {
-      runtime = task.runtime,
-      kind = OWNER_JOIN_WAKE,
-      task = joiner,
-      peer = task,
-      epoch = joiner.epoch,
-      timeout = 0,
-      repeat_time = 0,
-    }
-    if status < 0 then
-      promote_fatal(task.runtime,
-                    make_error(status, "task.join.wake", nil), "")
-    else
-      joiner.operation = owner
-    end
-    joiner = joiner.join_next
-  end
-end
-
-local function finish_task(task: Task, state: integer, result: value,
-                           err: value, trace: string)
-  if terminal(task.state) then
-    return
-  end
-  local runtime = task.runtime
-  if state == TASK_CANCELLED and task.main and
-      runtime.exit_requested and not runtime.fatal then
-    state = TASK_SUCCEEDED
-    result = runtime.exit_code
-    err = nil
-    trace = ""
-  end
-  task.operation = nil
-  task.current_request = nil
-  task.result = result
-  task.error_value = err
-  task.error_traceback = trace
-  task.state = state
-  task.cancel_fallback = false
-  task.cleanup_shield_depth = 0
-  unlink_task(task)
-  if state == TASK_FAILED and task.main then
-    promote_fatal(runtime, err, trace)
-  elseif state == TASK_CANCELLED and task.main then
-    promote_fatal(runtime, err, trace)
-  end
-  wake_joiners(task)
-  if state == TASK_FAILED then
-    if not task.main and not task.permanently_observed and
-        task.observer_count == 0 and
-        not runtime.fatal then
-      schedule_observation(task)
-    end
-  end
-  maybe_finish_session(runtime)
-end
-
-local function ticker_state(owner: uv_timer_t): TickerState
-  return owner.metadata.peer
-end
-
-local function detach_fs_wait(task: Task, request: Request)
-  local operation: FsOperation = request.subject
-  if request.cleanup then
-    return
-  end
-  if operation.kind == FS.close_wait and operation.file then
-    if operation.linked and operation.close_waiter then
-      remove_close_waiter(operation.file, operation)
-    end
-    return
-  end
-  if operation.owner then
-    local fs_owner = operation.owner
-    if fs_owner.metadata.lifecycle == FS_OWNER_SUBMITTED then
-      -- Success still completes through the normal callback.  A too-late
-      -- failure is likewise harmless because logical cancellation already won.
-      local handle: *libuv.uv_fs_t =
-        fs_owner.handle as owned *libuv.uv_fs_t
-      libuv.uv_cancel(handle as *libuv.uv_req_t)
-    end
-  elseif operation.file then
-    local file = operation.file
-    if operation.linked and not operation.close_waiter then
-      remove_file_operation(file, operation)
-      advance_file(file)
-    end
-  end
-end
-
-local function detach_net_wait(task: Task, request: Request)
-  local operation: NetOperation = request.subject
-  if request.cleanup then return end
-  if operation.kind == NET_CONNECT or operation.kind == NET_LISTEN then
-    if operation.tcp then
-      start_tcp_close(operation.tcp)
-    elseif operation.owner ~= nil then
-      local dns: uv_getaddrinfo_t = operation.owner
-      if dns.metadata.lifecycle == NET_OWNER_SUBMITTED then
-        local handle: *libuv.uv_getaddrinfo_t =
-          dns.handle as owned *libuv.uv_getaddrinfo_t
-        libuv.uv_cancel(handle as *libuv.uv_req_t)
-      end
-    end
-    return
-  end
-  local tcp = operation.tcp
-  local control = tcp.metadata
-  if operation.kind == NET_READ then
-    if control.read_waiter == task and
-        control.read_epoch == request.generation then
-      control.read_waiter = nil
-      control.read_epoch = 0
-    end
-  elseif operation.kind == NET_ACCEPT then
-    if control.accept_waiter == task and
-        control.accept_epoch == request.generation then
-      control.accept_waiter = nil
-      control.accept_epoch = 0
-    end
-  elseif operation.kind == NET_WRITE then
-    if operation.owner == nil and operation.linked then
-      remove_output(tcp, operation)
-      advance_tcp_output(tcp, nil)
-    end
-  elseif operation.kind == NET_SHUTDOWN then
-    if operation.owner == nil and operation.linked then
-      -- Once shutdown_requested is published, the physical half-close is
-      -- monotonic.  Cancellation detaches only the logical waiter; the FIFO
-      -- retains this taskless operation until uv_shutdown completes.
-      operation.task = nil
-      operation.request = nil
-    end
-  end
-end
-
-local function detach_process_wait(task: Task, request: Request)
-  local operation: ProcessOperation = request.subject
-  if request.cleanup then return end
-  if operation.kind == PROCESS_SPAWN then
-    -- Native setup/close ownership is monotonic.  Cancellation revokes only
-    -- result delivery; an unpublished child continues termination and reap.
-    operation.task = nil
-    operation.request = nil
-    return
-  end
-  if operation.kind == PROCESS_WAIT then
-    local process = operation.process
-    local process_control = process.metadata
-    if process_control.wait_task == task and
-        process_control.wait_epoch == request.generation then
-      process_control.wait_task = nil
-      process_control.wait_epoch = 0
-    end
-    return
-  end
-  local stream = operation.stream
-  if operation.kind == PROCESS_READ_STREAM then
-    if stream.read_waiter == task and
-        stream.read_epoch == request.generation then
-      stream.read_waiter = nil
-      stream.read_epoch = 0
-    end
-  elseif operation.kind == PROCESS_WRITE_STDIN and
-         not operation.owner and operation.linked then
-    remove_stream_output(stream, operation)
-    advance_stream_output(stream, nil)
-  end
-end
-
-local function detach_wait(task: Task)
-  local request? = task.current_request
-  local owner = task.operation
-  if request then
-    local request = request
-    if request.kind == REQUEST_JOIN then
-      local target? = task.joining_target
-      remove_joiner(task)
-      if owner ~= nil then
-        close_owner(owner)
-      end
-      if target then
-        local target = target
-        if target.state == TASK_FAILED and
-            not target.permanently_observed and
-            target.observer_count == 0 and
-            not target.runtime.fatal then
-          schedule_observation(target)
-        end
-      end
-    elseif request.kind == REQUEST_TICK then
-      local owner: uv_timer_t = request.subject
-      local state = ticker_state(owner)
-      if state.waiter == task and state.waiter_epoch == request.generation then
-        state.waiter = nil
-        state.waiter_epoch = 0
-      end
-    elseif request.kind == REQUEST_FS then
-      detach_fs_wait(task, request)
-    elseif request.kind == REQUEST_NET then
-      detach_net_wait(task, request)
-    elseif request.kind == REQUEST_PROCESS then
-      detach_process_wait(task, request)
-    elseif request.kind == REQUEST_SIGNAL and owner ~= nil then
-      local owner: uv_signal_t = owner
-      if owner.metadata.task == task and
-          owner.metadata.epoch == request.generation then
-        owner.metadata.task = nil
-        owner.metadata.epoch = 0
-        close_signal_owner(owner)
-      end
-    elseif request.kind == REQUEST_SLEEP and owner ~= nil then
-      close_owner(owner)
-    end
-  elseif owner ~= nil then
-    close_owner(owner)
-  end
-  task.operation = nil
-  task.current_request = nil
-end
-
-local function request_cancel(task: Task, reason: value)
-  if terminal(task.state) or task.cancel_requested then
-    return
-  end
-  local runtime = task.runtime
-  if runtime.generation ~= task.generation then
-    raise "Task belongs to a stale libuv Runtime"
-  end
-  task.cancel_requested = true
-  task.cancel_value = Cancelled.new(reason)
-  task.epoch = task.epoch + 1
-  if task.cleanup_shield_depth > 0 then
-    return
-  end
-  if task.state ~= TASK_RUNNING then
-    detach_wait(task)
-  end
-  local owner, status = start_owner {
-    runtime = runtime,
-    kind = OWNER_CANCEL,
-    task = task,
-    peer = nil,
-    epoch = task.epoch,
-    timeout = 0,
-    repeat_time = 0,
-  }
-  if status < 0 then
-    task.cancel_fallback = true
-    promote_fatal(runtime, make_error(status, "task.cancel", nil), "")
-  else
-    task.operation = owner
-  end
-end
-
-local function running_task(): Task
-  if not coroutine.is_yieldable(UV_TAG) then
-    raise "async operation used outside a UV Task"
-  end
-  local runtime = current_runtime()
-  return runtime.running_task
-end
-
-local function ordinary_task(): Task
+function _os_exit(code: integer)
   local task = running_task()
-  if task.cancel_requested then
-    raise task.cancel_value
-  end
-  if task.runtime.closing then
-    raise "the libuv Runtime is shutting down"
-  end
-  return task
-end
-
-local function new_request(kind: integer, subject: value,
-                           milliseconds: integer): Request
-  local task = ordinary_task()
-  task.epoch = task.epoch + 1
-  return Request.new {
-    kind = kind,
-    generation = task.epoch,
-    task = task,
-    subject = subject,
-    milliseconds = milliseconds,
-    cleanup = false,
-  }
-end
-
-local function new_cleanup_request(kind: integer, subject: value,
-                                   milliseconds: integer): Request
-  local task = running_task()
-  task.epoch = task.epoch + 1
-  return Request.new {
-    kind = kind,
-    generation = task.epoch,
-    task = task,
-    subject = subject,
-    milliseconds = milliseconds,
-    cleanup = true,
-  }
-end
-
-local function arm_request(task: Task, request: Request): DriveControl?
   local runtime = task.runtime
-  task.current_request = request
-  if request.kind == REQUEST_SLEEP then
-    local owner, status = start_owner {
-      runtime = runtime,
-      kind = OWNER_SLEEP,
-      task = task,
-      peer = request,
-      epoch = request.generation,
-      timeout = request.milliseconds,
-      repeat_time = 0,
-    }
-    if status < 0 then
-      task.current_request = nil
-      return DriveControl.new(DRIVE_ERROR,
-          make_error(status, "timer.start", nil), "", nil)
-    end
-    task.operation = owner
-    task.state = TASK_WAITING
-    return nil
-  elseif request.kind == REQUEST_JOIN then
-    local target: Task = request.subject
-    add_joiner(target, task)
-    task.operation = nil
-    task.state = TASK_WAITING
-    return nil
-  elseif request.kind == REQUEST_TICK then
-    local owner: uv_timer_t = request.subject
-    local state = ticker_state(owner)
-    state.waiter = task
-    state.waiter_epoch = request.generation
-    task.operation = owner
-    task.state = TASK_WAITING
-    return nil
-  elseif request.kind == REQUEST_FS then
-    local operation: FsOperation = request.subject
-    if operation.file then
-      local file = operation.file
-      if operation.kind == FS.close_wait then
-        enqueue_close_waiter(file, operation)
-        task.operation = operation
-        task.state = TASK_WAITING
-        return nil
-      end
-      enqueue_file_operation(file, operation)
-      task.operation = operation
-      task.state = TASK_WAITING
-      local failure: Error? = submit_file_head(file, task)
-      if failure then
-        local cleanup_request: Request? = nil
-        if request.cleanup then cleanup_request = request end
-        return DriveControl.new(DRIVE_ERROR, failure, "", cleanup_request)
-      end
-      return nil
-    end
-
-    local owner, status = submit_fs_operation(operation)
-    if status < 0 then
-      task.current_request = nil
-      local failure = make_error(status, fs_operation_name(operation.kind),
-                                 fs_operation_subject(operation))
-      retire_fs_owner_now(owner)
-      return DriveControl.new(DRIVE_ERROR, failure, "", nil)
-    end
-    task.operation = owner
-    task.state = TASK_WAITING
-    return nil
-  elseif request.kind == REQUEST_NET then
-    local failure: Error? = arm_net_request(task, request)
-    if failure then
-      local cleanup_request: Request? = nil
-      if request.cleanup then cleanup_request = request end
-      return DriveControl.new(DRIVE_ERROR, failure, "", cleanup_request)
-    end
-    return nil
-  elseif request.kind == REQUEST_SIGNAL then
-    local spec: SignalSpec = request.subject
-    local owner, status = start_signal_owner(runtime, task, spec,
-                                             request.generation)
-    if status < 0 then
-      task.current_request = nil
-      local operation = "signal.start"
-      if owner.metadata.lifecycle == OWNER_CLOSED then
-        operation = "signal.init"
-      end
-      return DriveControl.new(DRIVE_ERROR,
-          make_error(status, operation, spec.name), "", nil)
-    end
-    task.operation = owner
-    task.state = TASK_WAITING
-    return nil
-  elseif request.kind == REQUEST_PROCESS then
-    return arm_process_request(task, request)
-  else
-    raise internal_error("task.request.kind")
+  if runtime.exit_code == nil then
+    runtime.exit_code = code
   end
-end
-
-local function drive_task(task: Task, initial_mode: integer,
-                          initial_payload: value,
-                          initial_trace: string)
-  local runtime = task.runtime
-  local mode = initial_mode
-  local payload = initial_payload
-  local source_trace = initial_trace
-  while true do
-    runtime.running_task = task
-    task.state = TASK_RUNNING
-    task.operation = nil
-    task.current_request = nil
-    local yielded: value = nil
-    do
-      if mode == DRIVE_ERROR then
-        if #source_trace > 0 then
-          -- Task:join's suspended catch combines this target trace with the
-          -- join-site trace before the error reaches user code.  If it then
-          -- escapes the child, coroutine.Coro appends the callback propagation
-          -- trace once more using the same staged-trace protocol.
-          stash_trace_for_append(source_trace)
-        end
-        yielded = task.root:error(payload, UV_TAG)
-      else
-        yielded = task.root:resume(payload, UV_TAG)
-      end
-    catch
-      runtime.running_task = nil
-      if task.cancel_requested and error == task.cancel_value then
-        finish_task(task, TASK_CANCELLED, nil, error, traceback)
-      else
-        finish_task(task, TASK_FAILED, nil, error, traceback)
-      end
-      return
+  local index = 1
+  while index < runtime.next_task_root do
+    local other? = runtime.task_roots[index]
+    if other and not (other as Task).cleanup then
+      (other as Task):cancel("program exit")
     end
-    runtime.running_task = nil
-
-    local status = task.root:status()
-    if status == "dead" then
-      if task.cancel_requested then
-        finish_task(task, TASK_CANCELLED, nil, task.cancel_value, source_trace)
-      else
-        finish_task(task, TASK_SUCCEEDED, yielded, nil, "")
-      end
-      return
-    elseif status ~= "suspended" then
-      raise "invalid UV Task coroutine state"
-    end
-
-    local request: Request = yielded
-    local cleanup_request = request.cleanup and
-                            task.cleanup_shield_depth > 0
-    if task.cancel_requested and not cleanup_request then
-      mode = DRIVE_ERROR
-      payload = task.cancel_value
-      source_trace = ""
-    else
-      local outcome? = arm_request(task, request)
-      if not outcome then
-        return
-      end
-      local outcome = outcome
-      mode = outcome.mode
-      payload = outcome.payload
-      source_trace = outcome.trace
-    end
+    index = index + 1
   end
-end
-
-local function schedule_task_drive(task: Task, epoch: integer, mode: integer,
-                                   payload: value, trace: string,
-                                   cleanup_request: Request?): boolean
-  local control = DriveControl.new(mode, payload, trace, cleanup_request)
-  local owner, status = start_owner {
-    runtime = task.runtime,
-    kind = OWNER_TASK_DRIVE,
-    task = task,
-    peer = control,
-    epoch = epoch,
-    timeout = 0,
-    repeat_time = 0,
-  }
-  if status < 0 then
-    promote_fatal(task.runtime,
-                  make_error(status, "task.drive.schedule", nil), "")
-    return false
-  else
-    task.operation = owner
-    return true
-  end
-end
-
--- Trusted direct native dispatcher.  drive_task owns the inner Task catch;
--- this function's trailing catch is the non-raising Runtime invariant fence.
-local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
-                              _result: integer, _size: libuv.size_t,
-                              _pointer: ffi.titan_ffi_void_ptr)
-  local runtime = owner.metadata.runtime
-
-  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
-    local kind = owner.metadata.kind
-    owner.metadata.lifecycle = OWNER_CLOSED
-    if kind == OWNER_OBSERVE then
-      runtime.pending_observations = runtime.pending_observations - 1
-    end
-    -- Keep this callback's owner strongly reachable while a helper can run or
-    -- raise.  Only non-raising field clears remain after session bookkeeping;
-    -- unlinking is the final owner operation before returning to the shim.
-    maybe_finish_session(runtime)
-    owner.handle = nil
-    unlink_owner(owner)
-    return
-  end
-
-  local kind = owner.metadata.kind
-  if kind ~= OWNER_TICKER then
-    close_owner(owner)
-  end
-
-  if kind == OWNER_START then
-    local task = owner.metadata.task
-    if task.state == TASK_READY and not task.cancel_requested then
-      drive_task(task, DRIVE_RESUME, nil, "")
-    end
-  elseif kind == OWNER_SLEEP then
-    local task = owner.metadata.task
-    if task.state == TASK_WAITING and not task.cancel_requested and
-        task.epoch == owner.metadata.epoch then
-      drive_task(task, DRIVE_RESUME, nil, "")
-    end
-  elseif kind == OWNER_CANCEL then
-    local task = owner.metadata.task
-    if not terminal(task.state) and task.cancel_requested and
-        task.epoch == owner.metadata.epoch then
-      drive_task(task, DRIVE_ERROR, task.cancel_value, "")
-    end
-  elseif kind == OWNER_JOIN_WAKE then
-    local task = owner.metadata.task
-    local target: Task = owner.metadata.peer
-    if task.state == TASK_WAITING and not task.cancel_requested and
-        task.epoch == owner.metadata.epoch then
-      -- A waiting join is only permanently observed when this delivery wins.
-      -- Until now cancellation may revoke the observer and promote an
-      -- otherwise-unobserved target failure on its own next turn.
-      target.permanently_observed = true
-      remove_joiner(task)
-      if target.state == TASK_SUCCEEDED then
-        drive_task(task, DRIVE_RESUME, target.result, "")
-      elseif target.state == TASK_FAILED or target.state == TASK_CANCELLED then
-        drive_task(task, DRIVE_ERROR, target.error_value,
-                   target.error_traceback)
-      else
-        raise "Join wakeup target is not terminal"
-      end
-    end
-  elseif kind == OWNER_OBSERVE then
-    local task = owner.metadata.task
-    if task.state == TASK_FAILED and not task.permanently_observed and
-        task.observer_count == 0 then
-      promote_fatal(runtime, task.error_value, task.error_traceback)
-    end
-  elseif kind == OWNER_TASK_DRIVE then
-    local task = owner.metadata.task
-    local control: DriveControl = owner.metadata.peer
-    local deliver = false
-    if control.cleanup_request then
-      local request = control.cleanup_request
-      deliver = request.cleanup and task.state == TASK_WAITING and
-                task.current_request == request and
-                task.cleanup_shield_depth > 0
-    else
-      deliver = task.state == TASK_WAITING and
-                task.epoch == owner.metadata.epoch
-    end
-    if deliver then
-      drive_task(task, control.mode, control.payload, control.trace)
-    end
-  elseif kind == OWNER_TICKER then
-    local state: TickerState = owner.metadata.peer
-    if state.open and state.waiter then
-      local task = state.waiter
-      local epoch = state.waiter_epoch
-      state.waiter = nil
-      state.waiter_epoch = 0
-      if task.state == TASK_WAITING and not task.cancel_requested and
-          task.epoch == epoch then
-        drive_task(task, DRIVE_RESUME, true, "")
-      end
-    end
-  elseif kind == OWNER_TICKER_CLOSE_WAKE then
-    local task = owner.metadata.task
-    if task.state == TASK_WAITING and not task.cancel_requested and
-        task.epoch == owner.metadata.epoch then
-      drive_task(task, DRIVE_RESUME, false, "")
-    end
-  end
-catch
-  if not owner.metadata.runtime.fatal then
-    owner.metadata.runtime.fatal = true
-    owner.metadata.runtime.closing = true
-    owner.metadata.runtime.fatal_error = error
-    owner.metadata.runtime.fatal_traceback = traceback
-  end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle
-                as owned *libuv.uv_loop_t)
-  return
-end
-
-local function adapt(func: () -> value): (value) -> value
-  return function (_ignored: value): value
-    return func()
-  end
-end
-
-local function run_internal(func: () -> value, is_main: boolean): Task
-  local runtime = ensure_runtime()
-  local root = coroutine.create(adapt(func), UV_TAG)
-  local task: Task = {
-    root = root,
-    runtime = runtime,
-    generation = runtime.generation,
-    state = TASK_NEW,
-    epoch = 0,
-    result = nil,
-    error_value = nil,
-    error_traceback = "",
-    cancel_requested = false,
-    cancel_value = nil,
-    operation = nil,
-    current_request = nil,
-    joiner_head = nil,
-    join_next = nil,
-    join_previous = nil,
-    joining_target = nil,
-    next_task = nil,
-    previous_task = nil,
-    permanently_observed = false,
-    observer_count = 0,
-    cleanup_shield_depth = 0,
-    cancel_fallback = false,
-    main = is_main,
-  }
-  if is_main then runtime.main_task = task end
-  link_task(runtime, task)
-
-  local owner, status = start_owner {
-    runtime = runtime,
-    kind = OWNER_START,
-    task = task,
-    peer = nil,
-    epoch = 0,
-    timeout = 0,
-    repeat_time = 0,
-  }
-  task.operation = owner
-  if status < 0 then
-    finish_task(task, TASK_FAILED, nil,
-                make_error(status, "task.start", nil), "")
-  else
-    task.state = TASK_READY
-  end
-  return task
-end
-
-local function cleanup_begin()
-  local task = running_task()
-  task.cleanup_shield_depth = task.cleanup_shield_depth + 1
-end
-
-local function cleanup_end()
-  local task = running_task()
-  task.cleanup_shield_depth = task.cleanup_shield_depth - 1
-end
-
-local function drive_cancel_fallbacks(runtime: Runtime)
-  local task? = runtime.task_head
-  while task do
-    local to_drive = task
-    task = to_drive.next_task
-    if to_drive.cancel_fallback and not terminal(to_drive.state) then
-      to_drive.cancel_fallback = false
-      drive_task(to_drive, DRIVE_ERROR, to_drive.cancel_value, "")
-    end
-  end
-end
-
-local function begin_fatal_shutdown(runtime: Runtime)
-  runtime.closing = true
-  local task? = runtime.task_head
-  while task do
-    request_cancel(task, runtime.fatal_error)
-    task = task.next_task
-  end
-
-  local owner? = runtime.timer_owner_head
-  while owner do
-    if owner.metadata.kind == OWNER_TICKER or
-        owner.metadata.kind == OWNER_OBSERVE then
-      close_owner(owner)
-    end
-    owner = owner.metadata.next_owner
-  end
-  close_all_signal_owners(runtime)
-end
-
-local function begin_exit_shutdown(runtime: Runtime)
-  runtime.closing = true
-  local task? = runtime.task_head
-  while task do
-    request_cancel(task, "os.exit requested")
-    task = task.next_task
-  end
-
-  -- Repeating Tickers and signal watchers are ambient owners rather than Task
-  -- cleanup. Stop them once the request is committed, but leave observation
-  -- timers live so a pre-existing or cleanup-time unobserved failure can still
-  -- become Runtime-fatal and override the requested status.
-  local owner? = runtime.timer_owner_head
-  while owner do
-    if owner.metadata.kind == OWNER_TICKER then
-      close_owner(owner)
-    end
-    owner = owner.metadata.next_owner
-  end
-  close_all_signal_owners(runtime)
-end
-
-local function retire_closed_owners(runtime: Runtime)
-  local owner? = runtime.timer_owner_head
-  while owner do
-    local to_retire = owner
-    owner = to_retire.metadata.next_owner
-    if to_retire.metadata.lifecycle == OWNER_CLOSED then
-      to_retire.handle = nil
-      unlink_owner(to_retire)
-    end
-  end
-end
-
-local function close_runtime(runtime: Runtime)
-  retire_closed_owners(runtime)
-  retire_closed_signal_owners(runtime)
-  retire_fs_owners(runtime)
-  repair_acquired_files(runtime)
-  retire_aborted_net_requests(runtime)
-  retire_aborted_process_requests(runtime)
-  begin_parent_stdio_shutdown(runtime)
-  begin_file_shutdown(runtime)
-  advance_file_shutdown(runtime)
-  advance_parent_stdio_shutdown(runtime)
-  begin_tcp_shutdown(runtime)
-  advance_tcp_shutdown(runtime)
-  begin_process_shutdown(runtime)
-  advance_process_shutdown(runtime)
-  close_all_owners(runtime)
-  close_all_signal_owners(runtime)
-  retire_closed_owners(runtime)
-  retire_closed_signal_owners(runtime)
-  local loop_handle =
-    runtime.loop.handle as owned *libuv.uv_loop_t
-  -- Drain owners registered in the Runtime. An unknown active handle must not
-  -- make UV_RUN_DEFAULT hang here; once known owners are gone, loop_close
-  -- reports the remaining failure.
-  while not not runtime.timer_owner_head or
-        not not runtime.fs_pending_head or
-        not not runtime.file_head or
-        not not runtime.net_pending_head or
-        not not runtime.tcp_head or
-        not not runtime.signal_owner_head or
-        not not runtime.process_head or
-        not not runtime.process_request_head or
-        not not runtime.parent_stdin or
-        not not runtime.parent_stdout or
-        not not runtime.parent_stderr do
-    local alive = libuv.uv_run(loop_handle, libuv.UV_RUN_DEFAULT)
-    retire_closed_owners(runtime)
-    retire_closed_signal_owners(runtime)
-    retire_fs_owners(runtime)
-    repair_acquired_files(runtime)
-    advance_file_shutdown(runtime)
-    advance_tcp_shutdown(runtime)
-    advance_process_shutdown(runtime)
-    advance_parent_stdio_shutdown(runtime)
-    -- A callback may have called uv_stop or created a cleanup owner before it
-    -- returned.  Re-close/re-run only from this outer driver safe point.
-    close_all_owners(runtime)
-    close_all_signal_owners(runtime)
-    retire_closed_owners(runtime)
-    retire_closed_signal_owners(runtime)
-    retire_fs_owners(runtime)
-    advance_tcp_shutdown(runtime)
-    advance_process_shutdown(runtime)
-    advance_parent_stdio_shutdown(runtime)
-    if not not runtime.timer_owner_head or
-        not not runtime.fs_pending_head or
-        not not runtime.file_head or
-        not not runtime.net_pending_head or
-        not not runtime.tcp_head or
-        not not runtime.signal_owner_head or
-        not not runtime.process_head or
-        not not runtime.process_request_head or
-        not not runtime.parent_stdin or
-        not not runtime.parent_stdout or
-        not not runtime.parent_stderr then
-      if alive == 0 then
-        if not runtime.fatal then
-          runtime.fatal = true
-          runtime.closing = true
-          runtime.fatal_error = internal_error("shutdown.no-progress")
-          runtime.fatal_traceback = ""
-        end
-        -- Preserve every still-rooted native allocation and return the first
-        -- fatal error instead of spinning an idle uv_run forever.
-        return
-      end
-    end
-  end
-  local status = libuv.uv_loop_close(loop_handle)
-  if status ~= 0 then
-    if not runtime.fatal then
-      runtime.fatal = true
-      runtime.fatal_error = make_error(status, "loop.close", nil)
-      runtime.fatal_traceback = ""
-    end
-    -- Keep active_runtime and its storage root intact: reclaiming a busy loop
-    -- would be a native use-after-free even on an error-reporting path.
-    return
-  end
-  runtime.loop.handle = nil
-  if not runtime.file_head and not runtime.net_pending_head and
-      not runtime.tcp_head and not runtime.signal_owner_head and
-      not runtime.process_head and
-      not runtime.process_request_head and
-      not runtime.parent_stdin and
-      not runtime.parent_stdout and
-      not runtime.parent_stderr then
-    active_runtime = nil
-  end
+  raise task.cancel_value as Cancelled
 end

@@ -175,15 +175,6 @@ local function host_libuv_config()
 end
 M.host_libuv_config = host_libuv_config
 
-local function copy_file(source, destination)
-    local input = assert(io.open(source, "rb"))
-    local contents = input:read("*a")
-    input:close()
-    local output = assert(io.open(destination, "wb"))
-    output:write(contents)
-    output:close()
-end
-
 local function make_directory(path)
     if lfs.attributes(path, "mode") then return end
     local parent = path:match("^(.+)/[^/]+$")
@@ -358,109 +349,6 @@ function M.prepare_gc(workspace, layout)
         cppflags = "",
     })
     register_exact_provider(layout, "titan.gc")
-end
-
-local function build_variant_workspace(transformer, options)
-    options = options or {}
-    assert.truthy(type(options) == "table",
-        "async stdlib variant options must be a table")
-    assert.truthy(options.facades == nil or type(options.facades) == "boolean",
-        "async stdlib variant facades option must be boolean")
-    local build_facades = options.facades ~= false
-    local workspace = M.workspace("variant")
-    local built, variant_or_error = pcall(function()
-    M.refresh_private_runtime(workspace)
-    assert.truthy(lfs.mkdir(workspace .. "/titan"))
-    make_directory(workspace .. "/src/titan")
-    local transformers
-    if type(transformer) == "string" then
-        transformers = { transformer }
-    else
-        assert.truthy(type(transformer) == "table",
-            "async stdlib variant transformer must be a path or ordered array")
-        assert.truthy(#transformer > 0,
-            "async stdlib variant transformer array must not be empty")
-        transformers = transformer
-        for key in pairs(transformers) do
-            assert.truthy(type(key) == "number" and key >= 1
-                and key <= #transformers and key % 1 == 0,
-                "async stdlib variant transformers must be a dense array")
-        end
-    end
-
-    local raw_lua = host_lua()
-    local input = REPO .. "/titan/uv"
-    for index, configured in ipairs(transformers) do
-        assert.truthy(type(configured) == "string" and configured ~= "",
-            "async stdlib variant transformer paths must be nonempty strings")
-        local transform = configured
-        if transform:sub(1, 1) ~= "/" then
-            transform = REPO .. "/" .. transform
-        end
-        local destination = index == #transformers
-            and workspace .. "/src/titan/uv"
-            or workspace .. "/variant-stage-" .. tostring(index)
-        local ok, _, output = run(table.concat({
-            quote(raw_lua), quote(transform), quote(input),
-            quote(destination),
-        }, " "), workspace)
-        assert.truthy(ok, output)
-        input = destination
-    end
-    assert.truthy(exists(workspace .. "/src/titan/uv/uv.titan"),
-        "async stdlib variant transformer did not copy the folder main")
-    copy_file(REPO .. "/titan/timer.titan",
-        workspace .. "/src/titan/timer.titan")
-    copy_file(REPO .. "/titan/async.titan",
-        workspace .. "/src/titan/async.titan")
-    copy_file(REPO .. "/titan/coroutine.titan",
-        workspace .. "/src/titan/coroutine.titan")
-
-    assert.truthy(exists(workspace .. "/titan-runtime/libtitan.a"),
-        "async stdlib variant requires make runtime's libtitan.a")
-    local variant_layout = exact_layout(workspace)
-    M.compile(workspace, "titan.coroutine", {
-        layout = variant_layout,
-        cppflags = "",
-    })
-    register_exact_provider(variant_layout, "titan.coroutine")
-
-    local cppflags, ldflags, archive = host_libuv_config()
-    ldflags = archive .. " " .. ldflags
-    M.compile(workspace, "titan.uv", {
-        layout = variant_layout,
-        cppflags = cppflags,
-        cflags = "-fno-strict-aliasing",
-        ldflags = ldflags,
-    })
-    register_exact_provider(variant_layout, "titan.uv")
-    if build_facades then
-        -- Build the public facades against this private uv image. Its imported
-        -- uv module is loaded globally by the ordinary generated dependency
-        -- loader, so alias-owned Task methods resolve transitively without
-        -- another import in each consumer.
-        M.compile(workspace, "titan.async", {
-            layout = variant_layout,
-            cppflags = "",
-        })
-        register_exact_provider(variant_layout, "titan.async")
-        M.compile(workspace, "titan.timer", {
-            layout = variant_layout,
-            cppflags = "",
-        })
-        register_exact_provider(variant_layout, "titan.timer")
-    end
-    return variant_layout
-    end)
-    if not built then
-        run("rm -rf " .. quote(workspace))
-        error(variant_or_error, 0)
-    end
-    return workspace, variant_or_error
-end
-
-function M.variant_workspace(transformer, options)
-    return build_variant_workspace(transformer, options)
 end
 
 function M.run_lua_source(workspace, source, options)

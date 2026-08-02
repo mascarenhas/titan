@@ -21,6 +21,7 @@ local gc = require "titan.gc"
 
 local path = os.tmpname()
 os.remove(path)
+local task_finished = false
 local task = async.run(function()
     timer.sleep(0)
     async.yield()
@@ -36,10 +37,11 @@ local task = async.run(function()
     writer:write("\0payload")
     assert(writer:drain() == "writer\0payload")
     assert(writer:drain() == "")
-    return true
+    task_finished = true
 end)
 async.loop()
-assert(task:join())
+assert(task:status() == "succeeded")
+assert(task_finished)
 
 assert(peg.literal("peg"):match("peg") == 4)
 assert(strings.len("a\0b") == 3)

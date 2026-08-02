@@ -227,7 +227,7 @@ Titan dogfoods this layout in its private libuv plumbing module:
 ```
 titan/uv/
   uv.titan          # shared imports/constants/state, bootstrap, initializer
-  file.titan        # filesystem records, private FS constants, exported API
+  file.titan        # filesystem request/descriptor records and exported API
   os.titan          # OS/signal records and exported API
   process.titan     # process/pipe records and exported API
   runtime.titan     # runtime/byte records, Error, and version exports

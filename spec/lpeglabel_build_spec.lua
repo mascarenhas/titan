@@ -294,6 +294,10 @@ describe("private vendored LPegLabel build", function()
             write_file(ranlib_log, "")
             executable_script(ar_wrapper, string.format([[#!/bin/sh
 printf '%%s\n' "$*" >> %s
+if [ "${1-}" = qD ]; then
+  shift
+  set -- q "$@"
+fi
 exec %s "$@"
 ]], quote(ar_log), command_string(original_ar)))
             executable_script(ranlib_wrapper, string.format([[#!/bin/sh

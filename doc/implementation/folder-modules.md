@@ -274,9 +274,10 @@ callable strict entries, Interface descriptors, and concrete/Interface pair
 obligations are collected only after the contributors have become one checked
 AST, then emitted once per logical module. Their module-private slots follow
 the same importer-reconstructible public prefix and never give a contributor a
-runtime identity. The `process.titan` contributor now also exports the exact
-`uv_pipe_t` wrapper and process-stream bridge used by `titan.os`; this changes
-the logical `titan.uv` schema, not contributor identity or composition.
+runtime identity. The `process.titan` contributor now also exports the nominal
+`uv_stdio_t` process-stream wrapper used by `titan.os`; its private native
+representation is a pipe-or-TTY union. This changes the logical `titan.uv`
+schema, not contributor identity or composition.
 
 ## `titan.uv` dogfooding
 
@@ -285,9 +286,8 @@ The production `titan.uv` source is the folder ensemble
 `runtime.titan`, `task.titan`, and `tcp.titan`. The main file owns shared
 imports, shared constants, module state, bootstrap setup, program-argument
 setup, and the sole initializer. Each contributor owns its public API and both
-public and private records alongside the related implementation; `file.titan`
-also owns the private `FS` constants instance. The main file exports no member
-and declares no record. The Makefile
+public and private records alongside the related implementation. The main file
+exports no member and declares no record. The Makefile
 declares this set explicitly as `UV_TITAN_SOURCES`; it does not use a
 wildcard, so adding a production source changes the reviewed build graph.
 Every listed source is a prerequisite of the one combined standard-library
@@ -323,16 +323,6 @@ generated C/object pair, and one logical shim. Unlike `titan.uv`, both mains
 own their complete public API and every contributor has only module-local
 top-level declarations. Their contributor filenames do not become modules or
 archive metadata keys.
-
-The late-callback test variant reuses the production folder-source ensembles
-but deliberately not their provider layout. Its support code copies the
-complete uv ensemble to an isolated workspace, patches the owning contributors
-by unique per-file anchors, and compiles an exact `titan.uv` provider. DNS
-cases additionally build complete exact PEG and string providers before the
-exact net facade; filesystem-only sanitizer cases omit that dependency closure.
-The private root intentionally has no shallow `titan.so`, so prefix lookup
-reaches exact providers such as `titan/uv.so`. It does not reconstruct or
-concatenate a monolithic source and is not a production layout.
 
 See [Driver and toolchain](driver.md) for the complete search/build flow,
 [Lexer and parser](lexer-parser.md) for locations and non-reentrancy,

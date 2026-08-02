@@ -1464,8 +1464,9 @@ local register_decls = function(lst, item)
         item._declaration_provenance)
 end
 
--- Convert an table produced by an `extern inline` declaration
--- into one compatible with `register_decl`.
+-- Convert a parsed function definition into one compatible with
+-- `register_decl`. Header definitions may be extern, static, or bare inline;
+-- Darwin's __header_inline uses the last form under AppleClang in C99 mode.
 local function register_function(lst, item)
     -- Preserve the complete definition declarator. Reconstructing only its
     -- name and parameter list silently discarded return-pointer/array shape
@@ -1473,10 +1474,6 @@ local function register_function(lst, item)
     local id = { decl = item.func }
     return register_decl_item(
         lst, id, item.spec, item._declaration_provenance)
-end
-
-local function register_static_function(lst, item)
-    return register_function(lst, item)
 end
 
 local register_typedef_item = typed("TypeList, table, table, table? -> boolean, string?", function(lst, id, spec, provenance)
@@ -1530,12 +1527,10 @@ end
 local function register_one(lst, item)
     local spec_set = util.to_set(item.spec)
     local spec_type = item.spec.type or (item.spec[1] and item.spec[1].type)
-    if spec_set.extern and item.ids then
-        return register_decls(lst, item)
-    elseif spec_set.extern and item.func then
+    if item.func then
         return register_function(lst, item)
-    elseif spec_set.static and item.func then
-        return register_static_function(lst, item)
+    elseif spec_set.extern and item.ids then
+        return register_decls(lst, item)
     elseif spec_set.typedef then
         return register_typedefs(lst, item)
     elseif (spec_type == "struct" or spec_type == "union")

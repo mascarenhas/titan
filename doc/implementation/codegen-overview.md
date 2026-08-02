@@ -759,11 +759,13 @@ Serialized module type members now include ordered `Type.Interface`/
 `Type.Method` declarations. Runtime Interface values are two-user-value
 wrappers with an ordered `TitanInterfaceMethod` payload; generated modules
 also publish the exact/adjusted direct and bound entry artifacts needed by
-that payload. The standard `titan.uv` schema also exports its exact
-`uv_pipe_t` owner and process-stream bridge so `titan.os` stream facades retain
-their own native endpoints. The active suffix and provider namespace advance
-with the marker (`_0_20`, `TITAN_PATH_0_20`, `lib/titan/0.20`); 0.19
-providers are rejected before interface rehydration.
+that payload. The standard `titan.uv` schema also exports the nominal
+`uv_stdio_t` process-stream wrapper used by `titan.os`. Its private
+implementation selects the appropriate pipe-or-TTY native handle while the
+high-level stream facades retain their parent-facing endpoints. The active
+suffix and provider namespace advance with the marker (`_0_20`,
+`TITAN_PATH_0_20`, `lib/titan/0.20`); 0.19 providers are rejected before
+interface rehydration.
 
 ## The module protocol
 

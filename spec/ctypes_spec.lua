@@ -234,12 +234,14 @@ describe("C FFI ctype registration", function()
         assert.same({ "int" }, callback.ret.type)
     end)
 
-    it("imports static function definitions from headers", function()
+    it("imports static and bare-inline function definitions from headers", function()
         local ftypes = parse_header([[
             static int ffi_static(int x) { return x + 1; }
             struct ffi_opaque;
             static struct ffi_opaque *ffi_identity(
                 struct ffi_opaque *pointer) { return pointer; }
+            #define ffi_darwin_header_inline inline
+            ffi_darwin_header_inline int ffi_inline(int y) { return y + 1; }
         ]])
 
         local fn = assert(ftypes.ffi_static)
@@ -251,6 +253,11 @@ describe("C FFI ctype registration", function()
         assert.equal("function", identity.type)
         assert.equal("*", identity.ret.type[2])
         assert.equal("*", identity.params[1].type[2])
+
+        local inline = assert(ftypes.ffi_inline)
+        assert.equal("function", inline.type)
+        assert.same({ "int" }, inline.ret.type)
+        assert.same({ "int" }, inline.params[1].type)
     end)
 
     it("preserves complete parameter names across declaration forms", function()

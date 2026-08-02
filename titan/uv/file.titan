@@ -1,47 +1,5 @@
 local cstat = foreign import "sys/stat.h"
 
-local record FsConstants
-  local stat: integer
-  local open: integer
-  local read: integer
-  local write: integer
-  local flush: integer
-  local close: integer
-  local mkdir: integer
-  local unlink: integer
-  local rmdir: integer
-  local rename: integer
-  local list: integer
-  local lstat: integer
-  local tmpname: integer
-  local internal_close: integer
-  local close_wait: integer
-  local file_open: integer
-  local file_closing: integer
-  local file_closed: integer
-end
-
-local FS = FsConstants.new {
-  stat = 1,
-  open = 2,
-  read = 3,
-  write = 4,
-  flush = 5,
-  close = 6,
-  mkdir = 7,
-  unlink = 8,
-  rmdir = 9,
-  rename = 10,
-  list = 11,
-  lstat = 12,
-  tmpname = 13,
-  internal_close = 14,
-  close_wait = 15,
-  file_open = 1,
-  file_closing = 2,
-  file_closed = 3,
-}
-
 local record FsStatResult
   local size: integer
   local kind: string
@@ -50,722 +8,151 @@ local record FsStatResult
   local modified_nanoseconds: integer
 end
 
-local record FsTmpResult
+-- A uv_file is a process descriptor, not a Runtime-owned uv_handle_t.
+record uv_file
+  local handle: libuv.uv_file
+end
+
+local record FsOpenCall
+  local path: string
+  local flags: integer
+end
+
+local record FsReadCall
   local file: uv_file
+  local maximum: integer
+end
+
+local record FsWriteCall
+  local file: uv_file
+  local data: string
+  local offset: integer
+end
+
+local record FsFlushCall
+  local file: uv_file
+end
+
+local record FsCloseCall
+  local file: uv_file
+end
+
+local record FsStatCall
   local path: string
 end
 
-local record FsOperation
-  local kind: integer
-  local task: Task?
-  local request: Request?
-  local path: Text?
-  local second_path: Text?
-  local file: uv_file?
-  local data: string
-  local maximum: integer
-  local write_offset: integer
-  local write_bytes: Bytes?
-  local prepared_buffer: Buffer?
-  local owner: uv_fs_t?
-  local next_operation: FsOperation?
-  local previous_operation: FsOperation?
-  local linked: boolean
-  local close_waiter: boolean
+local record FsLstatCall
+  local path: string
 end
 
-local record FsControl
-  local runtime: Runtime
-  local lifecycle: integer
-  local callback_aborted: boolean
-  local operation: FsOperation
-  local next_owner: uv_fs_t?
-  local previous_owner: uv_fs_t?
-  local acquired_file: libuv.uv_file
+local record FsTmpnameCall
+  local path: string
 end
 
--- Filesystem requests stay private to uv.  The fixed five fields have the
--- same native callback layout as uv_timer_t while retaining their exact Titan
--- types and GC roots.
+local record FsMkdirCall
+  local path: string
+end
+
+local record FsUnlinkCall
+  local path: string
+end
+
+local record FsRmdirCall
+  local path: string
+end
+
+local record FsRenameCall
+  local from: string
+  local to: string
+end
+
+local record FsListCall
+  local path: string
+end
+
+-- One owner exists for exactly one accepted uv_fs_* submission. Libuv copies
+-- path and uv_buf_t arguments before returning. Its callback closure retains
+-- the Task and any pointed-to read or write data through completion.
 local record uv_fs_t
-  local handle?: owned *libuv.uv_fs_t
-  local main_thread: value
-  local dispatcher: (uv_fs_t, integer, integer, libuv.size_t,
-                     ffi.titan_ffi_void_ptr) -> ()
-  local metadata: FsControl
-  local buffer: Buffer?
+  local handle: owned *libuv.uv_fs_t
+  local callback: (uv_fs_t, integer) -> ()
 end
 
--- Persistent descriptors cross into fs as one nominal wrapper.  Its scalar
--- libuv handle never travels through value; every queue/resource link remains
--- local to uv and is omitted from the binary interface.
-record uv_file
-  local handle: libuv.uv_file
-  local runtime: Runtime
-  local generation: integer
-  local state: integer
-  local subject: string
-  local queue_head: FsOperation?
-  local queue_tail: FsOperation?
-  local current: FsOperation?
-  local close_waiter_head: FsOperation?
-  local close_waiter_tail: FsOperation?
-  local next_file: uv_file?
-  local previous_file: uv_file?
-  local close_enqueued: boolean
-end
-
-function _fs_open(path: string, mode: string): uv_file
-  fs_open_flags(mode)
-  local request = new_fs_request(FS.open, path, nil, mode)
-  return coroutine.yield(request, UV_TAG)
-end
-
-function _fs_read(file: uv_file, max_bytes: integer): string?
-  if max_bytes <= 0 then raise "read size must be positive" end
-  if max_bytes > climits.UINT_MAX then
-    raise "read size exceeds the portable libuv buffer limit"
-  end
-  validate_file(file, "read from", false)
-  local request = new_file_request(FS.read, file, "", max_bytes, false)
-  return coroutine.yield(request, UV_TAG)
-end
-
-function _fs_write(file: uv_file, data: string): integer
-  ordinary_task()
-  validate_file(file, "write to", false)
-  if #data == 0 then return 0 end
-  if #data > climits.UINT_MAX then
-    raise "write data exceeds the portable libuv buffer limit"
-  end
-  local request = new_file_request(FS.write, file, data, 0, false)
-  coroutine.yield(request, UV_TAG)
-  return #data
-end
-
-function _fs_flush(file: uv_file)
-  validate_file(file, "flush", false)
-  local request = new_file_request(FS.flush, file, "", 0, false)
-  coroutine.yield(request, UV_TAG)
-end
-
-function _fs_is_closed(file: uv_file): boolean
-  return file.state == FS.file_closed
-end
-
-function _fs_validate_read(file: uv_file)
-  -- Mirror the non-submission prefix of _fs_read so a facade-retained result
-  -- cannot bypass cancellation, stale-generation, closing, or closed checks.
-  validate_file(file, "read from", false)
-  ordinary_task()
-end
-
-function _fs_close(file: uv_file)
-  if file.state == FS.file_closed then return end
-  validate_file(file, "close", true)
-  local kind = FS.close_wait
-  if file.state == FS.file_open then
-    file.state = FS.file_closing
-  end
-  if not file.close_enqueued then
-    kind = FS.close
-  end
-  cleanup_begin()
-  do
-    local request = new_file_request(kind, file, "", 0, true)
-    coroutine.yield(request, UV_TAG)
-  finally
-    cleanup_end()
-  end
-end
-
-function _fs_stat(path: string): (integer, string, integer, integer, integer)
-  local request = new_fs_request(FS.stat, path, nil, "")
-  local result: FsStatResult = coroutine.yield(request, UV_TAG)
-  return result.size, result.kind, result.mode,
-         result.modified_seconds, result.modified_nanoseconds
-end
-
-function _fs_lstat(path: string): (integer, string, integer, integer, integer)
-  local request = new_fs_request(FS.lstat, path, nil, "")
-  local result: FsStatResult = coroutine.yield(request, UV_TAG)
-  return result.size, result.kind, result.mode,
-         result.modified_seconds, result.modified_nanoseconds
-end
-
-function _fs_tmpname(): string
-  local template = fs_tmpname_template()
-  local request = new_fs_request(FS.tmpname, template, nil, "")
-  local result: FsTmpResult = coroutine.yield(request, UV_TAG)
-  -- mkstemp returns an open descriptor. Reuse File's cleanup-shielded close
-  -- path so cancellation cannot escape between path delivery and close.
-  _fs_close(result.file)
-  return result.path
-end
-
-function _fs_mkdir(path: string)
-  coroutine.yield(new_fs_request(FS.mkdir, path, nil, ""), UV_TAG)
-end
-
-function _fs_unlink(path: string)
-  coroutine.yield(new_fs_request(FS.unlink, path, nil, ""), UV_TAG)
-end
-
-function _fs_rmdir(path: string)
-  coroutine.yield(new_fs_request(FS.rmdir, path, nil, ""), UV_TAG)
-end
-
-function _fs_rename(from: string, to: string)
-  coroutine.yield(new_fs_request(FS.rename, from, to, ""), UV_TAG)
-end
-
-function _fs_list(path: string): {string}
-  return coroutine.yield(new_fs_request(FS.list, path, nil, ""),
-                         UV_TAG)
-end
-
-local function extract_fs_list(owner: uv_fs_t): {string}
-  local names: {string} = {}
-  local entry = libuv.uv_dirent_t.new()
-  local handle =
-    owner.handle as owned *libuv.uv_fs_t
-  while true do
-    local status = libuv.uv_fs_scandir_next(handle, entry)
-    if status == libuv.UV_EOF then break end
-    if status < 0 then
-      raise make_error(status, "fs.list.next",
-                       fs_operation_subject(owner.metadata.operation))
-    end
-    names[#names + 1] = entry.name as string
-  end
-  return names
-end
-
-local function create_file(runtime: Runtime, handle: libuv.uv_file,
-                           subject: string): uv_file
-  local file = uv_file.new {
-    handle = handle,
-    runtime = runtime,
-    generation = runtime.generation,
-    state = FS.file_open,
-    subject = subject,
-    close_enqueued = false,
-  }
-  link_file(runtime, file)
-  return file
-end
-
-local function validate_file(file: uv_file, operation: string,
-                             allow_closing: boolean)
-  local runtime = current_runtime()
-  if file.runtime ~= runtime or file.generation ~= runtime.generation then
-    raise "File belongs to a stale libuv Runtime"
-  end
-  if file.state == FS.file_closed then
-    raise "cannot " .. operation .. " a closed File"
-  end
-  if file.state == FS.file_closing and not allow_closing then
-    raise "cannot " .. operation .. " a closing File"
-  end
-end
-
-local function enqueue_file_operation(file: uv_file, operation: FsOperation)
-  local previous? = file.queue_tail
-  operation.previous_operation = previous
-  operation.next_operation = nil
-  if previous then
-    previous.next_operation = operation
-  else
-    file.queue_head = operation
-  end
-  file.queue_tail = operation
-  operation.linked = true
-  operation.close_waiter = false
-  if operation.kind == FS.close or operation.kind == FS.internal_close then
-    file.close_enqueued = true
-  end
-end
-
-local function remove_file_operation(file: uv_file,
-                                     operation: FsOperation)
-  if not operation.linked or operation.close_waiter then return end
-  local previous? = operation.previous_operation
-  local next? = operation.next_operation
-  if previous then
-    previous.next_operation = next
-  else
-    file.queue_head = next
-  end
-  if next then
-    next.previous_operation = previous
-  else
-    file.queue_tail = previous
-  end
-  if file.current == operation then file.current = nil end
-  operation.previous_operation = nil
-  operation.next_operation = nil
-  operation.owner = nil
-  operation.linked = false
-end
-
-local function enqueue_close_waiter(file: uv_file, operation: FsOperation)
-  local previous? = file.close_waiter_tail
-  operation.previous_operation = previous
-  operation.next_operation = nil
-  if previous then
-    previous.next_operation = operation
-  else
-    file.close_waiter_head = operation
-  end
-  file.close_waiter_tail = operation
-  operation.linked = true
-  operation.close_waiter = true
-end
-
-local function remove_close_waiter(file: uv_file, operation: FsOperation)
-  if not operation.linked or not operation.close_waiter then return end
-  local previous? = operation.previous_operation
-  local next? = operation.next_operation
-  if previous then
-    previous.next_operation = next
-  else
-    file.close_waiter_head = next
-  end
-  if next then
-    next.previous_operation = previous
-  else
-    file.close_waiter_tail = previous
-  end
-  operation.previous_operation = nil
-  operation.next_operation = nil
-  operation.linked = false
-  operation.close_waiter = false
-end
-
-local function allocate_fs_owner(runtime: Runtime,
-                                 operation: FsOperation): uv_fs_t
-  local handle = libuv.uv_fs_t.new()
-  local metadata: FsControl = {
-    runtime = runtime,
-    lifecycle = FS_OWNER_ALLOCATED,
-    callback_aborted = false,
-    operation = operation,
-    next_owner = nil,
-    previous_owner = nil,
-    acquired_file = -1 as libuv.uv_file,
-  }
-  local owner: uv_fs_t = {
-    handle = handle,
-    main_thread = main_thread,
-    dispatcher = fs_dispatch,
-    metadata = metadata,
-    buffer = nil,
-  }
-  -- No allocating Titan helper may run after this owner is linked and before
-  -- libuv accepts (or synchronously rejects) its request.
-  local pointer = owner as ffi.titan_ffi_void_ptr
-  link_fs_owner(runtime, owner)
-  local request_handle: *libuv.uv_fs_t = handle
-  libuv.uv_req_set_data(
-      request_handle as *libuv.uv_req_t, pointer)
-  return owner
-end
-
-local function clean_fs_owner(owner: uv_fs_t)
-  if owner.metadata.lifecycle ~= FS_OWNER_CLEANED then
-    libuv.uv_fs_req_cleanup(
-        owner.handle as owned *libuv.uv_fs_t)
-  end
-  owner.metadata.lifecycle = FS_OWNER_CLEANED
-end
-
-local function fs_operation_name(kind: integer): string
-  if kind == FS.stat then return "fs.stat" end
-  if kind == FS.lstat then return "fs.lstat" end
-  if kind == FS.tmpname then return "fs.tmpname" end
-  if kind == FS.open then return "fs.open" end
-  if kind == FS.read then return "fs.read" end
-  if kind == FS.write then return "fs.write" end
-  if kind == FS.flush then return "fs.flush" end
-  if kind == FS.close or kind == FS.internal_close then return "fs.close" end
-  if kind == FS.mkdir then return "fs.mkdir" end
-  if kind == FS.unlink then return "fs.unlink" end
-  if kind == FS.rmdir then return "fs.rmdir" end
-  if kind == FS.rename then return "fs.rename" end
-  if kind == FS.list then return "fs.list" end
-  return "fs.unknown"
-end
-
-local function fs_operation_subject(operation: FsOperation): string?
-  if operation.file then
-    return operation.file.subject
-  elseif operation.path then
-    return operation.path.source
-  end
-  return nil
-end
+local type FsResult = (Task, uv_fs_t, integer, value) -> value
 
 local function fs_open_flags(mode: string): integer
-  local read_only = libuv.UV_FS_O_RDONLY
-  local write_only = libuv.UV_FS_O_WRONLY
-  local read_write = libuv.UV_FS_O_RDWR
-  local create = libuv.UV_FS_O_CREAT
-  local truncate = libuv.UV_FS_O_TRUNC
-  local append = libuv.UV_FS_O_APPEND
-  if mode == "r" or mode == "rb" then return read_only end
+  if mode == "r" or mode == "rb" then return libuv.UV_FS_O_RDONLY end
   if mode == "w" or mode == "wb" then
-    return write_only | create | truncate
+    return libuv.UV_FS_O_WRONLY | libuv.UV_FS_O_CREAT |
+           libuv.UV_FS_O_TRUNC
   end
   if mode == "a" or mode == "ab" then
-    return write_only | create | append
+    return libuv.UV_FS_O_WRONLY | libuv.UV_FS_O_CREAT |
+           libuv.UV_FS_O_APPEND
   end
   if mode == "r+" or mode == "r+b" or mode == "rb+" then
-    return read_write
+    return libuv.UV_FS_O_RDWR
   end
   if mode == "w+" or mode == "w+b" or mode == "wb+" then
-    return read_write | create | truncate
+    return libuv.UV_FS_O_RDWR | libuv.UV_FS_O_CREAT |
+           libuv.UV_FS_O_TRUNC
   end
   if mode == "a+" or mode == "a+b" or mode == "ab+" then
-    return read_write | create | append
+    return libuv.UV_FS_O_RDWR | libuv.UV_FS_O_CREAT |
+           libuv.UV_FS_O_APPEND
   end
   raise "invalid file mode '" .. mode .. "'"
 end
 
-local function fs_operation_runtime(operation: FsOperation): Runtime
-  if operation.file then
-    return operation.file.runtime
-  end
-  return operation.task.runtime
+local function validate_file(file: uv_file)
+  if file.handle < 0 then raise "File is closed" end
 end
 
-local function submit_fs_operation(operation: FsOperation):
-                                   (uv_fs_t, integer)
-  local runtime = fs_operation_runtime(operation)
-  local open_flags = 0
-  if operation.kind == FS.open then
-    open_flags = fs_open_flags(operation.data)
+-- Process descriptors are not loop-owned handles. A negative value is the
+-- local no-descriptor sentinel used by deferred cleanup after ownership moves.
+local function close_descriptor(descriptor: libuv.uv_file): integer
+  if descriptor < 0 then return 0 end
+  local request: libuv.uv_fs_t
+  local status = libuv.uv_fs_close(nil, request, descriptor, nil)
+  libuv.uv_fs_req_cleanup(request)
+  return status
+end
+
+local function new_fs_request(task: Task,
+                              operation: string,
+                              keepalive: value,
+                              success: FsResult): uv_fs_t
+  accepting_work(task.runtime, operation)
+  local native = libuv.uv_fs_t.new()
+  local callback = function (owner: uv_fs_t, result: integer)
+    complete_fs(task, owner, result, operation, keepalive, success)
   end
-  -- Finish every allocating preparation before publishing a request owner as
-  -- submitted. If preparation raises, libuv has seen no request and therefore
-  -- owes no callback; the operation remains rooted by its Task/File for the
-  -- outer fatal path without stranding a fake submitted owner.
-  operation.prepared_buffer = nil
-  if operation.kind == FS.read then
-    operation.prepared_buffer = allocate_read_buffer(operation.maximum)
-  elseif operation.kind == FS.write then
-    if not operation.write_bytes then
-      operation.write_bytes = copy_bytes(operation.data)
-    end
-    local bytes = operation.write_bytes
-    local write_length = #bytes - operation.write_offset
-    operation.prepared_buffer =
-        make_buffer(bytes, operation.write_offset, write_length)
-  end
-  -- Validate private operation state and cache every borrowed native argument
-  -- before publishing the owner. The fast path of a record cast does not
-  -- allocate, but its invariant-failure path raises; after publication that
-  -- could otherwise strand a request that libuv has never seen.
-  local kind = operation.kind
-  local loop_handle =
-    runtime.loop.handle as owned *libuv.uv_loop_t
-  local path_data: *ffi.titan_ffi_char = nil
-  local second_path_data: *ffi.titan_ffi_char = nil
-  local file_handle: libuv.uv_file = -1 as libuv.uv_file
-  local buffer_handle: *libuv.uv_buf_t = nil
-  if kind == FS.stat or kind == FS.lstat or kind == FS.tmpname or
-     kind == FS.open or kind == FS.mkdir or
-     kind == FS.unlink or kind == FS.rmdir or kind == FS.list then
-    path_data = operation.path.bytes
-  elseif kind == FS.rename then
-    path_data = operation.path.bytes
-    second_path_data = operation.second_path.bytes
-  elseif kind == FS.read or kind == FS.write then
-    file_handle = operation.file.handle
-    buffer_handle = operation.prepared_buffer.handle
-  elseif kind == FS.flush or kind == FS.close or
-         kind == FS.internal_close then
-    file_handle = operation.file.handle
-  else
-    raise "cannot submit unsupported filesystem operation"
-  end
-  local owner = allocate_fs_owner(runtime, operation)
-  local owner_handle =
-    owner.handle as owned *libuv.uv_fs_t
-  if operation.prepared_buffer then
-    owner.buffer = operation.prepared_buffer
-    operation.prepared_buffer = nil
-  end
-  owner.metadata.lifecycle = FS_OWNER_SUBMITTED
-  operation.owner = owner
-  local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
-  if kind == FS.stat then
-    status = libuv.uv_fs_stat(loop_handle, owner_handle, path_data,
-                             shim.titan_uvshim_fs_cb)
-  elseif kind == FS.lstat then
-    status = libuv.uv_fs_lstat(loop_handle, owner_handle, path_data,
-                              shim.titan_uvshim_fs_cb)
-  elseif kind == FS.tmpname then
-    status = libuv.uv_fs_mkstemp(loop_handle, owner_handle, path_data,
-                                shim.titan_uvshim_fs_cb)
-  elseif kind == FS.open then
-    status = libuv.uv_fs_open {
-      loop = loop_handle,
-      req = owner_handle,
-      path = path_data,
-      flags = open_flags as ffi.titan_ffi_int,
-      mode = 438 as ffi.titan_ffi_int,
-      cb = shim.titan_uvshim_fs_cb,
-    }
-  elseif kind == FS.read then
-    status = libuv.uv_fs_read {
-      loop = loop_handle,
-      req = owner_handle,
-      file = file_handle,
-      bufs = buffer_handle,
-      nbufs = 1,
-      offset = -1,
-      cb = shim.titan_uvshim_fs_cb,
-    }
-  elseif kind == FS.write then
-    status = libuv.uv_fs_write {
-      loop = loop_handle,
-      req = owner_handle,
-      file = file_handle,
-      bufs = buffer_handle,
-      nbufs = 1,
-      offset = -1,
-      cb = shim.titan_uvshim_fs_cb,
-    }
-  elseif kind == FS.flush then
-    status = libuv.uv_fs_fsync(loop_handle, owner_handle, file_handle,
-                              shim.titan_uvshim_fs_cb)
-  elseif kind == FS.close or kind == FS.internal_close then
-    status = libuv.uv_fs_close(loop_handle, owner_handle, file_handle,
-                              shim.titan_uvshim_fs_cb)
-  elseif kind == FS.mkdir then
-    status = libuv.uv_fs_mkdir {
-      loop = loop_handle,
-      req = owner_handle,
-      path = path_data,
-      mode = 511 as ffi.titan_ffi_int,
-      cb = shim.titan_uvshim_fs_cb,
-    }
-  elseif kind == FS.unlink then
-    status = libuv.uv_fs_unlink(loop_handle, owner_handle, path_data,
-                               shim.titan_uvshim_fs_cb)
-  elseif kind == FS.rmdir then
-    status = libuv.uv_fs_rmdir(loop_handle, owner_handle, path_data,
-                              shim.titan_uvshim_fs_cb)
-  elseif kind == FS.rename then
-    status = libuv.uv_fs_rename(loop_handle, owner_handle, path_data,
-        second_path_data, shim.titan_uvshim_fs_cb)
-  else
-    status = libuv.uv_fs_scandir {
-      loop = loop_handle,
-      req = owner_handle,
-      path = path_data,
-      flags = 0,
-      cb = shim.titan_uvshim_fs_cb,
-    }
-  end
+  local owner = uv_fs_t.new(native, callback)
+  local request: *libuv.uv_fs_t = native
+  libuv.uv_req_set_data(request as *libuv.uv_req_t,
+                        owner as ffi.titan_ffi_void_ptr)
+  task.pending = owner
+  return owner
+end
+
+local function submitted_fs_request(task: Task, owner: uv_fs_t,
+                                    status: integer,
+                                    operation: string): Immediate?
   if status < 0 then
-    clean_fs_owner(owner)
+    libuv.uv_fs_req_cleanup(owner.handle)
+    task.pending = nil
+    return immediate_error(status, operation)
   end
-  return owner, status
-end
-
-local function make_fs_operation(kind: integer, task: Task?,
-                                 request: Request?, path: Text?,
-                                 second_path: Text?, file: uv_file?,
-                                 data: string, maximum: integer): FsOperation
-  return FsOperation.new {
-    kind = kind,
-    task = task,
-    request = request,
-    path = path,
-    second_path = second_path,
-    file = file,
-    data = data,
-    maximum = maximum,
-    write_offset = 0,
-    linked = false,
-    close_waiter = false,
-  }
-end
-
-local function new_fs_request(kind: integer, path: string,
-                              second_path: string?, data: string): Request
-  local request = new_request(REQUEST_FS, nil, 0)
-  local copied_second: Text? = nil
-  if second_path then
-    local path = second_path
-    copied_second = copy_text(path, "fs.path", path)
-  end
-  local operation = make_fs_operation {
-    kind = kind,
-    task = request.task,
-    request = request,
-    path = copy_text(path, "fs.path", path),
-    second_path = copied_second,
-    file = nil,
-    data = data,
-    maximum = 0,
-  }
-  request.subject = operation
-  return request
-end
-
-local function new_file_request(kind: integer, file: uv_file, data: string,
-                                maximum: integer,
-                                cleanup: boolean): Request
-  local request: Request? = nil
-  if cleanup then
-    request = new_cleanup_request(REQUEST_FS, nil, 0)
-  else
-    request = new_request(REQUEST_FS, nil, 0)
-  end
-  local request = request
-  local operation = make_fs_operation {
-    kind = kind,
-    task = request.task,
-    request = request,
-    path = nil,
-    second_path = nil,
-    file = file,
-    data = data,
-    maximum = maximum,
-  }
-  request.subject = operation
-  return request
-end
-
-local function retire_fs_owner_now(owner: uv_fs_t)
-  owner.handle = nil
-  owner.buffer = nil
-  if owner.metadata.operation.owner == owner then
-    owner.metadata.operation.owner = nil
-  end
-  unlink_fs_owner(owner)
-end
-
-local function submit_file_head(file: uv_file, inline_task: Task?): Error?
-  while not file.current and file.queue_head do
-    local operation = file.queue_head
-    file.current = operation
-    local owner, status = submit_fs_operation(operation)
-    if status >= 0 then
-      if operation.task then
-        local task = operation.task
-        if task.state == TASK_WAITING and
-            task.current_request == operation.request then
-          task.operation = owner
-        end
-      end
-      return nil
-    end
-
-    local failure = make_error(status, fs_operation_name(operation.kind),
-                               fs_operation_subject(operation))
-    retire_fs_owner_now(owner)
-    remove_file_operation(file, operation)
-    if operation.kind == FS.close or
-        operation.kind == FS.internal_close then
-      file.close_enqueued = false
-    end
-    if operation.task then
-      local task = operation.task
-      local request = operation.request
-      if inline_task == task and task.current_request == request and
-          task.epoch == request.generation then
-        task.current_request = nil
-        return failure
-      elseif task.state == TASK_WAITING and
-             task.current_request == request and
-             (task.epoch == request.generation or request.cleanup) then
-        local epoch = request.generation
-        if request.cleanup then epoch = task.epoch end
-        local cleanup_request: Request? = nil
-        if request.cleanup then cleanup_request = request end
-        local scheduled = schedule_task_drive(task, epoch, DRIVE_ERROR,
-            failure, "", cleanup_request)
-        if request.cleanup and not scheduled then
-          operation.kind = FS.close_wait
-          enqueue_close_waiter(file, operation)
-        end
-      end
-    else
-      promote_fatal(file.runtime, failure, "")
-      return nil
-    end
-  end
+  -- The one-shot request owns the continuation through its callback. Logical
+  -- Task cancellation is delivered by that callback too; cancelling the
+  -- native filesystem work could suppress an accepted close or leave a
+  -- successful resource-producing operation without an owner.
   return nil
 end
 
-local function advance_file(file: uv_file)
-  submit_file_head(file, nil)
-end
-
-local function fs_operation_deliverable(operation: FsOperation): boolean
-  if not operation.task or not operation.request then return false end
-  local task = operation.task
-  local request = operation.request
-  if request.cleanup then
-    return task.state == TASK_WAITING and
-           task.current_request == request and task.cleanup_shield_depth > 0
-  end
-  return task.state == TASK_WAITING and task.current_request == request and
-         not task.cancel_requested and
-         task.epoch == request.generation
-end
-
-local function queue_internal_close(file: uv_file)
-  if file.state == FS.file_closed or file.close_enqueued then return end
-  file.state = FS.file_closing
-  local operation = make_fs_operation {
-    kind = FS.internal_close,
-    task = nil,
-    request = nil,
-    path = nil,
-    second_path = nil,
-    file = file,
-    data = "",
-    maximum = 0,
-  }
-  enqueue_file_operation(file, operation)
-  advance_file(file)
-end
-
-local function wake_close_waiters(file: uv_file, failure: Error?)
-  while file.close_waiter_head do
-    local operation = file.close_waiter_head
-    if not fs_operation_deliverable(operation) then
-      remove_close_waiter(file, operation)
-    else
-      local task = operation.task
-      local request = operation.request
-      local epoch = request.generation
-      if request.cleanup then epoch = task.epoch end
-      local scheduled = false
-      if not failure then
-        scheduled = schedule_task_drive(task, epoch, DRIVE_RESUME,
-                                        nil, "", request)
-      else
-        scheduled = schedule_task_drive(task, epoch, DRIVE_ERROR,
-                                        failure, "", request)
-      end
-      if not scheduled then
-        -- The Runtime is fatal now. Keep this exact cleanup waiter linked so
-        -- an outer safe point can retry without losing its only completion.
-        return
-      end
-      remove_close_waiter(file, operation)
-    end
-  end
-end
-
-local function extract_fs_stat(owner: uv_fs_t): FsStatResult
-  local statbuf = libuv.uv_fs_get_statbuf(
-      owner.handle as owned *libuv.uv_fs_t)
+local function stat_result(task: Task, owner: uv_fs_t, result: integer,
+                           keepalive: value): value
+  local statbuf = libuv.uv_fs_get_statbuf(owner.handle)
   local mode = statbuf.st_mode
   local file_type = mode & cstat.S_IFMT
   local kind = "other"
@@ -776,258 +163,313 @@ local function extract_fs_stat(owner: uv_fs_t): FsStatResult
   elseif file_type == cstat.S_IFLNK then
     kind = "symlink"
   end
-  return FsStatResult.new(
-      statbuf.st_size,
-      kind,
-      mode,
-      statbuf.st_mtim.tv_sec,
-      statbuf.st_mtim.tv_nsec)
+  return FsStatResult.new(statbuf.st_size, kind, mode,
+                          statbuf.st_mtim.tv_sec,
+                          statbuf.st_mtim.tv_nsec)
 end
 
-local function fs_dispatch_body(owner: uv_fs_t, result: integer)
-  local runtime = owner.metadata.runtime
-  owner.metadata.lifecycle = FS_OWNER_CALLBACK
-  local operation = owner.metadata.operation
+local function list_result(task: Task, owner: uv_fs_t,
+                           result: integer,
+                           keepalive: value): value
+  local names: {string} = {}
+  local entry: libuv.uv_dirent_t
+  while true do
+    local status = libuv.uv_fs_scandir_next(owner.handle, entry)
+    if status == libuv.UV_EOF then break end
+    if status < 0 then
+      raise make_error(status, "fs.list")
+    end
+    names[#names + 1] = entry.name as string
+  end
+  return names
+end
+
+local function unit_result(task: Task, owner: uv_fs_t, result: integer,
+                           keepalive: value): value
+  return nil
+end
+
+local function open_result(task: Task, owner: uv_fs_t, result: integer,
+                           keepalive: value): value
+  local descriptor = result as libuv.uv_file
+  local transferred = false
+  defer if not transferred then
+    check_status(close_descriptor(descriptor),
+                 "fs.open.abandon.close")
+  end
+  if task.cancel_value then
+    return nil
+  end
+  local file = uv_file.new(descriptor)
+  transferred = true
+  return file
+end
+
+local function read_result(task: Task, owner: uv_fs_t, result: integer,
+                           keepalive: value): value
+  if result == 0 then return nil end
+  return bytes_string(keepalive as Bytes, result)
+end
+
+local function write_result(task: Task, owner: uv_fs_t, result: integer,
+                            keepalive: value): value
+  return result
+end
+
+local function tmpname_result(task: Task, owner: uv_fs_t, result: integer,
+                              keepalive: value): value
+  local descriptor = result as libuv.uv_file
+  defer check_status(close_descriptor(descriptor),
+                     "fs.tmpname.close")
+  if task.cancel_value then
+    return nil
+  end
+  return libuv.uv_fs_get_path(owner.handle) as string
+end
+
+local function complete_fs(task: Task, owner: uv_fs_t, result: integer,
+                           operation: string, keepalive: value,
+                           success: FsResult)
+  local failed = false
   local payload: value = nil
-  local failure: Error? = nil
-  local acquired_path: string? = nil
-  if result < 0 then
-    failure = make_error(result, fs_operation_name(operation.kind),
-                         fs_operation_subject(operation))
-  elseif operation.kind == FS.stat or operation.kind == FS.lstat then
-    payload = extract_fs_stat(owner)
-  elseif operation.kind == FS.open or operation.kind == FS.tmpname then
-    -- The thin dispatcher recorded the returned descriptor before entering
-    -- this allocating body, so even body-entry GC failure can be repaired.
-    if operation.kind == FS.tmpname then
-      acquired_path = libuv.uv_fs_get_path(
-          owner.handle as owned *libuv.uv_fs_t) as string
-    end
-    payload = nil
-  elseif operation.kind == FS.read then
-    if result == 0 then
-      payload = nil
-    else
-      payload = bytes_string(owner.buffer.bytes, result)
-    end
-  elseif operation.kind == FS.write then
-    if result == 0 then
-      failure = make_error(libuv.UV_EIO,
-                           "fs.write",
-                           fs_operation_subject(operation))
-    else
-      operation.write_offset = operation.write_offset + result
-    end
-  elseif operation.kind == FS.list then
-    payload = extract_fs_list(owner)
-  else
-    payload = nil
+  do
+    if result < 0 then raise make_error(result, operation) end
+    payload = success(task, owner, result, keepalive)
+  catch
+    failed = true
+    payload = error
+  finally
+    libuv.uv_fs_req_cleanup(owner.handle)
   end
-  clean_fs_owner(owner)
-
-  if (operation.kind == FS.open or operation.kind == FS.tmpname) and
-      not failure then
-    local subject = fs_operation_subject(operation)
-    if acquired_path then subject = acquired_path as string end
-    local file = create_file(runtime, owner.metadata.acquired_file, subject)
-    owner.metadata.acquired_file = -1 as libuv.uv_file
-    if fs_operation_deliverable(operation) then
-      if operation.kind == FS.tmpname then
-        payload = FsTmpResult.new(file, acquired_path as string)
-      else
-        payload = file
-      end
-    else
-      queue_internal_close(file)
-    end
-  elseif operation.kind == FS.write and not failure and
-         operation.write_offset < #operation.data and
-         fs_operation_deliverable(operation) then
-    -- A partial write remains one logical File FIFO operation.  Root and
-    -- submit its next request before retiring the completed request owner.
-    local next_owner, status = submit_fs_operation(operation)
-    if status >= 0 then
-      operation.task.operation = next_owner
-      retire_fs_owner_now(owner)
-      return
-    end
-    failure = make_error(status, "fs.write",
-                         fs_operation_subject(operation))
-    retire_fs_owner_now(next_owner)
-  end
-
-  if operation.kind == FS.close or
-     operation.kind == FS.internal_close then
-    local file = operation.file
-    file.close_enqueued = false
-    remove_file_operation(file, operation)
-    -- A close callback is terminal even when it reports an error. Retrying a
-    -- failed close can act on a descriptor that the OS has already reused.
-    file.handle = -1 as libuv.uv_file
-    file.state = FS.file_closed
-    wake_close_waiters(file, failure)
-    if fs_operation_deliverable(operation) then
-      local task = operation.task
-      if not failure then
-        drive_task(task, DRIVE_RESUME, nil, "")
-      else
-        drive_task(task, DRIVE_ERROR, failure, "")
-      end
-    elseif failure then
-      promote_fatal(runtime, failure, "")
-    end
-    if file.state == FS.file_closed and not file.close_waiter_head then
-      -- Unlink only after every potentially throwing wake/Task drive. The
-      -- dispatcher catch can then repair any earlier failure from this root.
-      unlink_file(file)
-    end
-    retire_fs_owner_now(owner)
-    return
-  end
-
-  if fs_operation_deliverable(operation) then
-    local task = operation.task
-    if failure then
-      drive_task(task, DRIVE_ERROR, failure, "")
-    else
-      drive_task(task, DRIVE_RESUME, payload, "")
-    end
-  end
-
-  if operation.file then
-    local file = operation.file
-    remove_file_operation(file, operation)
-    advance_file(file)
-  end
-  retire_fs_owner_now(owner)
-end
-
--- Trusted direct filesystem dispatcher.  The native entry stays deliberately
--- thin; every allocating/extracting/bookkeeping helper call runs after this
--- function's setjmp target and under its trailing catch.
-local function fs_dispatch(owner: uv_fs_t, _event_kind: integer,
-                           result: integer, _size: libuv.size_t,
-                           _pointer: ffi.titan_ffi_void_ptr)
-  if result >= 0 and
-      (owner.metadata.operation.kind == FS.open or
-       owner.metadata.operation.kind == FS.tmpname) then
-    owner.metadata.acquired_file = result as libuv.uv_file
-  end
-  fs_dispatch_body(owner, result)
+  resume_task_from_callback(task, failed, payload)
 catch
-  owner.metadata.callback_aborted = true
-  if owner.metadata.lifecycle ~= FS_OWNER_CLEANED then
-    libuv.uv_fs_req_cleanup(
-        owner.handle as owned *libuv.uv_fs_t)
-  end
-  owner.metadata.lifecycle = FS_OWNER_CLEANED
-  if not owner.metadata.runtime.fatal then
-    owner.metadata.runtime.fatal = true
-    owner.metadata.runtime.closing = true
-    owner.metadata.runtime.fatal_error = error
-    owner.metadata.runtime.fatal_traceback = traceback
-  end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle
-                as owned *libuv.uv_loop_t)
-  return
+  fail_task_at_callback_boundary(task, error, traceback)
 end
 
-local function repair_aborted_fs_callback(owner: uv_fs_t)
-  if not owner.metadata.callback_aborted then return end
-  local operation = owner.metadata.operation
-  if operation.owner and operation.owner ~= owner then
-    -- A partial write may already have rooted its next submitted request.
-    -- That newer callback, not this retired owner, still owns logical repair.
-    return
-  end
-  if operation.owner == owner then operation.owner = nil end
-  if not operation.file then return end
-
-  local file = operation.file
-  if operation.kind == FS.close or
-      operation.kind == FS.internal_close then
-    if operation.linked and not operation.close_waiter then
-      remove_file_operation(file, operation)
-      file.close_enqueued = false
-    end
-
-    -- A public close whose native callback reached the invariant catch still
-    -- owns a shielded continuation. Convert it into an ordinary close waiter
-    -- so an outer safe point can finish that continuation.
-    if operation.kind == FS.close and operation.task and
-        operation.request and not operation.linked then
-      local task = operation.task
-      local request = operation.request
-      if task.state == TASK_WAITING and task.current_request == request and
-          request.cleanup and task.cleanup_shield_depth > 0 then
-        operation.kind = FS.close_wait
-        enqueue_close_waiter(file, operation)
-      end
-    end
-
-    file.handle = -1 as libuv.uv_file
-    file.state = FS.file_closed
-  elseif operation.linked and not operation.close_waiter then
-    -- The native operation is terminal even though result delivery or
-    -- bookkeeping failed. Remove it so fatal cancellation and File shutdown
-    -- can make progress; no obsolete result is delivered.
-    remove_file_operation(file, operation)
-  end
+local function FsOpenCall:dispatch(task: Task): Immediate?
+  local owner = new_fs_request(task, "fs.open", nil, open_result)
+  local status = libuv.uv_fs_open {
+    loop = task.runtime.loop,
+    req = owner.handle,
+    path = self.path,
+    flags = self.flags as ffi.titan_ffi_int,
+    mode = 438 as ffi.titan_ffi_int,
+    cb = shim.titan_uvshim_fs_cb,
+  }
+  return submitted_fs_request(task, owner, status, "fs.open")
 end
 
-local function retire_fs_owners(runtime: Runtime)
-  local owner? = runtime.fs_pending_head
-  while owner do
-    local to_retire = owner
-    owner = to_retire.metadata.next_owner
-    if to_retire.metadata.lifecycle == FS_OWNER_CLEANED then
-      repair_aborted_fs_callback(to_retire)
-      if to_retire.metadata.acquired_file < 0 then
-        retire_fs_owner_now(to_retire)
-      end
-    end
-  end
+local function FsReadCall:dispatch(task: Task): Immediate?
+  local bytes = ffi.titan_ffi_char.new_array(self.maximum)
+  local descriptor: libuv.uv_buf_t
+  descriptor.base = bytes
+  descriptor.len = self.maximum as libuv.size_t
+  local owner = new_fs_request(
+      task, "fs.read", bytes, read_result)
+  local status = libuv.uv_fs_read {
+    loop = task.runtime.loop,
+    req = owner.handle,
+    file = self.file.handle,
+    bufs = descriptor,
+    nbufs = 1,
+    offset = -1,
+    cb = shim.titan_uvshim_fs_cb,
+  }
+  return submitted_fs_request(task, owner, status, "fs.read")
 end
 
-local function repair_acquired_files(runtime: Runtime)
-  local owner? = runtime.fs_pending_head
-  while owner do
-    if owner.metadata.lifecycle == FS_OWNER_CLEANED and
-        owner.metadata.acquired_file >= 0 then
-      local operation = owner.metadata.operation
-      local subject = "<late-open>"
-      local actual_subject? = fs_operation_subject(operation)
-      if actual_subject then subject = actual_subject end
-      local file = create_file(runtime, owner.metadata.acquired_file, subject)
-      owner.metadata.acquired_file = -1 as libuv.uv_file
-      queue_internal_close(file)
-    end
-    owner = owner.metadata.next_owner
-  end
-  retire_fs_owners(runtime)
+local function FsWriteCall:dispatch(task: Task): Immediate?
+  local descriptor: libuv.uv_buf_t
+  local bytes = self.data as const *ffi.titan_ffi_char
+  shim.titan_uvshim_buf_init_const(
+      descriptor, bytes + self.offset,
+      (#self.data - self.offset) as libuv.size_t)
+  local owner = new_fs_request(
+      task, "fs.write", self.data, write_result)
+  local status = libuv.uv_fs_write {
+    loop = task.runtime.loop,
+    req = owner.handle,
+    file = self.file.handle,
+    bufs = descriptor,
+    nbufs = 1,
+    offset = -1,
+    cb = shim.titan_uvshim_fs_cb,
+  }
+  return submitted_fs_request(task, owner, status, "fs.write")
 end
 
-local function begin_file_shutdown(runtime: Runtime)
-  local file? = runtime.file_head
-  while file do
-    queue_internal_close(file)
-    file = file.next_file
-  end
+local function FsFlushCall:dispatch(task: Task): Immediate?
+  local owner = new_fs_request(task, "fs.flush", nil, unit_result)
+  local status = libuv.uv_fs_fsync(task.runtime.loop, owner.handle,
+                                  self.file.handle,
+                                  shim.titan_uvshim_fs_cb)
+  return submitted_fs_request(task, owner, status, "fs.flush")
 end
 
-local function advance_file_shutdown(runtime: Runtime)
-  local file? = runtime.file_head
-  while file do
-    local to_advance = file
-    file = to_advance.next_file
-    if to_advance.state == FS.file_closed then
-      wake_close_waiters(to_advance, nil)
-      if not to_advance.close_waiter_head then unlink_file(to_advance) end
-    elseif not to_advance.current and not to_advance.close_enqueued and
-        not to_advance.queue_head then
-      queue_internal_close(to_advance)
-    elseif not to_advance.current then
-      advance_file(to_advance)
-    end
+local function FsCloseCall:dispatch(task: Task): Immediate?
+  local descriptor = self.file.handle
+  local owner = new_fs_request(task, "fs.close", nil, unit_result)
+  local status = libuv.uv_fs_close(task.runtime.loop, owner.handle,
+                                  descriptor,
+                                  shim.titan_uvshim_fs_cb)
+  local immediate? = submitted_fs_request(
+      task, owner, status, "fs.close")
+  if not immediate then self.file.handle = -1 as libuv.uv_file end
+  return immediate
+end
+
+local function FsStatCall:dispatch(task: Task): Immediate?
+  local owner = new_fs_request(task, "fs.stat", nil, stat_result)
+  local status = libuv.uv_fs_stat(task.runtime.loop, owner.handle,
+                                 self.path,
+                                 shim.titan_uvshim_fs_cb)
+  return submitted_fs_request(task, owner, status, "fs.stat")
+end
+
+local function FsLstatCall:dispatch(task: Task): Immediate?
+  local owner = new_fs_request(task, "fs.lstat", nil, stat_result)
+  local status = libuv.uv_fs_lstat(task.runtime.loop, owner.handle,
+                                  self.path,
+                                  shim.titan_uvshim_fs_cb)
+  return submitted_fs_request(task, owner, status, "fs.lstat")
+end
+
+local function FsTmpnameCall:dispatch(task: Task): Immediate?
+  local owner = new_fs_request(
+      task, "fs.tmpname", nil, tmpname_result)
+  local status = libuv.uv_fs_mkstemp(task.runtime.loop, owner.handle,
+                                    self.path,
+                                    shim.titan_uvshim_fs_cb)
+  return submitted_fs_request(task, owner, status, "fs.tmpname")
+end
+
+local function FsMkdirCall:dispatch(task: Task): Immediate?
+  local owner = new_fs_request(task, "fs.mkdir", nil, unit_result)
+  local status = libuv.uv_fs_mkdir {
+    loop = task.runtime.loop,
+    req = owner.handle,
+    path = self.path,
+    mode = 511 as ffi.titan_ffi_int,
+    cb = shim.titan_uvshim_fs_cb,
+  }
+  return submitted_fs_request(task, owner, status, "fs.mkdir")
+end
+
+local function FsUnlinkCall:dispatch(task: Task): Immediate?
+  local owner = new_fs_request(task, "fs.unlink", nil, unit_result)
+  local status = libuv.uv_fs_unlink(task.runtime.loop, owner.handle,
+                                   self.path,
+                                   shim.titan_uvshim_fs_cb)
+  return submitted_fs_request(task, owner, status, "fs.unlink")
+end
+
+local function FsRmdirCall:dispatch(task: Task): Immediate?
+  local owner = new_fs_request(task, "fs.rmdir", nil, unit_result)
+  local status = libuv.uv_fs_rmdir(task.runtime.loop, owner.handle,
+                                  self.path,
+                                  shim.titan_uvshim_fs_cb)
+  return submitted_fs_request(task, owner, status, "fs.rmdir")
+end
+
+local function FsRenameCall:dispatch(task: Task): Immediate?
+  local owner = new_fs_request(task, "fs.rename", nil, unit_result)
+  local status = libuv.uv_fs_rename(task.runtime.loop, owner.handle,
+                                   self.from, self.to,
+                                   shim.titan_uvshim_fs_cb)
+  return submitted_fs_request(task, owner, status, "fs.rename")
+end
+
+local function FsListCall:dispatch(task: Task): Immediate?
+  local owner = new_fs_request(task, "fs.list", nil, list_result)
+  local status = libuv.uv_fs_scandir {
+    loop = task.runtime.loop,
+    req = owner.handle,
+    path = self.path,
+    flags = 0,
+    cb = shim.titan_uvshim_fs_cb,
+  }
+  return submitted_fs_request(task, owner, status, "fs.list")
+end
+
+function _fs_open(path: string, mode: string): uv_file
+  return await(Call.fs_open(FsOpenCall.new(
+      checked_text(path, "fs.open"), fs_open_flags(mode)))) as uv_file
+end
+
+function _fs_read(file: uv_file, max_bytes: integer): string?
+  validate_file(file)
+  return await(Call.fs_read(FsReadCall.new(file, max_bytes)))
+end
+
+function _fs_write(file: uv_file, data: string): integer
+  validate_file(file)
+  if #data == 0 then return 0 end
+  local offset = 0
+  while offset < #data do
+    local written = await(
+        Call.fs_write(FsWriteCall.new(file, data, offset))) as integer
+    offset = offset + written
   end
+  return offset
+end
+
+function _fs_flush(file: uv_file)
+  validate_file(file)
+  await(Call.fs_flush(FsFlushCall.new(file)))
+end
+
+function _fs_is_closed(file: uv_file): boolean
+  return file.handle < 0
+end
+
+function _fs_close(file: uv_file)
+  if file.handle < 0 then return end
+  validate_file(file)
+  await(Call.fs_close(FsCloseCall.new(file)))
+end
+
+function _fs_stat(path: string): (integer, string, integer, integer, integer)
+  local result = await(Call.fs_stat(FsStatCall.new(
+      checked_text(path, "fs.stat")))) as FsStatResult
+  return result.size, result.kind, result.mode,
+         result.modified_seconds, result.modified_nanoseconds
+end
+
+function _fs_lstat(path: string): (integer, string, integer, integer, integer)
+  local result = await(Call.fs_lstat(FsLstatCall.new(
+      checked_text(path, "fs.lstat")))) as FsStatResult
+  return result.size, result.kind, result.mode,
+         result.modified_seconds, result.modified_nanoseconds
+end
+
+function _fs_tmpname(): string
+  local template = fs_tmpname_template()
+  return await(Call.fs_tmpname(FsTmpnameCall.new(
+      checked_text(template, "fs.tmpname")))) as string
+end
+
+function _fs_mkdir(path: string)
+  await(Call.fs_mkdir(FsMkdirCall.new(
+      checked_text(path, "fs.mkdir"))))
+end
+
+function _fs_unlink(path: string)
+  await(Call.fs_unlink(FsUnlinkCall.new(
+      checked_text(path, "fs.unlink"))))
+end
+
+function _fs_rmdir(path: string)
+  await(Call.fs_rmdir(FsRmdirCall.new(
+      checked_text(path, "fs.rmdir"))))
+end
+
+function _fs_rename(from: string, to: string)
+  checked_text(from, "fs.rename")
+  checked_text(to, "fs.rename")
+  await(Call.fs_rename(FsRenameCall.new(from, to)))
+end
+
+function _fs_list(path: string): {string}
+  return await(Call.fs_list(FsListCall.new(
+      checked_text(path, "fs.list")))) as {string}
 end

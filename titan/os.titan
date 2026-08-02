@@ -43,18 +43,12 @@ type SpawnOption = (SpawnConfig) -> integer
 record InputStream
   local handle: uv.uv_stdio_t?
   local parent_descriptor: integer
-  local generation: integer
-  local process: uv.uv_process_t?
   local excess: string
-  local reading: boolean
-  local closed: boolean
 end
 
 record OutputStream
   local handle: uv.uv_stdio_t?
   local parent_descriptor: integer
-  local generation: integer
-  local process: uv.uv_process_t?
 end
 
 -- These are process-stdio records: the Titan process's stable streams and
@@ -68,9 +62,9 @@ record Process
   stderr: InputStream?
 end
 
-stdin: InputStream = InputStream.new(nil, 0, 0, nil, "", false, false)
-stdout: OutputStream = OutputStream.new(nil, 1, 0, nil)
-stderr: OutputStream = OutputStream.new(nil, 2, 0, nil)
+stdin: InputStream = InputStream.new(nil, 0, "")
+stdout: OutputStream = OutputStream.new(nil, 1)
+stderr: OutputStream = OutputStream.new(nil, 2)
 
 local function byte_at(text: string, index: integer): integer
   local bytes = text as const *ffi.titan_ffi_unsigned_char
@@ -205,14 +199,14 @@ end
 
 local function input_handle(stream: InputStream): uv.uv_stdio_t
   if stream.parent_descriptor < 0 then
-    return stream.handle as uv.uv_stdio_t
+    local captured? = stream.handle
+    if not captured then raise "InputStream is closed" end
+    return captured as uv.uv_stdio_t
   end
   local handle = parent_stdio(stream.parent_descriptor)
-  local generation = uv._os_stdio_generation(handle)
-  if stream.generation ~= generation then
-    stream.generation = generation
+  local previous? = stream.handle
+  if not previous or previous ~= handle then
     stream.excess = ""
-    stream.reading = false
   end
   stream.handle = handle
   return handle
@@ -220,32 +214,23 @@ end
 
 local function output_handle(stream: OutputStream): uv.uv_stdio_t
   if stream.parent_descriptor < 0 then
-    return stream.handle as uv.uv_stdio_t
+    local captured? = stream.handle
+    if not captured then raise "OutputStream is closed" end
+    return captured as uv.uv_stdio_t
   end
   local handle = parent_stdio(stream.parent_descriptor)
-  stream.generation = uv._os_stdio_generation(handle)
   stream.handle = handle
   return handle
 end
 
-local function begin_read(stream: InputStream)
-  input_handle(stream)
-  if stream.reading then
-    raise "InputStream already has a reader"
-  end
-  stream.reading = true
+local function captured_input_is_closed(stream: InputStream): boolean
+  return stream.parent_descriptor < 0 and not stream.handle
 end
 
-local function end_read(stream: InputStream)
-  stream.reading = false
-end
-
--- This helper runs only while the corresponding reader lock is held. Separate
--- streams retain independent excess; merged process output shares one facade.
-local function read_unlocked(stream: InputStream): string?
+local function read_stream(stream: InputStream): string?
+  if captured_input_is_closed(stream) then return nil end
   local handle = input_handle(stream)
   if #stream.excess > 0 then
-    uv._os_stdio_validate_read(handle)
     local result = stream.excess
     stream.excess = ""
     return result
@@ -253,113 +238,50 @@ local function read_unlocked(stream: InputStream): string?
   return uv._os_stdio_read(handle)
 end
 
-local function prepend_excess(stream: InputStream, prefix: string)
-  stream.excess = prefix .. stream.excess
-end
-
-local function read_error_is(stream: InputStream,
-                             candidate: value): boolean
-  return uv._os_stdio_read_error_is(input_handle(stream), candidate)
-end
-
-local function read_input(stream: InputStream): string?
-  begin_read(stream)
-  local result: string? = nil
-  do
-    result = read_unlocked(stream)
-    -- Another Task can commit close while this read is suspended in uv.
-    -- Once that monotonic bit is visible, queued or late callback bytes belong
-    -- to the discarded side of the close boundary.
-    if stream.closed then result = nil end
-  finally
-    end_read(stream)
-  end
-  return result
-end
-
 local function read_input_until(stream: InputStream, delimiter: string,
                                 chop: boolean?): string?
+  if captured_input_is_closed(stream) then return nil end
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
-  begin_read(stream)
   local builder = str.writer(false)
-  -- The native read is this producer's scheduling boundary. Keep the current
-  -- consumed chunk separately until the append succeeds so an append error
-  -- can restore every byte to the facade excess.
-  local pending = ""
-  local total = 0
   local tail = ""
-  local result: string? = nil
-  local finished = false
-  do
-    while not finished do
-      local maybe_chunk: string? = nil
-      local terminal_error_tail = false
-      do
-        maybe_chunk = read_unlocked(stream)
-      catch
-        if stream.closed then
-          maybe_chunk = nil
-        elseif total > 0 and read_error_is(stream, error) then
-          terminal_error_tail = true
-        else
-          raise
-        end
+  while true do
+    local chunk? = read_stream(stream)
+    if not chunk then
+      if captured_input_is_closed(stream) then return nil end
+      if #tail > 0 then builder:write(tail) end
+      local result = builder:drain()
+      if #result == 0 then return nil end
+      return result
+    end
+    local bytes = chunk as string
+    local boundary = bytes
+    if #tail > 0 then boundary = tail .. bytes end
+    local match: integer? = str.find(boundary, delimiter)
+    if match then
+      local match_first = match as integer
+      local match_end = match_first + #delimiter - 1
+      local result_end = match_end
+      if chop then result_end = match_first - 1 end
+      if result_end > 0 then
+        builder:write(str.sub(boundary, 1, result_end))
       end
-
-      if stream.closed then
-        builder:drain()
-        pending = ""
-        finished = true
-      elseif terminal_error_tail then
-        result = builder:drain()
-        finished = true
-      elseif not maybe_chunk then
-        if total > 0 then result = builder:drain() end
-        finished = true
+      stream.excess = str.sub(boundary, match_end + 1)
+      return builder:drain()
+    end
+    local keep = #delimiter - 1
+    if keep > #boundary then keep = #boundary end
+    local committed = #boundary - keep
+    if committed > 0 then
+      if committed == #boundary then
+        builder:write(boundary)
       else
-        local chunk = maybe_chunk as string
-        pending = chunk
-        builder:write(chunk)
-        if stream.closed then
-          builder:drain()
-          pending = ""
-          finished = true
-        else
-          pending = ""
-          local boundary = tail .. chunk
-          local match: integer? = str.find(boundary, delimiter)
-          total = total + #chunk
-          if match then
-            local match_end =
-              total - #boundary + (match as integer) - 1 + #delimiter
-            local result_end = match_end
-            if chop then result_end = result_end - #delimiter end
-            local all = builder:drain()
-            local selected = str.sub(all, 1, result_end)
-            local remaining = str.sub(all, match_end + 1)
-            result = selected
-            prepend_excess(stream, remaining)
-            finished = true
-          else
-            local keep = #delimiter - 1
-            if keep > #boundary then keep = #boundary end
-            tail = str.sub(boundary, #boundary - keep + 1)
-          end
-        end
+        builder:write(str.sub(boundary, 1, committed))
       end
     end
-  catch
-    local restored = builder:drain()
-    if #pending > 0 then restored = restored .. pending end
-    if not stream.closed and #restored > 0 then
-      prepend_excess(stream, restored)
-    end
-    raise
-  finally
-    end_read(stream)
+    tail = str.sub(boundary, committed + 1)
   end
-  return result
+  return nil
 end
 
 function clock(): float
@@ -553,45 +475,32 @@ end
 function spawn(file: string, args: {string},
                ...: SpawnOption): Process
   local config = SpawnConfig.new(uv._os_spawn_config_new())
-  local handle: uv.uv_process_t? = nil
-  do
-    local status = with_stdin(config)
-    if status >= 0 then status = with_stdout(config) end
-    if status >= 0 then status = with_stderr(config) end
-    local index = 1
-    while status >= 0 and index <= #... do
-      local option = ...[index]
-      status = option(config)
-      index = index + 1
-    end
-    if status < 0 then
-      uv._os_spawn_config_error(config.handle, status)
-    end
-    handle = uv._os_process_spawn_with_config(
-      file, args, config.handle)
-  catch
-    local saved_error = error
-    uv._os_spawn_config_close(config.handle)
-    raise saved_error
+  defer uv._os_spawn_config_close(config.handle)
+  local status = with_stdin(config)
+  if status >= 0 then status = with_stdout(config) end
+  if status >= 0 then status = with_stderr(config) end
+  local index = 1
+  while status >= 0 and index <= #... do
+    local option = ...[index]
+    status = option(config)
+    index = index + 1
   end
-  local process_handle = handle as uv.uv_process_t
-  local raw_stdin? = uv._os_process_stdin(process_handle)
-  local raw_stdout? = uv._os_process_stdout(process_handle)
-  local raw_stderr? = uv._os_process_stderr(process_handle)
+  if status < 0 then
+    uv._os_spawn_config_error(config.handle, status)
+  end
+  local process_handle, raw_stdin?, raw_stdout?, raw_stderr? =
+    uv._os_process_spawn_with_config(file, args, config.handle)
 
   local input: OutputStream? = nil
   if raw_stdin then
     local stdio = raw_stdin as uv.uv_stdio_t
-    input = OutputStream.new(
-      stdio, -1, uv._os_stdio_generation(stdio), process_handle)
+    input = OutputStream.new(stdio, -1)
   end
 
   local output: InputStream? = nil
   if raw_stdout then
     local stdio = raw_stdout as uv.uv_stdio_t
-    output = InputStream.new(
-      stdio, -1, uv._os_stdio_generation(stdio),
-      process_handle, "", false, false)
+    output = InputStream.new(stdio, -1, "")
   end
 
   local diagnostics: InputStream? = nil
@@ -600,9 +509,7 @@ function spawn(file: string, args: {string},
       diagnostics = output
     else
       local stdio = raw_stderr as uv.uv_stdio_t
-      diagnostics = InputStream.new(
-        stdio, -1, uv._os_stdio_generation(stdio),
-        process_handle, "", false, false)
+      diagnostics = InputStream.new(stdio, -1, "")
     end
   end
 
@@ -629,7 +536,10 @@ end
 
 function OutputStream:close()
   if self.parent_descriptor >= 0 then return end
-  uv._os_stdio_close(output_handle(self))
+  local captured? = self.handle
+  if not captured then return end
+  self.handle = nil
+  uv._os_stdio_close(captured as uv.uv_stdio_t)
 end
 
 function OutputStream:is_tty(): boolean
@@ -637,31 +547,22 @@ function OutputStream:is_tty(): boolean
 end
 
 function InputStream:read(): string?
-  if self.closed then return nil end
-  return read_input(self)
+  return read_stream(self)
 end
 
 function InputStream:read_until(delimiter: string,
                                 chop: boolean?): string?
-  if self.closed then return nil end
   return read_input_until(self, delimiter, chop)
 end
 
 function InputStream:close()
   -- Main-process stdin is a borrowed stable facade; closing it is a no-op.
-  if self.parent_descriptor >= 0 or self.closed then return end
-  local retained = self.excess
-  self.closed = true
+  if self.parent_descriptor >= 0 then return end
+  local captured? = self.handle
+  if not captured then return end
+  self.handle = nil
   self.excess = ""
-  do
-    uv._os_stdio_close(input_handle(self))
-  catch
-    -- Validation and request construction precede the low-level monotonic
-    -- close transition. Preserve retryability when one of those steps fails.
-    self.closed = false
-    self.excess = retained .. self.excess
-    raise
-  end
+  uv._os_stdio_close(captured as uv.uv_stdio_t)
 end
 
 function InputStream:is_tty(): boolean
