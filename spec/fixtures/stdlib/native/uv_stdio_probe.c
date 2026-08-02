@@ -1,3 +1,6 @@
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #define _DEFAULT_SOURCE
 #define _XOPEN_SOURCE 600
 
@@ -152,17 +155,6 @@ static int setup_socket_stdout(void) {
   return 0;
 }
 
-static void make_raw(struct termios *attributes) {
-  attributes->c_iflag &=
-    ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
-  attributes->c_oflag &= ~OPOST;
-  attributes->c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-  attributes->c_cflag &= ~(CSIZE | PARENB);
-  attributes->c_cflag |= CS8;
-  attributes->c_cc[VMIN] = 1;
-  attributes->c_cc[VTIME] = 0;
-}
-
 static int setup_tty(int master_target) {
   struct termios attributes;
   char *slave_name;
@@ -182,7 +174,7 @@ static int setup_tty(int master_target) {
     goto error;
   if (tcgetattr(slave, &attributes) != 0)
     goto error;
-  make_raw(&attributes);
+  cfmakeraw(&attributes);
   if (tcsetattr(slave, TCSANOW, &attributes) != 0)
     goto error;
 
@@ -337,10 +329,11 @@ int titan_uv_test_stdio_finish(int expected_nonblocking_mask) {
                      target, (flags & O_NONBLOCK) != 0, expected);
   }
 
-  /* Closing the final PTY master can discard unread input queued for the
-   * slave. Read the fallback-master case while the host-owned fd 1 is still
-   * open; EAGAIN then means the asynchronous write has been fully observed. */
-  if (active_mode == TITAN_UV_TEST_STDIO_TTY_MASTER &&
+  /* Closing either final PTY endpoint can discard unread peer input on some
+   * hosts. Read both TTY cases while the host-owned fd 1 is still open;
+   * EAGAIN then means the asynchronous write has been fully observed. */
+  if ((active_mode == TITAN_UV_TEST_STDIO_TTY_SLAVE ||
+       active_mode == TITAN_UV_TEST_STDIO_TTY_MASTER) &&
       peer_descriptors[1] >= 0) {
     read_peer(1, peer_descriptors[1], 0, 1);
     close(peer_descriptors[1]);

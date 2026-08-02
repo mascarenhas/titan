@@ -91,6 +91,10 @@ function result(): string
   return outcome
 end
 
+function captured_stdout(): string
+  return probe.titan_uv_test_stdio_output(1) as string
+end
+
 function start_processes(child: string): uv.Task
   outcome = "running"
   return uv._run(function (): value
@@ -263,7 +267,11 @@ local task = assert(cases.%s())
 local loop_ok, loop_error = pcall(async.loop)
 local finish_ok, finish_error = pcall(cases.%s)
 if not loop_ok then error(loop_error, 0) end
-if not finish_ok then error(finish_error, 0) end
+if not finish_ok then
+  local captured = cases.captured_stdout()
+  error(("%%s\ncaptured stdout (%%d bytes): %%q"):format(
+        tostring(finish_error), #captured, captured), 0)
+end
 assert(task:status() == "succeeded", task:status())
 assert(cases.result() == %q, cases.result())
 ]==]):format(start_name, finish_name, expected))
