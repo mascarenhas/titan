@@ -74,7 +74,8 @@ occur before the end of the supplied network chunk, so Titan subtracts
 `llhttp_get_error_pos` from the still-rooted input pointer and retains the
 unconsumed suffix. Resuming first consumes that suffix before another
 high-level connection read. This is how a handler can begin before the request
-body is buffered and how pipelined bytes survive one message boundary.
+body is buffered and how bytes already read for a later request survive one
+message boundary.
 
 A header pause at the exact end of a transport chunk can leave llhttp on an
 epsilon transition to message completion. After resuming with no retained
@@ -198,15 +199,26 @@ a later `close()` skips the completed logical step and idempotently retries
 exactly the transport or listener step. This is a concrete resource contract,
 not an HTTP queue or scheduler.
 
-## The idle-timeout composition blocker
+## Serial pipelining and the idle-timeout composition blocker
 
-HTTP/1.1 keep-alive and pipelined suffix preservation require no lower-level
-primitive. A robust idle deadline does. The public async facade has Task
-creation and cancellation plus timers, but no current-Task accessor, join,
-race, or deadline operation. A timer Task cannot simply cancel and be joined
-by the connection Task. Implementing the policy locally would require a
-connection-specific watchdog, generation tokens around every reuse interval,
-and carefully fenced close/cancellation behavior.
+The server supports ordered HTTP/1.1 request pipelining: a peer may send later
+requests before reading the current response. Its one connection Task runs a
+handler, finishes the response, drains any unread request body, and only then
+resets the parser and dispatches the next handler. If one transport read
+already contained bytes for a later request, the parser retains that
+unconsumed suffix for the same loop to process afterward. Responses remain in
+request order and never interleave; there is no concurrent per-connection
+handler scheduler. Suffix preservation is the byte-retention mechanism that
+enables this serial pipelined processing, not a concurrent request queue or
+scheduler.
+
+HTTP/1.1 keep-alive and this serial pipelined processing require no lower-level
+primitive. A robust idle deadline does. The public async facade
+has Task creation and cancellation plus timers, but no current-Task accessor,
+join, race, or deadline operation. A timer Task cannot simply cancel and be
+joined by the connection Task. Implementing the policy locally would require
+a connection-specific watchdog, generation tokens around every reuse
+interval, and carefully fenced close/cancellation behavior.
 
 That protocol would duplicate scheduling machinery for one library and is not
 part of this iteration. The server consequently has no internal idle timeout.
@@ -233,7 +245,8 @@ historical migration count is not the current provider contract.
 
 Focused standard-library tests run outside LuaCov. They fragment protocol
 input down to individual bytes, exercise fixed/chunked/EOF bodies, duplicate
-headers, streaming handlers, unread-body draining, keep-alive, pipelining, and
-HTTPS over the public SSL facade, and prove listener/response close retries
+headers, streaming handlers, unread-body draining, keep-alive, ordered
+pipelined requests, and HTTPS over the public SSL facade, and prove
+listener/response close retries
 after cancellation. The sanitizer boundary uses that same high-level path
 through TLS and llhttp rather than a private test transport.

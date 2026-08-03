@@ -253,9 +253,15 @@ Writing nonempty data to one of them raises an error. A 204 response must not
 include Content-Length. A 205 response must use `Content-Length: 0`; the server
 adds it when absent and rejects an explicit nonzero value. Transfer-Encoding is
 removed from every no-body response. A request or response `Connection: close`
-decision disables reuse; otherwise HTTP/1.1 keep-alive is preserved. The parser
-retains bytes after one message, so correctly ordered pipelined requests are
-processed in sequence on the same connection.
+decision disables reuse; otherwise HTTP/1.1 keep-alive is preserved.
+
+The server supports ordered HTTP/1.1 request pipelining: a peer may send later
+requests before reading the current response. Each connection dispatches
+handlers strictly one at a time; the current handler returns, its response is
+finished, and any unread request body is drained before the next handler runs.
+Bytes already read beyond the current message are retained for that next
+iteration. Responses remain in request order and never interleave; there is no
+concurrent per-connection handler scheduler.
 
 If a handler raises or parsing/framing fails, that connection Task terminates
 and its connection closes. Other accepted connection Tasks and the listening

@@ -132,12 +132,19 @@ decisions.
   transport/listener close can suspend. If sticky Task cancellation prevents
   that call from recording completion, the next `close()` idempotently retries
   only the transport/listener cleanup.
-- HTTP/1.1 keep-alive and pipelined suffix preservation are supported, but this
-  iteration does not manufacture an internal idle timeout. The public async API
-  has task creation/cancellation and timers but no current-task/join/race/deadline
-  primitive; a timeout implemented solely here would require a connection-local
-  watchdog and generation-fencing protocol. This is a high-level composition
-  blocker to call out, not grounds for changing `uv` in this feature.
+- HTTP/1.1 keep-alive and ordered request pipelining are supported. A peer may
+  send later requests before reading the current response, but each connection
+  dispatches handlers strictly one at a time: the current handler returns, its
+  response finishes, and any unread request body is drained before the next
+  handler runs. The parser preserves bytes already read beyond the current
+  message for that next iteration. Responses remain in request order and never
+  interleave; there is no concurrent per-connection handler scheduler.
+- This iteration does not manufacture an internal idle timeout. The public
+  async API has task creation/cancellation and timers but no
+  current-task/join/race/deadline primitive; a timeout implemented solely here
+  would require a connection-local watchdog and generation-fencing protocol.
+  This is a high-level composition blocker to call out, not grounds for
+  changing `uv` in this feature.
 
 ## Build and publication
 
@@ -163,7 +170,8 @@ decisions.
 - Add non-LuaCov URL and loopback TLS/HTTP suites with checked-in local CA fixtures:
   verification and hostname failure, binary/fragmented I/O, WANT_READ,
   clean/truncated close, strict/fragmented HTTP parsing, fixed/chunked/EOF
-  bodies, streaming handlers, pipelining, keep-alive, HTTPS, and the
+  bodies, streaming handlers, ordered pipelined requests, keep-alive, HTTPS,
+  and the
   lpeg_patterns URI normalization/error matrix. Review the
   same-payload WANT_WRITE retry path directly: dynamic memory BIOs have no
   capacity control and TLS 1.3 has no renegotiation API with which a portable

@@ -316,13 +316,9 @@ local function serve_connection(connection: io.ReaderWriterCloser,
         connection, request_value, response) then
       return
     end
-    do
-      handler(request_value, response)
-      response:close()
-      drain_request(request_value)
-    catch
-      raise
-    end
+    handler(request_value, response)
+    response:close()
+    drain_request(request_value)
     if not parser.keep_alive or not response.keep_alive then return end
     parser_reset_message(parser)
   end
