@@ -200,6 +200,7 @@ Satisfaction is structural at each coercion site; none of these records has an
 | Concrete type | Interfaces | Dispatch |
 | --- | --- | --- |
 | `net.Connection` | all seven | exact |
+| `ssl.Connection` | all seven | exact |
 | `fs.File` | all seven | adjusted |
 | `os.InputStream` | `Reader`, `Closer`, `ReaderCloser` | exact |
 | `os.OutputStream` | `Writer`, `Closer`, `WriterCloser` | exact |
@@ -207,6 +208,11 @@ Satisfaction is structural at each coercion site; none of these records has an
 | `string.StringReader` | `Reader`, `Closer`, `ReaderCloser` | exact |
 | `string.StringWriter` | `Writer`, `Closer`, `WriterCloser` | exact |
 | `net.Server` | `Closer` | exact |
+| `ssl.Server` | `Closer` | exact |
+| `http.ClientResponse` | `Reader`, `Closer`, `ReaderCloser` | exact |
+| `http.Request` | `Reader` | exact |
+| `http.Response` | `Writer`, `Closer`, `WriterCloser` | exact |
+| `http.Server` | `Closer` | exact |
 | `timer.Ticker` | `Closer` | exact |
 
 These Interface relations do not create a universal stream class.
@@ -240,12 +246,20 @@ input/output pair; its close method coordinates both endpoints and the child
 process. Those exact method shapes satisfy every Interface in this chapter;
 the additional `wait` method does not affect structural conversion.
 
-`net.Server` and `timer.Ticker` satisfy `Closer` incidentally through their
-existing exact, idempotent `close()` methods. Cancellation and post-close
-behavior remain concrete concerns.
+`ssl.Connection` has the same four exact stream method shapes as
+`net.Connection`, although its one OpenSSL state machine permits only one
+active operation. The HTTP client response and server request expose their
+decoded streaming bodies through exact Reader methods; a Response supplies an
+exact Writer/Closer pair. These shapes do not expose their transports or
+protocol parser through the Interface.
+
+`net.Server`, `ssl.Server`, `http.Server`, and `timer.Ticker` satisfy `Closer`
+incidentally through their existing exact, idempotent `close()` methods.
+Cancellation and post-close behavior remain concrete concerns.
 
 For the concrete contracts, see [Filesystem](standard-library-fs.md),
 [TCP networking](standard-library-net.md),
+[TLS](standard-library-ssl.md), [HTTP/1.1](standard-library-http.md),
 [Operating-system helpers](standard-library-os.md), and
 [Timers](standard-library-timer.md). For wrapper conversion, nominal identity,
 casts, and Lua behavior, see [Interfaces](interfaces.md).

@@ -4,6 +4,10 @@ local lfs = require "lfs"
 local INSTALLER_SCRIPT =
     lfs.currentdir() .. "/scripts/stdlib_installer.lua"
 local installer = assert(loadfile(INSTALLER_SCRIPT))()
+local FOURTEEN_MODULE_PREDECESSOR = {
+    "coroutine", "uv", "async", "timer", "io", "fs", "net", "os",
+    "peg", "string", "math", "lua", "iter", "gc",
+}
 
 local function make_directory(path)
     if lfs.symlinkattributes(path, "mode") == "directory" then return end
@@ -156,7 +160,19 @@ end
 
 local function fake_prior_archive_scanner(path)
     local contents = read_file(path)
-    local entries = fake_entries()
+    local entries
+    if contents == "prior fourteen-module archive\n" then
+        entries = {}
+        for _, module in ipairs(FOURTEEN_MODULE_PREDECESSOR) do
+            local name = "titan." .. module
+            entries[name] = {
+                abi = "0.20",
+                types = "types:" .. name,
+            }
+        end
+    else
+        entries = fake_entries()
+    end
     if contents == "prior archive with retired key\n" then
         entries["titan.retired"] = {
             abi = "0.20",
@@ -270,6 +286,16 @@ local function seed_complete_pair(root)
     capture_predecessor(root)
 end
 
+local function seed_fourteen_module_pair(root)
+    seed_complete_pair(root)
+    write_file(root .. "/lib/titan/0.20/titan.a",
+        "prior fourteen-module archive\n")
+    remove_tree(root .. "/share/lua/5.5/titan/ssl.lua")
+    remove_tree(root .. "/share/lua/5.5/titan/url.lua")
+    remove_tree(root .. "/share/lua/5.5/titan/http.lua")
+    capture_predecessor(root)
+end
+
 local function assert_older_abi_untouched(root)
     assert.equal("older ABI image\n",
         read_file(root .. "/lib/titan/0.19/titan.so"))
@@ -335,6 +361,21 @@ local function assert_complete_pair(root)
         read_file(root .. "/lib/titan/0.20/titan.a"))
 end
 
+local function assert_fourteen_module_pair(root)
+    assert.equal("prior image\n",
+        read_file(root .. "/lib/titan/0.20/titan.so"))
+    assert.equal("prior fourteen-module archive\n",
+        read_file(root .. "/lib/titan/0.20/titan.a"))
+    for _, module in ipairs(FOURTEEN_MODULE_PREDECESSOR) do
+        assert.equal(installer.shim_contents("titan." .. module),
+            read_file(root .. "/share/lua/5.5/titan/" .. module .. ".lua"))
+    end
+    for _, module in ipairs({ "ssl", "url", "http" }) do
+        assert.is_nil(lfs.symlinkattributes(
+            root .. "/share/lua/5.5/titan/" .. module .. ".lua"))
+    end
+end
+
 local function assert_no_transaction_residue(path)
     local mode = lfs.symlinkattributes(path, "mode")
     if mode ~= "directory" then return end
@@ -378,16 +419,17 @@ describe("recoverable paired standard-library publication", function()
     local root
     local old_failpoint
 
-    it("owns the exact current fourteen-module public layout", function()
+    it("owns the exact current seventeen-module public layout", function()
         assert.same({
-            "coroutine", "uv", "async", "timer", "io", "fs", "net", "os",
-            "peg", "string", "math", "lua", "iter", "gc",
+            "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
+            "url", "http", "os", "peg", "string", "math", "lua", "iter",
+            "gc",
         }, installer.MODULES)
         assert.same({
             "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
-            "titan.io", "titan.fs", "titan.net", "titan.os",
-            "titan.peg", "titan.string", "titan.math", "titan.lua",
-            "titan.iter", "titan.gc",
+            "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
+            "titan.http", "titan.os", "titan.peg", "titan.string",
+            "titan.math", "titan.lua", "titan.iter", "titan.gc",
         }, installer.MODULE_NAMES)
     end)
 
@@ -420,6 +462,20 @@ describe("recoverable paired standard-library publication", function()
             assert_new_install(root, false)
         end)
     end
+
+    it("upgrades a valid fourteen-module ABI-0.20 predecessor", function()
+        seed_fourteen_module_pair(root)
+        local ok, err = publish({
+            stage = stage, root = root, platform = "Linux",
+        })
+        assert.truthy(ok, err)
+        assert_new_install(root, false)
+        for _, module in ipairs({ "ssl", "url", "http" }) do
+            local path = root .. "/share/lua/5.5/titan/" .. module .. ".lua"
+            assert.equal(installer.shim_contents("titan." .. module),
+                read_file(path))
+        end
+    end)
 
     it("repeats a complete publication and retires active-ABI debris",
        function()
@@ -519,12 +575,25 @@ local entries = {}
 for _, name in ipairs(installer.MODULE_NAMES) do
     entries[name] = { abi = "0.20", types = "types:" .. name }
 end
+local function prior_archive_scanner(path)
+    local file = assert(io.open(path, "rb"))
+    local contents = file:read("*a")
+    assert(file:close())
+    local prior = {}
+    for name, entry in pairs(entries) do prior[name] = entry end
+    if contents == "prior fourteen-module archive\n" then
+        prior["titan.ssl"] = nil
+        prior["titan.url"] = nil
+        prior["titan.http"] = nil
+    end
+    return { entries = prior }
+end
 local ok, err = installer.publish({
     stage = stage,
     root = root,
     platform = "Darwin",
     image_validator = function() return true end,
-    prior_archive_scanner = function() return { entries = entries } end,
+    prior_archive_scanner = prior_archive_scanner,
 })
 if ok then os.exit(2) end
 if not tostring(err):find(os.getenv("TITAN_INSTALL_FAIL_AT"), 1, true) then
@@ -589,6 +658,12 @@ os.exit(1)
        function()
         assert_native_failpoints_restore(
             seed_complete_pair, assert_complete_pair)
+    end)
+
+    it("restores the exact fourteen-module predecessor at archive/DSO " ..
+       "failpoints", function()
+        assert_native_failpoints_restore(
+            seed_fourteen_module_pair, assert_fourteen_module_pair)
     end)
 
     it("rejects missing and nonregular staged archives before publication",

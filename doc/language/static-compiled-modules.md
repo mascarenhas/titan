@@ -229,8 +229,8 @@ $ROCKS_TREE/lib/titan/0.20/titan.so
 $ROCKS_TREE/lib/titan/0.20/titan.a
 ```
 
-Both contain the fourteen `titan.*` logical standard modules, including
-`titan.io`, under ABI 0.20. The DSO also
+Both contain the seventeen `titan.*` logical standard modules, including
+`titan.io`, `titan.ssl`, `titan.url`, and `titan.http`, under ABI 0.20. The DSO also
 contains bare native `require "titan"` support, and the archive carries that
 support object without inventing a logical module named `titan`.
 
@@ -238,6 +238,13 @@ The private namespaced LPegLabel archive is another metadata-free provider
 payload. Its five objects are carried into both forms for `titan.peg` and
 `titan.string`, but the archive and headers are not installed in the SDK and
 it does not advertise a Titan logical metadata key.
+
+The private llhttp archive and HTTP adapter are likewise metadata-free payload.
+`titan.ssl` uses OpenSSL directly and adds no adapter object. Bundled-OpenSSL
+mode carries the pinned OpenSSL objects into both provider forms.
+System-OpenSSL mode leaves the pkg-config-selected libraries as final-link
+inputs, so a static consumer must repeat that ordered link result just as it
+does for system libuv.
 
 In bundled-libuv mode, the pinned libuv archive is native provider payload. Its
 objects are carried into both `titan.so` and `titan.a`, so a `--static`

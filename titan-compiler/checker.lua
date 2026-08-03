@@ -455,6 +455,40 @@ local function is_foreign_ordinary_identifier(name, ftype)
                 or ftype.type == "enum")
 end
 
+-- Foreign imports are extracted independently, so two import closures can
+-- contain the same physical declaration even though the generated ordered
+-- includes emit it only once through an include guard or `#pragma once`.
+-- Source identity is useful only for recognizing that repeated extraction;
+-- the declaration graphs must additionally differ only by explicitly marked
+-- prototype-local tag objects. The final ordered-header compiler baseline
+-- still decides whether the declaration is actually emitted compatibly in the
+-- translation unit.
+local function same_foreign_declaration_source(left, right)
+    local lsource = left and left.provenance
+    local rsource = right and right.provenance
+    local left_has_identity = lsource ~= nil
+       and lsource.device ~= nil
+       and lsource.inode ~= nil
+    local right_has_identity = rsource ~= nil
+       and rsource.device ~= nil
+       and rsource.inode ~= nil
+    local same_file = left_has_identity and right_has_identity
+       and lsource.device == rsource.device
+       and lsource.inode == rsource.inode
+       or (not left_has_identity or not right_has_identity)
+          and lsource ~= nil
+          and rsource ~= nil
+          and lsource.file ~= nil
+          and lsource.file == rsource.file
+    return lsource ~= nil
+       and rsource ~= nil
+       and lsource.line ~= nil
+       and lsource.column ~= nil
+       and same_file
+       and lsource.line == rsource.line
+       and lsource.column == rsource.column
+end
+
 local function queue_foreign_redeclaration(
         st, node, name, previous, current, compatibility)
     local queue = st.pending_foreign_redeclarations
@@ -648,6 +682,188 @@ local function restore_rejected_foreign_type_registries(st, pending)
     end
 end
 
+-- A successful redeclaration can complete an unknown array bound or upgrade
+-- an old-style function inside the first declaration-owned type graph. Later
+-- probes must see those mutations exactly as the former sequential loop did.
+-- Track every type node whose spelling a later probe may read, and every node
+-- an earlier composite merge may write, so independently named declarations
+-- can still share one safe probe wave without assuming their graphs are
+-- disjoint.
+local foreign_redeclaration_batch = {}
+
+function foreign_redeclaration_batch.collect_reads(typ, reads, seen)
+    if type(typ) ~= "table" or seen[typ] then return end
+    seen[typ] = true
+    reads[typ] = true
+
+    local tag = typ._tag
+    if tag == "Type.CTypedef" then
+        -- Ordinary aliases retain their typedef spelling. A declaration-owned
+        -- array view is deliberately expanded by cprobe so a completed bound
+        -- is visible to the next wave; follow only that private target.
+        if typ._declaration_array_view then
+            foreign_redeclaration_batch.collect_reads(
+                typ.target, reads, seen)
+        end
+        return
+    elseif tag == "Type.CPointer" then
+        foreign_redeclaration_batch.collect_reads(typ.pointee, reads, seen)
+    elseif tag == "Type.CArray" then
+        foreign_redeclaration_batch.collect_reads(typ.elem, reads, seen)
+    elseif tag == "Type.CFunction" then
+        for _, param in ipairs(typ.params or {}) do
+            foreign_redeclaration_batch.collect_reads(param, reads, seen)
+        end
+        foreign_redeclaration_batch.collect_reads(typ.ret, reads, seen)
+    elseif tag == "Type.Function" then
+        foreign_redeclaration_batch.collect_reads(
+            typ._c_function, reads, seen)
+        for _, param in ipairs(typ.params or {}) do
+            foreign_redeclaration_batch.collect_reads(param, reads, seen)
+        end
+        for _, ret in ipairs(typ.rettypes or {}) do
+            foreign_redeclaration_batch.collect_reads(ret, reads, seen)
+        end
+    elseif tag == "Type.Pointer" then
+        foreign_redeclaration_batch.collect_reads(typ.type, reads, seen)
+    end
+end
+
+function foreign_redeclaration_batch.collect_writes(typ, writes, seen)
+    if type(typ) ~= "table" or seen[typ] then return end
+    seen[typ] = true
+
+    local tag = typ._tag
+    if tag == "Type.CTypedef" then
+        if typ._declaration_array_view then
+            foreign_redeclaration_batch.collect_writes(
+                typ.target, writes, seen)
+        end
+    elseif tag == "Type.CPointer" then
+        foreign_redeclaration_batch.collect_writes(
+            typ.pointee, writes, seen)
+    elseif tag == "Type.CArray" then
+        writes[typ] = true
+        foreign_redeclaration_batch.collect_writes(typ.elem, writes, seen)
+    elseif tag == "Type.CFunction" then
+        writes[typ] = true
+        for _, param in ipairs(typ.params or {}) do
+            foreign_redeclaration_batch.collect_writes(
+                param, writes, seen)
+        end
+        foreign_redeclaration_batch.collect_writes(typ.ret, writes, seen)
+    elseif tag == "Type.Function" then
+        writes[typ] = true
+        foreign_redeclaration_batch.collect_writes(
+            typ._c_function, writes, seen)
+        for _, param in ipairs(typ.params or {}) do
+            foreign_redeclaration_batch.collect_writes(
+                param, writes, seen)
+        end
+        for _, ret in ipairs(typ.rettypes or {}) do
+            foreign_redeclaration_batch.collect_writes(
+                ret, writes, seen)
+        end
+    end
+end
+
+function foreign_redeclaration_batch.reads_prior_write(
+        declaration, prior_writes)
+    local reads = {}
+    foreign_redeclaration_batch.collect_reads(
+        declaration.previous.type, reads, {})
+    foreign_redeclaration_batch.collect_reads(
+        declaration.current, reads, {})
+    for node in pairs(reads) do
+        if prior_writes[node] then return true end
+    end
+    return false
+end
+
+function foreign_redeclaration_batch.add_writes(declaration, writes)
+    foreign_redeclaration_batch.collect_writes(
+        declaration.previous.type, writes, {})
+    -- Canonicalizing two typedef declarations redirects the later private
+    -- alias object to the accepted first target. A distinct ordinary name in
+    -- that header can retain this exact alias root, so keep it behind the
+    -- typedef's wave even though its eventual C spelling remains the alias.
+    if declaration.current._tag == "Type.CTypedef"
+       and declaration.previous.type._tag == "Type.CTypedef" then
+        writes[declaration.current] = true
+    end
+end
+
+function foreign_redeclaration_batch.validate_candidates(
+        module_probe, candidates)
+    local compatibilities = {}
+    if #candidates == 0 then return compatibilities end
+
+    if type(module_probe.validate_declaration_compatibilities)
+        == "function" then
+        local ok, validated = pcall(
+            module_probe.validate_declaration_compatibilities,
+            module_probe, candidates)
+        if ok and type(validated) == "table" then
+            for index = 1, #candidates do
+                compatibilities[index] =
+                    type(validated[index]) == "table"
+                    and validated[index] or {
+                        status = "infrastructure_failure",
+                        message =
+                            "the C declaration compatibility batch "
+                            .. "returned no result for a candidate",
+                    }
+            end
+        else
+            local message = ok
+                and "the C declaration compatibility batch returned "
+                    .. "no result"
+                or "C declaration compatibility batch validation "
+                    .. "failed: " .. tostring(validated)
+            for index = 1, #candidates do
+                compatibilities[index] = {
+                    status = "infrastructure_failure",
+                    message = message,
+                }
+            end
+        end
+        return compatibilities
+    end
+
+    -- Keep compatibility with injected probe implementations that predate
+    -- batching. Production cprobe exposes the plural method.
+    for index, candidate in ipairs(candidates) do
+        if type(module_probe.validate_declaration_compatibility)
+            ~= "function" then
+            compatibilities[index] = {
+                status = "infrastructure_failure",
+                message =
+                    "the C probe service cannot validate a declaration pair",
+            }
+        else
+            local ok, validated = pcall(
+                module_probe.validate_declaration_compatibility,
+                module_probe,
+                candidate.left_type, candidate.right_type,
+                candidate.left_declaration,
+                candidate.right_declaration)
+            if ok and type(validated) == "table" then
+                compatibilities[index] = validated
+            else
+                compatibilities[index] = {
+                    status = "infrastructure_failure",
+                    message = ok
+                        and "the C declaration compatibility probe "
+                            .. "returned no result"
+                        or "C declaration compatibility validation "
+                            .. "failed: " .. tostring(validated),
+                }
+            end
+        end
+    end
+    return compatibilities
+end
+
 local function finalize_foreign_redeclarations(st, errors)
     local pending = st.pending_foreign_redeclarations
     -- Independent parsing supplies each import's member graph, but only the C
@@ -690,41 +906,94 @@ local function finalize_foreign_redeclarations(st, errors)
     end
 
     if result.status == "success" then
-        local rejected = {}
-        for _, declaration in ipairs(pending) do
-            local compatibility
-            if type(module_probe.validate_declaration_compatibility)
-                ~= "function" then
-                compatibility = {
-                    status = "infrastructure_failure",
-                    message =
-                        "the C probe service cannot validate a declaration pair",
-                }
-            else
-                local ok, validated = pcall(
-                    module_probe.validate_declaration_compatibility,
-                    module_probe,
-                    declaration.previous.type,
-                    declaration.current,
-                    declaration.previous.declaration,
-                    declaration.declaration)
-                if ok and type(validated) == "table" then
-                    compatibility = validated
-                else
-                    compatibility = {
-                        status = "infrastructure_failure",
-                        message = ok
-                            and "the C declaration compatibility probe "
-                                .. "returned no result"
-                            or "C declaration compatibility validation "
-                                .. "failed: " .. tostring(validated),
-                    }
+        local compatibilities = {}
+        local completed = {}
+        local remaining = #pending
+
+        while remaining > 0 do
+            local wave = {}
+            local seen_names = {}
+            local prior_writes = {}
+
+            -- Select the largest safe wave in source order. Only the first
+            -- remaining occurrence of one ordinary name is eligible. The
+            -- graph barrier additionally protects future or injected cases
+            -- where two names retain one mutable declaration-owned node.
+            for pending_index, declaration in ipairs(pending) do
+                if not completed[pending_index] then
+                    local first_for_name = not seen_names[declaration.name]
+                    seen_names[declaration.name] = true
+                    if first_for_name
+                       and not foreign_redeclaration_batch.reads_prior_write(
+                            declaration, prior_writes) then
+                        wave[#wave + 1] = {
+                            pending_index = pending_index,
+                            declaration = declaration,
+                        }
+                    end
+                    -- Include writes from skipped earlier declarations too:
+                    -- selecting a later reader ahead of such a declaration
+                    -- would also invert the former sequential semantics.
+                    foreign_redeclaration_batch.add_writes(
+                        declaration, prior_writes)
                 end
             end
 
-            if compatibility.status == "success" then
-                canonicalize_foreign_redeclaration(st, declaration)
-            else
+            assert(#wave > 0,
+                "foreign redeclaration probe wave made no progress")
+            local candidates = {}
+            local candidate_wave_indexes = {}
+            for wave_index, item in ipairs(wave) do
+                local declaration = item.declaration
+                if declaration.compatibility == "source-repeat" then
+                    -- Rendering two synthetic declarations would invent two
+                    -- prototype scopes for a prototype-local tag, even when
+                    -- the ordered headers emitted this one physical
+                    -- declaration only once. The successful baseline above
+                    -- is the authoritative proof for an exact source repeat.
+                    compatibilities[item.pending_index] = {
+                        status = "success",
+                    }
+                else
+                    candidates[#candidates + 1] = {
+                        left_type = declaration.previous.type,
+                        right_type = declaration.current,
+                        left_declaration =
+                            declaration.previous.declaration,
+                        right_declaration = declaration.declaration,
+                    }
+                    candidate_wave_indexes[#candidates] = wave_index
+                end
+            end
+
+            local validated =
+                foreign_redeclaration_batch.validate_candidates(
+                module_probe, candidates)
+            for candidate_index, wave_index in
+                ipairs(candidate_wave_indexes) do
+                compatibilities[wave[wave_index].pending_index] =
+                    validated[candidate_index]
+            end
+
+            -- Form accepted composites before constructing the next wave.
+            -- This preserves the historical []/[3] then [3]/[4] probe chain
+            -- instead of speculatively rendering both against [].
+            for _, item in ipairs(wave) do
+                local pending_index = item.pending_index
+                local compatibility = compatibilities[pending_index]
+                completed[pending_index] = true
+                remaining = remaining - 1
+                if compatibility.status == "success" then
+                    canonicalize_foreign_redeclaration(
+                        st, item.declaration)
+                end
+            end
+        end
+
+        local rejected = {}
+        for pending_index, declaration in ipairs(pending) do
+            local compatibility = compatibilities[pending_index]
+            if compatibility.status ~= "success" then
                 rejected[#rejected + 1] = declaration
                 report_foreign_redeclaration_failure(
                     declaration, errors, compatibility)
@@ -736,7 +1005,8 @@ local function finalize_foreign_redeclarations(st, errors)
         report_foreign_header_context_failure(st, errors, result)
         if result.status == "rejected" then
             for _, declaration in ipairs(pending) do
-                if declaration.compatibility == "conditional" then
+                if declaration.compatibility == "conditional"
+                   or declaration.compatibility == "source-repeat" then
                     report_foreign_redeclaration_failure(
                         declaration, errors, result)
                 end
@@ -7272,10 +7542,22 @@ local toplevel_visitor = util.make_visitor({
                 local previous = st:find_foreign_name(fname)
                 local pending
                 if previous then
-                    local compatibility =
+                    local isolated_compatibility =
                         foreigntypes.declaration_compatibility(
                             previous.type, current.type,
                             previous.declaration, current.declaration)
+                    local compatibility = isolated_compatibility
+                    if not isolated_compatibility
+                       and same_foreign_declaration_source(
+                            previous.declaration,
+                            current.declaration)
+                       and foreigntypes
+                            .prototype_tag_reextraction_compatibility(
+                                previous.type, current.type,
+                                previous.declaration,
+                                current.declaration) then
+                        compatibility = "source-repeat"
+                    end
                     if compatibility then
                         pending = queue_foreign_redeclaration(
                             st, node, fname, previous, current,

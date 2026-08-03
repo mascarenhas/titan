@@ -11,6 +11,10 @@ holds one opaque `uv.uv_tcp_t` wrapper, and only the private `uv` module can
 reach its native handle. There is no network control layer, Runtime network
 registry, ready queue, or per-operation generation number.
 
+The TLS layer wraps these public `net.Connection` and `net.Server` records with
+OpenSSL memory BIOs. It does not extend this module or obtain the private TCP
+owner; see [TLS-library implementation](ssl-library.md).
+
 ## Native owners and callbacks
 
 Each callback-taking libuv operation has one small Titan owner containing its
@@ -53,6 +57,11 @@ fresh TCP handle. Failure initiates that candidate's ordinary `uv_close`
 before the continuation moves to the next address; the close callback may run
 later. A successful outgoing or accepted connection starts its read watcher
 lazily when its first read is dispatched.
+
+The public `net.listen` facade substitutes backlog 128 when its trailing
+argument is absent, validates the resulting value, and passes an ordinary
+required integer to private `uv._net_listen`. Defaulting therefore adds no
+optional type or policy to `titan.uv`.
 
 ## Multi-shot reads and accepts
 

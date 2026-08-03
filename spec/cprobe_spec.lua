@@ -640,6 +640,346 @@ describe("session-scoped C probe service", function()
         assert.is_true(service:close())
     end)
 
+    it("batches distinct declaration pairs and deduplicates cache keys",
+    function()
+        local service, state = new_fake_service()
+        local module = assert(service:module_context({
+            includes = { "declarations.h" },
+        }))
+        local int = target_profile().integers.int.type
+        local first = {
+            left_type = types.CTypedef("ffi_batch_left_one", int),
+            right_type = types.CTypedef("ffi_batch_right_one", int),
+        }
+        local second = {
+            left_type = types.CTypedef("ffi_batch_left_two", int),
+            right_type = types.CTypedef("ffi_batch_right_two", int),
+        }
+
+        local results = module:validate_declaration_compatibilities({
+            first, second, first,
+        })
+        assert.equal(3, #results)
+        assert.equal("success", results[1].status)
+        assert.equal("success", results[2].status)
+        assert.equal("success", results[3].status)
+        assert.is_false(results[1].cached)
+        assert.is_false(results[2].cached)
+        assert.is_true(results[3].cached)
+        -- One baseline plus one candidate compilation proves that the checker
+        -- does not turn a successful group back into per-pair subprocesses.
+        assert.equal(2, #state.calls)
+
+        local source = state.calls[2].metadata.source
+        for index = 1, 3 do
+            assert.equal(source, results[index].source)
+        end
+        assert.matches(
+            "void titan_probe_db_%x+%(void%);\n"
+                .. "void titan_probe_db_%x+%(void%)\n%{",
+            source)
+        local _, block_count = source:gsub("\n    %{\n", "")
+        assert.equal(2, block_count)
+        assert.matches(
+            '# pragma GCC diagnostic ignored "%-Wnested%-externs"',
+            source)
+        local first_name = assert(source:match(
+            "extern ffi_batch_left_one (titan_probe_d1_%x+);"))
+        local second_name = assert(source:match(
+            "extern ffi_batch_left_two (titan_probe_d2_%x+);"))
+        assert.not_equal(first_name, second_name)
+        assert.matches(
+            "extern ffi_batch_right_one " .. first_name .. ";",
+            source, 1, true)
+        assert.matches(
+            "extern ffi_batch_right_two " .. second_name .. ";",
+            source, 1, true)
+        assert.is_nil(source:match("titan_probe_d3_%x+"))
+
+        local cached = module:validate_declaration_compatibilities({
+            first, second,
+        })
+        assert.is_true(cached[1].cached)
+        assert.is_true(cached[2].cached)
+        assert.equal(2, #state.calls)
+        assert.is_true(service:close())
+    end)
+
+    it("reports plural declaration API boundary and baseline failures",
+    function()
+        local int = target_profile().integers.int.type
+        local candidate = {
+            left_type = types.CTypedef("ffi_plural_left", int),
+            right_type = types.CTypedef("ffi_plural_right", int),
+        }
+
+        local service = new_fake_service()
+        local module = assert(service:module_context({
+            includes = { "declarations.h" },
+        }))
+        assert.has_error(function()
+            module:validate_declaration_compatibilities(false)
+        end, "C declaration compatibility candidates must be an array")
+
+        local facade = assert(
+            service:validate_declaration_compatibilities(
+                module, { candidate }))
+        assert.equal("success", facade[1].status)
+        local wrong, wrong_error =
+            service:validate_declaration_compatibilities({}, { candidate })
+        assert.is_nil(wrong)
+        assert.matches(
+            "module context does not belong to this probe service",
+            wrong_error, 1, true)
+        assert.is_true(service:close())
+
+        local closed =
+            module:validate_declaration_compatibilities({ candidate })
+        assert.equal("infrastructure_failure", closed[1].status)
+        assert.equal("closed", closed[1].reason)
+        assert.matches("probe service is closed",
+            closed[1].message, 1, true)
+
+        local message_service =
+            new_fake_service({}, function()
+                return nil, "injected compiler launch failure"
+            end)
+        local message_module = assert(message_service:module_context({
+            includes = { "declarations.h" },
+        }))
+        local message_baseline =
+            message_module:validate_declaration_compatibilities({ candidate })
+        assert.equal(
+            "infrastructure_failure", message_baseline[1].status)
+        assert.matches(
+            "C declaration compatibility",
+            message_baseline[1].message, 1, true)
+        assert.is_true(message_service:close())
+
+        local baseline_service = new_fake_service()
+        local baseline_module = assert(baseline_service:module_context({
+            includes = { "declarations.h" },
+        }))
+        baseline_service._ensure_baseline = function()
+            return {
+                status = "infrastructure_failure",
+                cached = false,
+                diagnostic = "injected baseline failure",
+                summary = "injected baseline failure",
+            }
+        end
+        local baseline = baseline_module:validate_declaration_compatibilities({
+            candidate,
+            {
+                left_type = types.CTypedef("ffi_plural_second_left", int),
+                right_type = types.CTypedef("ffi_plural_second_right", int),
+            },
+        })
+        assert.equal(2, #baseline)
+        for index = 1, 2 do
+            assert.equal("infrastructure_failure", baseline[index].status)
+            assert.equal("baseline", baseline[index].stage)
+            assert.matches(
+                "foreign header baseline failed",
+                baseline[index].message, 1, true)
+        end
+        assert.is_true(baseline_service:close())
+    end)
+
+    it("isolates batch tag scopes and preserves singleton C verdicts",
+    function()
+        local root = temporary_directory()
+        local header = root .. "/batch-types.h"
+        write_file(header, [[
+typedef struct { int value; } ffi_batch_anon_left;
+typedef struct { int value; } ffi_batch_anon_right;
+]])
+
+        local function new_real_service()
+            return assert(cprobe.new_service({
+                -- Bypass a user ccache shim: this test needs only the real
+                -- compiler's declaration and tag-scope verdicts.
+                compiler_argv = lfs.attributes("/usr/bin/cc", "mode")
+                    and { "/usr/bin/cc" }
+                    or { os.getenv("CC") or "cc" },
+                cflags = {
+                    "-Wall", "-Werror", "-Wnested-externs",
+                    "-pedantic-errors",
+                },
+            }))
+        end
+
+        local function module_context(service)
+            return assert(service:module_context({
+                source_dir = root,
+                includes = {
+                    {
+                        original = "batch-types.h",
+                        resolved = header,
+                        include_kind = "quote",
+                        include_name = "batch-types.h",
+                    },
+                },
+            }))
+        end
+
+        local int = target_profile().integers.int.type
+        local function scoped_tag()
+            return cstruct("ffi_batch_scope_tag")
+        end
+        local function scoped_function()
+            return types.CFunction({
+                types.CPointer(scoped_tag(), {}),
+            }, int, false, "cdecl")
+        end
+        local function anonymous_typedef(name)
+            return types.CTypedef(name,
+                types.CStruct(nil, nil, nil, {}, true, false))
+        end
+        local candidates = {
+            {
+                left_type = scoped_tag(),
+                right_type = scoped_tag(),
+            },
+            {
+                left_type = scoped_function(),
+                right_type = scoped_function(),
+            },
+            {
+                left_type = types.CArray(int, nil),
+                right_type = types.CArray(int, 4),
+            },
+            {
+                left_type = anonymous_typedef("ffi_batch_anon_left"),
+                right_type = anonymous_typedef("ffi_batch_anon_right"),
+            },
+        }
+
+        local singleton_statuses = {}
+        for index, candidate in ipairs(candidates) do
+            local service = new_real_service()
+            local result = module_context(service)
+                :validate_declaration_compatibilities({ candidate })[1]
+            singleton_statuses[index] = result.status
+            assert.is_true(service:close())
+        end
+        assert.same({
+            "success", "rejected", "success", "rejected",
+        }, singleton_statuses)
+
+        local service = new_real_service()
+        local results = module_context(service)
+            :validate_declaration_compatibilities(candidates)
+        local batch_statuses = {}
+        for index, result in ipairs(results) do
+            batch_statuses[index] = result.status
+        end
+        assert.same(singleton_statuses, batch_statuses)
+        assert.is_true(service:close())
+
+        assert(os.remove(header))
+        assert(lfs.rmdir(root))
+    end)
+
+    it("bisects rejected declaration batches to singleton verdicts", function()
+        local service, state = new_fake_service({}, function(_, _, metadata)
+            if metadata.stage == "baseline" then
+                return { started = true, ok = true, status = 0 }
+            elseif metadata.source:find("ffi_batch_bad", 1, true) then
+                return {
+                    started = true,
+                    ok = false,
+                    status = 1,
+                    diagnostic =
+                        "probe.c:9: error: rejected declaration batch",
+                }
+            end
+            return { started = true, ok = true, status = 0 }
+        end)
+        local module = assert(service:module_context({
+            includes = { "declarations.h" },
+        }))
+        local int = target_profile().integers.int.type
+        local function candidate(name)
+            return {
+                left_type = types.CTypedef(
+                    "ffi_batch_" .. name, int),
+                right_type = types.CTypedef(
+                    "ffi_batch_" .. name .. "_equivalent", int),
+            }
+        end
+
+        local candidates = {
+            candidate("first"),
+            candidate("second"),
+            candidate("bad"),
+            candidate("fourth"),
+        }
+        local results =
+            module:validate_declaration_compatibilities(candidates)
+        assert.same({ "success", "success", "rejected", "success" }, {
+            results[1].status,
+            results[2].status,
+            results[3].status,
+            results[4].status,
+        })
+        assert.matches("rejected declaration batch",
+            results[3].message, 1, true)
+        -- baseline; rejected 4-pair batch; accepted left half; rejected right
+        -- half; then the rejected and accepted singleton leaves.
+        assert.equal(6, #state.calls)
+
+        local cached =
+            module:validate_declaration_compatibilities(candidates)
+        assert.equal(6, #state.calls)
+        for index = 1, 4 do assert.is_true(cached[index].cached) end
+        assert.equal("rejected", cached[3].status)
+        assert.is_true(service:close())
+    end)
+
+    it("does not bisect or cache declaration-batch infrastructure failures",
+    function()
+        local service, state = new_fake_service({}, function(_, _, metadata)
+            if metadata.stage == "baseline" then
+                return { started = true, ok = true, status = 0 }
+            end
+            return nil, "configured compiler could not be started"
+        end)
+        local module = assert(service:module_context({
+            includes = { "declarations.h" },
+        }))
+        local int = target_profile().integers.int.type
+        local candidates = {}
+        for index = 1, 3 do
+            candidates[index] = {
+                left_type = types.CTypedef(
+                    "ffi_batch_infra_left_" .. index, int),
+                right_type = types.CTypedef(
+                    "ffi_batch_infra_right_" .. index, int),
+            }
+        end
+
+        local first =
+            module:validate_declaration_compatibilities(candidates)
+        assert.equal(2, #state.calls)
+        for index = 1, 3 do
+            assert.equal("infrastructure_failure", first[index].status)
+            assert.is_nil(first[index].accepted)
+            assert.is_false(first[index].cached)
+            assert.equal(
+                state.calls[2].metadata.source, first[index].source)
+        end
+
+        local retried =
+            module:validate_declaration_compatibilities(candidates)
+        assert.equal(3, #state.calls)
+        for index = 1, 3 do
+            assert.equal("infrastructure_failure", retried[index].status)
+            assert.is_false(retried[index].cached)
+        end
+        assert.is_true(service:close())
+    end)
+
     it("submits symbolic array bounds to the configured compiler", function()
         local service, state = new_fake_service()
         local module = assert(service:module_context({

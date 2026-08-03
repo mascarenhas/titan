@@ -28,7 +28,10 @@ export PATH="$PREFIX/bin:$PATH"
 
 make lua
 make luarocks
+make lpeglabel
 make libuv
+make openssl
+make llhttp
 "$PREFIX/bin/luarocks" make
 ```
 
@@ -84,13 +87,13 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h`, `titan_longjmp.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/{ffi,coro,uv}.h` | Namespaced portable FFI, coroutine, and libuv shim headers |
-| `$ROCKS_TREE/lib/titan/0.20/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus fourteen independent logical modules from `titan.coroutine` through `titan.gc` |
-| `$ROCKS_TREE/lib/titan/0.20/titan.a` | The self-describing static form of the same fourteen logical standard modules, plus native support, private LPegLabel payload, and bundled-libuv payload when that mode is selected |
-| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,os,peg,string,math,lua,iter,gc}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
+| `$ROCKS_TREE/lib/titan/0.20/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus seventeen independent logical modules from `titan.coroutine` through `titan.gc` |
+| `$ROCKS_TREE/lib/titan/0.20/titan.a` | The self-describing static form of the same seventeen logical standard modules, plus native support, private LPegLabel/llhttp payload, and bundled libuv/OpenSSL payload when those modes are selected |
+| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
 
-The fourteen-module pair and shims are the coordinated ABI-0.20 standard
+The seventeen-module pair and shims are the coordinated ABI-0.20 standard
 image. `titan.io` owns the shared Interface vocabulary and I/O helpers; bare
-native support adds the fifteenth DSO opener without adding a logical metadata
+native support adds the eighteenth DSO opener without adding a logical metadata
 key.
 
 Bundled-libuv installs also contain `$ROCKS_TREE/include/uv.h` and
@@ -108,6 +111,12 @@ engine for `titan.peg` and `titan.string`. Its exact five-object archive is a
 source-build input carried into `titan.so` and `titan.a`; the archive and its
 headers are not installed in the SDK, and applications do not need a separate
 LPeg/LPegLabel runtime module.
+
+It likewise embeds the always-private llhttp parser and its HTTP adapter. The
+TLS module calls OpenSSL directly through Titan's C FFI and uses either the
+pinned bundled OpenSSL objects or the system-mode final-link result. Neither
+the private llhttp/HTTP-adapter inputs nor bundled OpenSSL headers or archives
+become public Titan runtime-SDK libraries.
 
 ## Libuv setup
 
@@ -218,11 +227,44 @@ compiler; select unusual CMake toolchain executables explicitly through
 `LIBUV_CMAKE_FLAGS` rather than Make's `AR`/`RANLIB`, which configure Titan's
 own runtime archive.
 
+## OpenSSL and llhttp setup
+
+`titan.ssl` uses OpenSSL and `titan.http` uses llhttp. The default build pins,
+downloads, verifies, and statically builds OpenSSL 3.5.7 and llhttp 9.4.3.
+llhttp is always private and bundled. In addition to the libuv tools above,
+the bundled OpenSSL build requires Perl:
+
+```sh
+make openssl
+make llhttp
+```
+
+To use a system OpenSSL 3.0 or newer, install its development package and
+pkg-config metadata, then select that mode consistently for the provider
+build:
+
+```sh
+# Ubuntu/Debian
+sudo apt-get install libssl-dev pkg-config
+# Fedora
+sudo dnf install openssl-devel pkgconf-pkg-config
+# macOS
+brew install openssl@3 pkgconf
+
+OPENSSL_MODE=system make openssl
+OPENSSL_MODE=system "$PREFIX/bin/luarocks" make
+```
+
+The no-override TLS client API uses OpenSSL's compiled default certificate
+paths; it is not a portable wrapper around every platform's native trust
+database. See [TLS standard library](doc/language/standard-library-ssl.md) for
+explicit CA-file selection and the complete verification contract.
+
 The Titan-owned Lua's configured default `package.cpath` contains
 `$PREFIX/lib/titan/0.20/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
 template lets the generated `titan.*` loaders find the canonical provider; the
 second remains the root-discovery anchor. The default `package.path` finds all
-fourteen loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
+seventeen loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
 layout
 `ROCKS_TREE == PREFIX`, so `titanc` can use the first entry ending in
 `/lib/lua/5.5/?.so` to recover its Titan SDK/rocks root.
@@ -273,11 +315,13 @@ absent, the build atomically stages that bootstrap at
 `$ROCKS_TREE/lib/titan/0.20/titan.so` so the just-installed compiler can load
 its native support table; a repeated install preserves an already valid full
 image. After LuaRocks deploys the compiler, the source-only `post_install` hook
-invokes that `titanc` once for all fourteen current standard roots, with private
-LPegLabel payload between `titanlib.o` and any bundled libuv payload, stages
-the paired providers and generated loaders privately, validates them, and
-publishes them with rollback, committing
+invokes that `titanc` once for all seventeen current standard roots, with private
+LPegLabel, selected libuv, HTTP/llhttp, and TLS/OpenSSL payload after
+`titanlib.o`. It stages the paired providers and generated loaders privately,
+validates them, and publishes them with rollback, committing
 `titan.a` before `titan.so` and using the DSO rename as the final commit point.
+Publication recognizes a valid historical fourteen-module ABI-0.20 pair as an
+upgrade predecessor; seventeen modules remain the current installed contract.
 There is no separate Make install pass or pre-install hook. The provider,
 generated loaders, and SDK files remain
 direct artifacts outside the rock manifest, so `luarocks remove titan` does
@@ -346,19 +390,22 @@ precedence, interface/member and module-slot ordering, module-variable
 initialization, and code generation.
 
 The standard-library short names (`coroutine`, `uv`, `async`, `timer`, `io`,
-`fs`, `net`, `os`, `peg`, and `string`) are parser sugar for the corresponding
-`titan.*` module
+`fs`, `net`, `ssl`, `url`, `http`, `os`, `peg`, and `string`) are parser sugar
+for the corresponding `titan.*` module
 names. Module resolution checks binary dependencies before source, so an
 ordinary `./titan/uv/uv.titan` folder cannot displace the installed compiled
 provider;
 someone who explicitly changes `TITAN_PATH` to hide that provider is choosing
 a different module installation. Modules explicitly named on the `titanc`
 command line must come from source and use the folder-before-flat rule. Titan
-code uses those ten short imports; the four newer modules are imported as
-`titan.math`, `titan.lua`, `titan.iter`, and `titan.gc`. Lua uses the qualified
+code uses those thirteen short imports; the four qualified-only modules are
+imported as `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc`. Lua uses the
+qualified
 names `require "titan.coroutine"`, `require "titan.async"`,
 `require "titan.timer"`, `require "titan.io"`, `require "titan.fs"`,
-`require "titan.net"`, and `require "titan.os"`, plus `require "titan.peg"`,
+`require "titan.net"`, `require "titan.ssl"`, `require "titan.url"`,
+`require "titan.http"`, and
+`require "titan.os"`, plus `require "titan.peg"`,
 `require "titan.string"`, `require "titan.math"`, `require "titan.lua"`,
 `require "titan.iter"`, and `require "titan.gc"`. The private `titan.uv` logical module remains available
 for runtime plumbing and direct-libuv extensions. Lua's own `coroutine` and
@@ -369,14 +416,19 @@ with `titan.timer`, `titan.fs`, `titan.net`, and `titan.os` built on the same
 private plumbing. `titan.peg` owns the typed parsing-expression surface and
 `titan.string` builds byte operations, formatting/packing, and regexes on it.
 The independent `titan.io` module owns the standard Reader, Writer, and Closer
-Interface vocabulary and I/O helpers. Math, dynamic Lua loading, generic
+Interface vocabulary and I/O helpers. The high-level `titan.ssl` and
+`titan.http` modules compose over public networking and I/O APIs without
+changing `titan.uv`; `titan.url` supplies HTTP and applications with reusable
+PEG-based URL parsing. Math, dynamic Lua loading, generic
 iteration, and GC control live in `titan.math`, `titan.lua`, `titan.iter`, and
-`titan.gc`. Clean validation builds pass all fourteen roots
-to one `titanc` invocation, so their source imports are statically resolved
+`titan.gc`; GC-backed owners can attach table/full-userdata finalizers
+without discarding an existing metatable. Clean validation builds pass all
+seventeen roots to one `titanc` invocation, so their source imports are
+statically resolved
 inside the paired `titan.so` and `titan.a` providers. Bundled mode carries
 libuv's objects into both forms; system mode keeps the pkg-config-selected
 library as a repeated final-link input. The private LPegLabel objects enter
-both forms in either libuv mode. Fourteen generated Lua loaders expose the
+both forms in either libuv mode. Seventeen generated Lua loaders expose the
 qualified logical entries.
 Its source is the reviewed folder ensemble rooted at `titan/uv/uv.titan`, with
 `file.titan`, `os.titan`, `process.titan`, `runtime.titan`, `task.titan`, and
@@ -538,7 +590,10 @@ $ export PREFIX="/tmp/titan-$USER-test"
 $ export PATH="$PREFIX/bin:$PATH"
 $ make lua
 $ make luarocks
+$ make lpeglabel
 $ make libuv
+$ make openssl
+$ make llhttp
 $ make test
 ```
 
@@ -603,11 +658,13 @@ need the SDL2 development headers installed.
 
 `make clean` removes generated build and test artifacts (object files, generated
 C, compiled modules, coverage data), including nested `titan/uv/uv.c` and
-`titan/uv/uv.o`, the `titan/peg` and `titan/string` folder-main outputs, and
-the fourteen known generated standard-library loaders, while
+`titan/uv/uv.o`, the `titan/http`, `titan/peg`, and `titan/string` folder-main
+outputs, and
+the seventeen known generated standard-library loaders, while
 keeping source files and downloaded dependency trees.
 `make distclean` additionally removes the downloaded Lua, LuaRocks,
-libbacktrace, and libuv source/build trees and release tarballs. Neither target
+libbacktrace, libuv, OpenSSL, and llhttp source/build trees and release
+tarballs. Neither target
 removes an installed `PREFIX`; delete a throwaway `/tmp` prefix separately
 when it is no longer needed.
 
@@ -686,15 +743,16 @@ they are in the roadmap:
   unified Lua/Titan backtraces via `titan.backtrace()`
 * asymmetric, tagged (nested) coroutines as building block for async IO
 * libuv-backed `async` Tasks, timers, asynchronous binary filesystem I/O, DNS,
-  TCP,
+  TCP, verified TLS, streaming HTTP/1.1 clients and servers,
   portable OS helpers, one-shot signal waits, direct child processes with
   binary stdio, and shell-based merged-output `popen`
 * typed PEG construction/captures and a byte-oriented string library with
   Lua-compatible formatting/packing, `tostring`, and compiled regular
   expressions
 * typed math and random-number helpers, dynamic Lua loading, generic
-  map/array iteration, explicit garbage-collector control, formatted output,
-  ownership-safe line iteration, and graceful process exit
+  map/array iteration, explicit garbage-collector control and table/userdata
+  finalizer ownership, formatted output, ownership-safe line iteration, and
+  graceful process exit
 
 ## Next
 

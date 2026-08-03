@@ -224,10 +224,26 @@ The closure environment is already a GC root. Introduce an alias only when it
 represents a real snapshot or a different narrowed value, and name that
 semantic distinction rather than the rooting mechanism.
 
+## Use finalizers only for reachability ownership
+
+Use `gc.finalizable` when a table or full userdata truly owns state until it
+becomes unreachable. Store per-value state on or inside that owner and use a
+uniform callback that reads it; an existing metatable is preserved, but its
+raw `__gc` field is shared by every value using that metatable. Clear the
+owned pointer or terminal marker before releasing the resource so cleanup is
+idempotent.
+
+A finalizer is a reachability fallback, not prompt cleanup and not a substitute
+for a public `close` operation. In particular, do not use one to race or
+abandon an outstanding libuv request: the callback owner must stay rooted
+until libuv reports terminal completion. Keep raw metatable manipulation in
+`titan.gc` rather than duplicating its Lua-stack boundary in another module.
+
 ## Treat async calls as ownership boundaries
 
 Application code should import the public `async` facade and the high-level
-`timer`, `fs`, `net`, and `os` modules. The low-level `uv` module is runtime
+`timer`, `fs`, `net`, `ssl`, `http`, and `os` modules. The synchronous `url`
+module is likewise application-level. The low-level `uv` module is runtime
 plumbing, not the general application API.
 
 `async.run` schedules a Task and returns before its function runs. Observe
@@ -299,8 +315,9 @@ local strings = import "string"
 
 Use an alias such as `strings` when the short name is also a type keyword.
 The short-name set is `coroutine`, `uv`, `async`, `timer`, `io`, `fs`, `net`,
-`os`, `peg`, and `string`. This rule applies inside standard-library sources
-too: spelling one of those imports as `"titan.fs"`, `"titan.io"`, or a
+`ssl`, `url`, `http`, `os`, `peg`, and `string`. This rule applies inside
+standard-library sources too: spelling one of those imports as `"titan.fs"`,
+`"titan.ssl"`, or a
 similar qualified name is a style violation, not extra precision.
 Lua loads the same logical modules with qualified names:
 
@@ -340,8 +357,11 @@ C forwarding function. Reserve C shim code for callback ABI trampolines,
 opaque-layout normalization, or compile-time portability facts that Titan
 cannot express. For example, `titan/uv.h` may normalize both the presence and
 value of a platform constant, while Titan still invokes the corresponding
-ordinary C operation directly through the FFI. Keep every such shim narrow
-and namespaced. When libuv supplies an operation, prefer that reviewed portable
+ordinary C operation directly through the FFI. A non-callback forwarding
+function needs an exceptional boundary that the FFI cannot spell, such as a
+required function-like macro, and an immediately preceding code comment must
+name and justify that exception. Keep every such shim narrow and namespaced.
+When libuv supplies an operation, prefer that reviewed portable
 API over either a POSIX-specific shortcut or a lower-level ISO C platform
 service; use the latter only where libuv has no equivalent, such as calendar
 conversion and locale selection.

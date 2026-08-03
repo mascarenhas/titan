@@ -102,10 +102,13 @@ assert(type(titan_os) == "userdata")
 assert(require "os" == lua_os)
 ```
 
-The same rule applies to `titan.coroutine`, `titan.async`, `titan.timer`,
-`titan.fs`, `titan.net`, `titan.os`, `titan.peg`, `titan.string`, and
-`titan.io`. The
-private `titan.uv` plumbing module uses the same canonical identity. Requiring
+The same qualified Lua identity applies to every standard module, including
+`titan.coroutine`, `titan.async`, `titan.timer`, `titan.io`, `titan.fs`,
+`titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.os`, `titan.peg`,
+`titan.string`, `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc`. The
+private `titan.uv` plumbing module uses the same canonical identity. SSL, URL,
+and HTTP use the documented short Titan imports alongside the other public
+modules; math, Lua loading, iteration, and GC retain qualified Titan imports. Requiring
 `titan.string` does not mutate Lua's `string` table or string metatable. In an
 installed Titan 0.20 tree, generated
 loaders under `<root>/share/lua/5.5/titan/` all open the DSO form

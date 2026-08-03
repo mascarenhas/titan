@@ -411,6 +411,169 @@ describe("compatible C declarations across foreign imports", function()
         end)
     end)
 
+    it("forms each array composite before probing its next redeclaration",
+    function()
+        with_headers({
+            [[
+                extern int ffi_wave_values[];
+                #define TITAN_FFI_HIDE_WAVE_BOUNDS 1
+            ]],
+            [[
+                #ifndef TITAN_FFI_HIDE_WAVE_BOUNDS
+                extern int ffi_wave_values[3];
+                #endif
+            ]],
+            [[
+                #ifndef TITAN_FFI_HIDE_WAVE_BOUNDS
+                extern int ffi_wave_values[4];
+                #endif
+            ]],
+        }, function(first_header, second_header, third_header)
+            local calls = {}
+            local service = assert(cprobe.new_service({
+                toolchain = assert(driver.toolchain_descriptor()),
+                runner = function(argv, metadata)
+                    calls[#calls + 1] = metadata
+                    return require("c-parser.cdriver")
+                        .capture_command(argv)
+                end,
+            }))
+            local code =
+                'local first = foreign import "' .. first_header .. '"\n' ..
+                'local second = foreign import "' .. second_header .. '"\n' ..
+                'local third = foreign import "' .. third_header .. '"\n'
+            h.reset(true)
+            local ast = assert(h.parse(code))
+            local _, errors = checker.check(
+                "test", ast, code, "test.titan", nil, {
+                    probe_service_provider = function() return service end,
+                })
+            local err = table.concat(errors, "\n")
+            assert.not_equal("", err)
+            assert.matches(
+                "conflicting C declaration for 'ffi_wave_values'",
+                err, 1, true)
+            assert.matches(
+                "rejected the declaration compatibility candidate",
+                err, 1, true)
+            assert.equal(3, #calls)
+            assert.equal("baseline", calls[1].stage)
+            assert.matches("%[%]", calls[2].source)
+            assert.matches("%[3%]", calls[2].source)
+            assert.not_matches("%[4%]", calls[2].source)
+            assert.matches("%[3%]", calls[3].source)
+            assert.matches("%[4%]", calls[3].source)
+            assert.not_matches("%[%]", calls[3].source)
+            assert.is_true(service:close())
+        end)
+    end)
+
+    it("expands a completed declaration-owned array alias in the next probe",
+    function()
+        with_headers({
+            [[
+                typedef int ffi_wave_array_alias[];
+                extern ffi_wave_array_alias ffi_wave_alias_values;
+                #define TITAN_FFI_HIDE_ALIAS_BOUNDS 1
+            ]],
+            [[
+                #ifndef TITAN_FFI_HIDE_ALIAS_BOUNDS
+                extern int ffi_wave_alias_values[3];
+                #endif
+            ]],
+            [[
+                #ifndef TITAN_FFI_HIDE_ALIAS_BOUNDS
+                extern int ffi_wave_alias_values[4];
+                #endif
+            ]],
+        }, function(first_header, second_header, third_header)
+            local calls = {}
+            local service = assert(cprobe.new_service({
+                toolchain = assert(driver.toolchain_descriptor()),
+                runner = function(argv, metadata)
+                    calls[#calls + 1] = metadata
+                    return require("c-parser.cdriver")
+                        .capture_command(argv)
+                end,
+            }))
+            local code =
+                'local first = foreign import "' .. first_header .. '"\n' ..
+                'local second = foreign import "' .. second_header .. '"\n' ..
+                'local third = foreign import "' .. third_header .. '"\n'
+            h.reset(true)
+            local ast = assert(h.parse(code))
+            local _, errors = checker.check(
+                "test", ast, code, "test.titan", nil, {
+                    probe_service_provider = function() return service end,
+                })
+            local err = table.concat(errors, "\n")
+            assert.matches(
+                "conflicting C declaration for 'ffi_wave_alias_values'",
+                err, 1, true)
+            assert.equal(3, #calls)
+            assert.matches("%[%]", calls[2].source)
+            assert.matches("%[3%]", calls[2].source)
+            assert.matches("%[3%]", calls[3].source)
+            assert.matches("%[4%]", calls[3].source)
+            assert.not_matches(
+                "extern ffi_wave_array_alias titan_probe_d%d*_",
+                calls[3].source)
+            assert.is_true(service:close())
+        end)
+    end)
+
+    it("defers a distinct name that retains a redirected typedef root",
+    function()
+        local guarded = [[
+            #ifndef TITAN_FFI_SHARED_WAVE_ALIAS
+            #define TITAN_FFI_SHARED_WAVE_ALIAS
+            typedef struct { int value; } ffi_shared_wave_alias;
+            extern ffi_shared_wave_alias *ffi_shared_wave_object;
+            #endif
+        ]]
+        with_headers({ guarded, guarded },
+        function(first_header, second_header)
+            local calls = {}
+            local service = assert(cprobe.new_service({
+                toolchain = assert(driver.toolchain_descriptor()),
+                runner = function(argv, metadata)
+                    calls[#calls + 1] = metadata
+                    return require("c-parser.cdriver")
+                        .capture_command(argv)
+                end,
+            }))
+            local code =
+                'local first = foreign import "' .. first_header .. '"\n' ..
+                'local second = foreign import "' .. second_header .. '"\n'
+            h.reset(true)
+            local ast = assert(h.parse(code))
+            local _, errors = checker.check(
+                "test", ast, code, "test.titan", nil, {
+                    probe_service_provider = function() return service end,
+                })
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            assert.equal(3, #calls)
+            assert.equal("baseline", calls[1].stage)
+            assert.matches(
+                "extern ffi_shared_wave_alias titan_probe_d%d*_%x+",
+                calls[2].source)
+            assert.matches(
+                "extern ffi_shared_wave_alias %*titan_probe_d%d*_%x+",
+                calls[3].source)
+
+            local first_alias = ast[1]._type.type_members
+                .ffi_shared_wave_alias
+            local second_alias = ast[2]._type.type_members
+                .ffi_shared_wave_alias
+            assert.equal(first_alias, second_alias)
+            assert.equal(first_alias.target, second_alias.target)
+            assert.equal(
+                ast[1]._type.members.ffi_shared_wave_object.type,
+                ast[2]._type.members.ffi_shared_wave_object.type)
+            assert.is_true(service:close())
+        end)
+    end)
+
     it("accepts target-C-equivalent symbolic array bounds", function()
         with_headers({
             [[
@@ -1085,6 +1248,182 @@ describe("compatible C declarations across foreign imports", function()
         end)
     end)
 
+    it("recognizes one guarded prototype-tag declaration through path aliases",
+    function()
+        with_header([[
+            #ifndef TITAN_FFI_GUARDED_PROTOTYPE_TAG
+            #define TITAN_FFI_GUARDED_PROTOTYPE_TAG
+            extern int ffi_guarded_prototype_tag(
+                struct ffi_guarded_local *value);
+            #endif
+        ]], function(common_header)
+            local common_name =
+                assert(common_header:match("([^/]+)$"))
+            with_header(
+                '#include "' .. common_name .. '"\n',
+                function(first_header)
+                    with_header(
+                        '#include "./' .. common_name .. '"\n',
+                        function(second_header)
+                            local ok, err, ast = h.run_checker(
+                                'local first = foreign import "' ..
+                                    first_header .. '"\n' ..
+                                'local second = foreign import "' ..
+                                    second_header .. '"\n')
+                            assert.truthy(ok, err)
+
+                            local first = ast[1]._type.members
+                                .ffi_guarded_prototype_tag.type
+                            local second = ast[2]._type.members
+                                .ffi_guarded_prototype_tag.type
+                            assert.equal(first, second)
+                            assert.equal(first.params[1].pointee,
+                                second.params[1].pointee)
+                            assert.is_nil(ast[1]._type.type_members
+                                .ffi_guarded_local)
+                            assert.is_nil(ast[2]._type.type_members
+                                .ffi_guarded_local)
+                        end)
+                end)
+        end)
+    end)
+
+    it("does not excuse same-source macro-dependent type changes", function()
+        with_header([[
+            #ifndef TITAN_FFI_SOURCE_REPEAT_MACRO
+            #define TITAN_FFI_SOURCE_REPEAT_MACRO
+            extern TITAN_FFI_SHARED_TYPE ffi_source_repeat_macro(void);
+            #endif
+        ]], function(common_header)
+            local common_name =
+                assert(common_header:match("([^/]+)$"))
+            with_headers({
+                "#define TITAN_FFI_SUPPRESS_FIRST 1\n",
+                [[
+                    #ifndef TITAN_FFI_SUPPRESS_FIRST
+                    #define TITAN_FFI_SHARED_TYPE int
+                    #include "]] .. common_name .. [["
+                    #undef TITAN_FFI_SHARED_TYPE
+                    #endif
+                ]],
+                [[
+                    #define TITAN_FFI_SHARED_TYPE double
+                    #include "]] .. common_name .. [["
+                    #undef TITAN_FFI_SHARED_TYPE
+                ]],
+            }, function(prelude_header, first_header, second_header)
+                local ok, err, ast = h.run_checker(
+                    'local prelude = foreign import "' ..
+                        prelude_header .. '"\n' ..
+                    'local first = foreign import "' ..
+                        first_header .. '"\n' ..
+                    'local second = foreign import "' ..
+                        second_header .. '"\n')
+                assert.falsy(ok)
+                assert.matches(
+                    "conflicting C declaration for " ..
+                        "'ffi_source_repeat_macro'",
+                    err, 1, true)
+                assert.not_equal(
+                    ast[2]._type.members.ffi_source_repeat_macro.type,
+                    ast[3]._type.members.ffi_source_repeat_macro.type)
+            end)
+        end)
+    end)
+
+    it("preserves prototype-tag alias topology in source repeats", function()
+        with_header([[
+            #ifndef TITAN_FFI_SOURCE_REPEAT_TOPOLOGY
+            #define TITAN_FFI_SOURCE_REPEAT_TOPOLOGY
+            extern int ffi_source_repeat_topology(
+                struct ffi_topology_local { int value; } *outer,
+                void (*callback)(TITAN_FFI_CALLBACK_TAG *inner));
+            #endif
+        ]], function(common_header)
+            local common_name =
+                assert(common_header:match("([^/]+)$"))
+            with_headers({
+                "#define TITAN_FFI_SUPPRESS_TOPOLOGY_FIRST 1\n",
+                [[
+                    #ifndef TITAN_FFI_SUPPRESS_TOPOLOGY_FIRST
+                    #define TITAN_FFI_CALLBACK_TAG struct ffi_topology_local
+                    #include "]] .. common_name .. [["
+                    #undef TITAN_FFI_CALLBACK_TAG
+                    #endif
+                ]],
+                [[
+                    #define TITAN_FFI_CALLBACK_TAG \
+                        struct ffi_topology_local { int value; }
+                    #include "]] .. common_name .. [["
+                    #undef TITAN_FFI_CALLBACK_TAG
+                ]],
+            }, function(prelude_header, first_header, second_header)
+                local ok, err = h.run_checker(
+                    'local prelude = foreign import "' ..
+                        prelude_header .. '"\n' ..
+                    'local first = foreign import "' ..
+                        first_header .. '"\n' ..
+                    'local second = foreign import "' ..
+                        second_header .. '"\n')
+                assert.falsy(ok)
+                assert.matches(
+                    "conflicting C declaration for " ..
+                        "'ffi_source_repeat_topology'",
+                    err, 1, true)
+            end)
+        end)
+    end)
+
+    it("keeps separately sourced prototype tags nominal", function()
+        with_headers({
+            [[
+                extern int ffi_distinct_prototype_tag(
+                    struct ffi_distinct_local *value);
+            ]],
+            [[
+                extern int ffi_distinct_prototype_tag(
+                    struct ffi_distinct_local *value);
+            ]],
+        }, function(first_header, second_header)
+            local ok, err = h.run_checker(
+                'local first = foreign import "' .. first_header .. '"\n' ..
+                'local second = foreign import "' .. second_header .. '"\n')
+            assert.falsy(ok)
+            assert.matches(
+                "conflicting C declaration for " ..
+                    "'ffi_distinct_prototype_tag'",
+                err, 1, true)
+        end)
+    end)
+
+    it("rejects an unguarded physical prototype-tag declaration twice",
+    function()
+        with_header([[
+            extern int ffi_unguarded_prototype_tag(
+                struct ffi_unguarded_local *value);
+        ]], function(common_header)
+            local common_name =
+                assert(common_header:match("([^/]+)$"))
+            with_header(
+                '#include "' .. common_name .. '"\n',
+                function(first_header)
+                    with_header(
+                        '#include "' .. common_name .. '"\n',
+                        function(second_header)
+                            local ok, err = h.run_checker(
+                                'local first = foreign import "' ..
+                                    first_header .. '"\n' ..
+                                'local second = foreign import "' ..
+                                    second_header .. '"\n')
+                            assert.falsy(ok)
+                            assert.matches(
+                                "final ordered C header context is invalid",
+                                err, 1, true)
+                        end)
+                end)
+        end)
+    end)
+
     it("uses the final header context across path aliases and three imports",
     function()
         with_header([[
@@ -1204,6 +1543,144 @@ describe("compatible C declarations across foreign imports", function()
                                 err, 1, true)
                         end)
                 end)
+        end)
+    end)
+
+    it("submits all checker redeclarations in one successful probe batch",
+    function()
+        with_headers({
+            [[
+                extern int ffi_batch_integer(int value);
+                extern long ffi_batch_long(long value);
+                extern double ffi_batch_double(double value);
+            ]],
+            [[
+                extern int ffi_batch_integer(int value);
+                extern long ffi_batch_long(long value);
+                extern double ffi_batch_double(double value);
+            ]],
+        }, function(first_header, second_header)
+            local calls = {}
+            local service = assert(cprobe.new_service({
+                toolchain = assert(driver.toolchain_descriptor()),
+                runner = function(_, metadata)
+                    calls[#calls + 1] = metadata
+                    return {
+                        started = true,
+                        ok = true,
+                        status = 0,
+                        diagnostic = "",
+                    }
+                end,
+            }))
+            local code =
+                'local first = foreign import "' .. first_header .. '"\n' ..
+                'local second = foreign import "' .. second_header .. '"\n'
+            h.reset(true)
+            local ast = assert(h.parse(code))
+            local _, errors = checker.check(
+                "test", ast, code, "test.titan", nil, {
+                    probe_service_provider =
+                        function() return service end,
+                })
+            assert.equal(0, #errors)
+            assert.equal(2, #calls)
+            assert.equal("baseline", calls[1].stage)
+            assert.equal("candidate", calls[2].stage)
+            for index, name in ipairs({
+                "ffi_batch_integer", "ffi_batch_long", "ffi_batch_double",
+            }) do
+                assert.equal(
+                    ast[1]._type.members[name].type,
+                    ast[2]._type.members[name].type)
+                assert.matches(
+                    "titan_probe_d" .. tostring(index) .. "_%x+",
+                    calls[2].source)
+            end
+            assert.is_true(service:close())
+        end)
+    end)
+
+    it("normalizes plural and legacy injected probe failures", function()
+        with_headers({
+            "extern int ffi_injected_probe(int value);",
+            "extern int ffi_injected_probe(int value);",
+        }, function(first_header, second_header)
+            local profile_service = assert(cprobe.new_service({
+                toolchain = assert(driver.toolchain_descriptor()),
+            }))
+            local profile = profile_service.profile
+
+            local scenarios = {
+                {
+                    expected = "batch returned no result for a candidate",
+                    plural = function() return {} end,
+                },
+                {
+                    expected = "batch returned no result",
+                    plural = function() return nil end,
+                },
+                {
+                    expected = "batch validation failed: injected plural",
+                    plural = function()
+                        error("injected plural", 0)
+                    end,
+                },
+                {
+                    expected = "cannot validate a declaration pair",
+                },
+                {
+                    legacy = function()
+                        return { status = "success" }
+                    end,
+                },
+                {
+                    expected = "probe returned no result",
+                    legacy = function() return nil end,
+                },
+                {
+                    expected = "validation failed: injected legacy",
+                    legacy = function()
+                        error("injected legacy", 0)
+                    end,
+                },
+            }
+
+            local code =
+                'local first = foreign import "' .. first_header .. '"\n' ..
+                'local second = foreign import "' .. second_header .. '"\n'
+            for _, scenario in ipairs(scenarios) do
+                local module_probe = {
+                    validate_baseline = function()
+                        return { status = "success" }
+                    end,
+                    validate_declaration_compatibilities = scenario.plural,
+                    validate_declaration_compatibility = scenario.legacy,
+                }
+                local service = {
+                    profile = profile,
+                    cdriver_process_options = function()
+                        return profile_service:cdriver_process_options()
+                    end,
+                    module_context = function()
+                        return module_probe
+                    end,
+                }
+                h.reset(true)
+                local ast = assert(h.parse(code))
+                local _, errors = checker.check(
+                    "test", ast, code, "test.titan", nil, {
+                        probe_service_provider =
+                            function() return service end,
+                    })
+                local err = table.concat(errors, "\n")
+                if scenario.expected then
+                    assert.matches(scenario.expected, err, 1, true)
+                else
+                    assert.equal("", err)
+                end
+            end
+            assert.is_true(profile_service:close())
         end)
     end)
 

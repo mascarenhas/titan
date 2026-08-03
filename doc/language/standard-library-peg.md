@@ -536,3 +536,6 @@ positions in `1..#subject+1`. It intentionally corrects the pinned Lua
 
 The embedding and rooting rules behind this module are documented in
 [LPegLabel embedding and `titan.peg`](../implementation/lpeglabel-embedding.md).
+The [`url` standard module](standard-library-url.md) is a shipped Relabel
+dogfood example: it compiles its labeled RFC 3986-derived grammar once and
+turns match labels into a nonthrowing structured error value.

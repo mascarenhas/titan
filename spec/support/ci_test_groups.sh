@@ -56,6 +56,9 @@ while IFS= read -r test_file; do
             ;;
         spec/stdlib/io*_spec.lua | \
         spec/stdlib/net*_spec.lua | \
+        spec/stdlib/ssl*_spec.lua | \
+        spec/stdlib/url*_spec.lua | \
+        spec/stdlib/http*_spec.lua | \
         spec/stdlib/os*_spec.lua)
             library_net_os_tests+=("$test_file")
             ;;
@@ -206,7 +209,7 @@ case "$group" in
         "$BUSTED" -o gtest -v "${library_uv_fs_tests[@]}"
         ;;
     library-net-os)
-        echo "Running ${#library_net_os_tests[@]} net/OS spec files" \
+        echo "Running ${#library_net_os_tests[@]} net/SSL/URL/HTTP/OS spec files" \
             "without LuaCov"
         "$BUSTED" -o gtest -v "${library_net_os_tests[@]}"
         ;;
@@ -256,9 +259,9 @@ case "$group" in
         cat "$uv_fs_log"
         if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::endgroup::"; fi
         if [[ ${GITHUB_ACTIONS:-} == true ]]; then
-            echo "::group::Library net/OS worker"
+            echo "::group::Library net/SSL/URL/HTTP/OS worker"
         else
-            echo "Library net/OS worker"
+            echo "Library net/SSL/URL/HTTP/OS worker"
         fi
         cat "$net_os_log"
         if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::endgroup::"; fi

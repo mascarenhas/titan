@@ -63,7 +63,7 @@ their longest common sequence of complete components:
 | `foo.left foo.right` | `foo` | `foo.so`, `foo.a` |
 | `foo.bar.left foo.bar.right` | `foo.bar` | `foo/bar.so`, `foo/bar.a` |
 | `foo foo.bar` | `foo` | `foo.so`, `foo.a` |
-| all fourteen `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
+| all seventeen `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
 
 The comparison is component-based: `foo.bar` and `foo.baz` share `foo`, but
 `foo` and `foobar` share no module component. Unrelated roots are therefore an
@@ -271,7 +271,8 @@ legal in one program.
 
 ## The standard-library provider
 
-Titan's standard library is the fourteen-root production example of this model. One
+Titan's standard library is the seventeen-root production example of this
+model. One
 paired provider:
 
 ```text
@@ -281,8 +282,9 @@ $ROCKS_TREE/lib/titan/0.20/titan.a
 
 contains the native support entry plus the independent logical modules
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
-`titan.fs`, `titan.net`, `titan.os`, `titan.peg`, `titan.string`, `titan.math`,
-`titan.lua`, `titan.iter`, and `titan.gc`. Their
+`titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.os`,
+`titan.peg`, `titan.string`, `titan.math`, `titan.lua`, `titan.iter`, and
+`titan.gc`. Their
 generated logical loaders live at:
 
 ```text
@@ -293,6 +295,9 @@ $ROCKS_TREE/share/lua/5.5/titan/timer.lua
 $ROCKS_TREE/share/lua/5.5/titan/io.lua
 $ROCKS_TREE/share/lua/5.5/titan/fs.lua
 $ROCKS_TREE/share/lua/5.5/titan/net.lua
+$ROCKS_TREE/share/lua/5.5/titan/ssl.lua
+$ROCKS_TREE/share/lua/5.5/titan/url.lua
+$ROCKS_TREE/share/lua/5.5/titan/http.lua
 $ROCKS_TREE/share/lua/5.5/titan/os.lua
 $ROCKS_TREE/share/lua/5.5/titan/peg.lua
 $ROCKS_TREE/share/lua/5.5/titan/string.lua
@@ -304,9 +309,12 @@ $ROCKS_TREE/share/lua/5.5/titan/gc.lua
 
 The DSO is also the installation's one complete dynamic libuv provider; in
 bundled mode the archive carries the same private libuv object payload. Both
-forms also carry the private, metadata-free LPegLabel objects used by
-`titan.peg` and `titan.string`; that native archive is not an installed SDK
-library. There are
+forms also carry the private, metadata-free LPegLabel objects used through
+`titan.peg` by `titan.string` and `titan.url`, plus the llhttp objects and
+narrow callback adapter used by `titan.http`. `titan.ssl` calls OpenSSL
+directly; bundled mode carries its OpenSSL objects.
+None of those private
+archives or headers is an installed SDK library. There are
 no production child DSOs, aliases, symbolic links, hard links, or Lua-facing
 copies. `require "titan.async"` and `import "async"` still select the same
 logical module and state; only their physical provider has been combined.

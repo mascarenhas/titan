@@ -205,10 +205,10 @@ lua -e 'print(require("greeting").make("Lua"))'
 
 Another Titan module uses `local greeting = import "greeting"`. Lua uses
 `require "greeting"` for this application module. Standard-library names are
-different: Titan uses established short imports such as `import "fs"` and
-`import "string"`, while Lua uses the qualified identities
-`require "titan.fs"` and `require "titan.string"`. Newer modules whose names
-overlap Lua libraries use qualified Titan imports too, such as
+different: Titan uses established short imports such as `import "fs"`,
+`import "url"`, and `import "http"`, while Lua uses the qualified identities
+`require "titan.fs"`, `require "titan.url"`, and `require "titan.http"`.
+Modules without short-import sugar use qualified Titan imports too, such as
 `import "titan.math"`. The qualified names do not replace Lua's own `io`,
 `os`, `math`, or `string` libraries.
 
@@ -260,9 +260,10 @@ its post-close read/write and cancellation behavior.
 
 ## Tasks and asynchronous work
 
-The public asynchronous facade is `async`; `timer`, `fs`, `net`, and `os`
-build on the same Runtime. In a standalone program the event loop is driven
-automatically:
+The public asynchronous facade is `async`; `timer`, `fs`, `net`, `ssl`,
+`http`, and `os` build on the same Runtime. The synchronous `url` parser is
+also reusable without opening a connection. In a standalone program the event
+loop is driven automatically:
 
 ```titan
 local async = import "async"
@@ -364,6 +365,16 @@ implicitly Unicode. `Pattern:match` is anchored at its initial position,
 whereas `Regex:match` performs a leftmost search unless its expression is
 anchored. `Regex:gmatch` supplies the iterator to Titan's generic `for`; its
 missing state, initial-control, and close tuple slots are filled with nil.
+
+For ready-made HTTP URL parsing, `local url = import "url"` exposes
+`url.parse(source): (url.Url?, url.Error?)`. Success returns a normalized
+component record and nil; malformed input returns nil plus a structured
+one-based byte diagnostic instead of raising. The module compiles its labeled
+PEGs once and is usable independently of the HTTP client. Code that receives
+an HTTP scheme, Host authority, and origin-form target separately can call
+`url.parse_request(scheme, authority, target)` with the same result tuple;
+scheme, authority, and target boundaries are then validated before
+normalization.
 
 ## Child processes
 
@@ -467,15 +478,21 @@ Unlike Lua's `ipairs`, this Array iterator visits every position through
 `#values`, including an interior nil element. Its first result is the nonnil
 integer index, so the nil item does not end generic iteration.
 
-`titan.gc` exposes explicit collector actions, observation, tuning, and weak
-Map configuration. The stop action and status query are intentionally
-different functions:
+`titan.gc` exposes explicit collector actions, observation, tuning, weak Map
+configuration, and reachability-owned finalizers for tables and full
+userdata. The stop action and status query are intentionally different
+functions:
 
 ```titan
 local gc = import "titan.gc"
 
+local function finish_owner(_owner: value): ()
+  -- Clear and release reachability-owned state here.
+end
+
 function configure_cache(cache: {value: value})
   gc.weak(cache)
+  gc.finalizable(cache, finish_owner)
 
   gc.pause()             -- maps to collectgarbage("stop")
   if not gc.paused() then raise "collector did not pause" end
@@ -489,7 +506,10 @@ end
 `pause_percent` is the incremental collector's tuning accessor; `pause()` has
 side effects, while `paused()` only reports whether the collector is stopped.
 Weak and ephemeron configuration preserves an existing Map metatable and
-changes only its raw `__mode` field.
+changes only its raw `__mode` field. `finalizable` likewise preserves that
+exact metatable while replacing raw `__gc`; its callback receives the
+finalized value. Cleanup should clear owned state before releasing it so the
+callback remains safe if cleanup is retried or partially completed.
 
 Finally, `titan.lua` is the audited dynamic boundary for compiling Lua chunks,
 executing Lua files, and loading modules. Flexible arguments and results,

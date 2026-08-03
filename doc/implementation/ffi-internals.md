@@ -498,12 +498,54 @@ parameter adjustment, and incomplete/known array composites. Structurally
 matching anonymous aggregates are only conditional candidates.
 
 After the final baseline succeeds, every queued exact or conditional pair is
-rendered as two `extern` declarations of one probe-private synthetic identifier and
-compiled in the same foreign-header context. Acceptance proves that the two
-independently extracted declaration types can form compatible declarations in
-that context; it does not prove that both source declarations survived
-preprocessing. Only an accepted pair is rewritten to the first canonical
-declaration type and allowed to form a declaration composite.
+rendered as two `extern` declarations of one probe-private synthetic identifier.
+The checker submits dependency-safe waves in source order. A wave contains at
+most the first remaining occurrence of each ordinary name, and a later
+declaration whose rendered type graph could be changed by any earlier composite
+write waits for a following wave. Successful pairs are canonicalized in source
+order before the next wave is rendered, preserving chains such as `a[]`, then
+`a[3]`, then the incompatible `a[4]` probe.
+
+The declaration renderer normally preserves every C typedef spelling. For a
+typedef explicitly marked as a private declaration-owned array view, the probe
+path alone instead expands its structural target and reapplies the alias
+qualifiers at the same declarator level. This makes a bound completed by an
+earlier wave visible in the next compiler question even though the real typedef
+in the cumulative header preamble remains incomplete. Canonical typedefs and
+unrelated aliases are never expanded.
+
+Within a wave, the service deduplicates identical rendered pairs, assigns a
+different synthetic identifier and nested C block scope to each remaining pair,
+and compiles all uncached pairs together in the same foreign-header context.
+The block scopes isolate C tags as well as ordinary identifier lookup; generated
+GCC/Clang diagnostic guards suppress only the artificial `-Wnested-externs`
+warning. A successful batch accepts and caches every pair. A rejected batch is
+recursively bisected until each rejected singleton has the same pair-specific
+compiler verdict and diagnostic that an independent probe would have produced;
+accepted sub-batches are cached without further splitting. A spawn,
+interruption, workspace, or cleanup failure applies to the batch as
+infrastructure evidence, is not bisected, and is not cached. Acceptance proves
+that two independently extracted declaration types can form compatible
+declarations in that context; it does not prove that both source declarations
+survived preprocessing. Only an accepted pair is rewritten to the first
+canonical declaration type and allowed to form a declaration composite.
+
+One otherwise-incompatible pair is also queued when both ordinary declarations
+have the same preprocessor source identity, line, and column *and* a dedicated
+recursive relation proves that every unequal type node is an explicitly marked
+prototype-local struct or union with the same tag spelling, kind, completeness,
+and layout. A bidirectional object map also requires the two graphs to preserve
+tag reuse and shadowing topology. Source identity uses filesystem device/inode identity where the host
+provides it, with the resolved preprocessor pathname as the fallback, so lexical
+include aliases do not split one physical declaration. Independent parsing can
+assign different canonical objects to such a tag in one guarded declaration.
+After the ordered-header baseline succeeds, this `source-repeat` is canonicalized
+directly: rendering a synthetic pair would introduce two prototype scopes that
+the guarded ordered includes never emit. The fallback applies only when ordinary
+isolated compatibility failed, so exact and conditional repeats retain the
+declaration-pair probe, different source declarations retain nominal
+prototype-tag identity, and macro-dependent changes outside those tag objects
+remain conflicts even if cumulative preprocessing suppresses one occurrence.
 
 Array-bound completion mutates only a declaration-owned cloned view, never a
 canonical shared typedef target. Accepted repeated typedefs use a separate
@@ -511,12 +553,13 @@ operation: the checker rebinds the later isolated `CTypedef.target` to the
 first target so transitive references that share that alias in the later
 snapshot follow the chosen canonical target.
 
-An isolated semantic incompatibility is reported immediately. A failed final
-baseline reports the complete header-context failure and performs no
-canonicalization. A rejected or unrenderable declaration pair is reported as a
-conflict and any later type-registry entries are withdrawn. A compiler spawn,
-interruption, workspace, or cleanup failure is an infrastructure diagnostic,
-never a declaration-compatibility verdict.
+An isolated semantic incompatibility is reported immediately unless it is the
+narrow prototype-tag re-extraction fallback above. A failed final baseline
+reports the complete header-context failure, reports that incompatible source
+repeat, and performs no canonicalization. A rejected or unrenderable
+declaration pair is reported as a conflict and any later type-registry entries
+are withdrawn. A compiler spawn, interruption, workspace, or cleanup failure
+is an infrastructure diagnostic, never a declaration-compatibility verdict.
 During a module variable, `find_foreign_name` and `find_foreign_type` scan their
 histories backward and return the last declaration whose order is no later than
 `initializer_order`; outside that pass they use the final maps directly.
@@ -867,12 +910,16 @@ left for a later FFI iteration.
 * Neither the final baseline nor a declaration-pair probe reconstructs the
   alternate cumulative TypeList or proves that both extracted declarations
   occurred. The checker can retain an isolated unique value or type-namespace
-  binding, reject an isolated incompatibility that disappears cumulatively, or
-  canonicalize a repeat that cumulative preprocessing suppressed. A suppressed
-  `extern int a[7]` can, for example, complete an earlier `extern int a[]` in
-  Titan's declaration composite even though only the incomplete declaration
-  occurs cumulatively. Macro-coupled APIs need one umbrella header imported
-  once.
+  binding, reject a distinct-source isolated incompatibility that disappears
+  cumulatively, or canonicalize a repeat that cumulative preprocessing
+  suppressed. The source-repeat fallback covers a guarded physical declaration
+  only when its complete type graphs differ solely in independently extracted,
+  same-spelled prototype-local tag identities; it never unifies tags from
+  distinct declarations, changes tag reuse/shadowing topology, or hides other
+  macro-dependent changes. A suppressed
+  `extern int a[7]` can, for example, complete an earlier `extern int a[]` in Titan's
+  declaration composite even though only the incomplete declaration occurs
+  cumulatively. Macro-coupled APIs need one umbrella header imported once.
 
 ## `typed.lua`
 

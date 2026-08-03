@@ -54,6 +54,19 @@ preprocessing. An accepted incomplete/known array pair forms the known-bound
 composite, and array or function parameters undergo the usual C parameter
 adjustment.
 
+There is one narrower repeated-extraction case. Two independently parsed
+imports can both contain the same physical guarded declaration, while their
+isolated types appear incompatible because each parse gave a prototype-local
+struct or union tag a separate identity. Titan recognizes this case only when
+the ordinary name and exact source declaration match and the complete types
+are otherwise identical: every unequal node must be an explicitly
+prototype-local struct or union with the same tag spelling, kind, completeness,
+layout, and reuse topology. It accepts that repeat only after the ordered-header baseline
+succeeds, then reuses the first declaration without inventing a pair of
+synthetic prototypes. Same-spelled prototype tags from different source
+declarations remain distinct, and a macro-dependent change to any other part
+of the declaration remains a conflict.
+
 ### Header Resolution
 
 Header lookup mirrors C include intent:
@@ -910,9 +923,15 @@ process-global state.
   declaration types they compile, but they neither reconstruct a cumulative
   TypeList nor prove that an extracted declaration survived preprocessing. A
   unique value or type-namespace binding can consequently retain its isolated
-  type, and Titan may reject isolated declarations that become compatible only
-  cumulatively. Conversely, a macro-suppressed isolated repeat can still affect
-  canonicalization or contribute composite information: for example, an
-  isolated `extern int a[7]` hidden by cumulative macro state can complete an
-  earlier `extern int a[]` to `[7]` in Titan's view. Put macro-coupled
-  declarations behind one umbrella header and import that header once.
+  type, and distinct-source isolated declarations can remain incompatible even
+  if cumulative macro state would suppress one. A repeated extraction from the
+  exact same source declaration is canonicalized after a successful baseline
+  only when its complete type graphs differ solely in the separately interned,
+  same-spelled prototype-local aggregate tags; this does not collapse tags from
+  different declarations or excuse macro-dependent primitive, qualifier, bound,
+  tag-kind, layout, or tag-alias-topology changes.
+  Conversely, a macro-suppressed isolated repeat can still contribute composite
+  information: for example, an isolated `extern int a[7]` hidden by cumulative
+  macro state can complete an earlier `extern int a[]` to `[7]` in Titan's
+  view. Put macro-coupled declarations behind one umbrella header and import
+  that header once.

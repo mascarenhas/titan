@@ -40,6 +40,36 @@ function ephemeron(map: {value: value})
   set_weak_mode(map, "k")
 end
 
+function finalizable(v: value, f: (value) -> ()): ()
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if lua.lua_checkstack(L, 4) == 0 then
+    raise "cannot reserve Lua stack for finalizer configuration"
+  end
+
+  ffi.lua_pushtvalue(L, v)
+  local value_type = lua.lua_type(L, -1)
+  if value_type ~= lua.LUA_TTABLE and
+     value_type ~= lua.LUA_TUSERDATA then
+    raise "gc.finalizable expects a table or full userdata"
+  end
+
+  if lua.lua_getmetatable(L, -1) == 0 then
+    local metatable: {string: value} = {
+      ["__gc"] = f,
+    }
+    ffi.lua_pushtvalue(L, metatable)
+  else
+    -- Preserve the exact existing metatable. Raw assignment avoids invoking a
+    -- metatable-of-metatable callback, while reinstalling that same metatable
+    -- makes Lua mark an already-created value as finalizable.
+    ffi.lua_pushtvalue(L, "__gc")
+    ffi.lua_pushtvalue(L, f)
+    lua.lua_rawset(L, -3)
+  end
+  lua.lua_setmetatable(L, -2)
+end
+
 function pause()
   require_gc_result(lua.lua_gc(L, lua.LUA_GCSTOP))
 end

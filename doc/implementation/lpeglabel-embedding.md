@@ -320,6 +320,12 @@ public named `titan.peg` operations. It does not import `titan.string`, call
 private native metamethods directly, or install a separate `titan.peg.re`
 logical module.
 
+The independent `titan.url` module dogfoods that public surface: its
+initializer calls `peg.compile` once on a Relabel-source RFC 3986 grammar and
+retains the resulting `peg.Pattern` for later synchronous parses. URL owns its
+labels, captures, policy, and normalization; it does not reach the private
+LPegLabel engine directly.
+
 `Definition` distinguishes a pattern definition, whose private raw pattern
 must enter the native definition table, from a retained dynamic value used by
 replacement and callback suffixes. Definition and grammar collections are
@@ -396,24 +402,29 @@ the exact member manifest. Archive construction uses the same deterministic
 `ar`/`ranlib` preference and portable fallback as Titan's generated static
 providers, then rescans actual membership.
 
-The private archive is always metadata-free `-X` payload in this order:
+The standard provider's metadata-free `-X` payload has this order:
 
 ```text
 titanlib.o
 libtitan-lpeglabel.a
 [bundled libuv.a]
+titan_httpshim.o
+libtitan-llhttp.a
+[bundled OpenSSL libssl.a + libcrypto.a]
 ```
 
-The source build invokes one compiler process for the fourteen logical roots:
+The source build invokes one compiler process for the seventeen logical roots:
 
 ```text
 titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs
-titan.net titan.os titan.peg titan.string titan.math titan.lua titan.iter titan.gc
+titan.net titan.ssl titan.url titan.http titan.os titan.peg titan.string
+titan.math titan.lua titan.iter titan.gc
 ```
 
-The paired `titan.so`/`titan.a` has fourteen logical ABI/types protocols,
-fourteen archive metadata keys, and fourteen generated Lua shims. Bare native
-support adds a fifteenth DSO opener. LPegLabel contributes no logical key: its five members are
+The paired `titan.so`/`titan.a` has seventeen logical ABI/types protocols,
+seventeen archive metadata keys, and seventeen generated Lua shims. Bare native
+support adds an eighteenth DSO opener. LPegLabel contributes no logical key:
+its five members are
 force-carried into both provider forms solely as private native payload.
 
 The archive and headers are not copied into `$ROCKS_TREE/lib` or
@@ -429,15 +440,16 @@ That compiler-owned dependency is independent of the vendored standard
 module: a deployed `titan.peg` pattern never dynamically links to or requires
 the external module.
 
-The generated providers are validated for exact symbols, fourteen metadata
-keys, all fifteen Lua openers, and absence of an LPegLabel dynamic dependency. Isolation
+The generated providers are validated for exact symbols, seventeen metadata
+keys, all eighteen Lua openers, and absence of an LPegLabel dynamic
+dependency. Isolation
 tests load private and external engines in both orders, use both pattern
 families, vary their max-stack settings independently, and reject cross-engine
 patterns.
 
 Publication otherwise retains the canonical standard-library transaction:
 new or changed shims and dSYM are committed first, then `titan.a`, with
-`titan.so` renamed last. Current fourteen-module reinstall and caught-failure
+`titan.so` renamed last. Current seventeen-module reinstall and caught-failure
 rollback are supported. Titan remains a prototype; stale conflicting layouts
 and future ABI bumps are handled by cleaning the old installation and building
 a fresh versioned tree, not by adding cross-layout migration classifiers.

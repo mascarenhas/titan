@@ -32,6 +32,54 @@ describe("titan.gc", function()
             cppflags = "",
         })
         async_stdlib.register_exact_provider(layout, "titan.gc")
+
+        async_stdlib.write_source(workspace, "gc_finalizable_probe", [[
+local lua = foreign import "lua.h"
+local gc = import "titan.gc"
+
+local record Probe
+  marker: integer
+end
+
+local finalized_marker = 0
+
+function new_userdata(): value
+  return Probe.new(17)
+end
+
+function finalize_userdata(candidate: value): ()
+  local exact = candidate as Probe
+  finalized_marker = exact.marker
+end
+
+function userdata_finalized_marker(): integer
+  return finalized_marker
+end
+
+function finalizable_stack_delta(
+    candidate: value, callback: (value) -> ()): integer
+  local top = lua.lua_gettop(L)
+  gc.finalizable(candidate, callback)
+  return lua.lua_gettop(L) - top
+end
+
+function rejected_stack_delta(
+    candidate: value, callback: (value) -> ()): integer
+  local top = lua.lua_gettop(L)
+  do
+    gc.finalizable(candidate, callback)
+  catch
+    return lua.lua_gettop(L) - top
+  end
+  return 1000000
+end
+]])
+        async_stdlib.compile(workspace, "gc_finalizable_probe", {
+            layout = layout,
+            cppflags = "",
+        })
+        async_stdlib.register_exact_provider(
+            layout, "gc_finalizable_probe")
     end)
 
     teardown(function()
@@ -101,6 +149,194 @@ end
 gc.collect()
 gc.collect()
 assert(next(map) == nil)
+]])
+    end)
+
+    it("finalizes tables while preserving their exact metatables", function()
+        run([[
+local gc = require "titan.gc"
+
+local finalized = {}
+local first_callback_calls = 0
+local marker = {}
+local protection = {}
+local metatable = { marker = marker, __metatable = protection }
+setmetatable(metatable, {
+    __newindex = function() error("metatable assignment was not raw") end,
+})
+
+local first = { kind = "explicit" }
+local preexisting = { kind = "preexisting" }
+setmetatable(first, metatable)
+setmetatable(preexisting, metatable)
+local first_callback = function(_value)
+    first_callback_calls = first_callback_calls + 1
+end
+
+gc.finalizable(first, first_callback)
+local future = { kind = "future" }
+setmetatable(future, metatable)
+local current_callback = function(value)
+    finalized[#finalized + 1] = value
+end
+gc.finalizable(first, current_callback)
+assert(getmetatable(first) == protection)
+assert(debug.getmetatable(first) == metatable)
+assert(debug.getmetatable(first).marker == marker)
+assert(rawget(metatable, "__gc") == current_callback)
+
+first = nil
+preexisting = nil
+future = nil
+gc.collect()
+gc.collect()
+assert(first_callback_calls == 0)
+assert(#finalized == 2)
+local kinds = {}
+for _, value in ipairs(finalized) do
+    kinds[value.kind] = true
+    assert(getmetatable(value) == protection)
+    assert(debug.getmetatable(value) == metatable)
+end
+assert(kinds.explicit)
+assert(kinds.future)
+assert(not kinds.preexisting)
+finalized = {}
+
+local without_metatable = {}
+assert(getmetatable(without_metatable) == nil)
+local created_calls = 0
+local created_callback = function(_value)
+    created_calls = created_calls + 1
+end
+gc.finalizable(without_metatable, created_callback)
+local created = getmetatable(without_metatable)
+assert(type(created) == "table")
+assert(rawget(created, "__gc") == created_callback)
+without_metatable = nil
+gc.collect()
+gc.collect()
+assert(created_calls == 1)
+]])
+    end)
+
+    it("finalizes full userdata without replacing its metatable", function()
+        run([[
+local gc = require "titan.gc"
+local probe = require "gc_finalizable_probe"
+
+local typed_userdata = probe.new_userdata()
+local nominal_metatable = debug.getmetatable(typed_userdata)
+assert(type(nominal_metatable) == "table")
+assert(probe.finalizable_stack_delta(
+    typed_userdata, probe.finalize_userdata) == 0)
+assert(debug.getmetatable(typed_userdata) == nominal_metatable)
+typed_userdata = nil
+gc.collect()
+gc.collect()
+assert(probe.userdata_finalized_marker() == 17)
+
+local userdata = probe.new_userdata()
+assert(type(userdata) == "userdata")
+local marker = {}
+local protection = {}
+local metatable = { marker = marker, __metatable = protection }
+setmetatable(metatable, {
+    __newindex = function() error("metatable assignment was not raw") end,
+})
+debug.setmetatable(userdata, metatable)
+local finalized
+local first_callback_calls = 0
+local first_callback = function(_value)
+    first_callback_calls = first_callback_calls + 1
+end
+
+assert(probe.finalizable_stack_delta(userdata, first_callback) == 0)
+local capture_seen
+local current_callback_calls = 0
+local weak_capture = setmetatable({}, { __mode = "v" })
+local current_callback
+do
+    local captured = {}
+    weak_capture[1] = captured
+    current_callback = function(value)
+        current_callback_calls = current_callback_calls + 1
+        capture_seen = captured
+        finalized = value
+    end
+end
+local installed_callback = current_callback
+assert(probe.finalizable_stack_delta(userdata, current_callback) == 0)
+current_callback = nil
+assert(getmetatable(userdata) == protection)
+assert(debug.getmetatable(userdata) == metatable)
+assert(debug.getmetatable(userdata).marker == marker)
+assert(rawget(metatable, "__gc") == installed_callback)
+installed_callback = nil
+gc.collect()
+assert(weak_capture[1] ~= nil)
+userdata = nil
+gc.collect()
+gc.collect()
+assert(first_callback_calls == 0)
+assert(current_callback_calls == 1)
+assert(type(finalized) == "userdata")
+assert(getmetatable(finalized) == protection)
+assert(debug.getmetatable(finalized) == metatable)
+assert(capture_seen == weak_capture[1])
+finalized = nil
+
+local without_metatable = probe.new_userdata()
+debug.setmetatable(without_metatable, nil)
+assert(debug.getmetatable(without_metatable) == nil)
+local created_calls = 0
+local created_callback = function(_value)
+    created_calls = created_calls + 1
+end
+assert(probe.finalizable_stack_delta(
+    without_metatable, created_callback) == 0)
+local created = debug.getmetatable(without_metatable)
+assert(type(created) == "table")
+assert(rawget(created, "__gc") == created_callback)
+without_metatable = nil
+gc.collect()
+gc.collect()
+assert(created_calls == 1)
+]])
+    end)
+
+    it("rejects values other than tables and full userdata", function()
+        run([[
+local gc = require "titan.gc"
+local probe = require "gc_finalizable_probe"
+
+local captured = true
+local function with_upvalue() return captured end
+local light_userdata = debug.upvalueid(with_upvalue, 1)
+local rejected = {
+    false,
+    17,
+    3.5,
+    "text",
+    function() end,
+    coroutine.create(function() end),
+    light_userdata,
+}
+local callback = function(_) end
+
+assert(probe.rejected_stack_delta(17, callback) == 0)
+
+local nil_ok, nil_error = pcall(gc.finalizable, nil, callback)
+assert(not nil_ok)
+assert(tostring(nil_error):find(
+    "expects a table or full userdata", 1, true), nil_error)
+
+for _, value in ipairs(rejected) do
+    local ok, err = pcall(gc.finalizable, value, callback)
+    assert(not ok)
+    assert(tostring(err):find(
+        "expects a table or full userdata", 1, true), err)
+end
 ]])
     end)
 

@@ -1,0 +1,191 @@
+record Header
+  name: string
+  contents: string
+end
+
+record Headers
+  local entries: {Header}
+end
+
+-- Strict llhttp enforces these grammars on received messages. Headers is also
+-- the public outbound container, so values still need validation before they
+-- are serialized into a request or response.
+local HTTP_TOKEN_PATTERN = "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+local FORBIDDEN_FIELD_BYTE_PATTERN = "[\0-\8\10-\31\127]"
+local DECIMAL_PATTERN = "^[0-9]+$"
+
+local function validate_header_name(name: string)
+  if #name == 0 then raise "HTTP header name must not be empty" end
+  if not str.match(name, HTTP_TOKEN_PATTERN) then
+    raise "HTTP header name contains an invalid byte"
+  end
+end
+
+local function validate_header_value(contents: string)
+  -- RFC 9110 field values admit HTAB, SP/VCHAR, and obs-text. Reject the
+  -- remaining controls and DEL even though only CR/LF would split a line.
+  if str.match(contents, FORBIDDEN_FIELD_BYTE_PATTERN) then
+    raise "HTTP header value contains a forbidden byte"
+  end
+end
+
+local function lower_ascii_letter(upper: string): string
+  return str.char(str.byte(upper, 1) + 32)
+end
+
+local function lower_header_name(name: string): string
+  -- HTTP field names use ASCII case folding. str.lower follows the mutable
+  -- process C locale, so it cannot provide that protocol invariant.
+  local lowered = str.gsub(name, "[A-Z]", lower_ascii_letter, nil)
+  return lowered
+end
+
+local function same_header_name(left: string, right: string): boolean
+  return lower_header_name(left) == lower_header_name(right)
+end
+
+function headers(initial: {Header}?): Headers
+  local result = Headers.new({})
+  if initial then
+    local supplied = initial as {Header}
+    local index = 1
+    while index <= #supplied do
+      local entry = supplied[index]
+      result:add(entry.name, entry.contents)
+      index = index + 1
+    end
+  end
+  return result
+end
+
+function Headers:add(name: string, contents: string)
+  validate_header_name(name)
+  validate_header_value(contents)
+  self.entries[#self.entries + 1] = Header.new(name, contents)
+end
+
+function Headers:set(name: string, contents: string)
+  self:remove(name)
+  self:add(name, contents)
+end
+
+function Headers:get(name: string): string?
+  validate_header_name(name)
+  local index = 1
+  while index <= #self.entries do
+    local entry = self.entries[index]
+    if same_header_name(entry.name, name) then return entry.contents end
+    index = index + 1
+  end
+  return nil
+end
+
+function Headers:values(name: string): {string}
+  validate_header_name(name)
+  local result: {string} = {}
+  local index = 1
+  while index <= #self.entries do
+    local entry = self.entries[index]
+    if same_header_name(entry.name, name) then
+      result[#result + 1] = entry.contents
+    end
+    index = index + 1
+  end
+  return result
+end
+
+function Headers:remove(name: string)
+  validate_header_name(name)
+  local kept: {Header} = {}
+  local index = 1
+  while index <= #self.entries do
+    local entry = self.entries[index]
+    if not same_header_name(entry.name, name) then
+      kept[#kept + 1] = entry
+    end
+    index = index + 1
+  end
+  self.entries = kept
+end
+
+function Headers:all(): {Header}
+  local result: {Header} = {}
+  local index = 1
+  while index <= #self.entries do
+    local entry = self.entries[index]
+    result[#result + 1] = Header.new(entry.name, entry.contents)
+    index = index + 1
+  end
+  return result
+end
+
+local function copy_headers(source: Headers?): Headers
+  if not source then return headers(nil) end
+  return headers((source as Headers):all())
+end
+
+local function trim_header_value(contents: string): string
+  local first = 1
+  local last = #contents
+  while first <= last do
+    local byte = str.byte(contents, first)
+    if byte ~= 32 and byte ~= 9 then break end
+    first = first + 1
+  end
+  while last >= first do
+    local byte = str.byte(contents, last)
+    if byte ~= 32 and byte ~= 9 then break end
+    last = last - 1
+  end
+  if first > last then return "" end
+  return str.sub(contents, first, last)
+end
+
+local function header_has_token(headers_value: Headers, name: string,
+                                wanted: string): boolean
+  local lower_wanted = lower_header_name(wanted)
+  local found = headers_value:values(name)
+  local index = 1
+  while index <= #found do
+    local contents = found[index]
+    for item in str.split(contents, ",") do
+      if lower_header_name(trim_header_value(item)) == lower_wanted then
+        return true
+      end
+    end
+    index = index + 1
+  end
+  return false
+end
+
+local function validate_http_token(token: string, subject: string)
+  if #token == 0 then raise subject .. " must not be empty" end
+  if not str.match(token, HTTP_TOKEN_PATTERN) then
+    raise subject .. " contains an invalid byte"
+  end
+end
+
+local function render_headers(headers_value: Headers): string
+  local builder = str.writer(false)
+  local entries = headers_value:all()
+  local index = 1
+  while index <= #entries do
+    local entry = entries[index]
+    builder:write(entry.name .. ": " .. entry.contents .. "\r\n")
+    index = index + 1
+  end
+  return builder:drain()
+end
+
+local function decimal_header(contents: string,
+                              subject: string): integer
+  -- llhttp owns received Content-Length framing. This path parses a value
+  -- supplied through Titan's outbound API and bounds it to Titan's integer.
+  if #contents == 0 then raise subject .. " must not be empty" end
+  if not str.match(contents, DECIMAL_PATTERN) then
+    raise subject .. " must contain only decimal digits"
+  end
+  local result? = math.tointeger(contents)
+  if not result then raise subject .. " is too large" end
+  return result as integer
+end

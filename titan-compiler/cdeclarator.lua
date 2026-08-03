@@ -438,20 +438,37 @@ end
 
 local render_declarator
 
-local function render_parameter(typ)
+local function selected_typedef_target(typ, expand_typedef)
+    local seen = {}
+    while type(typ) == "table"
+       and typ._tag == "Type.CTypedef"
+       and expand_typedef
+       and expand_typedef(typ)
+       and not seen[typ] do
+        seen[typ] = true
+        typ = typ.target
+    end
+    return typ
+end
+
+local function render_parameter(typ, expand_typedef)
     -- A parameter written through a typedef keeps that spelling; the C
     -- compiler performs the required array/function adjustment after resolving
     -- it. Expanding here would discard useful header vocabulary.
     if typ._tag == "Type.CTypedef" then
-        return render_declarator(typ, "", nil)
+        -- When a selected private alias is expanded, keep its array/function
+        -- declarator intact here and let C perform parameter adjustment. That
+        -- preserves typedef-level qualification on an array element.
+        return render_declarator(typ, "", nil, expand_typedef)
     end
-    return render_declarator(cdeclarator.adjust_parameter_type(typ), "", nil)
+    return render_declarator(
+        cdeclarator.adjust_parameter_type(typ), "", nil, expand_typedef)
 end
 
-local function render_parameters(typ)
+local function render_parameters(typ, expand_typedef)
     local params = {}
     for _, param in ipairs(typ.params or {}) do
-        table.insert(params, render_parameter(param))
+        table.insert(params, render_parameter(param, expand_typedef))
     end
     if typ.vararg then
         table.insert(params, "...")
@@ -464,16 +481,21 @@ local function render_parameters(typ)
     return table.concat(params, ", ")
 end
 
-render_declarator = function(typ, name, quals)
+render_declarator = function(typ, name, quals, expand_typedef)
     local tag = typ and typ._tag
     if tag == "Type.CTypedef" then
+        if expand_typedef and expand_typedef(typ) then
+            return render_declarator(
+                typ.target, name,
+                combined_qualifiers(quals, typ.quals), expand_typedef)
+        end
         return finish_base(typ.name, name, quals)
     elseif tag == "Type.COwned" then
         return render_declarator({
             _tag = "Type.CPointer",
             pointee = { _tag = "Type.Typedef", name = "Udata" },
             quals = {},
-        }, name, quals)
+        }, name, quals, expand_typedef)
     elseif tag == "Type.CVoid" then
         return finish_base("void", name, quals)
     elseif tag == "Type.CInteger" or tag == "Type.CFloat" then
@@ -483,7 +505,10 @@ render_declarator = function(typ, name, quals)
     elseif tag == "Type.CUnion" then
         return finish_base(aggregate_base("union", typ), name, quals)
     elseif tag == "Type.CPointer" then
-        local pointee_tag = typ.pointee and typ.pointee._tag
+        local declarator_pointee = selected_typedef_target(
+            typ.pointee, expand_typedef)
+        local pointee_tag = declarator_pointee
+            and declarator_pointee._tag
         local resolved_pointee = types.resolve_c_typedef(typ.pointee)
         local points_to_function = resolved_pointee
             and resolved_pointee._tag == "Type.CFunction"
@@ -499,19 +524,22 @@ render_declarator = function(typ, name, quals)
         local nested_name = pointer_name(name, star_quals,
             pointee_tag == "Type.CArray" or
             pointee_tag == "Type.CFunction")
-        return render_declarator(typ.pointee, nested_name, pointee_quals)
+        return render_declarator(
+            typ.pointee, nested_name, pointee_quals, expand_typedef)
     elseif tag == "Type.CArray" then
         local len = render_array_extent(typ.len)
-        return render_declarator(typ.elem, name .. "[" .. len .. "]",
-            combined_qualifiers(quals, typ.quals))
+        return render_declarator(
+            typ.elem, name .. "[" .. len .. "]",
+            combined_qualifiers(quals, typ.quals), expand_typedef)
     elseif tag == "Type.CFunction" then
         if quals and #quals > 0 then
             error("cannot qualify a C function type", 3)
         end
-        local nested_name = name .. "(" .. render_parameters(typ) .. ")"
+        local nested_name = name .. "(" ..
+            render_parameters(typ, expand_typedef) .. ")"
         return render_declarator(
             typ.ret, nested_name,
-            typ._return_declaration_qualifiers)
+            typ._return_declaration_qualifiers, expand_typedef)
     elseif tag == "Type.Pointer" then
         local pointee = typ.type
         if pointee and pointee._tag == "Type.Nil" then
@@ -521,7 +549,8 @@ render_declarator = function(typ, name, quals)
         local nested_name = pointer_name(name, quals,
             pointee_tag == "Type.CArray" or
             pointee_tag == "Type.CFunction")
-        return render_declarator(pointee, nested_name, nil)
+        return render_declarator(
+            pointee, nested_name, nil, expand_typedef)
     elseif tag == "Type.String" then
         return render_declarator({
             _tag = "Type.CPointer",
@@ -530,7 +559,7 @@ render_declarator = function(typ, name, quals)
                 spelling = "char",
             },
             quals = {},
-        }, name, quals)
+        }, name, quals, expand_typedef)
     elseif tag == "Type.Typedef" then
         return finish_base(typ.name, name, quals)
     end
@@ -566,9 +595,14 @@ end
 -- only entry point that accepts a direct array type. `quals` carries the
 -- declaration-level qualifiers that the C parser stores separately from the
 -- structural type (for example the `const` in `extern const T value`).
-function cdeclarator.render_declaration(typ, name, quals)
+function cdeclarator.render_declaration(
+        typ, name, quals, expand_typedef)
     assert(type(name) == "string", "C declaration name must be a string")
-    return render_declarator(typ, name, quals)
+    if expand_typedef ~= nil then
+        assert(type(expand_typedef) == "function",
+            "C typedef expansion selector must be a function")
+    end
+    return render_declarator(typ, name, quals, expand_typedef)
 end
 
 cdeclarator.render_array_extent = render_array_extent

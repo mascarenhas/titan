@@ -502,18 +502,21 @@ driver can discover the Titan root from Lua's `package.cpath`; the names do not
 have inherently identical ownership.
 
 The standard-library names `coroutine`, `uv`, `async`, `timer`, `io`, `fs`,
-`net`, `os`, `peg`, and `string` are parser sugar for the qualified module names
+`net`, `ssl`, `url`, `http`, `os`, `peg`, and `string` are parser sugar for the
+qualified module names
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
-`titan.fs`, `titan.net`, `titan.os`, `titan.peg`, and `titan.string`. The
-qualified names then follow the ordinary module lookup rules. Thus
+`titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.os`,
+`titan.peg`, and `titan.string`. The qualified names then follow the ordinary
+module lookup rules. Thus
 `local os = import "os"` means
 Titan's `titan.os` module without colliding with Lua's own `os` library, which
 is not importable as a Titan module. Likewise, `import "string"` selects
 Titan's module without replacing Lua's `string` table.
 
 The additional standard modules `titan.math`, `titan.lua`, `titan.iter`, and
-`titan.gc` use their qualified names in Titan source as well as Lua. They do
-not add parser sugar or replace Lua's bare standard-library names.
+`titan.gc` use their qualified names in Titan source as well as Lua. Short
+Titan imports never add unqualified Lua modules or replace Lua's bare
+standard-library names.
 
 Application scheduling uses `import "async"` (or Lua's
 `require "titan.async"`). `titan.uv` is the private Runtime/libuv plumbing
