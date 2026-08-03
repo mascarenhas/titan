@@ -1,6 +1,6 @@
 local async_stdlib = require "spec.support.async_stdlib"
 
-local function source(cert, key, ca)
+local function source(cert, key)
     return ([==[
 local async = import "async"
 local http = import "http"
@@ -10,7 +10,6 @@ local timer = import "timer"
 
 local CERTIFICATE = %q
 local PRIVATE_KEY = %q
-local TRUST_ROOT = %q
 local outcome = "not-run"
 
 local function active(task: async.Task): boolean
@@ -66,7 +65,10 @@ function start(first_port: integer): async.Task
       return nil
     end)
 
-    local connection = ssl.connect("127.0.0.1", port, TRUST_ROOT)
+    -- SSL_CERT_FILE points the module-initialized default context at the
+    -- checked-in test CA. This exercises the shared context and its process-
+    -- exit finalizer without adding a second sanitizer test process.
+    local connection = ssl.connect("127.0.0.1", port, nil)
     defer connection:close()
     local request =
       "GET /fragmented HTTP/1.1\r\n" ..
@@ -92,7 +94,7 @@ function start(first_port: integer): async.Task
     return nil
   end)
 end
-]==]):format(cert, key, ca)
+]==]):format(cert, key)
 end
 
 describe("SSL and HTTP sanitizer boundary", function()
@@ -103,8 +105,7 @@ describe("SSL and HTTP sanitizer boundary", function()
         async_stdlib.write_source(workspace, "ssl_http_sanitizer_case",
             source(
                 async_stdlib.repo .. "/spec/fixtures/ssl/server.pem",
-                async_stdlib.repo .. "/spec/fixtures/ssl/server-key.pem",
-                async_stdlib.repo .. "/spec/fixtures/ssl/ca.pem"))
+                async_stdlib.repo .. "/spec/fixtures/ssl/server-key.pem"))
         async_stdlib.compile(workspace, "ssl_http_sanitizer_case")
     end)
 
@@ -128,7 +129,12 @@ assert(task:status() == "succeeded", task:status())
 assert(case.result() == "ok", case.result())
 ]==]):format(port)
         local ok, status, output =
-            async_stdlib.run_lua_source(workspace, command)
+            async_stdlib.run_lua_source(workspace, command, {
+                exec_prefix = {
+                    "SSL_CERT_FILE=" .. async_stdlib.repo ..
+                        "/spec/fixtures/ssl/ca.pem",
+                },
+            })
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
     end)

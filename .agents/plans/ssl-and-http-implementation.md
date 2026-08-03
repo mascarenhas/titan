@@ -71,7 +71,12 @@ decisions.
   OpenSSL's compiled default paths and documented environment overrides to
   ordinary connections; this is not described as a portable OS trust-store
   abstraction. The one-time default-path setup may synchronously discover its
-  configuration, but no OpenSSL file API runs on every ordinary connect.
+  configuration, but no OpenSSL file API runs on every ordinary connect. A
+  module-rooted private Titan record owns the shared `SSL_CTX`; its record
+  userdata retains the existing unique nominal metatable when
+  `gc.finalizable` installs the callback. That callback clears its pointer
+  field before freeing the context at Lua-state shutdown. The separately
+  cached pointer is borrowed only.
 - Server listeners read the certificate and private-key contents through the
   high-level asynchronous `fs` module and parse them from memory BIOs. The key
   path is optional and defaults to the certificate path, so a combined PEM

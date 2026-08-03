@@ -36,6 +36,46 @@ precise `{string: Pattern}` and `{string: Regex}` types for ordinary access,
 then pass the same Map through a local `{value: value}` view to `gc.weak` once
 at initialization. Neither module duplicates Lua stack or metatable code.
 
+## Finalizer stack ledger
+
+`finalizable` is the matching audited boundary for attaching a Lua finalizer
+to an existing table or full userdata:
+
+| Operation | Stack effect and obligation |
+| --- | --- |
+| `lua_gettop` | Save the exact entry height. |
+| `lua_checkstack(L, 4)` | Reserve the value, metatable, key, and callback temporaries. |
+| `ffi.lua_pushtvalue(v)` | Push and root the exact candidate. |
+| `lua_type` | Accept only `LUA_TTABLE` or `LUA_TUSERDATA`; light userdata has its own tag and is rejected. |
+| `lua_getmetatable` | Push the exact existing metatable when present. |
+| no-metatable branch | Construct a traced Titan Map containing `__gc = f` and push it. |
+| existing-metatable branch | Raw-set `__gc = f`, preserving the metatable identity and every other field. |
+| `lua_setmetatable` | Install the new metatable or reinstall the exact old one, causing Lua to run its finalizer-marking path for this existing value. |
+| deferred `lua_settop` | Restore the exact entry height on success or error. |
+
+Simply adding `__gc` to a metatable already attached to a table or userdata is
+not sufficient: Lua marks a collectable object as finalizable while assigning
+its metatable. Reinstalling the same metatable after the raw field write is
+therefore semantic, not an identity workaround. The candidate, metatable, and
+callback remain rooted on the Lua stack until that operation completes, and
+the normal table/metatable barriers record every new edge.
+
+Finalizer marking belongs to objects, while `__gc` lookup belongs to their
+metatable. Preexisting peers which shared the metatable before its first
+`__gc` write remain unmarked; objects assigned that metatable afterward are
+marked by ordinary `lua_setmetatable`, and already-marked peers observe any
+later raw replacement of `__gc`. Reinstalling the metatable repeatedly does
+not add duplicate finalizer-list entries.
+
+No C trampoline is involved. A Titan function value is already a Lua-callable
+closure whose upvalues retain its module and native entry point. Storing that
+closure as `__gc` lets Lua invoke the ordinary generated Lua entry with the
+finalized table or userdata as its sole argument. This also keeps the owning
+standard-provider module reachable for as long as the finalizer can run.
+Lua invokes that entry through its non-yielding protected finalizer call with
+collector steps internally stopped. A callback error is converted to a Lua
+warning rather than propagated.
+
 ## Direct collector control
 
 Collector operations call the public variadic `lua_gc` API directly. These

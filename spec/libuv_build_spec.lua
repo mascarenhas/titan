@@ -943,6 +943,12 @@ describe("libuv Makefile configuration", function()
             "local default_client_context: *openssl.SSL_CTX", 1, true),
             ssl)
         assert.truthy(ssl:find(
+            "local default_client_context_owner: " ..
+                "DefaultClientContextOwner?", 1, true), ssl)
+        assert.truthy(ssl:find(
+            "gc.finalizable(owner, finalize_default_client_context)",
+            1, true), ssl)
+        assert.truthy(ssl:find(
             "openssl.SSL_CTX_set_default_verify_paths(context)", 1, true),
             ssl)
         assert.truthy(ssl:find(
@@ -955,16 +961,19 @@ describe("libuv Makefile configuration", function()
             assert.falsy(ssl:find(retired, 1, true), retired)
         end
         assert.falsy(ssl:find('import "uv"', 1, true), ssl)
+        assert.falsy(ssl:find('foreign import "lua.h"', 1, true), ssl)
 
         assert.same({
-            "PemBlock", "CertificateResult", "PrivateKeyResult",
+            "DefaultClientContextOwner", "PemBlock",
+            "CertificateResult", "PrivateKeyResult",
         }, local_record_declarations("titan/ssl.titan"))
         local public = {}
         for _, name in ipairs(public_declarations("titan/ssl.titan")) do
             public[name] = true
         end
         for _, helper in ipairs({
-            "PemBlock", "CertificateResult", "PrivateKeyResult",
+            "DefaultClientContextOwner", "PemBlock",
+            "CertificateResult", "PrivateKeyResult",
         }) do
             assert.falsy(public[helper], helper .. " leaked into ssl ABI")
         end

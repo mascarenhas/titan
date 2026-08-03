@@ -187,7 +187,8 @@ Lua and `value` never discover an implementation from a bare record or union.
   `http` short imports;
   portable `os` helpers and direct child processes;
   typed PEG construction; byte-oriented string/regex operations; and the
-  qualified `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc` modules.
+  qualified `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc` modules,
+  including explicit weak-map policy and table/userdata finalizer ownership.
   Lua loads every standard module through its qualified `titan.*` name,
   leaving Lua's own standard modules unchanged.
 

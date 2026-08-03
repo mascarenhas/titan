@@ -1601,6 +1601,89 @@ describe("compatible C declarations across foreign imports", function()
         end)
     end)
 
+    it("normalizes plural and legacy injected probe failures", function()
+        with_headers({
+            "extern int ffi_injected_probe(int value);",
+            "extern int ffi_injected_probe(int value);",
+        }, function(first_header, second_header)
+            local profile_service = assert(cprobe.new_service({
+                toolchain = assert(driver.toolchain_descriptor()),
+            }))
+            local profile = profile_service.profile
+
+            local scenarios = {
+                {
+                    expected = "batch returned no result for a candidate",
+                    plural = function() return {} end,
+                },
+                {
+                    expected = "batch returned no result",
+                    plural = function() return nil end,
+                },
+                {
+                    expected = "batch validation failed: injected plural",
+                    plural = function()
+                        error("injected plural", 0)
+                    end,
+                },
+                {
+                    expected = "cannot validate a declaration pair",
+                },
+                {
+                    legacy = function()
+                        return { status = "success" }
+                    end,
+                },
+                {
+                    expected = "probe returned no result",
+                    legacy = function() return nil end,
+                },
+                {
+                    expected = "validation failed: injected legacy",
+                    legacy = function()
+                        error("injected legacy", 0)
+                    end,
+                },
+            }
+
+            local code =
+                'local first = foreign import "' .. first_header .. '"\n' ..
+                'local second = foreign import "' .. second_header .. '"\n'
+            for _, scenario in ipairs(scenarios) do
+                local module_probe = {
+                    validate_baseline = function()
+                        return { status = "success" }
+                    end,
+                    validate_declaration_compatibilities = scenario.plural,
+                    validate_declaration_compatibility = scenario.legacy,
+                }
+                local service = {
+                    profile = profile,
+                    cdriver_process_options = function()
+                        return profile_service:cdriver_process_options()
+                    end,
+                    module_context = function()
+                        return module_probe
+                    end,
+                }
+                h.reset(true)
+                local ast = assert(h.parse(code))
+                local _, errors = checker.check(
+                    "test", ast, code, "test.titan", nil, {
+                        probe_service_provider =
+                            function() return service end,
+                    })
+                local err = table.concat(errors, "\n")
+                if scenario.expected then
+                    assert.matches(scenario.expected, err, 1, true)
+                else
+                    assert.equal("", err)
+                end
+            end
+            assert.is_true(profile_service:close())
+        end)
+    end)
+
     it("reports baseline infrastructure failure without a conflict verdict",
     function()
         with_header([[

@@ -2,6 +2,7 @@ local async = import "async"
 local fs = import "fs"
 local net = import "net"
 local str = import "string"
+local gc = import "titan.gc"
 local openssl_err = foreign import "openssl/err.h"
 local openssl_x509v3 = foreign import "openssl/x509v3.h"
 local openssl_pem = foreign import "openssl/pem.h"
@@ -20,9 +21,36 @@ local STATE_SHUTDOWN = "shutdown"
 local STATE_FAILED = "failed"
 local STATE_CLOSED = "closed"
 
--- The module keeps this reference for its lifetime. Each default-trust
--- connection takes and releases another reference around SSL_new.
+local record DefaultClientContextOwner
+  local context: *openssl.SSL_CTX
+end
+
+-- This private record is the module's owning full-userdata GC root. The raw
+-- pointer is only a borrowed fast path; each default-trust connection takes
+-- and releases an independent reference around SSL_new.
+local default_client_context_owner: DefaultClientContextOwner? = nil
 local default_client_context: *openssl.SSL_CTX = nil
+
+local function finalize_default_client_context(owner_value: value)
+  local owner = owner_value as DefaultClientContextOwner
+  local context = owner.context
+  if not context then return end
+
+  -- Clear both views before releasing the native object. Besides making the
+  -- finalizer idempotent, this prevents a borrowed pointer from surviving the
+  -- typed owner field that governs its lifetime.
+  owner.context = nil
+  default_client_context = nil
+  openssl.SSL_CTX_free(context)
+end
+
+local function allocate_default_client_context_owner():
+    DefaultClientContextOwner
+  local owner = DefaultClientContextOwner.new(nil)
+  default_client_context_owner = owner
+  gc.finalizable(owner, finalize_default_client_context)
+  return owner
+end
 
 record Error
   code: integer
@@ -1229,9 +1257,15 @@ end
 do
   -- This is the only eager filesystem-backed OpenSSL trust operation. It runs
   -- once per loaded ssl module, honors SSL_CERT_FILE/SSL_CERT_DIR, and leaves
-  -- one shared context reference for all default-trust connections. OpenSSL
-  -- may still read a configured hashed CA directory lazily during the first
-  -- verification that needs it; sharing the context caches and amortizes it.
+  -- one shared, GC-finalized context reference for all default-trust
+  -- connections. OpenSSL may still read a configured hashed CA directory
+  -- lazily during the first verification that needs it; sharing the context
+  -- caches and amortizes it.
+  --
+  -- Root the nil owner field before any OpenSSL allocation. The native context
+  -- is transferred into it only after default trust succeeds, so every failure
+  -- path retains one unambiguous cleanup owner.
+  local owner = allocate_default_client_context_owner()
   local context = new_client_context()
   do
     openssl_err.ERR_clear_error()
@@ -1239,6 +1273,7 @@ do
       raise openssl_error("ssl.client.trust",
                           "failed to load default certificate trust roots")
     end
+    owner.context = context
     default_client_context = context
   catch
     local failure = error

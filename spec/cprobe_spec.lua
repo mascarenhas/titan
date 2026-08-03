@@ -705,6 +705,87 @@ describe("session-scoped C probe service", function()
         assert.is_true(service:close())
     end)
 
+    it("reports plural declaration API boundary and baseline failures",
+    function()
+        local int = target_profile().integers.int.type
+        local candidate = {
+            left_type = types.CTypedef("ffi_plural_left", int),
+            right_type = types.CTypedef("ffi_plural_right", int),
+        }
+
+        local service = new_fake_service()
+        local module = assert(service:module_context({
+            includes = { "declarations.h" },
+        }))
+        assert.has_error(function()
+            module:validate_declaration_compatibilities(false)
+        end, "C declaration compatibility candidates must be an array")
+
+        local facade = assert(
+            service:validate_declaration_compatibilities(
+                module, { candidate }))
+        assert.equal("success", facade[1].status)
+        local wrong, wrong_error =
+            service:validate_declaration_compatibilities({}, { candidate })
+        assert.is_nil(wrong)
+        assert.matches(
+            "module context does not belong to this probe service",
+            wrong_error, 1, true)
+        assert.is_true(service:close())
+
+        local closed =
+            module:validate_declaration_compatibilities({ candidate })
+        assert.equal("infrastructure_failure", closed[1].status)
+        assert.equal("closed", closed[1].reason)
+        assert.matches("probe service is closed",
+            closed[1].message, 1, true)
+
+        local message_service =
+            new_fake_service({}, function()
+                return nil, "injected compiler launch failure"
+            end)
+        local message_module = assert(message_service:module_context({
+            includes = { "declarations.h" },
+        }))
+        local message_baseline =
+            message_module:validate_declaration_compatibilities({ candidate })
+        assert.equal(
+            "infrastructure_failure", message_baseline[1].status)
+        assert.matches(
+            "C declaration compatibility",
+            message_baseline[1].message, 1, true)
+        assert.is_true(message_service:close())
+
+        local baseline_service = new_fake_service()
+        local baseline_module = assert(baseline_service:module_context({
+            includes = { "declarations.h" },
+        }))
+        baseline_service._ensure_baseline = function()
+            return {
+                status = "infrastructure_failure",
+                cached = false,
+                diagnostic = "injected baseline failure",
+                summary = "injected baseline failure",
+            }
+        end
+        local baseline = baseline_module:validate_declaration_compatibilities({
+            candidate,
+            {
+                left_type = types.CTypedef("ffi_plural_second_left", int),
+                right_type = types.CTypedef("ffi_plural_second_right", int),
+            },
+        })
+        assert.equal(2, #baseline)
+        for index = 1, 2 do
+            assert.equal("infrastructure_failure", baseline[index].status)
+            assert.equal("baseline", baseline[index].stage)
+            assert.matches(
+                "foreign header baseline failed",
+                baseline[index].message, 1, true)
+        end
+        assert.is_true(baseline_service:close())
+    end)
+
     it("isolates batch tag scopes and preserves singleton C verdicts",
     function()
         local root = temporary_directory()

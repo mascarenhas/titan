@@ -53,8 +53,16 @@ retained by Titan.
 
 The module initializer allocates one default client `SSL_CTX`, requires TLS
 1.2 or newer, enables peer verification, and calls
-`SSL_CTX_set_default_verify_paths` exactly once. The module owns that reference
-for its lifetime. A no-override `connect` takes a temporary context reference,
+`SSL_CTX_set_default_verify_paths` exactly once. A module-rooted private Titan
+record owns that reference in an `SSL_CTX *` field; as a record, the owner is
+already a full userdata with one unique nominal metatable. The owner is first
+rooted with a nil field; the configured context moves into that field only
+after default trust succeeds, leaving allocation and configuration failures
+with their exact local cleanup. `titan.gc.finalizable` installs the Titan
+finalizer on the existing record metatable. At Lua-state shutdown the
+idempotent finalizer clears the field and the module's borrowed fast-path
+pointer before calling `SSL_CTX_free`. A no-override `connect` takes a
+temporary context reference,
 which it releases after `SSL_new` has retained what the connection needs.
 
 An explicit `ca_file` instead goes through `fs.read_file` before `net.connect`.
@@ -178,9 +186,10 @@ already been drained: it means the peer won the close race. Explicit
 ## Trust-path boundary
 
 The module initializer calls `SSL_CTX_set_default_verify_paths` on the one
-shared default client context. In bundled mode these remain the defaults
-compiled into Titan's OpenSSL build, together with OpenSSL's documented
-environment overrides. This is the sole OpenSSL-owned path configuration.
+shared, GC-finalized default client context. In bundled mode these remain the
+defaults compiled into Titan's OpenSSL build, together with OpenSSL's
+documented environment overrides. This is the sole OpenSSL-owned path
+configuration.
 The initializer may synchronously load the default CA file once. OpenSSL
 registers hashed CA directories for lazy lookup, so the first verification
 that needs one may synchronously read its directory and certificate file; the
@@ -227,5 +236,7 @@ certificate fixtures to exercise combined full-chain/key and split PEM files,
 high-level path errors, empty and malformed CA bundles, DNS/IP identity,
 fragmented and binary records, lazy server handshake, authenticated versus
 truncated EOF, and interface-shaped I/O. Sanitizer coverage crosses the same
-high-level HTTPS path; it does not create a separate uv-backed TLS
-implementation.
+high-level HTTPS path with `SSL_CERT_FILE` selecting the checked-in CA for the
+shared default context. The fresh Lua process therefore exercises both a
+default-trust connection and shutdown finalization without adding a second
+sanitizer process; it does not create a separate uv-backed TLS implementation.

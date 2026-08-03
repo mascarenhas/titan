@@ -224,6 +224,21 @@ The closure environment is already a GC root. Introduce an alias only when it
 represents a real snapshot or a different narrowed value, and name that
 semantic distinction rather than the rooting mechanism.
 
+## Use finalizers only for reachability ownership
+
+Use `gc.finalizable` when a table or full userdata truly owns state until it
+becomes unreachable. Store per-value state on or inside that owner and use a
+uniform callback that reads it; an existing metatable is preserved, but its
+raw `__gc` field is shared by every value using that metatable. Clear the
+owned pointer or terminal marker before releasing the resource so cleanup is
+idempotent.
+
+A finalizer is a reachability fallback, not prompt cleanup and not a substitute
+for a public `close` operation. In particular, do not use one to race or
+abandon an outstanding libuv request: the callback owner must stay rooted
+until libuv reports terminal completion. Keep raw metatable manipulation in
+`titan.gc` rather than duplicating its Lua-stack boundary in another module.
+
 ## Treat async calls as ownership boundaries
 
 Application code should import the public `async` facade and the high-level

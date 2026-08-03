@@ -421,8 +421,10 @@ Interface vocabulary and I/O helpers. The high-level `titan.ssl` and
 changing `titan.uv`; `titan.url` supplies HTTP and applications with reusable
 PEG-based URL parsing. Math, dynamic Lua loading, generic
 iteration, and GC control live in `titan.math`, `titan.lua`, `titan.iter`, and
-`titan.gc`. Clean validation builds pass all seventeen roots
-to one `titanc` invocation, so their source imports are statically resolved
+`titan.gc`; GC-backed owners can attach table/full-userdata finalizers
+without discarding an existing metatable. Clean validation builds pass all
+seventeen roots to one `titanc` invocation, so their source imports are
+statically resolved
 inside the paired `titan.so` and `titan.a` providers. Bundled mode carries
 libuv's objects into both forms; system mode keeps the pkg-config-selected
 library as a repeated final-link input. The private LPegLabel objects enter
@@ -748,8 +750,9 @@ they are in the roadmap:
   Lua-compatible formatting/packing, `tostring`, and compiled regular
   expressions
 * typed math and random-number helpers, dynamic Lua loading, generic
-  map/array iteration, explicit garbage-collector control, formatted output,
-  ownership-safe line iteration, and graceful process exit
+  map/array iteration, explicit garbage-collector control and table/userdata
+  finalizer ownership, formatted output, ownership-safe line iteration, and
+  graceful process exit
 
 ## Next
 
