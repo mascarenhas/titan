@@ -145,7 +145,10 @@ decisions.
   response finishes, and any unread request body is drained before the next
   handler runs. The parser preserves bytes already read beyond the current
   message for that next iteration. Responses remain in request order and never
-  interleave; there is no concurrent per-connection handler scheduler.
+  interleave; there is no concurrent per-connection handler scheduler. EOF
+  before the reset request parser receives any bytes is a normal disconnect,
+  while EOF after empty lines, a dangling CR, or any other partial next request
+  remains a parse error.
 - This iteration does not manufacture an internal idle timeout. The public
   async API has task creation/cancellation and timers but no
   current-task/join/race/deadline primitive; a timeout implemented solely here
@@ -179,7 +182,8 @@ decisions.
   clean/truncated close, strict/fragmented HTTP parsing, fixed/chunked/EOF
   bodies, token/value byte boundaries, decimal overflow, informational/final
   opaque reason rejection, case-distinct method framing, structured Host
-  diagnostics, rejected non-origin targets,
+  diagnostics, rejected non-origin targets, clean byte-idle, buffered empty
+  lines, and dangling/other partial keep-alive EOF,
   streaming handlers, ordered pipelined requests, keep-alive, HTTPS, and the
   lpeg_patterns URI normalization/error matrix. Review the
   same-payload WANT_WRITE retry path directly: dynamic memory BIOs have no

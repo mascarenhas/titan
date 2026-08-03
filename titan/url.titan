@@ -228,10 +228,10 @@ local function normalize_component(source: string,
   local builder = str.writer(false)
   local index = 1
   while index <= #source do
-    local byte = str.byte(source, index) as integer
+    local byte = str.byte(source, index)
     if byte == 37 then
-      local high = hex_value(str.byte(source, index + 1) as integer)
-      local low = hex_value(str.byte(source, index + 2) as integer)
+      local high = hex_value(str.byte(source, index + 1))
+      local low = hex_value(str.byte(source, index + 2))
       local decoded = high * 16 + low
       if is_unreserved(decoded) then
         if lowercase and decoded >= 65 and decoded <= 90 then
@@ -256,14 +256,14 @@ end
 -- spelling for the Host header. RFC 6874's encoded zone separator is decoded
 -- only for the connection address.
 local function normalize_host(raw: string): (string, string)
-  local first = str.byte(raw, 1) as integer
+  local first = str.byte(raw, 1)
   if first ~= 91 then
     local host = normalize_component(raw, true)
     return host, host
   end
 
   local inner = str.sub(raw, 2, #raw - 1)
-  local inner_first = str.byte(inner, 1) as integer
+  local inner_first = str.byte(inner, 1)
   if inner_first == 118 or inner_first == 86 then
     local dot = str.find(inner, ".") as integer
     local version = normalize_component(
@@ -290,7 +290,7 @@ local function parse_port(text: string, position: integer):
   local port = 0
   local index = 1
   while index <= #text do
-    local digit = (str.byte(text, index) as integer) - 48
+    local digit = str.byte(text, index) - 48
     if port > (65535 - digit) // 10 then
       return nil, url_parse_error("port", position)
     end

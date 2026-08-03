@@ -255,7 +255,11 @@ Writing nonempty data to one of them raises an error. A 204 response must not
 include Content-Length. A 205 response must use `Content-Length: 0`; the server
 adds it when absent and rejects an explicit nonzero value. Transfer-Encoding is
 removed from every no-body response. A request or response `Connection: close`
-decision disables reuse; otherwise HTTP/1.1 keep-alive is preserved.
+decision disables reuse; otherwise HTTP/1.1 keep-alive is preserved. A peer
+closing an idle persistent connection before beginning its next request is a
+normal disconnect. EOF after any byte of a next request is a parse error,
+including after only empty request lines or a dangling CR. Empty request lines
+remain accepted when an actual request follows them.
 
 The server supports ordered HTTP/1.1 request pipelining: a peer may send later
 requests before reading the current response. Each connection dispatches

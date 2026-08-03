@@ -223,6 +223,18 @@ handler scheduler. Suffix preservation is the byte-retention mechanism that
 enables this serial pipelined processing, not a concurrent request queue or
 scheduler.
 
+After a keep-alive reset, header acquisition treats EOF with no next request as
+a normal idle peer disconnect. `llhttp_finish` also succeeds after some
+non-message input, including complete leading CRLF request lines and a dangling
+first CR. A Titan flag therefore records every nonempty parser input after
+construction or reset; internal empty executions used for llhttp epsilon
+transitions do not set it. Only byte-empty EOF is idle. CRLF-only input, a
+dangling CR, and every other request prefix take the existing
+incomplete-message or llhttp parse-error path. Leading empty lines followed by
+a real request remain accepted. The server maps only the idle outcome to normal
+connection-Task return; a client awaiting its first or final response maps the
+same outcome back to an incomplete-message error.
+
 HTTP/1.1 keep-alive and this serial pipelined processing require no lower-level
 primitive. A robust idle deadline does. The public async facade
 has Task creation and cancellation plus timers, but no current-Task accessor,
@@ -258,8 +270,8 @@ Focused standard-library tests run outside LuaCov. They fragment protocol
 input down to individual bytes, exercise fixed/chunked/EOF bodies, duplicate
 headers, token/value byte boundaries, decimal overflow, opaque inbound reason
 rejection, structured Host errors, rejected non-origin request targets,
-streaming handlers, unread-body draining, keep-alive, ordered pipelined
-requests, and HTTPS over the public SSL facade. They also prove
-listener/response close retries after cancellation. The sanitizer boundary
-uses that same high-level path through TLS and llhttp rather than a private
-test transport.
+streaming handlers, unread-body draining, clean idle versus partial keep-alive
+EOF, suffix retention across parser reset, ordered pipelined requests, and
+HTTPS over the public SSL facade. They also prove listener/response close
+retries after cancellation. The sanitizer boundary uses that same high-level
+path through TLS and llhttp rather than a private test transport.

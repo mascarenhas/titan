@@ -58,7 +58,11 @@ end
 
 local function final_response_headers(parser: Parser)
   while true do
-    ensure_parser_headers(parser)
+    if not ensure_parser_headers(parser) then
+      -- A client always requires a final response. This also preserves the
+      -- error when a peer closes after only informational responses.
+      raise "HTTP message ended before it was complete"
+    end
     if parser.status_number >= 200 then
       -- llhttp accepts reason-phrase controls, so apply the HTTP field-value
       -- repertoire before exposing a final response.

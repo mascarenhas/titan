@@ -30,7 +30,7 @@ local function validate_header_value(contents: string)
 end
 
 local function lower_ascii_letter(upper: string): string
-  return str.char((str.byte(upper, 1) as integer) + 32)
+  return str.char(str.byte(upper, 1) + 32)
 end
 
 local function lower_header_name(name: string): string
@@ -128,12 +128,12 @@ local function trim_header_value(contents: string): string
   local first = 1
   local last = #contents
   while first <= last do
-    local byte = str.byte(contents, first) as integer
+    local byte = str.byte(contents, first)
     if byte ~= 32 and byte ~= 9 then break end
     first = first + 1
   end
   while last >= first do
-    local byte = str.byte(contents, last) as integer
+    local byte = str.byte(contents, last)
     if byte ~= 32 and byte ~= 9 then break end
     last = last - 1
   end

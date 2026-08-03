@@ -48,8 +48,11 @@ local function request_url(parser: Parser,
 end
 
 local function read_request(parser: Parser,
-                            encrypted: boolean): Request
-  ensure_parser_headers(parser)
+                            encrypted: boolean): Request?
+  -- EOF in an idle request parser is a normal peer disconnect. Header
+  -- acquisition reports false only for that case; every partial request
+  -- raises instead.
+  if not ensure_parser_headers(parser) then return nil end
   if #parser.method_text == 0 then raise "HTTP request has no method" end
   local parsed_url = request_url(parser, encrypted)
   return Request.new(parser.method_text, parser.target_text, parsed_url,
@@ -289,7 +292,9 @@ local function serve_connection(connection: io.ReaderWriterCloser,
   defer close_parser(parser)
   defer connection:close()
   while true do
-    local request_value = read_request(parser, encrypted)
+    local request? = read_request(parser, encrypted)
+    if not request then return end
+    local request_value = request as Request
     local response = new_response(connection, request_value)
     if not accept_request_expectation(
         connection, request_value, response) then

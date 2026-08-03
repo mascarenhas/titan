@@ -66,6 +66,7 @@ local record Parser
   local headers_complete: boolean
   local message_complete: boolean
   local transport_eof: boolean
+  local input_seen: boolean
   local paused: boolean
   local closed: boolean
 end
@@ -241,6 +242,7 @@ local function new_parser(connection: io.ReaderWriterCloser,
     headers_complete = false,
     message_complete = false,
     transport_eof = false,
+    input_seen = false,
     paused = false,
     closed = false,
   }
@@ -320,6 +322,10 @@ local function raise_callback_failure(parser: Parser)
 end
 
 local function execute_input(parser: Parser, input: string)
+  -- Empty calls advance llhttp epsilon transitions and are not transport
+  -- input. Every nonempty input means EOF while still awaiting headers is not
+  -- idle, even when llhttp ignored it as a leading empty request line.
+  if #input > 0 then parser.input_seen = true end
   parser.callback_state = L
   parser.callback_failed = false
   parser.callback_error = nil
@@ -420,11 +426,19 @@ local function advance_parser(parser: Parser)
   end
 end
 
-local function ensure_parser_headers(parser: Parser)
-  while not parser.headers_complete do advance_parser(parser) end
+local function ensure_parser_headers(parser: Parser): boolean
+  while not parser.headers_complete do
+    -- Only EOF before any bytes of this message is an idle disconnect. Any
+    -- input falls through to the existing incomplete-message error.
+    if parser.transport_eof and not parser.input_seen then
+      return false
+    end
+    advance_parser(parser)
+  end
   if parser.major ~= 1 or parser.minor ~= 1 then
     raise "only HTTP/1.1 messages are supported"
   end
+  return true
 end
 
 local function parser_read(parser: Parser): string?
@@ -507,6 +521,7 @@ local function parser_reset_message(parser: Parser)
   parser.keep_alive = false
   parser.headers_complete = false
   parser.message_complete = false
+  parser.input_seen = false
   parser.paused = false
 end
 

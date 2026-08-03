@@ -652,6 +652,104 @@ function start_pipelining(first_port: integer): async.Task
   end)
 end
 
+local function start_keep_alive_eof(first_port: integer,
+                                    buffered_suffix: string,
+                                    suffix: string, result: string,
+                                    test_immediate: boolean): async.Task
+  outcome = "running"
+  return async.run(function (): value
+    local handled = 0
+    local handler: http.Handler = function (request: http.Request,
+                                            response: http.Response)
+      handled = handled + 1
+      check(request.target == "/first",
+            "keep-alive EOF reached an unexpected handler")
+      response:set_header("Content-Length", "0")
+    end
+    local server, port = http_listen(first_port, handler)
+    local serving = async.run(function (): value
+      server:serve()
+      return nil
+    end)
+    local current: net.Connection? = nil
+    local timed_out = false
+    local watchdog = async.run(function (): value
+      timer.sleep(5000)
+      timed_out = true
+      outcome = "keep-alive-eof-timeout-after-" .. outcome
+      if current then
+        do (current as net.Connection):close() catch end
+      end
+      do server:close() catch end
+      return nil
+    end)
+
+    if test_immediate then
+      -- Closing before request 1 and after a completed keep-alive request are
+      -- both idle parser EOFs, not malformed messages.
+      outcome = "keep-alive-immediate-eof"
+      local immediate = net.connect("127.0.0.1", port)
+      current = immediate
+      immediate:shutdown()
+      check(immediate:read() == nil,
+            "HTTP server did not close an idle initial connection")
+      immediate:close()
+      current = nil
+    end
+
+    local client = net.connect("127.0.0.1", port)
+    current = client
+    client:write(
+      "GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n" ..
+      buffered_suffix)
+    local response? = client:read_until("\r\n\r\n", false)
+    check(response ~= nil and
+          contains(response as string, "Content-Length: 0\r\n") and
+          not contains(response as string, "Connection: close\r\n"),
+          "HTTP server did not leave the first response reusable")
+    if #suffix > 0 then client:write(suffix) end
+    outcome = "keep-alive-client-shutdown"
+    client:shutdown()
+    check(client:read() == nil,
+          "HTTP server did not close after the keep-alive peer EOF")
+    client:close()
+    current = nil
+
+    server:close()
+    watchdog:cancel("keep-alive EOF completed")
+    check(not timed_out, "HTTP keep-alive EOF matrix timed out")
+    while active(serving) do timer.yield() end
+    check(serving:status() == "succeeded",
+          "HTTP listener failed during keep-alive EOF handling")
+    check(handled == 1,
+          "HTTP server dispatched an incomplete second request")
+    outcome = result
+    return nil
+  end)
+end
+
+function start_idle_keep_alive_eof(first_port: integer): async.Task
+  return start_keep_alive_eof(
+    first_port, "", "", "idle-keep-alive-eof-ok", true)
+end
+
+function start_buffered_empty_lines_eof(
+    first_port: integer): async.Task
+  return start_keep_alive_eof(
+    first_port, "\r\n\r\n", "",
+    "buffered-empty-lines-eof-ok", false)
+end
+
+function start_partial_keep_alive_eof(first_port: integer): async.Task
+  return start_keep_alive_eof(
+    first_port, "G", "", "partial-keep-alive-eof-ok", false)
+end
+
+function start_partial_empty_line_eof(first_port: integer): async.Task
+  return start_keep_alive_eof(
+    first_port, "", "\r", "partial-empty-line-eof-ok", false)
+end
+
 function start_client_framing(first_port: integer): async.Task
   outcome = "running"
   return async.run(function (): value
@@ -670,7 +768,7 @@ function start_client_framing(first_port: integer): async.Task
     end)
     local peer = async.run(function (): value
       defer server:close()
-      for index = 1, 6 do
+      for index = 1, 7 do
         do
           local connection = server:accept()
           current = connection
@@ -709,13 +807,19 @@ function start_client_framing(first_port: integer): async.Task
             connection:write(
               "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n" ..
               "Connection: close\r\n\r\nabc")
-          else
+          elseif index == 6 then
             check(contains(request_text, "GET /malformed HTTP/1.1\r\n"),
                   "malformed client case sent the wrong request")
             connection:write(
               "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n" ..
               "Transfer-Encoding: chunked\r\n" ..
               "Connection: close\r\n\r\n0\r\n\r\n")
+          else
+            check(contains(request_text,
+                           "GET /informational-eof HTTP/1.1\r\n"),
+                  "informational EOF case sent the wrong request")
+            connection:write(
+              "HTTP/1.1 103 Early Hints\r\nX-Info: only\r\n\r\n")
           end
         end
         current = nil
@@ -773,6 +877,22 @@ function start_client_framing(first_port: integer): async.Task
     end
     check(malformed_failed,
           "HTTP client accepted conflicting response framing")
+
+    outcome = "client-informational-eof"
+    local informational_failed = false
+    do
+      local informational = http.get(
+        base .. "/informational-eof", nil, nil)
+      informational:close()
+    catch
+      check(error is string and
+            contains(error as string,
+                     "HTTP message ended before it was complete"),
+            "HTTP client reported the wrong informational EOF error")
+      informational_failed = true
+    end
+    check(informational_failed,
+          "HTTP client accepted EOF after only an informational response")
 
     while active(peer) do timer.yield() end
     watchdog:cancel("client framing completed")
@@ -1228,6 +1348,7 @@ assert(cases.result() == %q, cases.result())
             async_stdlib.run_lua_source(workspace, source)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
+        return output
     end
 
     it("parses fragmented chunked responses without redirect or decoding",
@@ -1256,6 +1377,44 @@ assert(cases.result() == %q, cases.result())
 
     it("preserves and orders pipelined HTTP/1.1 requests", function()
         run("start_pipelining", "pipeline", "pipeline-ok")
+    end)
+
+    it("treats only idle keep-alive EOF as a clean disconnect", function()
+        local marker = "uncaught error in async Task:"
+        local clean = run(
+            "start_idle_keep_alive_eof", "idle-keep-alive-eof",
+            "idle-keep-alive-eof-ok")
+        local _, clean_reports = clean:gsub(marker, "")
+        assert.equals(0, clean_reports, clean)
+
+        local buffered_empty_lines = run(
+            "start_buffered_empty_lines_eof", "buffered-empty-lines-eof",
+            "buffered-empty-lines-eof-ok")
+        local _, buffered_empty_line_reports =
+            buffered_empty_lines:gsub(marker, "")
+        assert.equals(1, buffered_empty_line_reports, buffered_empty_lines)
+        assert.truthy(buffered_empty_lines:find(
+            "HTTP message ended before it was complete", 1, true),
+            buffered_empty_lines)
+
+        local partial = run(
+            "start_partial_keep_alive_eof", "partial-keep-alive-eof",
+            "partial-keep-alive-eof-ok")
+        local _, partial_reports = partial:gsub(marker, "")
+        assert.equals(1, partial_reports, partial)
+        assert.truthy(partial:find(
+            "HTTP parse error HPE_INVALID_EOF_STATE: Invalid EOF state",
+            1, true), partial)
+
+        local partial_empty_line = run(
+            "start_partial_empty_line_eof", "partial-empty-line-eof",
+            "partial-empty-line-eof-ok")
+        local _, partial_empty_line_reports =
+            partial_empty_line:gsub(marker, "")
+        assert.equals(1, partial_empty_line_reports, partial_empty_line)
+        assert.truthy(partial_empty_line:find(
+            "HTTP message ended before it was complete", 1, true),
+            partial_empty_line)
     end)
 
     it("handles informational, fixed, HEAD, EOF, and rejected bodies",
