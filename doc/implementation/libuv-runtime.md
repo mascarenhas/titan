@@ -18,6 +18,8 @@ result = yield operation parameters
 The public `async`, `timer`, `fs`, `net`, `io`, and `os` modules expose
 ordinary Titan records and Interfaces. Native pointers, callback records, the
 yield union, and libuv controls stay private to `titan.uv`.
+The qualified `titan.ssl` and `titan.http` modules are higher-level consumers
+of those public facades; they do not add variants, callbacks, or handles here.
 
 Contributor recipes for adding single-shot callbacks, persistent multi-shot
 sources, and new handle types, together with the current binding-coverage

@@ -2983,18 +2983,47 @@ local function archive_tool_capabilities(ar, ranlib, probe, object, verbose)
     }
 end
 
-local ARCHIVE_ARGV_LIMIT = 128 * 1024
+-- run_argv renders argv as one quoted command passed to os.execute, so on
+-- POSIX the complete rendering becomes the single `sh -c` argument. Linux
+-- limits one argument to 128 KiB independently of its larger ARG_MAX. Keep a
+-- deliberately conservative portable ceiling and measure the exact quoted
+-- rendering, including a configured multi-word AR command.
+local ARCHIVE_SHELL_COMMAND_LIMIT = 64 * 1024
 
-local function archive_batches(paths, fixed_size)
+local function shell_argv_size(argv)
+    local size = 0
+    for index, argument in ipairs(argv) do
+        local quoted, quote_err = cdriver.shell_quote(argument)
+        if not quoted then return nil, quote_err end
+        if index ~= 1 then size = size + 1 end
+        size = size + #quoted
+    end
+    return size
+end
+
+local function archive_batches(paths, prefix)
     local batches = {}
     local batch = {}
+    local fixed_size, size_err = shell_argv_size(prefix)
+    if not fixed_size then return nil, size_err end
+    if fixed_size > ARCHIVE_SHELL_COMMAND_LIMIT then
+        return nil, "configured AR command prefix exceeds the safe shell " ..
+            "command limit"
+    end
     local size = fixed_size
     for _, path in ipairs(paths) do
-        local contribution = #path + 1
-        if #batch ~= 0 and size + contribution > ARCHIVE_ARGV_LIMIT then
+        local quoted, quote_err = cdriver.shell_quote(path)
+        if not quoted then return nil, quote_err end
+        local contribution = #quoted + 1
+        if #batch ~= 0 and
+           size + contribution > ARCHIVE_SHELL_COMMAND_LIMIT then
             batches[#batches + 1] = batch
             batch = {}
             size = fixed_size
+        end
+        if size + contribution > ARCHIVE_SHELL_COMMAND_LIMIT then
+            return nil, "archive member path exceeds the safe shell command " ..
+                "limit: " .. path
         end
         batch[#batch + 1] = path
         size = size + contribution
@@ -3120,8 +3149,12 @@ function driver.build_static_archive(
     if not capability then return abort(capability_err) end
 
     os.remove(temporary)
-    local fixed_size = #temporary + 16
-    for _, batch in ipairs(archive_batches(staged_paths, fixed_size)) do
+    local archive_prefix = copy_argv(ar)
+    archive_prefix[#archive_prefix + 1] = capability.ar_mode
+    archive_prefix[#archive_prefix + 1] = temporary
+    local batches, batch_err = archive_batches(staged_paths, archive_prefix)
+    if not batches then return abort(batch_err) end
+    for _, batch in ipairs(batches) do
         local arguments = { capability.ar_mode, temporary }
         append_argv(arguments, batch)
         local ok, term, code =

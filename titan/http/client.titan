@@ -1,0 +1,166 @@
+record ClientResponse
+  status: integer
+  reason: string
+  version: string
+  headers: Headers
+  local parser: Parser
+  local connection: io.ReaderWriterCloser
+  local closed: boolean
+end
+
+local function client_connection(url: URL, ca_file: string?,
+                                 ca_directory: string?):
+    io.ReaderWriterCloser
+  if url.scheme == "https" then
+    local secure = ssl.connect(
+      url.host, url.port, ca_file, ca_directory)
+    local channel: io.ReaderWriterCloser = secure
+    return channel
+  end
+  local plain = net.connect(url.host, url.port)
+  local channel: io.ReaderWriterCloser = plain
+  return channel
+end
+
+local function validate_client_host(scheme: string, authority: string)
+  -- Parse Host as an authority in isolation. Appending the request target
+  -- before parsing would let '/', '?', '#', or '@' consume or reinterpret
+  -- bytes outside the authority, just as it would on the server boundary.
+  local index = 1
+  while index <= #authority do
+    local byte = header_byte(authority, index)
+    if byte == 47 or byte == 63 or byte == 35 or byte == 64 then
+      raise "HTTP Host header contains a non-authority delimiter"
+    end
+    index = index + 1
+  end
+  parse_url(scheme .. "://" .. authority .. "/")
+end
+
+local function client_request_headers(url: URL, supplied: Headers?,
+                                      body: string?): Headers
+  local result = copy_headers(supplied)
+  local hosts = result:values("Host")
+  if #hosts > 1 then raise "HTTP request has more than one Host header" end
+  if #hosts == 0 then
+    result:add("Host", url:host_header())
+  else
+    validate_client_host(url.scheme, hosts[1])
+  end
+
+  if #result:values("Transfer-Encoding") > 0 then
+    raise "HTTP client requests do not support Transfer-Encoding"
+  end
+  if #result:values("Expect") > 0 then
+    raise "HTTP client requests do not support Expect"
+  end
+  local body_length = 0
+  if body then body_length = #(body as string) end
+  local lengths = result:values("Content-Length")
+  if #lengths > 1 then
+    raise "HTTP request has more than one Content-Length header"
+  elseif #lengths == 1 then
+    if decimal_header(lengths[1], "HTTP Content-Length") ~= body_length then
+      raise "HTTP Content-Length does not match the request body"
+    end
+  elseif body then
+    result:add("Content-Length", str.tostring(body_length))
+  end
+  result:set("Connection", "close")
+  return result
+end
+
+local function final_response_headers(parser: Parser)
+  while true do
+    ensure_parser_headers(parser)
+    if parser.status_number >= 200 then return end
+    if parser.status_number < 100 then
+      raise "HTTP server returned an invalid status code"
+    end
+    while parser_read(parser) do end
+    parser_reset_message(parser)
+  end
+end
+
+function request(method: string, source_url: string,
+                 supplied_headers: Headers?, body: string?,
+                 ca_file: string?, ca_directory: string?): ClientResponse
+  validate_http_token(method, "HTTP method")
+  local parsed_url = parse_url(source_url)
+  local request_headers =
+    client_request_headers(parsed_url, supplied_headers, body)
+  local connection = client_connection(parsed_url, ca_file, ca_directory)
+  local parser: Parser? = nil
+  do
+    local builder = str.writer(false)
+    builder:write(method .. " " .. parsed_url.target ..
+                  " HTTP/1.1\r\n")
+    builder:write(render_headers(request_headers))
+    builder:write("\r\n")
+    if body then builder:write(body as string) end
+    connection:write(builder:drain())
+
+    local exact = new_response_parser(
+      connection, lower_header_name(method) == "head")
+    parser = exact
+    final_response_headers(exact)
+    if exact.status_number < 200 or exact.status_number > 999 then
+      raise "HTTP server returned an invalid final status code"
+    end
+    return ClientResponse.new(
+      exact.status_number, exact.reason_text, "HTTP/1.1",
+      exact.parsed_headers, exact, connection, false)
+  catch
+    local failure = error
+    if parser then close_parser(parser as Parser) end
+    do
+      connection:close()
+    catch
+    end
+    raise failure
+  end
+end
+
+function get(source_url: string, supplied_headers: Headers?,
+             ca_file: string?, ca_directory: string?): ClientResponse
+  return request("GET", source_url, supplied_headers, nil,
+                 ca_file, ca_directory)
+end
+
+function ClientResponse:read(): string?
+  if self.closed then return nil end
+  do
+    local chunk? = parser_read(self.parser)
+    if chunk then return chunk as string end
+    self:close()
+    return nil
+  catch
+    local failure = error
+    do self:close() catch end
+    raise failure
+  end
+  return nil
+end
+
+function ClientResponse:read_until(delimiter: string,
+                                   chop: boolean?): string?
+  if self.closed then return nil end
+  do
+    local result? = parser_read_until(self.parser, delimiter, chop)
+    if result then return result as string end
+    self:close()
+    return nil
+  catch
+    local failure = error
+    do self:close() catch end
+    raise failure
+  end
+  return nil
+end
+
+function ClientResponse:close()
+  if self.closed then return end
+  close_parser(self.parser)
+  self.closed = true
+  self.connection:close()
+end

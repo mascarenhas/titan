@@ -3,8 +3,8 @@ local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 
 local STDLIB_MODULES = {
-    "coroutine", "uv", "async", "timer", "io", "fs", "net", "os",
-    "peg", "string", "math", "lua", "iter", "gc",
+    "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
+    "http", "os", "peg", "string", "math", "lua", "iter", "gc",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
 
@@ -247,10 +247,16 @@ describe("standalone-prefix source installation", function()
         assert_absent(PREFIX .. "/include/titan_lpeglabel.h")
         assert_absent(PREFIX .. "/include/titan_lpeglabel_namespace.h")
         assert_absent(PREFIX .. "/share/lua/5.5/lpeglabel-build")
+        assert_absent(PREFIX .. "/lib/libtitan-llhttp.a")
+        assert_absent(PREFIX .. "/lib/libssl.a")
+        assert_absent(PREFIX .. "/lib/libcrypto.a")
+        assert_absent(PREFIX .. "/include/titan/ssl/openssl.h")
+        assert_absent(PREFIX .. "/include/titan/http/native/titan_httpshim.h")
         assert_file(PREFIX .. "/share/titan/THIRD_PARTY_NOTICES.md")
         for _, license in ipairs({
             "libuv-LICENSE", "lpeglabel-LICENSE", "lpeg-LICENSE",
-            "ta-regex-LICENSE", "lua-LICENSE",
+            "lpeg-patterns-LICENSE", "ta-regex-LICENSE", "lua-LICENSE",
+            "llhttp-LICENSE", "openssl-LICENSE",
         }) do
             assert_file(PREFIX .. "/share/titan/LICENSES/" .. license)
         end
@@ -258,10 +264,14 @@ describe("standalone-prefix source installation", function()
             read_file(PREFIX .. "/share/titan/THIRD_PARTY_NOTICES.md")
         for _, notice in ipairs({
             "912b0b9e8641074408ffc2259e069b188e0c717b",
+            "0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7",
+            "Copyright (c) 2012-2016 Daurnimator",
             "857e48682791ba55c98a7dd99c5fc7d71c02597d",
             "Converting regexes to Parsing Expression Grammars",
             "Marcelo Oikawa", "Ana Lucia de Moura",
             "lstrlib.c", "Lua 5.5.0",
+            "OpenSSL 3.5.7", "OPENSSL_MODE=system",
+            "llhttp 9.4.3", "Copyright Fedor Indutny, 2018",
         }) do
             assert.truthy(notices:find(notice, 1, true), notice)
         end
@@ -498,6 +508,23 @@ describe("standalone-prefix source installation", function()
             "titan/io.titan",
             "titan/fs.titan",
             "titan/net.titan",
+            "titan/ssl.titan",
+            "titan/ssl/openssl.h",
+            "titan/http/http.titan",
+            "titan/http/client.titan",
+            "titan/http/headers.titan",
+            "titan/http/native.titan",
+            "titan/http/server.titan",
+            "titan/http/url.titan",
+            "titan/http/native/titan_httpshim.h",
+            "titan/http/native/titan_httpshim.c",
+            "spec/stdlib/ssl_spec.lua",
+            "spec/stdlib/http_spec.lua",
+            "spec/stdlib/ssl_http_sanitizer_spec.lua",
+            "spec/fixtures/ssl/ca.pem",
+            "spec/fixtures/ssl/server.pem",
+            "spec/fixtures/ssl/server-key.pem",
+            "spec/fixtures/ssl/wrong-server.pem",
             "titan/os.titan",
             "titan/peg/peg.titan",
             "titan/peg/combinators.titan",
@@ -517,8 +544,11 @@ describe("standalone-prefix source installation", function()
             "titan/gc.titan",
             "LICENSES/lpeglabel-LICENSE",
             "LICENSES/lpeg-LICENSE",
+            "LICENSES/lpeg-patterns-LICENSE",
             "LICENSES/ta-regex-LICENSE",
             "LICENSES/lua-LICENSE",
+            "LICENSES/llhttp-LICENSE",
+            "LICENSES/openssl-LICENSE",
             "THIRD_PARTY_NOTICES.md",
         }) do
             assert.truthy(contains_suffix(expected), expected)
@@ -527,6 +557,10 @@ describe("standalone-prefix source installation", function()
             assert.falsy(path:find("/lpeglabel-build/", 1, true), path)
             assert.falsy(path:match("/libtitan%-lpeglabel[.]a$"), path)
             assert.falsy(path:match("/vendor/lpeglabel/.*[.]o$"), path)
+            assert.falsy(path:find("/llhttp-build/", 1, true), path)
+            assert.falsy(path:find("/llhttp-release-v", 1, true), path)
+            assert.falsy(path:find("/openssl-build/", 1, true), path)
+            assert.falsy(path:match("/openssl%-%d"), path)
         end
     end)
 
@@ -761,6 +795,8 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             local uv = require "titan.uv"
             local fs = require "titan.fs"
             local net = require "titan.net"
+            local ssl = require "titan.ssl"
+            local http = require "titan.http"
             local system = require "titan.os"
             assert(type(builtin_coroutine) == "table")
             assert(type(builtin_os) == "table")
@@ -777,6 +813,8 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             assert(type(titan_io) == "userdata")
             assert(type(fs) == "userdata")
             assert(type(net) == "userdata")
+            assert(type(ssl) == "userdata")
+            assert(type(http) == "userdata")
             assert(type(system) == "userdata")
             assert(type(peg) == "userdata")
             assert(type(titan_string) == "userdata")
@@ -796,6 +834,8 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 io = titan_io,
                 fs = fs,
                 net = net,
+                ssl = ssl,
+                http = http,
                 os = system,
                 peg = peg,
                 string = titan_string,

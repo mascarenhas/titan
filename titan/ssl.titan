@@ -1,0 +1,852 @@
+local async = import "async"
+local net = import "net"
+local str = import "string"
+local openssl = foreign import "ssl/openssl.h"
+local cstddef = foreign import "stddef.h"
+local ffi = foreign import "titan/ffi.h"
+local cstring = foreign import "string.h"
+
+local TLS_RECORD_BYTES = 16 * 1024
+local STATE_HANDSHAKING = "handshaking"
+local STATE_OPEN = "open"
+local STATE_WRITE_SHUTDOWN = "write-shutdown"
+local STATE_PEER_CLOSED = "peer-closed"
+local STATE_SHUTDOWN = "shutdown"
+local STATE_FAILED = "failed"
+local STATE_CLOSED = "closed"
+
+record Error
+  code: integer
+  name: string
+  message: string
+  operation: string
+end
+
+record Connection
+  local transport: net.Connection
+  local handle: *openssl.SSL
+  local input: *openssl.BIO
+  local output: *openssl.BIO
+  local client: boolean
+  local state: string
+  local busy: boolean
+  local transport_eof: boolean
+  local transport_shutdown: boolean
+  local transport_closed: boolean
+  local excess: string
+end
+
+record Server
+  local listener: net.Server
+  local context: *openssl.SSL_CTX
+  local closed: boolean
+  local listener_closed: boolean
+end
+
+local function checked_text(text: string, operation: string): string
+  if cstring.strlen(text) ~= (#text as cstring.size_t) then
+    raise Error.new(0, "INVALID_TEXT",
+                    "text must not contain an embedded NUL", operation)
+  end
+  return text
+end
+
+-- A zone identifier selects a local interface for a scoped IPv6 connection;
+-- it is not part of the certificate IP identity. OpenSSL's IP parser rejects
+-- the `%zone` suffix, so remove it only for verification while retaining the
+-- original address for net.connect.
+local function verification_host(host: string): string
+  local colon? = str.find(host, ":")
+  local scope? = str.find(host, "%")
+  if colon and scope and (colon as integer) < (scope as integer) then
+    return str.sub(host, 1, (scope as integer) - 1)
+  end
+  return host
+end
+
+local function error_reason(fallback: string): string
+  local packed = openssl.ERR_get_error()
+  if packed ~= 0 then
+    local reason = openssl.ERR_reason_error_string(packed)
+    if reason then return reason as string end
+  end
+  return fallback
+end
+
+local function openssl_error(operation: string,
+                             fallback: string): Error
+  local packed = openssl.ERR_get_error()
+  if packed ~= 0 then
+    local reason = openssl.ERR_reason_error_string(packed)
+    if reason then
+      return Error.new(packed as integer, "OPENSSL",
+                       reason as string, operation)
+    end
+    return Error.new(packed as integer, "OPENSSL", fallback, operation)
+  end
+  return Error.new(0, "OPENSSL", fallback, operation)
+end
+
+local function ssl_error_name(code: integer): string
+  if code == openssl.SSL_ERROR_NONE then return "SSL_ERROR_NONE" end
+  if code == openssl.SSL_ERROR_SSL then return "SSL_ERROR_SSL" end
+  if code == openssl.SSL_ERROR_WANT_READ then return "SSL_ERROR_WANT_READ" end
+  if code == openssl.SSL_ERROR_WANT_WRITE then return "SSL_ERROR_WANT_WRITE" end
+  if code == openssl.SSL_ERROR_WANT_X509_LOOKUP then
+    return "SSL_ERROR_WANT_X509_LOOKUP"
+  end
+  if code == openssl.SSL_ERROR_SYSCALL then return "SSL_ERROR_SYSCALL" end
+  if code == openssl.SSL_ERROR_ZERO_RETURN then
+    return "SSL_ERROR_ZERO_RETURN"
+  end
+  if code == openssl.SSL_ERROR_WANT_CONNECT then
+    return "SSL_ERROR_WANT_CONNECT"
+  end
+  if code == openssl.SSL_ERROR_WANT_ACCEPT then
+    return "SSL_ERROR_WANT_ACCEPT"
+  end
+  if code == openssl.SSL_ERROR_WANT_ASYNC then
+    return "SSL_ERROR_WANT_ASYNC"
+  end
+  if code == openssl.SSL_ERROR_WANT_ASYNC_JOB then
+    return "SSL_ERROR_WANT_ASYNC_JOB"
+  end
+  if code == openssl.SSL_ERROR_WANT_CLIENT_HELLO_CB then
+    return "SSL_ERROR_WANT_CLIENT_HELLO_CB"
+  end
+  if code == openssl.SSL_ERROR_WANT_RETRY_VERIFY then
+    return "SSL_ERROR_WANT_RETRY_VERIFY"
+  end
+  return "SSL_ERROR_UNKNOWN"
+end
+
+local function ssl_error(code: integer, operation: string): Error
+  return Error.new(code, ssl_error_name(code),
+                   error_reason("TLS operation failed"), operation)
+end
+
+local function operation_error(connection: Connection, code: integer,
+                               operation: string): Error
+  local failure = ssl_error(code, operation)
+  if connection.transport_eof and
+     (code == openssl.SSL_ERROR_SSL or
+      code == openssl.SSL_ERROR_SYSCALL) then
+    return Error.new(code, "TLS_TRUNCATED_EOF",
+                     "TLS transport closed without close_notify", operation)
+  end
+  return failure
+end
+
+local function verify_error(code: integer): Error
+  local message = "certificate verification failed"
+  local reason = openssl.X509_verify_cert_error_string(
+      code as ffi.titan_ffi_long)
+  if reason then message = reason as string end
+  return Error.new(code, "CERTIFICATE_VERIFY_FAILED", message,
+                   "ssl.handshake.verify")
+end
+
+local function bytes_string(bytes: const *ffi.titan_ffi_char,
+                            length: integer): string
+  if length == 0 then return "" end
+  local storage: owned ffi.titan_ffi_char[] =
+    ffi.titan_ffi_char.new_array(length)
+  cstring.memcpy(storage, bytes, length as cstring.size_t)
+  return storage as string
+end
+
+local function free_engine(connection: Connection)
+  if connection.handle then openssl.SSL_free(connection.handle) end
+  connection.handle = nil
+  connection.input = nil
+  connection.output = nil
+  connection.excess = ""
+end
+
+local function close_transport(connection: Connection)
+  if connection.transport_closed then return end
+  connection.transport:close()
+  connection.transport_closed = true
+end
+
+local function fail_connection(connection: Connection, failure: value)
+  connection.state = STATE_FAILED
+  free_engine(connection)
+  -- A cancelled Task remains cancellation-sticky, so this best-effort close
+  -- can itself be cancelled before net dispatches it. Preserve the original
+  -- failure; the net Runtime still owns its eventual handle cleanup.
+  do
+    close_transport(connection)
+  catch
+  end
+  raise failure
+end
+
+local function begin_operation(connection: Connection,
+                               operation: string): boolean
+  if connection.state == STATE_CLOSED then return false end
+  if connection.busy then
+    raise operation .. ": SSL Connection already has an operation in progress"
+  end
+  connection.busy = true
+  return true
+end
+
+local function require_engine(connection: Connection, operation: string)
+  if connection.state == STATE_FAILED then
+    raise operation .. ": SSL Connection has failed"
+  end
+  if not connection.handle then
+    raise operation .. ": SSL Connection is closed"
+  end
+end
+
+local function drain_output(connection: Connection): integer
+  local total = 0
+  local pending = openssl.BIO_ctrl_pending(connection.output) as integer
+  while pending > 0 do
+    local requested = pending
+    if requested > TLS_RECORD_BYTES then requested = TLS_RECORD_BYTES end
+    local buffer = ffi.titan_ffi_char.new_array(requested)
+    local lengths: cstddef.size_t[1]
+    lengths[0] = 0 as cstddef.size_t
+    openssl.ERR_clear_error()
+    local ok = openssl.BIO_read_ex(
+        connection.output, buffer,
+        requested as cstddef.size_t, lengths)
+    if ok ~= 1 or lengths[0] == 0 then
+      raise openssl_error("ssl.output.read",
+                          "failed to drain the TLS output BIO")
+    end
+    local length = lengths[0] as integer
+    connection.transport:write(bytes_string(buffer, length))
+    total = total + length
+    pending = openssl.BIO_ctrl_pending(connection.output) as integer
+  end
+  return total
+end
+
+local function feed_input(connection: Connection)
+  if connection.transport_eof then return end
+  local encrypted? = connection.transport:read()
+  if not encrypted then
+    connection.transport_eof = true
+    openssl.BIO_ctrl(connection.input,
+                     openssl.BIO_C_SET_BUF_MEM_EOF_RETURN, 0, nil)
+    return
+  end
+
+  local input = encrypted as string
+  local bytes = input as const *ffi.titan_ffi_char
+  local offset = 0
+  while offset < #input do
+    local lengths: cstddef.size_t[1]
+    lengths[0] = 0 as cstddef.size_t
+    openssl.ERR_clear_error()
+    local ok = openssl.BIO_write_ex(
+        connection.input, bytes + offset,
+        (#input - offset) as cstddef.size_t, lengths)
+    if ok ~= 1 or lengths[0] == 0 then
+      raise openssl_error("ssl.input.write",
+                          "failed to feed the TLS input BIO")
+    end
+    offset = offset + (lengths[0] as integer)
+  end
+end
+
+local function want_retry(connection: Connection, code: integer,
+                          operation: string, drained: integer): boolean
+  if code == openssl.SSL_ERROR_WANT_READ then
+    if connection.transport_eof then
+      raise Error.new(code, "TLS_TRUNCATED_EOF",
+                      "TLS transport closed without close_notify", operation)
+    end
+    feed_input(connection)
+    return true
+  elseif code == openssl.SSL_ERROR_WANT_WRITE then
+    if drained == 0 then
+      raise Error.new(code, "SSL_ERROR_WANT_WRITE",
+                      "TLS requested output progress without producing output",
+                      operation)
+    end
+    return true
+  end
+  return false
+end
+
+local function handshake_locked(connection: Connection)
+  require_engine(connection, "ssl.handshake")
+  if connection.state ~= STATE_HANDSHAKING then return end
+
+  while true do
+    openssl.ERR_clear_error()
+    local result = openssl.SSL_do_handshake(connection.handle)
+    if result == 1 then
+      drain_output(connection)
+      if connection.client then
+        local verification =
+          openssl.SSL_get_verify_result(connection.handle) as integer
+        if verification ~= openssl.X509_V_OK then
+          raise verify_error(verification)
+        end
+      end
+      connection.state = STATE_OPEN
+      return
+    end
+
+    -- SSL_get_error must be the first OpenSSL call after the failed operation.
+    local code = openssl.SSL_get_error(connection.handle, result) as integer
+    if connection.client then
+      local verification =
+        openssl.SSL_get_verify_result(connection.handle) as integer
+      if verification ~= openssl.X509_V_OK then
+        raise verify_error(verification)
+      end
+    end
+    local failure = operation_error(connection, code, "ssl.handshake")
+    local drained = drain_output(connection)
+    if not want_retry(connection, code, "ssl.handshake", drained) then
+      raise failure
+    end
+  end
+end
+
+local function send_shutdown_locked(connection: Connection)
+  if connection.state == STATE_WRITE_SHUTDOWN or
+     connection.state == STATE_SHUTDOWN then return end
+  require_engine(connection, "ssl.shutdown")
+  if connection.state == STATE_HANDSHAKING then
+    handshake_locked(connection)
+  end
+
+  while true do
+    openssl.ERR_clear_error()
+    local result = openssl.SSL_shutdown(connection.handle)
+    if result >= 0 then
+      drain_output(connection)
+      if result == 1 or connection.state == STATE_PEER_CLOSED then
+        connection.state = STATE_SHUTDOWN
+      else
+        connection.state = STATE_WRITE_SHUTDOWN
+      end
+      break
+    end
+
+    local code = openssl.SSL_get_error(connection.handle, result) as integer
+    local failure = operation_error(connection, code, "ssl.shutdown")
+    local drained = drain_output(connection)
+    if code == openssl.SSL_ERROR_WANT_READ then
+      local flags = openssl.SSL_get_shutdown(connection.handle)
+      if (flags & openssl.SSL_SENT_SHUTDOWN) ~= 0 then
+        connection.state = STATE_WRITE_SHUTDOWN
+        break
+      end
+    end
+    if not want_retry(connection, code, "ssl.shutdown", drained) then
+      raise failure
+    end
+  end
+
+  if not connection.transport_shutdown then
+    connection.transport:shutdown()
+    connection.transport_shutdown = true
+  end
+end
+
+local function read_locked(connection: Connection): string?
+  require_engine(connection, "ssl.read")
+  if #connection.excess > 0 then
+    local result = connection.excess
+    connection.excess = ""
+    return result
+  end
+  if connection.state == STATE_PEER_CLOSED or
+     connection.state == STATE_SHUTDOWN then return nil end
+  handshake_locked(connection)
+
+  local buffer = ffi.titan_ffi_char.new_array(TLS_RECORD_BYTES)
+  while true do
+    local lengths: cstddef.size_t[1]
+    lengths[0] = 0 as cstddef.size_t
+    openssl.ERR_clear_error()
+    local result = openssl.SSL_read_ex(
+        connection.handle, buffer,
+        TLS_RECORD_BYTES as cstddef.size_t, lengths)
+    if result == 1 then
+      drain_output(connection)
+      local length = lengths[0] as integer
+      if length > 0 then return bytes_string(buffer, length) end
+    else
+      local code = openssl.SSL_get_error(connection.handle, result) as integer
+      local failure = operation_error(connection, code, "ssl.read")
+      local drained = drain_output(connection)
+      if code == openssl.SSL_ERROR_ZERO_RETURN then
+        if connection.state == STATE_WRITE_SHUTDOWN then
+          connection.state = STATE_SHUTDOWN
+        else
+          connection.state = STATE_PEER_CLOSED
+        end
+        do
+          send_shutdown_locked(connection)
+        catch
+          local shutdown_failure = error
+          -- Receipt of close_notify is authenticated EOF. If our reciprocal
+          -- alert was written and only the TCP half-close failed because the
+          -- peer had already closed, preserve that clean EOF result. Do not
+          -- hide cancellation or another transport failure merely because the
+          -- TLS state reached SHUTDOWN before net.shutdown reported it.
+          if not (connection.state == STATE_SHUTDOWN and
+                  shutdown_failure is async.Error and
+                  (shutdown_failure as async.Error).name == "ENOTCONN" and
+                  (shutdown_failure as async.Error).operation ==
+                    "net.shutdown") then
+            raise shutdown_failure
+          end
+        end
+        return nil
+      elseif not want_retry(connection, code, "ssl.read", drained) then
+        raise failure
+      end
+    end
+  end
+  return nil
+end
+
+local function write_piece_locked(connection: Connection, piece: string)
+  local bytes = piece as const *ffi.titan_ffi_char
+  while true do
+    local lengths: cstddef.size_t[1]
+    lengths[0] = 0 as cstddef.size_t
+    openssl.ERR_clear_error()
+    local result = openssl.SSL_write_ex(
+        connection.handle, bytes,
+        #piece as cstddef.size_t, lengths)
+    if result == 1 then
+      if (lengths[0] as integer) ~= #piece then
+        raise Error.new(0, "TLS_PARTIAL_WRITE",
+                        "OpenSSL accepted only part of a TLS write",
+                        "ssl.write")
+      end
+      drain_output(connection)
+      return
+    end
+
+    -- Keep `piece`, its pointer, and its exact length unchanged across retry.
+    local code = openssl.SSL_get_error(connection.handle, result) as integer
+    local failure = operation_error(connection, code, "ssl.write")
+    local drained = drain_output(connection)
+    if not want_retry(connection, code, "ssl.write", drained) then
+      raise failure
+    end
+  end
+end
+
+local function write_locked(connection: Connection, data: string)
+  require_engine(connection, "ssl.write")
+  if connection.state == STATE_WRITE_SHUTDOWN or
+     connection.state == STATE_SHUTDOWN or
+     connection.state == STATE_PEER_CLOSED then
+    raise "ssl.write: SSL Connection is shutting down"
+  end
+  handshake_locked(connection)
+
+  local offset = 1
+  while offset <= #data do
+    local last = offset + TLS_RECORD_BYTES - 1
+    if last > #data then last = #data end
+    local piece = str.sub(data, offset, last)
+    write_piece_locked(connection, piece)
+    offset = last + 1
+  end
+end
+
+local function new_connection(transport: net.Connection,
+                              context: *openssl.SSL_CTX,
+                              client: boolean): Connection
+  openssl.ERR_clear_error()
+  local handle = openssl.SSL_new(context)
+  if not handle then
+    raise openssl_error("ssl.connection.new",
+                        "failed to allocate an SSL object")
+  end
+
+  openssl.ERR_clear_error()
+  local input = openssl.BIO_new(openssl.BIO_s_mem())
+  if not input then
+    openssl.SSL_free(handle)
+    raise openssl_error("ssl.input.new",
+                        "failed to allocate the TLS input BIO")
+  end
+  openssl.ERR_clear_error()
+  local output = openssl.BIO_new(openssl.BIO_s_mem())
+  if not output then
+    openssl.BIO_free(input)
+    openssl.SSL_free(handle)
+    raise openssl_error("ssl.output.new",
+                        "failed to allocate the TLS output BIO")
+  end
+
+  openssl.BIO_ctrl(input, openssl.BIO_C_SET_BUF_MEM_EOF_RETURN, -1, nil)
+  openssl.SSL_set0_rbio(handle, input)
+  openssl.SSL_set0_wbio(handle, output)
+  if client then
+    openssl.SSL_set_connect_state(handle)
+  else
+    openssl.SSL_set_accept_state(handle)
+  end
+  return Connection.new(transport, handle, input, output, client,
+                        STATE_HANDSHAKING, false, false, false, false, "")
+end
+
+local function configure_context(context: *openssl.SSL_CTX,
+                                 operation: string)
+  openssl.ERR_clear_error()
+  if openssl.SSL_CTX_ctrl(context,
+      openssl.SSL_CTRL_SET_MIN_PROTO_VERSION,
+      openssl.TLS1_2_VERSION as ffi.titan_ffi_long, nil) ~= 1 then
+    raise openssl_error(operation,
+                        "failed to require TLS 1.2 or newer")
+  end
+end
+
+local function client_context(ca_file: string?,
+                              ca_directory: string?): *openssl.SSL_CTX
+  openssl.ERR_clear_error()
+  local context = openssl.SSL_CTX_new(openssl.TLS_client_method())
+  if not context then
+    raise openssl_error("ssl.client.context",
+                        "failed to allocate a client SSL context")
+  end
+  do
+    configure_context(context, "ssl.client.minimum-version")
+    openssl.SSL_CTX_set_verify(context, openssl.SSL_VERIFY_PEER, nil)
+    openssl.ERR_clear_error()
+    local loaded = 0
+    if ca_file and ca_directory then
+      loaded = openssl.SSL_CTX_load_verify_locations(
+          context, ca_file as string, ca_directory as string)
+    elseif ca_file then
+      loaded = openssl.SSL_CTX_load_verify_locations(
+          context, ca_file as string, nil)
+    elseif ca_directory then
+      loaded = openssl.SSL_CTX_load_verify_locations(
+          context, nil, ca_directory as string)
+    else
+      loaded = openssl.SSL_CTX_set_default_verify_paths(context)
+    end
+    if loaded ~= 1 then
+      raise openssl_error("ssl.client.trust",
+                          "failed to load certificate trust roots")
+    end
+  catch
+    local failure = error
+    openssl.SSL_CTX_free(context)
+    raise failure
+  end
+  return context
+end
+
+local function server_context(certificate_file: string,
+                              private_key_file: string): *openssl.SSL_CTX
+  openssl.ERR_clear_error()
+  local context = openssl.SSL_CTX_new(openssl.TLS_server_method())
+  if not context then
+    raise openssl_error("ssl.server.context",
+                        "failed to allocate a server SSL context")
+  end
+  do
+    configure_context(context, "ssl.server.minimum-version")
+    openssl.ERR_clear_error()
+    if openssl.SSL_CTX_use_certificate_chain_file(
+        context, certificate_file) ~= 1 then
+      raise openssl_error("ssl.server.certificate",
+                          "failed to load the certificate chain")
+    end
+    openssl.ERR_clear_error()
+    if openssl.SSL_CTX_use_PrivateKey_file(
+        context, private_key_file, openssl.SSL_FILETYPE_PEM) ~= 1 then
+      raise openssl_error("ssl.server.private-key",
+                          "failed to load the private key")
+    end
+    openssl.ERR_clear_error()
+    if openssl.SSL_CTX_check_private_key(context) ~= 1 then
+      raise openssl_error("ssl.server.private-key",
+                          "private key does not match the certificate")
+    end
+  catch
+    local failure = error
+    openssl.SSL_CTX_free(context)
+    raise failure
+  end
+  return context
+end
+
+function connect(host: string, port: integer,
+                 ca_file: string?, ca_directory: string?): Connection
+  checked_text(host, "ssl.connect.host")
+  if ca_file then checked_text(ca_file as string, "ssl.connect.ca-file") end
+  if ca_directory then
+    checked_text(ca_directory as string, "ssl.connect.ca-directory")
+  end
+
+  local context = client_context(ca_file, ca_directory)
+  defer openssl.SSL_CTX_free(context)
+  local transport = net.connect(host, port)
+  local connection: Connection? = nil
+  do
+    connection = new_connection(transport, context, true)
+    local exact = connection as Connection
+    openssl.ERR_clear_error()
+    local parameters = openssl.SSL_get0_param(exact.handle)
+    if not parameters then
+      raise openssl_error("ssl.connect.verify-host",
+                          "failed to access peer verification parameters")
+    end
+    openssl.ERR_clear_error()
+    local identity = verification_host(host)
+    local ip_identity = openssl.X509_VERIFY_PARAM_set1_ip_asc(
+        parameters, identity) == 1
+    if not ip_identity then
+      -- A failed IP parse is the ordinary DNS-name branch, not the error
+      -- context for SSL_set1_host.
+      openssl.ERR_clear_error()
+      if openssl.SSL_set1_host(exact.handle, host) ~= 1 then
+        raise openssl_error("ssl.connect.verify-host",
+                            "failed to configure peer-name verification")
+      end
+    end
+    openssl.SSL_set_hostflags(
+        exact.handle,
+        openssl.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS as
+          ffi.titan_ffi_unsigned_int)
+    if not ip_identity then
+      openssl.ERR_clear_error()
+      local server_name = ffi.titan_ffi_char.new_array(#host + 1)
+      cstring.memcpy(server_name,
+                     host as const *ffi.titan_ffi_char,
+                     #host as cstddef.size_t)
+      server_name[#host] = 0 as ffi.titan_ffi_char
+      if openssl.SSL_ctrl(
+          exact.handle, openssl.SSL_CTRL_SET_TLSEXT_HOSTNAME,
+          openssl.TLSEXT_NAMETYPE_host_name as ffi.titan_ffi_long,
+          server_name as ffi.titan_ffi_void_ptr) ~= 1 then
+        raise openssl_error("ssl.connect.sni",
+                            "failed to configure TLS server name indication")
+      end
+    end
+    exact:handshake()
+    return exact
+  catch
+    local failure = error
+    if connection then
+      local exact = connection as Connection
+      free_engine(exact)
+    end
+    do
+      transport:close()
+    catch
+    end
+    raise failure
+  end
+end
+
+function listen(host: string, port: integer, backlog: integer,
+                certificate_file: string,
+                private_key_file: string): Server
+  checked_text(host, "ssl.listen.host")
+  checked_text(certificate_file, "ssl.listen.certificate")
+  checked_text(private_key_file, "ssl.listen.private-key")
+  if #certificate_file == 0 then
+    raise "ssl.listen: certificate file must not be empty"
+  end
+  if #private_key_file == 0 then
+    raise "ssl.listen: private key file must not be empty"
+  end
+
+  local context = server_context(certificate_file, private_key_file)
+  do
+    local listener = net.listen(host, port, backlog)
+    return Server.new(listener, context, false, false)
+  catch
+    local failure = error
+    openssl.SSL_CTX_free(context)
+    raise failure
+  end
+end
+
+function Connection:handshake()
+  if not begin_operation(self, "ssl.handshake") then return end
+  defer self.busy = false
+  do
+    handshake_locked(self)
+  catch
+    fail_connection(self, error)
+  end
+end
+
+function Connection:read(): string?
+  if not begin_operation(self, "ssl.read") then return nil end
+  defer self.busy = false
+  do
+    return read_locked(self)
+  catch
+    fail_connection(self, error)
+  end
+  return nil
+end
+
+function Connection:read_until(delimiter: string,
+                               chop: boolean?): string?
+  if #delimiter == 0 then raise "read delimiter must not be empty" end
+  if not begin_operation(self, "ssl.read_until") then return nil end
+  defer self.busy = false
+
+  do
+    local builder = str.writer(false)
+    local tail = ""
+    while true do
+      local chunk? = read_locked(self)
+      if not chunk then
+        if #tail > 0 then builder:write(tail) end
+        local result = builder:drain()
+        if #result == 0 then return nil end
+        return result
+      end
+      local bytes = chunk as string
+      local boundary = bytes
+      if #tail > 0 then boundary = tail .. bytes end
+      local match: integer? = str.find(boundary, delimiter)
+      if match then
+        local match_first = match as integer
+        local match_end = match_first + #delimiter - 1
+        local result_end = match_end
+        if chop then result_end = match_first - 1 end
+        if result_end > 0 then
+          builder:write(str.sub(boundary, 1, result_end))
+        end
+        self.excess = str.sub(boundary, match_end + 1)
+        return builder:drain()
+      end
+      local keep = #delimiter - 1
+      if keep > #boundary then keep = #boundary end
+      local committed = #boundary - keep
+      if committed > 0 then
+        if committed == #boundary then
+          builder:write(boundary)
+        else
+          builder:write(str.sub(boundary, 1, committed))
+        end
+      end
+      tail = str.sub(boundary, committed + 1)
+    end
+  catch
+    fail_connection(self, error)
+  end
+  return nil
+end
+
+function Connection:write(data: string)
+  if not begin_operation(self, "ssl.write") then
+    raise "ssl.write: SSL Connection is closed"
+  end
+  defer self.busy = false
+  do
+    write_locked(self, data)
+  catch
+    fail_connection(self, error)
+  end
+end
+
+function Connection:shutdown()
+  if not begin_operation(self, "ssl.shutdown") then return end
+  defer self.busy = false
+  do
+    send_shutdown_locked(self)
+  catch
+    fail_connection(self, error)
+  end
+end
+
+function Connection:close()
+  if self.transport_closed and not self.handle then
+    self.state = STATE_CLOSED
+    return
+  end
+  if self.busy then
+    raise "ssl.close: SSL Connection already has an operation in progress"
+  end
+  self.busy = true
+  defer self.busy = false
+
+  local failed = false
+  local failure: value = nil
+  if self.handle and self.state ~= STATE_FAILED and
+     self.state ~= STATE_HANDSHAKING then
+    do
+      send_shutdown_locked(self)
+    catch
+      local shutdown_failure = error
+      -- The alert bytes have already been drained before net.shutdown. If
+      -- the peer closes in that narrow window, libuv reports ENOTCONN for
+      -- the redundant TCP half-close. Closing this TLS owner is still
+      -- complete; explicit shutdown keeps reporting the same error.
+      if not (shutdown_failure is async.Error and
+              (shutdown_failure as async.Error).name == "ENOTCONN" and
+              (shutdown_failure as async.Error).operation ==
+                "net.shutdown") then
+        failed = true
+        failure = shutdown_failure
+      end
+    end
+  end
+  free_engine(self)
+  self.state = STATE_CLOSED
+  do
+    close_transport(self)
+  catch
+    if not failed then
+      failed = true
+      failure = error
+    end
+  end
+  if failed then raise failure end
+end
+
+function Server:accept(): Connection
+  if self.closed or not self.context then
+    raise "ssl.accept: Server is closed"
+  end
+  local context = self.context
+  openssl.ERR_clear_error()
+  if openssl.SSL_CTX_up_ref(context) ~= 1 then
+    raise openssl_error("ssl.accept.context",
+                        "failed to retain the server SSL context")
+  end
+  defer openssl.SSL_CTX_free(context)
+  local transport = self.listener:accept()
+  do
+    -- The TLS handshake is deliberately lazy so a slow ClientHello cannot
+    -- serialize the Server's accept loop. First I/O or handshake() drives it.
+    return new_connection(transport, context, false)
+  catch
+    local failure = error
+    do
+      transport:close()
+    catch
+    end
+    raise failure
+  end
+end
+
+function Server:close()
+  if self.closed and self.listener_closed then return end
+  if not self.closed then
+    self.closed = true
+    if self.context then openssl.SSL_CTX_free(self.context) end
+    self.context = nil
+  end
+  if not self.listener_closed then
+    self.listener:close()
+    self.listener_closed = true
+  end
+end

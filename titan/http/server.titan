@@ -1,0 +1,381 @@
+type Handler = (Request, Response) -> ()
+
+record Request
+  method: string
+  target: string
+  url: URL
+  version: string
+  headers: Headers
+  local parser: Parser
+  local ended: boolean
+end
+
+record Response
+  local connection: io.ReaderWriterCloser
+  local request_method: string
+  local request_keep_alive: boolean
+  local response_headers: Headers
+  local status_number: integer
+  local reason_text: string
+  local headers_sent: boolean
+  local chunked: boolean
+  local body_allowed: boolean
+  local content_length: integer?
+  local written: integer
+  local keep_alive: boolean
+  local closed: boolean
+end
+
+record Server
+  local plain: net.Server?
+  local secure: ssl.Server?
+  local encrypted: boolean
+  local handler: Handler
+  local closed: boolean
+end
+
+local function request_url(parser: Parser, encrypted: boolean): URL
+  local hosts = parser.parsed_headers:values("Host")
+  if #hosts ~= 1 then
+    raise "HTTP/1.1 request must contain exactly one Host header"
+  end
+  if #parser.target_text == 0 or
+     header_byte(parser.target_text, 1) ~= 47 then
+    raise "HTTP server supports only origin-form request targets"
+  end
+  -- Parse the received Host as an authority, not as a prefix of the combined
+  -- URL. Otherwise an authority delimiter could consume or rewrite the
+  -- separately received origin-form target before routing sees Request.url.
+  local authority = hosts[1]
+  local index = 1
+  while index <= #authority do
+    local byte = header_byte(authority, index)
+    if byte == 47 or byte == 63 or byte == 35 or byte == 64 then
+      raise "HTTP Host header contains a non-authority delimiter"
+    end
+    index = index + 1
+  end
+  local scheme = "http"
+  if encrypted then scheme = "https" end
+  return parse_url(scheme .. "://" .. authority .. parser.target_text)
+end
+
+local function read_request(parser: Parser,
+                            encrypted: boolean): Request
+  ensure_parser_headers(parser)
+  if #parser.method_text == 0 then raise "HTTP request has no method" end
+  local parsed_url = request_url(parser, encrypted)
+  return Request.new(parser.method_text, parser.target_text, parsed_url,
+                     "HTTP/1.1", parser.parsed_headers, parser, false)
+end
+
+function Request:read(): string?
+  if self.ended then return nil end
+  local chunk? = parser_read(self.parser)
+  if not chunk then self.ended = true end
+  return chunk
+end
+
+function Request:read_until(delimiter: string,
+                            chop: boolean?): string?
+  if self.ended then return nil end
+  local result? = parser_read_until(self.parser, delimiter, chop)
+  if not result then self.ended = true end
+  return result
+end
+
+local function drain_request(request_value: Request)
+  while request_value:read() do end
+end
+
+local function default_reason(status: integer): string
+  if status == 200 then return "OK" end
+  if status == 201 then return "Created" end
+  if status == 202 then return "Accepted" end
+  if status == 204 then return "No Content" end
+  if status == 301 then return "Moved Permanently" end
+  if status == 302 then return "Found" end
+  if status == 304 then return "Not Modified" end
+  if status == 400 then return "Bad Request" end
+  if status == 401 then return "Unauthorized" end
+  if status == 403 then return "Forbidden" end
+  if status == 404 then return "Not Found" end
+  if status == 405 then return "Method Not Allowed" end
+  if status == 408 then return "Request Timeout" end
+  if status == 413 then return "Content Too Large" end
+  if status == 414 then return "URI Too Long" end
+  if status == 417 then return "Expectation Failed" end
+  if status == 426 then return "Upgrade Required" end
+  if status == 500 then return "Internal Server Error" end
+  if status == 501 then return "Not Implemented" end
+  if status == 502 then return "Bad Gateway" end
+  if status == 503 then return "Service Unavailable" end
+  return "Status"
+end
+
+local function validate_reason(reason: string)
+  local index = 1
+  while index <= #reason do
+    local byte = header_byte(reason, index)
+    -- The HTTP/1.1 reason phrase has the same byte repertoire as a field
+    -- value: HTAB, SP/VCHAR, and obs-text, but no other control or DEL byte.
+    if (byte < 32 and byte ~= 9) or byte == 127 then
+      raise "HTTP reason phrase contains a forbidden byte"
+    end
+    index = index + 1
+  end
+end
+
+local function status_allows_body(method: string,
+                                  status: integer): boolean
+  if lower_header_name(method) == "head" then return false end
+  if status >= 100 and status < 200 then return false end
+  return status ~= 204 and status ~= 205 and status ~= 304
+end
+
+local function new_response(connection: io.ReaderWriterCloser,
+                            request_value: Request): Response
+  return Response.new(connection, request_value.method,
+                      request_value.parser.keep_alive,
+                      headers(nil), 200, "OK", false, false, true,
+                      nil, 0, request_value.parser.keep_alive, false)
+end
+
+function Response:set_status(status: integer, reason: string?)
+  if self.headers_sent then
+    raise "HTTP response headers have already been sent"
+  end
+  if status < 200 or status > 999 then
+    raise "HTTP final response status must be between 200 and 999"
+  end
+  local actual_reason = default_reason(status)
+  if reason then actual_reason = reason as string end
+  validate_reason(actual_reason)
+  self.status_number = status
+  self.reason_text = actual_reason
+end
+
+function Response:add_header(name: string, contents: string)
+  if self.headers_sent then
+    raise "HTTP response headers have already been sent"
+  end
+  self.response_headers:add(name, contents)
+end
+
+function Response:set_header(name: string, contents: string)
+  if self.headers_sent then
+    raise "HTTP response headers have already been sent"
+  end
+  self.response_headers:set(name, contents)
+end
+
+function Response:headers(): Headers
+  return copy_headers(self.response_headers)
+end
+
+local function prepare_response_headers(response: Response)
+  response.body_allowed =
+    status_allows_body(response.request_method, response.status_number)
+  local lengths = response.response_headers:values("Content-Length")
+  local encodings =
+    response.response_headers:values("Transfer-Encoding")
+  if #lengths > 1 then
+    raise "HTTP response has more than one Content-Length header"
+  end
+  if #encodings > 1 then
+    raise "HTTP response has more than one Transfer-Encoding header"
+  end
+  if #lengths > 0 and #encodings > 0 then
+    raise "HTTP response cannot combine Content-Length and Transfer-Encoding"
+  end
+
+  if not response.body_allowed then
+    response.response_headers:remove("Transfer-Encoding")
+    response.chunked = false
+    if response.status_number == 204 then
+      if #lengths == 1 then
+        raise "HTTP 204 response must not include Content-Length"
+      end
+    elseif response.status_number == 205 then
+      if #lengths == 1 and
+         decimal_header(lengths[1], "HTTP Content-Length") ~= 0 then
+        raise "HTTP 205 response Content-Length must be zero"
+      elseif #lengths == 0 then
+        response.response_headers:add("Content-Length", "0")
+      end
+      response.content_length = 0
+    elseif #lengths == 1 then
+      response.content_length =
+        decimal_header(lengths[1], "HTTP Content-Length")
+    end
+  elseif #lengths == 1 then
+    response.content_length =
+      decimal_header(lengths[1], "HTTP Content-Length")
+  elseif #encodings == 1 then
+    if lower_header_name(trim_header_value(encodings[1])) ~= "chunked" then
+      raise "HTTP response supports only chunked Transfer-Encoding"
+    end
+    response.chunked = true
+  else
+    response.response_headers:add("Transfer-Encoding", "chunked")
+    response.chunked = true
+  end
+
+  if header_has_token(response.response_headers,
+                      "Connection", "close") then
+    response.keep_alive = false
+  end
+  if not response.request_keep_alive then response.keep_alive = false end
+  if not response.keep_alive then
+    response.response_headers:set("Connection", "close")
+  end
+end
+
+function Response:send_headers()
+  if self.headers_sent then return end
+  if self.closed then raise "HTTP response is closed" end
+  prepare_response_headers(self)
+  local builder = str.writer(false)
+  builder:write("HTTP/1.1 " .. str.tostring(self.status_number) ..
+                " " .. self.reason_text .. "\r\n")
+  builder:write(render_headers(self.response_headers))
+  builder:write("\r\n")
+  self.connection:write(builder:drain())
+  self.headers_sent = true
+end
+
+function Response:write(data: string)
+  if self.closed then raise "HTTP response is closed" end
+  if not self.headers_sent then self:send_headers() end
+  if not self.body_allowed then
+    if #data > 0 then raise "HTTP response status does not allow a body" end
+    return
+  end
+  if #data == 0 then return end
+  if self.content_length and
+     self.written > (self.content_length as integer) - #data then
+    raise "HTTP response exceeds its Content-Length"
+  end
+  if self.chunked then
+    self.connection:write(
+      str.format("%x", #data) .. "\r\n" .. data .. "\r\n")
+  else
+    self.connection:write(data)
+  end
+  self.written = self.written + #data
+end
+
+function Response:close()
+  if self.closed then return end
+  if not self.headers_sent then self:send_headers() end
+  if self.content_length and self.body_allowed and
+     self.written ~= (self.content_length as integer) then
+    raise "HTTP response body does not match its Content-Length"
+  end
+  if self.chunked and self.body_allowed then
+    self.connection:write("0\r\n\r\n")
+  end
+  self.closed = true
+end
+
+-- A client using Expect: 100-continue deliberately withholds its body until
+-- the server answers.  Resolve that handshake before the handler can block in
+-- Request:read.  Unsupported or multiple expectations get a final response
+-- on a closing connection, so rejecting them never waits for an unread body.
+local function accept_request_expectation(
+    connection: io.ReaderWriterCloser, request_value: Request,
+    response: Response): boolean
+  local expectations = request_value.headers:values("Expect")
+  if #expectations == 0 then return true end
+  if #expectations == 1 and
+     lower_header_name(trim_header_value(expectations[1])) ==
+       "100-continue" then
+    connection:write("HTTP/1.1 100 Continue\r\n\r\n")
+    return true
+  end
+
+  response:set_status(417, nil)
+  response:set_header("Content-Length", "0")
+  response:set_header("Connection", "close")
+  response:close()
+  return false
+end
+
+local function serve_connection(connection: io.ReaderWriterCloser,
+                                encrypted: boolean, handler: Handler)
+  local parser = new_request_parser(connection)
+  defer close_parser(parser)
+  defer connection:close()
+  while true do
+    local request_value = read_request(parser, encrypted)
+    local response = new_response(connection, request_value)
+    if not accept_request_expectation(
+        connection, request_value, response) then
+      return
+    end
+    do
+      handler(request_value, response)
+      response:close()
+      drain_request(request_value)
+    catch
+      raise
+    end
+    if not parser.keep_alive or not response.keep_alive then return end
+    parser_reset_message(parser)
+  end
+end
+
+local function accept_connection(server: Server): io.ReaderWriterCloser
+  if server.encrypted then
+    local connection = (server.secure as ssl.Server):accept()
+    local channel: io.ReaderWriterCloser = connection
+    return channel
+  end
+  local connection = (server.plain as net.Server):accept()
+  local channel: io.ReaderWriterCloser = connection
+  return channel
+end
+
+function listen(host: string, port: integer, backlog: integer,
+                handler: Handler): Server
+  return Server.new(net.listen(host, port, backlog), nil,
+                    false, handler, false)
+end
+
+function listen_tls(host: string, port: integer, backlog: integer,
+                    certificate_file: string, private_key_file: string,
+                    handler: Handler): Server
+  return Server.new(nil, ssl.listen(host, port, backlog,
+                                   certificate_file, private_key_file),
+                    true, handler, false)
+end
+
+function Server:serve()
+  if self.closed then raise "HTTP Server is closed" end
+  while not self.closed do
+    local accepted: io.ReaderWriterCloser? = nil
+    do
+      accepted = accept_connection(self)
+    catch
+      if self.closed then return end
+      raise
+    end
+    local connection = accepted as io.ReaderWriterCloser
+    local encrypted = self.encrypted
+    local handler = self.handler
+    async.run(function (): value
+      serve_connection(connection, encrypted, handler)
+      return nil
+    end)
+  end
+end
+
+function Server:close()
+  if self.closed then return end
+  self.closed = true
+  if self.encrypted then
+    (self.secure as ssl.Server):close()
+  else
+    (self.plain as net.Server):close()
+  end
+end

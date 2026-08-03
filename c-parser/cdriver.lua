@@ -229,14 +229,30 @@ function cdriver.process_file(filename, options)
     end
 
     -- Preserve source positions through the flattened preprocessor stream for
-    -- declaration diagnostics. Compatibility never treats path/line/column as
-    -- proof of C type identity; the final ordered-header compiler baseline is
-    -- authoritative for independently parsed anonymous declarations.
+    -- declaration diagnostics and for recognizing one physical declaration
+    -- repeated by independent header extraction. Source identity alone never
+    -- proves that the declaration is valid in the cumulative include state;
+    -- the final ordered-header compiler baseline remains authoritative.
     local line_starts = {}
     local next_start = 1
     for index, output_line in ipairs(ctx.output) do
         line_starts[index] = next_start
         next_start = next_start + #output_line + 1
+    end
+    local source_identities = {}
+    local function source_identity(source_file)
+        local cached = source_identities[source_file]
+        if cached ~= nil then return cached end
+        local attributes = lfs.attributes(source_file)
+        cached = attributes
+            and attributes.dev ~= nil
+            and attributes.ino ~= nil
+            and {
+                device = attributes.dev,
+                inode = attributes.ino,
+            } or false
+        source_identities[source_file] = cached
+        return cached
     end
     local function source_origin(position)
         local low, high = 1, #line_starts
@@ -253,10 +269,13 @@ function cdriver.process_file(filename, options)
         local origin = ctx.output_origins
             and ctx.output_origins[found]
         if not origin then return nil end
+        local identity = source_identity(origin.file)
         return {
             file = origin.file,
             line = origin.line,
             column = position - line_starts[found] + 1,
+            device = identity and identity.device or nil,
+            inode = identity and identity.inode or nil,
         }
     end
     for _, declaration in ipairs(res) do

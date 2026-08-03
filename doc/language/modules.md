@@ -511,9 +511,10 @@ Titan's `titan.os` module without colliding with Lua's own `os` library, which
 is not importable as a Titan module. Likewise, `import "string"` selects
 Titan's module without replacing Lua's `string` table.
 
-The additional standard modules `titan.math`, `titan.lua`, `titan.iter`, and
-`titan.gc` use their qualified names in Titan source as well as Lua. They do
-not add parser sugar or replace Lua's bare standard-library names.
+The additional standard modules `titan.ssl`, `titan.http`, `titan.math`,
+`titan.lua`, `titan.iter`, and `titan.gc` use their qualified names in Titan
+source as well as Lua. They do not add parser sugar or replace Lua's bare
+standard-library names.
 
 Application scheduling uses `import "async"` (or Lua's
 `require "titan.async"`). `titan.uv` is the private Runtime/libuv plumbing

@@ -9,7 +9,8 @@ on:
 
 jobs:
   # Build and install the regular Linux tree once per workflow. Keep the
-  # compiler core, net/OS, and PEG/string/math/Lua/iter/GC groups on this warm
+  # compiler core, net/SSL/HTTP/OS, and PEG/string/math/Lua/iter/GC groups on
+  # this warm
   # standard runner.
   # Two consumers restore the pristine tree instead of rebuilding dependencies.
   # The build-heavy uv/timer/fs behavior uses a standard runner with 30-minute
@@ -17,7 +18,7 @@ jobs:
   # static-provider coverage remains on the 1-core slim runner. Both labels are
   # x86_64 Ubuntu 24.04, so the native artifact does not cross targets.
   prepare-linux:
-    name: regular (ubuntu-24.04, build+compiler-core+net-os+peg-string-math-lua-iter-gc)
+    name: regular (ubuntu-24.04, build+compiler-core+net-ssl-http-os+peg-string-math-lua-iter-gc)
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -31,6 +32,12 @@ jobs:
       LIBUV_VERSION: "1.52.1"
       # Bump when any CMake option that affects the cached archive changes.
       LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v1"
+      LLHTTP_VERSION: "9.4.3"
+      LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
+      LLHTTP_BUILD_PROFILE: "static-pic-hidden-c99-v1"
+      OPENSSL_VERSION: "3.5.7"
+      OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8"
+      OPENSSL_BUILD_PROFILE: "static-pic-hidden-minimal-v1"
 
     steps:
       - uses: actions/checkout@v6
@@ -68,8 +75,30 @@ jobs:
           restore-keys: |
             ubuntu-24.04-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
 
+      - name: Cache bundled llhttp source and static build
+        uses: actions/cache@v5
+        with:
+          path: |
+            llhttp-release-v${{ env.LLHTTP_VERSION }}
+            llhttp-release-v${{ env.LLHTTP_VERSION }}.tar.gz
+            llhttp-build
+          key: ubuntu-24.04-${{ runner.arch }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}
+          restore-keys: |
+            ubuntu-24.04-${{ runner.arch }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
+
+      - name: Cache bundled OpenSSL source and static build
+        uses: actions/cache@v5
+        with:
+          path: |
+            openssl-${{ env.OPENSSL_VERSION }}
+            openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+            openssl-build
+          key: ubuntu-24.04-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}
+          restore-keys: |
+            ubuntu-24.04-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
+
       - name: Install regular build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev libuv1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev libssl-dev libuv1-dev perl pkg-config
 
       - name: Prepare the ABI-0.20 standalone prefix
         run: |
@@ -103,7 +132,7 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer io fs net os peg string math lua iter gc; do
+          for module in coroutine uv async timer io fs net ssl http os peg string math lua iter gc; do
             rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           rm -f "$PREFIX/share/lua/5.5/titan.lua" \
@@ -129,6 +158,12 @@ jobs:
 
       - name: Build the pinned bundled libuv
         run: make libuv
+
+      - name: Build the pinned private llhttp support
+        run: make llhttp
+
+      - name: Build the pinned bundled OpenSSL support
+        run: make -j2 openssl
 
       - name: Activate the standalone Titan prefix
         run: |
@@ -199,7 +234,7 @@ jobs:
       # 30-minute timeout leaves room for host-load variance. Run the library
       # groups first so legacy compiler cleanup cannot make the serial packaging
       # gate rebuild the complete standard library again.
-      - name: Run serial, net/OS, and PEG/string/math/Lua/iter/GC library tests without coverage
+      - name: Run serial, net/SSL/HTTP/OS, and PEG/string/math/Lua/iter/GC library tests without coverage
         # These tests compile disposable fixtures and alternate images. The
         # installed bundled provider packed above remains the optimized
         # production image, and macOS repeats the complete suite at -O2.
@@ -249,7 +284,8 @@ jobs:
 
       - name: Smoke-test bundled libuv source image
         # The following installed-rock canary owns the Linux system-mode build;
-        # do not compile the same system uv image twice on this billed runner.
+        # do not compile the same system uv/OpenSSL image twice on this billed
+        # runner.
         run: bash spec/support/ci_libuv_mode_smoke.sh bundled
 
       # The prepared artifact was packed before the source-mode smoke, so this
@@ -259,14 +295,16 @@ jobs:
       # against the bundled image. The two focused rockspec cases own the
       # mode-dependent SDK layout and external-DSO promotion boundaries; the
       # production smoke owns the complete installed runtime behavior.
-      - name: Canary source-rock installation with system libuv
+      - name: Canary source-rock installation with system libuv and OpenSSL
         run: |
-          LIBUV_MODE=system TITAN_EXTRA_CFLAGS=-O0 luarocks make --force
+          LIBUV_MODE=system OPENSSL_MODE=system TITAN_EXTRA_CFLAGS=-O0 \
+            luarocks make --force
           TITAN_EXPECT_LIBUV_MODE=system \
             "$PREFIX/bin/busted" -o gtest -v spec/rockspec_spec.lua \
               --name='standalone-prefix source installation installs one matching Lua and Titan SDK before the standard images' \
               --name='standalone-prefix source installation loads direct libuv calls lazily for Titan and explicitly for Lua'
           TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE="$GITHUB_WORKSPACE/libuv-build/libuv.a" \
+            OPENSSL_MODE=system \
             bash spec/support/ci_libuv_mode_smoke.sh system
 
       - name: Upload prepared Linux tree
@@ -383,6 +421,12 @@ jobs:
       LIBUV_VERSION: "1.52.1"
       # Bump when any CMake option that affects the cached archive changes.
       LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v1"
+      LLHTTP_VERSION: "9.4.3"
+      LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
+      LLHTTP_BUILD_PROFILE: "static-pic-hidden-c99-v1"
+      OPENSSL_VERSION: "3.5.7"
+      OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8"
+      OPENSSL_BUILD_PROFILE: "static-pic-hidden-minimal-v1"
 
     steps:
       - uses: actions/checkout@v6
@@ -416,8 +460,30 @@ jobs:
           restore-keys: |
             macos-latest-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
 
+      - name: Cache bundled llhttp source and static build
+        uses: actions/cache@v5
+        with:
+          path: |
+            llhttp-release-v${{ env.LLHTTP_VERSION }}
+            llhttp-release-v${{ env.LLHTTP_VERSION }}.tar.gz
+            llhttp-build
+          key: macos-latest-${{ runner.arch }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}
+          restore-keys: |
+            macos-latest-${{ runner.arch }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
+
+      - name: Cache bundled OpenSSL source and static build
+        uses: actions/cache@v5
+        with:
+          path: |
+            openssl-${{ env.OPENSSL_VERSION }}
+            openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+            openssl-build
+          key: macos-latest-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}
+          restore-keys: |
+            macos-latest-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
+
       - name: Install system dependencies (macOS)
-        run: brew install cmake libuv pkgconf
+        run: brew install cmake libuv openssl@3 pkgconf
 
       - name: Build the bundled Lua 5.5 source tree
         run: make lua LUA_PLATFORM=macosx
@@ -430,6 +496,12 @@ jobs:
 
       - name: Build the pinned bundled libuv
         run: make libuv
+
+      - name: Build the pinned private llhttp support
+        run: make llhttp
+
+      - name: Build the pinned bundled OpenSSL support
+        run: make -j2 openssl
 
       - name: Install LuaRocks into the Titan prefix
         run: make luarocks
@@ -494,9 +566,9 @@ jobs:
 
       # Run this after the bundled test suite. The smoke first exercises the
       # existing self-contained provider pair, then rebuilds titan.so/titan.a
-      # against the platform package; the job can end in system mode without
-      # another build.
-      - name: Smoke-test bundled and system libuv modes
+      # against the platform libuv and OpenSSL packages; the job can end in
+      # system mode without another build.
+      - name: Smoke-test bundled and system libuv/OpenSSL modes
         run: |
           TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE="$GITHUB_WORKSPACE/libuv-build/libuv.a" \
             bash spec/support/ci_libuv_mode_smoke.sh
@@ -516,7 +588,7 @@ jobs:
       # Generated Titan translation units are large enough that combining
       # optimization with sanitizer instrumentation can exhaust this job's
       # budget. O0 retains the complete ASan/UBSan instrumentation;
-      # Lua, libbacktrace, and libuv remain at O1 below.
+      # Lua, libbacktrace, libuv, and OpenSSL remain at O1 below.
       SANITIZER_FLAGS: "-O0 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Make's content stamps deliberately revisit native dependencies from
       # later targets, so their complete O1 configuration must remain in the
@@ -528,6 +600,9 @@ jobs:
       LIBBT_CFLAGS: "-fPIC -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LIBUV_BUILD_TYPE: Debug
       LIBUV_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LLHTTP_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      OPENSSL_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      OPENSSL_EXTRA_CONFIGURE_FLAGS: "no-asm"
       TITAN_EXTRA_CFLAGS: "-O0 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       TITAN_EXTRA_LDFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Every Titan image intentionally embeds the vendored static Lua archive;
@@ -547,7 +622,7 @@ jobs:
             >> "$GITHUB_ENV"
 
       - name: Install sanitizer build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev
+        run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev perl
 
       - name: Build sanitizer-enabled native dependencies
         run: |
@@ -555,6 +630,9 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh native-libbacktrace \
             make libbacktrace
           bash spec/support/ci_sanitizer_capture.sh native-libuv make libuv
+          bash spec/support/ci_sanitizer_capture.sh native-llhttp make llhttp
+          bash spec/support/ci_sanitizer_capture.sh native-openssl \
+            make -j2 openssl
 
       - name: Install LuaRocks for the sanitizer Lua
         run: bash spec/support/ci_sanitizer_capture.sh luarocks make luarocks
@@ -580,7 +658,7 @@ jobs:
           test -f "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/manifest.txt"
           test -f "$snapshot_provider" && test ! -L "$snapshot_provider"
           cmp "$snapshot_provider" "$provider"
-          for module in coroutine uv async timer io fs net os peg string math lua iter gc; do
+          for module in coroutine uv async timer io fs net ssl http os peg string math lua iter gc; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           readelf -Ws .lua/bin/lua | grep __asan_
@@ -631,6 +709,16 @@ jobs:
             .lua/bin/busted -o gtest -v \
             spec/stdlib/coroutine_spec.lua \
             --name='coroutine standard module roots fresh terminal result and error transfers through pop-side GC'
+
+      - name: Run TLS/HTTP sanitizer boundary
+        env:
+          TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
+          TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh ssl-http \
+            .lua/bin/busted -o gtest -v \
+            spec/stdlib/ssl_http_sanitizer_spec.lua \
+            --filter='streams a fragmented HTTPS request through TLS and llhttp'
 
       - name: Run PEG/regex native sanitizer gate
         env:

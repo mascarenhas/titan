@@ -1,0 +1,316 @@
+-- The RFC 3986 productions below are a Titan relabel-syntax translation of
+-- daurnimator/lpeg_patterns' URI grammar at commit
+-- 0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7. Copyright (c) 2012-2016
+-- Daurnimator; see LICENSES/lpeg-patterns-LICENSE.
+
+record URL
+  scheme: string
+  host: string
+  port: integer
+  path: string
+  query: string?
+  target: string
+  local authority: string
+end
+
+-- This is the RFC 3986 grammar specialized at its public boundary for an
+-- absolute HTTP URL: an authority and nonempty host are required, userinfo and
+-- fragments are rejected, and an explicit port must contain decimal digits.
+-- Semantic checks below restrict the scheme and the numeric port range. The
+-- folder main compiles this source once in the module initializer.
+local http_url_pattern: peg.Pattern? = nil
+
+local function url_pattern(): peg.Pattern
+  return peg.compile([[
+  URL <- {|
+           {:scheme_position: {} :}
+           {:scheme: {Scheme / %{scheme}} :}
+           (':' / %{scheme_separator})
+           ('/' / %{authority_separator})
+           ('/' / %{authority_separator})
+           Authority
+           {:path: {PathAbempty} :}
+           ('?' {:query: {Query} :})?
+           (&'#' %{fragment} / !. / %{url_tail})
+         |}
+
+  Authority <- (&(Userinfo '@') %{userinfo})
+             / (!'[' &(NonColonAuthority* ':' NonColonAuthority* ':')
+                %{ipv6_brackets})
+             / ({:host_position: {} :}
+                {:host: {Host / %{host}} :}
+                (':' {:port_position: {} :}
+                     {:port: {Digit+ / %{port}} :})?
+                (&('/' / '?' / '#' / !.) / %{authority_tail}))
+
+  Scheme <- Alpha (Alpha / Digit / [-+.])*
+  Userinfo <- (Unreserved / PctEncoded / SubDelims / ':')*
+
+  Host <- (&'[' (IPLiteral / %{ip_literal}))
+        / IPv4Address &(':' / '/' / '?' / '#' / !.)
+        / RegName
+  IPLiteral <- '[' (IPv6AddrZ / IPvFuture / %{ip_literal})
+                   (']' / %{ipv6_close})
+  IPvFuture <- [vV] Hex+ '.' (Unreserved / SubDelims / ':')+
+  IPv6AddrZ <- IPv6Address ('%25' ZoneID)?
+  ZoneID <- (Unreserved / PctEncoded)+
+
+  IPv6Address <- H16C6 LS32
+               / '::' H16C5 LS32
+               / H16 '::' H16C4 LS32
+               / '::' H16C4 LS32
+               / H16P2 '::' H16C3 LS32
+               / H16 '::' H16C3 LS32
+               / '::' H16C3 LS32
+               / H16P3 '::' H16C2 LS32
+               / H16P2 '::' H16C2 LS32
+               / H16 '::' H16C2 LS32
+               / '::' H16C2 LS32
+               / H16P4 '::' H16C LS32
+               / H16P3 '::' H16C LS32
+               / H16P2 '::' H16C LS32
+               / H16 '::' H16C LS32
+               / '::' H16C LS32
+               / H16P5 '::' LS32
+               / H16P4 '::' LS32
+               / H16P3 '::' LS32
+               / H16P2 '::' LS32
+               / H16 '::' LS32
+               / '::' LS32
+               / H16P6 '::' H16
+               / H16P5 '::' H16
+               / H16P4 '::' H16
+               / H16P3 '::' H16
+               / H16P2 '::' H16
+               / H16 '::' H16
+               / '::' H16
+               / H16P7 '::'
+               / H16P6 '::'
+               / H16P5 '::'
+               / H16P4 '::'
+               / H16P3 '::'
+               / H16P2 '::'
+               / H16 '::'
+               / '::'
+
+  H16 <- Hex Hex^-3
+  H16C <- H16 ':'
+  H16C2 <- H16C H16C
+  H16C3 <- H16C2 H16C
+  H16C4 <- H16C3 H16C
+  H16C5 <- H16C4 H16C
+  H16C6 <- H16C5 H16C
+  H16P2 <- H16C H16
+  H16P3 <- H16C2 H16
+  H16P4 <- H16C3 H16
+  H16P5 <- H16C4 H16
+  H16P6 <- H16C5 H16
+  H16P7 <- H16C6 H16
+  LS32 <- H16C H16 / IPv4Address
+
+  IPv4Address <- DecOctet '.' DecOctet '.' DecOctet '.' DecOctet
+  DecOctet <- '25' [0-5]
+            / '2' [0-4] Digit
+            / '1' Digit Digit
+            / [1-9] Digit
+            / Digit
+
+  RegName <- (Unreserved / PctEncoded / SubDelims)+
+  PathAbempty <- ('/' Segment)*
+  Segment <- PChar*
+  Query <- (PChar / '/' / '?')*
+  PChar <- Unreserved / PctEncoded / SubDelims / ':' / '@'
+
+  PctEncoded <- '%' (Hex / %{percent_escape})
+                        (Hex / %{percent_escape})
+  Unreserved <- Alpha / Digit / [-._~]
+  SubDelims <- [!$&'()*+,;=]
+  NonColonAuthority <- [^:/?#]
+  Alpha <- [A-Za-z]
+  Digit <- [0-9]
+  Hex <- [A-Fa-f0-9]
+  ]])
+end
+
+local function url_parse_detail(label: string): string
+  if label == "scheme" then return "expected an RFC 3986 scheme"
+  elseif label == "scheme_separator" then
+    return "expected ':' after the scheme"
+  elseif label == "authority_separator" then
+    return "expected '//' before the authority"
+  elseif label == "userinfo" then
+    return "user information is unsupported"
+  elseif label == "ipv6_brackets" then
+    return "IPv6 addresses must use brackets"
+  elseif label == "ip_literal" then
+    return "expected an IPv6 or IPvFuture address"
+  elseif label == "ipv6_close" then
+    return "expected ']' after the IP literal"
+  elseif label == "host" then return "expected a nonempty host"
+  elseif label == "port" then return "expected a decimal port"
+  elseif label == "percent_escape" then
+    return "expected two hexadecimal digits after '%'"
+  elseif label == "authority_tail" then
+    return "unexpected byte in the authority"
+  elseif label == "fragment" then return "fragments are unsupported"
+  elseif label == "url_tail" then
+    return "unexpected byte in the path or query"
+  end
+  return "invalid absolute HTTP URL"
+end
+
+local function url_parse_message(label: string,
+                                 position: integer): string
+  return "HTTP URL parse error [" .. label .. "] at byte " ..
+    str.tostring(position) .. ": " .. url_parse_detail(label)
+end
+
+local function hex_value(byte: integer): integer
+  if byte >= 48 and byte <= 57 then return byte - 48
+  elseif byte >= 65 and byte <= 70 then return byte - 55
+  end
+  return byte - 87
+end
+
+local function is_unreserved(byte: integer): boolean
+  if byte >= 65 and byte <= 90 then return true end
+  if byte >= 97 and byte <= 122 then return true end
+  if byte >= 48 and byte <= 57 then return true end
+  if byte == 45 then return true end
+  if byte == 46 then return true end
+  if byte == 95 then return true end
+  return byte == 126
+end
+
+local HEX_UPPER = "0123456789ABCDEF"
+
+-- RFC 3986 sections 2.3 and 6.2.2.1: decode percent-encoded unreserved
+-- bytes and uppercase the hex digits of every retained escape. Host names
+-- additionally use the case-insensitive normalization from lpeg_patterns.
+local function normalize_component(source: string,
+                                   lowercase: boolean): string
+  local builder = str.writer(false)
+  local index = 1
+  while index <= #source do
+    local byte = header_byte(source, index)
+    if byte == 37 then
+      local high = hex_value(header_byte(source, index + 1))
+      local low = hex_value(header_byte(source, index + 2))
+      local decoded = high * 16 + low
+      if is_unreserved(decoded) then
+        if lowercase and decoded >= 65 and decoded <= 90 then
+          decoded = decoded + 32
+        end
+        builder:write(str.char(decoded))
+      else
+        builder:write("%" .. str.sub(HEX_UPPER, high + 1, high + 1) ..
+                      str.sub(HEX_UPPER, low + 1, low + 1))
+      end
+      index = index + 3
+    else
+      if lowercase and byte >= 65 and byte <= 90 then byte = byte + 32 end
+      builder:write(str.char(byte))
+      index = index + 1
+    end
+  end
+  return builder:drain()
+end
+
+-- Return the spelling for network/TLS identity and the bracket-preserving
+-- spelling for the Host header. RFC 6874's encoded zone separator is decoded
+-- only for the connection address.
+local function normalize_host(raw: string): (string, string)
+  if header_byte(raw, 1) ~= 91 then
+    local host = normalize_component(raw, true)
+    return host, host
+  end
+
+  local inner = str.sub(raw, 2, #raw - 1)
+  if header_byte(inner, 1) == 118 or header_byte(inner, 1) == 86 then
+    local dot = str.find(inner, ".") as integer
+    local version = lower_header_name(str.sub(inner, 1, dot - 1))
+    local future = version .. str.sub(inner, dot)
+    return future, "[" .. future .. "]"
+  end
+
+  local zone_marker? = str.find(inner, "%25")
+  if zone_marker then
+    local marker = zone_marker as integer
+    local address = lower_header_name(str.sub(inner, 1, marker - 1))
+    local zone = normalize_component(str.sub(inner, marker + 3), false)
+    return address .. "%" .. zone,
+      "[" .. address .. "%25" .. zone .. "]"
+  end
+  local address = lower_header_name(inner)
+  return address, "[" .. address .. "]"
+end
+
+local function parse_port(text: string, position: integer): integer
+  local port = 0
+  local index = 1
+  while index <= #text do
+    local digit = header_byte(text, index) - 48
+    if port > (65535 - digit) // 10 then
+      raise url_parse_message("port", position)
+    end
+    port = port * 10 + digit
+    index = index + 1
+  end
+  if port == 0 then raise url_parse_message("port", position) end
+  return port
+end
+
+function parse_url(source: string): URL
+  local captured, failure_label, failure_position =
+    http_url_pattern:match(source)
+  if captured == nil then
+    local label = "url"
+    local position = 1
+    if failure_label ~= nil then label = failure_label as string end
+    if failure_position ~= nil then
+      position = failure_position as integer
+    end
+    raise url_parse_message(label, position)
+  end
+
+  local parts = captured as {value: value}
+  local scheme = lower_header_name(parts["scheme"] as string)
+  local default_port = 0
+  if scheme == "http" then
+    default_port = 80
+  elseif scheme == "https" then
+    default_port = 443
+  else
+    raise url_parse_message(
+      "scheme", parts["scheme_position"] as integer)
+  end
+
+  local host, authority_host =
+    normalize_host(parts["host"] as string)
+  local port = default_port
+  local port_text = parts["port"]
+  if port_text ~= nil then
+    port = parse_port(
+      port_text as string, parts["port_position"] as integer)
+  end
+
+  local authority = authority_host
+  if port_text ~= nil then
+    authority = authority .. ":" .. str.tostring(port)
+  end
+
+  local path = normalize_component(parts["path"] as string, false)
+  if #path == 0 then path = "/" end
+  local query: string? = nil
+  local query_text = parts["query"]
+  if query_text ~= nil then
+    query = normalize_component(query_text as string, false)
+  end
+  local target = path
+  if query then target = target .. "?" .. (query as string) end
+  return URL.new(scheme, host, port, path, query, target, authority)
+end
+
+function URL:host_header(): string
+  return self.authority
+end

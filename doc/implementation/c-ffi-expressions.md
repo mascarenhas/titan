@@ -257,8 +257,22 @@ containing two `extern` declarations of one probe-private synthetic identifier.
 Compiler acceptance proves that the two extracted types can form compatible
 declarations in that foreign-header context; it is not evidence that both
 declarations occurred. After acceptance, the merger forms any known-bound
-array composite in a declaration-owned deep view. No include-guard/path/line
-heuristic participates.
+array composite in a declaration-owned deep view.
+
+There is one narrow source-provenance exception. If isolated compatibility
+fails, matching preprocessor source identity, line, and column make the pair a
+candidate, but are not sufficient. A recursive relation must also prove that
+the complete declaration graphs are exact except for distinct canonical
+objects explicitly marked as same-spelled prototype-local structs or unions;
+their kind, completeness, layout, and bidirectional reuse topology must match
+too. Filesystem device/inode
+identity is used when available, with the resolved pathname as fallback. The
+checker then queues a `source-repeat`. A successful final header baseline
+canonicalizes it directly because rendering two synthetic function declarations
+would invent two prototype scopes for a tag that a guarded physical declaration
+emitted only once. Distinct source declarations remain nominal, macro-dependent
+changes elsewhere in the type remain conflicts, and exact or conditional
+repeats retain their pair probes.
 
 The TypeLists themselves are still produced by preprocessing each foreign
 import independently without generated C's fixed preceding standard/Lua/Titan

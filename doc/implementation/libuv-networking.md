@@ -11,6 +11,10 @@ holds one opaque `uv.uv_tcp_t` wrapper, and only the private `uv` module can
 reach its native handle. There is no network control layer, Runtime network
 registry, ready queue, or per-operation generation number.
 
+The TLS layer wraps these public `net.Connection` and `net.Server` records with
+OpenSSL memory BIOs. It does not extend this module or obtain the private TCP
+owner; see [TLS-library implementation](ssl-library.md).
+
 ## Native owners and callbacks
 
 Each callback-taking libuv operation has one small Titan owner containing its

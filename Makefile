@@ -72,8 +72,88 @@ LIBUV_CMAKE_FLAGS := -DLIBUV_BUILD_SHARED=OFF -DBUILD_TESTING=OFF \
 	-DCMAKE_BUILD_TYPE=$(LIBUV_BUILD_TYPE)
 LIBUV_BUILD_CFLAGS ?=
 
+# HTTP parsing is always a private, statically carried standard-library
+# dependency.  Release archives contain the generated C parser, so the build
+# needs neither Node.js nor npm and can preserve Titan's configured CC/AR/
+# RANLIB identity directly.
+LLHTTP_VERSION       := 9.4.3
+LLHTTP_RELEASE_TAG   := release/v$(LLHTTP_VERSION)
+LLHTTP_SRC_DIR       := llhttp-release-v$(LLHTTP_VERSION)
+LLHTTP_TARBALL       := $(LLHTTP_SRC_DIR).tar.gz
+LLHTTP_URL           := https://github.com/nodejs/llhttp/archive/refs/tags/$(LLHTTP_RELEASE_TAG).tar.gz
+LLHTTP_SHA256        := 1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39
+LLHTTP_EXTRACTED     := $(LLHTTP_SRC_DIR)/.titan-extracted
+LLHTTP_BUILD_DIR     := llhttp-build
+LLHTTP_SOURCE_NAMES  := llhttp.c http.c api.c
+LLHTTP_SOURCES       := $(addprefix $(LLHTTP_SRC_DIR)/src/,$(LLHTTP_SOURCE_NAMES))
+LLHTTP_OBJECTS       := $(addprefix $(LLHTTP_BUILD_DIR)/,$(LLHTTP_SOURCE_NAMES:.c=.o))
+LLHTTP_HEADER        := $(LLHTTP_SRC_DIR)/include/llhttp.h
+LLHTTP_ARCHIVE       := $(LLHTTP_BUILD_DIR)/libtitan-llhttp.a
+LLHTTP_BUILD_CONFIG  := $(LLHTTP_BUILD_DIR)/.titan-llhttp-build-config
+LLHTTP_ARCHIVE_CONFIG := $(LLHTTP_BUILD_DIR)/.titan-llhttp-archive-config
+LLHTTP_CPPFLAGS      := -I$(abspath $(LLHTTP_SRC_DIR)/include)
+LLHTTP_CFLAGS        := -std=c99 -fPIC -fvisibility=hidden
+LLHTTP_BUILD_CFLAGS  ?=
+TITAN_HTTPSHIM_SOURCE := titan/http/native/titan_httpshim.c
+TITAN_HTTPSHIM_HEADER := titan/http/native/titan_httpshim.h
+TITAN_HTTPSHIM_O      := $(LLHTTP_BUILD_DIR)/titan_httpshim.o
+TITAN_HTTPSHIM_CPPFLAGS := -I$(abspath titan/http/native)
+TITAN_HTTPSHIM_RUNTIME_CPPFLAGS := -I$(abspath titan-runtime) \
+	-I$(abspath $(TITAN_RUNTIME_LUA_SOURCE_PATH))
+
+# The bundled OpenSSL release is the reproducible default.  System mode uses
+# pkg-config only for compilation/final linking and deliberately carries no
+# host OpenSSL archive into Titan's static provider.
+OPENSSL_MODE          ?= bundled
+OPENSSL_VERSION       := 3.5.7
+OPENSSL_MIN_VERSION   := 3.0.0
+OPENSSL_SRC_DIR       := openssl-$(OPENSSL_VERSION)
+OPENSSL_SRC_ABS       := $(abspath $(OPENSSL_SRC_DIR))
+OPENSSL_TARBALL       := $(OPENSSL_SRC_DIR).tar.gz
+OPENSSL_URL           := https://github.com/openssl/openssl/releases/download/openssl-$(OPENSSL_VERSION)/$(OPENSSL_TARBALL)
+OPENSSL_SHA256        := a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8
+OPENSSL_EXTRACTED     := $(OPENSSL_SRC_DIR)/.titan-extracted
+OPENSSL_BUILD_DIR     := openssl-build
+OPENSSL_BUILD_CONFIG  := $(OPENSSL_BUILD_DIR)/.titan-openssl-build-config
+OPENSSL_BUILD_COMPLETE := $(OPENSSL_BUILD_DIR)/.titan-openssl-build-complete
+OPENSSL_BUNDLED_LIBSSL := $(OPENSSL_BUILD_DIR)/libssl.a
+OPENSSL_BUNDLED_LIBCRYPTO := $(OPENSSL_BUILD_DIR)/libcrypto.a
+OPENSSL_PKG_CONFIG    ?= pkg-config
+OPENSSL_PERL          ?= perl
+OPENSSL_BUILD_CFLAGS  ?=
+OPENSSL_EXTRA_CONFIGURE_FLAGS ?=
+# Keep the embedded library self-contained and deterministic.  In particular,
+# no-pinshared is required when static libcrypto is embedded in titan.so.
+OPENSSL_CONFIGURE_FLAGS := --api=3.0 no-shared no-pinshared no-atexit \
+	no-apps no-tests no-docs no-legacy no-comp no-dso no-module no-quic \
+	no-zlib no-zstd no-brotli no-autoload-config \
+	$(OPENSSL_EXTRA_CONFIGURE_FLAGS)
+OPENSSL_REQUIRED_CFLAGS := -O2 -g -fPIC -fvisibility=hidden
+
 HOST_OS   := $(shell uname -s)
 HOST_ARCH := $(shell uname -m)
+
+ifeq ($(OPENSSL_MODE),bundled)
+  OPENSSL_LIBS := $(OPENSSL_BUNDLED_LIBSSL) $(OPENSSL_BUNDLED_LIBCRYPTO)
+  OPENSSL_CPPFLAGS := -I$(abspath $(OPENSSL_BUILD_DIR)/include) \
+	-I$(abspath $(OPENSSL_SRC_DIR)/include) -DOPENSSL_API_COMPAT=30000
+  OPENSSL_EXTRA_OBJECTS := $(OPENSSL_LIBS)
+  # no-dso and the explicitly disabled compression backends leave pthread as
+  # the only platform library outside the two carried archives on supported
+  # Linux/macOS builds.  The final validation link checks this assumption.
+  OPENSSL_PROVIDER_LDFLAGS := -lpthread
+else ifeq ($(OPENSSL_MODE),system)
+  OPENSSL_LIBS :=
+  OPENSSL_CPPFLAGS = $(strip $(shell $(OPENSSL_PKG_CONFIG) --cflags openssl 2>/dev/null)) \
+	-DOPENSSL_API_COMPAT=30000
+  OPENSSL_EXTRA_OBJECTS :=
+  OPENSSL_PROVIDER_LDFLAGS = $(strip $(shell $(OPENSSL_PKG_CONFIG) --libs openssl 2>/dev/null))
+else
+  OPENSSL_LIBS :=
+  OPENSSL_CPPFLAGS :=
+  OPENSSL_EXTRA_OBJECTS :=
+  OPENSSL_PROVIDER_LDFLAGS :=
+endif
 
 # These are the complete libuv inputs consumed by the later standard-library
 # rule. In bundled mode libuv's archive joins the compiler's ordered -X
@@ -200,17 +280,22 @@ UV_TITAN_SOURCES := \
 	titan/uv/runtime.titan \
 	titan/uv/task.titan \
 	titan/uv/tcp.titan
+STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
+	titan/http/headers.titan titan/http/native.titan \
+	titan/http/server.titan titan/http/url.titan
+STDLIB_SSL_INTEGRATION_HEADER := titan/ssl/openssl.h
 UV_CONFIG_STAMP := titan-runtime/.titan-uv-build-config
-STDLIB_MODULES := coroutine uv async timer io fs net os peg string \
+STDLIB_MODULES := coroutine uv async timer io fs net ssl http os peg string \
 	math lua iter gc
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
-	titan.io titan.fs titan.net titan.os titan.peg titan.string \
+	titan.io titan.fs titan.net titan.ssl titan.http titan.os \
+	titan.peg titan.string \
 	titan.math titan.lua titan.iter titan.gc
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
-	titan/net.titan titan/os.titan \
+	titan/net.titan titan/ssl.titan $(STDLIB_HTTP_SOURCES) titan/os.titan \
 	titan/peg/peg.titan titan/peg/combinators.titan \
 	titan/peg/native.titan \
 	titan/peg/relabel.titan titan/peg/relabel_parser.titan \
@@ -220,19 +305,27 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/string/regex_parser.titan \
 	titan/math.titan titan/lua.titan titan/iter.titan titan/gc.titan
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
-	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/os.lua \
+	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
+	titan/http.lua titan/os.lua \
 	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
 	titan/iter.lua titan/gc.lua
 STDLIB_CONTAINER := titan.so
 STDLIB_STATIC_ARCHIVE := titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
 STDLIB_EXTRA_OBJECTS := $(TITANLIB_O) $(LPEGLABEL_ARCHIVE) \
-	$(LIBUV_EXTRA_OBJECTS)
-STDLIB_NATIVE_IDENTITY_PREREQS := $(LPEGLABEL_ARCHIVE)
+	$(LIBUV_EXTRA_OBJECTS) $(TITAN_HTTPSHIM_O) $(LLHTTP_ARCHIVE) \
+	$(OPENSSL_EXTRA_OBJECTS)
+STDLIB_NATIVE_IDENTITY_PREREQS := $(LPEGLABEL_ARCHIVE) \
+	$(TITAN_HTTPSHIM_O) $(LLHTTP_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS)
 STDLIB_LPEGLABEL_CPPFLAGS := $(LPEGLABEL_CPPFLAGS)
+STDLIB_HTTP_CPPFLAGS := $(TITAN_HTTPSHIM_CPPFLAGS) $(LLHTTP_CPPFLAGS)
+STDLIB_OPENSSL_CPPFLAGS := $(OPENSSL_CPPFLAGS)
+STDLIB_OPENSSL_LDFLAGS := $(OPENSSL_PROVIDER_LDFLAGS)
 STDLIB_LICENSES := LICENSES/libuv-LICENSE \
 	LICENSES/lpeglabel-LICENSE LICENSES/lpeg-LICENSE \
-	LICENSES/ta-regex-LICENSE LICENSES/lua-LICENSE
+	LICENSES/lpeg-patterns-LICENSE \
+	LICENSES/ta-regex-LICENSE LICENSES/lua-LICENSE \
+	LICENSES/llhttp-LICENSE LICENSES/openssl-LICENSE
 STDLIB_EMBEDDED_FORMAT_INPUTS := titan-compiler/staticmetadata.lua \
 	titan-compiler/coder.lua
 TITAN_BOOTSTRAP_SO := titan-runtime/bootstrap/titan.so
@@ -292,12 +385,15 @@ TITANLIB_BUILD_CONFIG := titan-runtime/.titan-titanlib-build-config
 STDLIB_CONFIG_STAMP := titan-runtime/.titan-stdlib-build-config
 STDLIB_COMPLETION_STAMP := titan-runtime/.titan-stdlib-complete
 
-.PHONY: all help lua luarocks libbacktrace libuv libuv-config lpeglabel \
+.PHONY: all help lua luarocks libbacktrace libuv libuv-config llhttp \
+	check-llhttp-tools openssl openssl-config check-openssl-tools \
+	check-system-openssl invalid-openssl-mode lpeglabel \
 	check-libuv-tools check-system-libuv invalid-libuv-mode runtime titan \
 	stage-titan-bootstrap install-titan-sdk stdlib install-stdlib \
 	publish-stdlib \
 	rock-post-install test rock-build \
 	examples clean clean-lua clean-luarocks clean-libbacktrace clean-libuv \
+	clean-llhttp clean-openssl \
 	distclean FORCE
 
 FORCE:
@@ -309,13 +405,15 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "make all and make stdlib use bundled libuv $(LIBUV_VERSION) by default."
-	@echo "Use 'make libuv' for only that dependency, or LIBUV_MODE=system"
-	@echo "to use pkg-config with libuv >= $(LIBUV_MIN_VERSION)."
-	@echo "Bundled prerequisites: a C compiler, CMake, tar, curl/wget, and"
+	@echo "make all and make stdlib use bundled libuv $(LIBUV_VERSION), OpenSSL"
+	@echo "$(OPENSSL_VERSION), and llhttp $(LLHTTP_VERSION) by default. Use"
+	@echo "LIBUV_MODE=system and/or OPENSSL_MODE=system to select pkg-config"
+	@echo "libraries (libuv >= $(LIBUV_MIN_VERSION), OpenSSL >= $(OPENSSL_MIN_VERSION))."
+	@echo "Bundled prerequisites: a C compiler, CMake, Perl, tar, curl/wget, and"
 	@echo "sha256sum/shasum (macOS: xcode-select --install; brew install cmake)."
-	@echo "System mode packages: Ubuntu/Debian libuv1-dev pkg-config; Fedora"
-	@echo "libuv-devel pkgconf-pkg-config; macOS brew install libuv pkgconf."
+	@echo "System packages: Ubuntu/Debian libuv1-dev libssl-dev pkg-config;"
+	@echo "Fedora libuv-devel openssl-devel pkgconf-pkg-config; macOS"
+	@echo "brew install libuv openssl@3 pkgconf. llhttp is always bundled."
 	@echo "For a standalone installation, choose one writable PREFIX and run:"
 	@echo "  make lua PREFIX=/path && make luarocks PREFIX=/path && make libuv"
 	@echo "  PATH=/path/bin:\$$PATH /path/bin/luarocks make"
@@ -701,6 +799,323 @@ libuv-config: libuv ## Print the effective libuv compiler and linker inputs
 	@echo "LIBUV_LDFLAGS=$(LIBUV_LDFLAGS)"
 	@echo "LIBUV_PROVIDER_LDFLAGS=$(LIBUV_PROVIDER_LDFLAGS)"
 
+llhttp: $(TITAN_HTTPSHIM_O) $(LLHTTP_ARCHIVE) ## Build/validate private llhttp support
+
+check-llhttp-tools:
+	@missing=0; \
+	for tool in "$(firstword $(CC))" "$(firstword $(AR))" \
+		"$(firstword $(RANLIB))" tar; do \
+	  if ! command -v "$$tool" >/dev/null 2>&1; then \
+	    echo "ERROR: bundled llhttp requires '$$tool'." >&2; missing=1; \
+	  fi; \
+	done; \
+	if ! command -v curl >/dev/null 2>&1 && \
+	   ! command -v wget >/dev/null 2>&1; then \
+	  echo "ERROR: need curl or wget to download $(LLHTTP_TARBALL)." >&2; \
+	  missing=1; \
+	fi; \
+	if ! command -v sha256sum >/dev/null 2>&1 && \
+	   ! command -v shasum >/dev/null 2>&1; then \
+	  echo "ERROR: need sha256sum or shasum to verify llhttp." >&2; \
+	  missing=1; \
+	fi; \
+	test "$$missing" -eq 0
+
+$(LLHTTP_TARBALL):
+	@$(MAKE) --no-print-directory check-llhttp-tools
+	@echo "==> Downloading $(LLHTTP_URL)"
+	@if command -v curl >/dev/null 2>&1; then \
+	  curl -fL -o "$@" "$(LLHTTP_URL)"; \
+	else \
+	  wget -O "$@" "$(LLHTTP_URL)"; \
+	fi
+
+$(LLHTTP_EXTRACTED): $(LLHTTP_TARBALL)
+	@$(MAKE) --no-print-directory check-llhttp-tools
+	@echo "==> Verifying SHA-256 for $(LLHTTP_TARBALL)"
+	@if command -v sha256sum >/dev/null 2>&1; then \
+	  printf '%s  %s\n' "$(LLHTTP_SHA256)" "$(LLHTTP_TARBALL)" | \
+	    sha256sum -c -; \
+	else \
+	  printf '%s  %s\n' "$(LLHTTP_SHA256)" "$(LLHTTP_TARBALL)" | \
+	    shasum -a 256 -c -; \
+	fi || { \
+	  echo "ERROR: checksum mismatch for $(LLHTTP_TARBALL); removing it." >&2; \
+	  rm -f "$(LLHTTP_TARBALL)"; exit 1; \
+	}
+	@echo "==> Extracting $(LLHTTP_TARBALL)"
+	rm -rf "$(LLHTTP_SRC_DIR)"
+	tar zxf "$(LLHTTP_TARBALL)"
+	@test -f "$(LLHTTP_HEADER)" || { \
+	  echo "ERROR: $(LLHTTP_TARBALL) omitted generated llhttp sources." >&2; \
+	  exit 1; \
+	}
+	@touch "$@"
+
+# These files arrive together from the verified release archive.  Giving Make
+# their extraction stamp as the generating rule lets a clean parallel build
+# resolve the header/source prerequisites before the source directory exists.
+$(LLHTTP_SOURCES) $(LLHTTP_HEADER): $(LLHTTP_EXTRACTED)
+	@test -f "$@" || { echo "ERROR: extracted llhttp omitted $@" >&2; exit 1; }
+
+$(LLHTTP_BUILD_CONFIG): FORCE $(LLHTTP_EXTRACTED) $(LLHTTP_SOURCES) \
+		$(LLHTTP_HEADER) $(TITAN_HTTPSHIM_SOURCE) $(TITAN_HTTPSHIM_HEADER) \
+		$(TITAN_RUNTIME_LUA_LIB)
+	@mkdir -p "$(@D)"
+	@tmp="$@.tmp"; \
+	{ printf '%s\n' \
+		$(call make_shell_quote,LLHTTP_VERSION=$(LLHTTP_VERSION)) \
+		$(call make_shell_quote,LLHTTP_SHA256=$(LLHTTP_SHA256)) \
+		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
+		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
+		$(call make_shell_quote,CC=$(CC)) \
+		$(call make_shell_quote,AR=$(AR)) \
+		$(call make_shell_quote,RANLIB=$(RANLIB)) \
+		$(call make_shell_quote,ROCK_CFLAGS=$(ROCK_CFLAGS)) \
+		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
+		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
+		$(call make_shell_quote,LLHTTP_CPPFLAGS=$(LLHTTP_CPPFLAGS)) \
+		$(call make_shell_quote,TITAN_HTTPSHIM_CPPFLAGS=$(TITAN_HTTPSHIM_CPPFLAGS)) \
+		$(call make_shell_quote,TITAN_HTTPSHIM_RUNTIME_CPPFLAGS=$(TITAN_HTTPSHIM_RUNTIME_CPPFLAGS)) \
+		$(call make_shell_quote,TITAN_RUNTIME_LUA_SOURCE_PATH=$(TITAN_RUNTIME_LUA_SOURCE_PATH)) \
+		$(call make_shell_quote,LLHTTP_CFLAGS=$(LLHTTP_CFLAGS)) \
+		$(call make_shell_quote,LLHTTP_BUILD_CFLAGS=$(LLHTTP_BUILD_CFLAGS)) \
+		$(call make_shell_quote,SOURCES=$(LLHTTP_SOURCES)); \
+	  for input in $(LLHTTP_SOURCES) $(LLHTTP_HEADER) \
+			$(TITAN_HTTPSHIM_SOURCE) $(TITAN_HTTPSHIM_HEADER) \
+			$(TITAN_RUNTIME_LUA_LIB) \
+			"$(TITAN_RUNTIME_LUA_SOURCE_PATH)"/*.h; do \
+	    cksum "$$input"; \
+	  done; } > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
+	  rm -f "$$tmp"; \
+	else \
+	  mv -f "$$tmp" "$@"; \
+	fi
+
+$(LLHTTP_BUILD_DIR)/%.o: $(LLHTTP_SRC_DIR)/src/%.c \
+		$(LLHTTP_BUILD_CONFIG)
+	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(LLHTTP_CPPFLAGS) $(ROCK_CFLAGS) \
+		$(LLHTTP_CFLAGS) $(TITAN_EXTRA_CFLAGS) $(LLHTTP_BUILD_CFLAGS) \
+		-c "$<" -o "$@"
+
+$(TITAN_HTTPSHIM_O): $(TITAN_HTTPSHIM_SOURCE) $(TITAN_HTTPSHIM_HEADER) \
+		titan-runtime/titan.h $(LLHTTP_HEADER) $(LLHTTP_BUILD_CONFIG) | \
+		$(TITAN_RUNTIME_LUA_LIB)
+	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(LLHTTP_CPPFLAGS) \
+		$(TITAN_HTTPSHIM_CPPFLAGS) $(TITAN_HTTPSHIM_RUNTIME_CPPFLAGS) \
+		$(ROCK_CFLAGS) $(LLHTTP_CFLAGS) \
+		$(TITAN_EXTRA_CFLAGS) $(LLHTTP_BUILD_CFLAGS) \
+		-c "$(TITAN_HTTPSHIM_SOURCE)" -o "$@"
+
+$(LLHTTP_ARCHIVE_CONFIG): FORCE $(firstword $(LLHTTP_OBJECTS))
+	@mkdir -p "$(@D)"
+	@set -e; \
+	probe="$(@D)/.titan-llhttp-tool-probe.a"; tmp="$@.tmp"; \
+	rm -f "$$probe" "$$tmp"; \
+	if $(AR) qD "$$probe" "$(firstword $(LLHTTP_OBJECTS))" \
+			>/dev/null 2>&1 && \
+	   $(RANLIB) -D "$$probe" >/dev/null 2>&1; then \
+	  ar_mode=qD; ranlib_mode=-D; deterministic=yes; \
+	else \
+	  rm -f "$$probe"; \
+	  $(AR) q "$$probe" "$(firstword $(LLHTTP_OBJECTS))" \
+			>/dev/null 2>&1 || { \
+	    echo "ERROR: configured AR supports neither qD nor q" >&2; exit 1; \
+	  }; \
+	  $(RANLIB) "$$probe" >/dev/null 2>&1 || { \
+	    echo "ERROR: configured RANLIB is unusable" >&2; exit 1; \
+	  }; \
+	  ar_mode=q; ranlib_mode=ordinary; deterministic=no; \
+	fi; \
+	rm -f "$$probe"; \
+	{ printf '%s\n' \
+		$(call make_shell_quote,AR=$(AR)) \
+		$(call make_shell_quote,RANLIB=$(RANLIB)) \
+		$(call make_shell_quote,MEMBERS=$(notdir $(LLHTTP_OBJECTS))) \
+		"AR_MODE=$$ar_mode" "RANLIB_MODE=$$ranlib_mode" \
+		"DETERMINISTIC=$$deterministic"; } > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
+	  rm -f "$$tmp"; \
+	else \
+	  mv -f "$$tmp" "$@"; \
+	fi
+
+$(LLHTTP_ARCHIVE): FORCE $(LLHTTP_OBJECTS) $(LLHTTP_ARCHIVE_CONFIG)
+	@set -e; \
+	expected="$$(printf '%s\n' $(notdir $(LLHTTP_OBJECTS)))"; actual=""; \
+	if test -f "$@" && test ! -L "$@"; then \
+	  actual="$$( $(AR) t "$@" 2>/dev/null | \
+	    awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	fi; \
+	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
+	if test -n "$$newer" || test "$$actual" != "$$expected"; then \
+	  tmp="$@.tmp"; rm -f "$$tmp"; \
+	  ar_mode="$$(sed -n 's/^AR_MODE=//p' "$(LLHTTP_ARCHIVE_CONFIG)")"; \
+	  ranlib_mode="$$(sed -n 's/^RANLIB_MODE=//p' \
+	    "$(LLHTTP_ARCHIVE_CONFIG)")"; \
+	  $(AR) "$$ar_mode" "$$tmp" $(LLHTTP_OBJECTS); \
+	  if test "$$ranlib_mode" = -D; then \
+	    $(RANLIB) -D "$$tmp"; \
+	  else \
+	    $(RANLIB) "$$tmp"; \
+	  fi; \
+	  actual="$$( $(AR) t "$$tmp" 2>/dev/null | \
+	    awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	  test "$$actual" = "$$expected" || { \
+	    rm -f "$$tmp"; \
+	    echo "ERROR: private llhttp archive has wrong member order" >&2; \
+	    exit 1; \
+	  }; \
+	  mv -f "$$tmp" "$@"; \
+	fi
+
+ifeq ($(OPENSSL_MODE),bundled)
+openssl: $(OPENSSL_LIBS) ## Build bundled OpenSSL
+
+check-openssl-tools:
+	@missing=0; \
+	for tool in "$(firstword $(CC))" "$(firstword $(AR))" \
+		"$(firstword $(RANLIB))" "$(firstword $(OPENSSL_PERL))" tar; do \
+	  if ! command -v "$$tool" >/dev/null 2>&1; then \
+	    echo "ERROR: bundled OpenSSL requires '$$tool'." >&2; missing=1; \
+	  fi; \
+	done; \
+	if ! command -v curl >/dev/null 2>&1 && \
+	   ! command -v wget >/dev/null 2>&1; then \
+	  echo "ERROR: need curl or wget to download $(OPENSSL_TARBALL)." >&2; \
+	  missing=1; \
+	fi; \
+	if ! command -v sha256sum >/dev/null 2>&1 && \
+	   ! command -v shasum >/dev/null 2>&1; then \
+	  echo "ERROR: need sha256sum or shasum to verify OpenSSL." >&2; \
+	  missing=1; \
+	fi; \
+	if test "$(HOST_OS)" != Linux && test "$(HOST_OS)" != Darwin; then \
+	  echo "ERROR: bundled OpenSSL supports Linux and macOS, not $(HOST_OS)." >&2; \
+	  missing=1; \
+	fi; \
+	test "$$missing" -eq 0
+
+$(OPENSSL_TARBALL):
+	@$(MAKE) --no-print-directory check-openssl-tools
+	@echo "==> Downloading $(OPENSSL_URL)"
+	@if command -v curl >/dev/null 2>&1; then \
+	  curl -fL -o "$@" "$(OPENSSL_URL)"; \
+	else \
+	  wget -O "$@" "$(OPENSSL_URL)"; \
+	fi
+
+$(OPENSSL_EXTRACTED): $(OPENSSL_TARBALL)
+	@$(MAKE) --no-print-directory check-openssl-tools
+	@echo "==> Verifying SHA-256 for $(OPENSSL_TARBALL)"
+	@if command -v sha256sum >/dev/null 2>&1; then \
+	  printf '%s  %s\n' "$(OPENSSL_SHA256)" "$(OPENSSL_TARBALL)" | \
+	    sha256sum -c -; \
+	else \
+	  printf '%s  %s\n' "$(OPENSSL_SHA256)" "$(OPENSSL_TARBALL)" | \
+	    shasum -a 256 -c -; \
+	fi || { \
+	  echo "ERROR: checksum mismatch for $(OPENSSL_TARBALL); removing it." >&2; \
+	  rm -f "$(OPENSSL_TARBALL)"; exit 1; \
+	}
+	rm -rf "$(OPENSSL_SRC_DIR)"
+	tar zxf "$(OPENSSL_TARBALL)"
+	@test -f "$(OPENSSL_SRC_DIR)/Configure" || { \
+	  echo "ERROR: $(OPENSSL_TARBALL) omitted Configure." >&2; exit 1; \
+	}
+	@touch "$@"
+
+$(OPENSSL_BUILD_CONFIG): FORCE $(OPENSSL_EXTRACTED)
+	@set -e; \
+	tmp="$${TMPDIR:-/tmp}/titan-openssl-build-config.$$$$.tmp"; \
+	trap 'rm -f "$$tmp"' 0 1 2 15; \
+	{ printf '%s\n' \
+		$(call make_shell_quote,OPENSSL_VERSION=$(OPENSSL_VERSION)) \
+		$(call make_shell_quote,OPENSSL_SHA256=$(OPENSSL_SHA256)) \
+		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
+		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
+		$(call make_shell_quote,CC=$(CC)) \
+		$(call make_shell_quote,AR=$(AR)) \
+		$(call make_shell_quote,RANLIB=$(RANLIB)) \
+		$(call make_shell_quote,OPENSSL_PERL=$(OPENSSL_PERL)) \
+		$(call make_shell_quote,OPENSSL_CONFIGURE_FLAGS=$(OPENSSL_CONFIGURE_FLAGS)) \
+		$(call make_shell_quote,OPENSSL_REQUIRED_CFLAGS=$(OPENSSL_REQUIRED_CFLAGS)) \
+		$(call make_shell_quote,OPENSSL_BUILD_CFLAGS=$(OPENSSL_BUILD_CFLAGS)) \
+		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)); } \
+	  > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
+	  rm -f "$$tmp"; \
+	else \
+	  rm -rf "$(OPENSSL_BUILD_DIR)"; \
+	  mkdir -p "$(@D)"; \
+	  mv -f "$$tmp" "$@"; \
+	fi
+
+$(OPENSSL_BUILD_COMPLETE): $(OPENSSL_EXTRACTED) $(OPENSSL_BUILD_CONFIG)
+	@$(MAKE) --no-print-directory check-openssl-tools
+	@echo "==> Configuring OpenSSL $(OPENSSL_VERSION) (static, PIC, private)"
+	cd "$(OPENSSL_BUILD_DIR)" && \
+	  CC=$(call make_shell_quote,$(CC)) \
+	  AR=$(call make_shell_quote,$(AR)) \
+	  RANLIB=$(call make_shell_quote,$(RANLIB)) \
+	  CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
+	  CFLAGS=$(call make_shell_quote,$(OPENSSL_REQUIRED_CFLAGS) $(OPENSSL_BUILD_CFLAGS)) \
+	  $(OPENSSL_PERL) "$(OPENSSL_SRC_ABS)/Configure" \
+	    $(OPENSSL_CONFIGURE_FLAGS)
+	@echo "==> Building OpenSSL $(OPENSSL_VERSION) libraries"
+	$(MAKE) -C "$(OPENSSL_BUILD_DIR)" build_libs
+	@test -f "$(OPENSSL_BUNDLED_LIBSSL)" && \
+	  test ! -L "$(OPENSSL_BUNDLED_LIBSSL)" && \
+	  test -f "$(OPENSSL_BUNDLED_LIBCRYPTO)" && \
+	  test ! -L "$(OPENSSL_BUNDLED_LIBCRYPTO)" || { \
+	    echo "ERROR: OpenSSL build omitted regular static libraries." >&2; \
+	    exit 1; \
+	  }
+	@touch "$@"
+
+$(OPENSSL_LIBS): $(OPENSSL_BUILD_COMPLETE)
+	@test -f "$@" && test ! -L "$@"
+
+else ifeq ($(OPENSSL_MODE),system)
+openssl: check-system-openssl ## Validate system OpenSSL
+
+check-system-openssl:
+	@if ! command -v "$(firstword $(OPENSSL_PKG_CONFIG))" >/dev/null 2>&1; then \
+	  echo "ERROR: pkg-config is required for OPENSSL_MODE=system." >&2; \
+	  exit 1; \
+	fi
+	@if ! $(OPENSSL_PKG_CONFIG) --exists openssl; then \
+	  echo "ERROR: pkg-config cannot find OpenSSL development files." >&2; \
+	  echo "  Ubuntu/Debian: sudo apt-get install libssl-dev pkg-config" >&2; \
+	  echo "  Fedora: sudo dnf install openssl-devel pkgconf-pkg-config" >&2; \
+	  echo "  macOS: brew install openssl@3 pkgconf" >&2; exit 1; \
+	fi
+	@if ! $(OPENSSL_PKG_CONFIG) --atleast-version="$(OPENSSL_MIN_VERSION)" openssl; then \
+	  found=`$(OPENSSL_PKG_CONFIG) --modversion openssl 2>/dev/null || echo unknown`; \
+	  echo "ERROR: system OpenSSL $$found is too old; need >= $(OPENSSL_MIN_VERSION)." >&2; \
+	  exit 1; \
+	fi
+	@echo "==> Using system OpenSSL `$(OPENSSL_PKG_CONFIG) --modversion openssl`"
+	@echo "    OPENSSL_CPPFLAGS=$(OPENSSL_CPPFLAGS)"
+	@echo "    OPENSSL_PROVIDER_LDFLAGS=$(OPENSSL_PROVIDER_LDFLAGS)"
+
+else
+openssl: invalid-openssl-mode
+
+invalid-openssl-mode:
+	@echo "ERROR: unsupported OPENSSL_MODE='$(OPENSSL_MODE)'; choose 'bundled' or 'system'." >&2
+	@exit 1
+endif
+
+openssl-config: openssl ## Print effective OpenSSL compiler/linker inputs
+	@echo "OPENSSL_MODE=$(OPENSSL_MODE)"
+	@echo "OPENSSL_VERSION=$(OPENSSL_VERSION)"
+	@echo "OPENSSL_MIN_VERSION=$(OPENSSL_MIN_VERSION)"
+	@echo "OPENSSL_CPPFLAGS=$(OPENSSL_CPPFLAGS)"
+	@echo "OPENSSL_EXTRA_OBJECTS=$(OPENSSL_EXTRA_OBJECTS)"
+	@echo "OPENSSL_PROVIDER_LDFLAGS=$(OPENSSL_PROVIDER_LDFLAGS)"
+
 lpeglabel: $(LPEGLABEL_ARCHIVE) ## Build/validate the private LPegLabel archive
 
 # Hash every source/header and the exact public Lua configuration on every
@@ -1083,7 +1498,7 @@ ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
   endif
   STDLIB_UV_CFLAGS := $(LIBUV_CFLAGS)
 else
-  STDLIB_PLATFORM_PREREQS := libuv
+  STDLIB_PLATFORM_PREREQS := libuv openssl
   # The provider pair may extract every runtime member. Keep the runtime archive
   # itself order-only so its exact-membership repair runs before the compiler
   # without turning a no-op archive validation into a relink.
@@ -1115,7 +1530,8 @@ $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS): $(STDLIB_COMPLETION_STAMP)
 # forms. When content changes, explicitly invalidate the completion stamp so
 # rebuild correctness does not depend on filesystem timestamp granularity or
 # Make's prerequisite re-stat behavior.
-$(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
+$(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS) \
+		$(STDLIB_SSL_INTEGRATION_HEADER)
 	@set -e; \
 	tmp="$@.tmp"; \
 	{ printf '%s\n' \
@@ -1130,12 +1546,16 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,STDLIB_USE_INSTALLED_RUNTIME=$(STDLIB_USE_INSTALLED_RUNTIME)) \
 		$(call make_shell_quote,STDLIB_ROOTS=$(STDLIB_ROOTS)) \
 		$(call make_shell_quote,STDLIB_TITAN_SOURCES=$(STDLIB_TITAN_SOURCES)) \
+		$(call make_shell_quote,STDLIB_SSL_INTEGRATION_HEADER=$(STDLIB_SSL_INTEGRATION_HEADER)) \
 		$(call make_shell_quote,STDLIB_SHIMS=$(STDLIB_SHIMS)) \
 		$(call make_shell_quote,STDLIB_CONTAINER=$(STDLIB_CONTAINER)) \
 		$(call make_shell_quote,STDLIB_STATIC_ARCHIVE=$(STDLIB_STATIC_ARCHIVE)) \
 		$(call make_shell_quote,STDLIB_PROVIDER_OUTPUTS=$(STDLIB_PROVIDER_OUTPUTS)) \
 		$(call make_shell_quote,STDLIB_EXTRA_OBJECTS=$(STDLIB_EXTRA_OBJECTS)) \
 		$(call make_shell_quote,STDLIB_LPEGLABEL_CPPFLAGS=$(STDLIB_LPEGLABEL_CPPFLAGS)) \
+		$(call make_shell_quote,STDLIB_HTTP_CPPFLAGS=$(STDLIB_HTTP_CPPFLAGS)) \
+		$(call make_shell_quote,STDLIB_OPENSSL_CPPFLAGS=$(STDLIB_OPENSSL_CPPFLAGS)) \
+		$(call make_shell_quote,STDLIB_OPENSSL_LDFLAGS=$(STDLIB_OPENSSL_LDFLAGS)) \
 		$(call make_shell_quote,STDLIB_EMBEDDED_FORMAT_INPUTS=$(STDLIB_EMBEDDED_FORMAT_INPUTS)) \
 		$(call make_shell_quote,LPEGLABEL_VERSION=$(LPEGLABEL_VERSION)) \
 		$(call make_shell_quote,LPEGLABEL_COMMIT=$(LPEGLABEL_COMMIT)) \
@@ -1152,10 +1572,23 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,LIBUV_VERSION=$(LIBUV_VERSION)) \
 		$(call make_shell_quote,STDLIB_UV_CPPFLAGS=$(STDLIB_UV_CPPFLAGS)) \
 		$(call make_shell_quote,STDLIB_UV_CFLAGS=$(STDLIB_UV_CFLAGS)) \
-		$(call make_shell_quote,STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)); \
-	  for input in $(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
+		$(call make_shell_quote,STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)) \
+		$(call make_shell_quote,LLHTTP_VERSION=$(LLHTTP_VERSION)) \
+		$(call make_shell_quote,LLHTTP_SHA256=$(LLHTTP_SHA256)) \
+		$(call make_shell_quote,LLHTTP_SOURCE_NAMES=$(LLHTTP_SOURCE_NAMES)) \
+		$(call make_shell_quote,LLHTTP_BUILD_CFLAGS=$(LLHTTP_BUILD_CFLAGS)) \
+		$(call make_shell_quote,OPENSSL_MODE=$(OPENSSL_MODE)) \
+		$(call make_shell_quote,OPENSSL_VERSION=$(OPENSSL_VERSION)) \
+		$(call make_shell_quote,OPENSSL_SHA256=$(OPENSSL_SHA256)) \
+		$(call make_shell_quote,OPENSSL_CONFIGURE_FLAGS=$(OPENSSL_CONFIGURE_FLAGS)) \
+		$(call make_shell_quote,OPENSSL_BUILD_CFLAGS=$(OPENSSL_BUILD_CFLAGS)); \
+	  for input in $(STDLIB_SSL_INTEGRATION_HEADER) \
+			$(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
 			$(LPEGLABEL_BUILD_CONFIG) \
-			$(LPEGLABEL_ARCHIVE_CONFIG) $(LPEGLABEL_ARCHIVE); do \
+			$(LPEGLABEL_ARCHIVE_CONFIG) $(LPEGLABEL_ARCHIVE) \
+			$(LLHTTP_BUILD_CONFIG) $(LLHTTP_ARCHIVE_CONFIG) \
+			$(TITAN_HTTPSHIM_O) $(LLHTTP_ARCHIVE) \
+			$(OPENSSL_EXTRA_OBJECTS); do \
 	    cksum "$$input"; \
 	  done; } \
 		> "$$tmp"; \
@@ -1168,7 +1601,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 
 # FORCE runs the inexpensive completeness check on every invocation. The
 # compiler itself runs only when an input is newer, configuration changed, or
-# one public output is absent. All fourteen roots are explicit source roots in one
+# one public output is absent. All sixteen roots are explicit source roots in one
 # process, so their internal imports are linked into the paired titan.so/titan.a
 # provider. The warm check rescans the archive without rewriting either output.
 $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
@@ -1210,9 +1643,9 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
 	    TITAN_PATH_0_20=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 	    TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)) \
 	    TITAN_RUNTIME_PREBUILT=1 \
-	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
+	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
 	    TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
-	    TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS))) \
+	    TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))) \
 	    $(TITANC) $(STDLIB_ROOTS) -X $(STDLIB_EXTRA_OBJECTS); \
 	  for output in $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS); do \
 	    test -f "$$output" && test ! -L "$$output" || { \
@@ -1252,24 +1685,26 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 	  export TITAN_PATH=; \
 	  export TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)); \
 	  export TITAN_RUNTIME_PREBUILT=1; \
-	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
+	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
 	  export TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))); \
-	  export TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS))); \
+	  export TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))); \
 	  "$(TITAN_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua" \
 	    "$$stage" "$$root" )
 
 # The post-install compiler runs in a private destination-filesystem directory,
-# so every -X input is absolute. System mode carries titanlib.o followed by the
-# private LPegLabel archive; bundled mode appends the pinned libuv archive.
+# so every -X input is absolute. Both modes carry titanlib.o, private LPegLabel,
+# the HTTP callback adapter, and private llhttp. Bundled mode additionally
+# carries the pinned libuv and OpenSSL archives; system dependencies remain
+# final-link inputs instead.
 STDLIB_STAGED_EXTRA_OBJECTS = $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(abspath $(object)))
 
 # LuaRocks invokes this only after deploying titanc and its Lua compiler
-# modules. Build all fourteen source roots once in a private directory on the
+# modules. Build all sixteen source roots once in a private directory on the
 # destination filesystem. The Lua publisher validates the complete protocol,
-# commits fourteen shims, the archive, and the one macOS dSYM before renaming
+# commits sixteen shims, the archive, and the one macOS dSYM before renaming
 # titan.so last; any caught failure restores the prior pair, the legacy
 # DSO-only installation, or the first-install bootstrap.
-rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS)
+rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	@test -n "$(strip $(ROCKS_TREE))" || { \
 	  echo "ERROR: rock-post-install requires ROCKS_TREE" >&2; exit 1; \
 	}
@@ -1300,9 +1735,9 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS)
 	  export CC=$(call make_shell_quote,$(CC)); \
 	  export AR=$(call make_shell_quote,$(AR)); \
 	  export RANLIB=$(call make_shell_quote,$(RANLIB)); \
-	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
+	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
 	  export TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))); \
-	  export TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS))); \
+	  export TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))); \
 	  $(call make_shell_quote,$(ROCK_TITANC)) --tree \
 	    $(call make_shell_quote,$(CURDIR)) $(STDLIB_ROOTS) \
 	    -X $(STDLIB_STAGED_EXTRA_OBJECTS); \
@@ -1323,7 +1758,7 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS)
 # longer builds stdlib before LuaRocks has deployed the compiler.
 rock-build: titan
 
-test: luarocks libbacktrace libuv ## Build/install the rock and run the suite via `luarocks test`
+test: luarocks libbacktrace libuv llhttp openssl ## Build/install the rock and run the suite via `luarocks test`
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	  PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
 	  "$(PREFIX)/bin/luarocks" make --force
@@ -1339,6 +1774,7 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -f $(LPEGLABEL_OBJECTS) $(LPEGLABEL_ARCHIVE) \
 		$(LPEGLABEL_BUILD_CONFIG) $(LPEGLABEL_ARCHIVE_CONFIG)
 	rmdir "$(LPEGLABEL_BUILD_DIR)" 2>/dev/null || true
+	rm -rf "$(LLHTTP_BUILD_DIR)"
 	rm -f $(RUNTIME_BUILD_CONFIG) $(RUNTIME_ARCHIVE_CONFIG) \
 		$(TITANLIB_BUILD_CONFIG) $(UV_CONFIG_STAMP) \
 		$(STDLIB_CONFIG_STAMP) $(STDLIB_COMPLETION_STAMP)
@@ -1347,6 +1783,7 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rmdir titan-runtime/bootstrap 2>/dev/null || true
 	rm -f titan/*.c titan/*.o
 	rm -f titan/uv/*.c titan/uv/*.o
+	rm -f titan/http/http.c titan/http/http.o
 	rm -f titan/peg/peg.c titan/peg/peg.o
 	rm -f titan/string/string.c titan/string/string.o
 	rm -f $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_QUALIFIED_SOS) $(STDLIB_SOS)
@@ -1378,4 +1815,12 @@ clean-libuv: ## Remove the bundled libuv source, build tree, and release tarball
 	rm -rf $(LIBUV_SRC_DIR) $(LIBUV_BUILD_DIR)
 	rm -f $(LIBUV_TARBALL)
 
-distclean: clean clean-lua clean-luarocks clean-libbacktrace clean-libuv ## Remove all downloaded trees and artifacts
+clean-llhttp: ## Remove the private llhttp source, build tree, and release tarball
+	rm -rf $(LLHTTP_SRC_DIR) $(LLHTTP_BUILD_DIR)
+	rm -f $(LLHTTP_TARBALL)
+
+clean-openssl: ## Remove the bundled OpenSSL source/build trees and release tarball
+	rm -rf $(OPENSSL_SRC_DIR) $(OPENSSL_BUILD_DIR)
+	rm -f $(OPENSSL_TARBALL)
+
+distclean: clean clean-lua clean-luarocks clean-libbacktrace clean-libuv clean-llhttp clean-openssl ## Remove all downloaded trees and artifacts

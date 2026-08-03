@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 
 # Exercise both installed standard-library provider forms under the bundled
-# and system libuv policies. Besides the ordinary Lua/API smokes, this proves
-# that titan.a matches titan.so and can load io and run
-# async/timer/fs/net/os plus PEG/string behavior in a compiled Titan
-# application while the dynamic
-# provider and generated shims are out of search reach. System mode
-# additionally exercises both the host's ordinary pkg-config setting and an
-# explicit static archive selection.
+# and system libuv/OpenSSL policies. Besides the ordinary Lua/API smokes, this
+# proves that titan.a matches titan.so and can load io and run
+# async/timer/fs/net/ssl/http/os plus PEG/string behavior in a compiled Titan
+# application while the dynamic provider and generated shims are out of search
+# reach. System mode additionally exercises the host's ordinary pkg-config
+# settings and an explicit static libuv archive selection.
 
 set -euo pipefail
 
@@ -31,7 +30,17 @@ PROVIDER="$ABI_ROOT/titan.so"
 STATIC_ARCHIVE="$ABI_ROOT/titan.a"
 PROCESS_CHILD_SUPPLIED=${TITAN_PROCESS_SMOKE_CHILD:+1}
 LIBUV_PKG_CONFIG=${LIBUV_PKG_CONFIG:-pkg-config}
+OPENSSL_PKG_CONFIG=${OPENSSL_PKG_CONFIG:-pkg-config}
+OPENSSL_MODE=${OPENSSL_MODE:-bundled}
 STATIC_SYSTEM_LIBUV_ARCHIVE=${TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE:-}
+
+case "$OPENSSL_MODE" in
+    bundled|system) ;;
+    *)
+        echo "OPENSSL_MODE must be bundled or system, not '$OPENSSL_MODE'" >&2
+        exit 2
+        ;;
+esac
 
 if [[ -n $STATIC_SYSTEM_LIBUV_ARCHIVE ]]; then
     if [[ $STATIC_SYSTEM_LIBUV_ARCHIVE != /* ||
@@ -48,7 +57,9 @@ test -x "$TITANC"
 case "$(uname -s)" in
     Darwin)
         platform=macos
-        export PKG_CONFIG_PATH="$(brew --prefix libuv)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        libuv_pkgconfig="$(brew --prefix libuv)/lib/pkgconfig"
+        openssl_pkgconfig="$(brew --prefix openssl@3)/lib/pkgconfig"
+        export PKG_CONFIG_PATH="$libuv_pkgconfig:$openssl_pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
         bundled_cppflags="-I$PREFIX/include"
         bundled_ldflags="-lpthread"
         ;;
@@ -96,7 +107,7 @@ check_canonical_container() {
         test -f "$PROVIDER.dSYM/Contents/Resources/DWARF/titan.so"
     fi
 
-    for module in coroutine uv async timer io fs net os peg string math lua iter gc; do
+    for module in coroutine uv async timer io fs net ssl http os peg string math lua iter gc; do
         local shim="$SHIM_ROOT/titan/$module.lua"
         test -f "$shim"
         test ! -L "$shim"
@@ -131,6 +142,8 @@ local expected = {
     ["titan.io"] = true,
     ["titan.fs"] = true,
     ["titan.net"] = true,
+    ["titan.ssl"] = true,
+    ["titan.http"] = true,
     ["titan.os"] = true,
     ["titan.peg"] = true,
     ["titan.string"] = true,
@@ -201,6 +214,10 @@ has_libuv_dependency() {
     inspect_dependencies "$1" | grep -qi libuv
 }
 
+has_openssl_dependency() {
+    inspect_dependencies "$1" | grep -Eqi 'lib(ssl|crypto)'
+}
+
 has_lpeglabel_dependency() {
     inspect_dependencies "$1" | grep -qi lpeglabel
 }
@@ -268,6 +285,20 @@ defines_uv_version() {
     '
 }
 
+defines_ssl_do_handshake() {
+    nm -g "$1" | awk '
+        {
+            if (NF < 2) next
+            symbol = $NF
+            type = $(NF - 1)
+            if ((symbol == "SSL_do_handshake" ||
+                    symbol == "_SSL_do_handshake") &&
+                type != "U" && type != "u") found = 1
+        }
+        END { exit(found ? 0 : 1) }
+    '
+}
+
 system_libuv_flags() {
     local linkage=${1:-ordinary}
     local candidate libdir static_archive pkg_static_flags
@@ -324,6 +355,15 @@ LUA
     fi
 }
 
+system_openssl_flags() {
+    system_openssl_cppflags=$(
+        "$OPENSSL_PKG_CONFIG" --cflags openssl
+    )
+    system_openssl_ldflags=$(
+        "$OPENSSL_PKG_CONFIG" --libs openssl
+    )
+}
+
 build_process_child() {
     local mode=$1
     if [[ -n $PROCESS_CHILD_SUPPLIED ]]; then return; fi
@@ -360,12 +400,18 @@ build_process_child() {
 build_static_system_provider_image() {
     local mode_dir="$SMOKE_TMP/system-static-provider"
     local static_provider="$mode_dir/titan.so"
+    local provider_ldflags
     if [[ -z $STATIC_SYSTEM_LIBUV_ARCHIVE ]]; then
         echo "RESULT static system provider smoke skipped (no explicit PIC archive)"
         return
     fi
     mkdir -p "$mode_dir"
     system_libuv_flags static
+    provider_ldflags=$system_ldflags
+    if [[ $OPENSSL_MODE == system ]]; then
+        system_openssl_flags
+        provider_ldflags="${provider_ldflags:+$provider_ldflags }$system_openssl_ldflags"
+    fi
 
     # Reuse the production archive-backed validation path: it force-loads the
     # exact published Titan member set through the provider DSO link policy.
@@ -373,7 +419,7 @@ build_static_system_provider_image() {
     # the same final-link setting later repeated by the standalone consumer.
     env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
         TITAN_ROCKS_ROOT="$PREFIX" TITAN_RUNTIME_PREBUILT=1 \
-        TITAN_EXTRA_LDFLAGS="$system_ldflags" \
+        TITAN_EXTRA_LDFLAGS="$provider_ldflags" \
         "$LUA" -E - "$STATIC_ARCHIVE" "$static_provider" <<'LUA'
 local archive, output = ...
 local driver = require "titan-compiler.driver"
@@ -401,6 +447,11 @@ LUA
     fi
     if defines_uv_version "$STATIC_ARCHIVE"; then
         echo "static system-libuv provider link copied libuv into installed titan.a" >&2
+        exit 1
+    fi
+    if [[ $OPENSSL_MODE == system ]] &&
+       ! has_openssl_dependency "$static_provider"; then
+        echo "static system-libuv provider omitted its system OpenSSL dependency" >&2
         exit 1
     fi
 }
@@ -442,6 +493,8 @@ local timer = import "timer"
 local titan_io = import "io"
 local fs = import "fs"
 local net = import "net"
+local ssl = import "titan.ssl"
+local http = import "titan.http"
 local system = import "os"
 local peg = import "peg"
 local strings = import "string"
@@ -526,6 +579,15 @@ function main(args: {string}): integer
     gc.resume()
     check(not gc.paused() and gc.count() > 0,
           "static GC resume or count behavior failed")
+
+    local tls_error = ssl.Error.new(
+      0, "STATIC_SSL_READY", "static SSL module loaded", "static-smoke")
+    check(tls_error.name == "STATIC_SSL_READY",
+          "static SSL provider initialization failed")
+    local url = http.parse_url("https://localhost:8443/static?q=1")
+    check(url.scheme == "https" and url.host == "localhost" and
+          url.port == 8443 and url.target == "/static?q=1",
+          "static HTTP provider initialization failed")
 
     local server, port = listen_available()
     local peer_result = "not-run"
@@ -637,6 +699,12 @@ TITAN
         exit 2
     fi
 
+    if [[ $OPENSSL_MODE == system ]]; then
+        system_openssl_flags
+        cppflags="${cppflags:+$cppflags }$system_openssl_cppflags"
+        ldflags="${ldflags:+$ldflags }$system_openssl_ldflags"
+    fi
+
     (
         cd "$mode_dir"
         env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
@@ -663,6 +731,15 @@ TITAN
 
     require_no_titan_dependency "$executable"
     require_no_lpeglabel_dependency "$executable"
+    if [[ $OPENSSL_MODE == bundled ]]; then
+        if has_openssl_dependency "$executable"; then
+            echo "bundled static Titan executable depends on an OpenSSL DSO" >&2
+            exit 1
+        fi
+    elif ! has_openssl_dependency "$executable"; then
+        echo "system OpenSSL static Titan executable has no OpenSSL dependency" >&2
+        exit 1
+    fi
     if [[ $mode == bundled ]]; then
         if has_libuv_dependency "$executable"; then
             echo "bundled static Titan executable depends on a libuv DSO" >&2
@@ -689,6 +766,28 @@ TITAN
     fi
 }
 
+check_openssl_policy() {
+    if [[ $OPENSSL_MODE == bundled ]]; then
+        if has_openssl_dependency "$PROVIDER"; then
+            echo "bundled titan.so unexpectedly depends on an OpenSSL DSO" >&2
+            exit 1
+        fi
+        if ! defines_ssl_do_handshake "$STATIC_ARCHIVE"; then
+            echo "bundled titan.a omitted carried OpenSSL definitions" >&2
+            exit 1
+        fi
+    else
+        if ! has_openssl_dependency "$PROVIDER"; then
+            echo "system OpenSSL titan.so has no OpenSSL dependency" >&2
+            exit 1
+        fi
+        if defines_ssl_do_handshake "$STATIC_ARCHIVE"; then
+            echo "system OpenSSL was copied into installed titan.a" >&2
+            exit 1
+        fi
+    fi
+}
+
 check_bundled_mode() {
     check_canonical_container
     compare_archive_and_dso_metadata
@@ -701,6 +800,7 @@ check_bundled_mode() {
         exit 1
     fi
     require_no_lpeglabel_dependency "$PROVIDER"
+    check_openssl_policy
     if has_libuv_dependency "$PROVIDER"; then
         echo "bundled titan.so unexpectedly has a dynamic libuv dependency" >&2
         exit 1
@@ -724,6 +824,7 @@ check_system_mode() {
         exit 1
     fi
     require_no_lpeglabel_dependency "$PROVIDER"
+    check_openssl_policy
     if defines_uv_version "$STATIC_ARCHIVE"; then
         echo "system libuv was copied into installed titan.a" >&2
         exit 1
@@ -755,7 +856,9 @@ case "$scope" in
         # The paired publisher transactionally replaces both native forms and
         # all generated shims. CI may finish in system mode; its earlier
         # bundled artifact/smokes already consumed the bundled generation.
-        LIBUV_MODE=system "$PREFIX/bin/luarocks" make --force
+        LIBUV_MODE=system OPENSSL_MODE=system \
+            "$PREFIX/bin/luarocks" make --force
+        OPENSSL_MODE=system
         check_system_mode
         ;;
 esac

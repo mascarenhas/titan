@@ -11,6 +11,8 @@ local timer = require "titan.timer"
 local titan_io = require "titan.io"
 local fs = require "titan.fs"
 local net = require "titan.net"
+local ssl = require "titan.ssl"
+local http = require "titan.http"
 local system = require "titan.os"
 local peg = require "titan.peg"
 local strings = require "titan.string"
@@ -74,6 +76,8 @@ assert(type(titan_io) == "userdata")
 assert(type(async.version()) == "string")
 assert(type(uv) == "userdata")
 assert(type(net) == "userdata")
+assert(type(ssl) == "userdata")
+assert(type(http) == "userdata")
 
 local initially_paused = gc.paused()
 gc.pause()

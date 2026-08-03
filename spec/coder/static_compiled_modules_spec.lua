@@ -476,6 +476,49 @@ describe("static compiled-module native containers", function()
         end
     end)
 
+    it("batches the exact shell-quoted AR command below one-argument limits",
+       function()
+        local marker = workspace .. "/batched ar calls"
+        local wrapper = workspace .. "/bounded ar"
+        executable_script(wrapper, string.format([[#!/bin/sh
+arguments=$*
+length=${#arguments}
+printf '%%s %%s\n' "$1" "$length" >> %s
+if [ "$length" -gt 71680 ]; then exit 86; fi
+exec %s "$@"
+]], assert(cdriver.shell_quote(marker)),
+            quote_argv(configured_words(original_ar))))
+        driver.AR = assert(cdriver.shell_quote(wrapper))
+
+        local parsed = assert(staticmetadata.scan_bytes(
+            read_file(plain_object), plain_object, { target = target }))
+        assert.equal("object", parsed.kind)
+        local inputs = {}
+        for index = 1, 240 do
+            inputs[index] = { path = plain_object, object = parsed }
+        end
+
+        -- Repeating a moderately long stage prefix crosses the old 128 KiB
+        -- raw-path estimate without needing a large dependency fixture.
+        local directory = workspace
+        while #directory < 600 do
+            directory = directory .. "/archive-command-padding"
+        end
+        local result = assert(driver.build_static_archive(
+            directory .. "/batched output.a", inputs, {}, target, false))
+        assert.equal(#inputs, #result.manifest)
+
+        local calls = 0
+        for mode, length in read_file(marker):gmatch("(%S+) (%d+)\n") do
+            if mode == "qD" or mode == "q" then
+                calls = calls + 1
+                assert.is_true(tonumber(length) <= 71680)
+            end
+        end
+        -- One capability probe plus at least three bounded construction calls.
+        assert.is_true(calls >= 4)
+    end)
+
     it("observes configured AR/RANLIB and falls back without deterministic D",
        function()
         local ar_marker = workspace .. "/ar marker"

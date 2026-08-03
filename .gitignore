@@ -18,6 +18,16 @@
 /libuv-build/
 /libuv-v*.tar.gz
 
+# private llhttp release source, native build tree, and downloaded archive
+/llhttp-release-v*/
+/llhttp-build/
+/llhttp-release-v*.tar.gz
+
+# bundled OpenSSL release, out-of-tree build, and downloaded archive
+/openssl-*/
+/openssl-build/
+/openssl-*.tar.gz
+
 # private vendored LPegLabel objects, archive, and configuration stamps
 /lpeglabel-build/
 
@@ -32,6 +42,7 @@
 
 /titan/*.c
 /titan/uv/*.c
+/titan/http/http.c
 /titan/peg/peg.c
 /titan/string/string.c
 
@@ -43,6 +54,8 @@
 /titan/io.lua
 /titan/fs.lua
 /titan/net.lua
+/titan/ssl.lua
+/titan/http.lua
 /titan/os.lua
 /titan/peg.lua
 /titan/string.lua

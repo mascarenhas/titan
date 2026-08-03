@@ -4,8 +4,8 @@ local assert = require "luassert"
 local M = {}
 local REPO = lfs.currentdir()
 local STANDARD_MODULES = {
-    "coroutine", "uv", "async", "timer", "io", "fs", "net", "os",
-    "peg", "string", "math", "lua", "iter", "gc",
+    "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
+    "http", "os", "peg", "string", "math", "lua", "iter", "gc",
 }
 
 local function quote(word)
@@ -85,7 +85,7 @@ local function find_standard_layout()
     for _, layout in ipairs(layouts) do
         if valid_production_layout(layout) then return layout end
     end
-    error("async stdlib specs require the combined titan.so and all fourteen " ..
+    error("async stdlib specs require the combined titan.so and all sixteen " ..
           "generated titan/*.lua shims; run make stdlib first", 0)
 end
 M.standard_layout = find_standard_layout

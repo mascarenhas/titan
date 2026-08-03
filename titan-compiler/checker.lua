@@ -455,6 +455,40 @@ local function is_foreign_ordinary_identifier(name, ftype)
                 or ftype.type == "enum")
 end
 
+-- Foreign imports are extracted independently, so two import closures can
+-- contain the same physical declaration even though the generated ordered
+-- includes emit it only once through an include guard or `#pragma once`.
+-- Source identity is useful only for recognizing that repeated extraction;
+-- the declaration graphs must additionally differ only by explicitly marked
+-- prototype-local tag objects. The final ordered-header compiler baseline
+-- still decides whether the declaration is actually emitted compatibly in the
+-- translation unit.
+local function same_foreign_declaration_source(left, right)
+    local lsource = left and left.provenance
+    local rsource = right and right.provenance
+    local left_has_identity = lsource ~= nil
+       and lsource.device ~= nil
+       and lsource.inode ~= nil
+    local right_has_identity = rsource ~= nil
+       and rsource.device ~= nil
+       and rsource.inode ~= nil
+    local same_file = left_has_identity and right_has_identity
+       and lsource.device == rsource.device
+       and lsource.inode == rsource.inode
+       or (not left_has_identity or not right_has_identity)
+          and lsource ~= nil
+          and rsource ~= nil
+          and lsource.file ~= nil
+          and lsource.file == rsource.file
+    return lsource ~= nil
+       and rsource ~= nil
+       and lsource.line ~= nil
+       and lsource.column ~= nil
+       and same_file
+       and lsource.line == rsource.line
+       and lsource.column == rsource.column
+end
+
 local function queue_foreign_redeclaration(
         st, node, name, previous, current, compatibility)
     local queue = st.pending_foreign_redeclarations
@@ -693,7 +727,14 @@ local function finalize_foreign_redeclarations(st, errors)
         local rejected = {}
         for _, declaration in ipairs(pending) do
             local compatibility
-            if type(module_probe.validate_declaration_compatibility)
+            if declaration.compatibility == "source-repeat" then
+                -- Rendering two synthetic declarations would invent two
+                -- prototype scopes for a prototype-local tag, even when the
+                -- ordered headers emitted this one physical declaration only
+                -- once. The successful baseline above is the authoritative
+                -- proof for an exact source repeat.
+                compatibility = { status = "success" }
+            elseif type(module_probe.validate_declaration_compatibility)
                 ~= "function" then
                 compatibility = {
                     status = "infrastructure_failure",
@@ -736,7 +777,8 @@ local function finalize_foreign_redeclarations(st, errors)
         report_foreign_header_context_failure(st, errors, result)
         if result.status == "rejected" then
             for _, declaration in ipairs(pending) do
-                if declaration.compatibility == "conditional" then
+                if declaration.compatibility == "conditional"
+                   or declaration.compatibility == "source-repeat" then
                     report_foreign_redeclaration_failure(
                         declaration, errors, result)
                 end
@@ -7272,10 +7314,22 @@ local toplevel_visitor = util.make_visitor({
                 local previous = st:find_foreign_name(fname)
                 local pending
                 if previous then
-                    local compatibility =
+                    local isolated_compatibility =
                         foreigntypes.declaration_compatibility(
                             previous.type, current.type,
                             previous.declaration, current.declaration)
+                    local compatibility = isolated_compatibility
+                    if not isolated_compatibility
+                       and same_foreign_declaration_source(
+                            previous.declaration,
+                            current.declaration)
+                       and foreigntypes
+                            .prototype_tag_reextraction_compatibility(
+                                previous.type, current.type,
+                                previous.declaration,
+                                current.declaration) then
+                        compatibility = "source-repeat"
+                    end
                     if compatibility then
                         pending = queue_foreign_redeclaration(
                             st, node, fname, previous, current,

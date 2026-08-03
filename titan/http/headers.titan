@@ -1,0 +1,220 @@
+record Header
+  name: string
+  contents: string
+end
+
+record Headers
+  local entries: {Header}
+end
+
+local function header_byte(text: string, index: integer): integer
+  local bytes = text as const *ffi.titan_ffi_unsigned_char
+  return bytes[index - 1] as integer
+end
+
+local function token_byte(byte: integer): boolean
+  if byte >= 48 and byte <= 57 then return true end
+  if byte >= 65 and byte <= 90 then return true end
+  if byte >= 97 and byte <= 122 then return true end
+  return byte == 33 or byte == 35 or byte == 36 or byte == 37 or
+         byte == 38 or byte == 39 or byte == 42 or byte == 43 or
+         byte == 45 or byte == 46 or byte == 94 or byte == 95 or
+         byte == 96 or byte == 124 or byte == 126
+end
+
+local function validate_header_name(name: string)
+  if #name == 0 then raise "HTTP header name must not be empty" end
+  local index = 1
+  while index <= #name do
+    if not token_byte(header_byte(name, index)) then
+      raise "HTTP header name contains an invalid byte"
+    end
+    index = index + 1
+  end
+end
+
+local function validate_header_value(contents: string)
+  local index = 1
+  while index <= #contents do
+    local byte = header_byte(contents, index)
+    -- RFC 9110 field values admit HTAB, SP/VCHAR, and obs-text. Reject the
+    -- remaining controls and DEL even though only CR/LF would split a line.
+    if (byte < 32 and byte ~= 9) or byte == 127 then
+      raise "HTTP header value contains a forbidden byte"
+    end
+    index = index + 1
+  end
+end
+
+local function lower_header_name(name: string): string
+  local storage = ffi.titan_ffi_char.new_array(#name)
+  local index = 1
+  while index <= #name do
+    local byte = header_byte(name, index)
+    if byte >= 65 and byte <= 90 then byte = byte + 32 end
+    storage[index - 1] = byte as ffi.titan_ffi_char
+    index = index + 1
+  end
+  return storage as string
+end
+
+local function same_header_name(left: string, right: string): boolean
+  return lower_header_name(left) == lower_header_name(right)
+end
+
+function headers(initial: {Header}?): Headers
+  local result = Headers.new({})
+  if initial then
+    local supplied = initial as {Header}
+    local index = 1
+    while index <= #supplied do
+      local entry = supplied[index]
+      result:add(entry.name, entry.contents)
+      index = index + 1
+    end
+  end
+  return result
+end
+
+function Headers:add(name: string, contents: string)
+  validate_header_name(name)
+  validate_header_value(contents)
+  self.entries[#self.entries + 1] = Header.new(name, contents)
+end
+
+function Headers:set(name: string, contents: string)
+  self:remove(name)
+  self:add(name, contents)
+end
+
+function Headers:get(name: string): string?
+  validate_header_name(name)
+  local index = 1
+  while index <= #self.entries do
+    local entry = self.entries[index]
+    if same_header_name(entry.name, name) then return entry.contents end
+    index = index + 1
+  end
+  return nil
+end
+
+function Headers:values(name: string): {string}
+  validate_header_name(name)
+  local result: {string} = {}
+  local index = 1
+  while index <= #self.entries do
+    local entry = self.entries[index]
+    if same_header_name(entry.name, name) then
+      result[#result + 1] = entry.contents
+    end
+    index = index + 1
+  end
+  return result
+end
+
+function Headers:remove(name: string)
+  validate_header_name(name)
+  local kept: {Header} = {}
+  local index = 1
+  while index <= #self.entries do
+    local entry = self.entries[index]
+    if not same_header_name(entry.name, name) then
+      kept[#kept + 1] = entry
+    end
+    index = index + 1
+  end
+  self.entries = kept
+end
+
+function Headers:all(): {Header}
+  local result: {Header} = {}
+  local index = 1
+  while index <= #self.entries do
+    local entry = self.entries[index]
+    result[#result + 1] = Header.new(entry.name, entry.contents)
+    index = index + 1
+  end
+  return result
+end
+
+local function copy_headers(source: Headers?): Headers
+  if not source then return headers(nil) end
+  return headers((source as Headers):all())
+end
+
+local function trim_header_value(contents: string): string
+  local first = 1
+  local last = #contents
+  while first <= last do
+    local byte = header_byte(contents, first)
+    if byte ~= 32 and byte ~= 9 then break end
+    first = first + 1
+  end
+  while last >= first do
+    local byte = header_byte(contents, last)
+    if byte ~= 32 and byte ~= 9 then break end
+    last = last - 1
+  end
+  if first > last then return "" end
+  return str.sub(contents, first, last)
+end
+
+local function header_has_token(headers_value: Headers, name: string,
+                                wanted: string): boolean
+  local lower_wanted = lower_header_name(wanted)
+  local found = headers_value:values(name)
+  local index = 1
+  while index <= #found do
+    local contents = found[index]
+    for item in str.split(contents, ",") do
+      if lower_header_name(trim_header_value(item)) == lower_wanted then
+        return true
+      end
+    end
+    index = index + 1
+  end
+  return false
+end
+
+local function validate_http_token(token: string, subject: string)
+  if #token == 0 then raise subject .. " must not be empty" end
+  local index = 1
+  while index <= #token do
+    if not token_byte(header_byte(token, index)) then
+      raise subject .. " contains an invalid byte"
+    end
+    index = index + 1
+  end
+end
+
+local function render_headers(headers_value: Headers): string
+  local builder = str.writer(false)
+  local entries = headers_value:all()
+  local index = 1
+  while index <= #entries do
+    local entry = entries[index]
+    builder:write(entry.name .. ": " .. entry.contents .. "\r\n")
+    index = index + 1
+  end
+  return builder:drain()
+end
+
+local function decimal_header(contents: string,
+                              subject: string): integer
+  if #contents == 0 then raise subject .. " must not be empty" end
+  local result = 0
+  local index = 1
+  while index <= #contents do
+    local byte = header_byte(contents, index)
+    if byte < 48 or byte > 57 then
+      raise subject .. " must contain only decimal digits"
+    end
+    local digit = byte - 48
+    if result > (math.maxinteger - digit) // 10 then
+      raise subject .. " is too large"
+    end
+    result = result * 10 + digit
+    index = index + 1
+  end
+  return result
+end

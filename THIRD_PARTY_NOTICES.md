@@ -11,6 +11,35 @@ directory).
 Distributions containing Titan's statically linked libuv standard library must
 include that license text and this attribution.
 
+## OpenSSL
+
+Titan's `titan.ssl` standard module may statically incorporate OpenSSL 3.5.7,
+obtained from
+<https://github.com/openssl/openssl/releases/tag/openssl-3.5.7>. OpenSSL is
+distributed under the Apache License 2.0; its unmodified license text is
+distributed as `LICENSES/openssl-LICENSE` (or in the installer's corresponding
+license directory).
+
+Distributions containing Titan's bundled OpenSSL standard library must include
+that license text and this attribution. Builds configured with
+`OPENSSL_MODE=system` dynamically use the separately installed OpenSSL instead.
+
+## llhttp
+
+Titan's `titan.http` standard module statically incorporates the generated C
+parser from llhttp 9.4.3, obtained from
+<https://github.com/nodejs/llhttp/releases/tag/release%2Fv9.4.3>. llhttp is
+Copyright Fedor Indutny, 2018, and is distributed under the MIT license
+reproduced in `LICENSES/llhttp-LICENSE`.
+
+## lpeg_patterns URI grammar
+
+Titan's `titan.http` URI grammar is derived from lpeg_patterns commit
+`0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7`, obtained from
+<https://github.com/daurnimator/lpeg_patterns>. lpeg_patterns is
+Copyright (c) 2012-2016 Daurnimator and is distributed under the MIT license
+reproduced in `LICENSES/lpeg-patterns-LICENSE`.
+
 ## LPegLabel and LPeg
 
 Titan's `titan.peg` standard module statically incorporates a private,

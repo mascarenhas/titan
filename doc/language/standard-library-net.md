@@ -190,5 +190,9 @@ sets `ROCKS_TREE == PREFIX`; the former owns Titan's SDK/stdlib while the latter
 owns Lua and LuaRocks. Repository contributors can still use
 `make stdlib` for an in-checkout standard-library build.
 
+The qualified [`titan.ssl`](standard-library-ssl.md) module wraps this public
+Connection and Server API with OpenSSL memory BIOs. It does not reach through
+`net` to private libuv handles.
+
 UDP, Unix-domain/named pipes, socket options, and endpoint-inspection APIs are
 follow-ups.

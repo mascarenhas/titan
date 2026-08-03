@@ -505,18 +505,36 @@ that context; it does not prove that both source declarations survived
 preprocessing. Only an accepted pair is rewritten to the first canonical
 declaration type and allowed to form a declaration composite.
 
+One otherwise-incompatible pair is also queued when both ordinary declarations
+have the same preprocessor source identity, line, and column *and* a dedicated
+recursive relation proves that every unequal type node is an explicitly marked
+prototype-local struct or union with the same tag spelling, kind, completeness,
+and layout. A bidirectional object map also requires the two graphs to preserve
+tag reuse and shadowing topology. Source identity uses filesystem device/inode identity where the host
+provides it, with the resolved preprocessor pathname as the fallback, so lexical
+include aliases do not split one physical declaration. Independent parsing can
+assign different canonical objects to such a tag in one guarded declaration.
+After the ordered-header baseline succeeds, this `source-repeat` is canonicalized
+directly: rendering a synthetic pair would introduce two prototype scopes that
+the guarded ordered includes never emit. The fallback applies only when ordinary
+isolated compatibility failed, so exact and conditional repeats retain the
+declaration-pair probe, different source declarations retain nominal
+prototype-tag identity, and macro-dependent changes outside those tag objects
+remain conflicts even if cumulative preprocessing suppresses one occurrence.
+
 Array-bound completion mutates only a declaration-owned cloned view, never a
 canonical shared typedef target. Accepted repeated typedefs use a separate
 operation: the checker rebinds the later isolated `CTypedef.target` to the
 first target so transitive references that share that alias in the later
 snapshot follow the chosen canonical target.
 
-An isolated semantic incompatibility is reported immediately. A failed final
-baseline reports the complete header-context failure and performs no
-canonicalization. A rejected or unrenderable declaration pair is reported as a
-conflict and any later type-registry entries are withdrawn. A compiler spawn,
-interruption, workspace, or cleanup failure is an infrastructure diagnostic,
-never a declaration-compatibility verdict.
+An isolated semantic incompatibility is reported immediately unless it is the
+narrow prototype-tag re-extraction fallback above. A failed final baseline
+reports the complete header-context failure, reports that incompatible source
+repeat, and performs no canonicalization. A rejected or unrenderable
+declaration pair is reported as a conflict and any later type-registry entries
+are withdrawn. A compiler spawn, interruption, workspace, or cleanup failure
+is an infrastructure diagnostic, never a declaration-compatibility verdict.
 During a module variable, `find_foreign_name` and `find_foreign_type` scan their
 histories backward and return the last declaration whose order is no later than
 `initializer_order`; outside that pass they use the final maps directly.
@@ -867,12 +885,16 @@ left for a later FFI iteration.
 * Neither the final baseline nor a declaration-pair probe reconstructs the
   alternate cumulative TypeList or proves that both extracted declarations
   occurred. The checker can retain an isolated unique value or type-namespace
-  binding, reject an isolated incompatibility that disappears cumulatively, or
-  canonicalize a repeat that cumulative preprocessing suppressed. A suppressed
-  `extern int a[7]` can, for example, complete an earlier `extern int a[]` in
-  Titan's declaration composite even though only the incomplete declaration
-  occurs cumulatively. Macro-coupled APIs need one umbrella header imported
-  once.
+  binding, reject a distinct-source isolated incompatibility that disappears
+  cumulatively, or canonicalize a repeat that cumulative preprocessing
+  suppressed. The source-repeat fallback covers a guarded physical declaration
+  only when its complete type graphs differ solely in independently extracted,
+  same-spelled prototype-local tag identities; it never unifies tags from
+  distinct declarations, changes tag reuse/shadowing topology, or hides other
+  macro-dependent changes. A suppressed
+  `extern int a[7]` can, for example, complete an earlier `extern int a[]` in Titan's
+  declaration composite even though only the incomplete declaration occurs
+  cumulatively. Macro-coupled APIs need one umbrella header imported once.
 
 ## `typed.lua`
 

@@ -75,14 +75,18 @@ local function same_declaration_list(left, right, seen,
                                      ignore_outer_qualifiers,
                                      allow_anonymous_aggregate,
                                      allow_oldstyle_prototype,
-                                     allow_array_bound_candidate)
+                                     allow_array_bound_candidate,
+                                     allow_prototype_tag_reextraction,
+                                     prototype_tag_state)
     if #left ~= #right then return false end
     for index = 1, #left do
         if not declaration_types_compatible(
             left[index], right[index], seen, ignore_outer_qualifiers,
             allow_anonymous_aggregate,
             allow_oldstyle_prototype,
-            allow_array_bound_candidate) then
+            allow_array_bound_candidate,
+            allow_prototype_tag_reextraction,
+            prototype_tag_state) then
             return false
         end
     end
@@ -134,7 +138,9 @@ end
 
 local function anonymous_aggregates_compatible(
         left, right, seen, allow_oldstyle_prototype,
-        allow_array_bound_candidate)
+        allow_array_bound_candidate,
+        allow_prototype_tag_reextraction,
+        prototype_tag_state)
     if not is_anonymous_aggregate(left)
        or not is_anonymous_aggregate(right)
        or left.complete ~= right.complete
@@ -152,7 +158,55 @@ local function anonymous_aggregates_compatible(
            or not declaration_types_compatible(
                 lfield.type, rfield.type, seen, false, true,
                 allow_oldstyle_prototype,
-                allow_array_bound_candidate) then
+                allow_array_bound_candidate,
+                allow_prototype_tag_reextraction,
+                prototype_tag_state) then
+            return false
+        end
+    end
+    return true
+end
+
+-- Independently extracted declarations allocate a fresh canonical object for
+-- each prototype-local struct/union tag. Two such objects may represent the
+-- same guarded physical declaration, but this exception must not weaken C's
+-- ordinary nominal tag identity. Require explicit prototype-scope metadata and
+-- compare the complete aggregate graph exactly; the caller separately proves
+-- that the enclosing declarations have the same physical source location.
+local function prototype_tag_reextractions_compatible(
+        left, right, seen, prototype_tag_state)
+    if left._c_tag_scope ~= "prototype"
+       or right._c_tag_scope ~= "prototype"
+       or left.tagname == nil
+       or left.tagname ~= right.tagname
+       or left.cname ~= right.cname
+       or left.typedef ~= right.typedef
+       or left.complete ~= right.complete
+       or left.has_fam ~= right.has_fam
+       or #(left.fields or {}) ~= #(right.fields or {}) then
+        return false
+    end
+
+    local mapped_right = prototype_tag_state.left_to_right[left]
+    local mapped_left = prototype_tag_state.right_to_left[right]
+    if (mapped_right ~= nil and mapped_right ~= right)
+       or (mapped_left ~= nil and mapped_left ~= left) then
+        return false
+    end
+    prototype_tag_state.left_to_right[left] = right
+    prototype_tag_state.right_to_left[right] = left
+    prototype_tag_state.matched = true
+    for index, lfield in ipairs(left.fields or {}) do
+        local rfield = right.fields[index]
+        if not rfield
+           or lfield.name ~= rfield.name
+           or not same_declaration_value(
+                lfield.bitfield, rfield.bitfield)
+           or lfield.flexible_array ~= rfield.flexible_array
+           or not declaration_types_compatible(
+                lfield.type, rfield.type, seen, false,
+                false, false, false, true,
+                prototype_tag_state) then
             return false
         end
     end
@@ -162,7 +216,9 @@ end
 local function function_returns_compatible(
         left, right, left_qualifiers, right_qualifiers, seen,
         allow_anonymous_aggregate, allow_oldstyle_prototype,
-        allow_array_bound_candidate)
+        allow_array_bound_candidate,
+        allow_prototype_tag_reextraction,
+        prototype_tag_state)
     local _, lalias_quals =
         resolve_declaration_typedefs(left)
     local _, ralias_quals =
@@ -174,7 +230,9 @@ local function function_returns_compatible(
             left, right, seen, true,
             allow_anonymous_aggregate,
             allow_oldstyle_prototype,
-            allow_array_bound_candidate)
+            allow_array_bound_candidate,
+            allow_prototype_tag_reextraction,
+            prototype_tag_state)
 end
 
 local function function_paramstyle(typ)
@@ -207,7 +265,9 @@ declaration_types_compatible = function(left, right, seen,
                                         ignore_outer_qualifiers,
                                         allow_anonymous_aggregate,
                                         allow_oldstyle_prototype,
-                                        allow_array_bound_candidate)
+                                        allow_array_bound_candidate,
+                                        allow_prototype_tag_reextraction,
+                                        prototype_tag_state)
     if left == right then return true end
     if type(left) ~= "table" or type(right) ~= "table" then return false end
     local ltype, lquals =
@@ -257,7 +317,9 @@ declaration_types_compatible = function(left, right, seen,
                 ltype.pointee, rtype.pointee, seen, true,
                 allow_anonymous_aggregate,
                 allow_oldstyle_prototype,
-                allow_array_bound_candidate)
+                allow_array_bound_candidate,
+                allow_prototype_tag_reextraction,
+                prototype_tag_state)
     elseif tag == "Type.CArray" then
         local _, lelem_quals =
             resolve_declaration_typedefs(ltype.elem)
@@ -274,7 +336,9 @@ declaration_types_compatible = function(left, right, seen,
                 ltype.elem, rtype.elem, seen, true,
                 allow_anonymous_aggregate,
                 allow_oldstyle_prototype,
-                allow_array_bound_candidate)
+                allow_array_bound_candidate,
+                allow_prototype_tag_reextraction,
+                prototype_tag_state)
     elseif tag == "Type.CFunction" then
         local oldstyle_candidate =
             oldstyle_prototype_candidate(ltype, rtype)
@@ -286,7 +350,9 @@ declaration_types_compatible = function(left, right, seen,
                 ltype.params, rtype.params, seen, true,
                 allow_anonymous_aggregate,
                 allow_oldstyle_prototype,
-                allow_array_bound_candidate)
+                allow_array_bound_candidate,
+                allow_prototype_tag_reextraction,
+                prototype_tag_state)
             or allow_oldstyle_prototype
                 and oldstyle_candidate
         return params_compatible
@@ -297,7 +363,9 @@ declaration_types_compatible = function(left, right, seen,
                 rtype._return_declaration_qualifiers, seen,
                 allow_anonymous_aggregate,
                 allow_oldstyle_prototype,
-                allow_array_bound_candidate)
+                allow_array_bound_candidate,
+                allow_prototype_tag_reextraction,
+                prototype_tag_state)
     elseif tag == "Type.Function" then
         -- Foreign functions are represented as ordinary Titan Function values
         -- whose slots contain C types. C ignores the outer qualification of a
@@ -307,7 +375,9 @@ declaration_types_compatible = function(left, right, seen,
                 ltype._c_function, rtype._c_function, seen, false,
                 allow_anonymous_aggregate,
                 allow_oldstyle_prototype,
-                allow_array_bound_candidate)
+                allow_array_bound_candidate,
+                allow_prototype_tag_reextraction,
+                prototype_tag_state)
         end
         return function_paramstyle(ltype)
                     == function_paramstyle(rtype)
@@ -318,7 +388,9 @@ declaration_types_compatible = function(left, right, seen,
                 ltype.params, rtype.params, seen, true,
                 allow_anonymous_aggregate,
                 allow_oldstyle_prototype,
-                allow_array_bound_candidate)
+                allow_array_bound_candidate,
+                allow_prototype_tag_reextraction,
+                prototype_tag_state)
            and #ltype.rettypes == #rtype.rettypes
            and (#ltype.rettypes == 0
                 or function_returns_compatible(
@@ -327,13 +399,22 @@ declaration_types_compatible = function(left, right, seen,
                     rtype._return_declaration_qualifiers, seen,
                     allow_anonymous_aggregate,
                     allow_oldstyle_prototype,
-                    allow_array_bound_candidate))
+                    allow_array_bound_candidate,
+                    allow_prototype_tag_reextraction,
+                    prototype_tag_state))
     elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+        if allow_prototype_tag_reextraction
+           and prototype_tag_reextractions_compatible(
+                ltype, rtype, seen, prototype_tag_state) then
+            return true
+        end
         if allow_anonymous_aggregate then
             return anonymous_aggregates_compatible(
                 ltype, rtype, seen,
                 allow_oldstyle_prototype,
-                allow_array_bound_candidate)
+                allow_array_bound_candidate,
+                allow_prototype_tag_reextraction,
+                prototype_tag_state)
         end
         -- Reaching this branch means the objects are distinct. Equal tag
         -- spellings do not collapse distinct file/prototype-scope identities,
@@ -384,6 +465,42 @@ end
 
 function foreigntypes.declarations_compatible(...)
     return foreigntypes.declaration_compatibility(...) == "exact"
+end
+
+-- This relation is intentionally separate from ordinary declaration
+-- compatibility. It accepts a pair only when every difference is an explicitly
+-- marked prototype-local struct/union object created by independent extraction.
+-- Physical source identity and the final ordered-header baseline remain the
+-- checker's responsibility.
+function foreigntypes.prototype_tag_reextraction_compatibility(
+        left, right, left_declaration, right_declaration)
+    local ltype, lalias_quals =
+        resolve_declaration_typedefs(left)
+    local rtype, ralias_quals =
+        resolve_declaration_typedefs(right)
+    if not ltype or not rtype then return false end
+    local arrays = ltype._tag == "Type.CArray"
+        and rtype._tag == "Type.CArray"
+    if not arrays
+       and not same_qualifiers(
+            combined_qualifiers(
+                left_declaration and left_declaration.qualifiers,
+                lalias_quals),
+            combined_qualifiers(
+                right_declaration and right_declaration.qualifiers,
+                ralias_quals)) then
+        return false
+    end
+
+    local state = {
+        matched = false,
+        left_to_right = {},
+        right_to_left = {},
+    }
+    return declaration_types_compatible(
+            left, right, {}, not arrays,
+            false, false, false, true, state)
+       and state.matched
 end
 
 local function merge_declaration_composite(previous, current, seen)
@@ -741,6 +858,10 @@ local function convert_struct_or_union(st, ftype)
                 st:add_foreign_type(key, owner)
             end
         end
+        -- Keep scope provenance on the canonical aggregate without making it
+        -- part of general Type.CStruct/CUnion equality. It is needed only for
+        -- the narrowly scoped repeated-extraction relation above.
+        owner._c_tag_scope = record.scope
         if ftype.fields and not owner.complete then
             return populate_struct_or_union(st, owner, ftype)
         end

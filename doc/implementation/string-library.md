@@ -43,10 +43,10 @@ embedded PEG engine or private uv continuation layer through a raw escape
 hatch. Both
 `titan.net` and `titan.os` dogfood the literal
 `titan.string.find` and byte-preserving `titan.string.sub` operations.
-Production places all fourteen logical modules and LPegLabel in one static
+Production places all sixteen logical modules and LPegLabel in one static
 bundle.
 
-The installed standard build requests fourteen roots in stable order:
+The installed standard build requests sixteen roots in stable order:
 
 ```text
 titan.coroutine
@@ -56,6 +56,8 @@ titan.timer
 titan.io
 titan.fs
 titan.net
+titan.ssl
+titan.http
 titan.os
 titan.peg
 titan.string
@@ -65,20 +67,22 @@ titan.iter
 titan.gc
 ```
 
-The request order preserves the previous ten roots' relative order, keeps
-`titan.io` before its concrete stream users, appends the four independent
-qualified modules, and remains
+The request order keeps `titan.io` before its concrete stream users, places
+the qualified high-level SSL and HTTP layers after `titan.net`, retains the
+four independent qualified utility modules, and remains
 non-topological. Recursive import loading resolves both the
 `titan.net`/`titan.os` to `titan.string` to `titan.peg` chains while those
 facades are processed.
 
-The paired `titan.so`/`titan.a` therefore contains fourteen logical protocols
-and fourteen archive metadata keys. The DSO exposes fifteen Lua openers: bare
+The paired `titan.so`/`titan.a` therefore contains sixteen logical protocols
+and sixteen archive metadata keys. The DSO exposes seventeen Lua openers: bare
 `luaopen_titan` support plus one entry per logical module. The provider's
 metadata-free payload begins with `titanlib.o`, then the private
-`libtitan-lpeglabel.a`, then the bundled libuv archive when bundled mode is
-selected. LPegLabel has no Titan metadata key and its archive/headers are not
-installed in the compiler SDK.
+`libtitan-lpeglabel.a`, then the selected libuv payload, private HTTP adapter
+and llhttp archive, and the selected OpenSSL payload used directly by
+`titan.ssl`.
+Those native inputs have no Titan metadata keys and their private
+archives/headers are not installed in the compiler SDK.
 
 ## Exact-byte storage
 

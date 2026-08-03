@@ -396,24 +396,28 @@ the exact member manifest. Archive construction uses the same deterministic
 `ar`/`ranlib` preference and portable fallback as Titan's generated static
 providers, then rescans actual membership.
 
-The private archive is always metadata-free `-X` payload in this order:
+The standard provider's metadata-free `-X` payload has this order:
 
 ```text
 titanlib.o
 libtitan-lpeglabel.a
 [bundled libuv.a]
+titan_httpshim.o
+libtitan-llhttp.a
+[bundled OpenSSL libssl.a + libcrypto.a]
 ```
 
-The source build invokes one compiler process for the fourteen logical roots:
+The source build invokes one compiler process for the sixteen logical roots:
 
 ```text
 titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs
-titan.net titan.os titan.peg titan.string titan.math titan.lua titan.iter titan.gc
+titan.net titan.ssl titan.http titan.os titan.peg titan.string
+titan.math titan.lua titan.iter titan.gc
 ```
 
-The paired `titan.so`/`titan.a` has fourteen logical ABI/types protocols,
-fourteen archive metadata keys, and fourteen generated Lua shims. Bare native
-support adds a fifteenth DSO opener. LPegLabel contributes no logical key: its five members are
+The paired `titan.so`/`titan.a` has sixteen logical ABI/types protocols,
+sixteen archive metadata keys, and sixteen generated Lua shims. Bare native
+support adds a seventeenth DSO opener. LPegLabel contributes no logical key: its five members are
 force-carried into both provider forms solely as private native payload.
 
 The archive and headers are not copied into `$ROCKS_TREE/lib` or
@@ -429,15 +433,15 @@ That compiler-owned dependency is independent of the vendored standard
 module: a deployed `titan.peg` pattern never dynamically links to or requires
 the external module.
 
-The generated providers are validated for exact symbols, fourteen metadata
-keys, all fifteen Lua openers, and absence of an LPegLabel dynamic dependency. Isolation
+The generated providers are validated for exact symbols, sixteen metadata
+keys, all seventeen Lua openers, and absence of an LPegLabel dynamic dependency. Isolation
 tests load private and external engines in both orders, use both pattern
 families, vary their max-stack settings independently, and reject cross-engine
 patterns.
 
 Publication otherwise retains the canonical standard-library transaction:
 new or changed shims and dSYM are committed first, then `titan.a`, with
-`titan.so` renamed last. Current fourteen-module reinstall and caught-failure
+`titan.so` renamed last. Current sixteen-module reinstall and caught-failure
 rollback are supported. Titan remains a prototype; stale conflicting layouts
 and future ABI bumps are handled by cleaning the old installation and building
 a fresh versioned tree, not by adding cross-layout migration classifiers.

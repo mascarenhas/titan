@@ -1,0 +1,16 @@
+local async = import "async"
+local io = import "io"
+local math = import "titan.math"
+local net = import "net"
+local peg = import "peg"
+local ssl = import "titan.ssl"
+local str = import "string"
+local ffi = foreign import "titan/ffi.h"
+
+-- This folder module is intentionally layered over the public net, ssl, io,
+-- and async modules. Its C boundary contains only exact llhttp callback
+-- trampolines; synchronous parsing policy and event storage remain in Titan.
+
+do
+  http_url_pattern = url_pattern()
+end
