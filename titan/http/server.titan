@@ -41,26 +41,10 @@ local function request_url(parser: Parser,
   if #hosts ~= 1 then
     raise "HTTP/1.1 request must contain exactly one Host header"
   end
-  if #parser.target_text == 0 or
-     header_byte(parser.target_text, 1) ~= 47 then
-    raise "HTTP server supports only origin-form request targets"
-  end
-  -- Parse the received Host as an authority, not as a prefix of the combined
-  -- URL. Otherwise an authority delimiter could consume or rewrite the
-  -- separately received origin-form target before routing sees Request.url.
-  local authority = hosts[1]
-  local index = 1
-  while index <= #authority do
-    local byte = header_byte(authority, index)
-    if byte == 47 or byte == 63 or byte == 35 or byte == 64 then
-      raise "HTTP Host header contains a non-authority delimiter"
-    end
-    index = index + 1
-  end
   local scheme = "http"
   if encrypted then scheme = "https" end
-  return parse_url_or_raise(
-    scheme .. "://" .. authority .. parser.target_text)
+  return parse_request_url_or_raise(
+    scheme, hosts[1], parser.target_text)
 end
 
 local function read_request(parser: Parser,
@@ -117,21 +101,16 @@ local function default_reason(status: integer): string
 end
 
 local function validate_reason(reason: string)
-  local index = 1
-  while index <= #reason do
-    local byte = header_byte(reason, index)
-    -- The HTTP/1.1 reason phrase has the same byte repertoire as a field
-    -- value: HTAB, SP/VCHAR, and obs-text, but no other control or DEL byte.
-    if (byte < 32 and byte ~= 9) or byte == 127 then
-      raise "HTTP reason phrase contains a forbidden byte"
-    end
-    index = index + 1
+  -- The HTTP/1.1 reason phrase has the same byte repertoire as a field value:
+  -- HTAB, SP/VCHAR, and obs-text, but no other control or DEL byte.
+  if str.match(reason, FORBIDDEN_FIELD_BYTE_PATTERN) then
+    raise "HTTP reason phrase contains a forbidden byte"
   end
 end
 
 local function status_allows_body(method: string,
                                   status: integer): boolean
-  if lower_header_name(method) == "head" then return false end
+  if method == "HEAD" then return false end
   if status >= 100 and status < 200 then return false end
   return status ~= 204 and status ~= 205 and status ~= 304
 end

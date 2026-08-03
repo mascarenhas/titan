@@ -99,47 +99,58 @@ applicable.
 
 Response parsing likewise pauses at headers so `request` can return a
 `ClientResponse`. Informational responses are drained and the parser reset
-until a final status is reached. A HEAD request configures llhttp's response
-semantics before all informational/final parsing. Reading body EOF releases
-the parser and the one-use transport.
+until a final status is reached. An exact, case-sensitive `HEAD` request
+configures llhttp's response semantics before all informational/final parsing;
+case-distinct extension methods retain ordinary body semantics. Reading body
+EOF releases the parser and the one-use transport.
 
 ## Headers, URL consumption, and framing
 
 Headers use an Array of public `Header` records. Lookup performs ASCII folding
 without normalizing stored spelling, so duplicate order remains available to
-protocol checks and applications. Construction/mutation rejects invalid token
-names and field values containing controls other than HTAB or containing DEL.
-The parser appends fields only on llhttp's complete
-value event, after trimming optional whitespace.
+protocol checks and applications. The folding uses `string.gsub` over
+`[A-Z]`, rather than locale-sensitive `string.lower`, because HTTP field-name
+case is ASCII-defined even after an application changes the process C locale.
+Cached `string` regex matching validates token names and rejects field values
+containing controls other than HTAB or containing DEL. The parser appends
+fields only on llhttp's complete value event, after trimming optional
+whitespace.
+
+Strict llhttp already applies the same name/value checks to received fields
+and parses inbound Content-Length syntax and framing. Titan repeats the
+name/value checks when constructing `Headers` to preserve the public record's
+invariant and still validates outbound fields, methods, response reasons, and
+Content-Length values before serializing them. llhttp treats a received reason
+phrase as an opaque span up to CR/LF, so the client applies Titan's field-value
+byte check to every informational and final response reason as well.
 
 The reusable grammar, labels, normalization, and `(Url?, Error?)` boundary are
 owned by `titan.url` and documented in the
-[URL-library implementation chapter](url-library.md). The HTTP-local
-`parse_url_or_raise` adapter calls `url.parse`, raises its structured
-`url.Error` when parsing fails, and otherwise unwraps the `url.Url`. HTTP does
-not re-export either record or a second parse function.
+[URL-library implementation chapter](url-library.md). HTTP's local adapters
+call `url.parse` for an absolute client URL and `url.parse_request` for a
+separate scheme, Host authority, and origin-form target, raise the structured
+`url.Error` when parsing fails, and otherwise unwrap the `url.Url`. HTTP does
+not re-export either record or either parse function.
 
 The client connects with normalized `Url.host`, uses normalized
 `Url.authority` when it generates an absent Host field, and sends normalized
 `Url.target`. HTTPS passes its sole optional `ca_file` through to
 `ssl.connect`; HTTP neither reads trust paths nor exposes a CA-directory
 parameter. The SSL layer performs explicit CA-file I/O through high-level
-`fs`. The server runs the same parser over `scheme://` plus the exact received
-Host and origin-form target, after rejecting `/`, `?`, `#`, or `@` in Host so
-it cannot consume or reinterpret the independently parsed target.
-`Request.target` remains that received target, while `Request.url` provides
-the normalized routing view.
+`fs`. The server passes the scheme, exact received Host, and origin-form target
+to the URL module as separate values, so an authority delimiter cannot consume
+or reinterpret the independently parsed target. `Request.target` remains that
+received target, while `Request.url` provides the normalized routing view.
 
 The client copies supplied headers, validates Content-Length, rejects request
 Transfer-Encoding and Expect fields, and forces `Connection: close`. Rejecting
 Expect is deliberate: the initial client assembles the optional body with the
 preamble in one write and must not advertise a `100-continue` handshake that
-it does not honor. A supplied singleton Host
-first rejects `/`, `?`, `#`, and `@`, then is parsed in isolation by the same
-URL grammar as a complete authority; this enforces host, bracketed IP-literal,
-and optional-port syntax before opening the connection. Its optional body is
-assembled with the request preamble as one high-level write. Response bodies
-alone are streaming.
+it does not honor. A supplied singleton Host is parsed by the URL module's
+separate-input request entry; this enforces authority boundaries, host,
+bracketed IP-literal, and optional-port syntax before opening the connection.
+Its optional body is assembled with the request preamble as one high-level
+write. Response bodies alone are streaming.
 
 The server derives response framing at first header send. A declared
 Content-Length is counted exactly; explicit Transfer-Encoding must be one
@@ -245,8 +256,10 @@ historical migration count is not the current provider contract.
 
 Focused standard-library tests run outside LuaCov. They fragment protocol
 input down to individual bytes, exercise fixed/chunked/EOF bodies, duplicate
-headers, streaming handlers, unread-body draining, keep-alive, ordered
-pipelined requests, and HTTPS over the public SSL facade, and prove
-listener/response close retries
-after cancellation. The sanitizer boundary uses that same high-level path
-through TLS and llhttp rather than a private test transport.
+headers, token/value byte boundaries, decimal overflow, opaque inbound reason
+rejection, structured Host errors, rejected non-origin request targets,
+streaming handlers, unread-body draining, keep-alive, ordered pipelined
+requests, and HTTPS over the public SSL facade. They also prove
+listener/response close retries after cancellation. The sanitizer boundary
+uses that same high-level path through TLS and llhttp rather than a private
+test transport.

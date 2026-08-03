@@ -370,7 +370,11 @@ For ready-made HTTP URL parsing, `local url = import "url"` exposes
 `url.parse(source): (url.Url?, url.Error?)`. Success returns a normalized
 component record and nil; malformed input returns nil plus a structured
 one-based byte diagnostic instead of raising. The module compiles its labeled
-PEG once and is usable independently of the HTTP client.
+PEGs once and is usable independently of the HTTP client. Code that receives
+an HTTP scheme, Host authority, and origin-form target separately can call
+`url.parse_request(scheme, authority, target)` with the same result tuple;
+scheme, authority, and target boundaries are then validated before
+normalization.
 
 ## Child processes
 

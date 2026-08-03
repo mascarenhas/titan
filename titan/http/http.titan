@@ -16,3 +16,11 @@ local function parse_url_or_raise(source: string): url.Url
   if parse_error then raise parse_error as url.Error end
   return parsed as url.Url
 end
+
+local function parse_request_url_or_raise(
+    scheme: string, authority: string, target: string): url.Url
+  local parsed?, parse_error? =
+    url.parse_request(scheme, authority, target)
+  if parse_error then raise parse_error as url.Error end
+  return parsed as url.Url
+end

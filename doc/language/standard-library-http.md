@@ -124,8 +124,8 @@ URL parsing and normalization belong to the standalone
 module's absolute HTTP/HTTPS subset. A client request raises the structured
 `url.Error` returned by `url.parse` when its source URL is invalid; no network
 operation has begun at that point. A server `Request.url` is the normalized
-`url.Url` obtained from the connection scheme, required Host field, and
-received origin-form target.
+`url.Url` returned by `url.parse_request` from the connection scheme, required
+Host field, and received origin-form target.
 
 The HTTP client connects with `Url.host` and `Url.port`, sends `Url.target` in
 the request line, and uses `Url.authority` when it generates an absent Host
@@ -136,8 +136,9 @@ field. Applications that only need to validate or inspect a URL should import
 
 `request` validates `method` as an HTTP token, parses `source_url`, chooses a
 plain or TLS connection from its scheme, sends one request, and returns after
-the final response headers have been parsed. For HTTPS, `ca_file` has exactly
-the trust-selection behavior documented by
+the final response headers have been parsed. Method names are case-sensitive;
+only exact `HEAD` selects response-to-HEAD framing. For HTTPS, `ca_file` has
+exactly the trust-selection behavior documented by
 [`ssl.connect`](standard-library-ssl.md#verified-client-connections); it is
 ignored for HTTP.
 
@@ -147,7 +148,8 @@ supplied value must be one complete URI authority: a registered name, IPv4
 address, or bracketed IP literal, followed by an optional valid port. User
 information and the `/`, `?`, and `#` delimiters are rejected, so a supplied
 Host cannot consume or reinterpret the separately generated request target.
-The valid supplied spelling is preserved on the wire.
+These failures raise the structured `url.Error` returned by
+`url.parse_request`. The valid supplied spelling is preserved on the wire.
 Client request bodies are one optional in-memory string, not a streaming
 Writer. When a body is present, `Content-Length` is generated unless supplied;
 an explicit length must exactly match. Request `Transfer-Encoding` is not
@@ -229,8 +231,8 @@ Exactly one `Host` header is required, and only an origin-form target beginning
 with `/` is accepted. Absolute-form proxy requests, authority-form `CONNECT`,
 and asterisk-form requests are outside this initial server API. The Host value
 must itself be an authority: user-information, path, query, and fragment
-delimiters are rejected before it is combined with the separately received
-target.
+delimiters are rejected by `url.parse_request`, which receives Host and target
+as separate inputs so one cannot consume the other.
 
 Each `Response` begins as `200 OK` with empty headers. `set_status` accepts a
 final status from 200 through 999 and an optional reason phrase. A supplied
@@ -271,9 +273,14 @@ Server remain independent.
 
 Parsing uses llhttp in strict mode. Malformed or truncated messages,
 conflicting framing, unsupported HTTP versions, and protocol upgrades are
-errors. HTTP/2, WebSockets, and every other Upgrade protocol are out of scope.
-The server has no routing abstraction: one Handler receives every request and
-can dispatch on `Request.url`, `Host`, method, or path itself.
+errors. Strict llhttp owns received header-name, header-value, and
+Content-Length grammar. Titan's public header/request/response APIs separately
+validate values before serializing them. Because llhttp treats a received
+reason phrase as opaque bytes up to its line ending, Titan also applies the
+field-value byte repertoire before exposing any informational or final
+response reason. HTTP/2, WebSockets, and every other Upgrade protocol are out
+of scope. The server has no routing abstraction: one Handler receives every
+request and can dispatch on `Request.url`, `Host`, method, or path itself.
 
 Headers are accumulated before a request or response object is returned, and
 this version configures no header-byte or field-count limit. A handler can

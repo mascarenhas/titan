@@ -1,6 +1,5 @@
 local peg = import "peg"
 local str = import "string"
-local ffi = foreign import "titan/ffi.h"
 
 -- The RFC 3986 productions below are a Titan relabel-syntax translation of
 -- daurnimator/lpeg_patterns' URI grammar at commit
@@ -27,8 +26,13 @@ end
 -- absolute HTTP URL: an authority and nonempty host are required, userinfo and
 -- fragments are rejected, and an explicit port must contain decimal digits.
 -- Semantic checks below restrict the scheme and the numeric port range. The
--- module compiles this source once in its initializer.
+-- module compiles this source once in its initializer. The three request-part
+-- boundary patterns are likewise compiled once; the absolute grammar remains
+-- the sole component parser and normalizer.
 local http_url_pattern: peg.Pattern? = nil
+local request_scheme_pattern: peg.Pattern? = nil
+local request_authority_pattern: peg.Pattern? = nil
+local request_origin_pattern: peg.Pattern? = nil
 
 local function url_pattern(): peg.Pattern
   return peg.compile([[
@@ -142,6 +146,23 @@ local function url_pattern(): peg.Pattern
   ]])
 end
 
+local function scheme_pattern(): peg.Pattern
+  -- A separately supplied scheme is exactly HTTP or HTTPS. The outer choice
+  -- makes every mismatch report the start of this virtual-URL component.
+  return peg.compile(
+    "([Hh][Tt][Tt][Pp] [Ss]? !.) / %{scheme}")
+end
+
+local function authority_pattern(): peg.Pattern
+  -- A separately received authority must end before an origin-form target.
+  -- Leave '@' to the complete URL grammar so it retains the userinfo label.
+  return peg.compile("[^/?#]* (!. / %{authority_tail})")
+end
+
+local function origin_pattern(): peg.Pattern
+  return peg.compile("'/' / %{origin_form}")
+end
+
 local function url_parse_detail(kind: string): string
   if kind == "scheme" then return "expected an HTTP or HTTPS scheme"
   elseif kind == "scheme_separator" then
@@ -165,6 +186,8 @@ local function url_parse_detail(kind: string): string
     return "expected two hexadecimal digits after '%'"
   elseif kind == "authority_tail" then
     return "unexpected byte in the authority"
+  elseif kind == "origin_form" then
+    return "expected an origin-form request target beginning with '/'"
   elseif kind == "fragment" then return "fragments are unsupported"
   elseif kind == "url_tail" then
     return "unexpected byte in the path or query"
@@ -176,11 +199,6 @@ local function url_parse_error(kind: string, position: integer): Error
   local message = "URL parse error [" .. kind .. "] at byte " ..
     str.tostring(position) .. ": " .. url_parse_detail(kind)
   return Error.new(position, kind, message)
-end
-
-local function url_byte(text: string, index: integer): integer
-  local bytes = text as const *ffi.titan_ffi_unsigned_char
-  return bytes[index - 1] as integer
 end
 
 local function hex_value(byte: integer): integer
@@ -210,10 +228,10 @@ local function normalize_component(source: string,
   local builder = str.writer(false)
   local index = 1
   while index <= #source do
-    local byte = url_byte(source, index)
+    local byte = str.byte(source, index) as integer
     if byte == 37 then
-      local high = hex_value(url_byte(source, index + 1))
-      local low = hex_value(url_byte(source, index + 2))
+      local high = hex_value(str.byte(source, index + 1) as integer)
+      local low = hex_value(str.byte(source, index + 2) as integer)
       local decoded = high * 16 + low
       if is_unreserved(decoded) then
         if lowercase and decoded >= 65 and decoded <= 90 then
@@ -238,13 +256,15 @@ end
 -- spelling for the Host header. RFC 6874's encoded zone separator is decoded
 -- only for the connection address.
 local function normalize_host(raw: string): (string, string)
-  if url_byte(raw, 1) ~= 91 then
+  local first = str.byte(raw, 1) as integer
+  if first ~= 91 then
     local host = normalize_component(raw, true)
     return host, host
   end
 
   local inner = str.sub(raw, 2, #raw - 1)
-  if url_byte(inner, 1) == 118 or url_byte(inner, 1) == 86 then
+  local inner_first = str.byte(inner, 1) as integer
+  if inner_first == 118 or inner_first == 86 then
     local dot = str.find(inner, ".") as integer
     local version = normalize_component(
       str.sub(inner, 1, dot - 1), true)
@@ -270,7 +290,7 @@ local function parse_port(text: string, position: integer):
   local port = 0
   local index = 1
   while index <= #text do
-    local digit = url_byte(text, index) - 48
+    local digit = (str.byte(text, index) as integer) - 48
     if port > (65535 - digit) // 10 then
       return nil, url_parse_error("port", position)
     end
@@ -334,10 +354,53 @@ function parse(source: string): (Url?, Error?)
   return Url.new(scheme, host, port, path, query, target, authority), nil
 end
 
+function parse_request(scheme: string, authority: string,
+                       target: string): (Url?, Error?)
+  local scheme_match, scheme_label, scheme_position =
+    request_scheme_pattern:match(scheme)
+  if scheme_match == nil then
+    local label = "scheme"
+    local position = 1
+    if scheme_label ~= nil then label = scheme_label as string end
+    if scheme_position ~= nil then position = scheme_position as integer end
+    return nil, url_parse_error(label, position)
+  end
+
+  local source = scheme .. "://" .. authority .. target
+
+  local authority_match, authority_label, authority_position =
+    request_authority_pattern:match(authority)
+  if authority_match == nil then
+    local label = "authority_tail"
+    local position = 1
+    if authority_label ~= nil then label = authority_label as string end
+    if authority_position ~= nil then
+      position = authority_position as integer
+    end
+    return nil, url_parse_error(label, #scheme + 3 + position)
+  end
+
+  local origin_match, origin_label, origin_position =
+    request_origin_pattern:match(target)
+  if origin_match == nil then
+    local label = "origin_form"
+    local position = 1
+    if origin_label ~= nil then label = origin_label as string end
+    if origin_position ~= nil then position = origin_position as integer end
+    return nil, url_parse_error(
+      label, #scheme + 3 + #authority + position)
+  end
+
+  return parse(source)
+end
+
 function Url:host_header(): string
   return self.authority
 end
 
 do
   http_url_pattern = url_pattern()
+  request_scheme_pattern = scheme_pattern()
+  request_authority_pattern = authority_pattern()
+  request_origin_pattern = origin_pattern()
 end

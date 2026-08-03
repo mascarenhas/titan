@@ -110,14 +110,21 @@ decisions.
   `http`/`https` authority URLs supported by this iteration and returns
   `(Url?, Error?)`: a normalized public `Url` plus nil, or nil plus an `Error`
   record containing the one-based byte `position`, stable error `kind`, and
-  rendered `message`. It never raises for malformed input. HTTP converts that
+  rendered `message`. It never raises for malformed input. A second
+  `url.parse_request` entry accepts scheme, authority, and origin-form target
+  separately and fences all three components so none can consume another.
+  HTTP converts either
   recoverable error to a raised boundary error where a request cannot proceed.
   The upstream URI cases live in the non-LuaCov URL suite.
 - The client supports `http` and verified `https`, streams a parsed response as
   an `io.ReaderCloser`, sends `Connection: close`, and neither follows redirects
   nor decompresses content encodings.
 - Header storage preserves insertion order, original spelling, and duplicate
-  values; lookup is ASCII case-insensitive.
+  values; lookup is ASCII case-insensitive. High-level `string` matching owns
+  outbound token/value/decimal validation; strict llhttp independently
+  validates the inbound header and framing grammar. llhttp leaves received
+  reason phrases opaque, so Titan applies the field-value byte repertoire
+  before exposing them.
 - Server requests expose a streaming body Reader with chunk framing removed.
   Responses expose status/header mutation before commit plus `write` and
   idempotent `close`; absent Content-Length uses chunked framing when a body is
@@ -170,8 +177,10 @@ decisions.
 - Add non-LuaCov URL and loopback TLS/HTTP suites with checked-in local CA fixtures:
   verification and hostname failure, binary/fragmented I/O, WANT_READ,
   clean/truncated close, strict/fragmented HTTP parsing, fixed/chunked/EOF
-  bodies, streaming handlers, ordered pipelined requests, keep-alive, HTTPS,
-  and the
+  bodies, token/value byte boundaries, decimal overflow, informational/final
+  opaque reason rejection, case-distinct method framing, structured Host
+  diagnostics, rejected non-origin targets,
+  streaming handlers, ordered pipelined requests, keep-alive, HTTPS, and the
   lpeg_patterns URI normalization/error matrix. Review the
   same-payload WANT_WRITE retry path directly: dynamic memory BIOs have no
   capacity control and TLS 1.3 has no renegotiation API with which a portable

@@ -22,21 +22,6 @@ local function client_connection(parsed_url: url.Url, ca_file: string?):
   return channel
 end
 
-local function validate_client_host(scheme: string, authority: string)
-  -- Parse Host as an authority in isolation. Appending the request target
-  -- before parsing would let '/', '?', '#', or '@' consume or reinterpret
-  -- bytes outside the authority, just as it would on the server boundary.
-  local index = 1
-  while index <= #authority do
-    local byte = header_byte(authority, index)
-    if byte == 47 or byte == 63 or byte == 35 or byte == 64 then
-      raise "HTTP Host header contains a non-authority delimiter"
-    end
-    index = index + 1
-  end
-  parse_url_or_raise(scheme .. "://" .. authority .. "/")
-end
-
 local function client_request_headers(parsed_url: url.Url,
                                       supplied: Headers?,
                                       body: string?): Headers
@@ -46,7 +31,7 @@ local function client_request_headers(parsed_url: url.Url,
   if #hosts == 0 then
     result:add("Host", parsed_url:host_header())
   else
-    validate_client_host(parsed_url.scheme, hosts[1])
+    parse_request_url_or_raise(parsed_url.scheme, hosts[1], "/")
   end
 
   if #result:values("Transfer-Encoding") > 0 then
@@ -74,10 +59,16 @@ end
 local function final_response_headers(parser: Parser)
   while true do
     ensure_parser_headers(parser)
-    if parser.status_number >= 200 then return end
+    if parser.status_number >= 200 then
+      -- llhttp accepts reason-phrase controls, so apply the HTTP field-value
+      -- repertoire before exposing a final response.
+      validate_reason(parser.reason_text)
+      return
+    end
     if parser.status_number < 100 then
       raise "HTTP server returned an invalid status code"
     end
+    validate_reason(parser.reason_text)
     while parser_read(parser) do end
     parser_reset_message(parser)
   end
@@ -102,7 +93,7 @@ function request(method: string, source_url: string,
     connection:write(builder:drain())
 
     local exact = new_response_parser(
-      connection, lower_header_name(method) == "head")
+      connection, method == "HEAD")
     parser = exact
     final_response_headers(exact)
     if exact.status_number < 200 or exact.status_number > 999 then

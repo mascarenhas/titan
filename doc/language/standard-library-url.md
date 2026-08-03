@@ -1,9 +1,10 @@
 # URL standard library
 
-The `url` standard module parses and normalizes absolute HTTP and HTTPS URLs.
-It is synchronous and performs no network I/O: callers can use the parsed
-value for HTTP, routing, validation, logging, or another layer that consumes
-HTTP(S) endpoint identifiers. Titan source uses the short import:
+The `url` standard module parses and normalizes absolute HTTP and HTTPS URLs,
+including URLs supplied as separate scheme, authority, and request-target
+components. It is synchronous and performs no network I/O: callers can use
+the parsed value for HTTP, routing, validation, logging, or another layer that
+consumes HTTP(S) endpoint identifiers. Titan source uses the short import:
 
 ```titan
 local url = import "url"
@@ -32,12 +33,17 @@ record Error
 end
 
 function parse(source: string): (Url?, Error?)
+function parse_request(
+  scheme: string,
+  authority: string,
+  target: string
+): (Url?, Error?)
 function Url:host_header(): string
 ```
 
-`parse` is a recoverable boundary. A valid input returns the parsed `Url` and
-nil. Invalid input returns nil and an `Error`; malformed input never raises.
-The two positions are mutually exclusive:
+`parse` and `parse_request` are recoverable boundaries. A valid input returns
+the parsed `Url` and nil. Invalid input returns nil and an `Error`; malformed
+input never raises. The two positions are mutually exclusive:
 
 ```titan
 local url = import "url"
@@ -56,8 +62,10 @@ end
 
 The `Error` field is named `kind`, rather than `type`, because `type` is a
 Titan keyword. `position` is the one-based byte position at which parsing or a
-semantic URL policy check failed. The stable `kind` values and corresponding
-message details are:
+semantic URL policy check failed. For `parse_request`, positions refer to the
+virtual absolute URL `scheme .. "://" .. authority .. target`, even when an
+authority or origin-form boundary check fails before those components are
+joined. The stable `kind` values and corresponding message details are:
 
 | `kind` | Detail |
 | --- | --- |
@@ -73,6 +81,7 @@ message details are:
 | `port` | `expected a decimal port in the range 1..65535` |
 | `percent_escape` | `expected two hexadecimal digits after '%'` |
 | `authority_tail` | `unexpected byte in the authority` |
+| `origin_form` | `expected an origin-form request target beginning with '/'` |
 | `fragment` | `fragments are unsupported` |
 | `url_tail` | `unexpected byte in the path or query` |
 | `url` | `invalid absolute HTTP URL` |
@@ -91,6 +100,23 @@ For example, `http://[::%25]/` returns kind `zone` at byte 14 with message:
 ```text
 URL parse error [zone] at byte 14: expected a nonempty zone identifier after '%25'
 ```
+
+## Separately received request components
+
+`parse_request(scheme, authority, target)` builds the same normalized `Url`
+from the three components which an HTTP server receives independently. The
+scheme must be exactly `http` or `https`, compared case-insensitively; an
+invalid separate scheme reports `scheme` at byte 1. The authority must be one
+complete authority: an unescaped `/`, `?`, or `#` is an
+`authority_tail` error instead of being allowed to consume part of `target`.
+Raw `@` remains part of the absolute grammar's user-information check and
+therefore reports `userinfo`.
+
+The target must be origin-form and begin with `/`. Empty, absolute-form,
+authority-form, and asterisk-form targets report `origin_form`. Once these
+component boundaries are established, the exact concatenation is parsed by the
+same absolute grammar as `parse`, so host, IP-literal, port, path, query,
+percent-escape, normalization, and structured-error behavior stay identical.
 
 ## Accepted URLs
 

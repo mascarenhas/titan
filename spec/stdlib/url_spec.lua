@@ -36,6 +36,8 @@ local function error_detail(kind: string): string
     return "expected two hexadecimal digits after '%'"
   elseif kind == "authority_tail" then
     return "unexpected byte in the authority"
+  elseif kind == "origin_form" then
+    return "expected an origin-form request target beginning with '/'"
   elseif kind == "fragment" then return "fragments are unsupported"
   elseif kind == "url_tail" then
     return "unexpected byte in the path or query"
@@ -56,6 +58,17 @@ local function parse_valid(source: string): url.Url
   return parsed as url.Url
 end
 
+local function parse_request_valid(scheme: string, authority: string,
+                                   target: string): url.Url
+  local parsed?, parse_error? =
+    url.parse_request(scheme, authority, target)
+  check(parsed ~= nil,
+        "valid request URL parts were rejected: " .. authority .. target)
+  check(parse_error == nil,
+        "valid request URL parts returned both a result and an error")
+  return parsed as url.Url
+end
+
 local function expect_error(source: string, kind: string,
                             position: integer)
   -- Invalid input is an ordinary `(nil, Error)` result, not a raised value.
@@ -73,6 +86,27 @@ local function expect_error(source: string, kind: string,
         str.tostring(position))
   check(diagnostic.message == expected_message(kind, position),
         "URL diagnostic message was incomplete: " .. diagnostic.message)
+end
+
+local function expect_request_error(scheme: string, authority: string,
+                                    target: string, kind: string,
+                                    position: integer)
+  local parsed?, parse_error? =
+    url.parse_request(scheme, authority, target)
+  check(parsed == nil,
+        "invalid request URL parts returned both a result and an error")
+  check(parse_error ~= nil, "invalid request URL parts were accepted")
+  local diagnostic = parse_error as url.Error
+  check(diagnostic.kind == kind,
+        "request URL diagnostic kind was " .. diagnostic.kind ..
+        ", expected " .. kind)
+  check(diagnostic.position == position,
+        "request URL diagnostic position was " ..
+        str.tostring(diagnostic.position) .. ", expected " ..
+        str.tostring(position))
+  check(diagnostic.message == expected_message(kind, position),
+        "request URL diagnostic message was incomplete: " ..
+        diagnostic.message)
 end
 
 local function expect_rejected(source: string)
@@ -178,6 +212,39 @@ function run(): string
           "/underscore_character/%00/kept%2Fslash?query%26with_escapes",
         "percent escapes were not normalized without ambiguity")
 
+  local request = parse_request_valid(
+    "HtTpS", "Example.COM:00443",
+    "/under%73core%5f?query=%7e")
+  check(request.scheme == "https" and request.host == "example.com" and
+        request.port == 443 and request.authority == "example.com:443" and
+        request.path == "/underscore_" and request.query == "query=~" and
+        request.target == "/underscore_?query=~",
+        "request URL parts were not normalized by the absolute parser")
+
+  local maximum_port = parse_request_valid(
+    "http", "example.com:65535", "/maximum-port")
+  check(maximum_port.port == 65535 and
+        maximum_port.authority == "example.com:65535",
+        "request authority rejected the maximum valid port")
+
+  expect_request_error(
+    "http", "example.com/path", "/target", "authority_tail", 19)
+  expect_request_error(
+    "http", "example.com?query", "/target", "authority_tail", 19)
+  expect_request_error(
+    "http", "example.com#fragment", "/target", "authority_tail", 19)
+  expect_request_error(
+    "http", "user@example.com", "/target", "userinfo", 8)
+  expect_request_error(
+    "http://attacker.example/path?x", "victim.example", "/safe",
+    "scheme", 1)
+  expect_request_error("http", "example.com", "", "origin_form", 19)
+  expect_request_error("http", "example.com", "*", "origin_form", 19)
+  expect_request_error(
+    "http", "example.com", "http://other", "origin_form", 19)
+  expect_request_error(
+    "http", "example.com:65536", "/target", "port", 20)
+
   expect_error("ftp://example.com/", "scheme", 1)
   expect_error("//localhost/path", "scheme", 1)
   expect_error("http//example.com/", "scheme_separator", 5)
@@ -224,6 +291,16 @@ assert(invalid[2].kind == "port" and invalid[2].position == 20)
 assert(invalid[2].message ==
        "URL parse error [port] at byte 20: expected a decimal port " ..
        "in the range 1..65535")
+local request = table.pack(
+    url.parse_request("https", "Example.COM:443", "/request?q=1"))
+assert(request.n == 2 and request[1] and request[2] == nil)
+assert(request[1].host == "example.com" and
+       request[1].target == "/request?q=1")
+local bad_target = table.pack(
+    url.parse_request("http", "example.com", "*"))
+assert(bad_target.n == 2 and bad_target[1] == nil and bad_target[2])
+assert(bad_target[2].kind == "origin_form" and
+       bad_target[2].position == 19)
 assert(cases.run() == "url-parser-ok")
 ]==]
         local ok, status, output =

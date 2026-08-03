@@ -165,27 +165,14 @@ function start_client(first_port: integer): async.Task
   end)
 end
 
-local function expect_client_host_rejected(source_url: string,
-                                           authority: string,
-                                           expected: string)
-  local request_headers = http.headers(nil)
-  request_headers:add("Host", authority)
-  local rejected = false
-  do
-    local response = http.get(source_url, request_headers, nil)
-    response:close()
-  catch
-    local message = error as string
-    check(contains(message, expected),
-          "HTTP client rejected Host for the wrong reason: " .. message)
-    rejected = true
-  end
-  check(rejected, "HTTP client accepted invalid Host: " .. authority)
-end
-
 local function expect_client_url_rejected(source_url: string,
                                           authority: string,
                                           expected_kind: string)
+  local expected_url?, expected_error? =
+    url.parse_request("http", authority, "/")
+  check(expected_url == nil and expected_error ~= nil,
+        "URL request parser accepted invalid Host: " .. authority)
+  local expected_diagnostic = expected_error as url.Error
   local request_headers = http.headers(nil)
   request_headers:add("Host", authority)
   local rejected = false
@@ -196,11 +183,13 @@ local function expect_client_url_rejected(source_url: string,
     check(error is url.Error,
           "HTTP client did not raise the URL parser's error record")
     local diagnostic = error as url.Error
-    check(diagnostic.kind == expected_kind,
+    check(diagnostic.kind == expected_kind and
+          diagnostic.kind == expected_diagnostic.kind,
           "HTTP client URL error kind was " .. diagnostic.kind ..
           ", expected " .. expected_kind)
-    check(diagnostic.position >= 1 and #diagnostic.message > 0,
-          "HTTP client URL error lost its position or message")
+    check(diagnostic.position == expected_diagnostic.position and
+          diagnostic.message == expected_diagnostic.message,
+          "HTTP client changed the URL parser's Host diagnostic")
     rejected = true
   end
   check(rejected, "HTTP client accepted invalid Host: " .. authority)
@@ -236,14 +225,13 @@ function start_client_host_validation(first_port: integer): async.Task
     check(peer:status() == "succeeded", "Host validation peer failed")
 
     expect_client_url_rejected(source_url, "", "host")
-    expect_client_host_rejected(
-      source_url, "user@example.com", "non-authority delimiter")
-    expect_client_host_rejected(
-      source_url, "example.com/path", "non-authority delimiter")
-    expect_client_host_rejected(
-      source_url, "example.com?query", "non-authority delimiter")
-    expect_client_host_rejected(
-      source_url, "example.com#fragment", "non-authority delimiter")
+    expect_client_url_rejected(source_url, "user@example.com", "userinfo")
+    expect_client_url_rejected(
+      source_url, "example.com/path", "authority_tail")
+    expect_client_url_rejected(
+      source_url, "example.com?query", "authority_tail")
+    expect_client_url_rejected(
+      source_url, "example.com#fragment", "authority_tail")
     expect_client_url_rejected(source_url, "::1", "ipv6_brackets")
     expect_client_url_rejected(source_url, "[::1", "ipv6_close")
     expect_client_url_rejected(source_url, "[::1]:0", "port")
@@ -284,6 +272,140 @@ function start_client_host_validation(first_port: integer): async.Task
           "HTTP client emitted an Expect field without withholding the body")
 
     outcome = "client-host-validation-ok"
+    return nil
+  end)
+end
+
+local function expect_header_rejected(name: string, contents: string,
+                                      expected: string)
+  local rejected = false
+  do
+    local values = http.headers(nil)
+    values:add(name, contents)
+  catch
+    check(error is string,
+          "HTTP header validation raised a non-string error")
+    local message = error as string
+    check(contains(message, expected),
+          "HTTP header validation failed for the wrong reason: " .. message)
+    rejected = true
+  end
+  check(rejected, "HTTP headers accepted invalid input")
+end
+
+local function expect_length_rejected(contents: string, expected: string)
+  local supplied = http.headers(nil)
+  supplied:add("Content-Length", contents)
+  local rejected = false
+  do
+    local response = http.request(
+      "POST", "http://127.0.0.1:1/", supplied, "body", nil)
+    response:close()
+  catch
+    check(error is string,
+          "HTTP Content-Length validation reached the network")
+    local message = error as string
+    check(contains(message, expected),
+          "HTTP Content-Length failed for the wrong reason: " .. message)
+    rejected = true
+  end
+  check(rejected, "HTTP client accepted an invalid Content-Length")
+end
+
+function start_header_validation(first_port: integer): async.Task
+  outcome = "running"
+  return async.run(function (): value
+    local valid_name =
+      "!#$" .. str.char(37) .. "&'*+-.^_`|~09AZaz"
+    local valid_contents = str.char(9, 32, 126, 128, 255)
+    local accepted = http.headers(nil)
+    accepted:add(valid_name, valid_contents)
+    check(accepted:get(
+            "!#$" .. str.char(37) .. "&'*+-.^_`|~09azaz") ==
+          valid_contents,
+          "HTTP header token or ASCII case folding changed valid bytes")
+
+    expect_header_rejected("", "value", "must not be empty")
+    local invalid_names = {
+      "bad:name", "bad name", "bad" .. str.char(0),
+      "bad" .. str.char(9), "bad" .. str.char(31),
+      "bad" .. str.char(127), "bad" .. str.char(128),
+    }
+    for index = 1, #invalid_names do
+      expect_header_rejected(
+        invalid_names[index], "value", "invalid byte")
+    end
+
+    local forbidden_values = {0, 8, 10, 13, 31, 127}
+    for index = 1, #forbidden_values do
+      expect_header_rejected(
+        "X-Invalid-Value", "ok" .. str.char(forbidden_values[index]),
+        "forbidden byte")
+    end
+
+    local method_rejected = false
+    do
+      local response = http.request(
+        "BAD METHOD", "http://127.0.0.1:1/", nil, nil, nil)
+      response:close()
+    catch
+      check(error is string and
+            contains(error as string, "HTTP method contains an invalid byte"),
+            "HTTP method validation failed for the wrong reason")
+      method_rejected = true
+    end
+    check(method_rejected, "HTTP client accepted an invalid method token")
+
+    expect_length_rejected("", "must not be empty")
+    expect_length_rejected("12x", "only decimal digits")
+    expect_length_rejected(str.rep("9", 100, nil), "too large")
+
+    -- llhttp validates status-code framing but deliberately treats the reason
+    -- phrase as an opaque span. The high-level client still enforces the same
+    -- field-value byte repertoire that the server uses for outbound reasons.
+    local forbidden_reasons = {1, 127}
+    local server, port = raw_listen(first_port)
+    local peer = async.run(function (): value
+      defer server:close()
+      for index = 1, #forbidden_reasons do
+        local connection = server:accept()
+        local preamble = connection:read_until("\r\n\r\n", false)
+        if not preamble then raise "reason-validation peer saw no request" end
+        if index == 1 then
+          connection:write(
+            "HTTP/1.1 103 bad" .. str.char(forbidden_reasons[index]) ..
+            "\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n" ..
+            "Connection: close\r\n\r\n")
+        else
+          connection:write(
+            "HTTP/1.1 200 bad" .. str.char(forbidden_reasons[index]) ..
+            "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        end
+        connection:close()
+      end
+      return nil
+    end)
+    for index = 1, #forbidden_reasons do
+      local reason_rejected = false
+      do
+        local response = http.get(
+          "http://127.0.0.1:" .. str.tostring(port) .. "/", nil, nil)
+        response:close()
+      catch
+        check(error is string and
+              contains(error as string,
+                       "reason phrase contains a forbidden"),
+              "HTTP client rejected an invalid reason for the wrong reason")
+        reason_rejected = true
+      end
+      check(reason_rejected,
+            "HTTP client accepted a forbidden reason-phrase byte")
+    end
+    while active(peer) do timer.yield() end
+    check(peer:status() == "succeeded",
+          "reason-validation peer failed")
+
+    outcome = "header-validation-ok"
     return nil
   end)
 end
@@ -548,7 +670,7 @@ function start_client_framing(first_port: integer): async.Task
     end)
     local peer = async.run(function (): value
       defer server:close()
-      for index = 1, 5 do
+      for index = 1, 6 do
         do
           local connection = server:accept()
           current = connection
@@ -570,11 +692,18 @@ function start_client_framing(first_port: integer): async.Task
               "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n" ..
               "Connection: close\r\n\r\n")
           elseif index == 3 then
+            check(contains(request_text,
+                           "head /lowercase-head HTTP/1.1\r\n"),
+                  "lowercase method client case changed the method")
+            connection:write(
+              "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n" ..
+              "Connection: close\r\n\r\nbody")
+          elseif index == 4 then
             check(contains(request_text, "GET /eof HTTP/1.1\r\n"),
                   "EOF-delimited client case sent the wrong request")
             connection:write(
               "HTTP/1.1 200 OK\r\nX-Mode: eof\r\n\r\neof-body")
-          elseif index == 4 then
+          elseif index == 5 then
             check(contains(request_text, "GET /truncated HTTP/1.1\r\n"),
                   "truncated client case sent the wrong request")
             connection:write(
@@ -611,6 +740,12 @@ function start_client_framing(first_port: integer): async.Task
           head:read() == nil,
           "HTTP client expected a body for a HEAD response")
     head:close()
+
+    outcome = "client-lowercase-head"
+    local lowercase_head = http.request(
+      "head", base .. "/lowercase-head", nil, nil, nil)
+    check(read_response(lowercase_head) == "body",
+          "HTTP client treated a case-distinct method as HEAD")
 
     outcome = "client-eof"
     local eof_response = http.get(base .. "/eof", nil, nil)
@@ -775,6 +910,22 @@ function start_server_failure_isolation(first_port: integer): async.Task
       "Connection: close\r\n\r\n")
     check(#bad_204 == 0 and handled == 1,
           "HTTP 204 response admitted Content-Length")
+
+    local non_origin_lines = {
+      "OPTIONS * HTTP/1.1\r\n",
+      "GET http://other.example/path HTTP/1.1\r\n",
+      "GET example.com:443 HTTP/1.1\r\n",
+      "CONNECT example.com:443 HTTP/1.1\r\n",
+    }
+    for index = 1, #non_origin_lines do
+      outcome = "server-rejecting-non-origin-target-" ..
+        str.tostring(index)
+      local non_origin = exchange(
+        non_origin_lines[index] .. "Host: " .. authority .. "\r\n" ..
+        "Connection: close\r\n\r\n")
+      check(#non_origin == 0 and handled == 1,
+            "HTTP server admitted a non-origin-form request target")
+    end
 
     -- These delimiters would reinterpret the separately received origin-form
     -- target if Host were accepted merely as a prefix of a combined URL.
@@ -1087,6 +1238,11 @@ assert(cases.result() == %q, cases.result())
     it("validates caller-supplied Host as one complete authority", function()
         run("start_client_host_validation", "client-host",
             "client-host-validation-ok")
+    end)
+
+    it("validates outbound fields and inbound reason phrases", function()
+        run("start_header_validation", "header-validation",
+            "header-validation-ok")
     end)
 
     it("starts handlers at headers and streams request and response bodies",
