@@ -11,20 +11,20 @@ local STDLIB_TYPES_FIXTURE =
 "spec/fixtures/stdlib/titan_stdlib_types.lua"
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-    "http", "os", "peg", "string", "math", "lua", "iter", "gc",
+    "url", "http", "os", "peg", "string", "math", "lua", "iter", "gc",
 }
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
-    "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.http",
-    "titan.os", "titan.peg", "titan.string", "titan.math", "titan.lua",
-    "titan.iter", "titan.gc",
+    "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
+    "titan.http", "titan.os", "titan.peg", "titan.string", "titan.math",
+    "titan.lua", "titan.iter", "titan.gc",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
     "titan/timer.lua", "titan/io.lua", "titan/fs.lua", "titan/net.lua",
-    "titan/ssl.lua", "titan/http.lua", "titan/os.lua", "titan/peg.lua",
-    "titan/string.lua", "titan/math.lua", "titan/lua.lua", "titan/iter.lua",
-    "titan/gc.lua",
+    "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/os.lua",
+    "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
+    "titan/iter.lua", "titan/gc.lua",
 }
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
@@ -610,10 +610,6 @@ describe("libuv Makefile configuration", function()
             "$(LLHTTP_CFLAGS) $(TITAN_EXTRA_CFLAGS) " ..
                 "$(LLHTTP_BUILD_CFLAGS)",
             "openssl: $(OPENSSL_LIBS)",
-            "STDLIB_SSL_INTEGRATION_HEADER := titan/ssl/openssl.h",
-            "STDLIB_SSL_INTEGRATION_HEADER=" ..
-                "$(STDLIB_SSL_INTEGRATION_HEADER)",
-            "for input in $(STDLIB_SSL_INTEGRATION_HEADER)",
             "$(OPENSSL_PKG_CONFIG) --atleast-version=" ..
                 "\"$(OPENSSL_MIN_VERSION)\" openssl",
             "CFLAGS=$(call make_shell_quote,$(OPENSSL_REQUIRED_CFLAGS) " ..
@@ -628,12 +624,10 @@ describe("libuv Makefile configuration", function()
         end
         assert.falsy(makefile:find("TITAN_SSLSHIM", 1, true), makefile)
         assert.falsy(makefile:find("titan/ssl/native", 1, true), makefile)
-        assert.equal(table.concat({
-            "#include <openssl/ssl.h>",
-            "#include <openssl/err.h>",
-            "#include <openssl/x509v3.h>",
-            "",
-        }, "\n"), read_file("titan/ssl/openssl.h"))
+        assert.falsy(makefile:find("STDLIB_SSL_INTEGRATION_HEADER", 1, true),
+            makefile)
+        assert.is_nil(lfs.attributes("titan/ssl"),
+            "the retired SSL integration-header directory still exists")
     end)
 
     it("builds the exact three-member private llhttp archive", function()
@@ -800,8 +794,6 @@ describe("libuv Makefile configuration", function()
             assert.same(STDLIB_MODULES, makefile_words("STDLIB_MODULES"))
             assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
             assert.same(STDLIB_SHIMS, makefile_words("STDLIB_SHIMS"))
-            assert.same({ "titan/ssl/openssl.h" },
-                makefile_words("STDLIB_SSL_INTEGRATION_HEADER"))
             assert.same({
                 "$(TITANLIB_O)", "$(LPEGLABEL_ARCHIVE)",
                 "$(LIBUV_EXTRA_OBJECTS)", "$(TITAN_HTTPSHIM_O)",
@@ -851,10 +843,10 @@ describe("libuv Makefile configuration", function()
                 "titan/uv/runtime.titan", "titan/uv/task.titan",
                 "titan/uv/tcp.titan", "titan/async.titan",
                 "titan/timer.titan", "titan/io.titan", "titan/fs.titan",
-                "titan/net.titan", "titan/ssl.titan",
+                "titan/net.titan", "titan/ssl.titan", "titan/url.titan",
                 "titan/http/http.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
-                "titan/http/server.titan", "titan/http/url.titan",
+                "titan/http/server.titan",
                 "titan/os.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
@@ -885,20 +877,17 @@ describe("libuv Makefile configuration", function()
             assert.same({ "titan/gc.titan" }, callers)
         end)
 
-    it("keeps established imports short and new module identities qualified",
+    it("keeps parser-sugared standard-library imports short",
     function()
-        local established = {
+        local short = {
             "coroutine", "uv", "async", "timer", "io", "fs", "net",
-            "os", "peg", "string",
+            "ssl", "url", "http", "os", "peg", "string",
         }
         for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
-            local new_qualified_module = source == "titan/ssl.titan" or
-                source:match("^titan/http/.*[.]titan$")
             if source ~= "$(UV_TITAN_SOURCES)" and
-               source ~= "$(STDLIB_HTTP_SOURCES)" and
-               not new_qualified_module then
+               source ~= "$(STDLIB_HTTP_SOURCES)" then
                 local contents = read_file(source)
-                for _, module in ipairs(established) do
+                for _, module in ipairs(short) do
                     local long = 'import "titan.' .. module .. '"'
                     assert.falsy(contents:find(long, 1, true),
                         source .. " uses " .. long)
@@ -907,7 +896,7 @@ describe("libuv Makefile configuration", function()
         end
 
         local ssl = read_file("titan/ssl.titan")
-        for _, dependency in ipairs({ "async", "net", "string" }) do
+        for _, dependency in ipairs({ "async", "fs", "net", "string" }) do
             assert.truthy(ssl:find(
                 'import "' .. dependency .. '"', 1, true), dependency)
             assert.falsy(ssl:find(
@@ -915,17 +904,85 @@ describe("libuv Makefile configuration", function()
         end
         local http = read_file("titan/http/http.titan")
         for _, dependency in ipairs({
-            "async", "io", "net", "peg", "string",
+            "async", "io", "net", "ssl", "string", "url",
         }) do
             assert.truthy(http:find(
                 'import "' .. dependency .. '"', 1, true), dependency)
             assert.falsy(http:find(
                 'import "titan.' .. dependency .. '"', 1, true), dependency)
         end
-        for _, dependency in ipairs({ "titan.math", "titan.ssl" }) do
+        for _, dependency in ipairs({ "titan.math" }) do
             assert.truthy(http:find(
                 'import "' .. dependency .. '"', 1, true), dependency)
         end
+        local url = read_file("titan/url.titan")
+        for _, dependency in ipairs({ "peg", "string" }) do
+            assert.truthy(url:find(
+                'import "' .. dependency .. '"', 1, true), dependency)
+            assert.falsy(url:find(
+                'import "titan.' .. dependency .. '"', 1, true), dependency)
+        end
+    end)
+
+    it("keeps SSL path loading high-level and PEM owners private", function()
+        local ssl = read_file("titan/ssl.titan")
+        local openssl_headers = {}
+        for header in ssl:gmatch(
+                'foreign import "openssl/([^"]+)"') do
+            openssl_headers[#openssl_headers + 1] = header
+        end
+        assert.same({ "err.h", "x509v3.h", "pem.h", "ssl.h" },
+            openssl_headers)
+        assert.truthy(ssl:find(
+            "local trust_data = fs.read_file", 1, true), ssl)
+        assert.truthy(ssl:find(
+            "local certificate_data = fs.read_file", 1, true), ssl)
+        assert.truthy(ssl:find(
+            "private_key_data = fs.read_file", 1, true), ssl)
+        assert.truthy(ssl:find(
+            "local default_client_context: *openssl.SSL_CTX", 1, true),
+            ssl)
+        assert.truthy(ssl:find(
+            "openssl.SSL_CTX_set_default_verify_paths(context)", 1, true),
+            ssl)
+        assert.truthy(ssl:find(
+            "openssl.SSL_CTX_up_ref(context)", 1, true), ssl)
+        for _, retired in ipairs({
+            "SSL_CTX_load_verify_locations",
+            "SSL_CTX_use_certificate_chain_file",
+            "SSL_CTX_use_PrivateKey_file",
+        }) do
+            assert.falsy(ssl:find(retired, 1, true), retired)
+        end
+        assert.falsy(ssl:find('import "uv"', 1, true), ssl)
+
+        assert.same({
+            "PemBlock", "CertificateResult", "PrivateKeyResult",
+        }, local_record_declarations("titan/ssl.titan"))
+        local public = {}
+        for _, name in ipairs(public_declarations("titan/ssl.titan")) do
+            public[name] = true
+        end
+        for _, helper in ipairs({
+            "PemBlock", "CertificateResult", "PrivateKeyResult",
+        }) do
+            assert.falsy(public[helper], helper .. " leaked into ssl ABI")
+        end
+    end)
+
+    it("keeps listener defaults in the high-level facades", function()
+        local net = read_file("titan/net.titan")
+        assert.truthy(net:find(
+            "local actual_backlog = 128", 1, true), net)
+
+        local ssl = read_file("titan/ssl.titan")
+        assert.truthy(ssl:find(
+            "local actual_private_key_file = certificate_file", 1, true),
+            ssl)
+
+        local http = read_file("titan/http/server.titan")
+        assert.truthy(http:find("local actual_port = 80", 1, true), http)
+        assert.truthy(http:find("local actual_port = 443", 1, true), http)
     end)
 
     it("parses titan.io as seven ordered Interfaces plus public helpers",
@@ -1028,10 +1085,10 @@ describe("libuv Makefile configuration", function()
             }, public_declarations(path))
         end)
 
-    it("pins current metadata for all sixteen standard modules",
+    it("pins current metadata for all seventeen standard modules",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
-            assert.equal(16, #STDLIB_ROOTS)
+            assert.equal(17, #STDLIB_ROOTS)
 
             local support = require "titan"
             local container = installed_stdlib_container()
@@ -1052,11 +1109,11 @@ describe("libuv Makefile configuration", function()
             end
         end)
 
-    it("exports seventeen DSO openers for sixteen standard modules",
+    it("exports eighteen DSO openers for seventeen standard modules",
         function()
-            assert.equal(16, #STDLIB_MODULES)
-            assert.equal(16, #STDLIB_ROOTS)
-            assert.equal(16, #STDLIB_SHIMS)
+            assert.equal(17, #STDLIB_MODULES)
+            assert.equal(17, #STDLIB_ROOTS)
+            assert.equal(17, #STDLIB_SHIMS)
 
             local container = installed_stdlib_container()
             local ok, output, why, code = run_argv(tool_argv(
@@ -1080,7 +1137,7 @@ describe("libuv Makefile configuration", function()
                     found[symbol] = true
                 end
             end
-            assert.equal(17, (function()
+            assert.equal(18, (function()
                 local count = 0
                 for _ in pairs(found) do count = count + 1 end
                 return count
@@ -1718,10 +1775,10 @@ esac
             local sources = {
                 "titan/coroutine.titan", "titan/async.titan",
                 "titan/timer.titan", "titan/io.titan", "titan/fs.titan",
-                "titan/net.titan", "titan/ssl.titan",
+                "titan/net.titan", "titan/ssl.titan", "titan/url.titan",
                 "titan/http/http.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
-                "titan/http/server.titan", "titan/http/url.titan",
+                "titan/http/server.titan",
                 "titan/os.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
@@ -2093,7 +2150,7 @@ fi
                 '"$shim_dir/iter.lua" "$shim_dir/gc.lua"',
                 '"$shim_dir/io.lua"',
                 '"$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/ssl.lua"',
-                '"$shim_dir/http.lua" "$shim_dir/os.lua"',
+                '"$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/os.lua"',
             }) do
                 assert.truthy(snapshot:find(contract, 1, true), contract)
             end
@@ -2106,8 +2163,9 @@ fi
                 'local titan_io = import "io"',
                 'local fs = import "fs"',
                 'local net = import "net"',
-                'local ssl = import "titan.ssl"',
-                'local http = import "titan.http"',
+                'local ssl = import "ssl"',
+                'local url = import "url"',
+                'local http = import "http"',
                 'local system = import "os"',
                 'local peg = import "peg"',
                 'local strings = import "string"',
@@ -2139,7 +2197,7 @@ fi
                 'reader:read_until("\\n", true) == process_payload',
                 'net.connect("127.0.0.1", port)',
                 'ssl.Error.new(',
-                'http.parse_url("https://localhost:8443/static?q=1")',
+                'url.parse("https://localhost:8443/static?q=1")',
                 "system.exepath()",
                 '"$LIBUV_PKG_CONFIG" --static --libs libuv',
                 '"$libdir/libuv.a" "$libdir/libuv_a.a"',
@@ -2190,6 +2248,7 @@ fi
                 'local builtin_io = require "io"',
                 'local titan_io = require "titan.io"',
                 'local ssl = require "titan.ssl"',
+                'local url = require "titan.url"',
                 'local http = require "titan.http"',
                 'local math = require "titan.math"',
                 'local lua = require "titan.lua"',
@@ -2209,7 +2268,8 @@ fi
             assert.truthy(workflow:find(
                 "PEG/string/math/Lua/iter/GC groups", 1, true), workflow)
             assert.truthy(workflow:find(
-                "Run serial, net/SSL/HTTP/OS, and PEG/string/math/Lua/iter/GC " ..
+                "Run serial, net/SSL/URL/HTTP/OS, and " ..
+                    "PEG/string/math/Lua/iter/GC " ..
                     "library tests without coverage", 1, true), workflow)
             assert.truthy(workflow:find(
                 "ci_libuv_mode_smoke.sh system", 1, true), workflow)
@@ -2236,7 +2296,7 @@ fi
                 assert.truthy(workflow:find(contract, 1, true), contract)
             end
             assert.truthy(workflow:find(
-                "for module in coroutine uv async timer io fs net ssl http os peg string math lua iter gc",
+                "for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc",
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "--name='titan.peg GC roots patterns and callbacks across " ..
@@ -2252,12 +2312,13 @@ fi
             local groups = read_file("spec/support/ci_test_groups.sh")
             for _, pattern in ipairs({
                 "spec/stdlib/ssl*_spec.lua",
+                "spec/stdlib/url*_spec.lua",
                 "spec/stdlib/http*_spec.lua",
             }) do
                 assert.truthy(groups:find(pattern, 1, true), pattern)
             end
             assert.truthy(groups:find(
-                "net/SSL/HTTP/OS spec files", 1, true), groups)
+                "net/SSL/URL/HTTP/OS spec files", 1, true), groups)
             assert.truthy(groups:find("library-peg-string)", 1, true), groups)
             assert.truthy(groups:find(
                 "PEG/string/math/Lua/iter/GC spec files without LuaCov",

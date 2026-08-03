@@ -43,10 +43,14 @@ embedded PEG engine or private uv continuation layer through a raw escape
 hatch. Both
 `titan.net` and `titan.os` dogfood the literal
 `titan.string.find` and byte-preserving `titan.string.sub` operations.
-Production places all sixteen logical modules and LPegLabel in one static
+The independent `titan.url` module imports both public modules: `titan.peg`
+compiles and executes its labeled grammar, while `titan.string` supplies its
+writer and byte-preserving normalization helpers. Neither dependency exposes
+private engine or storage state to URL.
+Production places all seventeen logical modules and LPegLabel in one static
 bundle.
 
-The installed standard build requests sixteen roots in stable order:
+The installed standard build requests seventeen roots in stable order:
 
 ```text
 titan.coroutine
@@ -57,6 +61,7 @@ titan.io
 titan.fs
 titan.net
 titan.ssl
+titan.url
 titan.http
 titan.os
 titan.peg
@@ -68,14 +73,14 @@ titan.gc
 ```
 
 The request order keeps `titan.io` before its concrete stream users, places
-the qualified high-level SSL and HTTP layers after `titan.net`, retains the
-four independent qualified utility modules, and remains
+the high-level SSL, URL, and HTTP layers after `titan.net`, retains the four
+independent qualified utility modules, and remains
 non-topological. Recursive import loading resolves both the
-`titan.net`/`titan.os` to `titan.string` to `titan.peg` chains while those
-facades are processed.
+`titan.net`/`titan.os` to `titan.string` to `titan.peg` chains and the
+`titan.url` PEG/string dependencies while those facades are processed.
 
-The paired `titan.so`/`titan.a` therefore contains sixteen logical protocols
-and sixteen archive metadata keys. The DSO exposes seventeen Lua openers: bare
+The paired `titan.so`/`titan.a` therefore contains seventeen logical protocols
+and seventeen archive metadata keys. The DSO exposes eighteen Lua openers: bare
 `luaopen_titan` support plus one entry per logical module. The provider's
 metadata-free payload begins with `titanlib.o`, then the private
 `libtitan-lpeglabel.a`, then the selected libuv payload, private HTTP adapter

@@ -329,9 +329,17 @@ local function declaration_qualifiers(declaration)
     return declaration.qualifiers
 end
 
-local function render_declaration_compatibility_source(
-        module_context, left_type, right_type,
-        left_declaration, right_declaration)
+local function expand_probe_declaration_typedef(typ)
+    -- A declaration-owned array view can acquire a composite bound after an
+    -- earlier accepted redeclaration. Its source typedef still has the old
+    -- incomplete definition in the header preamble, so probe the private view
+    -- structurally instead of hiding that mutation behind the typedef name.
+    return typ._tag == "Type.CTypedef"
+       and typ._declaration_array_view == true
+end
+
+local function render_declaration_compatibility_pair(
+        left_type, right_type, left_declaration, right_declaration, name)
     left_type = probe_declaration_type(left_type)
     right_type = probe_declaration_type(right_type)
     if not left_type or not right_type then
@@ -343,20 +351,100 @@ local function render_declaration_compatibility_source(
     -- the final ordered header context? This is stronger than compiling the
     -- preamble alone, which does not compare independently extracted types.
     -- It still cannot prove that a macro-suppressed source declaration occurred.
-    local name = probe_identifier("d", module_context.header_key)
     local left = cdeclarator.render_declaration(
-        left_type, name, declaration_qualifiers(left_declaration))
+        left_type, name, declaration_qualifiers(left_declaration),
+        expand_probe_declaration_typedef)
     local right = cdeclarator.render_declaration(
-        right_type, name, declaration_qualifiers(right_declaration))
-    local lines = {}
-    append_preamble(lines, module_context.header_preamble)
-    lines[#lines + 1] = "extern " .. left .. ";"
-    lines[#lines + 1] = "extern " .. right .. ";"
-    lines[#lines + 1] = ""
-    return table.concat(lines, "\n"), {
+        right_type, name, declaration_qualifiers(right_declaration),
+        expand_probe_declaration_typedef)
+    return {
         left_declaration = left,
         right_declaration = right,
     }
+end
+
+local function render_declaration_compatibility_source(
+        module_context, left_type, right_type,
+        left_declaration, right_declaration)
+    local rendered = render_declaration_compatibility_pair(
+        left_type, right_type, left_declaration, right_declaration,
+        probe_identifier("d", module_context.header_key))
+    local lines = {}
+    append_preamble(lines, module_context.header_preamble)
+    lines[#lines + 1] =
+        "extern " .. rendered.left_declaration .. ";"
+    lines[#lines + 1] =
+        "extern " .. rendered.right_declaration .. ";"
+    lines[#lines + 1] = ""
+    return table.concat(lines, "\n"), rendered
+end
+
+local function render_declaration_compatibility_batch_source(
+        module_context, entries)
+    local lines = {}
+    append_preamble(lines, module_context.header_preamble)
+
+    if #entries == 1 then
+        local entry = entries[1]
+        local rendered = render_declaration_compatibility_pair(
+            entry.left_type, entry.right_type,
+            entry.left_declaration, entry.right_declaration,
+            probe_identifier("d", module_context.header_key))
+        lines[#lines + 1] =
+            "extern " .. rendered.left_declaration .. ";"
+        lines[#lines + 1] =
+            "extern " .. rendered.right_declaration .. ";"
+        lines[#lines + 1] = ""
+        return table.concat(lines, "\n")
+    end
+
+    -- Ordinary identifiers have separate block scopes below, but every
+    -- block-scope extern still denotes an external-linkage C identifier. Keep
+    -- the pair spellings distinct just as the former flat batch did.
+    local wrapper = probe_identifier("db", module_context.header_key)
+    lines[#lines + 1] = "void " .. wrapper .. "(void);"
+    lines[#lines + 1] = "void " .. wrapper .. "(void)"
+    lines[#lines + 1] = "{"
+
+    -- The block-scope extern declarations are intentional probe machinery.
+    -- Do not let an opt-in warning about nested externs turn otherwise valid
+    -- pairs into compiler rejections; preserve other configured diagnostics
+    -- and remain ordinary C99 on non-GNU-compatible compilers.
+    lines[#lines + 1] = "#if defined(__clang__)"
+    lines[#lines + 1] = "# pragma clang diagnostic push"
+    lines[#lines + 1] =
+        "# pragma clang diagnostic ignored \"-Wnested-externs\""
+    lines[#lines + 1] = "#elif defined(__GNUC__)"
+    lines[#lines + 1] = "# pragma GCC diagnostic push"
+    lines[#lines + 1] =
+        "# pragma GCC diagnostic ignored \"-Wnested-externs\""
+    lines[#lines + 1] = "#endif"
+
+    for index, entry in ipairs(entries) do
+        -- A C tag introduced by a file-scope object declaration remains
+        -- visible to every later declaration in that translation unit. Give
+        -- each pair its own nested block so one candidate cannot seed a tag
+        -- that changes another candidate's prototype-scope identity.
+        local role = "d" .. tostring(index)
+        local rendered = render_declaration_compatibility_pair(
+            entry.left_type, entry.right_type,
+            entry.left_declaration, entry.right_declaration,
+            probe_identifier(role, module_context.header_key))
+        lines[#lines + 1] = "    {"
+        lines[#lines + 1] =
+            "        extern " .. rendered.left_declaration .. ";"
+        lines[#lines + 1] =
+            "        extern " .. rendered.right_declaration .. ";"
+        lines[#lines + 1] = "    }"
+    end
+    lines[#lines + 1] = "#if defined(__clang__)"
+    lines[#lines + 1] = "# pragma clang diagnostic pop"
+    lines[#lines + 1] = "#elif defined(__GNUC__)"
+    lines[#lines + 1] = "# pragma GCC diagnostic pop"
+    lines[#lines + 1] = "#endif"
+    lines[#lines + 1] = "}"
+    lines[#lines + 1] = ""
+    return table.concat(lines, "\n")
 end
 
 local function render_pointer_source(module_context, source_type, target_type)
@@ -1043,105 +1131,88 @@ local function declaration_compatibility_result_key(
     })
 end
 
-function ModuleContext:validate_declaration_compatibility(
-        left_type, right_type, left_declaration, right_declaration)
-    local service = self.service
-    if service.closed then
-        return {
-            status = "infrastructure_failure",
-            ok = false,
-            accepted = nil,
-            stage = "service",
-            reason = "closed",
-            diagnostic = "probe service is closed",
-            summary = "probe service is closed",
-            message =
-                "cannot validate C declaration compatibility because "
-                .. "the probe service is closed",
-        }
-    end
+local function closed_declaration_compatibility_result()
+    return {
+        status = "infrastructure_failure",
+        ok = false,
+        accepted = nil,
+        stage = "service",
+        reason = "closed",
+        diagnostic = "probe service is closed",
+        summary = "probe service is closed",
+        message =
+            "cannot validate C declaration compatibility because "
+            .. "the probe service is closed",
+    }
+end
 
-    local rendered_ok, source, rendered = pcall(
-        render_declaration_compatibility_source, self,
-        left_type, right_type, left_declaration, right_declaration)
-    if not rendered_ok then
-        local diagnostic = tostring(source)
-        return {
-            status = "rejected",
-            ok = false,
-            accepted = false,
-            stage = "source",
-            reason = "unrenderable_declaration",
-            diagnostic = diagnostic,
-            summary = first_diagnostic_line(diagnostic),
-            message =
-                "cannot prove C declaration compatibility because the "
-                .. "exact declaration pair cannot be rendered: "
-                .. first_diagnostic_line(diagnostic),
-        }
-    end
+local function unrenderable_declaration_compatibility_result(diagnostic)
+    diagnostic = tostring(diagnostic)
+    return {
+        status = "rejected",
+        ok = false,
+        accepted = false,
+        stage = "source",
+        reason = "unrenderable_declaration",
+        diagnostic = diagnostic,
+        summary = first_diagnostic_line(diagnostic),
+        message =
+            "cannot prove C declaration compatibility because the "
+            .. "exact declaration pair cannot be rendered: "
+            .. first_diagnostic_line(diagnostic),
+    }
+end
 
-    local key = declaration_compatibility_result_key(
-        service, self, rendered)
-    local cached = service.result_cache[key]
-    service:_emit({
-        kind = "cache",
-        cache = "candidate",
-        hit = cached ~= nil,
-        key = key,
-    })
-    if cached then
-        local result = deep_copy(cached)
-        result.cached = true
-        return result
-    end
-
-    local baseline = service:_ensure_baseline(self)
-    if baseline.status ~= "success" then
-        return {
-            status = "infrastructure_failure",
-            ok = false,
-            accepted = nil,
-            stage = "baseline",
-            kind = "declaration_compatibility",
-            key = key,
-            baseline_key = self.baseline_key,
-            cached = false,
-            baseline_cached = baseline.cached,
-            left_declaration = rendered.left_declaration,
-            right_declaration = rendered.right_declaration,
-            diagnostic = baseline.diagnostic,
-            summary = baseline.summary,
-            message = baseline.message
-                and baseline.message:gsub(
-                    "cannot validate C conversion",
-                    "cannot validate C declaration compatibility", 1)
-                or "cannot validate C declaration compatibility because "
-                    .. "the foreign header baseline failed",
-            command = baseline.command,
-            argv = baseline.argv,
-            source = baseline.source,
-            source_path = baseline.source_path,
-            exit_status = baseline.exit_status,
-            interrupted = baseline.interrupted,
-        }
-    end
-
-    local run = service:_run_source(
-        "candidate", source, key, "declaration-compatibility")
-    local result = {
+local function baseline_declaration_compatibility_result(
+        module_context, entry, baseline)
+    return {
+        status = "infrastructure_failure",
+        ok = false,
+        accepted = nil,
+        stage = "baseline",
         kind = "declaration_compatibility",
-        key = key,
-        baseline_key = self.baseline_key,
+        key = entry.key,
+        baseline_key = module_context.baseline_key,
         cached = false,
         baseline_cached = baseline.cached,
-        left_declaration = rendered.left_declaration,
-        right_declaration = rendered.right_declaration,
+        left_declaration = entry.rendered.left_declaration,
+        right_declaration = entry.rendered.right_declaration,
+        diagnostic = baseline.diagnostic,
+        summary = baseline.summary,
+        message = baseline.message
+            and baseline.message:gsub(
+                "cannot validate C conversion",
+                "cannot validate C declaration compatibility", 1)
+            or "cannot validate C declaration compatibility because "
+                .. "the foreign header baseline failed",
+        command = baseline.command,
+        argv = baseline.argv,
+        source = baseline.source,
+        source_path = baseline.source_path,
+        exit_status = baseline.exit_status,
+        interrupted = baseline.interrupted,
+    }
+end
+
+local function declaration_compatibility_candidate_result(
+        module_context, entry, run, baseline_cached)
+    local result = {
+        kind = "declaration_compatibility",
+        key = entry.key,
+        baseline_key = module_context.baseline_key,
+        cached = false,
+        baseline_cached = baseline_cached,
+        left_declaration = entry.rendered.left_declaration,
+        right_declaration = entry.rendered.right_declaration,
         diagnostic = run.diagnostic,
         summary = first_diagnostic_line(run.diagnostic),
         command = run.command,
         argv = run.argv,
-        source = source,
+        -- Keep the exact program compiled for this verdict aligned with its
+        -- diagnostic, command, and temporary pathname. Lua strings are shared
+        -- immutable values, so caching this one batch source under each pair
+        -- key does not copy its bytes per result.
+        source = run.source,
         source_path = run.source_path,
         object_path = run.object_path,
         exit_status = run.status,
@@ -1159,7 +1230,6 @@ function ModuleContext:validate_declaration_compatibility(
         result.message = infrastructure_message("candidate", run):gsub(
             "cannot validate C conversion",
             "cannot validate C declaration compatibility", 1)
-        return result
     elseif not run.ok then
         result.status = "rejected"
         result.ok = false
@@ -1178,9 +1248,168 @@ function ModuleContext:validate_declaration_compatibility(
         result.accepted = true
         result.stage = "candidate"
     end
-
-    service.result_cache[key] = deep_copy(result)
     return result
+end
+
+local function declaration_compatibility_batch_key(
+        service, module_context, entries)
+    local fields = {
+        { "toolchain", service.toolchain_key },
+        { "headers", module_context.header_key },
+        { "probe_kind", "declaration_compatibility_batch" },
+    }
+    for index, entry in ipairs(entries) do
+        fields[#fields + 1] = {
+            "candidate_" .. tostring(index), entry.key,
+        }
+    end
+    return keyed_fields(fields)
+end
+
+local function copy_entry_slice(entries, first, last)
+    local out = {}
+    for index = first, last do
+        out[#out + 1] = entries[index]
+    end
+    return out
+end
+
+-- Compile a group once on the ordinary success path. A compiler rejection says
+-- only that at least one pair in the group failed, so recursively bisect until
+-- every rejected leaf has the same singleton evidence the historical API
+-- produced. Spawn/interruption/workspace failures are not semantic evidence and
+-- therefore apply to the whole group without bisection or caching.
+local function validate_declaration_compatibility_batch(
+        module_context, entries, baseline, resolved)
+    local service = module_context.service
+    local source = render_declaration_compatibility_batch_source(
+        module_context, entries)
+    local key = declaration_compatibility_batch_key(
+        service, module_context, entries)
+    local run = service:_run_source(
+        "candidate", source, key, "declaration-compatibility-batch")
+
+    if not run.started or run.interrupted or run.cleanup_error then
+        for _, entry in ipairs(entries) do
+            resolved[entry.key] =
+                declaration_compatibility_candidate_result(
+                    module_context, entry, run, baseline.cached)
+        end
+        return
+    elseif run.ok or #entries == 1 then
+        for _, entry in ipairs(entries) do
+            local result = declaration_compatibility_candidate_result(
+                module_context, entry, run, baseline.cached)
+            resolved[entry.key] = result
+            service.result_cache[entry.key] = deep_copy(result)
+        end
+        return
+    end
+
+    local middle = math.floor(#entries / 2)
+    validate_declaration_compatibility_batch(
+        module_context, copy_entry_slice(entries, 1, middle),
+        baseline, resolved)
+    validate_declaration_compatibility_batch(
+        module_context, copy_entry_slice(entries, middle + 1, #entries),
+        baseline, resolved)
+end
+
+function ModuleContext:validate_declaration_compatibilities(candidates)
+    if type(candidates) ~= "table" then
+        error("C declaration compatibility candidates must be an array", 2)
+    end
+    local service = self.service
+    local results = {}
+    if service.closed then
+        for index = 1, #candidates do
+            results[index] = closed_declaration_compatibility_result()
+        end
+        return results
+    end
+
+    local entries = {}
+    local pending_by_key = {}
+    for index, candidate in ipairs(candidates) do
+        local left_type = candidate.left_type or candidate[1]
+        local right_type = candidate.right_type or candidate[2]
+        local left_declaration = candidate.left_declaration or candidate[3]
+        local right_declaration = candidate.right_declaration or candidate[4]
+        local rendered_ok, rendered = pcall(
+            render_declaration_compatibility_pair,
+            left_type, right_type, left_declaration, right_declaration,
+            probe_identifier("d", self.header_key))
+        if not rendered_ok then
+            results[index] =
+                unrenderable_declaration_compatibility_result(rendered)
+        else
+            local key = declaration_compatibility_result_key(
+                service, self, rendered)
+            local cached = service.result_cache[key]
+            local pending = pending_by_key[key]
+            service:_emit({
+                kind = "cache",
+                cache = "candidate",
+                hit = cached ~= nil or pending ~= nil,
+                pending = cached == nil and pending ~= nil or nil,
+                key = key,
+            })
+            if cached then
+                local result = deep_copy(cached)
+                result.cached = true
+                results[index] = result
+            elseif pending then
+                pending.indexes[#pending.indexes + 1] = index
+            else
+                local entry = {
+                    key = key,
+                    rendered = rendered,
+                    left_type = left_type,
+                    right_type = right_type,
+                    left_declaration = left_declaration,
+                    right_declaration = right_declaration,
+                    indexes = { index },
+                }
+                entries[#entries + 1] = entry
+                pending_by_key[key] = entry
+            end
+        end
+    end
+
+    if #entries == 0 then return results end
+
+    local baseline = service:_ensure_baseline(self)
+    local resolved = {}
+    if baseline.status ~= "success" then
+        for _, entry in ipairs(entries) do
+            resolved[entry.key] = baseline_declaration_compatibility_result(
+                self, entry, baseline)
+        end
+    else
+        validate_declaration_compatibility_batch(
+            self, entries, baseline, resolved)
+    end
+
+    for _, entry in ipairs(entries) do
+        local result = resolved[entry.key]
+        for occurrence, index in ipairs(entry.indexes) do
+            results[index] = deep_copy(result)
+            if occurrence > 1 and result.status ~= "infrastructure_failure" then
+                results[index].cached = true
+            end
+        end
+    end
+    return results
+end
+
+function ModuleContext:validate_declaration_compatibility(
+        left_type, right_type, left_declaration, right_declaration)
+    return self:validate_declaration_compatibilities({ {
+        left_type = left_type,
+        right_type = right_type,
+        left_declaration = left_declaration,
+        right_declaration = right_declaration,
+    } })[1]
 end
 
 local function pointer_result_key(service, module_context, rendered)
@@ -1582,6 +1811,15 @@ function Service:validate_declaration_compatibility(
     end
     return module_context:validate_declaration_compatibility(
         left_type, right_type, left_declaration, right_declaration)
+end
+
+function Service:validate_declaration_compatibilities(
+        module_context, candidates)
+    if getmetatable(module_context) ~= ModuleContext
+    or module_context.service ~= self then
+        return nil, "module context does not belong to this probe service"
+    end
+    return module_context:validate_declaration_compatibilities(candidates)
 end
 
 function Service:probe_operator(module_context, trait)

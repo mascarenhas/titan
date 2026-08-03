@@ -6,18 +6,18 @@ record ClientResponse
   local parser: Parser
   local connection: io.ReaderWriterCloser
   local closed: boolean
+  local connection_closed: boolean
 end
 
-local function client_connection(url: URL, ca_file: string?,
-                                 ca_directory: string?):
+local function client_connection(parsed_url: url.Url, ca_file: string?):
     io.ReaderWriterCloser
-  if url.scheme == "https" then
+  if parsed_url.scheme == "https" then
     local secure = ssl.connect(
-      url.host, url.port, ca_file, ca_directory)
+      parsed_url.host, parsed_url.port, ca_file)
     local channel: io.ReaderWriterCloser = secure
     return channel
   end
-  local plain = net.connect(url.host, url.port)
+  local plain = net.connect(parsed_url.host, parsed_url.port)
   local channel: io.ReaderWriterCloser = plain
   return channel
 end
@@ -34,18 +34,19 @@ local function validate_client_host(scheme: string, authority: string)
     end
     index = index + 1
   end
-  parse_url(scheme .. "://" .. authority .. "/")
+  parse_url_or_raise(scheme .. "://" .. authority .. "/")
 end
 
-local function client_request_headers(url: URL, supplied: Headers?,
+local function client_request_headers(parsed_url: url.Url,
+                                      supplied: Headers?,
                                       body: string?): Headers
   local result = copy_headers(supplied)
   local hosts = result:values("Host")
   if #hosts > 1 then raise "HTTP request has more than one Host header" end
   if #hosts == 0 then
-    result:add("Host", url:host_header())
+    result:add("Host", parsed_url:host_header())
   else
-    validate_client_host(url.scheme, hosts[1])
+    validate_client_host(parsed_url.scheme, hosts[1])
   end
 
   if #result:values("Transfer-Encoding") > 0 then
@@ -84,12 +85,12 @@ end
 
 function request(method: string, source_url: string,
                  supplied_headers: Headers?, body: string?,
-                 ca_file: string?, ca_directory: string?): ClientResponse
+                 ca_file: string?): ClientResponse
   validate_http_token(method, "HTTP method")
-  local parsed_url = parse_url(source_url)
+  local parsed_url = parse_url_or_raise(source_url)
   local request_headers =
     client_request_headers(parsed_url, supplied_headers, body)
-  local connection = client_connection(parsed_url, ca_file, ca_directory)
+  local connection = client_connection(parsed_url, ca_file)
   local parser: Parser? = nil
   do
     local builder = str.writer(false)
@@ -109,7 +110,7 @@ function request(method: string, source_url: string,
     end
     return ClientResponse.new(
       exact.status_number, exact.reason_text, "HTTP/1.1",
-      exact.parsed_headers, exact, connection, false)
+      exact.parsed_headers, exact, connection, false, false)
   catch
     local failure = error
     if parser then close_parser(parser as Parser) end
@@ -122,9 +123,8 @@ function request(method: string, source_url: string,
 end
 
 function get(source_url: string, supplied_headers: Headers?,
-             ca_file: string?, ca_directory: string?): ClientResponse
-  return request("GET", source_url, supplied_headers, nil,
-                 ca_file, ca_directory)
+             ca_file: string?): ClientResponse
+  return request("GET", source_url, supplied_headers, nil, ca_file)
 end
 
 function ClientResponse:read(): string?
@@ -159,8 +159,13 @@ function ClientResponse:read_until(delimiter: string,
 end
 
 function ClientResponse:close()
-  if self.closed then return end
-  close_parser(self.parser)
-  self.closed = true
-  self.connection:close()
+  if self.closed and self.connection_closed then return end
+  if not self.closed then
+    close_parser(self.parser)
+    self.closed = true
+  end
+  if not self.connection_closed then
+    self.connection:close()
+    self.connection_closed = true
+  end
 end

@@ -44,6 +44,39 @@ describe("C declarator rendering", function()
                     types.CPointer(const_word, {}), "pointer"))
         end)
 
+        it("selectively expands private array views with correct precedence",
+        function()
+            local array = types.CTypedef(
+                "ffi_private_array", types.CArray(cint(), 3))
+            array._declaration_array_view = true
+            local const_array = types.CTypedef(
+                "ffi_private_const_array", types.CArray(cint(), 3),
+                { "const" })
+            const_array._declaration_array_view = true
+            local function private_view(typ)
+                return typ._declaration_array_view == true
+            end
+
+            assert.equal("ffi_private_array values",
+                cdeclarator.render_declaration(array, "values"))
+            assert.equal("int values[3]",
+                cdeclarator.render_declaration(
+                    array, "values", nil, private_view))
+            assert.equal("int (*pointer)[3]",
+                cdeclarator.render_declaration(
+                    types.CPointer(array, {}), "pointer", nil,
+                    private_view))
+            assert.equal("const int (*pointer)[3]",
+                cdeclarator.render_declaration(
+                    types.CPointer(const_array, {}), "pointer", nil,
+                    private_view))
+            assert.equal("void take(const int [3])",
+                cdeclarator.render_declaration(
+                    types.CFunction(
+                        { const_array }, types.CVoid(), false, "cdecl"),
+                    "take", nil, private_view))
+        end)
+
         it("uses real tag spelling and never invents a typedef for tag aliases",
         function()
             local struct = types.CStruct(

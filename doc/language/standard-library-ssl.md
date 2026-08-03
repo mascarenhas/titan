@@ -1,23 +1,24 @@
 # TLS standard library
 
-The qualified `titan.ssl` standard module provides verified TLS clients and
-TLS servers over the public [TCP networking](standard-library-net.md) API.
-Titan source imports it with its full name:
+The `ssl` standard module provides verified TLS clients and TLS servers over
+the public [TCP networking](standard-library-net.md) API. Titan source uses
+its short import:
 
 ```titan
-local ssl = import "titan.ssl"
+local ssl = import "ssl"
 ```
 
-Lua loads the same canonical module identity with:
+The parser resolves that spelling to the canonical `titan.ssl` module
+identity. Lua loads that identity directly with:
 
 ```lua
 local ssl = require "titan.ssl"
 ```
 
-There is deliberately no short `import "ssl"` spelling. TLS is an ordinary
-high-level standard-library layer, not an addition to Titan's private libuv
-binding. Its operations call `net.Connection` methods and therefore must run
-inside an async Task, under the same loop-driving rules as `net`.
+TLS is an ordinary high-level standard-library layer, not an addition to
+Titan's private libuv binding. Its operations call `net.Connection` methods
+and therefore must run inside an async Task, under the same loop-driving rules
+as `net`.
 
 ## API
 
@@ -33,12 +34,12 @@ record Connection
 record Server
 
 function connect(host: string, port: integer,
-                 ca_file: string?,
-                 ca_directory: string?): Connection
+                 ca_file: string?): Connection
 
-function listen(host: string, port: integer, backlog: integer,
+function listen(host: string, port: integer,
                 certificate_file: string,
-                private_key_file: string): Server
+                private_key_file: string?,
+                backlog: integer?): Server
 
 function Connection:handshake()
 function Connection:read(): string?
@@ -58,16 +59,20 @@ exact method shapes required by all seven [`io` Interfaces](standard-library-io.
 ordinary structural conversions at a statically known conversion site; the
 records do not share a base class with their `net` counterparts.
 
-The optional trailing arguments may be omitted. Strings used as hostnames,
-certificate paths, or trust paths are text and may not contain an embedded
-NUL. Application payloads and read delimiters are binary strings.
+The optional trailing arguments may be omitted. In `listen`, an omitted
+`private_key_file` uses `certificate_file` as a combined PEM certificate/key
+bundle, while an omitted `backlog` defaults to 128. A listener port must be in
+`0..65535`, where 0 requests an ephemeral port, and a supplied backlog must be
+in `1..2147483647`. Strings used as hostnames, certificate paths, or trust
+paths are text and may not contain an embedded NUL. Application payloads and
+read delimiters are binary strings.
 
 ## Verified client connections
 
-`connect` first establishes a `net.Connection`, configures a client TLS state
-machine, and completes its handshake before returning. It requires TLS 1.2 or
-newer and verifies the peer certificate by default. There is no insecure
-client mode.
+`connect` selects trust, establishes a `net.Connection`, configures a client
+TLS state machine, and completes its handshake before returning. It requires
+TLS 1.2 or newer and verifies the peer certificate by default. There is no
+insecure client mode.
 
 The requested `host` is also the certificate identity. A DNS name is checked
 against the certificate's DNS identity with partial wildcards disabled and is
@@ -81,29 +86,41 @@ the TCP destination so the zone selects the local interface. The `%zone` suffix
 is not part of an X.509 IP identity, so it is removed only for certificate
 matching. The connection still follows the IP-address branch and sends no SNI.
 
-The two trust arguments select OpenSSL's certificate-location mechanism:
+The optional trust argument selects one of two modes:
 
-- with neither argument, the context loads OpenSSL's compiled default verify
-  paths, including the environment overrides OpenSSL recognizes;
-- `ca_file` selects an explicit PEM bundle;
-- `ca_directory` selects an explicit OpenSSL certificate directory; and
-- both may be supplied together.
+- without `ca_file`, connections share the module's default client context,
+  initialized once from OpenSSL's compiled default verify paths and the
+  environment overrides OpenSSL recognizes; or
+- `ca_file` selects an explicit PEM certificate bundle for that connection.
 
-An explicit file or directory replaces the default-path call for that
-connection; it is not added after the defaults. In particular, the no-argument
-case is **not** a portable abstraction over every operating system's native
-trust store. A bundled OpenSSL build still uses OpenSSL's compiled filesystem
-defaults. Programs that need deployment-independent trust selection should
-pass an explicit CA file or directory.
+An explicit file replaces the default roots; it is not added after them. Titan
+reads that path through the high-level asynchronous `fs` module, then parses
+and installs every certificate from the in-memory PEM data before opening the
+TCP connection. An empty file, a file with no certificate, or malformed PEM is
+rejected. This API has no explicit CA-directory argument.
+
+The no-file case is **not** a portable abstraction over every operating
+system's native trust store. A bundled OpenSSL build still uses OpenSSL's
+compiled filesystem defaults. Default hashed certificate directories are
+looked up lazily by OpenSSL. Module initialization may synchronously load the
+default CA file once, and the first verification that needs a hashed-directory
+entry may perform another synchronous filesystem read. Reusing the one default
+context caches and amortizes those default-path costs across later connections.
+Programs that need deployment-independent trust selection should pass an
+explicit CA file.
 
 The underlying `net.connect` contract supplies DNS resolution, address-order
 fallback, port validation, cancellation, and TCP errors.
 
 ## Server connections and handshakes
 
-`listen` loads one PEM certificate chain and matching PEM private key, then
-creates a `net.Server`. The listener requires TLS 1.2 or newer. This version
-does not request or verify client certificates, so mutual TLS is unsupported.
+`listen` reads one PEM certificate chain and matching PEM private key through
+the high-level asynchronous `fs` module, parses them from memory, then creates
+a `net.Server`. The first certificate is the server leaf and later
+certificates form its transmitted chain. The private key may occupy the same
+PEM file or a separate file, but must be unencrypted because this API has no
+password input. The listener requires TLS 1.2 or newer. This version does not
+request or verify client certificates, so mutual TLS is unsupported.
 
 `Server:accept()` returns after accepting TCP; it does **not** wait for a
 ClientHello. The accepted connection's server handshake is lazy and runs on
@@ -171,18 +188,19 @@ TLS and certificate failures raise `ssl.Error`, whose `operation` names the
 failed layer and whose `name` distinguishes such outcomes as
 `CERTIFICATE_VERIFY_FAILED`, `TLS_TRUNCATED_EOF`, and OpenSSL's `SSL_ERROR_*`
 conditions. `code` is the corresponding OpenSSL error or verification code
-when one exists. Argument/state errors may remain strings, and errors from the
-wrapped TCP connection retain the [`async.Error`](async-io.md) value supplied
-by `net`.
+when one exists. Argument/state errors may remain strings. Errors while reading
+explicit CA, certificate, or key paths and errors from the wrapped TCP
+connection retain the [`async.Error`](async-io.md) value supplied by `fs` or
+`net`.
 
 ## Example
 
 ```titan
 local async = import "async"
-local ssl = import "titan.ssl"
+local ssl = import "ssl"
 
 function fetch_head(): value
-  local connection = ssl.connect("example.com", 443, nil, nil)
+  local connection = ssl.connect("example.com", 443, nil)
   defer connection:close()
   connection:write(
     "HEAD / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")

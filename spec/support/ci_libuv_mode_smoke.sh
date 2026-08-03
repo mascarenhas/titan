@@ -3,7 +3,7 @@
 # Exercise both installed standard-library provider forms under the bundled
 # and system libuv/OpenSSL policies. Besides the ordinary Lua/API smokes, this
 # proves that titan.a matches titan.so and can load io and run
-# async/timer/fs/net/ssl/http/os plus PEG/string behavior in a compiled Titan
+# async/timer/fs/net/ssl/url/http/os plus PEG/string behavior in a compiled Titan
 # application while the dynamic provider and generated shims are out of search
 # reach. System mode additionally exercises the host's ordinary pkg-config
 # settings and an explicit static libuv archive selection.
@@ -107,7 +107,7 @@ check_canonical_container() {
         test -f "$PROVIDER.dSYM/Contents/Resources/DWARF/titan.so"
     fi
 
-    for module in coroutine uv async timer io fs net ssl http os peg string math lua iter gc; do
+    for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc; do
         local shim="$SHIM_ROOT/titan/$module.lua"
         test -f "$shim"
         test ! -L "$shim"
@@ -143,6 +143,7 @@ local expected = {
     ["titan.fs"] = true,
     ["titan.net"] = true,
     ["titan.ssl"] = true,
+    ["titan.url"] = true,
     ["titan.http"] = true,
     ["titan.os"] = true,
     ["titan.peg"] = true,
@@ -493,8 +494,9 @@ local timer = import "timer"
 local titan_io = import "io"
 local fs = import "fs"
 local net = import "net"
-local ssl = import "titan.ssl"
-local http = import "titan.http"
+local ssl = import "ssl"
+local url = import "url"
+local http = import "http"
 local system = import "os"
 local peg = import "peg"
 local strings = import "string"
@@ -584,10 +586,14 @@ function main(args: {string}): integer
       0, "STATIC_SSL_READY", "static SSL module loaded", "static-smoke")
     check(tls_error.name == "STATIC_SSL_READY",
           "static SSL provider initialization failed")
-    local url = http.parse_url("https://localhost:8443/static?q=1")
-    check(url.scheme == "https" and url.host == "localhost" and
-          url.port == 8443 and url.target == "/static?q=1",
-          "static HTTP provider initialization failed")
+    local parsed?, parse_error? =
+      url.parse("https://localhost:8443/static?q=1")
+    check(parse_error == nil and parsed ~= nil,
+          "static URL provider initialization failed")
+    local parsed_url = parsed as url.Url
+    check(parsed_url.scheme == "https" and parsed_url.host == "localhost" and
+          parsed_url.port == 8443 and parsed_url.target == "/static?q=1",
+          "static URL provider parsing failed")
 
     local server, port = listen_available()
     local peer_result = "not-run"

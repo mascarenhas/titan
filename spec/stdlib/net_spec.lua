@@ -34,7 +34,7 @@ local function listen_available(first_port: integer): (net.Server, integer)
   local port = first_port
   for _ = 1, 100 do
     do
-      local server = net.listen("127.0.0.1", port, 8)
+      local server = net.listen("127.0.0.1", port)
       return server, port
     catch
       if error is async.Error then

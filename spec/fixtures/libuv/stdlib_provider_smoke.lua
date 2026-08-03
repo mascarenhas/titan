@@ -12,6 +12,7 @@ local titan_io = require "titan.io"
 local fs = require "titan.fs"
 local net = require "titan.net"
 local ssl = require "titan.ssl"
+local url = require "titan.url"
 local http = require "titan.http"
 local system = require "titan.os"
 local peg = require "titan.peg"
@@ -23,6 +24,13 @@ local gc = require "titan.gc"
 
 local path = os.tmpname()
 os.remove(path)
+local parsed_url, parse_error = url.parse(
+    "https://localhost:8443/provider?q=1")
+assert(parse_error == nil)
+assert(parsed_url.scheme == "https")
+assert(parsed_url.host == "localhost")
+assert(parsed_url.port == 8443)
+assert(parsed_url.target == "/provider?q=1")
 local task_finished = false
 local task = async.run(function()
     timer.sleep(0)

@@ -39,6 +39,12 @@ typedef struct titan_httpshim_callback_context {
     int stack_top;
 } titan_httpshim_callback_context;
 
+/*
+ * This is callback-only extraction, not a Titan-callable trampoline.  It must
+ * inspect the raw Udata/CClosure slots supplied by Titan's generated native
+ * entry ABI, which Titan code cannot express.  Keeping it here makes each
+ * llhttp callback do only that extraction plus the exact native-entry call.
+ */
 static titan_httpshim_callback_context titan_httpshim_callback_context_for(
     llhttp_t *parser, size_t callback_index)
 {
@@ -57,6 +63,12 @@ static titan_httpshim_callback_context titan_httpshim_callback_context_for(
     return context;
 }
 
+/*
+ * This is callback-only stack cleanup, not a Titan-callable trampoline.  The
+ * C callback temporarily roots its Titan owner on the raw Lua stack so an
+ * Array append may collect safely; only the C callback boundary can restore
+ * the exact pre-callback stack top.
+ */
 static void titan_httpshim_callback_context_release(
     titan_httpshim_callback_context *context)
 {

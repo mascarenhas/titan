@@ -58,6 +58,11 @@ before the continuation moves to the next address; the close callback may run
 later. A successful outgoing or accepted connection starts its read watcher
 lazily when its first read is dispatched.
 
+The public `net.listen` facade substitutes backlog 128 when its trailing
+argument is absent, validates the resulting value, and passes an ordinary
+required integer to private `uv._net_listen`. Defaulting therefore adds no
+optional type or policy to `titan.uv`.
+
 ## Multi-shot reads and accepts
 
 The allocation callback receives libuv's `uv_buf_t` destination. The Titan

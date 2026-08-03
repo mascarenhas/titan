@@ -205,10 +205,10 @@ lua -e 'print(require("greeting").make("Lua"))'
 
 Another Titan module uses `local greeting = import "greeting"`. Lua uses
 `require "greeting"` for this application module. Standard-library names are
-different: Titan uses established short imports such as `import "fs"` and
-`import "string"`, while Lua uses the qualified identities
-`require "titan.fs"` and `require "titan.string"`. Newer modules whose names
-overlap Lua libraries use qualified Titan imports too, such as
+different: Titan uses established short imports such as `import "fs"`,
+`import "url"`, and `import "http"`, while Lua uses the qualified identities
+`require "titan.fs"`, `require "titan.url"`, and `require "titan.http"`.
+Modules without short-import sugar use qualified Titan imports too, such as
 `import "titan.math"`. The qualified names do not replace Lua's own `io`,
 `os`, `math`, or `string` libraries.
 
@@ -260,9 +260,10 @@ its post-close read/write and cancellation behavior.
 
 ## Tasks and asynchronous work
 
-The public asynchronous facade is `async`; `timer`, `fs`, `net`, and `os`
-build on the same Runtime. In a standalone program the event loop is driven
-automatically:
+The public asynchronous facade is `async`; `timer`, `fs`, `net`, `ssl`,
+`http`, and `os` build on the same Runtime. The synchronous `url` parser is
+also reusable without opening a connection. In a standalone program the event
+loop is driven automatically:
 
 ```titan
 local async = import "async"
@@ -364,6 +365,12 @@ implicitly Unicode. `Pattern:match` is anchored at its initial position,
 whereas `Regex:match` performs a leftmost search unless its expression is
 anchored. `Regex:gmatch` supplies the iterator to Titan's generic `for`; its
 missing state, initial-control, and close tuple slots are filled with nil.
+
+For ready-made HTTP URL parsing, `local url = import "url"` exposes
+`url.parse(source): (url.Url?, url.Error?)`. Success returns a normalized
+component record and nil; malformed input returns nil plus a structured
+one-based byte diagnostic instead of raising. The module compiles its labeled
+PEG once and is usable independently of the HTTP client.
 
 ## Child processes
 

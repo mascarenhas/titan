@@ -77,7 +77,8 @@ use the chapters below for the normative language reference.
 | [Filesystem standard library](standard-library-fs.md) | Binary file reads and writes, explicit File concurrency and close, whole-file helpers, metadata, and path operations. |
 | [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads, libuv-ordered writes, shutdown, close, and cancellation. |
 | [TLS standard library](standard-library-ssl.md) | Verified TLS 1.2+ clients and certificate-backed servers composed over high-level TCP with memory BIOs, explicit trust overrides, authenticated shutdown, and serialized connection operations. |
-| [HTTP/1.1 standard library](standard-library-http.md) | Strict HTTP and HTTPS clients, ordered duplicate-preserving headers, normalized RFC 3986 HTTP(S) URLs, streaming response/request bodies, per-connection server Tasks, and keep-alive/pipelining boundaries. |
+| [URL standard library](standard-library-url.md) | Nonthrowing parsing and normalization of absolute HTTP(S) URLs with structured labeled errors and public component records. |
+| [HTTP/1.1 standard library](standard-library-http.md) | Strict HTTP and HTTPS clients, ordered duplicate-preserving headers, standalone URL-module integration, streaming response/request bodies, per-connection server Tasks, and keep-alive/pipelining boundaries. |
 | [Operating-system standard library](standard-library-os.md) | Portable clocks and timestamps, ISO C calendars/locales, plus environment, parent stdio, signals, graceful exit, and configurable direct child processes. |
 | [PEG standard library](standard-library-peg.md) | Typed parsing-expression constructors and combinators, labeled failure/recovery, captures and callback timing, anchored pattern matching and leftmost search, locale controls, and relabel source notation. |
 | [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, configurably yielding in-memory streams, and compiled byte-regex matching, capture iteration, splitting, and substitution. |
@@ -182,8 +183,9 @@ Lua and `value` never discover an implementation from a bare record or union.
 * **Titan ships a focused standard library.** It includes stackful
   `coroutine`; the libuv-backed `async` Task facade and `timer`; `io`
   Interfaces plus printing, line iteration, and shell-process streams;
-  asynchronous `fs` and `net`; qualified high-level `titan.ssl` and
-  `titan.http` modules; portable `os` helpers and direct child processes;
+  asynchronous `fs` and `net`; reusable `url` parsing; high-level `ssl` and
+  `http` short imports;
+  portable `os` helpers and direct child processes;
   typed PEG construction; byte-oriented string/regex operations; and the
   qualified `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc` modules.
   Lua loads every standard module through its qualified `titan.*` name,

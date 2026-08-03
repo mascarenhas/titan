@@ -9,7 +9,7 @@ on:
 
 jobs:
   # Build and install the regular Linux tree once per workflow. Keep the
-  # compiler core, net/SSL/HTTP/OS, and PEG/string/math/Lua/iter/GC groups on
+  # compiler core, net/SSL/URL/HTTP/OS, and PEG/string/math/Lua/iter/GC groups on
   # this warm
   # standard runner.
   # Two consumers restore the pristine tree instead of rebuilding dependencies.
@@ -18,7 +18,7 @@ jobs:
   # static-provider coverage remains on the 1-core slim runner. Both labels are
   # x86_64 Ubuntu 24.04, so the native artifact does not cross targets.
   prepare-linux:
-    name: regular (ubuntu-24.04, build+compiler-core+net-ssl-http-os+peg-string-math-lua-iter-gc)
+    name: regular (ubuntu-24.04, build+compiler-core+net-ssl-url-http-os+peg-string-math-lua-iter-gc)
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -132,7 +132,7 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer io fs net ssl http os peg string math lua iter gc; do
+          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc; do
             rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           rm -f "$PREFIX/share/lua/5.5/titan.lua" \
@@ -234,7 +234,7 @@ jobs:
       # 30-minute timeout leaves room for host-load variance. Run the library
       # groups first so legacy compiler cleanup cannot make the serial packaging
       # gate rebuild the complete standard library again.
-      - name: Run serial, net/SSL/HTTP/OS, and PEG/string/math/Lua/iter/GC library tests without coverage
+      - name: Run serial, net/SSL/URL/HTTP/OS, and PEG/string/math/Lua/iter/GC library tests without coverage
         # These tests compile disposable fixtures and alternate images. The
         # installed bundled provider packed above remains the optimized
         # production image, and macOS repeats the complete suite at -O2.
@@ -658,7 +658,7 @@ jobs:
           test -f "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/manifest.txt"
           test -f "$snapshot_provider" && test ! -L "$snapshot_provider"
           cmp "$snapshot_provider" "$provider"
-          for module in coroutine uv async timer io fs net ssl http os peg string math lua iter gc; do
+          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           readelf -Ws .lua/bin/lua | grep __asan_

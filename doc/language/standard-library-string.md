@@ -494,3 +494,7 @@ its AST through constant-depth match-time actions, so parsing cannot leak a
 depth-dependent backtrack-stack overflow and remains independent of
 `peg.set_max_stack`. During matching, a backreference to a group which did not
 participate is ordinary mismatch rather than a missing-back-capture error.
+
+The [`url` standard module](standard-library-url.md) also uses this module's
+binary writer and byte operations for RFC 3986 normalization; URL parsing does
+not assume Unicode text or delegate to Lua's mutable string table.

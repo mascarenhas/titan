@@ -55,6 +55,7 @@
 /titan/fs.lua
 /titan/net.lua
 /titan/ssl.lua
+/titan/url.lua
 /titan/http.lua
 /titan/os.lua
 /titan/peg.lua

@@ -285,7 +285,7 @@ Lua process and requires exactly one support table exposing `_loadlib` and
 proof.
 
 The production standard library is the canonical example. One compiler
-invocation names all sixteen logical roots and publishes root `titan.so` and
+invocation names all seventeen logical roots and publishes root `titan.so` and
 `titan.a`. Internal standard imports are direct. `titanlib.o` is shared `-X`
 payload and supplies bare `luaopen_titan` without adding a logical metadata
 key. The private namespaced five-member LPegLabel archive follows it as
@@ -293,9 +293,9 @@ metadata-free payload. The selected libuv payload follows it, then the private
 HTTP adapter and llhttp archive, and finally the selected OpenSSL payload used
 directly by `titan.ssl`. Bundled archives are force-carried into the DSO and flattened
 into the archive; system-mode libuv/OpenSSL settings remain final-link inputs
-and are never copied into `titan.a`. The DSO exports seventeen Lua entries
-(`luaopen_titan` plus the sixteen logical entries); both forms define the
-sixteen logical protocols, and the archive advertises exactly sixteen
+and are never copied into `titan.a`. The DSO exports eighteen Lua entries
+(`luaopen_titan` plus the seventeen logical entries); both forms define the
+seventeen logical protocols, and the archive advertises exactly seventeen
 metadata keys.
 The private LPegLabel archive and its headers remain source-build inputs; they
 are not installed in the compiler/runtime SDK.
@@ -315,9 +315,9 @@ native inputs. TLS uses the selected OpenSSL library directly and has no
 adapter object. The hook then executes the source-only
 `scripts/stdlib_installer.lua` directly with the installed Lua; the publisher
 is not an installed compiler module. The script rescans `titan.a`, requires
-the exact sixteen-key set, compares embedded metadata with the staged DSO and a
+the exact seventeen-key set, compares embedded metadata with the staged DSO and a
 fresh-process archive-backed validation image, validates bare
-`luaopen_titan`, the sixteen exact shims, and the macOS dSYM, then publishes the
+`luaopen_titan`, the seventeen exact shims, and the macOS dSYM, then publishes the
 paired bundle with the DSO last. It recognizes bootstrap-only, legacy complete
 ABI-0.20 DSO/shims-without-archive, a valid historical fourteen-module
 ABI-0.20 pair, and current complete-pair predecessors. Injected
@@ -327,13 +327,13 @@ is best effort and cannot turn the coherent install into a reported hook
 failure. Separately versioned 0.17, 0.18, and 0.19 artifacts are not purged.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
-dSYM) and sixteen Lua shims:
+dSYM) and seventeen Lua shims:
 
 ```text
 <root>/lib/titan/0.20/titan.so
 <root>/lib/titan/0.20/titan.a
 <root>/lib/titan/0.20/titan.so.dSYM          # macOS only
-<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,http,os,peg,string,math,lua,iter,gc}.lua
+<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc}.lua
 ```
 
 These remain direct Titan artifacts outside the source-rock manifest. The
@@ -341,11 +341,11 @@ manifest owns the compiler Lua/script files; `luarocks remove` does not claim
 to remove Titan library-package artifacts.
 
 The checkout Make graph has one provider-pair completion/configuration stamp.
-All sixteen flat/folder source sets, native inputs, effective
+All seventeen flat/folder source sets, native inputs, effective
 `CC`/`AR`/`RANLIB`, embedded-format inputs, libuv/OpenSSL modes, dependency
 identities, and extra flags are prerequisites. The
 DSO, archive, conditional dSYM, and every shim must exist; every warm
-invocation rescans `titan.a` for the exact sixteen-key set without changing pair
+invocation rescans `titan.a` for the exact seventeen-key set without changing pair
 mtimes. `make clean` removes only exact known generated outputs. Production
 library tests treat the combined set as read-only. CI snapshots and restores
 the checkout runtime archive plus the installed DSO/archive/dSYM/shims around

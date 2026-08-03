@@ -26,7 +26,7 @@ record Server
 
 function connect(host: string, port: integer): Connection
 function listen(host: string, port: integer,
-                backlog: integer): Server
+                backlog: integer?): Server
 
 function Connection:read(): string?
 function Connection:read_until(delimiter: string,
@@ -55,8 +55,9 @@ wait for that close callback. It accepts ports `1..65535`.
 
 `listen` resolves and binds `host`, then starts a TCP listener. Its port may be
 `0` to request an ephemeral operating-system port, although this initial API
-does not expose the selected address or port. `backlog` must be positive and
-is passed directly to libuv's listener.
+does not expose the selected address or port. `backlog` must be in
+`1..2147483647` and is passed directly to libuv's listener; when omitted, it
+defaults to 128.
 
 Hosts are text and cannot contain an embedded NUL. Socket payloads are binary
 and may contain any byte, including NUL.
@@ -190,7 +191,7 @@ sets `ROCKS_TREE == PREFIX`; the former owns Titan's SDK/stdlib while the latter
 owns Lua and LuaRocks. Repository contributors can still use
 `make stdlib` for an in-checkout standard-library build.
 
-The qualified [`titan.ssl`](standard-library-ssl.md) module wraps this public
+The [`ssl` standard module](standard-library-ssl.md) wraps this public
 Connection and Server API with OpenSSL memory BIOs. It does not reach through
 `net` to private libuv handles.
 

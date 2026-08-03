@@ -1,12 +1,17 @@
 local async = import "async"
+local fs = import "fs"
 local net = import "net"
 local str = import "string"
-local openssl = foreign import "ssl/openssl.h"
+local openssl_err = foreign import "openssl/err.h"
+local openssl_x509v3 = foreign import "openssl/x509v3.h"
+local openssl_pem = foreign import "openssl/pem.h"
+local openssl = foreign import "openssl/ssl.h"
 local cstddef = foreign import "stddef.h"
 local ffi = foreign import "titan/ffi.h"
 local cstring = foreign import "string.h"
 
 local TLS_RECORD_BYTES = 16 * 1024
+local MAX_PEM_BYTES = 2147483647
 local STATE_HANDSHAKING = "handshaking"
 local STATE_OPEN = "open"
 local STATE_WRITE_SHUTDOWN = "write-shutdown"
@@ -14,6 +19,10 @@ local STATE_PEER_CLOSED = "peer-closed"
 local STATE_SHUTDOWN = "shutdown"
 local STATE_FAILED = "failed"
 local STATE_CLOSED = "closed"
+
+-- The module keeps this reference for its lifetime. Each default-trust
+-- connection takes and releases another reference around SSL_new.
+local default_client_context: *openssl.SSL_CTX = nil
 
 record Error
   code: integer
@@ -43,6 +52,25 @@ record Server
   local listener_closed: boolean
 end
 
+local record PemBlock
+  local name_buffer: ffi.titan_ffi_void_ptr
+  local header_buffer: ffi.titan_ffi_void_ptr
+  local data_buffer: ffi.titan_ffi_void_ptr
+  local name: string
+  local header: string
+  local length: integer
+end
+
+local record CertificateResult
+  local pointer: *openssl_pem.X509
+  local found: boolean
+end
+
+local record PrivateKeyResult
+  local pointer: *openssl_pem.EVP_PKEY
+  local found: boolean
+end
+
 local function checked_text(text: string, operation: string): string
   if cstring.strlen(text) ~= (#text as cstring.size_t) then
     raise Error.new(0, "INVALID_TEXT",
@@ -65,9 +93,9 @@ local function verification_host(host: string): string
 end
 
 local function error_reason(fallback: string): string
-  local packed = openssl.ERR_get_error()
+  local packed = openssl_err.ERR_get_error()
   if packed ~= 0 then
-    local reason = openssl.ERR_reason_error_string(packed)
+    local reason = openssl_err.ERR_reason_error_string(packed)
     if reason then return reason as string end
   end
   return fallback
@@ -75,9 +103,9 @@ end
 
 local function openssl_error(operation: string,
                              fallback: string): Error
-  local packed = openssl.ERR_get_error()
+  local packed = openssl_err.ERR_get_error()
   if packed ~= 0 then
-    local reason = openssl.ERR_reason_error_string(packed)
+    local reason = openssl_err.ERR_reason_error_string(packed)
     if reason then
       return Error.new(packed as integer, "OPENSSL",
                        reason as string, operation)
@@ -139,7 +167,7 @@ end
 
 local function verify_error(code: integer): Error
   local message = "certificate verification failed"
-  local reason = openssl.X509_verify_cert_error_string(
+  local reason = openssl_x509v3.X509_verify_cert_error_string(
       code as ffi.titan_ffi_long)
   if reason then message = reason as string end
   return Error.new(code, "CERTIFICATE_VERIFY_FAILED", message,
@@ -210,7 +238,7 @@ local function drain_output(connection: Connection): integer
     local buffer = ffi.titan_ffi_char.new_array(requested)
     local lengths: cstddef.size_t[1]
     lengths[0] = 0 as cstddef.size_t
-    openssl.ERR_clear_error()
+    openssl_err.ERR_clear_error()
     local ok = openssl.BIO_read_ex(
         connection.output, buffer,
         requested as cstddef.size_t, lengths)
@@ -226,13 +254,21 @@ local function drain_output(connection: Connection): integer
   return total
 end
 
+-- BIO_set_mem_eof_return is a public function-like macro unavailable to the
+-- FFI. BIO_ctrl with BIO_C_SET_BUF_MEM_EOF_RETURN is its documented primitive
+-- expansion for configuring a memory BIO's empty-read result.
+local function set_memory_bio_eof_return(bio: *openssl.BIO,
+                                         result: integer)
+  openssl.BIO_ctrl(bio, openssl.BIO_C_SET_BUF_MEM_EOF_RETURN,
+                   result as ffi.titan_ffi_long, nil)
+end
+
 local function feed_input(connection: Connection)
   if connection.transport_eof then return end
   local encrypted? = connection.transport:read()
   if not encrypted then
     connection.transport_eof = true
-    openssl.BIO_ctrl(connection.input,
-                     openssl.BIO_C_SET_BUF_MEM_EOF_RETURN, 0, nil)
+    set_memory_bio_eof_return(connection.input, 0)
     return
   end
 
@@ -242,7 +278,7 @@ local function feed_input(connection: Connection)
   while offset < #input do
     local lengths: cstddef.size_t[1]
     lengths[0] = 0 as cstddef.size_t
-    openssl.ERR_clear_error()
+    openssl_err.ERR_clear_error()
     local ok = openssl.BIO_write_ex(
         connection.input, bytes + offset,
         (#input - offset) as cstddef.size_t, lengths)
@@ -279,14 +315,14 @@ local function handshake_locked(connection: Connection)
   if connection.state ~= STATE_HANDSHAKING then return end
 
   while true do
-    openssl.ERR_clear_error()
+    openssl_err.ERR_clear_error()
     local result = openssl.SSL_do_handshake(connection.handle)
     if result == 1 then
       drain_output(connection)
       if connection.client then
         local verification =
           openssl.SSL_get_verify_result(connection.handle) as integer
-        if verification ~= openssl.X509_V_OK then
+        if verification ~= openssl_x509v3.X509_V_OK then
           raise verify_error(verification)
         end
       end
@@ -299,7 +335,7 @@ local function handshake_locked(connection: Connection)
     if connection.client then
       local verification =
         openssl.SSL_get_verify_result(connection.handle) as integer
-      if verification ~= openssl.X509_V_OK then
+      if verification ~= openssl_x509v3.X509_V_OK then
         raise verify_error(verification)
       end
     end
@@ -320,7 +356,7 @@ local function send_shutdown_locked(connection: Connection)
   end
 
   while true do
-    openssl.ERR_clear_error()
+    openssl_err.ERR_clear_error()
     local result = openssl.SSL_shutdown(connection.handle)
     if result >= 0 then
       drain_output(connection)
@@ -368,7 +404,7 @@ local function read_locked(connection: Connection): string?
   while true do
     local lengths: cstddef.size_t[1]
     lengths[0] = 0 as cstddef.size_t
-    openssl.ERR_clear_error()
+    openssl_err.ERR_clear_error()
     local result = openssl.SSL_read_ex(
         connection.handle, buffer,
         TLS_RECORD_BYTES as cstddef.size_t, lengths)
@@ -417,7 +453,7 @@ local function write_piece_locked(connection: Connection, piece: string)
   while true do
     local lengths: cstddef.size_t[1]
     lengths[0] = 0 as cstddef.size_t
-    openssl.ERR_clear_error()
+    openssl_err.ERR_clear_error()
     local result = openssl.SSL_write_ex(
         connection.handle, bytes,
         #piece as cstddef.size_t, lengths)
@@ -463,21 +499,21 @@ end
 local function new_connection(transport: net.Connection,
                               context: *openssl.SSL_CTX,
                               client: boolean): Connection
-  openssl.ERR_clear_error()
+  openssl_err.ERR_clear_error()
   local handle = openssl.SSL_new(context)
   if not handle then
     raise openssl_error("ssl.connection.new",
                         "failed to allocate an SSL object")
   end
 
-  openssl.ERR_clear_error()
+  openssl_err.ERR_clear_error()
   local input = openssl.BIO_new(openssl.BIO_s_mem())
   if not input then
     openssl.SSL_free(handle)
     raise openssl_error("ssl.input.new",
                         "failed to allocate the TLS input BIO")
   end
-  openssl.ERR_clear_error()
+  openssl_err.ERR_clear_error()
   local output = openssl.BIO_new(openssl.BIO_s_mem())
   if not output then
     openssl.BIO_free(input)
@@ -486,7 +522,7 @@ local function new_connection(transport: net.Connection,
                         "failed to allocate the TLS output BIO")
   end
 
-  openssl.BIO_ctrl(input, openssl.BIO_C_SET_BUF_MEM_EOF_RETURN, -1, nil)
+  set_memory_bio_eof_return(input, -1)
   openssl.SSL_set0_rbio(handle, input)
   openssl.SSL_set0_wbio(handle, output)
   if client then
@@ -498,9 +534,12 @@ local function new_connection(transport: net.Connection,
                         STATE_HANDSHAKING, false, false, false, false, "")
 end
 
+-- SSL_CTX_set_min_proto_version is a public function-like macro unavailable
+-- to the FFI. This direct SSL_CTX_ctrl expansion applies its documented TLS
+-- version control without a C wrapper.
 local function configure_context(context: *openssl.SSL_CTX,
                                  operation: string)
-  openssl.ERR_clear_error()
+  openssl_err.ERR_clear_error()
   if openssl.SSL_CTX_ctrl(context,
       openssl.SSL_CTRL_SET_MIN_PROTO_VERSION,
       openssl.TLS1_2_VERSION as ffi.titan_ffi_long, nil) ~= 1 then
@@ -509,9 +548,8 @@ local function configure_context(context: *openssl.SSL_CTX,
   end
 end
 
-local function client_context(ca_file: string?,
-                              ca_directory: string?): *openssl.SSL_CTX
-  openssl.ERR_clear_error()
+local function new_client_context(): *openssl.SSL_CTX
+  openssl_err.ERR_clear_error()
   local context = openssl.SSL_CTX_new(openssl.TLS_client_method())
   if not context then
     raise openssl_error("ssl.client.context",
@@ -520,24 +558,6 @@ local function client_context(ca_file: string?,
   do
     configure_context(context, "ssl.client.minimum-version")
     openssl.SSL_CTX_set_verify(context, openssl.SSL_VERIFY_PEER, nil)
-    openssl.ERR_clear_error()
-    local loaded = 0
-    if ca_file and ca_directory then
-      loaded = openssl.SSL_CTX_load_verify_locations(
-          context, ca_file as string, ca_directory as string)
-    elseif ca_file then
-      loaded = openssl.SSL_CTX_load_verify_locations(
-          context, ca_file as string, nil)
-    elseif ca_directory then
-      loaded = openssl.SSL_CTX_load_verify_locations(
-          context, nil, ca_directory as string)
-    else
-      loaded = openssl.SSL_CTX_set_default_verify_paths(context)
-    end
-    if loaded ~= 1 then
-      raise openssl_error("ssl.client.trust",
-                          "failed to load certificate trust roots")
-    end
   catch
     local failure = error
     openssl.SSL_CTX_free(context)
@@ -546,9 +566,356 @@ local function client_context(ca_file: string?,
   return context
 end
 
-local function server_context(certificate_file: string,
-                              private_key_file: string): *openssl.SSL_CTX
-  openssl.ERR_clear_error()
+local function pem_memory_bio(data: string,
+                              operation: string): *openssl_pem.BIO
+  if #data > MAX_PEM_BYTES then
+    raise Error.new(0, "PEM_TOO_LARGE",
+                    "PEM data is too large for OpenSSL", operation)
+  end
+
+  local source = data as const *ffi.titan_ffi_char
+  openssl_err.ERR_clear_error()
+  local bio = openssl_pem.BIO_new_mem_buf(
+      source as const *ffi.titan_ffi_void,
+      #data as ffi.titan_ffi_int)
+  if not bio then
+    raise openssl_error(operation,
+                        "failed to allocate a PEM memory BIO")
+  end
+  return bio
+end
+
+-- OPENSSL_free is a public function-like macro unavailable to Titan's FFI.
+-- CRYPTO_free is its exported primitive; nil and zero are valid source
+-- attribution because Titan is not using OpenSSL's allocation diagnostics.
+local function openssl_free(pointer: ffi.titan_ffi_void_ptr)
+  if pointer then
+    openssl_pem.CRYPTO_free(pointer, nil, 0)
+  end
+end
+
+local function free_pem_buffers(name: ffi.titan_ffi_void_ptr,
+                                header: ffi.titan_ffi_void_ptr,
+                                data: ffi.titan_ffi_void_ptr)
+  openssl_free(name)
+  openssl_free(header)
+  openssl_free(data)
+end
+
+local function free_pem_block(block: PemBlock)
+  free_pem_buffers(block.name_buffer, block.header_buffer,
+                   block.data_buffer)
+end
+
+-- ERR_GET_LIB and ERR_GET_REASON are inline header helpers without exported
+-- symbols. This is their public non-system error bit extraction; PEM parser
+-- EOF is never a system error.
+local function pem_no_start_line(packed: integer): boolean
+  local library =
+    (packed >> (openssl_err.ERR_LIB_OFFSET as integer)) &
+    (openssl_err.ERR_LIB_MASK as integer)
+  local reason = packed & (openssl_err.ERR_REASON_MASK as integer)
+  return library == (openssl_err.ERR_LIB_PEM as integer) and
+         reason == (openssl_pem.PEM_R_NO_START_LINE as integer)
+end
+
+local function read_pem_block(bio: *openssl_pem.BIO,
+                              operation: string): PemBlock?
+  local names: ffi.titan_ffi_void_ptr[1]
+  local headers: ffi.titan_ffi_void_ptr[1]
+  local data: ffi.titan_ffi_void_ptr[1]
+  local lengths: ffi.titan_ffi_long[1]
+  names[0] = nil
+  headers[0] = nil
+  data[0] = nil
+  lengths[0] = 0 as ffi.titan_ffi_long
+
+  openssl_err.ERR_clear_error()
+  local result = openssl_pem.PEM_read_bio(
+      bio,
+      names as **ffi.titan_ffi_char,
+      headers as **ffi.titan_ffi_char,
+      data as **ffi.titan_ffi_unsigned_char,
+      lengths)
+  if result ~= 1 then
+    local packed = openssl_err.ERR_peek_last_error() as integer
+    free_pem_buffers(names[0], headers[0], data[0])
+    if packed ~= 0 and pem_no_start_line(packed) then
+      openssl_err.ERR_clear_error()
+      return nil
+    end
+    raise openssl_error(operation, "failed to parse PEM data")
+  end
+
+  if not names[0] or not headers[0] or not data[0] or lengths[0] < 0 then
+    free_pem_buffers(names[0], headers[0], data[0])
+    raise Error.new(0, "OPENSSL", "OpenSSL returned an invalid PEM block",
+                    operation)
+  end
+  do
+    local name = (names[0] as *ffi.titan_ffi_char) as string
+    local header = (headers[0] as *ffi.titan_ffi_char) as string
+    return PemBlock.new(names[0], headers[0], data[0], name, header,
+                        lengths[0] as integer)
+  catch
+    local failure = error
+    free_pem_buffers(names[0], headers[0], data[0])
+    raise failure
+  end
+end
+
+local function certificate_pem_name(name: string): boolean
+  return name == "CERTIFICATE" or name == "X509 CERTIFICATE" or
+         name == "TRUSTED CERTIFICATE"
+end
+
+local function private_key_pem_name(name: string): boolean
+  return name == "PRIVATE KEY" or name == "RSA PRIVATE KEY" or
+         name == "DSA PRIVATE KEY" or name == "EC PRIVATE KEY"
+end
+
+local function decode_certificate(block: PemBlock,
+                                  operation: string): *openssl_pem.X509
+  local cursors: ffi.titan_ffi_void_ptr[1]
+  cursors[0] = block.data_buffer
+  openssl_err.ERR_clear_error()
+  local certificate: *openssl_pem.X509 = nil
+  if block.name == "TRUSTED CERTIFICATE" then
+    certificate = openssl_pem.d2i_X509_AUX(
+        nil, cursors as *const *ffi.titan_ffi_unsigned_char,
+        block.length as ffi.titan_ffi_long)
+  else
+    certificate = openssl_pem.d2i_X509(
+        nil, cursors as *const *ffi.titan_ffi_unsigned_char,
+        block.length as ffi.titan_ffi_long)
+  end
+  if not certificate then
+    raise openssl_error(operation, "failed to decode a PEM certificate")
+  end
+  local expected =
+    (block.data_buffer as const *ffi.titan_ffi_unsigned_char) + block.length
+  if (cursors[0] as const *ffi.titan_ffi_unsigned_char) ~= expected then
+    openssl_pem.X509_free(certificate)
+    raise Error.new(0, "OPENSSL",
+                    "certificate PEM block has trailing DER data", operation)
+  end
+  return certificate
+end
+
+local function decode_private_key(block: PemBlock): *openssl_pem.EVP_PKEY
+  if #block.header > 0 then
+    raise Error.new(0, "OPENSSL",
+                    "encrypted private keys are not supported",
+                    "ssl.server.private-key")
+  end
+  local cursors: ffi.titan_ffi_void_ptr[1]
+  cursors[0] = block.data_buffer
+  openssl_err.ERR_clear_error()
+  local private_key = openssl_pem.d2i_AutoPrivateKey(
+      nil, cursors as *const *ffi.titan_ffi_unsigned_char,
+      block.length as ffi.titan_ffi_long)
+  if not private_key then
+    raise openssl_error("ssl.server.private-key",
+                        "failed to decode a PEM private key")
+  end
+  local expected =
+    (block.data_buffer as const *ffi.titan_ffi_unsigned_char) + block.length
+  if (cursors[0] as const *ffi.titan_ffi_unsigned_char) ~= expected then
+    openssl_pem.EVP_PKEY_free(private_key)
+    raise Error.new(0, "OPENSSL",
+                    "private-key PEM block has trailing DER data",
+                    "ssl.server.private-key")
+  end
+  return private_key
+end
+
+local function decode_certificate_block(
+    block: PemBlock, operation: string): *openssl_pem.X509
+  defer free_pem_block(block)
+  return decode_certificate(block, operation)
+end
+
+local function decode_private_key_block(
+    block: PemBlock): *openssl_pem.EVP_PKEY
+  defer free_pem_block(block)
+  return decode_private_key(block)
+end
+
+local function next_certificate(bio: *openssl_pem.BIO,
+                                operation: string): CertificateResult
+  while true do
+    local block? = read_pem_block(bio, operation)
+    if not block then return CertificateResult.new(nil, false) end
+    local exact = block as PemBlock
+    if certificate_pem_name(exact.name) then
+      return CertificateResult.new(
+          decode_certificate_block(exact, operation), true)
+    end
+    free_pem_block(exact)
+  end
+  return CertificateResult.new(nil, false)
+end
+
+local function next_private_key(
+    bio: *openssl_pem.BIO): PrivateKeyResult
+  while true do
+    local block? = read_pem_block(bio, "ssl.server.private-key")
+    if not block then return PrivateKeyResult.new(nil, false) end
+    local exact = block as PemBlock
+    if exact.name == "ENCRYPTED PRIVATE KEY" then
+      free_pem_block(exact)
+      raise Error.new(0, "OPENSSL",
+                      "encrypted private keys are not supported",
+                      "ssl.server.private-key")
+    elseif private_key_pem_name(exact.name) then
+      return PrivateKeyResult.new(
+          decode_private_key_block(exact), true)
+    end
+    free_pem_block(exact)
+  end
+  return PrivateKeyResult.new(nil, false)
+end
+
+local function load_ca_certificates(context: *openssl.SSL_CTX,
+                                    data: string)
+  local bio = pem_memory_bio(data, "ssl.client.trust")
+  defer openssl_pem.BIO_free(bio)
+  local store = openssl.SSL_CTX_get_cert_store(context)
+  if not store then
+    raise openssl_error("ssl.client.trust",
+                        "failed to access the certificate store")
+  end
+
+  local certificates = 0
+  while true do
+    local next_result = next_certificate(bio, "ssl.client.trust")
+    if not next_result.found then break end
+    local certificate = next_result.pointer
+    do
+      openssl_err.ERR_clear_error()
+      if openssl_x509v3.X509_STORE_add_cert(
+          store, certificate) ~= 1 then
+        raise openssl_error("ssl.client.trust",
+                            "failed to add a CA certificate")
+      end
+    catch
+      local failure = error
+      openssl_pem.X509_free(certificate)
+      raise failure
+    end
+    -- X509_STORE_add_cert retains its own reference.
+    openssl_pem.X509_free(certificate)
+    certificates = certificates + 1
+  end
+  if certificates == 0 then
+    raise Error.new(0, "OPENSSL", "PEM data contains no certificates",
+                    "ssl.client.trust")
+  end
+end
+
+local function explicit_client_context(data: string): *openssl.SSL_CTX
+  local context = new_client_context()
+  do
+    load_ca_certificates(context, data)
+  catch
+    local failure = error
+    openssl.SSL_CTX_free(context)
+    raise failure
+  end
+  return context
+end
+
+local function acquire_default_client_context(): *openssl.SSL_CTX
+  local context = default_client_context
+  if not context then
+    raise Error.new(0, "OPENSSL", "default trust context is unavailable",
+                    "ssl.client.trust")
+  end
+  openssl_err.ERR_clear_error()
+  if openssl.SSL_CTX_up_ref(context) ~= 1 then
+    raise openssl_error("ssl.client.context",
+                        "failed to retain the default client SSL context")
+  end
+  return context
+end
+
+-- SSL_CTX_add1_chain_cert is a public function-like macro, which the Titan
+-- FFI cannot call directly. SSL_CTX_ctrl with SSL_CTRL_CHAIN_CERT and arg 1
+-- is its documented expansion and makes the context retain each chain cert.
+local function load_certificate_chain(context: *openssl.SSL_CTX,
+                                      data: string)
+  local bio = pem_memory_bio(data, "ssl.server.certificate")
+  defer openssl_pem.BIO_free(bio)
+  local certificates = 0
+  while true do
+    local next_result = next_certificate(bio, "ssl.server.certificate")
+    if not next_result.found then break end
+    local certificate = next_result.pointer
+    do
+      openssl_err.ERR_clear_error()
+      if certificates == 0 then
+        if openssl.SSL_CTX_use_certificate(context, certificate) ~= 1 then
+          raise openssl_error("ssl.server.certificate",
+                              "failed to load the server certificate")
+        end
+      elseif openssl.SSL_CTX_ctrl(
+          context, openssl.SSL_CTRL_CHAIN_CERT, 1,
+          certificate as ffi.titan_ffi_void_ptr) ~= 1 then
+        raise openssl_error("ssl.server.certificate",
+                            "failed to load the certificate chain")
+      end
+    catch
+      local failure = error
+      openssl_pem.X509_free(certificate)
+      raise failure
+    end
+    -- Both SSL_CTX_use_certificate and the add1-chain control retain their
+    -- own references before Titan releases the decoded certificate.
+    openssl_pem.X509_free(certificate)
+    certificates = certificates + 1
+  end
+  if certificates == 0 then
+    raise Error.new(0, "OPENSSL", "PEM data contains no certificates",
+                    "ssl.server.certificate")
+  end
+end
+
+local function load_private_key(context: *openssl.SSL_CTX, data: string)
+  local bio = pem_memory_bio(data, "ssl.server.private-key")
+  defer openssl_pem.BIO_free(bio)
+  local next_result = next_private_key(bio)
+  if not next_result.found then
+    raise Error.new(0, "OPENSSL",
+                    "PEM data contains no unencrypted private key",
+                    "ssl.server.private-key")
+  end
+  local private_key = next_result.pointer
+  do
+    -- Continue through the file before retaining the selected key so a valid
+    -- first block cannot hide malformed trailing PEM input.
+    while true do
+      local trailing = next_private_key(bio)
+      if not trailing.found then break end
+      openssl_pem.EVP_PKEY_free(trailing.pointer)
+    end
+    openssl_err.ERR_clear_error()
+    if openssl.SSL_CTX_use_PrivateKey(
+        context, private_key) ~= 1 then
+      raise openssl_error("ssl.server.private-key",
+                          "failed to load the private key")
+    end
+  catch
+    local failure = error
+    openssl_pem.EVP_PKEY_free(private_key)
+    raise failure
+  end
+  -- SSL_CTX_use_PrivateKey retains its own reference.
+  openssl_pem.EVP_PKEY_free(private_key)
+end
+
+local function server_context(certificate_data: string,
+                              private_key_data: string): *openssl.SSL_CTX
+  openssl_err.ERR_clear_error()
   local context = openssl.SSL_CTX_new(openssl.TLS_server_method())
   if not context then
     raise openssl_error("ssl.server.context",
@@ -556,19 +923,9 @@ local function server_context(certificate_file: string,
   end
   do
     configure_context(context, "ssl.server.minimum-version")
-    openssl.ERR_clear_error()
-    if openssl.SSL_CTX_use_certificate_chain_file(
-        context, certificate_file) ~= 1 then
-      raise openssl_error("ssl.server.certificate",
-                          "failed to load the certificate chain")
-    end
-    openssl.ERR_clear_error()
-    if openssl.SSL_CTX_use_PrivateKey_file(
-        context, private_key_file, openssl.SSL_FILETYPE_PEM) ~= 1 then
-      raise openssl_error("ssl.server.private-key",
-                          "failed to load the private key")
-    end
-    openssl.ERR_clear_error()
+    load_certificate_chain(context, certificate_data)
+    load_private_key(context, private_key_data)
+    openssl_err.ERR_clear_error()
     if openssl.SSL_CTX_check_private_key(context) ~= 1 then
       raise openssl_error("ssl.server.private-key",
                           "private key does not match the certificate")
@@ -581,35 +938,57 @@ local function server_context(certificate_file: string,
   return context
 end
 
+-- SSL_set_tlsext_host_name is a public function-like macro unavailable to the
+-- FFI. SSL_ctrl with SSL_CTRL_SET_TLSEXT_HOSTNAME is its documented primitive
+-- expansion. OpenSSL consumes the mutable NUL-terminated copy during the call.
+local function configure_server_name(handle: *openssl.SSL, host: string)
+  local server_name = ffi.titan_ffi_char.new_array(#host + 1)
+  cstring.memcpy(server_name,
+                 host as const *ffi.titan_ffi_char,
+                 #host as cstddef.size_t)
+  server_name[#host] = 0 as ffi.titan_ffi_char
+  openssl_err.ERR_clear_error()
+  if openssl.SSL_ctrl(
+      handle, openssl.SSL_CTRL_SET_TLSEXT_HOSTNAME,
+      openssl.TLSEXT_NAMETYPE_host_name as ffi.titan_ffi_long,
+      server_name as ffi.titan_ffi_void_ptr) ~= 1 then
+    raise openssl_error("ssl.connect.sni",
+                        "failed to configure TLS server name indication")
+  end
+end
+
 function connect(host: string, port: integer,
-                 ca_file: string?, ca_directory: string?): Connection
+                 ca_file: string?): Connection
   checked_text(host, "ssl.connect.host")
   if ca_file then checked_text(ca_file as string, "ssl.connect.ca-file") end
-  if ca_directory then
-    checked_text(ca_directory as string, "ssl.connect.ca-directory")
-  end
 
-  local context = client_context(ca_file, ca_directory)
+  local context: *openssl.SSL_CTX = nil
+  if ca_file then
+    local trust_data = fs.read_file(ca_file as string)
+    context = explicit_client_context(trust_data)
+  else
+    context = acquire_default_client_context()
+  end
   defer openssl.SSL_CTX_free(context)
   local transport = net.connect(host, port)
   local connection: Connection? = nil
   do
     connection = new_connection(transport, context, true)
     local exact = connection as Connection
-    openssl.ERR_clear_error()
+    openssl_err.ERR_clear_error()
     local parameters = openssl.SSL_get0_param(exact.handle)
     if not parameters then
       raise openssl_error("ssl.connect.verify-host",
                           "failed to access peer verification parameters")
     end
-    openssl.ERR_clear_error()
+    openssl_err.ERR_clear_error()
     local identity = verification_host(host)
-    local ip_identity = openssl.X509_VERIFY_PARAM_set1_ip_asc(
+    local ip_identity = openssl_x509v3.X509_VERIFY_PARAM_set1_ip_asc(
         parameters, identity) == 1
     if not ip_identity then
       -- A failed IP parse is the ordinary DNS-name branch, not the error
       -- context for SSL_set1_host.
-      openssl.ERR_clear_error()
+      openssl_err.ERR_clear_error()
       if openssl.SSL_set1_host(exact.handle, host) ~= 1 then
         raise openssl_error("ssl.connect.verify-host",
                             "failed to configure peer-name verification")
@@ -617,22 +996,10 @@ function connect(host: string, port: integer,
     end
     openssl.SSL_set_hostflags(
         exact.handle,
-        openssl.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS as
+        openssl_x509v3.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS as
           ffi.titan_ffi_unsigned_int)
     if not ip_identity then
-      openssl.ERR_clear_error()
-      local server_name = ffi.titan_ffi_char.new_array(#host + 1)
-      cstring.memcpy(server_name,
-                     host as const *ffi.titan_ffi_char,
-                     #host as cstddef.size_t)
-      server_name[#host] = 0 as ffi.titan_ffi_char
-      if openssl.SSL_ctrl(
-          exact.handle, openssl.SSL_CTRL_SET_TLSEXT_HOSTNAME,
-          openssl.TLSEXT_NAMETYPE_host_name as ffi.titan_ffi_long,
-          server_name as ffi.titan_ffi_void_ptr) ~= 1 then
-        raise openssl_error("ssl.connect.sni",
-                            "failed to configure TLS server name indication")
-      end
+      configure_server_name(exact.handle, host)
     end
     exact:handshake()
     return exact
@@ -650,20 +1017,28 @@ function connect(host: string, port: integer,
   end
 end
 
-function listen(host: string, port: integer, backlog: integer,
-                certificate_file: string,
-                private_key_file: string): Server
+function listen(host: string, port: integer, certificate_file: string,
+                private_key_file: string?, backlog: integer?): Server
   checked_text(host, "ssl.listen.host")
   checked_text(certificate_file, "ssl.listen.certificate")
-  checked_text(private_key_file, "ssl.listen.private-key")
   if #certificate_file == 0 then
     raise "ssl.listen: certificate file must not be empty"
   end
-  if #private_key_file == 0 then
+  local actual_private_key_file = certificate_file
+  if private_key_file then
+    actual_private_key_file = private_key_file as string
+  end
+  checked_text(actual_private_key_file, "ssl.listen.private-key")
+  if #actual_private_key_file == 0 then
     raise "ssl.listen: private key file must not be empty"
   end
 
-  local context = server_context(certificate_file, private_key_file)
+  local certificate_data = fs.read_file(certificate_file)
+  local private_key_data = certificate_data
+  if actual_private_key_file ~= certificate_file then
+    private_key_data = fs.read_file(actual_private_key_file)
+  end
+  local context = server_context(certificate_data, private_key_data)
   do
     local listener = net.listen(host, port, backlog)
     return Server.new(listener, context, false, false)
@@ -817,7 +1192,7 @@ function Server:accept(): Connection
     raise "ssl.accept: Server is closed"
   end
   local context = self.context
-  openssl.ERR_clear_error()
+  openssl_err.ERR_clear_error()
   if openssl.SSL_CTX_up_ref(context) ~= 1 then
     raise openssl_error("ssl.accept.context",
                         "failed to retain the server SSL context")
@@ -848,5 +1223,26 @@ function Server:close()
   if not self.listener_closed then
     self.listener:close()
     self.listener_closed = true
+  end
+end
+
+do
+  -- This is the only eager filesystem-backed OpenSSL trust operation. It runs
+  -- once per loaded ssl module, honors SSL_CERT_FILE/SSL_CERT_DIR, and leaves
+  -- one shared context reference for all default-trust connections. OpenSSL
+  -- may still read a configured hashed CA directory lazily during the first
+  -- verification that needs it; sharing the context caches and amortizes it.
+  local context = new_client_context()
+  do
+    openssl_err.ERR_clear_error()
+    if openssl.SSL_CTX_set_default_verify_paths(context) ~= 1 then
+      raise openssl_error("ssl.client.trust",
+                          "failed to load default certificate trust roots")
+    end
+    default_client_context = context
+  catch
+    local failure = error
+    openssl.SSL_CTX_free(context)
+    raise failure
   end
 end

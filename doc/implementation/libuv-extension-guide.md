@@ -555,7 +555,7 @@ Those lists are compiled-symbol and build-input checks, not assertions about
 the spelling or internal architecture of Titan source. Do not replace them
 with searches through `titan/uv/*.titan`.
 
-After rebuilding the canonical sixteen-root provider, mechanically extract
+After rebuilding the canonical seventeen-root provider, mechanically extract
 its exact serialized interface and compare it with
 `spec/fixtures/libuv/titan_uv_types.lua`:
 

@@ -1,23 +1,33 @@
+local peg = import "peg"
+local str = import "string"
+local ffi = foreign import "titan/ffi.h"
+
 -- The RFC 3986 productions below are a Titan relabel-syntax translation of
 -- daurnimator/lpeg_patterns' URI grammar at commit
 -- 0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7. Copyright (c) 2012-2016
 -- Daurnimator; see LICENSES/lpeg-patterns-LICENSE.
 
-record URL
+record Url
   scheme: string
   host: string
   port: integer
   path: string
   query: string?
   target: string
-  local authority: string
+  authority: string
+end
+
+record Error
+  position: integer
+  kind: string
+  message: string
 end
 
 -- This is the RFC 3986 grammar specialized at its public boundary for an
 -- absolute HTTP URL: an authority and nonempty host are required, userinfo and
 -- fragments are rejected, and an explicit port must contain decimal digits.
 -- Semantic checks below restrict the scheme and the numeric port range. The
--- folder main compiles this source once in the module initializer.
+-- module compiles this source once in its initializer.
 local http_url_pattern: peg.Pattern? = nil
 
 local function url_pattern(): peg.Pattern
@@ -52,7 +62,7 @@ local function url_pattern(): peg.Pattern
   IPLiteral <- '[' (IPv6AddrZ / IPvFuture / %{ip_literal})
                    (']' / %{ipv6_close})
   IPvFuture <- [vV] Hex+ '.' (Unreserved / SubDelims / ':')+
-  IPv6AddrZ <- IPv6Address ('%25' ZoneID)?
+  IPv6AddrZ <- IPv6Address ('%25' (ZoneID / %{zone}))?
   ZoneID <- (Unreserved / PctEncoded)+
 
   IPv6Address <- H16C6 LS32
@@ -132,37 +142,45 @@ local function url_pattern(): peg.Pattern
   ]])
 end
 
-local function url_parse_detail(label: string): string
-  if label == "scheme" then return "expected an RFC 3986 scheme"
-  elseif label == "scheme_separator" then
+local function url_parse_detail(kind: string): string
+  if kind == "scheme" then return "expected an HTTP or HTTPS scheme"
+  elseif kind == "scheme_separator" then
     return "expected ':' after the scheme"
-  elseif label == "authority_separator" then
+  elseif kind == "authority_separator" then
     return "expected '//' before the authority"
-  elseif label == "userinfo" then
+  elseif kind == "userinfo" then
     return "user information is unsupported"
-  elseif label == "ipv6_brackets" then
+  elseif kind == "ipv6_brackets" then
     return "IPv6 addresses must use brackets"
-  elseif label == "ip_literal" then
+  elseif kind == "ip_literal" then
     return "expected an IPv6 or IPvFuture address"
-  elseif label == "ipv6_close" then
+  elseif kind == "ipv6_close" then
     return "expected ']' after the IP literal"
-  elseif label == "host" then return "expected a nonempty host"
-  elseif label == "port" then return "expected a decimal port"
-  elseif label == "percent_escape" then
+  elseif kind == "zone" then
+    return "expected a nonempty zone identifier after '%25'"
+  elseif kind == "host" then return "expected a nonempty host"
+  elseif kind == "port" then
+    return "expected a decimal port in the range 1..65535"
+  elseif kind == "percent_escape" then
     return "expected two hexadecimal digits after '%'"
-  elseif label == "authority_tail" then
+  elseif kind == "authority_tail" then
     return "unexpected byte in the authority"
-  elseif label == "fragment" then return "fragments are unsupported"
-  elseif label == "url_tail" then
+  elseif kind == "fragment" then return "fragments are unsupported"
+  elseif kind == "url_tail" then
     return "unexpected byte in the path or query"
   end
   return "invalid absolute HTTP URL"
 end
 
-local function url_parse_message(label: string,
-                                 position: integer): string
-  return "HTTP URL parse error [" .. label .. "] at byte " ..
-    str.tostring(position) .. ": " .. url_parse_detail(label)
+local function url_parse_error(kind: string, position: integer): Error
+  local message = "URL parse error [" .. kind .. "] at byte " ..
+    str.tostring(position) .. ": " .. url_parse_detail(kind)
+  return Error.new(position, kind, message)
+end
+
+local function url_byte(text: string, index: integer): integer
+  local bytes = text as const *ffi.titan_ffi_unsigned_char
+  return bytes[index - 1] as integer
 end
 
 local function hex_value(byte: integer): integer
@@ -192,10 +210,10 @@ local function normalize_component(source: string,
   local builder = str.writer(false)
   local index = 1
   while index <= #source do
-    local byte = header_byte(source, index)
+    local byte = url_byte(source, index)
     if byte == 37 then
-      local high = hex_value(header_byte(source, index + 1))
-      local low = hex_value(header_byte(source, index + 2))
+      local high = hex_value(url_byte(source, index + 1))
+      local low = hex_value(url_byte(source, index + 2))
       local decoded = high * 16 + low
       if is_unreserved(decoded) then
         if lowercase and decoded >= 65 and decoded <= 90 then
@@ -220,15 +238,16 @@ end
 -- spelling for the Host header. RFC 6874's encoded zone separator is decoded
 -- only for the connection address.
 local function normalize_host(raw: string): (string, string)
-  if header_byte(raw, 1) ~= 91 then
+  if url_byte(raw, 1) ~= 91 then
     local host = normalize_component(raw, true)
     return host, host
   end
 
   local inner = str.sub(raw, 2, #raw - 1)
-  if header_byte(inner, 1) == 118 or header_byte(inner, 1) == 86 then
+  if url_byte(inner, 1) == 118 or url_byte(inner, 1) == 86 then
     local dot = str.find(inner, ".") as integer
-    local version = lower_header_name(str.sub(inner, 1, dot - 1))
+    local version = normalize_component(
+      str.sub(inner, 1, dot - 1), true)
     local future = version .. str.sub(inner, dot)
     return future, "[" .. future .. "]"
   end
@@ -236,31 +255,33 @@ local function normalize_host(raw: string): (string, string)
   local zone_marker? = str.find(inner, "%25")
   if zone_marker then
     local marker = zone_marker as integer
-    local address = lower_header_name(str.sub(inner, 1, marker - 1))
+    local address = normalize_component(
+      str.sub(inner, 1, marker - 1), true)
     local zone = normalize_component(str.sub(inner, marker + 3), false)
     return address .. "%" .. zone,
       "[" .. address .. "%25" .. zone .. "]"
   end
-  local address = lower_header_name(inner)
+  local address = normalize_component(inner, true)
   return address, "[" .. address .. "]"
 end
 
-local function parse_port(text: string, position: integer): integer
+local function parse_port(text: string, position: integer):
+    (integer?, Error?)
   local port = 0
   local index = 1
   while index <= #text do
-    local digit = header_byte(text, index) - 48
+    local digit = url_byte(text, index) - 48
     if port > (65535 - digit) // 10 then
-      raise url_parse_message("port", position)
+      return nil, url_parse_error("port", position)
     end
     port = port * 10 + digit
     index = index + 1
   end
-  if port == 0 then raise url_parse_message("port", position) end
-  return port
+  if port == 0 then return nil, url_parse_error("port", position) end
+  return port, nil
 end
 
-function parse_url(source: string): URL
+function parse(source: string): (Url?, Error?)
   local captured, failure_label, failure_position =
     http_url_pattern:match(source)
   if captured == nil then
@@ -270,19 +291,19 @@ function parse_url(source: string): URL
     if failure_position ~= nil then
       position = failure_position as integer
     end
-    raise url_parse_message(label, position)
+    return nil, url_parse_error(label, position)
   end
 
   local parts = captured as {value: value}
-  local scheme = lower_header_name(parts["scheme"] as string)
+  local scheme = normalize_component(parts["scheme"] as string, true)
   local default_port = 0
   if scheme == "http" then
     default_port = 80
   elseif scheme == "https" then
     default_port = 443
   else
-    raise url_parse_message(
-      "scheme", parts["scheme_position"] as integer)
+    local position = parts["scheme_position"] as integer
+    return nil, url_parse_error("scheme", position)
   end
 
   local host, authority_host =
@@ -290,8 +311,10 @@ function parse_url(source: string): URL
   local port = default_port
   local port_text = parts["port"]
   if port_text ~= nil then
-    port = parse_port(
+    local parsed_port?, port_error? = parse_port(
       port_text as string, parts["port_position"] as integer)
+    if not parsed_port then return nil, port_error end
+    port = parsed_port as integer
   end
 
   local authority = authority_host
@@ -308,9 +331,13 @@ function parse_url(source: string): URL
   end
   local target = path
   if query then target = target .. "?" .. (query as string) end
-  return URL.new(scheme, host, port, path, query, target, authority)
+  return Url.new(scheme, host, port, path, query, target, authority), nil
 end
 
-function URL:host_header(): string
+function Url:host_header(): string
   return self.authority
+end
+
+do
+  http_url_pattern = url_pattern()
 end

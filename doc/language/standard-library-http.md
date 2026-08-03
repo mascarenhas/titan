@@ -1,16 +1,16 @@
 # HTTP/1.1 standard library
 
-The qualified `titan.http` standard module provides a small streaming HTTP/1.1
-client and server. It is layered over public `titan.net`, [`titan.ssl`](standard-library-ssl.md),
-[`io`](standard-library-io.md), and [`async`](async-io.md) APIs; its URL grammar
-uses the public `titan.peg` module. Titan source imports it with its full name:
+The `http` standard module provides a small streaming HTTP/1.1 client and
+server. It is layered over public `net`, [`ssl`](standard-library-ssl.md),
+[`url`](standard-library-url.md), [`io`](standard-library-io.md), and
+[`async`](async-io.md) APIs. Titan source uses its short import:
 
 ```titan
-local http = import "titan.http"
+local http = import "http"
 ```
 
-Lua loads the same canonical module identity with `require "titan.http"`.
-There is deliberately no short `import "http"` spelling.
+The parser resolves that spelling to the canonical `titan.http` module
+identity. Lua loads that identity directly with `require "titan.http"`.
 
 All network operations and server handlers run in async Tasks. The module
 supports only HTTP/1.1. It does not expose its llhttp parser or any native
@@ -34,18 +34,6 @@ function Headers:values(name: string): {string}
 function Headers:remove(name: string)
 function Headers:all(): {Header}
 
-record URL
-    scheme: string
-    host: string
-    port: integer
-    path: string
-    query: string?
-    target: string
-end
-
-function parse_url(source: string): URL
-function URL:host_header(): string
-
 record ClientResponse
     status: integer
     reason: string
@@ -55,12 +43,10 @@ end
 
 function request(method: string, source_url: string,
                  supplied_headers: Headers?, body: string?,
-                 ca_file: string?,
-                 ca_directory: string?): ClientResponse
+                 ca_file: string?): ClientResponse
 
 function get(source_url: string, supplied_headers: Headers?,
-             ca_file: string?,
-             ca_directory: string?): ClientResponse
+             ca_file: string?): ClientResponse
 
 function ClientResponse:read(): string?
 function ClientResponse:read_until(delimiter: string,
@@ -72,7 +58,7 @@ type Handler = (Request, Response) -> ()
 record Request
     method: string
     target: string
-    url: URL
+    url: url.Url
     version: string
     headers: Headers
 end
@@ -93,19 +79,23 @@ function Response:close()
 
 record Server
 
-function listen(host: string, port: integer, backlog: integer,
-                handler: Handler): Server
-function listen_tls(host: string, port: integer, backlog: integer,
-                    certificate_file: string,
-                    private_key_file: string,
-                    handler: Handler): Server
+function listen(host: string, handler: Handler,
+                port: integer?, backlog: integer?): Server
+function listen_tls(host: string, certificate_file: string, handler: Handler,
+                    private_key_file: string?, port: integer?,
+                    backlog: integer?): Server
 function Server:serve()
 function Server:close()
 ```
 
 `ClientResponse` satisfies `io.ReaderCloser`, `Request` satisfies `io.Reader`,
 and `Response` satisfies both `io.Writer` and `io.Closer` through their exact
-method shapes. The optional trailing arguments may be omitted.
+method shapes. The optional trailing arguments may be omitted. Plain `listen`
+defaults to port 80, `listen_tls` defaults to port 443, and both default to a
+backlog of 128. A supplied port must be in `0..65535`, where 0 requests an
+ephemeral port, and a supplied backlog must be in `1..2147483647`. When
+`private_key_file` is omitted, TLS reads the private key from the same PEM
+bundle named by `certificate_file`; a separate key path remains supported.
 
 ## Headers
 
@@ -129,54 +119,26 @@ keyword.
 
 ## URLs
 
-`parse_url` accepts only an absolute `http://` or `https://` URL with an
-authority and nonempty host. It returns the normalized scheme, connection
-host, effective port, path, optional query, and origin-form `target` (`path`
-plus `?query`). The default ports are 80 and 443. An explicit port must contain
-decimal digits and have value `1..65535`; its spelling in `host_header()` is
-the canonical decimal value. An explicitly written port remains present even
-when it equals the scheme's default. An empty path becomes `/`, while an empty
-query remains present and makes the target end in `?`.
+URL parsing and normalization belong to the standalone
+[`url` standard module](standard-library-url.md). HTTP accepts exactly that
+module's absolute HTTP/HTTPS subset. A client request raises the structured
+`url.Error` returned by `url.parse` when its source URL is invalid; no network
+operation has begun at that point. A server `Request.url` is the normalized
+`url.Url` obtained from the connection scheme, required Host field, and
+received origin-form target.
 
-The host grammar accepts RFC 3986 registered names, IPv4 addresses, bracketed
-IPv6 addresses, and bracketed IPvFuture literals. IPv6 zone identifiers use
-the RFC 6874 `%25` separator. Unbracketed IPv6 authorities are rejected.
-For an IP literal, public `URL.host` omits URI brackets because it is the
-spelling passed to DNS/TCP and TLS identity handling; `host_header()` restores
-the brackets. A zoned address such as `[fe80::1%25eth0]` therefore has
-`host == "fe80::1%eth0"` and keeps `[fe80::1%25eth0]` in the Host authority.
-
-Normalization lowercases the scheme and registered-name host. In the host,
-path, query, and zone identifier, a percent-encoded unreserved byte is decoded;
-every retained escape keeps its meaning but uses uppercase hexadecimal digits.
-Thus `%5f` becomes `_`, while encoded `/` remains `%2F`. IPv6 hexadecimal and
-the IPvFuture version prefix are canonicalized to lowercase; an IPvFuture
-suffix and zone-identifier letters otherwise retain their case.
-
-User information and fragments are deliberately unsupported. Malformed
-schemes, separators, authorities, IP literals, ports, percent escapes, paths,
-and queries raise a stable diagnostic of the form:
-
-```text
-HTTP URL parse error [label] at byte N: detail
-```
-
-`N` is a one-based byte position in the supplied string. The label identifies
-the rejected production or policy boundary, such as `userinfo`, `fragment`,
-`ipv6_brackets`, `port`, or `percent_escape`.
-
-`host_header()` returns the normalized authority, including brackets for an
-IP literal and an explicit canonicalized port. The HTTP client uses the
-normalized `target` for its request line and this authority when it generates
-an absent `Host` field.
+The HTTP client connects with `Url.host` and `Url.port`, sends `Url.target` in
+the request line, and uses `Url.authority` when it generates an absent Host
+field. Applications that only need to validate or inspect a URL should import
+`url` directly and handle its nonthrowing `(Url?, Error?)` result.
 
 ## Client requests
 
 `request` validates `method` as an HTTP token, parses `source_url`, chooses a
 plain or TLS connection from its scheme, sends one request, and returns after
-the final response headers have been parsed. For HTTPS, `ca_file` and
-`ca_directory` have exactly the trust-selection behavior documented by
-[`ssl.connect`](standard-library-ssl.md#verified-client-connections); they are
+the final response headers have been parsed. For HTTPS, `ca_file` has exactly
+the trust-selection behavior documented by
+[`ssl.connect`](standard-library-ssl.md#verified-client-connections); it is
 ignored for HTTP.
 
 The supplied headers are copied before the module adds framing fields. There
@@ -210,6 +172,12 @@ Reading through body EOF closes the parser and transport. `close()` lets the
 caller discard the remaining response and is idempotent. The client has no
 connection pool and never reuses its connection.
 
+The response becomes logically closed before its transport close can suspend.
+If Task cancellation prevents that call from recording completion, later
+reads still return EOF and a later `close()` retries the idempotent transport
+cleanup. Only a close call that returns records completion and makes every
+later call a no-op.
+
 Redirect status codes are returned unchanged; the client never follows them.
 Content codings such as gzip are likewise returned unchanged. The caller owns
 redirect policy and decompression.
@@ -217,14 +185,19 @@ redirect policy and decompression.
 ## Servers and handlers
 
 `listen` creates a plain `net.Server`. `listen_tls` creates an `ssl.Server`
-with the given PEM certificate chain and private key. The returned Server does
-not accept until `serve()` runs. `serve` loops until close, accepting each
-connection and starting one independent async Task for it; requests on the
-same persistent connection remain serial and ordered.
+with the given PEM certificate chain and its combined or separate private key.
+The returned Server does not accept until `serve()` runs. `serve` loops until
+close, accepting each connection and starting one independent async Task for
+it; requests on the same persistent connection remain serial and ordered.
 
 `Server:close()` is idempotent and stops the listener and accept loop. It does
 not maintain a registry of already accepted connection Tasks, so those
 connections finish or fail according to their own HTTP/transport lifecycle.
+The Server becomes logically closed before the wrapped listener close can
+suspend. If cancellation prevents that call from recording completion,
+another `close()` retries the idempotent listener operation and releases a
+blocked `serve()` call. Only a close call that returns makes later calls
+immediate no-ops.
 
 The handler is called as soon as the request line and headers are complete,
 without waiting for the HTTP parser to consume the complete body.
@@ -317,7 +290,7 @@ another policy.
 
 ```titan
 local async = import "async"
-local http = import "titan.http"
+local http = import "http"
 
 local function handler(request: http.Request, response: http.Response)
   response:set_header("Content-Type", "text/plain")
@@ -326,7 +299,7 @@ local function handler(request: http.Request, response: http.Response)
 end
 
 local function run_server(): value
-  local server = http.listen("127.0.0.1", 8080, 128, handler)
+  local server = http.listen("127.0.0.1", handler, 8080)
   defer server:close()
   server:serve()
   return nil

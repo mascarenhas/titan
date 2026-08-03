@@ -14,28 +14,42 @@ decisions.
   BIOs through `net.Connection:read`, `write`, `shutdown`, and `close`.
 - `titan.http` is an ordinary high-level standard-library module above
   `titan.net`, `titan.ssl`, `titan.io`, and `titan.async`.
-- Applications import the new module identities as `titan.ssl` and
-  `titan.http`; adding those names to the parser's short standard-import list
-  would be a language change and is out of scope. Their implementations keep
-  the established short spellings for existing standard-module dependencies.
+- `titan.url` is an ordinary synchronous standard-library module above
+  `titan.peg` and `titan.string`. It owns the reusable URL grammar and
+  normalization; HTTP imports it instead of exporting an HTTP-private parser.
+- `ssl`, `url`, and `http` are standard-library short imports, like `net` and
+  `fs`: applications write `import "ssl"`, `import "url"`, and
+  `import "http"`, while the compiler resolves those spellings to the logical
+  module identities `titan.ssl`, `titan.url`, and `titan.http`. Their
+  implementations use the same short spellings for standard-module
+  dependencies.
 - OpenSSL is used directly through Titan's C FFI. There is no SSL convenience
   shim: Titan spells function-like OpenSSL macros through their exported
   control functions and keeps all TLS policy and state-machine work in
   `titan.ssl`.
-- `titan.ssl` has one source-only integration header containing exactly the
-  `openssl/ssl.h`, `openssl/err.h`, and `openssl/x509v3.h` includes. It has no
-  declaration, definition, object, or provider payload. The FFI checker now
-  correctly accepts those three headers as separate imports: it recognizes a
-  re-extracted physical declaration, validates the final ordered include
-  context, and does not collapse same-spelled tags from distinct declarations.
-  The aggregator remains a compilation-time choice because independently
-  extracting the three large overlapping OpenSSL closures and probing their
-  hundreds of repeats takes minutes instead of seconds.
+- `titan.ssl` imports `openssl/ssl.h`, `openssl/err.h`,
+  `openssl/x509v3.h`, and `openssl/pem.h` directly. There is no `titan/ssl/`
+  header folder. The FFI checker recognizes a re-extracted
+  physical declaration and validates the final ordered include context. A
+  same-kind file-scope tag reuses one module-wide canonical owner regardless
+  of which header exposed it; genuinely distinct tag objects, including
+  prototype-local tags, remain nominally distinct. It batches
+  independent declaration-pair compatibility checks into dependency-safe
+  compiler waves on the successful path, isolates every pair's C tag scope,
+  preserves sequential composite-type dependencies between waves, and bisects
+  only a rejected batch to retain exact diagnostics. This fixes the former
+  thousands-of-process performance bug without an aggregation header or a
+  weaker FFI type relation. The successful direct-OpenSSL-header extraction
+  must remain within roughly three times the single umbrella-header baseline;
+  the final un-cached benchmark is 9.30 seconds with one baseline plus three
+  dependency-safe waves of 714, 657, and 1,798 declaration pairs, versus the
+  approximately 3.98-second umbrella baseline (about 2.34 times).
 - The one native adapter is private to `titan.http` and contains only llhttp
   callback ABI trampolines. Each trampoline recovers the Lua state, callback
   closure/module, and exact Titan native entry point, invokes it synchronously,
-  and restores its temporary root. Titan owns the `{Event}` queue, copies
-  borrowed callback spans into Titan strings, and performs all event policy.
+  and restores its temporary root. Titan owns the GC-traced `{Event}` Array,
+  copies borrowed callback spans into Titan strings, and performs all event
+  policy.
   A non-callback C trampoline is allowed only for a boundary Titan cannot
   express (notably a required function-like macro), and every such exception
   must have an immediately preceding C comment naming and justifying the gap.
@@ -50,12 +64,28 @@ decisions.
 
 - Client connections verify peers by default, validate DNS/IP identity during
   the handshake, and send SNI for DNS names.
-- Client configuration accepts optional CA file and CA directory overrides.
-  Without them OpenSSL's compiled default paths and its documented environment
-  overrides are used; this is not described as a portable OS trust-store
-  abstraction.
-- Server listeners load one PEM certificate chain and private key and do not
-  support mTLS in this iteration.
+- Client configuration accepts an optional PEM CA file, read through the
+  high-level asynchronous `fs` module and parsed from an OpenSSL memory BIO.
+  There is no per-connect CA-directory parameter. A module-initialized shared
+  client context calls `SSL_CTX_set_default_verify_paths` once and supplies
+  OpenSSL's compiled default paths and documented environment overrides to
+  ordinary connections; this is not described as a portable OS trust-store
+  abstraction. The one-time default-path setup may synchronously discover its
+  configuration, but no OpenSSL file API runs on every ordinary connect.
+- Server listeners read the certificate and private-key contents through the
+  high-level asynchronous `fs` module and parse them from memory BIOs. The key
+  path is optional and defaults to the certificate path, so a combined PEM
+  bundle is the concise case while split files remain supported. Servers do
+  not support mTLS in this iteration.
+- Titan's extracted `pem.h` namespace does not expose the stack-returning
+  `PEM_X509_INFO_read_bio` family. This is handled without a shim: Titan calls
+  exported `PEM_read_bio`, classifies PEM blocks, decodes certificate/key DER
+  through exported OpenSSL entry points, and releases each OpenSSL allocation
+  through the primitive underlying `OPENSSL_free`. Encrypted private keys are
+  outside this API iteration.
+- Listener backlog is optional throughout `net`, `ssl`, and `http`, with a
+  default of 128. HTTP listener ports are optional and default to 80 for HTTP
+  and 443 for HTTPS.
 - Accepted connections handshake lazily on explicit `handshake()` or the first
   read/write. Performing it inside the accept loop would let a slow ClientHello
   stall every later accept.
@@ -68,13 +98,16 @@ decisions.
 
 ### HTTP/1.1
 
-- URL parsing is a module-initialized `titan.peg` relabel-source translation of
-  RFC 3986 URI grammar from `daurnimator/lpeg_patterns` at pinned commit
-  `0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7`. The HTTP boundary accepts only
-  absolute `http`/`https` authority URLs, preserves the upstream percent
-  normalization rules, and converts committed PEG labels into stable
-  one-based byte diagnostics. The relevant upstream URI cases are ported into
-  the non-LuaCov HTTP suite.
+- URL parsing belongs to the standalone `titan.url` module. Its
+  module-initialized `titan.peg` relabel-source grammar translates the RFC 3986
+  URI grammar from `daurnimator/lpeg_patterns` at pinned commit
+  `0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7`. `url.parse` accepts the absolute
+  `http`/`https` authority URLs supported by this iteration and returns
+  `(Url?, Error?)`: a normalized public `Url` plus nil, or nil plus an `Error`
+  record containing the one-based byte `position`, stable error `kind`, and
+  rendered `message`. It never raises for malformed input. HTTP converts that
+  recoverable error to a raised boundary error where a request cannot proceed.
+  The upstream URI cases live in the non-LuaCov URL suite.
 - The client supports `http` and verified `https`, streams a parsed response as
   an `io.ReaderCloser`, sends `Connection: close`, and neither follows redirects
   nor decompresses content encodings.
@@ -90,6 +123,10 @@ decisions.
 - The server drains any unread request body before parsing the next keep-alive
   request. Handler return closes an unclosed response so framing is always
   completed.
+- `ClientResponse` and `Server` become logically closed before their wrapped
+  transport/listener close can suspend. If sticky Task cancellation prevents
+  that call from recording completion, the next `close()` idempotently retries
+  only the transport/listener cleanup.
 - HTTP/1.1 keep-alive and pipelined suffix preservation are supported, but this
   iteration does not manufacture an internal idle timeout. The public async API
   has task creation/cancellation and timers but no current-task/join/race/deadline
@@ -105,11 +142,12 @@ decisions.
   consumer inputs.
 - Pin and checksum llhttp 9.4.3 and always build its three generated C sources
   into a private deterministic archive.
-- Carry the private HTTP adapter separately. Neither dependency archive, the
-  HTTP callback header, nor the source-only SSL integration header is installed
-  in Titan's runtime SDK, and `libtitan.a` retains its exact existing members.
-- Add `ssl` and `http` to the coordinated standard provider, producing sixteen
-  logical modules/shims/archive keys and seventeen `luaopen_*` entries.
+- Carry the private HTTP adapter separately. Neither dependency archive nor the
+  HTTP callback header is installed in Titan's runtime SDK, and `libtitan.a`
+  retains its exact existing members.
+- Add `ssl`, `url`, and `http` to the coordinated standard provider, producing
+  seventeen logical modules/shims/archive keys and eighteen `luaopen_*`
+  entries.
 - Preserve recoverable publication and explicitly test upgrade/rollback from a
   valid fourteen-module ABI-0.20 predecessor.
 - Attribute and ship the OpenSSL, llhttp, and derivative lpeg_patterns
@@ -117,23 +155,26 @@ decisions.
 
 ## Tests and documentation
 
-- Add non-LuaCov loopback TLS/HTTP suites with checked-in local CA fixtures:
+- Add non-LuaCov URL and loopback TLS/HTTP suites with checked-in local CA fixtures:
   verification and hostname failure, binary/fragmented I/O, WANT_READ,
-  clean/truncated close, strict/fractional HTTP parsing, fixed/chunked/EOF
+  clean/truncated close, strict/fragmented HTTP parsing, fixed/chunked/EOF
   bodies, streaming handlers, pipelining, keep-alive, HTTPS, and the
-  HTTP-relevant lpeg_patterns URI normalization/error matrix. Review the
+  lpeg_patterns URI normalization/error matrix. Review the
   same-payload WANT_WRITE retry path directly: dynamic memory BIOs have no
   capacity control and TLS 1.3 has no renegotiation API with which a portable
   public loopback test can force that OpenSSL result.
 - Add focused build/package tests for pins, checksums, exact archive members,
   native-symbol privacy, bundled/system OpenSSL, source-rock inventory,
-  provider counts, migration, rollback, and static consumers.
+  provider counts, migration, rollback, static consumers, direct OpenSSL
+  imports, and batched FFI compatibility probes.
 - Update Linux CI caches, dependency preparation, module snapshots, production
   smokes, and one sanitizer TLS/HTTP boundary. Do not dispatch macOS CI for this
   PR.
-- Add language chapters for the two public modules and implementation chapters
-  for memory-BIO ownership/retries and llhttp event ownership/pause/resume.
-  Link both manual indexes and update every exact fourteen/fifteen-module claim.
+- Add language and implementation chapters for all three public modules:
+  URL grammar/error ownership, TLS memory-BIO ownership/retries, and HTTP
+  llhttp event ownership/pause/resume. Link both manual indexes and update
+  every exact standard-provider count while preserving the historical
+  fourteen-module predecessor description.
 - Before publication, run focused tests, `make test`, adversarial code/docs/API
   reviews, exact-head Linux CI, and then commit both this plan and the original
   draft with the implementation.

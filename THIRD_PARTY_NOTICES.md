@@ -34,7 +34,7 @@ reproduced in `LICENSES/llhttp-LICENSE`.
 
 ## lpeg_patterns URI grammar
 
-Titan's `titan.http` URI grammar is derived from lpeg_patterns commit
+Titan's `titan.url` URI grammar is derived from lpeg_patterns commit
 `0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7`, obtained from
 <https://github.com/daurnimator/lpeg_patterns>. lpeg_patterns is
 Copyright (c) 2012-2016 Daurnimator and is distributed under the MIT license

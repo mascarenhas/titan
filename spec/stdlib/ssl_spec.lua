@@ -2,9 +2,10 @@ local async_stdlib = require "spec.support.async_stdlib"
 
 local SSL_CASES = ([==[
 local async = import "async"
+local fs = import "fs"
 local stream = import "io"
 local net = import "net"
-local ssl = import "titan.ssl"
+local ssl = import "ssl"
 local str = import "string"
 local timer = import "timer"
 
@@ -24,12 +25,16 @@ local function active(task: async.Task): boolean
 end
 
 local function listen_available(first_port: integer,
-                                certificate: string): (ssl.Server, integer)
+                                certificate: string,
+                                private_key: string?): (ssl.Server, integer)
   local port = first_port
   for _ = 1, 100 do
     do
-      return ssl.listen("127.0.0.1", port, 8,
-                        certificate, PRIVATE_KEY), port
+      if not private_key then
+        return ssl.listen("127.0.0.1", port, certificate), port
+      end
+      return ssl.listen("127.0.0.1", port,
+                        certificate, private_key as string), port
     catch
       if error is async.Error then
         local failure = error as async.Error
@@ -55,7 +60,14 @@ end
 function start_exchange(first_port: integer): async.Task
   outcome = "running"
   return async.run(function (): value
-    local server, port = listen_available(first_port, CERTIFICATE)
+    local certificate_bundle = fs.tmpname()
+    fs.write_file(certificate_bundle,
+                  fs.read_file(CERTIFICATE) .. "\n" ..
+                  fs.read_file(TRUST_ROOT) .. "\n" ..
+                  fs.read_file(PRIVATE_KEY))
+    defer fs.unlink(certificate_bundle)
+    local server, port =
+      listen_available(first_port, certificate_bundle, nil)
     local peer = async.run(function (): value
       local connection = server:accept()
       local channel: stream.ReaderWriterCloser = connection
@@ -74,8 +86,7 @@ function start_exchange(first_port: integer): async.Task
       return nil
     end)
 
-    local connection = ssl.connect(
-      "127.0.0.1", port, TRUST_ROOT, nil)
+    local connection = ssl.connect("127.0.0.1", port, TRUST_ROOT)
     local channel: stream.ReaderWriterCloser = connection
     channel:write(str.rep("x", 40000) .. "\0ENDtail")
     check(channel:read_until("\n", true) == "reply\0",
@@ -100,7 +111,8 @@ end
 function start_lazy_accept(first_port: integer): async.Task
   outcome = "running"
   return async.run(function (): value
-    local server, port = listen_available(first_port, CERTIFICATE)
+    local server, port =
+      listen_available(first_port, CERTIFICATE, PRIVATE_KEY)
     local stalled = net.connect("127.0.0.1", port)
     local first = server:accept()
 
@@ -110,7 +122,7 @@ function start_lazy_accept(first_port: integer): async.Task
       connection:close()
       return nil
     end)
-    local second = ssl.connect("127.0.0.1", port, TRUST_ROOT, nil)
+    local second = ssl.connect("127.0.0.1", port, TRUST_ROOT)
     check(second:read() == "second",
           "a stalled ClientHello blocked the next accept")
     check(not second:read(), "second TLS connection did not close cleanly")
@@ -129,7 +141,8 @@ end
 function start_verification_failure(first_port: integer): async.Task
   outcome = "running"
   return async.run(function (): value
-    local server, port = listen_available(first_port, WRONG_CERTIFICATE)
+    local server, port =
+      listen_available(first_port, WRONG_CERTIFICATE, PRIVATE_KEY)
     local peer_failed = false
     local peer = async.run(function (): value
       local connection = server:accept()
@@ -143,7 +156,7 @@ function start_verification_failure(first_port: integer): async.Task
     end)
     local failed = false
     do
-      ssl.connect("localhost", port, TRUST_ROOT, nil)
+      ssl.connect("localhost", port, TRUST_ROOT)
     catch
       check(error is ssl.Error, "verification raised a non-TLS error")
       local failure = error as ssl.Error
@@ -164,7 +177,8 @@ end
 function start_truncated_eof(first_port: integer): async.Task
   outcome = "running"
   return async.run(function (): value
-    local server, port = listen_available(first_port, CERTIFICATE)
+    local server, port =
+      listen_available(first_port, CERTIFICATE, PRIVATE_KEY)
     local accepted: ssl.Connection? = nil
     local handshake_done = false
     local peer = async.run(function (): value
@@ -179,7 +193,7 @@ function start_truncated_eof(first_port: integer): async.Task
       connection:read()
       return nil
     end)
-    local client = ssl.connect("127.0.0.1", port, TRUST_ROOT, nil)
+    local client = ssl.connect("127.0.0.1", port, TRUST_ROOT)
     while not handshake_done do timer.yield() end
     peer:cancel("intentional abrupt TLS peer")
     -- TCP read cancellation is physical only when its own callback arrives.
@@ -208,6 +222,138 @@ function start_truncated_eof(first_port: integer): async.Task
     client:close()
     server:close()
     outcome = "truncated-ok"
+    return nil
+  end)
+end
+
+function start_loading_failures(first_port: integer): async.Task
+  outcome = "running"
+  return async.run(function (): value
+    local missing = fs.tmpname()
+    fs.unlink(missing)
+
+    local missing_ca = false
+    do
+      ssl.connect("127.0.0.1", first_port, missing)
+    catch
+      check(error is async.Error,
+            "missing CA path raised a non-filesystem error")
+      local failure = error as async.Error
+      check(failure.name == "ENOENT" and failure.operation == "fs.open",
+            "missing CA path did not fail through fs.open")
+      missing_ca = true
+    end
+    check(missing_ca, "missing CA path was accepted")
+
+    local missing_certificate = false
+    do
+      ssl.listen("127.0.0.1", first_port, missing, PRIVATE_KEY)
+    catch
+      check(error is async.Error,
+            "missing certificate path raised a non-filesystem error")
+      local failure = error as async.Error
+      check(failure.name == "ENOENT" and failure.operation == "fs.open",
+            "missing certificate path did not fail through fs.open")
+      missing_certificate = true
+    end
+    check(missing_certificate, "missing certificate path was accepted")
+
+    local missing_key = false
+    do
+      ssl.listen("127.0.0.1", first_port, CERTIFICATE, missing)
+    catch
+      check(error is async.Error,
+            "missing private-key path raised a non-filesystem error")
+      local failure = error as async.Error
+      check(failure.name == "ENOENT" and failure.operation == "fs.open",
+            "missing private-key path did not fail through fs.open")
+      missing_key = true
+    end
+    check(missing_key, "missing private-key path was accepted")
+
+    local empty = fs.tmpname()
+    defer fs.unlink(empty)
+    local empty_ca = false
+    do
+      ssl.connect("127.0.0.1", first_port, empty)
+    catch
+      check(error is ssl.Error, "empty CA PEM raised a non-TLS error")
+      local failure = error as ssl.Error
+      check(failure.operation == "ssl.client.trust",
+            "empty CA PEM reported " .. failure.operation)
+      empty_ca = true
+    end
+    check(empty_ca, "empty CA PEM was accepted")
+
+    local empty_certificate = false
+    do
+      ssl.listen("127.0.0.1", first_port, empty, PRIVATE_KEY)
+    catch
+      check(error is ssl.Error,
+            "empty certificate PEM raised a non-TLS error")
+      local failure = error as ssl.Error
+      check(failure.operation == "ssl.server.certificate",
+            "empty certificate PEM reported " .. failure.operation)
+      empty_certificate = true
+    end
+    check(empty_certificate, "empty certificate PEM was accepted")
+
+    local empty_key = false
+    do
+      ssl.listen("127.0.0.1", first_port, CERTIFICATE, empty)
+    catch
+      check(error is ssl.Error,
+            "empty private-key PEM raised a non-TLS error")
+      local failure = error as ssl.Error
+      check(failure.operation == "ssl.server.private-key",
+            "empty private-key PEM reported " .. failure.operation)
+      empty_key = true
+    end
+    check(empty_key, "empty private-key PEM was accepted")
+
+    local malformed = fs.tmpname()
+    fs.write_file(malformed,
+                  fs.read_file(TRUST_ROOT) .. "\n" ..
+                  "-----BEGIN CERTIFICATE-----\n" ..
+                  "not-base64\n" ..
+                  "-----END CERTIFICATE-----\n")
+    defer fs.unlink(malformed)
+    local malformed_ca = false
+    do
+      ssl.connect("127.0.0.1", first_port, malformed)
+    catch
+      check(error is ssl.Error,
+            "malformed trailing CA PEM raised a non-TLS error")
+      local failure = error as ssl.Error
+      check(failure.operation == "ssl.client.trust",
+            "malformed trailing CA PEM reported " .. failure.operation)
+      malformed_ca = true
+    end
+    check(malformed_ca, "malformed trailing CA PEM was accepted")
+
+    local malformed_key = fs.tmpname()
+    fs.write_file(malformed_key,
+                  fs.read_file(PRIVATE_KEY) .. "\n" ..
+                  "-----BEGIN PRIVATE KEY-----\n" ..
+                  "not-base64\n" ..
+                  "-----END PRIVATE KEY-----\n")
+    defer fs.unlink(malformed_key)
+    local malformed_private_key = false
+    do
+      ssl.listen("127.0.0.1", first_port, CERTIFICATE, malformed_key)
+    catch
+      check(error is ssl.Error,
+            "malformed trailing private-key PEM raised a non-TLS error")
+      local failure = error as ssl.Error
+      check(failure.operation == "ssl.server.private-key",
+            "malformed trailing private-key PEM reported " ..
+              failure.operation)
+      malformed_private_key = true
+    end
+    check(malformed_private_key,
+          "malformed trailing private-key PEM was accepted")
+
+    outcome = "loading-ok"
     return nil
   end)
 end
@@ -254,12 +400,12 @@ assert(cases.result() == %q, cases.result())
         assert.equals(0, status, output)
     end
 
-    it("verifies a peer and exchanges binary data across TLS records",
+    it("loads a combined full-chain/key PEM and exchanges TLS records",
     function()
         run("start_exchange", "exchange", "exchange-ok")
     end)
 
-    it("does not let a stalled ClientHello serialize server accepts",
+    it("loads split server PEM files without serializing accepts",
     function()
         run("start_lazy_accept", "lazy", "lazy-ok")
     end)
@@ -272,5 +418,10 @@ assert(cases.result() == %q, cases.result())
     it("distinguishes a cancelled peer's truncated transport from clean EOF",
     function()
         run("start_truncated_eof", "truncated", "truncated-ok")
+    end)
+
+    it("rejects missing, empty, or malformed in-memory PEM inputs",
+    function()
+        run("start_loading_failures", "loading", "loading-ok")
     end)
 end)

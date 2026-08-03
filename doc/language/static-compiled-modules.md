@@ -229,8 +229,8 @@ $ROCKS_TREE/lib/titan/0.20/titan.so
 $ROCKS_TREE/lib/titan/0.20/titan.a
 ```
 
-Both contain the sixteen `titan.*` logical standard modules, including
-`titan.io`, `titan.ssl`, and `titan.http`, under ABI 0.20. The DSO also
+Both contain the seventeen `titan.*` logical standard modules, including
+`titan.io`, `titan.ssl`, `titan.url`, and `titan.http`, under ABI 0.20. The DSO also
 contains bare native `require "titan"` support, and the archive carries that
 support object without inventing a logical module named `titan`.
 

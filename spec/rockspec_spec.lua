@@ -4,7 +4,7 @@ local lfs = require "lfs"
 
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-    "http", "os", "peg", "string", "math", "lua", "iter", "gc",
+    "url", "http", "os", "peg", "string", "math", "lua", "iter", "gc",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
 
@@ -250,7 +250,6 @@ describe("standalone-prefix source installation", function()
         assert_absent(PREFIX .. "/lib/libtitan-llhttp.a")
         assert_absent(PREFIX .. "/lib/libssl.a")
         assert_absent(PREFIX .. "/lib/libcrypto.a")
-        assert_absent(PREFIX .. "/include/titan/ssl/openssl.h")
         assert_absent(PREFIX .. "/include/titan/http/native/titan_httpshim.h")
         assert_file(PREFIX .. "/share/titan/THIRD_PARTY_NOTICES.md")
         for _, license in ipairs({
@@ -509,16 +508,16 @@ describe("standalone-prefix source installation", function()
             "titan/fs.titan",
             "titan/net.titan",
             "titan/ssl.titan",
-            "titan/ssl/openssl.h",
+            "titan/url.titan",
             "titan/http/http.titan",
             "titan/http/client.titan",
             "titan/http/headers.titan",
             "titan/http/native.titan",
             "titan/http/server.titan",
-            "titan/http/url.titan",
             "titan/http/native/titan_httpshim.h",
             "titan/http/native/titan_httpshim.c",
             "spec/stdlib/ssl_spec.lua",
+            "spec/stdlib/url_spec.lua",
             "spec/stdlib/http_spec.lua",
             "spec/stdlib/ssl_http_sanitizer_spec.lua",
             "spec/fixtures/ssl/ca.pem",
@@ -796,6 +795,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             local fs = require "titan.fs"
             local net = require "titan.net"
             local ssl = require "titan.ssl"
+            local url = require "titan.url"
             local http = require "titan.http"
             local system = require "titan.os"
             assert(type(builtin_coroutine) == "table")
@@ -814,6 +814,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             assert(type(fs) == "userdata")
             assert(type(net) == "userdata")
             assert(type(ssl) == "userdata")
+            assert(type(url) == "userdata")
             assert(type(http) == "userdata")
             assert(type(system) == "userdata")
             assert(type(peg) == "userdata")
@@ -825,6 +826,11 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             assert(peg.literal("installed"):match("installed") == 10)
             assert(titan_string.len("installed\0string") == 16)
             assert(titan_math.sqrt(81.0) == 9.0)
+            local parsed_url, parse_error =
+                url.parse("https://example.com/installed?q=1")
+            assert(parse_error == nil)
+            assert(parsed_url.authority == "example.com")
+            assert(parsed_url.target == "/installed?q=1")
             assert(builtin_string == string)
             for name, module in pairs({
                 coroutine = coroutine,
@@ -835,6 +841,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 fs = fs,
                 net = net,
                 ssl = ssl,
+                url = url,
                 http = http,
                 os = system,
                 peg = peg,
@@ -891,10 +898,24 @@ assert(support._loadlib(%q, "titan_uv_abi"))
         local source = assert(io.open(workspace .. "/installed.titan", "wb"))
         source:write([[
 local timer = import "timer"
+local ssl = import "ssl"
+local url = import "url"
+local http = import "http"
+
+local function accepts_tls(_connection: ssl.Connection): boolean
+  return true
+end
 
 function main(args: {string}): integer
   timer.sleep(0)
-  return 0
+  local parsed?, parse_error? =
+    url.parse("https://example.com/short-import")
+  if parse_error then return 1 end
+  local actual = parsed as url.Url
+  if actual.scheme == "https" and actual.path == "/short-import" then
+    return 0
+  end
+  return 1
 end
 ]])
         source:close()
@@ -926,6 +947,9 @@ end
         assert.truthy(generated:find(
             'loadlib(L, "titan.so")', 1, true), generated)
         assert.falsy(generated:find("/titan/timer.so", 1, true), generated)
+        assert.falsy(generated:find("/titan/ssl.so", 1, true), generated)
+        assert.falsy(generated:find("/titan/url.so", 1, true), generated)
+        assert.falsy(generated:find("/titan/http.so", 1, true), generated)
 
         ok, output, why, code = run(clean_environment({
             workspace .. "/installed",

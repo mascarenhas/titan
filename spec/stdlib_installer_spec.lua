@@ -291,6 +291,7 @@ local function seed_fourteen_module_pair(root)
     write_file(root .. "/lib/titan/0.20/titan.a",
         "prior fourteen-module archive\n")
     remove_tree(root .. "/share/lua/5.5/titan/ssl.lua")
+    remove_tree(root .. "/share/lua/5.5/titan/url.lua")
     remove_tree(root .. "/share/lua/5.5/titan/http.lua")
     capture_predecessor(root)
 end
@@ -369,7 +370,7 @@ local function assert_fourteen_module_pair(root)
         assert.equal(installer.shim_contents("titan." .. module),
             read_file(root .. "/share/lua/5.5/titan/" .. module .. ".lua"))
     end
-    for _, module in ipairs({ "ssl", "http" }) do
+    for _, module in ipairs({ "ssl", "url", "http" }) do
         assert.is_nil(lfs.symlinkattributes(
             root .. "/share/lua/5.5/titan/" .. module .. ".lua"))
     end
@@ -418,16 +419,17 @@ describe("recoverable paired standard-library publication", function()
     local root
     local old_failpoint
 
-    it("owns the exact current sixteen-module public layout", function()
+    it("owns the exact current seventeen-module public layout", function()
         assert.same({
             "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-            "http", "os", "peg", "string", "math", "lua", "iter", "gc",
+            "url", "http", "os", "peg", "string", "math", "lua", "iter",
+            "gc",
         }, installer.MODULES)
         assert.same({
             "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
-            "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.http",
-            "titan.os", "titan.peg", "titan.string", "titan.math",
-            "titan.lua", "titan.iter", "titan.gc",
+            "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
+            "titan.http", "titan.os", "titan.peg", "titan.string",
+            "titan.math", "titan.lua", "titan.iter", "titan.gc",
         }, installer.MODULE_NAMES)
     end)
 
@@ -468,7 +470,7 @@ describe("recoverable paired standard-library publication", function()
         })
         assert.truthy(ok, err)
         assert_new_install(root, false)
-        for _, module in ipairs({ "ssl", "http" }) do
+        for _, module in ipairs({ "ssl", "url", "http" }) do
             local path = root .. "/share/lua/5.5/titan/" .. module .. ".lua"
             assert.equal(installer.shim_contents("titan." .. module),
                 read_file(path))
@@ -581,6 +583,7 @@ local function prior_archive_scanner(path)
     for name, entry in pairs(entries) do prior[name] = entry end
     if contents == "prior fourteen-module archive\n" then
         prior["titan.ssl"] = nil
+        prior["titan.url"] = nil
         prior["titan.http"] = nil
     end
     return { entries = prior }

@@ -291,12 +291,12 @@ exports no member and declares no record. The Makefile
 declares this set explicitly as `UV_TITAN_SOURCES`; it does not use a
 wildcard, so adding a production source changes the reviewed build graph.
 Every listed source is a prerequisite of the one combined standard-library
-completion target. The production compiler invocation names all sixteen logical
+completion target. The production compiler invocation names all seventeen logical
 roots:
 
 ```sh
 titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
-  titan.ssl titan.http titan.os \
+  titan.ssl titan.url titan.http titan.os \
   titan.peg titan.string \
   titan.math titan.lua titan.iter titan.gc \
   -X titan-runtime/titanlib.o lpeglabel-build/libtitan-lpeglabel.a \
@@ -308,19 +308,21 @@ titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.
 Generated `titan/uv/uv.c` and `titan/uv/uv.o` are build artifacts and are
 removed by `make clean`. No contributor DSO, archive, or contributor shim is
 built or installed. The one logical `titan.uv` object, its one generated
-`titan/uv.lua` shim, and the other fifteen logical standard modules reside in
-the physical `titan.so`/`titan.a` pair. The private five-member LPegLabel
-archive is shared metadata-free payload for the `titan.peg`/`titan.string`
-folder modules. Bundled mode then supplies the private libuv archive, so its
+`titan/uv.lua` shim, and the remaining sixteen logical modules (seventeen in
+total) reside in the physical `titan.so`/`titan.a` pair. The private
+five-member LPegLabel archive is shared metadata-free payload for the
+`titan.peg`/`titan.string` folder modules. Bundled mode then supplies the
+private libuv archive, so its
 members enter both provider forms;
 system mode repeats the configured final-link setting for the DSO and does not
 copy it into `titan.a` (and omits `libuv-build/libuv.a` from the command).
 That setting may itself select a shared or static system library. Higher
 `async`/`timer`/`fs`/`net`/`os` modules still import
 the independent logical `titan.uv` protocol, but their calls are direct
-because all sixteen source roots are linked together. `titan.ssl` reaches that
-runtime only through public `titan.net`, and `titan.http` only through the
-public net/SSL/I/O/async layers; neither adds a direct uv dependency.
+because all seventeen source roots are linked together. `titan.ssl` reaches
+that runtime only through public `titan.net`, and `titan.http` only through the
+public net/SSL/I/O/async layers; `titan.url` is synchronous composition over
+`titan.peg` and `titan.string`. None adds a direct uv dependency.
 
 `titan.http`, `titan.peg`, and `titan.string` apply the same folder-module
 rules: each has one canonical main, immediate contributors sharing

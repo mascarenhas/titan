@@ -498,12 +498,37 @@ parameter adjustment, and incomplete/known array composites. Structurally
 matching anonymous aggregates are only conditional candidates.
 
 After the final baseline succeeds, every queued exact or conditional pair is
-rendered as two `extern` declarations of one probe-private synthetic identifier and
-compiled in the same foreign-header context. Acceptance proves that the two
-independently extracted declaration types can form compatible declarations in
-that context; it does not prove that both source declarations survived
-preprocessing. Only an accepted pair is rewritten to the first canonical
-declaration type and allowed to form a declaration composite.
+rendered as two `extern` declarations of one probe-private synthetic identifier.
+The checker submits dependency-safe waves in source order. A wave contains at
+most the first remaining occurrence of each ordinary name, and a later
+declaration whose rendered type graph could be changed by any earlier composite
+write waits for a following wave. Successful pairs are canonicalized in source
+order before the next wave is rendered, preserving chains such as `a[]`, then
+`a[3]`, then the incompatible `a[4]` probe.
+
+The declaration renderer normally preserves every C typedef spelling. For a
+typedef explicitly marked as a private declaration-owned array view, the probe
+path alone instead expands its structural target and reapplies the alias
+qualifiers at the same declarator level. This makes a bound completed by an
+earlier wave visible in the next compiler question even though the real typedef
+in the cumulative header preamble remains incomplete. Canonical typedefs and
+unrelated aliases are never expanded.
+
+Within a wave, the service deduplicates identical rendered pairs, assigns a
+different synthetic identifier and nested C block scope to each remaining pair,
+and compiles all uncached pairs together in the same foreign-header context.
+The block scopes isolate C tags as well as ordinary identifier lookup; generated
+GCC/Clang diagnostic guards suppress only the artificial `-Wnested-externs`
+warning. A successful batch accepts and caches every pair. A rejected batch is
+recursively bisected until each rejected singleton has the same pair-specific
+compiler verdict and diagnostic that an independent probe would have produced;
+accepted sub-batches are cached without further splitting. A spawn,
+interruption, workspace, or cleanup failure applies to the batch as
+infrastructure evidence, is not bisected, and is not cached. Acceptance proves
+that two independently extracted declaration types can form compatible
+declarations in that context; it does not prove that both source declarations
+survived preprocessing. Only an accepted pair is rewritten to the first
+canonical declaration type and allowed to form a declaration composite.
 
 One otherwise-incompatible pair is also queued when both ordinary declarations
 have the same preprocessor source identity, line, and column *and* a dedicated

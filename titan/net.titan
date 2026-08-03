@@ -49,11 +49,13 @@ function connect(host: string, port: integer): Connection
 end
 
 function listen(host: string, port: integer,
-                backlog: integer): Server
+                backlog: integer?): Server
   check_host(host)
   check_listen_port(port)
-  if backlog <= 0 then raise "listen backlog must be positive" end
-  return Server.new(uv._net_listen(host, port, backlog))
+  local actual_backlog = 128
+  if backlog then actual_backlog = backlog as integer end
+  if actual_backlog <= 0 then raise "listen backlog must be positive" end
+  return Server.new(uv._net_listen(host, port, actual_backlog))
 end
 
 function Connection:read(): string?

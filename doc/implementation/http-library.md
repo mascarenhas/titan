@@ -7,25 +7,25 @@ callback bridge, streaming parser ownership, and high-level server composition.
 
 ## Folder-module structure and layering
 
-The canonical `titan/http/http.titan` main imports `titan.net`, `titan.ssl`,
-`titan.io`, `titan.async`, `titan.peg`, `titan.string`, and `titan.math`. Its
-immediate contributors share one module-private scope:
+The canonical `titan/http/http.titan` main uses the short `net`, `ssl`, `url`,
+`io`, `async`, and `string` imports plus qualified `titan.math`. The parser
+resolves every short spelling to its ordinary `titan.*` logical identity before
+checking. Its immediate contributors share one module-private scope:
 
 ```text
 titan/http/http.titan       imports and initialization
 titan/http/client.titan     one-request client and ClientResponse
 titan/http/headers.titan    ordered public Headers value
-titan/http/native.titan     private parser owner and callback event queue
+titan/http/native.titan     private parser owner and callback event Array
 titan/http/server.titan     Request, Response, and per-connection serving
-titan/http/url.titan        module-initialized RFC 3986 PEG and normalization
 ```
 
 The only HTTP-owned native boundary is the synchronous callback bridge in
 `titan/http/native/titan_httpshim.{c,h}`. It has no network or Task operation.
 HTTP obtains every byte from the public `io.ReaderWriterCloser` view of either
 a `net.Connection` or an `ssl.Connection`, and writes through that same view.
-URL parsing calls the public `titan.peg` API without an HTTP-specific C bridge.
-The module neither imports nor changes `titan.uv`.
+URL parsing calls the independent public `titan.url` module without an
+HTTP-specific C bridge. The module neither imports nor changes `titan.uv`.
 
 ## Synchronous llhttp callback bridge
 
@@ -102,7 +102,7 @@ until a final status is reached. A HEAD request configures llhttp's response
 semantics before all informational/final parsing. Reading body EOF releases
 the parser and the one-use transport.
 
-## Headers, URLs, and framing
+## Headers, URL consumption, and framing
 
 Headers use an Array of public `Header` records. Lookup performs ASCII folding
 without normalizing stored spelling, so duplicate order remains available to
@@ -111,44 +111,23 @@ names and field values containing controls other than HTAB or containing DEL.
 The parser appends fields only on llhttp's complete
 value event, after trimming optional whitespace.
 
-The URL parser is a Titan translation, written in `titan.peg`'s Relabel source
-notation, of the RFC 3986 URI grammar from daurnimator/lpeg_patterns commit
-`0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7`. The derived grammar is used under
-the upstream MIT license recorded in `THIRD_PARTY_NOTICES.md` and
-`LICENSES/lpeg-patterns-LICENSE`.
+The reusable grammar, labels, normalization, and `(Url?, Error?)` boundary are
+owned by `titan.url` and documented in the
+[URL-library implementation chapter](url-library.md). The HTTP-local
+`parse_url_or_raise` adapter calls `url.parse`, raises its structured
+`url.Error` when parsing fails, and otherwise unwraps the `url.Url`. HTTP does
+not re-export either record or a second parse function.
 
-The folder main's one-time module initializer calls `url_pattern()`, which
-compiles the relabel source through public `titan.peg`, and stores the resulting
-`peg.Pattern` in `http_url_pattern`. Every parse uses that stored pattern
-directly. The grammar captures the component text plus the starting byte
-positions needed for semantic errors. Its public specialization requires an
-absolute authority URL and nonempty host, labels userinfo and fragments as
-unsupported, requires brackets around IP literals, and constrains an explicit
-port syntactically to digits. Titan code then accepts only `http`/`https` and
-checks the numeric port range `1..65535`.
-
-Relabel failures return a stable label and one-based byte position. The
-`url_parse_message` boundary renders them as
-`HTTP URL parse error [label] at byte N: detail`; semantic scheme and port
-failures use the captured component positions and the same format.
-
-`normalize_component` decodes percent-encoded RFC 3986 unreserved bytes and
-uppercases the hexadecimal digits of every retained escape. Its lowercase
-mode additionally canonicalizes schemes and registered-name hosts.
-`normalize_host` distinguishes registered names, IPv4, IPv6, IPvFuture, and
-RFC 6874 zones: connection identity omits URI brackets and decodes a zone's
-`%25` separator to `%`, while the stored authority keeps brackets and the
-encoded separator for `Host`. Default ports are assigned only when absent;
-explicit ports are rendered from their parsed integer. An empty path becomes
-`/`, and the normalized path plus optional normalized query forms `URL.target`.
-
-The client connects with normalized `URL.host`, uses normalized
-`URL:host_header()` when it generates an absent Host field, and sends
-normalized `URL.target`. The server runs the same parser over `scheme://` plus
-the exact received Host and origin-form target, after rejecting `/`, `?`, `#`,
-or `@` in Host so it cannot consume or reinterpret the independently parsed
-target. `Request.target` remains that received target, while `Request.url`
-provides the normalized routing view.
+The client connects with normalized `Url.host`, uses normalized
+`Url.authority` when it generates an absent Host field, and sends normalized
+`Url.target`. HTTPS passes its sole optional `ca_file` through to
+`ssl.connect`; HTTP neither reads trust paths nor exposes a CA-directory
+parameter. The SSL layer performs explicit CA-file I/O through high-level
+`fs`. The server runs the same parser over `scheme://` plus the exact received
+Host and origin-form target, after rejecting `/`, `?`, `#`, or `@` in Host so
+it cannot consume or reinterpret the independently parsed target.
+`Request.target` remains that received target, while `Request.url` provides
+the normalized routing view.
 
 The client copies supplied headers, validates Content-Length, rejects request
 Transfer-Encoding and Expect fields, and forces `Connection: close`. Rejecting
@@ -186,6 +165,14 @@ deferred transport close makes that rejection safe without parser reuse.
 connections can progress independently while requests on one connection stay
 ordered.
 
+The high-level constructors keep required values before optional configuration:
+plain `listen` takes host and handler before optional port/backlog, while
+`listen_tls` takes host, certificate, and handler before optional private-key
+path, port, and backlog. The plain/TLS port defaults are 80/443. Both pass the
+optional backlog to `net.listen` (directly or through `ssl.listen`), where it
+defaults to 128; TLS likewise delegates the omitted-key PEM-bundle behavior to
+`ssl.listen`.
+
 The Server record deliberately stores separate optional `net.Server` and
 `ssl.Server` fields and branches while accepting. A tempting common Interface
 would need an `accept(): io.ReaderWriterCloser` result, but Titan's structural
@@ -200,6 +187,16 @@ An uncaught parse, handler, or response-framing error exits only that
 connection Task. Deferred parser and transport closers run while the accept
 loop and other Tasks remain live, following the ordinary Task-local error
 policy.
+
+`ClientResponse:close` marks its Titan parser closed before calling the
+suspending transport close, but records transport completion only after that
+call returns. `Server:close` similarly marks the high-level listener closed
+before delegating to `net.Server` or `ssl.Server`, then records listener
+completion after the delegate returns. Sticky cancellation can therefore
+leave either object logically closed without a recorded delegate completion;
+a later `close()` skips the completed logical step and idempotently retries
+exactly the transport or listener step. This is a concrete resource contract,
+not an HTTP queue or scheduler.
 
 ## The idle-timeout composition blocker
 
@@ -228,14 +225,15 @@ system-llhttp mode, and neither the private archive nor headers are installed
 as runtime-SDK files.
 
 The HTTP root adds one logical protocol, archive key, generated shim, and
-`luaopen_titan_http`. Together SSL and HTTP advance the coordinated current
-standard image to sixteen logical modules and shims and seventeen DSO openers
-including bare `luaopen_titan` support. A valid fourteen-module ABI-0.20 image
-remains an explicitly recognized publication predecessor; that historical
-migration count is not the current provider contract.
+`luaopen_titan_http`. Together URL, SSL, and HTTP advance the coordinated
+current standard image to seventeen logical modules and shims and eighteen DSO
+openers including bare `luaopen_titan` support. A valid fourteen-module
+ABI-0.20 image remains an explicitly recognized publication predecessor; that
+historical migration count is not the current provider contract.
 
 Focused standard-library tests run outside LuaCov. They fragment protocol
 input down to individual bytes, exercise fixed/chunked/EOF bodies, duplicate
 headers, streaming handlers, unread-body draining, keep-alive, pipelining, and
-HTTPS over the public SSL facade. The sanitizer boundary uses that same
-high-level path through TLS and llhttp rather than a private test transport.
+HTTPS over the public SSL facade, and prove listener/response close retries
+after cancellation. The sanitizer boundary uses that same high-level path
+through TLS and llhttp rather than a private test transport.

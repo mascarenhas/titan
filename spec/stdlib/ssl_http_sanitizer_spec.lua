@@ -3,8 +3,8 @@ local async_stdlib = require "spec.support.async_stdlib"
 local function source(cert, key, ca)
     return ([==[
 local async = import "async"
-local http = import "titan.http"
-local ssl = import "titan.ssl"
+local http = import "http"
+local ssl = import "ssl"
 local str = import "string"
 local timer = import "timer"
 
@@ -40,8 +40,8 @@ function start(first_port: integer): async.Task
     local server: http.Server? = nil
     for _ = 1, 100 do
       do
-        server = http.listen_tls("127.0.0.1", port, 8,
-                                 CERTIFICATE, PRIVATE_KEY, handler)
+        server = http.listen_tls("127.0.0.1",
+                                 CERTIFICATE, handler, PRIVATE_KEY, port)
         break
       catch
         if error is async.Error then
@@ -66,7 +66,7 @@ function start(first_port: integer): async.Task
       return nil
     end)
 
-    local connection = ssl.connect("127.0.0.1", port, TRUST_ROOT, nil)
+    local connection = ssl.connect("127.0.0.1", port, TRUST_ROOT)
     defer connection:close()
     local request =
       "GET /fragmented HTTP/1.1\r\n" ..

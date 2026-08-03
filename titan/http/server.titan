@@ -3,7 +3,7 @@ type Handler = (Request, Response) -> ()
 record Request
   method: string
   target: string
-  url: URL
+  url: url.Url
   version: string
   headers: Headers
   local parser: Parser
@@ -32,9 +32,11 @@ record Server
   local encrypted: boolean
   local handler: Handler
   local closed: boolean
+  local listener_closed: boolean
 end
 
-local function request_url(parser: Parser, encrypted: boolean): URL
+local function request_url(parser: Parser,
+                           encrypted: boolean): url.Url
   local hosts = parser.parsed_headers:values("Host")
   if #hosts ~= 1 then
     raise "HTTP/1.1 request must contain exactly one Host header"
@@ -57,7 +59,8 @@ local function request_url(parser: Parser, encrypted: boolean): URL
   end
   local scheme = "http"
   if encrypted then scheme = "https" end
-  return parse_url(scheme .. "://" .. authority .. parser.target_text)
+  return parse_url_or_raise(
+    scheme .. "://" .. authority .. parser.target_text)
 end
 
 local function read_request(parser: Parser,
@@ -336,18 +339,23 @@ local function accept_connection(server: Server): io.ReaderWriterCloser
   return channel
 end
 
-function listen(host: string, port: integer, backlog: integer,
-                handler: Handler): Server
-  return Server.new(net.listen(host, port, backlog), nil,
-                    false, handler, false)
+function listen(host: string, handler: Handler, port: integer?,
+                backlog: integer?): Server
+  local actual_port = 80
+  if port then actual_port = port as integer end
+  return Server.new(net.listen(host, actual_port, backlog), nil,
+                    false, handler, false, false)
 end
 
-function listen_tls(host: string, port: integer, backlog: integer,
-                    certificate_file: string, private_key_file: string,
-                    handler: Handler): Server
-  return Server.new(nil, ssl.listen(host, port, backlog,
-                                   certificate_file, private_key_file),
-                    true, handler, false)
+function listen_tls(host: string, certificate_file: string, handler: Handler,
+                    private_key_file: string?, port: integer?,
+                    backlog: integer?): Server
+  local actual_port = 443
+  if port then actual_port = port as integer end
+  return Server.new(nil, ssl.listen(host, actual_port,
+                                   certificate_file, private_key_file,
+                                   backlog),
+                    true, handler, false, false)
 end
 
 function Server:serve()
@@ -371,11 +379,14 @@ function Server:serve()
 end
 
 function Server:close()
-  if self.closed then return end
-  self.closed = true
-  if self.encrypted then
-    (self.secure as ssl.Server):close()
-  else
-    (self.plain as net.Server):close()
+  if self.closed and self.listener_closed then return end
+  if not self.closed then self.closed = true end
+  if not self.listener_closed then
+    if self.encrypted then
+      (self.secure as ssl.Server):close()
+    else
+      (self.plain as net.Server):close()
+    end
+    self.listener_closed = true
   end
 end

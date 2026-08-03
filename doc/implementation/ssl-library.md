@@ -9,37 +9,38 @@ boundary, and how it is packaged.
 
 `titan/ssl.titan` is an ordinary logical standard module. Each public
 `Connection` contains a public-layer `net.Connection`; each public `Server`
-contains a `net.Server` and an OpenSSL server context. The module imports
-`titan.net` and drives only its public `read`, `write`, `shutdown`, `close`,
-and `accept` methods.
+contains a `net.Server` and an OpenSSL server context. The module imports the
+high-level `fs` and `net` modules. Explicit path reads go through
+`fs.read_file`; network traffic drives only `net`'s public `read`, `write`,
+`shutdown`, `close`, and `accept` methods.
 
 This feature makes no change to `titan.uv`, adds no TLS call to its private
 continuation union, and does not import it. The existing networking module is
 treated as fixed language-level substrate. A TLS operation suspends only when
 the wrapped high-level `net.Connection` suspends.
 
-`titan/ssl.titan` imports one source-only integration header containing exactly
-OpenSSL's `ssl.h`, `err.h`, and `x509v3.h` includes. It has no declarations or
-definitions and produces no object or provider payload; it is a compile-time
-include aggregator, not an API shim.
+`titan/ssl.titan` directly imports OpenSSL's public `err.h`, `x509v3.h`,
+`pem.h`, and `ssl.h` headers. There is no SSL-owned integration header. Their
+overlapping declaration closures are reconciled by the ordinary C FFI: it
+batches compatibility validation while isolating each candidate declaration
+pair's scope, then relies on the configured C compiler's ordered include
+context as the authority. A same-kind file-scope tag is the generated C
+translation unit's tag and reuses one module-wide canonical owner regardless
+of which header exposed it. Genuinely distinct tag objects, including
+prototype-local tags, remain nominally distinct; only the narrow repeat of one
+physical guarded declaration is reconciled by source identity.
 
-The aggregator is a performance choice, not an FFI correctness workaround.
-Independent extraction of the three large overlapping header closures repeats
-guarded glibc declarations containing a prototype-local `struct sched_attr`.
-The FFI checker recognizes the same physical declaration by source provenance,
-requires the configured C compiler to accept the final ordered include context,
-and canonicalizes that repeat without inventing two prototype scopes.
-Same-spelled tags from distinct source declarations remain nominally distinct.
-The three direct imports therefore typecheck, but their hundreds of independent
-declaration-pair probes take minutes rather than the aggregator's seconds.
-
-There is no SSL-specific C translation unit, function, callback, or provider
-object. Titan's C FFI does not expose function-like macros, so the module spells
-the three needed macro expansions with their exported primitive calls and
-object-like constants: `SSL_CTX_ctrl` for the TLS-version floor, `SSL_ctrl`
-for DNS SNI, and `BIO_ctrl` for memory-BIO EOF behavior. DNS-versus-IP identity
-selection and the stable `SSL_ERROR_*` name mapping are ordinary Titan control
-flow; `SSL_set1_host`, `SSL_get0_param`, and
+There is no hand-written SSL shim, adapter function, callback, or native
+provider object. The compiler still emits the ordinary generated
+`titan/ssl.c` translation unit for the Titan module. Where the FFI cannot name
+a function-like or inline-only header helper, the Titan source comments and
+spells its public primitive expansion directly:
+`SSL_CTX_ctrl` for the TLS-version floor and retained chain certificates,
+`SSL_ctrl` for DNS SNI, `BIO_ctrl` for memory-BIO EOF behavior, and
+`CRYPTO_free` for `OPENSSL_free`. The `ERR_GET_LIB`/`ERR_GET_REASON` bit
+extraction used to recognize PEM EOF likewise lives in Titan. DNS-versus-IP
+identity selection and the stable `SSL_ERROR_*` name mapping are ordinary
+Titan control flow; `SSL_set1_host`, `SSL_get0_param`, and
 `X509_VERIFY_PARAM_set1_ip_asc` are called directly.
 
 The `SSL_ctrl` signature uses mutable `void *` even though the SNI input is
@@ -50,10 +51,19 @@ retained by Titan.
 
 ## Contexts, SSL objects, and BIO ownership
 
-A client call allocates one temporary `SSL_CTX`, requires TLS 1.2 or newer,
-enables peer verification, and loads either explicit CA locations or OpenSSL's
-default paths. It then connects through `net`, allocates its `SSL`, and
-configures the exact requested DNS or IP identity. DNS names additionally get
+The module initializer allocates one default client `SSL_CTX`, requires TLS
+1.2 or newer, enables peer verification, and calls
+`SSL_CTX_set_default_verify_paths` exactly once. The module owns that reference
+for its lifetime. A no-override `connect` takes a temporary context reference,
+which it releases after `SSL_new` has retained what the connection needs.
+
+An explicit `ca_file` instead goes through `fs.read_file` before `net.connect`.
+The call allocates a private client context and adds every certificate decoded
+from the GC-owned in-memory bytes to its `X509_STORE`; the store retains each
+certificate before the decoder reference is released. It rejects empty input,
+input with no certificates, and malformed PEM rather than falling through to
+default trust. Both paths then connect through `net`, allocate an `SSL`, and
+configure the exact requested DNS or IP identity. DNS names additionally get
 SNI and partial wildcards are disabled. `connect` drives the handshake and
 checks `SSL_get_verify_result` before returning.
 
@@ -64,14 +74,41 @@ separator selects this narrow transformation; DNS names are not stripped at a
 percent byte. A successfully parsed scoped address remains in the IP branch,
 so neither `SSL_set1_host` nor DNS SNI is configured.
 
-A server retains one configured `SSL_CTX` on `ssl.Server`. Certificate-chain
-and PEM-key loading and their match check happen before `net.listen` returns a
-public Server. Accepting a TCP connection creates an `SSL` in accept state but
-deliberately does not drive its handshake. `Server:accept` takes a context
-reference before the suspending net accept, so another Task may close the
-listener without invalidating the in-flight accept. `SSL_new` retains the
-context it needs; the Server's own reference can therefore be released
-independently after a connection has been created.
+A server reads its certificate path and optional distinct key path through
+`fs.read_file` before creating an OpenSSL context or calling `net.listen`. An
+absent key path reuses the already-read certificate bytes, supporting one
+combined PEM bundle without a second filesystem operation. The first decoded
+certificate becomes the leaf and later certificates are retained as the
+transmitted chain. The first decoded unencrypted private key is retained by
+the context, then checked against the leaf. Encrypted keys are rejected because
+the API has no password input.
+
+The configured `SSL_CTX` is retained on `ssl.Server`. The optional backlog is
+delegated to `net.listen`, which supplies 128 when absent. Accepting a TCP
+connection creates an `SSL` in accept state but deliberately does not drive its
+handshake. `Server:accept` takes a context reference before the suspending net
+accept, so another Task may close the listener without invalidating the
+in-flight accept. `SSL_new` retains the context it needs; the Server's own
+reference can therefore be released independently after a connection has been
+created.
+
+OpenSSL's typed `PEM_X509_INFO_read_bio` and generated
+`PEM_read_bio_X509`/`PEM_read_bio_PrivateKey` declarations are not currently
+representable by Titan's C-header parser. That FFI surface limitation stays in
+Titan rather than justifying a C shim. The implementation calls the exported
+generic `PEM_read_bio`, classifies each block name in Titan, and decodes the
+borrowed DER span with `d2i_X509`, `d2i_X509_AUX`, or
+`d2i_AutoPrivateKey`.
+
+Each successful generic read transfers three OpenSSL-allocated buffers—name,
+header, and DER data—to one local `PemBlock`. Every exit frees all three through
+the exported `CRYPTO_free` primitive underlying `OPENSSL_free`. The DER buffer
+remains live while the `d2i_*` cursor advances, and decoding must consume its
+exact length. A failed read is clean EOF only when direct public
+`ERR_GET_LIB`/`ERR_GET_REASON` masking identifies
+`ERR_LIB_PEM`/`PEM_R_NO_START_LINE`; every other failure, including a malformed
+trailing PEM block, is reported. `PemBlock` and the pointer-result owners are
+local records and therefore do not enter `titan.ssl`'s public type metadata.
 
 Every connection creates one input and one output memory BIO. `SSL_set0_rbio`
 and `SSL_set0_wbio` transfer both BIO references to the SSL object. The
@@ -140,13 +177,22 @@ already been drained: it means the peer won the close race. Explicit
 
 ## Trust-path boundary
 
-The no-override branch uses `SSL_CTX_set_default_verify_paths`. In bundled
-mode these remain the defaults compiled into Titan's OpenSSL build, together
-with OpenSSL's documented environment overrides. The implementation does not
-translate a platform Keychain or other native trust database into certificates
-and must not be documented as a portable operating-system trust abstraction.
-Explicit `ca_file` and `ca_directory` use
-`SSL_CTX_load_verify_locations` instead of first loading those defaults.
+The module initializer calls `SSL_CTX_set_default_verify_paths` on the one
+shared default client context. In bundled mode these remain the defaults
+compiled into Titan's OpenSSL build, together with OpenSSL's documented
+environment overrides. This is the sole OpenSSL-owned path configuration.
+The initializer may synchronously load the default CA file once. OpenSSL
+registers hashed CA directories for lazy lookup, so the first verification
+that needs one may synchronously read its directory and certificate file; the
+shared context retains the resulting lookup cache for later connections.
+
+The implementation does not translate a platform Keychain or other native
+trust database into certificates and must not be documented as a portable
+operating-system trust abstraction. An explicit `ca_file` does not call an
+OpenSSL file or directory loader: high-level `fs` reads it asynchronously and
+the private context receives only certificates decoded from memory. Removing
+the former directory parameter is deliberate; emulating OpenSSL's hashed
+directory semantics with ad hoc Titan traversal would change trust policy.
 
 ## Build and provider composition
 
@@ -160,8 +206,8 @@ installed as Titan runtime-SDK archives.
 newer. Its ordered link result remains a final-link input and must be repeated
 by static consumers; it is not copied into `titan.a`. Because the module uses
 OpenSSL directly, neither mode builds, carries, or installs an SSL adapter
-object or API header. The include-only integration header ships only as source
-for compilation and never enters the runtime SDK or provider payload.
+object or integration header. The generated translation unit includes only the
+direct public OpenSSL headers selected by the Titan foreign imports.
 
 The SSL root is compiled in the same source invocation as the other standard
 modules. It adds one logical ABI/types protocol, one static metadata key, one
@@ -169,14 +215,17 @@ generated Lua shim, and `luaopen_titan_ssl` to the coordinated provider.
 
 ## High-level composition limits
 
-The public `net` surface is sufficient for the entire TLS record and handshake
-state machine. No blocker required a direct libuv operation or a native socket
-escape hatch. The deliberate limitation is concurrency: without a higher-level
-duplex coordination abstraction, the SSL record serializes the one state
-machine rather than promising simultaneous reader and writer Tasks.
+The public `fs` and `net` surfaces are sufficient for explicit path loading and
+the entire TLS record and handshake state machine. No blocker required a direct
+libuv operation, native filesystem escape hatch, or native socket escape hatch.
+The deliberate limitation is concurrency: without a higher-level duplex
+coordination abstraction, the SSL record serializes the one state machine
+rather than promising simultaneous reader and writer Tasks.
 
 The focused non-LuaCov standard-library tests use checked-in local CA and
-certificate fixtures to exercise DNS/IP identity, fragmented and binary
-records, lazy server handshake, authenticated versus truncated EOF, and
-interface-shaped I/O. Sanitizer coverage crosses the same high-level HTTPS
-path; it does not create a separate uv-backed TLS implementation.
+certificate fixtures to exercise combined full-chain/key and split PEM files,
+high-level path errors, empty and malformed CA bundles, DNS/IP identity,
+fragmented and binary records, lazy server handshake, authenticated versus
+truncated EOF, and interface-shaped I/O. Sanitizer coverage crosses the same
+high-level HTTPS path; it does not create a separate uv-backed TLS
+implementation.

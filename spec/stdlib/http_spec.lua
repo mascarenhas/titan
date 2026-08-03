@@ -2,10 +2,12 @@ local async_stdlib = require "spec.support.async_stdlib"
 
 local HTTP_CASES = ([==[
 local async = import "async"
-local http = import "titan.http"
+local fs = import "fs"
+local http = import "http"
 local net = import "net"
 local str = import "string"
 local timer = import "timer"
+local url = import "url"
 
 local CERTIFICATE = %q
 local PRIVATE_KEY = %q
@@ -72,7 +74,7 @@ local function http_listen(first_port: integer,
   local port = first_port
   for _ = 1, 100 do
     do
-      return http.listen("127.0.0.1", port, 8, handler), port
+      return http.listen("127.0.0.1", handler, port), port
     catch
       if error is async.Error and
          (error as async.Error).name == "EADDRINUSE" then
@@ -138,7 +140,7 @@ function start_client(first_port: integer): async.Task
     outcome = "client-requesting"
     local response = http.request(
       "POST", "http://127.0.0.1:" .. str.tostring(port) ..
-      "/path?q=one", request_headers, "request\0body", nil, nil)
+      "/path?q=one", request_headers, "request\0body", nil)
     outcome = "client-reading-response"
     check(response.status == 302 and response.reason == "Found",
           "HTTP client did not return the redirect response")
@@ -170,12 +172,35 @@ local function expect_client_host_rejected(source_url: string,
   request_headers:add("Host", authority)
   local rejected = false
   do
-    local response = http.get(source_url, request_headers, nil, nil)
+    local response = http.get(source_url, request_headers, nil)
     response:close()
   catch
     local message = error as string
     check(contains(message, expected),
           "HTTP client rejected Host for the wrong reason: " .. message)
+    rejected = true
+  end
+  check(rejected, "HTTP client accepted invalid Host: " .. authority)
+end
+
+local function expect_client_url_rejected(source_url: string,
+                                          authority: string,
+                                          expected_kind: string)
+  local request_headers = http.headers(nil)
+  request_headers:add("Host", authority)
+  local rejected = false
+  do
+    local response = http.get(source_url, request_headers, nil)
+    response:close()
+  catch
+    check(error is url.Error,
+          "HTTP client did not raise the URL parser's error record")
+    local diagnostic = error as url.Error
+    check(diagnostic.kind == expected_kind,
+          "HTTP client URL error kind was " .. diagnostic.kind ..
+          ", expected " .. expected_kind)
+    check(diagnostic.position >= 1 and #diagnostic.message > 0,
+          "HTTP client URL error lost its position or message")
     rejected = true
   end
   check(rejected, "HTTP client accepted invalid Host: " .. authority)
@@ -203,14 +228,14 @@ function start_client_host_validation(first_port: integer): async.Task
     request_headers:add("Host", "[2001:db8::1]:8443")
     local source_url =
       "http://127.0.0.1:" .. str.tostring(port) .. "/host-check"
-    local response = http.get(source_url, request_headers, nil, nil)
+    local response = http.get(source_url, request_headers, nil)
     check(response.status == 204,
           "HTTP client did not accept a valid supplied IP-literal Host")
     response:close()
     while active(peer) do timer.yield() end
     check(peer:status() == "succeeded", "Host validation peer failed")
 
-    expect_client_host_rejected(source_url, "", "HTTP URL parse error [")
+    expect_client_url_rejected(source_url, "", "host")
     expect_client_host_rejected(
       source_url, "user@example.com", "non-authority delimiter")
     expect_client_host_rejected(
@@ -219,16 +244,11 @@ function start_client_host_validation(first_port: integer): async.Task
       source_url, "example.com?query", "non-authority delimiter")
     expect_client_host_rejected(
       source_url, "example.com#fragment", "non-authority delimiter")
-    expect_client_host_rejected(
-      source_url, "::1", "HTTP URL parse error [ipv6_brackets]")
-    expect_client_host_rejected(
-      source_url, "[::1", "HTTP URL parse error [")
-    expect_client_host_rejected(
-      source_url, "[::1]:0", "HTTP URL parse error [port]")
-    expect_client_host_rejected(
-      source_url, "[::1]:65536", "HTTP URL parse error [port]")
-    expect_client_host_rejected(
-      source_url, "example.com:oops", "HTTP URL parse error [port]")
+    expect_client_url_rejected(source_url, "::1", "ipv6_brackets")
+    expect_client_url_rejected(source_url, "[::1", "ipv6_close")
+    expect_client_url_rejected(source_url, "[::1]:0", "port")
+    expect_client_url_rejected(source_url, "[::1]:65536", "port")
+    expect_client_url_rejected(source_url, "example.com:oops", "port")
 
     local duplicate_headers = http.headers(nil)
     duplicate_headers:add("Host", "example.com")
@@ -236,7 +256,7 @@ function start_client_host_validation(first_port: integer): async.Task
     local duplicate_rejected = false
     do
       local duplicate_response =
-        http.get(source_url, duplicate_headers, nil, nil)
+        http.get(source_url, duplicate_headers, nil)
       duplicate_response:close()
     catch
       local message = error as string
@@ -252,7 +272,7 @@ function start_client_host_validation(first_port: integer): async.Task
     local expect_rejected = false
     do
       local expect_response = http.request(
-        "POST", source_url, expect_headers, "body", nil, nil)
+        "POST", source_url, expect_headers, "body", nil)
       expect_response:close()
     catch
       local message = error as string
@@ -576,7 +596,7 @@ function start_client_framing(first_port: integer): async.Task
 
     local base = "http://127.0.0.1:" .. str.tostring(port)
     outcome = "client-fixed"
-    local fixed = http.get(base .. "/fixed", nil, nil, nil)
+    local fixed = http.get(base .. "/fixed", nil, nil)
     check(fixed.status == 206 and fixed.reason == "Partial Content",
           "HTTP client did not skip the informational response")
     check(fixed.headers:get("X-Info") == nil,
@@ -586,19 +606,19 @@ function start_client_framing(first_port: integer): async.Task
 
     outcome = "client-head"
     local head = http.request(
-      "HEAD", base .. "/head", nil, nil, nil, nil)
+      "HEAD", base .. "/head", nil, nil, nil)
     check(head.headers:get("Content-Length") == "5" and
           head:read() == nil,
           "HTTP client expected a body for a HEAD response")
     head:close()
 
     outcome = "client-eof"
-    local eof_response = http.get(base .. "/eof", nil, nil, nil)
+    local eof_response = http.get(base .. "/eof", nil, nil)
     check(read_response(eof_response) == "eof-body",
           "HTTP client did not read the EOF-delimited body")
 
     outcome = "client-truncated"
-    local truncated = http.get(base .. "/truncated", nil, nil, nil)
+    local truncated = http.get(base .. "/truncated", nil, nil)
     local truncated_failed = false
     do
       read_response(truncated)
@@ -611,7 +631,7 @@ function start_client_framing(first_port: integer): async.Task
     outcome = "client-malformed"
     local malformed_failed = false
     do
-      local malformed = http.get(base .. "/malformed", nil, nil, nil)
+      local malformed = http.get(base .. "/malformed", nil, nil)
       malformed:close()
     catch
       malformed_failed = true
@@ -804,6 +824,128 @@ function start_server_failure_isolation(first_port: integer): async.Task
   end)
 end
 
+function start_cancelled_server_close(first_port: integer): async.Task
+  outcome = "running"
+  return async.run(function (): value
+    local handler: http.Handler = function (_request: http.Request,
+                                            _response: http.Response)
+      raise "cancelled-close server unexpectedly accepted a request"
+    end
+    local server, _port = http_listen(first_port, handler)
+    defer server:close()
+    local serving = async.run(function (): value
+      server:serve()
+      return nil
+    end)
+    while serving:status() == "ready" do timer.yield() end
+    check(serving:status() == "waiting",
+          "HTTP serve Task did not suspend in accept")
+
+    local closer: async.Task? = nil
+    local close_returned = false
+    closer = async.run(function (): value
+      (closer as async.Task):cancel(
+        "cancel before HTTP listener transport close")
+      server:close()
+      close_returned = true
+      return nil
+    end)
+    local close_task = closer as async.Task
+    while active(close_task) do timer.yield() end
+    check(close_task:status() == "cancelled" and not close_returned,
+          "cancelled HTTP Server close crossed its suspension boundary")
+    check(active(serving),
+          "skipped listener close unexpectedly released accept")
+
+    local timed_out = false
+    local watchdog = async.run(function (): value
+      timer.sleep(5000)
+      timed_out = true
+      serving:cancel("HTTP Server close retry timed out")
+      return nil
+    end)
+    server:close()
+    while active(serving) do timer.yield() end
+    watchdog:cancel("HTTP Server close retry completed")
+    check(not timed_out, "HTTP Server close retry left accept stranded")
+    check(serving:status() == "succeeded",
+          "HTTP Server close retry did not stop serve cleanly")
+    server:close()
+    outcome = "server-close-retry-ok"
+    return nil
+  end)
+end
+
+function start_cancelled_client_close(first_port: integer): async.Task
+  outcome = "running"
+  return async.run(function (): value
+    local server, port = raw_listen(first_port)
+    local peer_connection: net.Connection? = nil
+    defer do
+      if peer_connection then
+        do (peer_connection as net.Connection):close() catch end
+      end
+      do server:close() catch end
+    end
+
+    local peer_saw_eof = false
+    local peer = async.run(function (): value
+      local connection = server:accept()
+      peer_connection = connection
+      defer do
+        peer_connection = nil
+        connection:close()
+        server:close()
+      end
+      local preamble? = connection:read_until("\r\n\r\n", false)
+      if not preamble then raise "HTTP close peer saw no request" end
+      connection:write(
+        "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+      local trailing? = connection:read()
+      check(trailing == nil,
+            "HTTP client wrote data after receiving its response")
+      peer_saw_eof = true
+      return nil
+    end)
+
+    local response = http.get(
+      "http://127.0.0.1:" .. str.tostring(port) .. "/close", nil, nil)
+    defer response:close()
+    local closer: async.Task? = nil
+    local close_returned = false
+    closer = async.run(function (): value
+      (closer as async.Task):cancel(
+        "cancel before HTTP client transport close")
+      response:close()
+      close_returned = true
+      return nil
+    end)
+    local close_task = closer as async.Task
+    while active(close_task) do timer.yield() end
+    check(close_task:status() == "cancelled" and not close_returned,
+          "cancelled HTTP response close crossed its suspension boundary")
+    check(response:read() == nil,
+          "logically closed HTTP response remained readable")
+
+    local timed_out = false
+    local watchdog = async.run(function (): value
+      timer.sleep(5000)
+      timed_out = true
+      peer:cancel("HTTP client close retry timed out")
+      return nil
+    end)
+    response:close()
+    while active(peer) do timer.yield() end
+    watchdog:cancel("HTTP client close retry completed")
+    check(not timed_out, "HTTP client close retry left its peer stranded")
+    check(peer:status() == "succeeded" and peer_saw_eof,
+          "HTTP client close retry did not close its transport")
+    response:close()
+    outcome = "client-close-retry-ok"
+    return nil
+  end)
+end
+
 function start_https(first_port: integer): async.Task
   outcome = "running"
   return async.run(function (): value
@@ -818,12 +960,17 @@ function start_https(first_port: integer): async.Task
       response:set_header("Content-Length", "7")
       response:write("secure\0")
     end
+    local certificate_bundle = fs.tmpname()
+    fs.write_file(certificate_bundle,
+                  fs.read_file(CERTIFICATE) .. "\n" ..
+                  fs.read_file(PRIVATE_KEY))
+    defer fs.unlink(certificate_bundle)
     local port = first_port
     local server: http.Server? = nil
     for _ = 1, 100 do
       do
-        server = http.listen_tls("127.0.0.1", port, 8,
-                                 CERTIFICATE, PRIVATE_KEY, handler)
+        server = http.listen_tls("127.0.0.1",
+                                 certificate_bundle, handler, nil, port)
         break
       catch
         if error is async.Error and
@@ -850,7 +997,7 @@ function start_https(first_port: integer): async.Task
       do
         local response = http.get(
           "https://localhost:" .. str.tostring(port) ..
-          "/secure?value=1", nil, TRUST_ROOT, nil)
+          "/secure?value=1", nil, TRUST_ROOT)
         response_status = response.status
         body = read_response(response)
       catch
@@ -894,170 +1041,13 @@ end
     async_stdlib.repo .. "/spec/fixtures/ssl/server-key.pem",
     async_stdlib.repo .. "/spec/fixtures/ssl/ca.pem")
 
--- The valid cases below adapt the HTTP-relevant URI normalization examples
--- from daurnimator/lpeg_patterns' spec/uri_spec.lua at commit
--- 0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7. HTTP's public parser is
--- deliberately narrower: it requires an absolute http(s) URL and rejects
--- user information and fragments.
-local HTTP_URL_CASES = [==[
-local http = import "titan.http"
-local str = import "string"
-
-local function check(condition: boolean, message: string)
-  if not condition then raise message end
-end
-
-local function contains(subject: string, needle: string): boolean
-  local first: integer? = str.find(subject, needle)
-  if first then return true end
-  return false
-end
-
-local function expect_error(source: string, label: string,
-                            position: integer)
-  local rejected = false
-  do
-    http.parse_url(source)
-  catch
-    local message = error as string
-    check(contains(message, "[" .. label .. "]"),
-          "URL diagnostic lost label [" .. label .. "]: " .. message)
-    check(contains(message,
-                   "at byte " .. str.tostring(position) .. ":"),
-          "URL diagnostic reported the wrong byte position: " .. message)
-    rejected = true
-  end
-  check(rejected, "invalid URL was accepted: " .. source)
-end
-
-local function expect_rejected(source: string)
-  local rejected = false
-  do
-    http.parse_url(source)
-  catch
-    local message = error as string
-    check(contains(message, "HTTP URL parse error [") and
-          contains(message, " at byte "),
-          "URL rejection lost its labeled byte diagnostic: " .. message)
-    rejected = true
-  end
-  check(rejected, "invalid URL was accepted: " .. source)
-end
-
-function run(): string
-  local full = http.parse_url(
-    "http://Example.COM:8080/path/to?q=one")
-  check(full.scheme == "http" and full.host == "example.com" and
-        full.port == 8080 and full.path == "/path/to" and
-        full.query == "q=one" and full.target == "/path/to?q=one" and
-        full:host_header() == "example.com:8080",
-        "full absolute HTTP URL was parsed incorrectly")
-
-  local secure = http.parse_url("HtTpS://LOCALHOST")
-  check(secure.scheme == "https" and secure.host == "localhost" and
-        secure.port == 443 and secure.path == "/" and
-        not secure.query and secure.target == "/" and
-        secure:host_header() == "localhost",
-        "HTTPS scheme, localhost, or default path normalization failed")
-
-  local empty_query = http.parse_url("http://localhost?")
-  check(empty_query.path == "/" and empty_query.query == "" and
-        empty_query.target == "/?",
-        "empty path or present empty query was lost")
-
-  local explicit_default = http.parse_url("https://localhost:00443/")
-  check(explicit_default.port == 443 and
-        explicit_default:host_header() == "localhost:443",
-        "explicit default port was not retained and canonicalized")
-
-  local numeric_reg_name =
-    http.parse_url("http://1.2.3.4.example/numeric-name")
-  check(numeric_reg_name.host == "1.2.3.4.example" and
-        numeric_reg_name.path == "/numeric-name",
-        "an IPv4-shaped registered-name prefix captured the host")
-
-  local ipv6 = http.parse_url("http://[::1]:80")
-  check(ipv6.host == "::1" and ipv6.port == 80 and
-        ipv6:host_header() == "[::1]:80",
-        "bracketed IPv6 URL was parsed incorrectly")
-
-  local future = http.parse_url("http://[V4.2]:81/future")
-  check(future.host == "v4.2" and future.port == 81 and
-        future.path == "/future" and
-        future:host_header() == "[v4.2]:81",
-        "IPvFuture URL was parsed incorrectly")
-
-  local zoned = http.parse_url("http://[::1%25eth0]/zone")
-  check(zoned.host == "::1%eth0" and zoned.path == "/zone" and
-        zoned:host_header() == "[::1%25eth0]",
-        "IPv6 zone identifier was parsed incorrectly")
-
-  -- These are the HTTP-authority forms of the valid address matrix in
-  -- lpeg_patterns' spec/IPv6_spec.lua. The public URL value deliberately
-  -- preserves compression and group spelling while lowercasing hex digits.
-  local valid_ipv6 = {
-    "::", "::0.0.0.0", "::0:0.0.0.0", "0::0.0.0.0", "::1",
-    "ff02::1", "2001:0db8:85a3:0042:1000:8a2e:0370:7334",
-    "::FFFF:204.152.189.116",
-  }
-  for index = 1, #valid_ipv6 do
-    local literal = valid_ipv6[index]
-    local parsed = http.parse_url("http://[" .. literal .. "]/address")
-    local normalized = str.lower(literal)
-    check(parsed.host == normalized and
-          parsed:host_header() == "[" .. normalized .. "]",
-          "valid IPv6 authority was not preserved: " .. literal)
-  end
-
-  -- And the corresponding invalid upstream matrix, specialized to a
-  -- bracketed HTTP authority. Every rejection must retain a label and byte.
-  local invalid_ipv6 = {
-    "", "not an ip", "::x", "x::", ":::", ":1::",
-    "1234::5678::", "::FFFF:0.0.0", "::FFFF:0.999.0.0",
-    "::01.02.03.04",
-  }
-  for index = 1, #invalid_ipv6 do
-    expect_rejected("http://[" .. invalid_ipv6[index] .. "]/")
-  end
-
-  local escaped = http.parse_url(
-    "https://l%4FcAlH%6fSt/under%73core%5fcharacter/" ..
-    "%00/kept%2fslash?query%26with%5fescapes")
-  check(escaped.host == "localhost" and
-        escaped.path == "/underscore_character/%00/kept%2Fslash" and
-        escaped.query == "query%26with_escapes" and
-        escaped.target ==
-          "/underscore_character/%00/kept%2Fslash?query%26with_escapes",
-        "percent escapes were not normalized without ambiguity")
-
-  expect_error("ftp://example.com/", "scheme", 1)
-  expect_error("//localhost/path", "scheme", 1)
-  expect_error("http//example.com/", "scheme_separator", 5)
-  expect_error("http:/example.com/", "authority_separator", 7)
-  expect_error("http://user@example.com/", "userinfo", 8)
-  expect_error("http://example.com/path#fragment", "fragment", 24)
-  expect_error("http://example.com:oops/", "port", 20)
-  expect_error("http://example.com:65536/", "port", 20)
-  expect_error("http://example.com/path\\tail", "url_tail", 24)
-  expect_error("http:///path", "host", 8)
-  expect_error("http://::1/", "ipv6_brackets", 8)
-  expect_error("http://[v.2]/", "ip_literal", 9)
-  expect_error("http://host/bad%x0percent", "percent_escape", 17)
-  expect_error("http://host/%s", "percent_escape", 14)
-  return "url-parser-ok"
-end
-]==]
-
 describe("HTTP standard library", function()
     local workspace
 
     setup(function()
         workspace = async_stdlib.workspace("http-runtime")
         async_stdlib.write_source(workspace, "http_cases", HTTP_CASES)
-        async_stdlib.write_source(
-            workspace, "http_url_cases", HTTP_URL_CASES)
         async_stdlib.compile(workspace, "http_cases")
-        async_stdlib.compile(workspace, "http_url_cases")
     end)
 
     teardown(function()
@@ -1088,21 +1078,6 @@ assert(cases.result() == %q, cases.result())
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
     end
-
-    local function run_url_parser()
-        local source = [==[
-local cases = require "http_url_cases"
-assert(cases.run() == "url-parser-ok")
-]==]
-        local ok, status, output =
-            async_stdlib.run_lua_source(workspace, source)
-        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
-        assert.equals(0, status, output)
-    end
-
-    it("parses and diagnoses absolute HTTP URLs synchronously", function()
-        run_url_parser()
-    end)
 
     it("parses fragmented chunked responses without redirect or decoding",
     function()
@@ -1141,6 +1116,16 @@ assert(cases.run() == "url-parser-ok")
     function()
         run("start_server_failure_isolation", "server-failures",
             "server-failures-ok")
+    end)
+
+    it("retries a listener close skipped by Task cancellation", function()
+        run("start_cancelled_server_close", "server-close-retry",
+            "server-close-retry-ok")
+    end)
+
+    it("retries a client close skipped by Task cancellation", function()
+        run("start_cancelled_client_close", "client-close-retry",
+            "client-close-retry-ok")
     end)
 
     it("serves and requests verified HTTPS through the public API", function()

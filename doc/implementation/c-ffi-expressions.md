@@ -252,12 +252,25 @@ pair's compatibility probe succeed. The pure declaration relation resolves
 typedefs, normalizes declaration-only qualification, adjusts array/function
 parameters, and recognizes an incomplete/known array pair as compatible.
 Structurally matching anonymous aggregates are only conditional candidates.
-Every queued exact or conditional repeat then gets a pair-specific probe
-containing two `extern` declarations of one probe-private synthetic identifier.
-Compiler acceptance proves that the two extracted types can form compatible
-declarations in that foreign-header context; it is not evidence that both
-declarations occurred. After acceptance, the merger forms any known-bound
-array composite in a declaration-owned deep view.
+Every queued exact or conditional repeat then contributes two `extern`
+declarations of one probe-private synthetic identifier. The checker constructs
+dependency-safe waves in source order: only the first remaining occurrence of
+one ordinary name is eligible, and a type-graph read after an earlier possible
+composite write starts a later wave. Accepted composites are therefore formed
+before the next dependent pair is rendered. Within one wave, identical rendered
+pairs are deduplicated and every distinct pair receives its own identifier and
+nested C block scope, preventing one candidate's file-scope tag from changing
+another candidate. All uncached pairs in that wave share one compiler
+invocation on the ordinary success path. A rejected group is recursively
+bisected to recover pair-specific verdicts and diagnostics; an infrastructure
+failure is neither bisected nor cached. Compiler acceptance proves that two
+extracted types can form compatible declarations in that foreign-header
+context; it is not evidence that both declarations occurred. After acceptance,
+the merger forms any known-bound array composite in a declaration-owned deep
+view. Later probes structurally expand only typedefs marked as private
+declaration-owned array views, so a bound completed in an earlier wave is not
+hidden again behind the source header's still-incomplete typedef spelling;
+ordinary typedefs retain their source names.
 
 There is one narrow source-provenance exception. If isolated compatibility
 fails, matching preprocessor source identity, line, and column make the pair a

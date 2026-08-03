@@ -282,20 +282,20 @@ UV_TITAN_SOURCES := \
 	titan/uv/tcp.titan
 STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan \
-	titan/http/server.titan titan/http/url.titan
-STDLIB_SSL_INTEGRATION_HEADER := titan/ssl/openssl.h
+	titan/http/server.titan
 UV_CONFIG_STAMP := titan-runtime/.titan-uv-build-config
-STDLIB_MODULES := coroutine uv async timer io fs net ssl http os peg string \
+STDLIB_MODULES := coroutine uv async timer io fs net ssl url http os peg string \
 	math lua iter gc
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
-	titan.io titan.fs titan.net titan.ssl titan.http titan.os \
+	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.os \
 	titan.peg titan.string \
 	titan.math titan.lua titan.iter titan.gc
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
-	titan/net.titan titan/ssl.titan $(STDLIB_HTTP_SOURCES) titan/os.titan \
+	titan/net.titan titan/ssl.titan titan/url.titan \
+	$(STDLIB_HTTP_SOURCES) titan/os.titan \
 	titan/peg/peg.titan titan/peg/combinators.titan \
 	titan/peg/native.titan \
 	titan/peg/relabel.titan titan/peg/relabel_parser.titan \
@@ -306,7 +306,7 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/math.titan titan/lua.titan titan/iter.titan titan/gc.titan
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
-	titan/http.lua titan/os.lua \
+	titan/url.lua titan/http.lua titan/os.lua \
 	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
 	titan/iter.lua titan/gc.lua
 STDLIB_CONTAINER := titan.so
@@ -1530,8 +1530,7 @@ $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS): $(STDLIB_COMPLETION_STAMP)
 # forms. When content changes, explicitly invalidate the completion stamp so
 # rebuild correctness does not depend on filesystem timestamp granularity or
 # Make's prerequisite re-stat behavior.
-$(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS) \
-		$(STDLIB_SSL_INTEGRATION_HEADER)
+$(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 	@set -e; \
 	tmp="$@.tmp"; \
 	{ printf '%s\n' \
@@ -1546,7 +1545,6 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS) \
 		$(call make_shell_quote,STDLIB_USE_INSTALLED_RUNTIME=$(STDLIB_USE_INSTALLED_RUNTIME)) \
 		$(call make_shell_quote,STDLIB_ROOTS=$(STDLIB_ROOTS)) \
 		$(call make_shell_quote,STDLIB_TITAN_SOURCES=$(STDLIB_TITAN_SOURCES)) \
-		$(call make_shell_quote,STDLIB_SSL_INTEGRATION_HEADER=$(STDLIB_SSL_INTEGRATION_HEADER)) \
 		$(call make_shell_quote,STDLIB_SHIMS=$(STDLIB_SHIMS)) \
 		$(call make_shell_quote,STDLIB_CONTAINER=$(STDLIB_CONTAINER)) \
 		$(call make_shell_quote,STDLIB_STATIC_ARCHIVE=$(STDLIB_STATIC_ARCHIVE)) \
@@ -1582,8 +1580,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS) \
 		$(call make_shell_quote,OPENSSL_SHA256=$(OPENSSL_SHA256)) \
 		$(call make_shell_quote,OPENSSL_CONFIGURE_FLAGS=$(OPENSSL_CONFIGURE_FLAGS)) \
 		$(call make_shell_quote,OPENSSL_BUILD_CFLAGS=$(OPENSSL_BUILD_CFLAGS)); \
-	  for input in $(STDLIB_SSL_INTEGRATION_HEADER) \
-			$(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
+	  for input in $(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
 			$(LPEGLABEL_BUILD_CONFIG) \
 			$(LPEGLABEL_ARCHIVE_CONFIG) $(LPEGLABEL_ARCHIVE) \
 			$(LLHTTP_BUILD_CONFIG) $(LLHTTP_ARCHIVE_CONFIG) \
@@ -1601,7 +1598,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS) \
 
 # FORCE runs the inexpensive completeness check on every invocation. The
 # compiler itself runs only when an input is newer, configuration changed, or
-# one public output is absent. All sixteen roots are explicit source roots in one
+# one public output is absent. All seventeen roots are explicit source roots in one
 # process, so their internal imports are linked into the paired titan.so/titan.a
 # provider. The warm check rescans the archive without rewriting either output.
 $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
@@ -1699,9 +1696,9 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 STDLIB_STAGED_EXTRA_OBJECTS = $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(abspath $(object)))
 
 # LuaRocks invokes this only after deploying titanc and its Lua compiler
-# modules. Build all sixteen source roots once in a private directory on the
+# modules. Build all seventeen source roots once in a private directory on the
 # destination filesystem. The Lua publisher validates the complete protocol,
-# commits sixteen shims, the archive, and the one macOS dSYM before renaming
+# commits seventeen shims, the archive, and the one macOS dSYM before renaming
 # titan.so last; any caught failure restores the prior pair, the legacy
 # DSO-only installation, or the first-install bootstrap.
 rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
