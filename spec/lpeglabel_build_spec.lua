@@ -450,6 +450,38 @@ exec %s "$@"
         if not tested then error(test_error, 0) end
     end)
 
+    it("rejects impossible UTF-8 leads before reading continuations",
+    function()
+        ensure_archive()
+        local workspace = temporary_directory("lpeglabel-utf8-guard")
+        local executable = workspace .. "/lpeglabel-utf8-guard"
+        local compile = configured_argv(
+            "CC", "cc", "-std=c99", "-Wall", "-Wextra",
+            "-I", PREFIX .. "/include", "-I", VENDOR,
+            "spec/fixtures/stdlib/native/lpeglabel_utf8_guard_harness.c",
+            ARCHIVE, PREFIX .. "/lib/liblua.a", "-lm")
+        local host_ok, host_output = run({ "uname", "-s" })
+        assert.truthy(host_ok, host_output)
+        if host_output:match("^%s*Linux%s*$") then
+            compile[#compile + 1] = "-ldl"
+        end
+        compile[#compile + 1] = "-o"
+        compile[#compile + 1] = executable
+
+        local tested, test_error = xpcall(function()
+            local ok, output, why, code = run({
+                "env", "CCACHE_DISABLE=1", table.unpack(compile),
+            })
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            ok, output, why, code = run({ executable })
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+        end, debug.traceback)
+        remove_tree(workspace)
+        if not tested then error(test_error, 0) end
+    end)
+
     it("keeps generated payload private and cleanup exact", function()
         local makefile = read_file("Makefile")
         local gitignore = read_file(".gitignore")

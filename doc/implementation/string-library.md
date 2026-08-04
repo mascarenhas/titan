@@ -167,9 +167,12 @@ either raw pointer is live.
 calling `tolower`/`toupper`. This avoids undefined behavior for a negative
 plain `char` and preserves Lua's process-locale behavior.
 
-`rep` checks one subject-plus-separator unit before multiplying by the count,
-then subtracts the unused final separator. It appends the final subject
-separately so a maximum count is never incremented.
+`rep` returns immediately when both the subject and separator are empty. It
+then checks one subject-plus-separator unit before multiplying by the count,
+and subtracts the unused final separator. It appends the final subject
+separately so a maximum count is never incremented. The empty-input fast path
+matches Lua 5.5.1 and keeps an arbitrarily large positive count away from the
+otherwise unnecessary size arithmetic.
 
 ## Raw Lua conversions and fixed-call adjustment
 
@@ -261,9 +264,11 @@ uses the integer literal branch rather than the hexadecimal-float branch.
 
 One mutable `PackState` carries the format cursor, selected byte order, native
 byte order, and maximum alignment. `sizeof` and `alignof` on the imported C
-types supply the target's actual widths and the native maximum-alignment
-policy. A small integer probe determines native endianness through `memcpy`,
-without type-punning.
+types supply the target's actual widths. The default maximum is the greatest
+alignment of Lua 5.5.1's `LUAI_MAXALIGN` members (`long double`, `void *`, and
+`long long` in Titan's required C99 mode), so `![n]` stays byte-for-byte
+compatible with the linked Lua. A small integer probe determines native
+endianness through `memcpy`, without type-punning.
 
 The format reader classifies one option and then computes alignment padding
 from the current output/data position. `X` consumes the following option only

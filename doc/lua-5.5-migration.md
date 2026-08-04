@@ -1,5 +1,9 @@
 # Titan's migration from Lua 5.3 to Lua 5.5
 
+> This is the historical Lua 5.3.5-to-5.5.0 migration report. For the current
+> Lua 5.5.1 and Titan ABI 0.21 follow-up, see the
+> [Lua 5.5.1 Update Audit](implementation/lua-5.5.1-update.md).
+
 This document explains every change made to migrate Titan from targeting
 Lua 5.3.5 to targeting Lua 5.5.0 — both making the compiler's own Lua code
 run on a Lua 5.5 host and making the generated C compile and behave

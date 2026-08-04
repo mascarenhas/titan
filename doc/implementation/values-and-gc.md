@@ -403,7 +403,7 @@ if (L->stack_last.p - L->top.p > $NSLOTS) {
 StkId _base = L->top.p;
 L->top.p += $NSLOTS;
 for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
-    setnilvalue(s2v(_s));
+    setnilvalue2s(_s);
 }
 ```
 
@@ -411,8 +411,9 @@ The fast path bumps `L->ci->top.p` (the current call's allowed stack
 ceiling) only when needed, skipping the `lua_checkstack` call when room
 already exists; the slow path may reallocate the stack and propagates
 `LUA_ERRMEM` if it cannot reserve the slots. Slots are
-nil-initialized so a collection arriving before a slot's first real
-store sees nil rather than stack garbage. Anchor slots are addressed as
+nil-initialized through Lua's stack-aware `setnilvalue2s` macro so a
+collection arriving before a slot's first real store sees nil rather than
+stack garbage. Anchor slots are addressed as
 `s2v(_base + k)`: `newslot` hands out indices, `pushd`/`popd` save and
 restore the depth around blocks and loop bodies so sibling scopes reuse
 slots, and `nslots` records the high-water mark that sizes the

@@ -57,6 +57,10 @@ copyright headers from which they derive.
   numeric-looking strings preserve their bytes and a recovery rule named
   `"1"` is not mistaken for that positional slot; the upstream integer-label
   tests retain their original behavior.
+- `lplvm.c` rejects UTF-8 lead bytes at or above `0xF8` before its continuation
+  loop. Such bytes necessarily exceed LPegLabel's four-byte Unicode range; the
+  early guard mirrors Lua 5.5.1's decoder hardening and avoids excess reads and
+  an oversized shift before the existing rejection.
 - `titan_lpeglabel.h` declares the hidden private opener used by Titan's
   standard-library wrapper and the test-only host.
 
@@ -83,8 +87,8 @@ b10cf150bfef74dd180e1112c54a71d4c427d4c695b643fdb2404870019d7a78  testrelabelpar
 b57029e58122ab2f6051fc34b992fba68cb18f430809948a3e015f6ae7de9f2a  LICENSE
 ```
 
-The listed `lpltypes.h` and `lpltree.c` digests are the pristine upstream
-digests, before the documented local edits.
+The listed `lpltypes.h`, `lpltree.c`, and `lplvm.c` digests are the pristine
+upstream digests, before the documented local edits.
 
 ## Verification
 

@@ -38,6 +38,12 @@ Upstream headers and the vendor license remain with the snapshot.
 translation, while the installed notices include the separate LPegLabel and
 LPeg license texts.
 
+The snapshot also carries Lua 5.5.1's constant-time UTF-8 lead-byte guard in
+LPegLabel's same-shaped decoder: bytes `0xF8..0xFF`, which would require an
+unsupported five-or-more-byte sequence, are rejected before the continuation
+loop. This preserves the existing accepted UTF-8 domain while bounding hostile
+invalid input at the native boundary.
+
 ## Native namespace and registry identity
 
 The combined `titan.so` provider is promoted with `RTLD_GLOBAL`, and the

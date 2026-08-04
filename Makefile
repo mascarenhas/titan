@@ -16,7 +16,7 @@ override PREFIX := $(abspath $(PREFIX))
 # Must match the Lua source layout resolved by titan-compiler/driver.lua and
 # spec/support/helpers.lua, so don't override this unless those consumers move
 # with it — the variable primarily keeps the download/install paths below DRY.
-LUA_VERSION      ?= 5.5.0
+LUA_VERSION      ?= 5.5.1
 LUA_ABI_VERSION  ?= 5.5
 LUA_DIR          := lua-$(LUA_VERSION)
 LUA_TARBALL      := $(LUA_DIR).tar.gz
@@ -35,6 +35,63 @@ TITAN_RUNTIME_LUA_LIB = $(TITAN_RUNTIME_LUA_SOURCE_PATH)/liblua.a
 LUA_BIN          := $(PREFIX)/bin/lua
 LUA_SOURCE_INSTALL_DIR := $(PREFIX)/src/$(LUA_DIR)
 LUA_INSTALL_STAMP := $(PREFIX)/etc/titan/lua-$(LUA_VERSION).installed
+
+# Lua 5.5.1's interactive Linux and macOS targets use GNU Readline. Prefer a
+# usable host installation, but do not require a development package: an
+# immutable/minimal host can build this pinned static fallback into PREFIX.
+# The archive lives in a private library directory so an unrelated readline
+# already installed in PREFIX cannot change which library Lua links.
+READLINE_MODE        ?= auto
+READLINE_VERSION     := 8.3
+READLINE_PATCHLEVEL  := 3
+READLINE_RELEASE     := $(READLINE_VERSION)-p$(READLINE_PATCHLEVEL)
+READLINE_DIR         := readline-$(READLINE_VERSION)
+READLINE_BUILD_DIR   := readline-build
+READLINE_TARBALL     := $(READLINE_DIR).tar.gz
+READLINE_URL         := https://ftp.gnu.org/gnu/readline/$(READLINE_TARBALL)
+READLINE_SHA256      := fe5383204467828cd495ee8d1d3c037a7eba1389c22bc6a041f627976f9061cc
+READLINE_PATCH_URL   := https://ftp.gnu.org/gnu/readline/readline-$(READLINE_VERSION)-patches
+READLINE_PATCH_001   := readline83-001
+READLINE_PATCH_002   := readline83-002
+READLINE_PATCH_003   := readline83-003
+READLINE_PATCHES     := $(READLINE_PATCH_001) $(READLINE_PATCH_002) $(READLINE_PATCH_003)
+READLINE_PATCH_FILE  := vendor/readline/readline-8.3-p1-p3.patch
+READLINE_COMBINED_PATCH_SHA256 := 70cbc596c0a7b3a35fabb8a05711a60e2695bd2d06a4e2f46f6f168f84403f96
+READLINE_PATCH_001_SHA256 := 21f0a03106dbe697337cd25c70eb0edbaa2bdb6d595b45f83285cdd35bac84de
+READLINE_PATCH_002_SHA256 := e27364396ba9f6debf7cbaaf1a669e2b2854241ae07f7eca74ca8a8ba0c97472
+READLINE_PATCH_003_SHA256 := 72dee13601ce38f6746eb15239999a7c56f8e1ff5eb1ec8153a1f213e4acdb29
+READLINE_EXTRACTED   := $(READLINE_DIR)/.titan-extracted-p$(READLINE_PATCHLEVEL)
+READLINE_PRIVATE_ROOT := $(PREFIX)/lib/titan/deps/readline/$(READLINE_RELEASE)
+READLINE_PRIVATE_INCLUDEDIR := $(READLINE_PRIVATE_ROOT)/include
+READLINE_PRIVATE_LIBDIR := $(READLINE_PRIVATE_ROOT)/lib
+READLINE_PRIVATE_DATADIR := $(READLINE_PRIVATE_ROOT)/share
+READLINE_STATIC_LIB  := $(READLINE_PRIVATE_LIBDIR)/libreadline.a
+READLINE_HEADER      := $(READLINE_PRIVATE_INCLUDEDIR)/readline/readline.h
+READLINE_HISTORY_HEADER := $(READLINE_PRIVATE_INCLUDEDIR)/readline/history.h
+READLINE_LICENSE     := $(READLINE_PRIVATE_DATADIR)/licenses/COPYING
+READLINE_LICENSE_SOURCE := LICENSES/readline-LICENSE
+READLINE_LICENSE_SHA256 := 8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903
+READLINE_INSTALL_STAMP := $(PREFIX)/etc/titan/readline-$(READLINE_RELEASE).installed
+READLINE_SELECTION_CONFIG := $(PREFIX)/etc/titan/readline-$(READLINE_RELEASE).config
+READLINE_BUILD_PROFILE := static-pic-private-staged-prefix-p3-v4
+READLINE_CFLAGS      ?= $(LUA_MYCFLAGS)
+READLINE_CPPFLAGS    ?=
+READLINE_LDFLAGS     ?= $(LUA_MYLDFLAGS)
+READLINE_ARFLAGS     ?= cr
+READLINE_HOST        ?=
+READLINE_PKG_CONFIG  ?= pkg-config
+READLINE_PKG_CPPFLAGS := $(strip $(shell $(READLINE_PKG_CONFIG) --cflags-only-I readline 2>/dev/null))
+READLINE_PKG_LDFLAGS := $(strip $(shell $(READLINE_PKG_CONFIG) --libs-only-L readline 2>/dev/null))
+READLINE_PKG_LIBS    := $(filter-out -lreadline,$(strip $(shell $(READLINE_PKG_CONFIG) --libs-only-l --libs-only-other readline 2>/dev/null)))
+READLINE_SYSTEM_CPPFLAGS ?= $(READLINE_PKG_CPPFLAGS)
+READLINE_SYSTEM_LDFLAGS ?= $(READLINE_PKG_LDFLAGS)
+# Lua's interactive targets already add -lreadline. This variable carries any
+# additional system-provider libraries discovered through pkg-config (or an
+# explicit override), and the probe adds the primary archive itself.
+READLINE_SYSTEM_LIBS ?= $(READLINE_PKG_LIBS)
+# Set this to explicit terminal-capability linker flags only when auto
+# detection cannot find a usable curses, tinfo, or termcap library.
+READLINE_TERMCAP_LIB ?= auto
 
 # LuaRocks is part of the standalone Titan installation. Pin it just like Lua
 # and bundled libuv so the complete toolchain lives under the same PREFIX.
@@ -206,11 +263,13 @@ ifeq ($(HOST_OS),Linux)
   endif
 endif
 
-# The Lua build target ("linux", "macosx", ...) is taken from `uname` but can be
-# overridden on the command line: `make lua LUA_PLATFORM=bsd`.
+# The Lua build target ("linux-readline", "macosx", ...) is taken from `uname`
+# but can be overridden on the command line: `make lua LUA_PLATFORM=bsd`.
 ifndef LUA_PLATFORM
   ifeq ($(HOST_OS),Darwin)
     LUA_PLATFORM := macosx
+  else ifeq ($(HOST_OS),Linux)
+    LUA_PLATFORM := linux-readline
   else
     LUA_PLATFORM := linux
   endif
@@ -361,7 +420,7 @@ STDLIB_INSTALL_STAGE       ?= $(CURDIR)
 # pairs for failure-only sanitizer symbolization before later tests can replace
 # those outputs. Ordinary builds leave this empty and pay no snapshot cost.
 TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT ?=
-TITAN_ABI_VERSION          := 0.20
+TITAN_ABI_VERSION          := 0.21
 TITAN_STDLIB_ABI_DIR       ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)
 TITAN_CANONICAL_SUPPORT_SO ?= $(TITAN_STDLIB_ABI_DIR)/titan.so
 TITAN_CANONICAL_STATIC_ARCHIVE ?= $(TITAN_STDLIB_ABI_DIR)/titan.a
@@ -372,7 +431,7 @@ TITAN_STDLIB_LEGACY_DIR    ?= $(LUA_LIBDIR)/titan/stdlib_$(subst .,_,$(TITAN_ABI
 TITAN_SHARE_DIR            ?= $(TITAN_INSTALL_TREE)/share/titan
 
 # libbacktrace is cloned + built into ./libbacktrace (gitignored), mirroring the
-# ./lua-5.5.0 tree. The generated C and the runtime include its backtrace.h and
+# ./lua-5.5.1 tree. The generated C and the runtime include its backtrace.h and
 # link its static archive (driver.lua references ./libbacktrace/.libs/...).
 LIBBT_DIR := libbacktrace
 LIBBT_URL := https://github.com/ianlancetaylor/libbacktrace.git
@@ -385,14 +444,15 @@ TITANLIB_BUILD_CONFIG := titan-runtime/.titan-titanlib-build-config
 STDLIB_CONFIG_STAMP := titan-runtime/.titan-stdlib-build-config
 STDLIB_COMPLETION_STAMP := titan-runtime/.titan-stdlib-complete
 
-.PHONY: all help lua luarocks libbacktrace libuv libuv-config llhttp \
+.PHONY: all help lua readline readline-bundled-install \
+	check-readline-tools luarocks libbacktrace libuv libuv-config llhttp \
 	check-llhttp-tools openssl openssl-config check-openssl-tools \
 	check-system-openssl invalid-openssl-mode lpeglabel \
 	check-libuv-tools check-system-libuv invalid-libuv-mode runtime titan \
 	stage-titan-bootstrap install-titan-sdk stdlib install-stdlib \
 	publish-stdlib \
 	rock-post-install test rock-build \
-	examples clean clean-lua clean-luarocks clean-libbacktrace clean-libuv \
+	examples clean clean-lua clean-readline clean-luarocks clean-libbacktrace clean-libuv \
 	clean-llhttp clean-openssl \
 	distclean FORCE
 
@@ -409,10 +469,13 @@ help: ## Show this help
 	@echo "$(OPENSSL_VERSION), and llhttp $(LLHTTP_VERSION) by default. Use"
 	@echo "LIBUV_MODE=system and/or OPENSSL_MODE=system to select pkg-config"
 	@echo "libraries (libuv >= $(LIBUV_MIN_VERSION), OpenSSL >= $(OPENSSL_MIN_VERSION))."
-	@echo "Bundled prerequisites: a C compiler, CMake, Perl, tar, curl/wget, and"
-	@echo "sha256sum/shasum (macOS: xcode-select --install; brew install cmake)."
-	@echo "System packages: Ubuntu/Debian libuv1-dev libssl-dev pkg-config;"
-	@echo "Fedora libuv-devel openssl-devel pkgconf-pkg-config; macOS"
+	@echo "Bundled prerequisites: a C compiler, CMake, Perl, git, tar, curl/wget,"
+	@echo "and sha256sum/shasum (macOS: xcode-select --install; brew install cmake)."
+	@echo "A usable system Readline is preferred; otherwise make lua builds pinned"
+	@echo "GNU Readline $(READLINE_RELEASE) into PREFIX automatically; that fallback also"
+	@echo "needs a linkable curses, tinfo, or termcap provider. Optional system packages:"
+	@echo "Ubuntu/Debian libreadline-dev libuv1-dev libssl-dev pkg-config; Fedora"
+	@echo "readline-devel libuv-devel openssl-devel pkgconf-pkg-config; macOS"
 	@echo "brew install libuv openssl@3 pkgconf. llhttp is always bundled."
 	@echo "For a standalone installation, choose one writable PREFIX and run:"
 	@echo "  make lua PREFIX=/path && make luarocks PREFIX=/path && make libuv"
@@ -420,7 +483,380 @@ help: ## Show this help
 
 libuv: ## Build/validate libuv (bundled by default; LIBUV_MODE=system is optional)
 
+readline: $(READLINE_SELECTION_CONFIG) ## Select system Readline or provision the prefix-local fallback
+
 lua: $(LUA_INSTALL_STAMP) ## Build and install Titan's prefix-configured Lua
+
+# Re-run the real compile/link probe on every invocation, but preserve the
+# configuration mtime when its result and inputs are unchanged. This keeps a
+# warm `make lua` quiet while noticing a host development package appearing or
+# disappearing. The system probe deliberately omits PREFIX: a previously
+# provisioned fallback is not misclassified as a host installation.
+$(READLINE_SELECTION_CONFIG): FORCE
+	@set -e; \
+	mkdir -p "$(@D)"; \
+	base="$@.base"; probe="$@.probe"; probe_source="$@.probe.c"; \
+	probe_log="$@.probe.log"; \
+	tmp="$@.tmp"; stamp_tmp="$(READLINE_INSTALL_STAMP).tmp"; \
+	trap 'rm -f "$$base" "$$probe" "$$probe_source" "$$probe_log" "$$tmp" "$$stamp_tmp"' \
+		EXIT HUP INT TERM; \
+	case "$(READLINE_MODE)" in \
+	  auto|system|bundled) ;; \
+	  *) echo "ERROR: READLINE_MODE must be auto, system, or bundled (got '$(READLINE_MODE)')." >&2; \
+	     exit 1 ;; \
+	esac; \
+	case "$(LUA_PLATFORM)" in \
+	  linux-readline|macosx) needs_readline=yes ;; \
+	  *) needs_readline=no ;; \
+	esac; \
+	provider=disabled; \
+	if test "$$needs_readline" = yes; then \
+	  printf '%s\n' 'int main(void) { return 0; }' > "$$probe_source"; \
+	  if ! $(LUA_CC) $(LUA_MYCFLAGS) $(LUA_MYLDFLAGS) \
+	       "$$probe_source" -o "$$probe" $(LUA_MYLIBS) \
+	       >"$$probe_log" 2>&1; then \
+	    echo "ERROR: Lua compiler/linker sanity probe failed before Readline selection." >&2; \
+	    cat "$$probe_log" >&2; \
+	    exit 1; \
+	  fi; \
+	  printf '%s\n' \
+	    '#include <stdio.h>' \
+	    '#include <readline/readline.h>' \
+	    '#include <readline/history.h>' \
+	    'int main(int argc, char **argv) {' \
+	    '  if (argc == 12345) add_history(readline(argv[0]));' \
+	    '  return rl_readline_name == NULL;' \
+	    '}' \
+	    > "$$probe_source"; \
+	  system_readline=no; \
+	  if test "$(READLINE_MODE)" != bundled && \
+	     $(LUA_CC) $(LUA_MYCFLAGS) $(READLINE_SYSTEM_CPPFLAGS) \
+	       $(LUA_MYLDFLAGS) $(READLINE_SYSTEM_LDFLAGS) "$$probe_source" \
+	       -o "$$probe" -lreadline $(LUA_MYLIBS) $(READLINE_SYSTEM_LIBS) \
+	       >"$$probe_log" 2>&1; then \
+	    system_readline=yes; \
+	  fi; \
+	  if test "$$system_readline" = yes; then \
+	    provider=system; \
+	  elif test "$(READLINE_MODE)" = system; then \
+	    echo "ERROR: READLINE_MODE=system, but the readline header/library probe failed." >&2; \
+	    cat "$$probe_log" >&2; \
+	    echo "  Use READLINE_MODE=auto (the default) to build the prefix-local fallback." >&2; \
+	    exit 1; \
+	  else \
+	    provider=bundled; \
+	  fi; \
+	fi; \
+	if test "$$provider" = bundled; then \
+	  source_inputs_ok=no; \
+	  if command -v sha256sum >/dev/null 2>&1; then \
+	    if printf '%s  %s\n' "$(READLINE_COMBINED_PATCH_SHA256)" \
+	         "$(READLINE_PATCH_FILE)" | sha256sum -c - >/dev/null 2>&1 && \
+	       printf '%s  %s\n' "$(READLINE_LICENSE_SHA256)" \
+	         "$(READLINE_LICENSE_SOURCE)" | sha256sum -c - >/dev/null 2>&1; then \
+	      source_inputs_ok=yes; \
+	    fi; \
+	  elif command -v shasum >/dev/null 2>&1; then \
+	    if printf '%s  %s\n' "$(READLINE_COMBINED_PATCH_SHA256)" \
+	         "$(READLINE_PATCH_FILE)" | shasum -a 256 -c - >/dev/null 2>&1 && \
+	       printf '%s  %s\n' "$(READLINE_LICENSE_SHA256)" \
+	         "$(READLINE_LICENSE_SOURCE)" | shasum -a 256 -c - >/dev/null 2>&1; then \
+	      source_inputs_ok=yes; \
+	    fi; \
+	  else \
+	    echo "ERROR: need sha256sum or shasum to verify $(READLINE_PATCH_FILE)." >&2; \
+	    exit 1; \
+	  fi; \
+	  if test "$$source_inputs_ok" != yes; then \
+	    echo "ERROR: checksum mismatch in vendored Readline patch or license input." >&2; \
+	    exit 1; \
+	  fi; \
+	fi; \
+	if test "$$provider" = bundled; then \
+	  printf '%s\n' 'int main(void) { return 0; }' > "$$probe_source"; \
+	  if ! $(LUA_CC) $(READLINE_CFLAGS) $(READLINE_CPPFLAGS) \
+	       $(READLINE_LDFLAGS) "$$probe_source" -o "$$probe" $(LUA_MYLIBS) \
+	       >"$$probe_log" 2>&1; then \
+	    echo "ERROR: Readline fallback compiler/linker sanity probe failed before terminal-library selection." >&2; \
+	    cat "$$probe_log" >&2; \
+	    exit 1; \
+	  fi; \
+	fi; \
+	termcap=; \
+	if test "$$provider" = bundled; then \
+	  printf '%s\n' \
+	    'extern int tgetent(char *, const char *);' \
+	    'int main(void) { return tgetent((char *)0, (const char *)0); }' \
+	    > "$$probe_source"; \
+	  termcap_found=no; \
+	  if test "$(READLINE_TERMCAP_LIB)" != auto; then \
+	    termcap=$(call make_shell_quote,$(READLINE_TERMCAP_LIB)); \
+	    if $(LUA_CC) $(READLINE_CFLAGS) $(READLINE_CPPFLAGS) \
+	       $(READLINE_LDFLAGS) "$$probe_source" -o "$$probe" \
+	       $(LUA_MYLIBS) $$termcap \
+	       >/dev/null 2>&1; then \
+	      termcap_found=yes; \
+	    fi; \
+	  else \
+	    candidates='none -ltinfo -lncursesw -lncurses -lcurses -ltermcap'; \
+	    if test "$(HOST_OS)" = Linux; then \
+	      candidates="$$candidates -Wl,-l:libtinfo.so.6 -Wl,-l:libtinfo.so.5 -Wl,-l:libncursesw.so.6 -Wl,-l:libncurses.so.6"; \
+	    fi; \
+	    for candidate in $$candidates; do \
+	      candidate_flags=$$candidate; \
+	      if test "$$candidate" = none; then candidate_flags=; fi; \
+	      if $(LUA_CC) $(READLINE_CFLAGS) $(READLINE_CPPFLAGS) \
+	         $(READLINE_LDFLAGS) "$$probe_source" -o "$$probe" \
+	         $(LUA_MYLIBS) $$candidate_flags >/dev/null 2>&1; then \
+	        termcap="$$candidate_flags"; termcap_found=yes; break; \
+	      fi; \
+	    done; \
+	  fi; \
+	  if test "$$termcap_found" != yes; then \
+	    echo "ERROR: prefix-local Readline needs a usable curses, tinfo, or termcap library." >&2; \
+	    echo "  Install the platform terminal-library development package or set READLINE_TERMCAP_LIB." >&2; \
+	    exit 1; \
+	  fi; \
+	fi; \
+	{ printf 'provider=%s\n' "$$provider"; \
+	  printf 'termcap=%s\n' "$$termcap"; \
+	  printf '%s\n' \
+	    $(call make_shell_quote,PREFIX=$(PREFIX)) \
+	    $(call make_shell_quote,LUA_PLATFORM=$(LUA_PLATFORM)) \
+	    $(call make_shell_quote,READLINE_MODE=$(READLINE_MODE)) \
+	    $(call make_shell_quote,READLINE_VERSION=$(READLINE_VERSION)) \
+	    $(call make_shell_quote,READLINE_PATCHLEVEL=$(READLINE_PATCHLEVEL)) \
+	    $(call make_shell_quote,READLINE_SHA256=$(READLINE_SHA256)) \
+	    $(call make_shell_quote,READLINE_PATCH_001_SHA256=$(READLINE_PATCH_001_SHA256)) \
+	    $(call make_shell_quote,READLINE_PATCH_002_SHA256=$(READLINE_PATCH_002_SHA256)) \
+	    $(call make_shell_quote,READLINE_PATCH_003_SHA256=$(READLINE_PATCH_003_SHA256)) \
+	    $(call make_shell_quote,READLINE_COMBINED_PATCH_SHA256=$(READLINE_COMBINED_PATCH_SHA256)) \
+	    $(call make_shell_quote,READLINE_LICENSE_SHA256=$(READLINE_LICENSE_SHA256)) \
+	    $(call make_shell_quote,READLINE_BUILD_PROFILE=$(READLINE_BUILD_PROFILE)) \
+	    $(call make_shell_quote,READLINE_PRIVATE_ROOT=$(READLINE_PRIVATE_ROOT)) \
+	    $(call make_shell_quote,READLINE_PRIVATE_INCLUDEDIR=$(READLINE_PRIVATE_INCLUDEDIR)) \
+	    $(call make_shell_quote,READLINE_PRIVATE_LIBDIR=$(READLINE_PRIVATE_LIBDIR)) \
+	    $(call make_shell_quote,LUA_CC=$(LUA_CC)) \
+	    $(call make_shell_quote,AR=$(AR)) \
+	    $(call make_shell_quote,RANLIB=$(RANLIB)) \
+	    $(call make_shell_quote,READLINE_CFLAGS=$(READLINE_CFLAGS)) \
+	    $(call make_shell_quote,READLINE_CPPFLAGS=$(READLINE_CPPFLAGS)) \
+	    $(call make_shell_quote,READLINE_LDFLAGS=$(READLINE_LDFLAGS)) \
+	    $(call make_shell_quote,READLINE_ARFLAGS=$(READLINE_ARFLAGS)) \
+	    $(call make_shell_quote,READLINE_HOST=$(READLINE_HOST)) \
+	    $(call make_shell_quote,READLINE_SYSTEM_CPPFLAGS=$(READLINE_SYSTEM_CPPFLAGS)) \
+	    $(call make_shell_quote,READLINE_SYSTEM_LDFLAGS=$(READLINE_SYSTEM_LDFLAGS)) \
+	    $(call make_shell_quote,READLINE_SYSTEM_LIBS=$(READLINE_SYSTEM_LIBS)) \
+	    $(call make_shell_quote,READLINE_TERMCAP_LIB=$(READLINE_TERMCAP_LIB)); \
+	} > "$$base"; \
+	if test "$$provider" = bundled; then \
+	  printf '%s\n' \
+	    '#include <stdio.h>' \
+	    '#include <readline/readline.h>' \
+	    '#include <readline/history.h>' \
+	    'int main(int argc, char **argv) {' \
+	    '  if (argc == 12345) add_history(readline(argv[0]));' \
+	    '  return rl_readline_name == NULL;' \
+	    '}' \
+	    > "$$probe_source"; \
+	  fallback_current=no; \
+	  if test -f "$(READLINE_INSTALL_STAMP)" && \
+	     cmp -s "$$base" "$(READLINE_INSTALL_STAMP)" && \
+	     test -f "$(READLINE_HEADER)" && test -f "$(READLINE_HISTORY_HEADER)" && \
+	     test -f "$(READLINE_STATIC_LIB)" && \
+	     cmp -s "$(READLINE_LICENSE_SOURCE)" "$(READLINE_LICENSE)" && \
+	     $(LUA_CC) -I"$(READLINE_PRIVATE_INCLUDEDIR)" \
+	       $(READLINE_CFLAGS) $(READLINE_CPPFLAGS) $(READLINE_LDFLAGS) \
+	       "$$probe_source" -o "$$probe" "$(READLINE_STATIC_LIB)" \
+	       $(LUA_MYLIBS) $$termcap >/dev/null 2>&1; then \
+	    fallback_current=yes; \
+	  fi; \
+	  if test "$$fallback_current" != yes; then \
+	    echo "==> System Readline development files unavailable; provisioning $(READLINE_RELEASE) in $(PREFIX)"; \
+	    $(MAKE) --no-print-directory readline-bundled-install \
+	      PREFIX=$(call make_shell_quote,$(PREFIX)) \
+	      LUA_CC=$(call make_shell_quote,$(LUA_CC)) \
+	      AR=$(call make_shell_quote,$(AR)) \
+	      RANLIB=$(call make_shell_quote,$(RANLIB)) \
+	      READLINE_CFLAGS=$(call make_shell_quote,$(READLINE_CFLAGS)) \
+	      READLINE_CPPFLAGS=$(call make_shell_quote,$(READLINE_CPPFLAGS)) \
+	      READLINE_LDFLAGS=$(call make_shell_quote,$(READLINE_LDFLAGS)) \
+	      READLINE_ARFLAGS=$(call make_shell_quote,$(READLINE_ARFLAGS)) \
+	      READLINE_HOST=$(call make_shell_quote,$(READLINE_HOST)) \
+	      READLINE_SELECTED_TERMCAP_LIB="$$termcap"; \
+	    if ! test -f "$(READLINE_HEADER)" || \
+	       ! test -f "$(READLINE_HISTORY_HEADER)" || \
+	       ! test -f "$(READLINE_STATIC_LIB)" || \
+	       ! cmp -s "$(READLINE_LICENSE_SOURCE)" "$(READLINE_LICENSE)" || \
+	       ! $(LUA_CC) -I"$(READLINE_PRIVATE_INCLUDEDIR)" \
+	         $(READLINE_CFLAGS) $(READLINE_CPPFLAGS) $(READLINE_LDFLAGS) \
+	         "$$probe_source" -o "$$probe" "$(READLINE_STATIC_LIB)" \
+	         $(LUA_MYLIBS) $$termcap >/dev/null 2>&1; then \
+	      echo "ERROR: prefix-local Readline failed its exact post-install link validation." >&2; \
+	      exit 1; \
+	    fi; \
+	    cp "$$base" "$$stamp_tmp"; \
+	    mv -f "$$stamp_tmp" "$(READLINE_INSTALL_STAMP)"; \
+	  fi; \
+	fi; \
+	cp "$$base" "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then \
+	  :; \
+	else \
+	  echo "==> Lua Readline provider: $$provider"; \
+	  mv -f "$$tmp" "$@"; \
+	fi
+
+check-readline-tools:
+	@missing=0; \
+	if ! command -v "$(firstword $(LUA_CC))" >/dev/null 2>&1; then \
+	  echo "ERROR: Lua C compiler '$(firstword $(LUA_CC))' was not found." >&2; missing=1; \
+	fi; \
+	if ! command -v "$(firstword $(AR))" >/dev/null 2>&1; then \
+	  echo "ERROR: archiver '$(firstword $(AR))' was not found." >&2; missing=1; \
+	fi; \
+	if ! command -v "$(firstword $(RANLIB))" >/dev/null 2>&1; then \
+	  echo "ERROR: ranlib '$(firstword $(RANLIB))' was not found." >&2; missing=1; \
+	fi; \
+	if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then \
+	  echo "ERROR: need curl or wget to download $(READLINE_TARBALL)." >&2; missing=1; \
+	fi; \
+	if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then \
+	  echo "ERROR: need sha256sum or shasum to verify $(READLINE_TARBALL)." >&2; missing=1; \
+	fi; \
+	if ! command -v tar >/dev/null 2>&1; then \
+	  echo "ERROR: tar is required to extract $(READLINE_TARBALL)." >&2; missing=1; \
+	fi; \
+	if ! command -v git >/dev/null 2>&1; then \
+	  echo "ERROR: git is required to apply GNU Readline's vendored official fixes." >&2; missing=1; \
+	fi; \
+	test "$$missing" -eq 0
+
+$(READLINE_TARBALL):
+	@$(MAKE) --no-print-directory check-readline-tools
+	@echo "==> Downloading $(READLINE_URL)"
+	@set -e; tmp="$@.tmp"; trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	if command -v curl >/dev/null 2>&1; then \
+	  curl -fL -o "$$tmp" "$(READLINE_URL)"; \
+	else \
+	  wget -O "$$tmp" "$(READLINE_URL)"; \
+	fi; \
+	if command -v sha256sum >/dev/null 2>&1; then \
+	  printf '%s  %s\n' "$(READLINE_SHA256)" "$$tmp" | sha256sum -c -; \
+	else \
+	  printf '%s  %s\n' "$(READLINE_SHA256)" "$$tmp" | shasum -a 256 -c -; \
+	fi; \
+	mv -f "$$tmp" "$@"
+
+$(READLINE_EXTRACTED): $(READLINE_TARBALL) $(READLINE_PATCH_FILE)
+	@$(MAKE) --no-print-directory check-readline-tools
+	@echo "==> Verifying GNU Readline $(READLINE_VERSION) release archive and patch"
+	@set -e; check_sha256() { \
+	  expected="$$1"; path="$$2"; \
+	  if command -v sha256sum >/dev/null 2>&1; then \
+	    printf '%s  %s\n' "$$expected" "$$path" | sha256sum -c -; \
+	  else \
+	    printf '%s  %s\n' "$$expected" "$$path" | shasum -a 256 -c -; \
+	  fi; \
+	}; \
+	if ! check_sha256 "$(READLINE_SHA256)" "$(READLINE_TARBALL)"; then \
+	  echo "ERROR: checksum mismatch for $(READLINE_TARBALL); removing it." >&2; \
+	  rm -f "$(READLINE_TARBALL)"; exit 1; \
+	fi; \
+	if ! check_sha256 "$(READLINE_COMBINED_PATCH_SHA256)" \
+	     "$(READLINE_PATCH_FILE)"; then \
+	  echo "ERROR: checksum mismatch for applied Readline patch $(READLINE_PATCH_FILE)." >&2; \
+	  exit 1; \
+	fi
+	@echo "==> Extracting and patching GNU Readline $(READLINE_RELEASE)"
+	rm -rf "$(READLINE_DIR)"
+	tar zxf "$(READLINE_TARBALL)"
+	@test -x "$(READLINE_DIR)/configure" || { \
+	  echo "ERROR: $(READLINE_TARBALL) did not contain $(READLINE_DIR)." >&2; exit 1; \
+	}
+	git apply --directory="$(READLINE_DIR)" "$(READLINE_PATCH_FILE)"
+	@test "$$(sed -n '$$p' "$(READLINE_DIR)/patchlevel")" = "3"
+	@touch "$@"
+
+# The fallback is a private Lua build input, not a discoverable SDK. Upstream's
+# pkg-config files capture the temporary stage paths, so discard them before
+# atomically publishing the validated include/library tree.
+readline-bundled-install: check-readline-tools $(READLINE_EXTRACTED)
+	@set -e; \
+	echo "==> Building staged static GNU Readline $(READLINE_RELEASE) for $(PREFIX)"; \
+	mkdir -p "$(dir $(READLINE_PRIVATE_ROOT))"; \
+	stage="$$(mktemp -d \
+	  "$(dir $(READLINE_PRIVATE_ROOT)).readline-$(READLINE_RELEASE).stage.XXXXXX")"; \
+	backup=; \
+	cleanup() { \
+	  if test -n "$$backup" && test -e "$$backup" && \
+	     ! test -e "$(READLINE_PRIVATE_ROOT)"; then \
+	    mv "$$backup" "$(READLINE_PRIVATE_ROOT)"; \
+	  fi; \
+	  if test -n "$$stage" && test -e "$$stage"; then rm -rf "$$stage"; fi; \
+	}; \
+	trap cleanup EXIT HUP INT TERM; \
+	rm -rf "$(READLINE_BUILD_DIR)"; \
+	mkdir -p "$(READLINE_BUILD_DIR)"; \
+	( cd "$(READLINE_BUILD_DIR)" && \
+	  "$(abspath $(READLINE_DIR))/configure" \
+	    --prefix="$(PREFIX)" \
+	    --includedir="$$stage/include" \
+	    --libdir="$$stage/lib" \
+	    --datarootdir="$$stage/share" \
+	    --disable-shared --enable-static \
+	    $(if $(strip $(READLINE_HOST)),--host=$(call make_shell_quote,$(READLINE_HOST)),) \
+	    CC=$(call make_shell_quote,$(LUA_CC)) \
+	    AR=$(call make_shell_quote,$(AR)) \
+	    ARFLAGS=$(call make_shell_quote,$(READLINE_ARFLAGS)) \
+	    RANLIB=$(call make_shell_quote,$(RANLIB)) \
+	    CFLAGS=$(call make_shell_quote,$(READLINE_CFLAGS)) \
+	    CPPFLAGS=$(call make_shell_quote,$(READLINE_CPPFLAGS)) \
+	    LDFLAGS=$(call make_shell_quote,$(READLINE_LDFLAGS)) \
+	    LIBS=$(call make_shell_quote,$(READLINE_SELECTED_TERMCAP_LIB)) ); \
+	$(MAKE) -C "$(READLINE_BUILD_DIR)"; \
+	$(MAKE) -C "$(READLINE_BUILD_DIR)" install; \
+	rm -rf "$$stage/lib/pkgconfig"; \
+	mkdir -p "$$stage/share/licenses"; \
+	cmp -s "$(READLINE_DIR)/COPYING" "$(READLINE_LICENSE_SOURCE)" || { \
+	  echo "ERROR: checked-in GNU Readline license does not match the pinned source." >&2; \
+	  exit 1; \
+	}; \
+	install -m 0644 "$(READLINE_LICENSE_SOURCE)" \
+	  "$$stage/share/licenses/COPYING"; \
+	test -f "$$stage/include/readline/readline.h" && \
+	test -f "$$stage/include/readline/history.h" && \
+	test -f "$$stage/lib/libreadline.a" && \
+	cmp -s "$(READLINE_LICENSE_SOURCE)" "$$stage/share/licenses/COPYING" || { \
+	  echo "ERROR: staged GNU Readline install is incomplete." >&2; exit 1; \
+	}; \
+	probe_source="$(READLINE_BUILD_DIR)/.titan-link-probe.c"; \
+	probe="$(READLINE_BUILD_DIR)/.titan-link-probe"; \
+	printf '%s\n' \
+	  '#include <stdio.h>' \
+	  '#include <readline/readline.h>' \
+	  '#include <readline/history.h>' \
+	  'int main(int argc, char **argv) {' \
+	  '  if (argc == 12345) add_history(readline(argv[0]));' \
+	  '  return rl_readline_name == NULL;' \
+	  '}' > "$$probe_source"; \
+	$(LUA_CC) -I"$$stage/include" $(READLINE_CFLAGS) $(READLINE_CPPFLAGS) \
+	  $(READLINE_LDFLAGS) "$$probe_source" -o "$$probe" \
+	  "$$stage/lib/libreadline.a" $(LUA_MYLIBS) \
+	  $(READLINE_SELECTED_TERMCAP_LIB) || { \
+	  echo "ERROR: staged GNU Readline failed its exact link validation." >&2; \
+	  exit 1; \
+	}; \
+	rm -f "$$probe" "$$probe_source"; \
+	if test -e "$(READLINE_PRIVATE_ROOT)"; then \
+	  backup="$(READLINE_PRIVATE_ROOT).backup.$$$$"; \
+	  test ! -e "$$backup"; \
+	  mv "$(READLINE_PRIVATE_ROOT)" "$$backup"; \
+	fi; \
+	mv "$$stage" "$(READLINE_PRIVATE_ROOT)"; \
+	stage=; \
+	if test -n "$$backup"; then rm -rf "$$backup"; backup=; fi; \
+	trap - EXIT HUP INT TERM
 
 $(LUA_INSTALL_STAMP): $(LUA_LIB) $(LUA_BUILD_CONFIG)
 	@echo "==> Installing Lua $(LUA_VERSION) into $(PREFIX)"
@@ -452,7 +888,7 @@ $(LUA_EXTRACTED): $(LUA_TARBALL)
 # objects whenever that configuration or any effective native-build input
 # changes. An unchanged invocation preserves the stamp mtime and leaves the
 # already-built interpreter warm. loadlib.c remains the pristine upstream file.
-$(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) FORCE
+$(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) $(READLINE_SELECTION_CONFIG) FORCE
 	@tmp="$@.tmp"; header="$(LUA_DIR)/src/luaconf.h"; \
 	tmp_header="$$header.titan.tmp"; \
 	changed="$@.changed"; \
@@ -468,6 +904,7 @@ $(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) FORCE
 		$(call make_shell_quote,LUA_MYLIBS=$(LUA_MYLIBS)) \
 		$(call make_shell_quote,TITAN_ABI_VERSION=$(TITAN_ABI_VERSION)); } \
 		> "$$tmp"; \
+	cat "$(READLINE_SELECTION_CONFIG)" >> "$$tmp"; \
 	awk -v root=$(call make_shell_quote,$(PREFIX)) \
 	    -v titan_abi=$(call make_shell_quote,$(TITAN_ABI_VERSION)) \
 	  '$$1 == "#define" && $$2 == "LUA_TITAN_CDIR" { next } \
@@ -482,14 +919,16 @@ $(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) FORCE
 	       next; \
 	     } \
 	     line = $$0; \
-	     gsub(/LUA_TITAN_CDIR"[?][.]so;"[ \t]*/, "", line); \
-	     if (line ~ /LUA_CDIR"[?][.]so;"/) { \
-	       sub(/LUA_CDIR"[?][.]so;"/, \
-	           "LUA_TITAN_CDIR\"?.so;\" LUA_CDIR\"?.so;\"", line); \
+	     gsub(/LUA_TITAN_CDIR[ \t]*"[?][.]so;"[ \t]*/, "", line); \
+	     if (line ~ /LUA_CDIR[ \t]*"[?][.]so;"/) { \
+	       sub(/LUA_CDIR[ \t]*"[?][.]so;"/, \
+	           "LUA_TITAN_CDIR \"?.so;\" LUA_CDIR \"?.so;\"", line); \
 	     } \
 	     print line; }' "$$header" > "$$tmp_header"; \
 	grep -q '^#define LUA_ROOT' "$$tmp_header"; \
 	grep -q '^#define LUA_TITAN_CDIR' "$$tmp_header"; \
+	test "$$(grep -Ec 'LUA_TITAN_CDIR[[:space:]]*"[?][.]so;"' \
+	              "$$tmp_header")" -eq 1; \
 	if test -r "$@" && cmp -s "$$tmp" "$@" && \
 	   cmp -s "$$tmp_header" "$$header"; then \
 	  rm -f "$$tmp" "$$tmp_header"; \
@@ -504,14 +943,29 @@ $(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) FORCE
 	@if test -r "$@.changed"; then mv -f "$@.changed" "$@"; fi
 
 $(LUA_LIB): $(LUA_BUILD_CONFIG)
-	@echo "==> Building Lua ($(LUA_PLATFORM), MYCFLAGS=$(LUA_MYCFLAGS))"
+	@set -e; \
+	readline_provider="$$(sed -n 's/^provider=//p' "$(READLINE_SELECTION_CONFIG)")"; \
+	readline_termcap="$$(sed -n 's/^termcap=//p' "$(READLINE_SELECTION_CONFIG)")"; \
+	lua_mycflags=$(call make_shell_quote,$(LUA_MYCFLAGS)); \
+	lua_myldflags=$(call make_shell_quote,$(LUA_MYLDFLAGS)); \
+	lua_mylibs=$(call make_shell_quote,$(LUA_MYLIBS)); \
+	if test "$$readline_provider" = bundled; then \
+	  lua_mycflags="-I$(READLINE_PRIVATE_INCLUDEDIR) $$lua_mycflags"; \
+	  lua_myldflags="-L$(READLINE_PRIVATE_LIBDIR) $$lua_myldflags"; \
+	  lua_mylibs="$$lua_mylibs $$readline_termcap"; \
+	elif test "$$readline_provider" = system; then \
+	  lua_mycflags="$$lua_mycflags $(READLINE_SYSTEM_CPPFLAGS)"; \
+	  lua_myldflags="$$lua_myldflags $(READLINE_SYSTEM_LDFLAGS)"; \
+	  lua_mylibs="$$lua_mylibs $(READLINE_SYSTEM_LIBS)"; \
+	fi; \
+	echo "==> Building Lua ($(LUA_PLATFORM), Readline=$$readline_provider, MYCFLAGS=$$lua_mycflags)"; \
 	$(MAKE) -C "$(LUA_DIR)" $(LUA_PLATFORM) \
 		CC=$(call make_shell_quote,$(LUA_CC)) \
 		AR=$(call make_shell_quote,$(LUA_AR)) \
 		RANLIB=$(call make_shell_quote,$(LUA_RANLIB)) \
-		MYCFLAGS=$(call make_shell_quote,$(LUA_MYCFLAGS)) \
-		MYLDFLAGS=$(call make_shell_quote,$(LUA_MYLDFLAGS)) \
-		MYLIBS=$(call make_shell_quote,$(LUA_MYLIBS))
+		MYCFLAGS="$$lua_mycflags" \
+		MYLDFLAGS="$$lua_myldflags" \
+		MYLIBS="$$lua_mylibs"
 
 luarocks: $(LUAROCKS_INSTALL_STAMP) ## Install pinned LuaRocks into PREFIX
 
@@ -1637,7 +2091,7 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
 	  CC=$(call make_shell_quote,$(CC)) \
 	    AR=$(call make_shell_quote,$(AR)) \
 	    RANLIB=$(call make_shell_quote,$(RANLIB)) \
-	    TITAN_PATH_0_20=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+	    TITAN_PATH_0_21=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 	    TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)) \
 	    TITAN_RUNTIME_PREBUILT=1 \
 	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
@@ -1678,7 +2132,7 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 	  export CC=$(call make_shell_quote,$(CC)); \
 	  export AR=$(call make_shell_quote,$(AR)); \
 	  export RANLIB=$(call make_shell_quote,$(RANLIB)); \
-	  export TITAN_PATH_0_20=$(call make_shell_quote,$(CURDIR)); \
+	  export TITAN_PATH_0_21=$(call make_shell_quote,$(CURDIR)); \
 	  export TITAN_PATH=; \
 	  export TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)); \
 	  export TITAN_RUNTIME_PREBUILT=1; \
@@ -1726,7 +2180,7 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	( cd "$$stage"; \
 	  unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	  export TITAN_ROCKS_ROOT="$$rocks_tree"; \
-	  export TITAN_PATH_0_20="$$abi_dir"; \
+	  export TITAN_PATH_0_21="$$abi_dir"; \
 	  export TITAN_PATH=; \
 	  export TITAN_RUNTIME_PREBUILT=1; \
 	  export CC=$(call make_shell_quote,$(CC)); \
@@ -1801,6 +2255,10 @@ clean-lua: ## Remove the downloaded Lua source tree(s) and tarball
 	rm -f $(LUA_TARBALL) lua-5.*.tar.gz
 	rm -rf .lua
 
+clean-readline: ## Remove the bundled Readline source/build trees and release archive
+	rm -rf $(READLINE_DIR) $(READLINE_BUILD_DIR)
+	rm -f $(READLINE_TARBALL) $(READLINE_PATCHES)
+
 clean-luarocks: ## Remove the downloaded LuaRocks source tree and tarball
 	rm -rf $(LUAROCKS_DIR)
 	rm -f $(LUAROCKS_TARBALL)
@@ -1820,4 +2278,4 @@ clean-openssl: ## Remove the bundled OpenSSL source/build trees and release tarb
 	rm -rf $(OPENSSL_SRC_DIR) $(OPENSSL_BUILD_DIR)
 	rm -f $(OPENSSL_TARBALL)
 
-distclean: clean clean-lua clean-luarocks clean-libbacktrace clean-libuv clean-llhttp clean-openssl ## Remove all downloaded trees and artifacts
+distclean: clean clean-lua clean-readline clean-luarocks clean-libbacktrace clean-libuv clean-llhttp clean-openssl ## Remove all downloaded trees and artifacts

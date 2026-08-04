@@ -159,7 +159,7 @@ describe("titan.peg", function()
         local command = table.concat({
             "env -u LUA_PATH -u LUA_CPATH" ..
                 " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-            "TITAN_PATH_0_20=" .. quote(workspace),
+            "TITAN_PATH_0_21=" .. quote(workspace),
             "TITAN_PATH=",
             "LUA_PATH=" .. quote(lua_path),
             "LUA_PATH_5_5=" .. quote(lua_path),
@@ -203,6 +203,12 @@ describe("titan.peg", function()
                 string.char(0xed, 0xa0, 0x80)) == 4)
             assert(peg.utf_range(0x10ffff, 0x10ffff):match(
                 utf8.char(0x10ffff)) == 5)
+            local all_utf = peg.utf_range(0, 0x10ffff)
+            assert(select(1, all_utf:match(
+                string.char(0xf8, 0x80, 0x80, 0x80, 0x80))) == nil)
+            assert(select(1, all_utf:match(
+                string.char(0xff, 0x80, 0x80, 0x80,
+                            0x80, 0x80, 0x80, 0x80))) == nil)
             assert(not pcall(peg.utf_range, -1, 0))
             assert(not pcall(peg.utf_range, 2, 1))
             assert(not pcall(peg.utf_range, 0, 0x110000))

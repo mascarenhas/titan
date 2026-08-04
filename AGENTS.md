@@ -35,14 +35,14 @@ not add epicycles around what may be a misunderstood simpler design.
 
 - **Lua 5.5.** Both the compiler's own Lua code and generated C target Lua
   5.5 (rockspec: `lua ~> 5.5`). Use an absolute project-local prefix such as
-  `PREFIX=$HOME/.local/titan/titan-dev`. `make lua` configures Lua 5.5.0's
+  `PREFIX=$HOME/.local/titan/titan-dev`. `make lua` configures Lua 5.5.1's
   `LUA_ROOT` to that prefix while leaving upstream `loadlib.c` unchanged. The
   generated standard-module shims resolve physical `titan.so` through
   `package.cpath`, load bare native support with `require "titan"`, then use
   `titan._loadlibglobal` to map/promote the provider with
   `RTLD_LAZY | RTLD_GLOBAL` before invoking the exact `luaopen_titan_*` entry.
   It builds and installs Lua there
-  and copies its matching `.c` and `.h` files to `$PREFIX/src/lua-5.5.0/`;
+  and copies its matching `.c` and `.h` files to `$PREFIX/src/lua-5.5.1/`;
   `make luarocks` builds and installs
   pinned LuaRocks 3.13.0 against that Lua with `--prefix`, `--rocks-tree`, and
   `--with-lua` all set to the prefix and `--force-config`. CI uses these same
@@ -97,11 +97,13 @@ not add epicycles around what may be a misunderstood simpler design.
   Linux compiler group, the canonical bundled provider packed before those
   tests, its bundled production smoke, and the complete macOS run (including
   both libuv modes) remain optimized. The
-  regular producer now prepares a clean ABI-0.20 prefix directly. Its
+  regular producer now prepares a clean ABI-0.21 prefix directly. Its
   dependency cache key includes the active Titan ABI; after restore it runs
-  `make lua` and `make luarocks`, removes or replaces only known active-0.20
+  `make lua` and `make luarocks`, removes or replaces only known active-0.21
   Titan-owned rock/direct-shim state, and proves the interpreter's
-  `package.cpath` contains `lib/titan/0.20/?.so` but not the 0.19 template.
+  `package.cpath` contains `lib/titan/0.21/?.so` but not the 0.20 template.
+  Separately versioned ABI-0.20 files remain preserved prior-version state;
+  the 0.21 preparation has no cross-ABI migration or cleanup path.
   The historical ABI-0.17-to-0.18 cutover smoke is retired rather than carried
   forward as migration machinery. This does not waive the ordinary manually
   dispatched complete macOS pre-merge gate. The
@@ -189,17 +191,26 @@ not add epicycles around what may be a misunderstood simpler design.
   Make owns that dependency state. The serial coroutine suite is the isolated
   exception described below.
 - **A local Titan prefix prepared by `make lua`.** The checkout keeps the
-  gitignored `./lua-5.5.0` build tree, while the installation contains the
+  gitignored `./lua-5.5.1` build tree, while the installation contains the
   same internal sources, including the configured `luaconf.h`, under
-  `$PREFIX/src/lua-5.5.0/` and the
+  `$PREFIX/src/lua-5.5.1/` and the
   matching `$PREFIX/lib/liblua.a`. Generated C includes Lua internal headers
   (`lobject.h`, `lgc.h`, `lvm.h`, ...) from that installed source tree and
   links the matching archive. That `luaconf.h` is also the public configuration
   used when this LuaRocks builds other Lua libraries and Titan packages.
-  `make lua` uses `MYCFLAGS=-fPIC` and selects `linux`/`macosx`
+  `make lua` uses `MYCFLAGS=-fPIC` and selects `linux-readline`/`macosx`
   from `uname`; override with `make lua LUA_PLATFORM=...`, and use `LUA_CC`
-  for Lua's compiler. Its configuration stamp cleans Lua objects whenever
-  `PREFIX`, `LUA_PLATFORM`, `LUA_CC`, or a `LUA_MY*` input changes.
+  for Lua's compiler. It compile-links a host Readline probe first. When the
+  development header/library is unavailable, it verifies and builds pinned
+  GNU Readline 8.3 patchlevel 3 as a static prefix-local dependency using the
+  same `PREFIX`, `LUA_CC`, `AR`, and `RANLIB`;
+  `READLINE_MODE=system|bundled` can override automatic selection. Its
+  checksum-bound repair path builds and validates a sibling stage before
+  replacing an existing private installation. `READLINE_HOST` supplies an
+  optional Autoconf cross-target triplet; the `READLINE_*FLAGS` inputs are
+  recorded alongside the native tools. Its configuration stamp cleans Lua
+  objects whenever `PREFIX`, `LUA_PLATFORM`, `LUA_CC`, a native-build input,
+  or the selected Readline provider changes.
 - **Lua deps and rock installation**: `$PREFIX/bin/luarocks make
   titan-dev-1.rockspec` installs lpeglabel, inspect, argparse, luafilesystem,
   then deploys the compiler/runtime SDK and the combined standard library. The
@@ -220,7 +231,7 @@ not add epicycles around what may be a misunderstood simpler design.
   not a runtime-SDK archive: neither it nor its private headers are installed.
 
   SDK staging atomically places the bootstrap at
-  `$ROCKS_TREE/lib/titan/0.20/titan.so` only when the path is absent. It
+  `$ROCKS_TREE/lib/titan/0.21/titan.so` only when the path is absent. It
   validates and preserves an existing usable bootstrap or full image, and
   refuses to clobber an incompatible file; a repeated build must never shrink
   a full image back to bootstrap form. After LuaRocks deploys the compiler, the
@@ -251,19 +262,18 @@ not add epicycles around what may be a misunderstood simpler design.
   `scripts/stdlib_installer.lua` under the same effective `CC`, `AR`, `RANLIB`,
   `TITAN_EXTRA_*`, `TITAN_ROCKS_ROOT`, and runtime-prebuilt environment for
   recoverable publication. The script is not part of the installed compiler
-  modules. It recognizes bootstrap-only, legacy complete ABI-0.20
-  DSO/shims-without-archive, the valid historical fourteen-module ABI-0.20
-  pair, and current complete-pair predecessor states; backs up the
+  modules. It recognizes bootstrap-only and current complete-pair predecessor
+  states; backs up the
   exact current DSO/archive/dSYM/shims and stale active-layout copies; commits
   shims and dSYM, then `titan.a`, and renames `titan.so` last. Caught errors and
-  injected archive/DSO failpoints restore the exact predecessor, including
-  leaving `titan.a` absent for a legacy installation. This is not crash-,
-  power-loss-, or asynchronous-signal-atomic publication. The canonical
-  artifacts are `$ROCKS_TREE/lib/titan/0.20/{titan.so,titan.a}`, the DSO's
+  injected archive/DSO failpoints restore the exact supported predecessor. This is
+  not crash-, power-loss-, or asynchronous-signal-atomic publication. The
+  canonical artifacts are `$ROCKS_TREE/lib/titan/0.21/{titan.so,titan.a}`, the DSO's
   macOS dSYM, and generated
   `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc}.lua`.
   No symbolic links, hard links, child DSOs, or `lib/lua` compatibility copies
-  are used, and separately versioned 0.17/0.18/0.19 trees are not purged. These direct
+  are used, and separately versioned 0.17/0.18/0.19/0.20 trees are not purged,
+  migrated, or cleaned up. These direct
   SDK/stdlib files remain outside the rock manifest and are not removed by
   `luarocks remove`; binary-rock ownership is deferred until Titan has a
   library/application packaging story. The
@@ -284,9 +294,11 @@ not add epicycles around what may be a misunderstood simpler design.
   authoritative object target comes from the first generated module object,
   not `uname`, because `CC`/`TITAN_EXTRA_CFLAGS` may select another target; all
   other source, selected-provider, and `-X` objects must match it. The probe is
-  POSIX-only today (`/dev/null`, `LANG=C`). Bundled native dependencies need
-  CMake for libuv, Perl for OpenSSL, tar, a downloader (`curl` or `wget`), and
-  `sha256sum` or `shasum`.
+  POSIX-only today (`/dev/null`, `LANG=C`). A system Readline development
+  package is optional: when its compile/link probe fails, `make lua` builds the
+  pinned, officially patched source fallback inside `PREFIX`. Bundled native
+  dependencies need CMake for libuv, Perl for OpenSSL, tar, a downloader
+  (`curl` or `wget`), and `sha256sum` or `shasum`.
 
 ## Commands
 
@@ -324,7 +336,7 @@ make test                                           # `luarocks make` + `luarock
 luarocks test                                       # test an already current install; with its bin on PATH, PREFIX/ROCKS_TREE are not required
 luarocks make && bash spec/support/ci_test_groups.sh compiler  # CI's covered compiler/language group
 bash spec/support/ci_test_groups.sh libraries       # CI's complete uncovered library group
-make clean                                           # remove generated artifacts; `make distclean` also removes downloaded Lua/LuaRocks/libbacktrace/libuv/OpenSSL/llhttp trees
+make clean                                           # remove generated artifacts; `make distclean` also removes downloaded Lua/Readline/LuaRocks/libbacktrace/libuv/OpenSSL/llhttp trees
 
 busted                                              # full test suite — MUST run from repo root (all driver paths are relative); busted recurses into spec/ subdirs
 busted spec/parser_spec.lua                         # single spec file
@@ -489,8 +501,8 @@ genuine deeper folder child remains legal. It recovers the Titan
 SDK/rocks-tree root from the first `package.cpath` template ending in
 `/lib/lua/5.5/?.so`; that works because the supported install currently sets
 `ROCKS_TREE == PREFIX`, not because the two owners are inherently identical.
-Compiled-module lookup defaults to `.;<root>/lib/titan/0.20`, with
-`TITAN_PATH_0_20`/`TITAN_PATH` overriding it and `;;` inserting that ordinary
+Compiled-module lookup defaults to `.;<root>/lib/titan/0.21`, with
+`TITAN_PATH_0_21`/`TITAN_PATH` overriding it and `;;` inserting that ordinary
 default at compile time and run time. For logical `a.b.c`, each compiled-format
 pass checks `a.<ext>`, `a/b.<ext>`, and exact `a/b/c.<ext>` path-root-major and
 shallow-to-exact. Default lookup completes the `.so` pass across every path
@@ -514,7 +526,7 @@ slice, and the driver selects the slice matching the authoritative generated
 object target. There is no `.tmm` sidecar and lookup must not shell out to
 `ar`, `nm`, `objcopy`, `lipo`, or a linker.
 
-Recovered ABI-0.20 module interfaces use one closed validator for DSO and archive
+Recovered ABI-0.21 module interfaces use one closed validator for DSO and archive
 metadata. Value-facing graphs reject descriptor wrappers (including
 `Type.Variant` outside its owning union list); callable `paramnames` must be
 dense, unique, and match fixed arity; and union schemas must prove canonical
@@ -549,7 +561,7 @@ contributors; `titan.peg` and `titan.string` instead collect their complete
 public APIs in the canonical main and require every contributor top-level
 declaration to be module-local.
 Clean validation invokes all seventeen roots in one compiler process, stages
-`<root>/lib/titan/0.20/{titan.so,titan.a}`, and installs seventeen generated shims
+`<root>/lib/titan/0.21/{titan.so,titan.a}`, and installs seventeen generated shims
 below `<root>/share/lua/5.5/titan/`. The archive advertises exactly seventeen
 logical metadata keys; its metadata-free payload begins with `titanlib.o` and
 the private five-member LPegLabel archive, followed by the selected libuv
@@ -632,18 +644,20 @@ Filesystem source cache entries carry `program_output` (`P` flat,
 `driver.compile_program`. Keep the optional argument's old dotted-name default
 for `tableloader` and external callers.
 
-The compiled-module ABI version is `0.20`. It gives every Array proxy a second
-traced user value carrying its construction-selected Lua-write policy and
-gives every Titan function closure a fixed opaque brand upvalue plus a trailing
-strict generic entry. `TITAN_VER`, `_0_20`, `TITAN_PATH_0_20`,
-`lib/titan/0.20`, and `stdlib_0_20` advance together; a 0.19 provider is
-rejected before its type metadata is decoded. There is no 0.19-to-0.20
-in-place migration: use a clean prefix and preserve any separately versioned
-0.19 tree. The relation review owned that one mechanical path advance, and the
-Interface layout inherited 0.20 without another bump. The resulting ABI-0.20
-release/provider contract includes both changes; the intermediate
+ABI 0.20 gave every Array proxy a second traced user value carrying its
+construction-selected Lua-write policy and every Titan function closure a
+fixed opaque brand upvalue plus a trailing strict generic entry. The relation
+review owned that mechanical path advance, and the Interface layout inherited
+0.20 without another bump. The resulting ABI-0.20 release/provider contract
+includes both changes; the intermediate
 relation-only and Interface-only layouts were validation artifacts and were
 never independently publishable.
+The current compiled-module ABI version is `0.21`. It retains those layouts
+while advancing the embedded Lua contract from 5.5.0 to 5.5.1. `TITAN_VER`,
+`_0_21`, `TITAN_PATH_0_21`, `lib/titan/0.21`, and `stdlib_0_21` advance
+together; a 0.20 provider is rejected before its type metadata is decoded.
+There is no 0.20-to-0.21 migration or cleanup path; any separately versioned
+0.20 tree remains preserved prior-version state.
 `0.19` itself was bumped from `0.18` when serialized union/variant schemas and
 userdata/tag dispatch extended the importer-reconstructible public module-slot
 prefix with exported statics of each public record/union. This preserves
@@ -690,7 +704,7 @@ metatable pointer; `0.7` itself was bumped from `0.6` when record instances and
 module state collapsed to single Lua 5.5 `Udata` objects; `0.6` added the
 native `_fn` closure parameter). `.so`/`.a` providers built by an older Titan are
 incompatible. `-v` prints the exact `cc` command lines. Without the prepared
-Lua 5.5.0 installation, only the pure specs pass (cpp, lexer, location,
+Lua 5.5.1 installation, only the pure specs pass (cpp, lexer, location,
 parser, symtab, types, util); `spec/checker/`, `spec/coder/`, and
 `spec/stdlib/` need the full setup.
 
@@ -1101,7 +1115,7 @@ substitution, recursive; error on missing keys). Key facts:
   in shared C globals.** Several logical modules may share one physical DSO or
   static provider; once linked, each keeps its own `_abi`, `_types`, `_init`,
   `luaopen_*`, registry module `Udata`, initializer, record identities,
-  closures, and file-local native wiring. The ABI-0.20 `titan.so`/`titan.a`
+  closures, and file-local native wiring. The ABI-0.21 `titan.so`/`titan.a`
   pair carries all seventeen current logical modules, including the
   `titan.io` Interface vocabulary and high-level I/O helpers.
   `titan.so` is the shared runtime provider and also owns bare Lua support,
@@ -1161,8 +1175,8 @@ substitution, recursive; error on missing keys). Key facts:
   constants and non-stateful wiring that is known to be identical for every
   Titan module; native caches belong in registry-owned userdata rather than
   mutable per-DSO globals.
-- First-class function values use the canonical ABI-0.20 `CClosure` layout
-  described above: `_mod`, exact tag, native pointer, opaque brand in slot 3,
+- First-class function values use the `CClosure` layout introduced in ABI 0.20
+  and retained in ABI 0.21: `_mod`, exact tag, native pointer, opaque brand in slot 3,
   captures or a bound receiver from slot 4, and the strict LCF last. Anonymous
   functions/closures and `obj:method` **bound methods** are supported as
   values. A captured-and-mutated local is stored in a **box** so all sharers
@@ -1327,10 +1341,11 @@ The conditional inherited-`SIGPIPE` policy is implemented in
 libuv wrappers, including the old DNS/address helpers, must not return.
 Archive-backed generated modules now have direct undefined references to those
 external callbacks and no references to the retired helpers, which established
-the compiled-module ABI-0.18 boundary rather than 0.17. ABI 0.19 preserves that
+the compiled-module ABI-0.18 boundary rather than 0.17. ABI 0.19 preserved that
 native callback contract while adding union and public-slot changes; ABI 0.20
-preserves both while adding the Array-writer and strict function-closure
-protocols.
+preserved both while adding the Array-writer and strict function-closure
+protocols. ABI 0.21 retains those contracts while advancing the matched Lua
+runtime.
 
 Ordinary libuv handles, requests, read buffers, and normalized address arrays
 are owned directly by source-level `owned *T`/`owned T[]` fields. There is one

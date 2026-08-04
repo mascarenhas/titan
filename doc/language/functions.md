@@ -453,9 +453,10 @@ stored as a Titan function value (see [the FFI chapter](ffi.md)). Assigning
 Lua 5.5 permits at most 255 upvalues in a C closure. The four fixed header
 slots and the strict-entry trailer leave 250 slots for captures or a bound
 receiver. Titan diagnoses the first closure that would exceed that budget
-instead of emitting an invalid C closure. ABI 0.20 adds the fixed brand and
-strict trailer; a 0.19 provider has the old closure layout and is rejected
-before an old and new function value can be exchanged.
+instead of emitting an invalid C closure. ABI 0.20 added the fixed brand and
+strict trailer; ABI 0.21 retains that layout while advancing the matched Lua
+runtime. A prior-ABI provider is rejected before function values can be
+exchanged.
 
 ## Recursion and declaration order
 

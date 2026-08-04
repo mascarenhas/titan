@@ -1,3 +1,4 @@
 # Keep the pinned third-party snapshot byte-for-byte, including upstream
 # whitespace that Titan does not otherwise permit in new source.
 vendor/lpeglabel/** whitespace=-trailing-space,-space-before-tab
+vendor/readline/*.patch whitespace=-trailing-space,-space-before-tab

@@ -214,7 +214,7 @@ describe("titan.lua", function()
         local command_words = {
             "env", "-u", "LUA_PATH", "-u", "LUA_CPATH",
             "-u", "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5",
-            "TITAN_PATH_0_20=" .. workspace,
+            "TITAN_PATH_0_21=" .. workspace,
             "TITAN_PATH=",
             "LUA_PATH=" .. lua_path,
             "LUA_PATH_5_5=" .. lua_path,

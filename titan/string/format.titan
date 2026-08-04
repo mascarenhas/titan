@@ -1,7 +1,7 @@
 -- Format parsing and semantics translated and adapted from src/lstrlib.c in
--- the immutable Lua 5.5.0 release:
--- https://www.lua.org/ftp/lua-5.5.0.tar.gz
--- Copyright (C) 1994-2025 Lua.org, PUC-Rio. MIT terms are reproduced in
+-- the immutable Lua 5.5.1 release:
+-- https://www.lua.org/ftp/lua-5.5.1.tar.gz
+-- Copyright (C) 1994-2026 Lua.org, PUC-Rio. MIT terms are reproduced in
 -- LICENSES/lua-LICENSE.
 
 local stdio = foreign import "stdio.h"

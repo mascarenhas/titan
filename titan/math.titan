@@ -1,8 +1,8 @@
 -- Mathematical semantics and xoshiro256** translated and adapted from
 -- src/lmathlib.c and numeric conversion from src/lobject.c/lbaselib.c in the
--- immutable Lua 5.5.0 release:
--- https://www.lua.org/ftp/lua-5.5.0.tar.gz
--- Copyright (C) 1994-2025 Lua.org, PUC-Rio. MIT terms are reproduced in
+-- immutable Lua 5.5.1 release:
+-- https://www.lua.org/ftp/lua-5.5.1.tar.gz
+-- Copyright (C) 1994-2026 Lua.org, PUC-Rio. MIT terms are reproduced in
 -- LICENSES/lua-LICENSE.
 local cmath = foreign import "math.h"
 local cstdlib = foreign import "stdlib.h"

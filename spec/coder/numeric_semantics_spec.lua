@@ -1,4 +1,4 @@
--- End-to-end tests pinning Titan's numeric operator semantics to Lua 5.5.0's,
+-- End-to-end tests pinning Titan's numeric operator semantics to Lua 5.5.1's,
 -- exactly (two's-complement integer wrap, bitwise xor, the x^2 special case,
 -- full-precision float literals, and -- the headline -- mixed integer/float
 -- comparisons that compare mathematical values with NO promotion).

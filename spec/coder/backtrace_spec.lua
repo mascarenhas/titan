@@ -65,7 +65,7 @@ describe("libbacktrace unified stack trace", function()
             assert(not bt:find("titanentry", 1, true), "leaked trampoline frame\n"..bt)
             assert(not bt:find("_titan", 1, true), "leaked mangled symbol\n"..bt)
             -- interpreter/runtime/libc frames filtered out of the native part
-            assert(not bt:find("lua-5.5.0/src/", 1, true), "leaked interp frame")
+            assert(not bt:find("lua-5.5.1/src/", 1, true), "leaked interp frame")
             assert(not bt:find("titan-runtime/", 1, true), "leaked runtime frame")
             print("OK")
         ]==])

@@ -186,8 +186,10 @@ Real output for `for i = 1, n, 2` (integer form):
 The unsigned count and `l_castS2U`/`l_castU2S` stepping keep the step
 arithmetic out of C signed-overflow undefined behavior. The visible
 `_local_i` is only declared when the body actually reads it. The float
-form is simpler: there is no count — `_foridx += _forstep` and the loop
-breaks once `_foridx` passes `_forlimit` in the step's direction.
+form is simpler: there is no count —
+`_foridx = luai_numadd(L, _foridx, _forstep)` uses Lua's configured numeric
+addition hook, and the loop breaks once `_foridx` passes `_forlimit` in the
+step's direction.
 
 The body tail gets the same allocation-gated `luaC_checkGC(L);` as
 `while`. `codereturn` evaluates the checker's adjusted return list once,

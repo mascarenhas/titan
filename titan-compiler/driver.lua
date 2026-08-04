@@ -16,8 +16,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.20"
-driver.TITAN_VER_SUFFIX = "_0_20"
+driver.TITAN_VER = "0.21"
+driver.TITAN_VER_SUFFIX = "_0_21"
 driver.LUA_VERSION = "5.5"
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
@@ -85,7 +85,7 @@ function driver.installed_paths(root)
     local titan_lib = root_join(root, "lib/titan/" .. driver.TITAN_VER)
     return {
         root = root,
-        lua_source = root_join(root, "src/lua-5.5.0"),
+        lua_source = root_join(root, "src/lua-5.5.1"),
         include = root_join(root, "include"),
         lib = root_join(root, "lib"),
         libtitan = root_join(root, "lib/libtitan.a"),
@@ -141,7 +141,7 @@ driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
     or default_titan_bin_path
 driver.TITAN_SOURCE_PATH = "."
 driver.LUA_SOURCE_PATH = driver.INSTALLED and driver.INSTALL_PATHS and
-    driver.INSTALL_PATHS.lua_source or "lua-5.5.0/src"
+    driver.INSTALL_PATHS.lua_source or "lua-5.5.1/src"
 driver.EMIT_LINE_DIRECTIVES = os.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.LIBBACKTRACE_PATH = "libbacktrace"

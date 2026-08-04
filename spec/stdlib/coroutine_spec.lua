@@ -226,7 +226,7 @@ function _test_set_transfer_gc_mode(mode: integer)
   transfer_gc_mode = mode
 end
 ]]
-    local initializer = '\ndo\n  local res = lual.luaL_newmetatable'
+    local initializer = '\ndo\n  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, "titan.coroutine")'
     source = replace_once(source, initializer, exports .. initializer)
     compile_coroutine_variant(
         COROUTINE_VARIANT_ROOT,
@@ -282,7 +282,7 @@ function _test_checkstack_failure_ok(): boolean
   return (coro_test.titan_coro_test_checkstack_failure_ok() as integer) ~= 0
 end
 ]]
-    local initializer = '\ndo\n  local res = lual.luaL_newmetatable'
+    local initializer = '\ndo\n  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, "titan.coroutine")'
     source = replace_once(source, initializer, exports .. initializer)
     compile_coroutine_variant(
         CHECKSTACK_VARIANT_ROOT,
@@ -875,6 +875,50 @@ describe("coroutine standard module", function()
             assert.not_match("titan_coro_root_transfer", output, 1, true)
             assert.not_match("titan_coro_clear_transfer", output, 1, true)
         end
+    end)
+
+    it("rejects a poisoned metatable entry without replacing it",
+    function()
+        local out = run_lua([==[
+            local registry = debug.getregistry()
+            registry["titan.coroutine"] = "poisoned"
+            local ok, err = pcall(require, "titan.coroutine")
+            assert(not ok)
+            assert(tostring(err):find(
+                "invalid Titan coroutine metatable registry entry", 1,
+                true), tostring(err))
+            assert(registry["titan.coroutine"] == "poisoned")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("publishes a complete coroutine metatable and preserves its type name",
+    function()
+        local source = read_file(COROUTINE_VARIANT_SOURCE)
+        local lookup = assert(source:find(
+            'lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, "titan.coroutine")',
+            1, true))
+        local construct = assert(source:find(
+            "lua.lua_createtable(L, 0, 2)", lookup, true))
+        local name = assert(source:find(
+            'lua.lua_setfield(L, -2, "__name")', construct, true))
+        local gc = assert(source:find(
+            'lua.lua_setfield(L, -2, "__gc")', name, true))
+        local publish = assert(source:find(
+            'lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, "titan.coroutine")',
+            name, true))
+        assert.is_true(lookup < construct and construct < name)
+        assert.is_true(name < gc and gc < publish)
+
+        local out = run_lua([==[
+            local coroutine = require "titan.coroutine"
+            local metatable = debug.getregistry()["titan.coroutine"]
+            assert(type(metatable) == "table")
+            assert(metatable.__name == "titan.coroutine")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
     end)
 
     it("anchors a popped payload before clearing its transfer root", function()

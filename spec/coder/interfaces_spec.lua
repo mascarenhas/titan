@@ -1366,10 +1366,10 @@ int main(void) {
             os.getenv("CC") or "cc"))
         for _, argument in ipairs({
             "--std=c99", "-O0", "-g", "-Wall", "-Wextra",
-            "-I.", "-Ititan-runtime", "-Ilua-5.5.0/src",
+            "-I.", "-Ititan-runtime", "-Ilua-5.5.1/src",
             harness, "test.o", "titan-runtime/libtitan.a",
             "libbacktrace/.libs/libbacktrace.a",
-            "lua-5.5.0/src/liblua.a", "-o", executable,
+            "lua-5.5.1/src/liblua.a", "-o", executable,
             "-lm", "-pthread",
         }) do
             compiler[#compiler + 1] = argument

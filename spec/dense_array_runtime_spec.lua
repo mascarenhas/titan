@@ -71,6 +71,7 @@ local HARNESS = [=[
 #include "lualib.h"
 
 #include "lgc.h"
+#include "lfunc.h"
 #include "lobject.h"
 #include "lstate.h"
 #include "ltable.h"
@@ -82,6 +83,32 @@ static char weak_root_key;
 static char first_function_tag_candidate;
 static char second_function_tag_candidate;
 static int coercing_writer_calls;
+
+typedef struct MetatableFaultAllocator {
+    lua_Alloc delegate;
+    void *delegate_userdata;
+    int fail_cclosure;
+    unsigned failed_cclosures;
+} MetatableFaultAllocator;
+
+static void *metatable_fault_allocator(void *userdata, void *block,
+                                       size_t old_size, size_t new_size) {
+    MetatableFaultAllocator *allocator = userdata;
+
+    /*
+    ** luaL_setfuncs creates one-upvalue C closures only after the candidate
+    ** metatable has all of its non-callback fields. Reject that exact object
+    ** allocation, including Lua's emergency-GC retry, without perturbing the
+    ** earlier table and string allocations.
+    */
+    if (allocator->fail_cclosure && block == NULL &&
+        old_size == LUA_TFUNCTION && new_size == sizeCclosure(1)) {
+        allocator->failed_cclosures++;
+        return NULL;
+    }
+    return allocator->delegate(
+        allocator->delegate_userdata, block, old_size, new_size);
+}
 
 static int identity_writer(lua_State *L) {
     lua_settop(L, 1);
@@ -232,6 +259,11 @@ static int constructor_one_past(lua_State *L) {
     return 0;
 }
 
+static int open_array_metatable(lua_State *L) {
+    (void)titan_array_metatable(L);
+    return 0;
+}
+
 static void expect_c_error(lua_State *L, lua_CFunction function,
                            const char *message) {
     int status;
@@ -241,6 +273,88 @@ static void expect_c_error(lua_State *L, lua_CFunction function,
     assert(lua_type(L, -1) == LUA_TSTRING);
     assert(strstr(lua_tostring(L, -1), message) != NULL);
     lua_pop(L, 1);
+}
+
+static void test_array_metatable_publication(void) {
+    lua_State *L = luaL_newstate();
+    Table *metatable;
+    TValue value;
+
+    assert(L != NULL);
+    lua_pushliteral(L, "poisoned");
+    lua_setfield(L, LUA_REGISTRYINDEX, TITAN_ARRAY_METATABLE);
+    expect_c_error(L, open_array_metatable,
+                   "invalid Titan array metatable registry entry");
+    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_ARRAY_METATABLE);
+    assert(lua_type(L, -1) == LUA_TSTRING);
+    assert(strcmp(lua_tostring(L, -1), "poisoned") == 0);
+    lua_pop(L, 1);
+
+    lua_pushnil(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, TITAN_ARRAY_METATABLE);
+    metatable = titan_array_metatable(L);
+    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_ARRAY_METATABLE);
+    value = lua_totvalue(L, -1);
+    assert(ttistable(&value));
+    assert(hvalue(&value) == metatable);
+    lua_pop(L, 1);
+    lua_close(L);
+}
+
+static void test_array_metatable_allocation_retry(void) {
+    static const char *callbacks[] = {
+        "__index", "__newindex", "__len"
+    };
+    MetatableFaultAllocator allocator = {0};
+    lua_State *L = luaL_newstate();
+    Table *metatable;
+    TValue value;
+    int status;
+    unsigned i;
+
+    assert(L != NULL);
+    allocator.delegate = lua_getallocf(L, &allocator.delegate_userdata);
+    assert(allocator.delegate != NULL);
+    lua_setallocf(L, metatable_fault_allocator, &allocator);
+    lua_pushcfunction(L, open_array_metatable);
+    allocator.fail_cclosure = 1;
+    status = lua_pcall(L, 0, 0, 0);
+    allocator.fail_cclosure = 0;
+    lua_setallocf(L, allocator.delegate, allocator.delegate_userdata);
+
+    assert(status == LUA_ERRMEM);
+    assert(allocator.failed_cclosures > 0);
+    assert(lua_type(L, -1) == LUA_TSTRING);
+    lua_pop(L, 1);
+
+    /* The failed candidate must not become the state's nominal identity. */
+    assert(lua_getfield(
+        L, LUA_REGISTRYINDEX, TITAN_ARRAY_METATABLE) == LUA_TNIL);
+    lua_pop(L, 1);
+
+    /* With allocation restored, retry publishes one complete metatable. */
+    metatable = titan_array_metatable(L);
+    assert(lua_getfield(
+        L, LUA_REGISTRYINDEX, TITAN_ARRAY_METATABLE) == LUA_TTABLE);
+    value = lua_totvalue(L, -1);
+    assert(ttistable(&value));
+    assert(hvalue(&value) == metatable);
+    lua_getfield(L, -1, "__name");
+    assert(lua_type(L, -1) == LUA_TSTRING);
+    assert(strcmp(lua_tostring(L, -1), TITAN_ARRAY_METATABLE) == 0);
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "__metatable");
+    assert(lua_type(L, -1) == LUA_TSTRING);
+    assert(strcmp(lua_tostring(L, -1), TITAN_ARRAY_METATABLE) == 0);
+    lua_pop(L, 1);
+    for (i = 0; i < sizeof(callbacks) / sizeof(callbacks[0]); i++) {
+        lua_getfield(L, -1, callbacks[i]);
+        assert(lua_iscfunction(L, -1));
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+    assert(titan_array_metatable(L) == metatable);
+    lua_close(L);
 }
 
 static void run_chunk(lua_State *L, const char *chunk) {
@@ -862,6 +976,8 @@ static void test_function_type_tag_publication(void) {
 }
 
 int main(void) {
+    test_array_metatable_publication();
+    test_array_metatable_allocation_retry();
     test_capacity_length_and_hash();
     test_lua_callbacks_and_boxing();
 #ifndef TITAN_ARRAY_HARDMEM_PROBE
@@ -895,7 +1011,7 @@ local function compile_and_run(hard_memory)
     for _, word in ipairs({
         "--std=c99", hard_memory and "-O0" or "-O1", "-g",
         "-Wall", "-Wextra", "-fno-optimize-sibling-calls",
-        "-I.", "-Ititan-runtime", "-Ilua-5.5.0/src", "-Ilibbacktrace",
+        "-I.", "-Ititan-runtime", "-Ilua-5.5.1/src", "-Ilibbacktrace",
     }) do
         argv[#argv + 1] = word
     end
@@ -912,10 +1028,10 @@ local function compile_and_run(hard_memory)
     argv[#argv + 1] = "titan-runtime/titan.c"
     if hard_memory then
         for _, stem in ipairs(LUA_SOURCES) do
-            argv[#argv + 1] = "lua-5.5.0/src/" .. stem .. ".c"
+            argv[#argv + 1] = "lua-5.5.1/src/" .. stem .. ".c"
         end
     else
-        argv[#argv + 1] = "lua-5.5.0/src/liblua.a"
+        argv[#argv + 1] = "lua-5.5.1/src/liblua.a"
     end
     for _, word in ipairs({
         "libbacktrace/.libs/libbacktrace.a", "-o", executable,

@@ -360,7 +360,7 @@ therefore not itself a stack-relocation hazard.
 
 ## ABI and search path
 
-The current compiled-module ABI is `0.20`. The error-handling control-flow
+The current compiled-module ABI is `0.21`. The error-handling control-flow
 machinery did not by itself require an ABI bump. The earlier ABI-0.10 change
 changed the `TitanVargX` structs from inline flexible-array backing
 objects to descriptor structs with an `args` pointer. That layout change
@@ -408,20 +408,21 @@ It advanced the boundary for serialized union/variant schemas, union userdata
 dispatch, and the reconstructible public nominal-static slot prefix. A case
 arm still runs through the ordinary `StatTry` cleanup path.
 
-ABI 0.20 again leaves pending actions and longjmp unwinding unchanged. Its
-boundary covers the two-user-value Array proxy, the strict-entry-bearing
+ABI 0.20 again left pending actions and longjmp unwinding unchanged. Its
+boundary covered the two-user-value Array proxy, the strict-entry-bearing
 first-class function closure, and Interface metadata/wrappers/bound
-trampolines. Errors raised by an Interface adapter, strict guard, dynamic
-conversion, or failed exact downcast still use the same Titan error handler;
-all wrapper and adapter roots are ordinary Lua-traced values, so unwinding
-requires no resource-specific cleanup path.
+trampolines. ABI 0.21 also retains this machinery while advancing the matched
+Lua internal-header/runtime contract. Errors raised by an Interface adapter,
+strict guard, dynamic conversion, or failed exact downcast still use the same
+Titan error handler; all wrapper and adapter roots are ordinary Lua-traced
+values, so unwinding requires no resource-specific cleanup path.
 
 The compiler and runtime therefore agree on:
 
-* `TITAN_VER "0.20"`
-* `TITAN_VER_SUFFIX "_0_20"`
-* versioned binary path variable `TITAN_PATH_0_20`
-* default binary path `.;<root>/lib/titan/0.20`, with `<root>` recovered from
+* `TITAN_VER "0.21"`
+* `TITAN_VER_SUFFIX "_0_21"`
+* versioned binary path variable `TITAN_PATH_0_21`
+* default binary path `.;<root>/lib/titan/0.21`, with `<root>` recovered from
   the Lua `PREFIX`'s `package.cpath` in the currently supported layout where
   that path also names the equal Titan `ROCKS_TREE`
 

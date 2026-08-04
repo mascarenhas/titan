@@ -24,6 +24,7 @@ typedef long long titan_ffi_long_long;
 typedef unsigned long long titan_ffi_unsigned_long_long;
 typedef float titan_ffi_float;
 typedef double titan_ffi_double;
+typedef long double titan_ffi_long_double;
 
 typedef struct lua_State lua_State;
 typedef struct TValue TValue;

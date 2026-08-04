@@ -659,9 +659,10 @@ same for source dependencies, individual shared providers, regular static
 archives, multi-module prefix providers, and standalone executables.
 
 Interface method order is ABI-significant and is preserved in compiled module
-metadata. Interfaces are part of compiled-module ABI 0.20 together with the
-two-user-value Array proxy and strict generic function-entry protocol. ABI
-0.19 providers are rejected rather than adapted in place.
+metadata. Interfaces entered the compiled-module contract in ABI 0.20 together
+with the two-user-value Array proxy and strict generic function-entry protocol.
+ABI 0.21 retains that model while advancing the matched Lua runtime; prior-ABI
+providers are rejected rather than adapted in place.
 
 ## Version-one boundaries
 

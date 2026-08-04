@@ -99,7 +99,7 @@ assert.truthy(PREFIX:sub(1, 1) == "/",
 local LUA = PREFIX .. "/bin/lua"
 local LUAROCKS = PREFIX .. "/bin/luarocks"
 local TITANC = PREFIX .. "/bin/titanc"
-local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.20"
+local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.21"
 local STDLIB_PROVIDER = TITAN_LIBDIR .. "/titan.so"
 local STDLIB_STATIC_ARCHIVE = TITAN_LIBDIR .. "/titan.a"
 local LUA_LIBDIR = PREFIX .. "/lib/lua/5.5"
@@ -117,6 +117,7 @@ local function clean_environment(argv)
         "-u", "LUAROCKS_CONFIG",
         "-u", "LUAROCKS_CONFIG_5_5",
         "-u", "LUAROCKS_SYSCONFDIR",
+        "-u", "TITAN_PATH_0_21",
         "-u", "TITAN_PATH_0_20",
         "-u", "TITAN_PATH_0_19",
         "-u", "TITAN_PATH_0_18",
@@ -186,13 +187,13 @@ local function assert_generated_shim(path, module)
 end
 
 local function assert_no_obsolete_module_layout(root, module)
-    local abi_dir = root .. "/lib/titan/0.20"
+    local abi_dir = root .. "/lib/titan/0.21"
     local lua_libdir = root .. "/lib/lua/5.5"
     for _, obsolete in ipairs({
         abi_dir .. "/titan/" .. module .. ".so",
         abi_dir .. "/" .. module .. ".so",
         lua_libdir .. "/titan/" .. module .. ".so",
-        lua_libdir .. "/titan/stdlib_0_20/" .. module .. ".so",
+        lua_libdir .. "/titan/stdlib_0_21/" .. module .. ".so",
     }) do
         assert_absent(obsolete)
         assert_absent(obsolete .. ".dSYM")
@@ -211,7 +212,7 @@ describe("standalone-prefix source installation", function()
         for _, source in ipairs({
             "lua.h", "luaconf.h", "lobject.h", "lapi.c", "loadlib.c",
         }) do
-            assert_file(PREFIX .. "/src/lua-5.5.0/" .. source)
+            assert_file(PREFIX .. "/src/lua-5.5.1/" .. source)
         end
         for _, header in ipairs({
             "lua.h", "luaconf.h", "titan.h", "titan_longjmp.h",
@@ -227,6 +228,10 @@ describe("standalone-prefix source installation", function()
         assert_file(LUA)
         assert_file(LUAROCKS)
         assert_file(TITANC)
+        local version_ok, version_output = run({ LUA, "-v" })
+        assert.truthy(version_ok, version_output)
+        assert.truthy(version_output:find("Lua 5.5.1", 1, true),
+            version_output)
         assert_unique_regular_file(STDLIB_PROVIDER)
         assert_unique_regular_file(STDLIB_STATIC_ARCHIVE)
         assert_file(PREFIX ..
@@ -268,7 +273,7 @@ describe("standalone-prefix source installation", function()
             "857e48682791ba55c98a7dd99c5fc7d71c02597d",
             "Converting regexes to Parsing Expression Grammars",
             "Marcelo Oikawa", "Ana Lucia de Moura",
-            "lstrlib.c", "Lua 5.5.0",
+            "lstrlib.c", "Lua 5.5.1",
             "OpenSSL 3.5.7", "OPENSSL_MODE=system",
             "llhttp 9.4.3", "Copyright Fedor Indutny, 2018",
         }) do
@@ -310,21 +315,21 @@ describe("standalone-prefix source installation", function()
         end
 
         local source_config = read_file(
-            PREFIX .. "/src/lua-5.5.0/luaconf.h")
+            PREFIX .. "/src/lua-5.5.1/luaconf.h")
         local source_loadlib = read_file(
-            PREFIX .. "/src/lua-5.5.0/loadlib.c")
+            PREFIX .. "/src/lua-5.5.1/loadlib.c")
         local public_config = read_file(PREFIX .. "/include/luaconf.h")
         assert.equal(source_config, public_config)
         assert.truthy(public_config:find(
             '#define LUA_ROOT "' .. PREFIX .. '/"', 1, true), public_config)
         assert.truthy(public_config:find(
-            '#define LUA_TITAN_CDIR%s+LUA_ROOT "lib/titan/0.20/"'),
+            '#define LUA_TITAN_CDIR%s+LUA_ROOT "lib/titan/0.21/"'),
             public_config)
         local _, titan_cdir_definitions = public_config:gsub(
             "#define LUA_TITAN_CDIR", "")
         assert.equal(1, titan_cdir_definitions, public_config)
         local _, titan_cpath_templates = public_config:gsub(
-            'LUA_TITAN_CDIR"%?%.so;"', "")
+            'LUA_TITAN_CDIR%s+"%?%.so;"', "")
         assert.equal(1, titan_cpath_templates, public_config)
         assert.falsy(source_loadlib:find("luaopen_titan_uv", 1, true),
             source_loadlib)
@@ -565,25 +570,25 @@ describe("standalone-prefix source installation", function()
 
     it("publishes one prepared image and removes only active-ABI layouts",
     function()
-        workspace = temporary_directory("stdlib-layout-migration")
+        workspace = temporary_directory("stdlib-layout-publication")
 
         local stage = workspace .. "/stage"
-        local canonical = workspace .. "/lib/titan/0.20/titan.so"
-        local canonical_archive = workspace .. "/lib/titan/0.20/titan.a"
-        local preserved = workspace .. "/lib/titan/0.19/titan/uv.so"
+        local canonical = workspace .. "/lib/titan/0.21/titan.so"
+        local canonical_archive = workspace .. "/lib/titan/0.21/titan.a"
+        local preserved = workspace .. "/lib/titan/0.20/titan/uv.so"
         local preserved_legacy =
-            workspace .. "/lib/lua/5.5/titan/stdlib_0_19/uv.so"
+            workspace .. "/lib/lua/5.5/titan/stdlib_0_20/uv.so"
 
         local function seed_layout()
             make_directory(assert(canonical:match("^(.+)/[^/]+$")))
             write_file(canonical, "prior combined image\n")
             for _, module in ipairs(STDLIB_MODULES) do
                 for _, path in ipairs({
-                    workspace .. "/lib/titan/0.20/titan/" ..
+                    workspace .. "/lib/titan/0.21/titan/" ..
                         module .. ".so",
-                    workspace .. "/lib/titan/0.20/" .. module .. ".so",
+                    workspace .. "/lib/titan/0.21/" .. module .. ".so",
                     workspace .. "/lib/lua/5.5/titan/" .. module .. ".so",
-                    workspace .. "/lib/lua/5.5/titan/stdlib_0_20/" ..
+                    workspace .. "/lib/lua/5.5/titan/stdlib_0_21/" ..
                         module .. ".so",
                 }) do
                     make_directory(assert(path:match("^(.+)/[^/]+$")))
@@ -601,18 +606,18 @@ describe("standalone-prefix source installation", function()
                 write_file(path .. ".dSYM/obsolete", "obsolete symbols\n")
             end
             make_directory(assert(preserved:match("^(.+)/[^/]+$")))
-            write_file(preserved, "preserved 0.19 image\n")
+            write_file(preserved, "preserved 0.20 image\n")
             make_directory(preserved .. ".dSYM")
             write_file(preserved .. ".dSYM/symbols", "preserved\n")
             make_directory(assert(
                 preserved_legacy:match("^(.+)/[^/]+$")))
-            write_file(preserved_legacy, "preserved legacy 0.19 image\n")
+            write_file(preserved_legacy, "preserved legacy 0.20 image\n")
             make_directory(preserved_legacy .. ".dSYM")
             write_file(
                 preserved_legacy .. ".dSYM/symbols", "preserved legacy\n")
         end
 
-        local function assert_migrated()
+        local function assert_published()
             assert_unique_regular_file(canonical)
             assert_unique_regular_file(canonical_archive)
             local same, comparison, comparison_why, comparison_code = run({
@@ -640,10 +645,10 @@ describe("standalone-prefix source installation", function()
             end
             assert_absent(workspace .. "/lib/lua/5.5/titan.so")
             assert_absent(workspace .. "/lib/lua/5.5/titan.so.dSYM")
-            assert.equal("preserved 0.19 image\n", read_file(preserved))
+            assert.equal("preserved 0.20 image\n", read_file(preserved))
             assert.equal("directory",
                 lfs.symlinkattributes(preserved .. ".dSYM", "mode"))
-            assert.equal("preserved legacy 0.19 image\n",
+            assert.equal("preserved legacy 0.20 image\n",
                 read_file(preserved_legacy))
             assert.equal("directory",
                 lfs.symlinkattributes(
@@ -680,7 +685,7 @@ describe("standalone-prefix source installation", function()
             "canonical after installation")
         assert.equal("file", lfs.attributes(canonical_archive, "mode"),
             "canonical archive after installation")
-        assert_migrated()
+        assert_published()
     end)
 
     it("stages a private bootstrap once without downgrading a full provider",
@@ -689,8 +694,8 @@ describe("standalone-prefix source installation", function()
         assert_file(STDLIB_PROVIDER)
         assert_file(STDLIB_STATIC_ARCHIVE)
         workspace = temporary_directory("stdlib-bootstrap")
-        local canonical = workspace .. "/lib/titan/0.20/titan.so"
-        local canonical_archive = workspace .. "/lib/titan/0.20/titan.a"
+        local canonical = workspace .. "/lib/titan/0.21/titan.so"
+        local canonical_archive = workspace .. "/lib/titan/0.21/titan.a"
         local stage = {
             "make", "--no-print-directory", "-s",
             "PREFIX=" .. PREFIX,
@@ -923,14 +928,14 @@ end
         -- Running the installed driver from the checkout root must not turn it
         -- back into source mode merely because that CWD contains a Makefile.
         local ok, output = run(clean_environment({
-            TITANC, "--lua", PREFIX .. "/src/lua-5.5.0", "installed",
+            TITANC, "--lua", PREFIX .. "/src/lua-5.5.1", "installed",
         }))
         assert.falsy(ok, output)
         assert.truthy(output:find(
             "--lua is only available in a source checkout", 1, true), output)
 
         ok, output = run(clean_environment({
-            TITANC, "--lua", PREFIX .. "/src/lua-5.5.0", "installed",
+            TITANC, "--lua", PREFIX .. "/src/lua-5.5.1", "installed",
         }), workspace)
         assert.falsy(ok, output)
         assert.truthy(output:find(

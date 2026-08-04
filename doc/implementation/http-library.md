@@ -276,9 +276,9 @@ as runtime-SDK files.
 The HTTP root adds one logical protocol, archive key, generated shim, and
 `luaopen_titan_http`. Together URL, SSL, and HTTP advance the coordinated
 current standard image to seventeen logical modules and shims and eighteen DSO
-openers including bare `luaopen_titan` support. A valid fourteen-module
-ABI-0.20 image remains an explicitly recognized publication predecessor; that
-historical migration count is not the current provider contract.
+openers including bare `luaopen_titan` support. ABI 0.21 publishes that
+complete image in its own namespace; it neither recognizes ABI 0.20 as a
+publication predecessor nor removes the preserved prior-version provider.
 
 Focused standard-library tests run outside LuaCov. They fragment protocol
 input down to individual bytes, exercise fixed/chunked/EOF bodies, duplicate

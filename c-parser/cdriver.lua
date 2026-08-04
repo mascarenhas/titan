@@ -64,11 +64,11 @@ end
 local function find_lua_source_dir(start_dir)
     local dir = start_dir
     while dir do
-        local lua_source = join_path(join_path(dir, "lua-5.5.0"), "src")
+        local lua_source = join_path(join_path(dir, "lua-5.5.1"), "src")
         if file_exists(join_path(lua_source, "lua.h")) then
             return lua_source
         end
-        lua_source = join_path(join_path(dir, "src"), "lua-5.5.0")
+        lua_source = join_path(join_path(dir, "src"), "lua-5.5.1")
         if file_exists(join_path(lua_source, "lua.h")) then
             return lua_source
         end

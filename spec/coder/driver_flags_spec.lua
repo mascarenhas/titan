@@ -208,7 +208,7 @@ describe("Titan driver generic build flags", function()
             true), verbose_output)
 
         local runtime_checks = command_lines(verbose_output,
-            "TITAN_RUNTIME_LUA_SOURCE_PATH=lua-5.5.0/src")
+            "TITAN_RUNTIME_LUA_SOURCE_PATH=lua-5.5.1/src")
         assert.equal(1, #runtime_checks, verbose_output)
         assert.truthy(runtime_checks[1]:find(
             "titan-runtime/libtitan.a", 1, true), runtime_checks[1])
@@ -216,7 +216,7 @@ describe("Titan driver generic build flags", function()
 
     it("builds the source runtime against the Lua tree selected by --lua",
        function()
-        local lua_source = lfs.currentdir() .. "/lua-5.5.0/src"
+        local lua_source = lfs.currentdir() .. "/lua-5.5.1/src"
         -- Explicit command-line roots are source-first. Supply this fixture's
         -- required foreign-import inputs instead of relying on the binary
         -- produced by setup to hide its source.

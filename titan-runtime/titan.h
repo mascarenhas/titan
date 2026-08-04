@@ -103,9 +103,13 @@
    construction-selected Lua writer, and Titan function closures gain the
    strict generic-entry trailer and fixed closure-brand upvalue. This version is
    also the coordinated Interface representation cutover; relation-only and
-   Interface-only intermediate layouts are not separately publishable ABIs. */
-#define TITAN_VER "0.20"
-#define TITAN_VER_SUFFIX "_0_20"
+   Interface-only intermediate layouts are not separately publishable ABIs.
+   0.20 -> 0.21: the embedded Lua contract advances from 5.5.0 to 5.5.1.
+   Generated code follows the revised stack-slot and numeric-operation macros,
+   and native-layout consumers follow Lua's revised LUAI_MAXALIGN contract.
+   Providers compiled against the two internal-header sets must not mix. */
+#define TITAN_VER "0.21"
+#define TITAN_VER_SUFFIX "_0_21"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"

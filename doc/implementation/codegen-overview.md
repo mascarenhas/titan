@@ -90,7 +90,7 @@ semantic effect may still use `pairs`. The pieces appear in this order:
    are the point: generated code manipulates `TValue`s, tables and the
    Lua stack directly instead of going through the Lua C API — which is
    what makes Titan fast and ties each compiler release to one Lua
-   version (currently 5.5.0).
+   version (currently 5.5.1).
 2. **Foreign `#include`s** (`$FOREIGNIMPORTS`): one per `foreign import`
    — quoted includes for absolute paths and local relative headers, angle
    includes for compiler-provided and system headers ([FFI
@@ -738,7 +738,7 @@ Udata. Generated modules also reserve a per-state Array-metatable cache and
 use explicit internal-versus-boxed conversions. A 0.16 module would
 misinterpret Array values even when a serialized interface happens not to
 mention one, so the semantic/runtime boundary requires a full rebuild. See
-[Dense Arrays](dense-arrays.md#abi-017-and-020-boundaries).
+[Dense Arrays](dense-arrays.md#abi-017-020-and-021-boundaries).
 
 ABI **0.18** preserved those generated Array shapes and the ordinary module
 protocol, but made standard-library archive objects directly reference
@@ -752,7 +752,7 @@ that includes exported nominal statics. An importer and producer must agree on
 that prefix before an imported record or union constructor can be used as the
 same canonical first-class closure.
 
-The current ABI is **0.20**. Array proxies now have two traced user values,
+ABI **0.20** introduced Array proxies with two traced user values,
 with the per-construction-type Lua writer closure in the second; function
 closures add a fixed opaque brand upvalue and a strict-entry trailer.
 Serialized module type members now include ordered `Type.Interface`/
@@ -763,9 +763,12 @@ that payload. The standard `titan.uv` schema also exports the nominal
 `uv_stdio_t` process-stream wrapper used by `titan.os`. Its private
 implementation selects the appropriate pipe-or-TTY native handle while the
 high-level stream facades retain their parent-facing endpoints. The active
-suffix and provider namespace advance with the marker (`_0_20`,
-`TITAN_PATH_0_20`, `lib/titan/0.20`); 0.19 providers are rejected before
-interface rehydration.
+ABI is now **0.21**: it retains those 0.20 layouts while advancing the embedded
+Lua contract from 5.5.0 to 5.5.1. The active suffix and provider namespace
+advance with the marker (`_0_21`, `TITAN_PATH_0_21`, `lib/titan/0.21`); 0.20
+providers are rejected before interface rehydration. Existing 0.20 artifacts
+remain a separately versioned prior installation and are not migrated or
+cleaned up by 0.21.
 
 ## The module protocol
 
@@ -929,10 +932,11 @@ representation and adds the module-local metatable cache without changing the
 serialized `Type.Array` constructor. ABI 0.18 preserved that logical protocol
 while advancing the standard-library archive/runtime native-symbol boundary.
 ABI 0.19 added union/variant schemas and the public nominal-static slot prefix;
-it did not change the metadata container itself. ABI 0.20 adds the second
+it did not change the metadata container itself. ABI 0.20 added the second
 Array-proxy user value and callable strict-entry/brand protocol; those runtime
 layouts require a full boundary even though the metadata container is still
-unchanged.
+unchanged. ABI 0.21 retains those layouts and advances the matched Lua internal
+header/runtime contract.
 
 ## Static vs dynamic dependency wiring
 

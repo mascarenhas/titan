@@ -861,6 +861,13 @@ a metatable. New allocations stamp that metatable onto the `Udata`, and
 userdata. This prevents unrelated full userdata, including Titan records, from
 being reinterpreted as C payload memory.
 
+The module initializer constructs each owned-C metatable privately, installs
+its protected display name, and publishes the registry key only after setup
+succeeds. The registry cannot expose a half-initialized identity, and a
+pre-existing non-table registry value is rejected. This is a metatable
+publication rule, not a transaction boundary for the complete module
+initializer.
+
 Making C-bearing Titan function types source-nameable exposes a separate
 registry-identity issue. Canonical C type spellings are meaningful only within
 the module that imported their headers, so two modules may render unrelated

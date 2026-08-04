@@ -6,7 +6,7 @@
         "${3rd}/luassert/library"
     ],
     "workspace.ignoreDir": [
-        "lua-5.5.0"
+        "lua-5.5.1"
     ],
     "diagnostics.globals": [
         "jit",

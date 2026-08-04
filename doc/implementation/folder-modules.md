@@ -269,12 +269,13 @@ and absolute variant tags, plus the reconstructible public nominal-static slot
 prefix. Folder order therefore remains authoritative for public owner/member
 order and for variant tags, while keyed static maps use bytewise ordering.
 
-ABI 0.20 again leaves folder composition unchanged. Array writer inventories,
-callable strict entries, Interface descriptors, and concrete/Interface pair
-obligations are collected only after the contributors have become one checked
-AST, then emitted once per logical module. Their module-private slots follow
-the same importer-reconstructible public prefix and never give a contributor a
-runtime identity. The `process.titan` contributor now also exports the nominal
+ABI 0.20 left folder composition unchanged, and ABI 0.21 does likewise. Array
+writer inventories, callable strict entries, Interface descriptors, and
+concrete/Interface pair obligations are collected only after the contributors
+have become one checked AST, then emitted once per logical module. Their
+module-private slots follow the same importer-reconstructible public prefix
+and never give a contributor a runtime identity. The `process.titan`
+contributor now also exports the nominal
 `uv_stdio_t` process-stream wrapper used by `titan.os`; its private native
 representation is a pipe-or-TTY union. This changes the logical `titan.uv`
 schema, not contributor identity or composition.

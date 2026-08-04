@@ -4907,7 +4907,7 @@ function coder._emit_interface_adapter(
             L->top.p += $NSLOTS;
             for (StkId _ia_slot = L->top.p - 1;
                  _base <= _ia_slot; _ia_slot--) {
-                setnilvalue(s2v(_ia_slot));
+                setnilvalue2s(_ia_slot);
             }
             ptrdiff_t _base_off = savestack(L, _base);
         ]], {
@@ -6855,7 +6855,7 @@ local function codefor(ctx, node)
                         $CVARDECL
                         $CBLOCK
                         $CHECKGC
-                        _foridx += _forstep;
+                        _foridx = luai_numadd(L, _foridx, _forstep);
                         if (!(_forstep > 0 ? (_foridx <= _forlimit) : (_foridx >= _forlimit))) {
                             break;
                         }
@@ -8541,7 +8541,7 @@ function coder._cleanup_result_run(run)
     if not run or not run.root_depth then return "" end
     return render([[
         for (int _rri = 0; _rri < $COUNT; _rri++) {
-            setnilvalue(s2v($ROOT + _rri));
+            setnilvalue2s($ROOT + _rri);
         }
     ]], {
         COUNT = run.count,
@@ -9195,7 +9195,7 @@ local function codevaluecall(ctx, node)
         ]]
         slowpre = render([[
             while (L->top.p < restorestack(L, _vc_func) + $NVISIBLE) {
-                setnilvalue(s2v(L->top.p));
+                setnilvalue2s(L->top.p);
                 L->top.p++;
             }
         ]], { NVISIBLE = c_integer_literal(nresults) })
@@ -9812,7 +9812,7 @@ function coder._reset_pending_flex(flex)
     if flex.root_depth then
         clear = render([[
             for (int _pa_clear_i = 0; _pa_clear_i < $COUNT; _pa_clear_i++) {
-                setnilvalue(s2v($ROOT + _pa_clear_i));
+                setnilvalue2s($ROOT + _pa_clear_i);
             }
         ]], {
             COUNT = flex.count,
@@ -13904,7 +13904,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             titan_ensure_stack(L, $NFIXED + _flexcap);
             ptrdiff_t _firstret_off = savestack(L, L->top.p);
             for (int _ri = 0; _ri < $NFIXED + _flexcap; _ri++) {
-                setnilvalue(s2v(L->top.p + _ri));
+                setnilvalue2s(L->top.p + _ri);
             }
             L->top.p += $NFIXED + _flexcap;
             $CALL
@@ -13985,7 +13985,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             titan_ensure_stack(L, (int)_missing);
             func = L->ci->func.p;
             while (_missing-- > 0) {
-                setnilvalue(s2v(L->top.p));
+                setnilvalue2s(L->top.p);
                 L->top.p++;
                 _nargs++;
             }
@@ -14002,7 +14002,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             titan_ensure_stack(L, (int)_missing);
             func = L->ci->func.p;
             while (_missing-- > 0) {
-                setnilvalue(s2v(L->top.p));
+                setnilvalue2s(L->top.p);
                 L->top.p++;
                 _nargs++;
             }
@@ -14237,7 +14237,7 @@ local function codefuncdec(tlcontext, node)
         StkId _base = L->top.p;
         L->top.p += $NSLOTS;
         for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
-            setnilvalue(s2v(_s));
+            setnilvalue2s(_s);
         }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
@@ -14334,7 +14334,7 @@ local function codeinitializerdec(tlcontext, node)
         StkId _base = L->top.p;
         L->top.p += $NSLOTS;
         for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
-            setnilvalue(s2v(_s));
+            setnilvalue2s(_s);
         }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
@@ -14806,7 +14806,7 @@ function codelambdadec(tlcontext, node)
         StkId _base = L->top.p;
         L->top.p += $NSLOTS;
         for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
-            setnilvalue(s2v(_s));
+            setnilvalue2s(_s);
         }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
@@ -16233,7 +16233,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
             StkId _base = L->top.p;
             L->top.p += $NSLOTS;
             for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
-                setnilvalue(s2v(_s));
+                setnilvalue2s(_s);
             }$BASEOFF
         ]], {
             NSLOTS = c_integer_literal(nslots),
@@ -16268,10 +16268,20 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
 
     for _, entry in pairs(tlcontext.owned_c_metatables) do
         table.insert(initrecs, render([[
-            if (luaL_newmetatable(L, $NAME)) {
+            luaL_getmetatable(L, $NAME);
+            if (lua_isnil(L, -1)) {
+                lua_pop(L, 1);
+                lua_newtable(L);
+                lua_pushliteral(L, $DISPLAY);
+                lua_setfield(L, -2, "__name");
                 lua_pushliteral(L, "__metatable");
                 lua_pushliteral(L, $DISPLAY);
                 lua_settable(L, -3);
+                lua_pushvalue(L, -1);
+                lua_setfield(L, LUA_REGISTRYINDEX, $NAME);
+            } else if (!lua_istable(L, -1)) {
+                luaL_error(L,
+                    "invalid Titan owned C metatable registry entry");
             }
             setobj2t(L, &_mod->uv[$INDEX].uv, s2v(L->top.p - 1));
             luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);

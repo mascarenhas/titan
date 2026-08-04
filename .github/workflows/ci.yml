@@ -28,7 +28,9 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
-      TITAN_ABI_VERSION: "0.20"
+      TITAN_ABI_VERSION: "0.21"
+      # Exercise the immutable/minimal-host path in the regular Linux build.
+      READLINE_MODE: bundled
       LIBUV_VERSION: "1.52.1"
       # Bump when any CMake option that affects the cached archive changes.
       LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v1"
@@ -44,8 +46,9 @@ jobs:
 
       # Cache only the LuaRocks-managed portion of the standalone prefix. Lua,
       # native SDK archives, and the standard container/shims are rebuilt from
-      # this checkout;
-      # dependency rocks and their launchers can be reused safely.
+      # this checkout; dependency rocks and their launchers can be reused
+      # safely. The private Readline root is deliberately omitted so this
+      # bundled-provider lane must exercise source verification and staging.
       - name: Cache standalone-prefix LuaRocks dependencies
         uses: actions/cache@v5
         with:
@@ -98,12 +101,41 @@ jobs:
             ubuntu-24.04-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
 
       - name: Install regular build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev libssl-dev libuv1-dev perl pkg-config
+        run: sudo apt-get update && sudo apt-get install -y cmake curl libssl-dev libtinfo-dev libuv1-dev perl pkg-config
 
-      - name: Prepare the ABI-0.20 standalone prefix
+      - name: Prepare the ABI-0.21 standalone prefix
         run: |
           make lua
+          grep -qx 'provider=bundled' \
+            "$PREFIX/etc/titan/readline-8.3-p3.config"
+          test -f \
+            "$PREFIX/lib/titan/deps/readline/8.3-p3/lib/libreadline.a"
+          cmp LICENSES/readline-LICENSE \
+            "$PREFIX/lib/titan/deps/readline/8.3-p3/share/licenses/COPYING"
           make luarocks
+
+      - name: Verify bundled Readline warm reuse and repair
+        run: |
+          config="$PREFIX/etc/titan/readline-8.3-p3.config"
+          stamp="$PREFIX/etc/titan/readline-8.3-p3.installed"
+          archive="$PREFIX/lib/titan/deps/readline/8.3-p3/lib/libreadline.a"
+          config_mtime="$(stat -c %Y "$config")"
+          stamp_mtime="$(stat -c %Y "$stamp")"
+          archive_mtime="$(stat -c %Y "$archive")"
+          make readline
+          test "$(stat -c %Y "$config")" = "$config_mtime"
+          test "$(stat -c %Y "$stamp")" = "$stamp_mtime"
+          test "$(stat -c %Y "$archive")" = "$archive_mtime"
+
+          cp "$config" "$RUNNER_TEMP/readline.config"
+          cp "$stamp" "$RUNNER_TEMP/readline.installed"
+          truncate -s 64 "$archive"
+          make readline
+          test "$(wc -c < "$archive")" -gt 100000
+          cmp "$config" "$RUNNER_TEMP/readline.config"
+          cmp "$stamp" "$RUNNER_TEMP/readline.installed"
+          cmp LICENSES/readline-LICENSE \
+            "$PREFIX/lib/titan/deps/readline/8.3-p3/share/licenses/COPYING"
 
           clean_titan_environment() {
             env \
@@ -120,6 +152,7 @@ jobs:
               -u TITAN_PATH_0_18 \
               -u TITAN_PATH_0_19 \
               -u TITAN_PATH_0_20 \
+              -u TITAN_PATH_0_21 \
               -u TITAN_ROCKS_ROOT \
               "$@"
           }
@@ -146,9 +179,9 @@ jobs:
           clean_titan_environment "$PREFIX/bin/lua" -E -e '
             local cpath = package.cpath
             local current = assert(os.getenv("PREFIX")) ..
-              "/lib/titan/0.20/?.so"
+              "/lib/titan/0.21/?.so"
             local previous = assert(os.getenv("PREFIX")) ..
-              "/lib/titan/0.19/?.so"
+              "/lib/titan/0.20/?.so"
             assert(cpath:find(current, 1, true), cpath)
             assert(not cpath:find(previous, 1, true), cpath)
           '
@@ -176,14 +209,14 @@ jobs:
         # titan dev-1. Force this checkout through both source-install phases.
         run: |
           luarocks make --force
-          provider="$PREFIX/lib/titan/0.20/titan.so"
+          provider="$PREFIX/lib/titan/0.21/titan.so"
           static_archive="${provider%.so}.a"
           test -f "$provider" && test ! -L "$provider"
           test -f "$static_archive" && test ! -L "$static_archive"
 
-      - name: Verify bare support loading through the ABI-0.20 path
+      - name: Verify bare support loading through the ABI-0.21 path
         run: |
-          provider="$PREFIX/lib/titan/0.20/titan.so"
+          provider="$PREFIX/lib/titan/0.21/titan.so"
           TITAN_EXPECTED_PROVIDER="$provider" env \
             -u LUA_PATH \
             -u LUA_CPATH \
@@ -198,6 +231,7 @@ jobs:
             -u TITAN_PATH_0_18 \
             -u TITAN_PATH_0_19 \
             -u TITAN_PATH_0_20 \
+            -u TITAN_PATH_0_21 \
             -u TITAN_ROCKS_ROOT \
             "$PREFIX/bin/lua" -E -e '
               local expected = assert(os.getenv("TITAN_EXPECTED_PROVIDER"))
@@ -418,6 +452,9 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
+      TITAN_ABI_VERSION: "0.21"
+      # Keep the one complete cross-platform gate on the same fallback path.
+      READLINE_MODE: bundled
       LIBUV_VERSION: "1.52.1"
       # Bump when any CMake option that affects the cached archive changes.
       LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v1"
@@ -431,6 +468,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # As on Linux, omit the installed private Readline root so the one
+      # pre-merge macOS run validates a clean fallback build.
       - name: Cache standalone-prefix LuaRocks dependencies
         uses: actions/cache@v5
         with:
@@ -445,9 +484,9 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: macos-latest-${{ runner.arch }}-prefix-system-tree-v2-rocks-3.13.0-${{ hashFiles('titan-dev-1.rockspec') }}
+          key: macos-latest-${{ runner.arch }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-dev-1.rockspec') }}
           restore-keys: |
-            macos-latest-${{ runner.arch }}-prefix-system-tree-v2-rocks-3.13.0-
+            macos-latest-${{ runner.arch }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
 
       - name: Cache bundled libuv source and static build
         uses: actions/cache@v5
@@ -486,7 +525,14 @@ jobs:
         run: brew install cmake libuv openssl@3 pkgconf
 
       - name: Build the bundled Lua 5.5 source tree
-        run: make lua LUA_PLATFORM=macosx
+        run: |
+          make lua LUA_PLATFORM=macosx
+          grep -qx 'provider=bundled' \
+            "$PREFIX/etc/titan/readline-8.3-p3.config"
+          test -f \
+            "$PREFIX/lib/titan/deps/readline/8.3-p3/lib/libreadline.a"
+          cmp LICENSES/readline-LICENSE \
+            "$PREFIX/lib/titan/deps/readline/8.3-p3/share/licenses/COPYING"
 
       # Every generated module and executable links the separate
       # ./libbacktrace/.libs/libbacktrace.a (unified stack traces). CI
@@ -525,7 +571,7 @@ jobs:
           bash spec/support/ci_retry_luarocks_dependencies.sh \
             luarocks make --only-deps
           luarocks make --force
-          provider="$PREFIX/lib/titan/0.20/titan.so"
+          provider="$PREFIX/lib/titan/0.21/titan.so"
           static_archive="${provider%.so}.a"
           test -f "$provider" && test ! -L "$provider"
           test -f "$static_archive" && test ! -L "$static_archive"
@@ -585,6 +631,8 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
+      # Retain one explicit system-provider lane alongside the bundled jobs.
+      READLINE_MODE: system
       # Generated Titan translation units are large enough that combining
       # optimization with sanitizer instrumentation can exhaust this job's
       # budget. O0 retains the complete ASan/UBSan instrumentation;
@@ -627,6 +675,8 @@ jobs:
       - name: Build sanitizer-enabled native dependencies
         run: |
           bash spec/support/ci_sanitizer_capture.sh native-lua make lua
+          grep -qx 'provider=system' \
+            "$PREFIX/etc/titan/readline-8.3-p3.config"
           bash spec/support/ci_sanitizer_capture.sh native-libbacktrace \
             make libbacktrace
           bash spec/support/ci_sanitizer_capture.sh native-libuv make libuv
@@ -649,7 +699,7 @@ jobs:
         run: |
           bash spec/support/ci_sanitizer_capture.sh titan-artifacts \
             luarocks make --force
-          provider="$PREFIX/lib/titan/0.20/titan.so"
+          provider="$PREFIX/lib/titan/0.21/titan.so"
           static_archive="${provider%.so}.a"
           snapshot_provider="$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/provider.so"
           test -f "$provider" && test ! -L "$provider"
@@ -752,16 +802,16 @@ jobs:
         run: |
           bash spec/support/ci_sanitizer_capture.sh net-production-smoke \
             env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_20="$PREFIX/lib/titan/0.20" \
+            TITAN_PATH_0_21="$PREFIX/lib/titan/0.21" \
             LUA_PATH="$PREFIX/share/lua/5.5/?.lua;$PREFIX/share/lua/5.5/?/init.lua;;" \
-            LUA_CPATH="$PREFIX/lib/titan/0.20/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
+            LUA_CPATH="$PREFIX/lib/titan/0.21/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/net_production_smoke.lua \
               sanitizer
           bash spec/support/ci_sanitizer_capture.sh os-production-smoke \
             env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_20="$PREFIX/lib/titan/0.20" \
+            TITAN_PATH_0_21="$PREFIX/lib/titan/0.21" \
             LUA_PATH="$PREFIX/share/lua/5.5/?.lua;$PREFIX/share/lua/5.5/?/init.lua;;" \
-            LUA_CPATH="$PREFIX/lib/titan/0.20/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
+            LUA_CPATH="$PREFIX/lib/titan/0.21/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua \
               sanitizer "$TITAN_PROCESS_SMOKE_CHILD"
 
