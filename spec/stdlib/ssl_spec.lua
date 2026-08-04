@@ -215,8 +215,10 @@ function start_truncated_eof(first_port: integer): async.Task
       check(error is ssl.Error,
             "truncated TLS transport raised a non-TLS error")
       local failure = error as ssl.Error
-      check(failure.name == "TLS_TRUNCATED_EOF",
-            "truncated TLS transport reported " .. failure.name)
+      check(failure.name == "TLS_TRUNCATED_EOF" and
+            failure.operation == "ssl.read",
+            "truncated TLS transport reported " .. failure.name ..
+              " from " .. failure.operation)
       truncated = true
     end
     check(truncated,
