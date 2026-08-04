@@ -166,7 +166,7 @@ local function validate_http_token(token: string, subject: string)
 end
 
 local function render_headers(headers_value: Headers): string
-  local builder = str.writer(false)
+  local builder = str.writer()
   local entries = headers_value:all()
   local index = 1
   while index <= #entries do

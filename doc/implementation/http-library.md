@@ -178,12 +178,13 @@ connections can progress independently while requests on one connection stay
 ordered.
 
 The high-level constructors keep required values before optional configuration:
-plain `listen` takes host and handler before optional port/backlog, while
-`listen_tls` takes host, certificate, and handler before optional private-key
-path, port, and backlog. The plain/TLS port defaults are 80/443. Both pass the
-optional backlog to `net.listen` (directly or through `ssl.listen`), where it
-defaults to 128; TLS likewise delegates the omitted-key PEM-bundle behavior to
-`ssl.listen`.
+plain `listen` takes host and handler before optional port, backlog, and idle
+timeout, while `listen_tls` takes host, certificate, and handler before
+optional private-key path, port, backlog, and idle timeout. The plain/TLS port
+defaults are 80/443. Both pass the optional backlog to `net.listen` (directly
+or through `ssl.listen`), where it defaults to 128; TLS likewise delegates the
+omitted-key PEM-bundle behavior to `ssl.listen`. Idle timeout defaults to zero
+and is validated before listener creation or TLS PEM reads.
 
 The Server record deliberately stores separate optional `net.Server` and
 `ssl.Server` fields and branches while accepting. A tempting common Interface
@@ -201,27 +202,26 @@ loop and other Tasks remain live, following the ordinary Task-local error
 policy.
 
 `ClientResponse:close` marks its Titan parser closed before calling the
-suspending transport close, but records transport completion only after that
-call returns. `Server:close` similarly marks the high-level listener closed
-before delegating to `net.Server` or `ssl.Server`, then records listener
-completion after the delegate returns. Sticky cancellation can therefore
-leave either object logically closed without a recorded delegate completion;
-a later `close()` skips the completed logical step and idempotently retries
-exactly the transport or listener step. This is a concrete resource contract,
-not an HTTP queue or scheduler.
+suspending transport close, then records transport completion after that call
+returns. `Server:close` similarly marks the high-level listener closed before
+delegating to `net.Server` or `ssl.Server`, then records listener completion
+after the delegate returns. Those underlying close Calls are
+cancellation-insensitive: pending cancellation neither prevents submission
+nor replaces their ordinary callback completion. Cleanup therefore finishes,
+the completion flag is recorded, and only then can the Task publish terminal
+cancellation; every later `close()` is an immediate no-op. This is a concrete
+resource contract, not an HTTP queue or scheduler.
 
-## Serial pipelining and the idle-timeout composition blocker
+## Serial keep-alive and idle-timeout composition
 
-The server supports ordered HTTP/1.1 request pipelining: a peer may send later
-requests before reading the current response. Its one connection Task runs a
-handler, finishes the response, drains any unread request body, and only then
-resets the parser and dispatches the next handler. If one transport read
-already contained bytes for a later request, the parser retains that
-unconsumed suffix for the same loop to process afterward. Responses remain in
-request order and never interleave; there is no concurrent per-connection
-handler scheduler. Suffix preservation is the byte-retention mechanism that
-enables this serial pipelined processing, not a concurrent request queue or
-scheduler.
+The server implements one serial request/response cycle per connection Task.
+It does not expose a pipelining API or schedule concurrent handlers for one
+connection. A handler finishes its response and the server drains any unread
+request body before resetting the parser for the next keep-alive request. If a
+transport read happened to include bytes beyond the current message, the
+parser retains that unconsumed suffix so the next ordinary serial iteration
+does not lose input. That byte-preservation invariant is not a separate
+pipelining queue or a promise of concurrent pipeline processing.
 
 After a keep-alive reset, header acquisition treats EOF with no next request as
 a normal idle peer disconnect. `llhttp_finish` also succeeds after some
@@ -235,19 +235,33 @@ a real request remain accepted. The server maps only the idle outcome to normal
 connection-Task return; a client awaiting its first or final response maps the
 same outcome back to an incomplete-message error.
 
-HTTP/1.1 keep-alive and this serial pipelined processing require no lower-level
-primitive. A robust idle deadline does. The public async facade
-has Task creation and cancellation plus timers, but no current-Task accessor,
-join, race, or deadline operation. A timer Task cannot simply cancel and be
-joined by the connection Task. Implementing the policy locally would require
-a connection-specific watchdog, generation tokens around every reuse
-interval, and carefully fenced close/cancellation behavior.
+At the start of each serial request iteration, the connection Task snapshots
+the Server's `idle_timeout_ms`. Zero reads directly. A positive value starts a
+header-reader Task and timer Task and uses `async.race_two`. Reader success
+cancels the timer-only deadline and detaches its cancellation cleanup; its
+libuv timer close can finish in the background because it owns no parser or
+transport state. Deadline success cancels and `async.join`s the reader before
+the parent unwinds, because that child owns the parser/connection operation and
+an SSL read retains the connection's serialized busy state until cancellation
+cleanup completes. Reader success supplies the `Request?`; timer success is an
+ordinary silent connection return. A failed child has already emitted its
+Task-local error and traceback, so the parent applies the same ownership rule
+to its peer and returns instead of raising the same failure a second time.
 
-That protocol would duplicate scheduling machinery for one library and is not
-part of this iteration. The server consequently has no internal idle timeout.
-This limitation is explicitly treated as a blocker in high-level composition;
-the implementation does not work around it by changing or reaching through
-the fixed `titan.uv` substrate.
+On HTTPS, cancelling the child read follows `ssl.Connection`'s existing
+terminal cancellation path: it frees the TLS engine and closes the transport
+without `close_notify`, so the remote peer observes `TLS_TRUNCATED_EOF`. The
+current high-level SSL surface cannot interrupt its serialized busy read and
+then initiate graceful shutdown. A clean-alert timeout would therefore require
+a new SSL-level composition primitive; HTTP neither reaches through to `uv`
+nor adds native state to simulate one.
+
+The deadline is absolute from that iteration's start and does not reset on
+partial header bytes. The setter changes only later iterations. Handler work,
+request bodies, automatic draining, and response writes remain outside the
+policy. The implementation uses only high-level `async`, `timer`, and public
+connection operations; it neither imports nor changes `titan.uv` and adds no
+connection-local watchdog or generation protocol.
 
 ## Native build and provider composition
 
@@ -271,7 +285,17 @@ input down to individual bytes, exercise fixed/chunked/EOF bodies, duplicate
 headers, token/value byte boundaries, decimal overflow, opaque inbound reason
 rejection, structured Host errors, rejected non-origin request targets,
 streaming handlers, unread-body draining, clean idle versus partial keep-alive
-EOF, suffix retention across parser reset, ordered pipelined requests, and
-HTTPS over the public SSL facade. They also prove listener/response close
-retries after cancellation. The sanitizer boundary uses that same high-level
-path through TLS and llhttp rather than a private test transport.
+EOF, and next-request suffix retention when buffered input survives a serial
+keep-alive parser reset. Idle-timeout cases validate the public configuration,
+require completion before an unrelated-listener watchdog can wake the loop,
+send periodic partial headers to distinguish the absolute deadline from an
+inactivity timeout, and keep handler-side body reads and automatic draining
+outside that deadline. A buffered follow-up request proves that reader success
+does not wait for the cancelled timer, while timeout coverage proves that the
+connection does wait for reader cancellation before teardown. Plain and TLS
+cases cover initial and keep-alive waits; TLS additionally proves partial-header
+cancellation and the peer's exact `TLS_TRUNCATED_EOF`. They also prove
+listener/response close completion under cancellation without a retry. The
+focused sanitizer boundary drives the same timeout-induced SSL-read
+cancellation and serial HTTP path through public TLS and llhttp, rather than a
+private test transport.

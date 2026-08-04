@@ -503,23 +503,56 @@ describe(".so-only cross-module imports", function()
                 record Foo
                     n: integer
                 end
+
+                function Foo.make(n: integer): Foo
+                    return Foo.new(n)
+                end
+
                 function Foo:plus(delta: integer): integer
                     return self.n + delta
+                end
+
+                union Reason
+                    simple: integer
+                    empty
+                end
+
+                function Reason.amount(reason: Reason): integer
+                    case reason
+                    when simple: amount then
+                        return amount
+                    else
+                        return 0
+                    end
                 end
             ]] },
             { name = "alias_facade", src = [[
                 local provider = import "alias_provider"
                 type Foo = provider.Foo
+                type FooAgain = Foo
+                type Reason = provider.Reason
                 function make(n: integer): Foo
-                    return provider.Foo.new(n)
+                    return Foo.new(n)
                 end
             ]] },
             { name = "alias_consumer", src = [[
                 local facade = import "alias_facade"
                 function run(): integer
-                    local foo: facade.Foo = facade.make(40)
+                    local make: (integer) -> facade.Foo =
+                        facade.Foo.make
+                    local new: (integer) -> facade.Foo =
+                        facade.FooAgain.new
+                    local simple: (integer) -> facade.Reason =
+                        facade.Reason.simple
+                    local amount: (facade.Reason) -> integer =
+                        facade.Reason.amount
+                    local foo = make(40)
+                    local other = new(39)
                     local plus: (integer) -> integer = foo:plus
-                    return foo:plus(1) + plus(2)
+                    return foo:plus(1) + plus(2) + other.n
+                        + amount(simple(3))
+                        + facade.Foo.make(38).n
+                        + facade.make(37).n
                 end
             ]] },
         })
@@ -529,6 +562,9 @@ describe(".so-only cross-module imports", function()
         local facade_c = bf:read("*a")
         bf:close()
         assert.match('loadlib%(L, "alias_provider%.so"%)', facade_c)
+        assert.match(
+            'loadsym%(L, alias_provider_handle, "alias_provider_Foo_new_titanstatic"%)',
+            facade_c)
 
         local cf = assert(io.open("alias_consumer.c", "r"))
         local consumer_c = cf:read("*a")
@@ -545,9 +581,15 @@ describe(".so-only cross-module imports", function()
         assert.match(
             'loadglobalsym%(L, "alias_provider_Foo_plus_titanentry_boundlua"%)',
             consumer_c)
+        assert.match(
+            'loadglobalsym%(L, "alias_provider_Foo_make_titanstatic"%)',
+            consumer_c)
+        assert.match(
+            'lua_getfield%(L, LUA_REGISTRYINDEX, "Titan module alias_provider"%)',
+            consumer_c)
 
         local rok, out = call("alias_consumer",
-            "assert(alias_consumer.run() == 83)")
+            "assert(alias_consumer.run() == 200)")
         assert.truthy(rok, out)
     end)
 

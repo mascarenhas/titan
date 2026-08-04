@@ -19,9 +19,10 @@ owner; see [TLS-library implementation](ssl-library.md).
 
 Each callback-taking libuv operation has one small Titan owner containing its
 native request and exact callback. That callback captures the suspended Task
-directly. A write owner additionally retains the original Titan string through
-`write_cb`; libuv copies the submitted `uv_buf_t`, and Titan does not allocate
-a second payload string.
+directly. A write assigns the immutable Titan string directly to
+`uv_buf_t.base` through Titan's `string`-to-`char *` FFI conversion and retains
+that original string through `write_cb`; libuv borrows the bytes without
+mutating them and copies the submitted descriptor, not the pointed-to payload.
 DNS, connect, and shutdown need no common control record.
 
 The persistent TCP owner is the multi-shot exception. A private union gives a
@@ -98,20 +99,24 @@ submits its own `uv_write_t`, and libuv supplies stream write ordering.
 
 ## Cancellation, shutdown, and close
 
-Cancellation of DNS, connect, write, or shutdown does not release its owner
-early. The native callback still performs cleanup, and the Task's next resume
-injects its sticky cancellation. Cancelling a read or accept only detaches the
-matching waiter from the shared multi-shot handle. A private zero-duration
-timer wakes that Task on a later loop turn, preserving the non-reentrant
-callback model while the TCP watcher remains active.
+Cancellation of DNS, connect, write, or shutdown privately retains the reason
+without releasing its owner early; the public status remains in its current
+live state. The native callback still performs cleanup, and the Task's next
+resume injects the pending cancellation before terminal `cancelled` publishes
+the reason. Cancelling a read or accept only detaches the matching waiter from
+the shared multi-shot handle. A Task-owned zero-duration one-shot timer closes
+before waking that Task from its close callback, preserving callback-deferred,
+non-reentrant delivery while the TCP watcher remains active.
 
 `Connection:shutdown` submits one `uv_shutdown_t`; libuv's writable-state
 query makes later calls no-ops once the write side is shut down.
 `Connection:close` and `Server:close` submit one `uv_close`; libuv stops the
 handle's active watcher and its handle state answers later close checks. The
-closer is that callback's sole continuation. Any reader or acceptor detached
-by explicit close is woken by an independent zero timer rather than being
-resumed synchronously or attached to the close callback.
+close `Call` is cancellation-insensitive, and the close callback schedules the
+closer's continuation through the ordinary Task-owned one-shot wake. Any reader
+or acceptor detached by explicit close is woken by its own one-shot timer rather
+than being resumed synchronously or attached to the close callback. Each such
+timer follows the runtime's close-before-resume lifecycle.
 
 Final Runtime cleanup does not traverse a Titan networking registry. Its
 cleanup Task discovers the remaining `uv_tcp_t` handles through `uv_walk` and
@@ -122,9 +127,9 @@ native owners live until callbacks; they are not the source of traversal.
 
 Titan calls the public libuv request, stream, handle, and request-data APIs
 directly through the host's `uv.h`. The C support layer contains the
-libuv-shaped callback shims, the opaque normalized-address cell, and one tiny
-helper that initializes a `uv_buf_t` from rooted const string bytes. There is
-no POSIX socket, read, write, poll, or resolver fallback.
+libuv-shaped callback shims and the opaque normalized-address cell. Titan
+initializes `uv_buf_t` fields directly through the FFI. There is no POSIX
+socket, read, write, poll, or resolver fallback.
 
 Compiler tests cover the FFI and callback mechanisms. The focused
 standard-library suite, run outside LuaCov, covers binary listen/connect/

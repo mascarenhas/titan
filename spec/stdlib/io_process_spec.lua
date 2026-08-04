@@ -139,7 +139,7 @@ local async = require "titan.async"
 local cases = require "io_process_cases"
 local task = assert(cases.%s())
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(cases.result() == %q, cases.result())
 ]==]):format(function_name, expected)
         local ok, status, output =

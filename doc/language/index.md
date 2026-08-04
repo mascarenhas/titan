@@ -49,7 +49,7 @@ use the chapters below for the normative language reference.
 | --- | --- |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
 | [The type system](types.md) | All Titan types; equality, symmetric non-transitive consistency, direct coercions, gradual views, callable adjustment, the normative boundary matrix, inference, and `value`. |
-| [Type aliases](type-aliases.md) | Transparent compile-time type names, type-only namespaces, visibility, record re-exports, and alias cycles. |
+| [Type aliases](type-aliases.md) | Transparent compile-time type names, preserved record/union static namespaces, visibility, nominal re-exports, and alias cycles. |
 | [Interfaces](interfaces.md) | Nominal behavioral types, structural satisfaction by records and unions, wrapper conversions, method calls, options, casts, Lua interoperation, and separate compilation. |
 | [Option types](option-types.md) | `T?`: nil-tolerant types — syntax, semantics, defaulting with `or`, and how `nil` flows through arrays, maps, and the Lua boundary. |
 | [Expressions](expressions.md) | Literals and escapes, operators and precedence, Lua-faithful arithmetic, concatenation, `and`/`or`, explicit casts with `as`, non-raising type tests with `is`, constructors, calls. |
@@ -61,7 +61,7 @@ use the chapters below for the normative language reference.
 | [Variadic parameters](variadic-parameters.md) | The trailing `...: t` parameter, `#...`, the raising `...[e]` index, spreading `...` into calls, returns, and positional Array/integer-Map constructors, slot-driven adjust-up, variadic functions as values, and the limits and bans. |
 | [Flexible returns](flexible-returns.md) | Runtime-sized homogeneous result tails, finite option projection, open sinks, contextual calls through `value`, surplus adjustment, and directional callable adjustment. |
 | [Records](records.md) | Nominal record types, constructors, fields, methods, record functions, and records as seen from Lua. |
-| [Unions](unions.md) | Nominal tagged unions, positional variant constructors, full-block `when` arms, non-exhaustive `case`, payload binding, and Lua visibility. |
+| [Unions](unions.md) | Nominal tagged unions, positional variant constructors, full-block `when` arms, optional case coverage with closed-union control-flow proof, payload binding, and Lua visibility. |
 | [Arrays and maps](arrays-maps.md) | Distinct structural containers: positive-only, holed Arrays with deterministic highest-present length and canonical Lua userdata proxies; ordinary Maps, positional integer-Map construction, integer-Map border length, conversions, and performance. |
 | [Modules](modules.md) | Logical modules, `import`, visibility, module variables, initialization, and the compilation model (shared libraries, executables, search paths). |
 | [Multi-module libraries](multi-module-libraries.md) | Separating logical modules from physical providers: common-prefix library output, prefix lookup, generated Lua loaders, and the combined standard library. |
@@ -70,7 +70,7 @@ use the chapters below for the normative language reference.
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, status, and Lua interop. |
-| [Asynchronous I/O and tasks](async-io.md) | Nonblocking Tasks, explicit/automatic loop driving, the one-tag direct callback continuation model, Task-local errors, cancellation, explicit Files, and final libuv-handle cleanup. |
+| [Asynchronous I/O and tasks](async-io.md) | Nonblocking Tasks, structured terminal statuses and errors, closeable bounded FIFO channels and string Reader/Writer adapters, terminal listeners, explicit suspension/resume, fixed-arity any/race/all/join combinators, loop driving, cancellation, and final libuv-handle cleanup. |
 | [I/O standard library](standard-library-io.md) | The seven `Reader`/`Writer`/`Closer` Interface combinations, standard-output `print`, ownership-safe line iteration, and shell-command `popen` with merged output. |
 | [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
 | [Mathematical standard library](standard-library-math.md) | Typed C99 numeric operations, Lua 5.5-compatible xoshiro256** random sequences, and length-bounded numeric conversion. |
@@ -78,10 +78,10 @@ use the chapters below for the normative language reference.
 | [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads, libuv-ordered writes, shutdown, close, and cancellation. |
 | [TLS standard library](standard-library-ssl.md) | Verified TLS 1.2+ clients and certificate-backed servers composed over high-level TCP with memory BIOs, explicit trust overrides, authenticated shutdown, and serialized connection operations. |
 | [URL standard library](standard-library-url.md) | Nonthrowing parsing and normalization of absolute HTTP(S) URLs or separate request components, with structured labeled errors and public component records. |
-| [HTTP/1.1 standard library](standard-library-http.md) | Strict HTTP and HTTPS clients, ordered duplicate-preserving headers, standalone URL-module integration, streaming response/request bodies, per-connection server Tasks, sequential keep-alive, and ordered pipelined-request processing. |
+| [HTTP/1.1 standard library](standard-library-http.md) | Strict HTTP and HTTPS clients, ordered duplicate-preserving headers, standalone URL-module integration, streaming response/request bodies, per-connection server Tasks, ownership-aware request-header idle deadlines, and sequential keep-alive request processing without pipelining support. |
 | [Operating-system standard library](standard-library-os.md) | Portable clocks and timestamps, ISO C calendars/locales, plus environment, parent stdio, signals, graceful exit, and configurable direct child processes. |
 | [PEG standard library](standard-library-peg.md) | Typed parsing-expression constructors and combinators, labeled failure/recovery, captures and callback timing, anchored pattern matching and leftmost search, locale controls, and relabel source notation. |
-| [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, configurably yielding in-memory streams, and compiled byte-regex matching, capture iteration, splitting, and substitution. |
+| [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, synchronous in-memory streams, and compiled byte-regex matching, capture iteration, splitting, and substitution. |
 | [Lua loading standard library](standard-library-lua.md) | Binary-safe chunk compilation, Reader and file loading, asynchronous Lua-source `require`, cache semantics, C/Titan loaders, and the custom-searcher policy. |
 | [Iteration standard library](standard-library-iter.md) | Lua-compatible Map traversal, corrected generic-for iterator tuples, and Array iteration that preserves inner nil elements. |
 | [Garbage-collection standard library](standard-library-gc.md) | Weak Maps and ephemerons, collector actions and mode switches, byte counts, and Lua 5.5 tuning parameters. |
@@ -149,8 +149,9 @@ Lua and `value` never discover an implementation from a bare record or union.
   ([statements](statements.md#break-no-goto)).
 * **Union v1 is deliberately small.** A variant carries at most one payload,
   variants are not first-class types, constructors are positional-only, and
-  `case` is non-exhaustive even when every current variant is listed
-  ([unions](unions.md#version-one-boundaries)).
+  the compiler never requires a `case` to be exhaustive. Complete coverage of
+  the statically known closed union can nevertheless prove that a case does
+  not fall through ([unions](unions.md#version-one-boundaries)).
 
 ### The C FFI
 

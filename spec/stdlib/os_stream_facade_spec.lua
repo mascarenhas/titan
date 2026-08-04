@@ -14,8 +14,7 @@ local function check(condition: boolean, message: string)
 end
 
 local function active(task: async.Task): boolean
-  local status = task:status()
-  return status == "ready" or status == "running" or status == "waiting"
+  return not task:status():has_finished()
 end
 
 local function required_input(candidate: os.InputStream?,
@@ -166,11 +165,11 @@ function start_pending_read_close(): async.Task
       end
       return nil
     end)
-    while reader:status() == "ready" or
-          reader:status() == "running" do
+    while reader:status():as_string() == "ready" or
+          reader:status():as_string() == "running" do
       async.yield()
     end
-    check(reader:status() == "waiting",
+    check(reader:status():as_string() == "waiting",
           "captured read did not reach its callback wait")
     local competing_reader_rejected = false
     do
@@ -183,7 +182,7 @@ function start_pending_read_close(): async.Task
     output:close()
     output:close()
     while active(reader) do async.yield() end
-    check(reader:status() == "succeeded" and read_result == "eof",
+    check(reader:status():as_string() == "succeeded" and read_result == "eof",
           "closing captured input did not wake its reader with EOF")
     check(not output:read() and not output:read_until("missing"),
           "closed captured input did not keep terminal EOF")
@@ -280,7 +279,7 @@ local async = require "titan.async"
 local cases = require "os_stream_facade_cases"
 local task = assert(cases.%s())
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(cases.result() == %q, cases.result())
 ]==]):format(function_name, expected)
         local ok, status, output =
@@ -314,12 +313,12 @@ local cases = require "os_stream_facade_cases"
 
 local first = assert(cases.start_close_for_next_runtime())
 async.loop()
-assert(first:status() == "succeeded", first:status())
+assert(first:status():as_string() == "succeeded", first:status():as_string())
 assert(cases.result() == "closed-for-next-runtime", cases.result())
 
 local second = assert(cases.start_read_closed_in_next_runtime())
 async.loop()
-assert(second:status() == "succeeded", second:status())
+assert(second:status():as_string() == "succeeded", second:status():as_string())
 assert(cases.result() == "cross-runtime-closed-ok", cases.result())
 ]]
         local ok, status, output =

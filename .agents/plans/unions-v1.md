@@ -161,9 +161,12 @@ adding a multi-version build path.
   any arm runs. Other non-union types, including `value`, remain errors.
 - Cases need not be exhaustive. If no arm matches and there is no `else`, the
   statement does nothing and execution continues.
-- The always-return result is exactly the conditional rule: a case returns on
-  every path only when it has an explicit `else` and every arm plus the `else`
-  returns or raises.
+- The always-return result uses the closed union: every explicit arm must
+  terminate, and either the unique arms cover all `nvariants` or an explicit
+  `else` must terminate. Complete coverage makes a redundant `else`
+  unreachable, so its fallthrough does not defeat the proof. Imported hidden
+  variants remain in `nvariants`, preventing visible arms alone from proving
+  complete coverage.
 - Union payloads and record fields have the same userdata-user-value storage
   contract. Both must use one shared `types.has_tvalue_representation`
   eligibility check: direct C aggregates, C arrays, direct C functions, and C
@@ -533,9 +536,11 @@ Exhaustiveness is not required in v1:
   duplicate-arm error.
 
 For the checker's existing always-return analysis, a `case` returns on every
-path only when it has `else` and every explicit arm plus the `else` is
-terminating. Listing every visible variant is not enough, because a compiled
-public union may have hidden variants.
+path when every explicit arm is terminating and either those unique arms cover
+all variants of the statically known closed union or an explicit `else` is
+terminating. A redundant fallthrough `else` is unreachable after complete
+coverage. Listing every visible variant of an imported public union is not
+enough when its preserved `nvariants` count includes hidden variants.
 
 `return`, `raise`, `defer`, `catch`, `finally`, and a `break` targeting an
 enclosing loop retain their ordinary meanings inside an arm, including
@@ -1172,7 +1177,7 @@ Add a `StatCase` checker arm that:
 10. rejects an empty-variant binding;
 11. checks each arm and `else` through ordinary `checkstat` on the full
     `StatBlock`/`StatTry`, in its own arm scope; and
-12. returns the conservative always-return result from §2.6 through the shared
+12. returns the closed-union always-return result from §2.6 through the shared
     `checkstat` decoration protocol; do not stamp or interpret a case-specific
     termination flag.
 
@@ -1552,7 +1557,8 @@ At minimum audit and update:
 - `doc/implementation/string-library.md`
 
 Update the AST/type inventories and known-limitation tables, including the fact
-that case exhaustiveness is not checked. Update the checker and code-generator
+that case exhaustiveness is not required or diagnosed while complete static
+coverage can prove non-fallthrough. Update the checker and code-generator
 chapters to document the shared `_always_returns` reachability boundary and
 remove any implication that the coder recognizes only direct
 return/break/raise statements; retain the documented limitation that dead
@@ -1713,12 +1719,11 @@ the dogfood objective.
 
 Use explicit arms for every known regex variant in the total dispatches:
 `RegexNode:position`, `regex_nullable`, `regex_projected_size`, and
-`regex_compile_node`. Give those a defensive `else` which raises the existing
-internal-invalid-AST error where a returning function requires it.
+`regex_compile_node`. Their complete closed-union coverage must satisfy the
+return analysis without defensive impossible `else` errors.
 `regex_validate_backreference` is intentionally a partial one-arm case with
 no noise arms; it is the dogfood proof that non-exhaustive cases fall through.
-This conversion should not be used to add exhaustiveness semantics to the
-language.
+This control-flow proof must not become a requirement that cases be exhaustive.
 
 This also proves folder composition: `regex_compile.titan` sorts before
 `regex_parser.titan`, yet the folder ensemble is checked once. Union
@@ -1891,7 +1896,9 @@ Add `spec/checker/unions_spec.lua`:
   finally-transfer diagnostics exactly matching an `if` block;
 - no direct payload/variant field access;
 - clean rejection of contextual `{}` as a union;
-- non-exhaustive fallthrough and conservative always-return analysis;
+- non-exhaustive fallthrough plus closed-union always-return analysis, including
+  complete local/aliased coverage, a redundant falling-through `else`, and an
+  imported hidden variant that prevents visible-arm coverage;
 - all-returning nested block, if/else, try, and case statements followed by
   unchecked dead syntax, proving that each receives the same shared
   `_always_returns` decoration and reaches the same checker boundary;

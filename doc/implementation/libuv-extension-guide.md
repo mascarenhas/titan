@@ -51,10 +51,16 @@ system modes. Do not hide an unavailable symbol behind a forwarding shim or a
 run-time identity trick.
 
 The supported targets are Linux and macOS. Prefer the public portable libuv
-operation to a POSIX alternative. A small C boundary is justified only for a
-callback ABI, an opaque-layout normalization, a narrow type or const adaptation
-such as `titan_uvshim_buf_init_const`, or a compile-time portability fact that
-Titan cannot express safely.
+operation to a POSIX alternative. A C boundary is ordinary only for a callback
+ABI. A non-callback shim requires an exceptional gap that Titan cannot express,
+such as a function-like macro or a compile-time portability fact, and its
+justification must appear in a comment immediately above the C definition.
+Ordinary public struct fields are handled directly through Titan's FFI. When a
+native ABI spells borrowed bytes as mutable but promises not to mutate them,
+Titan's direct `string`-to-`char *` conversion can initialize the field. For an
+asynchronous borrow, the Titan owner must retain the original string through
+the terminal callback; this internal lifetime proof does not relax the public
+FFI rule against C retaining an otherwise unanchored string pointer.
 
 ## Classify the addition before adding state
 
@@ -120,10 +126,10 @@ need one plain-C trampoline in `titan-runtime/titan_uv.c` and one declaration
 in `titan-runtime/titan/uv.h`. Reuse an existing trampoline only when the
 libuv callback typedef, owner lookup, loop lookup, callback slot, and Titan
 handler signature are the same protocol. Similar parameter counts are not
-enough: `uv_timer_cb` and `uv_idle_cb`, for example, should not be conflated
-merely because each receives one handle pointer. The existing connect, write,
-and shutdown callbacks remain separately named even though their Titan result
-shapes coincide. Conversely, TCP and process-stdio writes correctly share
+enough. The existing connect, write, and shutdown callbacks remain separately
+named even though their native callbacks all receive a request and status and
+their Titan result shapes coincide. Conversely, TCP and process-stdio writes
+correctly share
 `titan_uvshim_write_cb`: both use the same `uv_write_cb` protocol, request-data
 owner channel, callback slot, loop relation, and Titan handler signature.
 
@@ -220,11 +226,13 @@ local record uv_getaddrinfo_t
 end
 ```
 
-Stream and filesystem writes retain the original string bytes, but libuv
-copies their `uv_buf_t` descriptors during submission. Filesystem paths and
-DNS text are also copied during accepted submission, so they need no separate
-owner field afterward. Derive each interval from the pinned libuv contract;
-do not generalize one operation's borrowing rule to another.
+Stream and filesystem writes assign immutable strings directly to
+`uv_buf_t.base` and retain those original strings while libuv borrows their
+payload; libuv copies only the descriptors during submission. Filesystem paths
+and DNS text are copied during accepted
+submission, so they need no separate owner field afterward. Derive each
+interval from the pinned libuv contract; do not generalize one operation's
+borrowing rule to another.
 
 Set request data to the owner and assign `task.pending = owner` before libuv
 accepts ownership. The Task root is the request's lifetime root until callback
@@ -267,7 +275,7 @@ continuation can observe an invalid result:
 - dispose of a newly produced descriptor or handle in the callback when no
   continuation owner has received it; and
 - only then resume the suspended Task with an ordinary Titan value or
-  `async.Error`.
+  `async.OperationError`.
 
 Use `catch`/`finally` when release must happen after either successful
 conversion or a Titan allocation error. A continuation `finally` is also the
@@ -278,15 +286,22 @@ only the affected Task.
 
 Accepted request storage remains alive until this callback even after logical
 cancellation. Do not drop its root, race it with a GC finalizer, or call
-`uv_cancel` merely to make the Task look cancelled sooner. Cancellation is
-sticky and is injected when the callback eventually resumes the continuation.
+`uv_cancel` merely to make the Task look cancelled sooner. `Task:cancel`
+privately stores the first reason while the public status remains in its current
+live variant. Cancellation is injected when the callback eventually resumes
+the continuation, and only terminal `TaskStatus.cancelled(reason)` publishes
+the reason.
 
 A one-shot handle differs from an accepted request because closing it can
 suppress its event callback. `SignalWaitCall` therefore installs a cancellation
-action that calls `close_handle`; `close_cb` becomes the continuation. On a
-real signal, the signal callback also starts close and resumes only through
-close completion. Do not apply the request rule of waiting for its terminal
-operation callback to a handle whose close replaces that callback.
+action that calls `close_handle`; the resulting `close_cb` schedules the
+continuation through the ordinary callback-deferred one-shot wake. On a real
+signal, the signal callback also starts close and resumes only after close
+completion. This close
+operation is cancellation-insensitive: once issued, cancellation cannot
+suppress the callback that releases its native owner. Do not apply the request
+rule of waiting for its terminal operation callback to a handle whose close
+replaces that callback.
 
 ### 5. Verify the one-shot lifecycle
 
@@ -360,9 +375,14 @@ unless starting itself is the Task's asynchronous suspension boundary.
 ### 3. Separate callback production from Task consumption
 
 The callback first copies or converts its result. It then clears and takes the
-current waiter **before** resuming it. The continuation may install the next
-waiter while the current callback is still returning, and the non-reentrant
-loop guarantees no unrelated libuv callback interleaves.
+current waiter **before** delivering it. An ordinary operation callback resumes
+the Task directly. A boundary whose semantics require callback-deferred
+delivery, notably close completion and the repeating-ticker continuation, may
+instead use the existing Task-owned zero-timer wake. Every such one-shot timer
+closes
+in `timer_cb` and resumes its Task only from `close_cb`. The continuation may
+install the next waiter while the producing callback is still returning, and
+the non-reentrant loop guarantees no unrelated libuv callback interleaves.
 
 If there is no waiter, buffer the natural result or update the pending state.
 A callback can also fail with no waiter, so the owner must retain a terminal
@@ -384,10 +404,12 @@ fallback and not distrust of libuv's callback ordering.
 
 ### 4. Detach waiters without closing shared state
 
-Cancelling one wait detaches only that Task. Wake it with
-`wake_task_next_turn`, so it receives cancellation through its own zero-timer
-callback rather than being resumed synchronously inside another Task. Do not
-close a shared watcher because one waiter was cancelled.
+Cancelling one wait privately records the reason and detaches only that Task.
+Wake it through the Task-owned zero-timer path, so that timer closes and its
+close callback delivers cancellation rather than resuming it synchronously
+inside another Task. Do not close a shared watcher because one waiter was
+cancelled. Cleanup and close `Call` variants must be cancellation-insensitive
+when their callbacks own native lifetime completion.
 
 Explicit close uses libuv's active/closing queries, stops the watcher where
 the API requires it, settles any waiter on a later callback turn, clears
@@ -405,7 +427,7 @@ Cover the applicable public lifecycle:
 - an event buffered before a waiter and an event delivered to a waiter;
 - two or more distinct events when the API promises buffering;
 - rejection of a second waiter;
-- later-turn cancellation without closing the shared handle;
+- callback-deferred cancellation without closing the shared handle;
 - terminal EOF/error and an error that arrives without a waiter for sources
   that have terminal callbacks;
 - explicit close while a Task is waiting;
@@ -413,10 +435,33 @@ Cover the applicable public lifecycle:
 - any new callback/buffer rooting shape not already covered by the generic GC
   proofs.
 
-Do not recreate tests for joins, scheduler queues, generations, delayed-source
-variants, or reentrant `uv_run`; those abstractions are absent from this
-design. Do not add test-only module hooks or source transformers merely to run
-the same ownership proof through another handle type.
+Do not recreate a scheduler queue, generation fence, delayed-source variant,
+or reentrant `uv_run`; those abstractions are absent from this design. The
+public Task terminal-listener Array is the one intentional observation
+primitive. Terminal publication stores the final status, detaches the current
+Array as a stable snapshot, and installs an empty live list before calling the
+snapshot sequentially on the main thread with each call protected by an empty
+`catch`. Removal during delivery therefore cannot shift the snapshot or skip a
+later callback. This is Task-local notification, not a scheduler-owned join
+protocol or native operation queue.
+
+The public `async.join*`, `any_*`, `race_*`, and `all_*` functions first scan
+their fixed named operands. If the result is not yet decided, they install a
+separate listener closure directly on each still-relevant operand, suspend the
+current Task once, and let the captured result/counter state decide when to
+call `Task:resume()`. Each registration has a deferred removal so external
+cancellation of the suspended combinator cannot leave a stale listener. Do not
+collect operands into a `{Task}` helper: keeping each named path expanded
+preserves heterogeneous result and cancellation types for future generic Tasks.
+
+`Task:resume()` is synchronous from either terminal notification or another
+running Task. It coalesces requests and installs a target-owned zero-duration
+timer; `timer_cb` initiates close and `close_cb` resumes the target after
+releasing the timer owner. The same wake handles cancellation of an explicitly
+suspended Task. There is no public Waiter, `uv_check_t`, Runtime `uv_idle_t`,
+polling loop, phase fence, or Task Array in this composition. Do not add
+test-only module hooks or source transformers merely to run the same ownership
+proof through another handle type.
 
 ## Adding a new handle type
 
@@ -650,10 +695,12 @@ Against bundled libuv 1.52.1:
 The concrete handle denominator is `UV_HANDLE_TYPE_MAP`'s 16 entries minus
 the abstract `uv_handle_t` and `uv_stream_t`. Titan owns wrappers for named
 pipe, process, signal, TCP, timer, and TTY. `UV_FILE` is outside the map and is
-not a handle. Neither `uv_loop_t`, `uv_dir_t`, nor any request type belongs in
-the handle denominator. If the two abstract base entries are mechanically
-included, Titan uses 8 of 16 map entries, or 50.0%; the concrete 6-of-14 figure
-is the useful measure of supported handle kinds.
+not a handle. Neither `uv_loop_t`, `uv_dir_t`, nor any request
+type belongs in the handle denominator. If the two abstract base entries are
+mechanically included, Titan uses 8 of 16 map entries, or 50.0%; the concrete
+6-of-14 figure is the useful measure of supported handle kinds.
+Task composition uses terminal listeners and target-owned timer wakes, so it
+requires neither a check-handle wrapper nor an idle-handle phase bridge.
 
 The function denominator is the 318 unique public `UV_EXTERN uv_*`
 declarations in `include/uv.h`, before host preprocessing. No platform header

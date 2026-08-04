@@ -123,8 +123,6 @@ local function regex_projected_size(node: RegexNode):
     return 8, 0
   when word_end then
     return 8, 0
-  else
-    raise "internal regular-expression AST node is invalid"
   end
 end
 
@@ -288,8 +286,6 @@ local function regex_compile_node(node: RegexNode,
   when word_end then
     return peg.sequence(
       peg.runtime(regex_word_end_capture), continuation)
-  else
-    raise "internal regular-expression AST node is invalid"
   end
 end
 

@@ -24,6 +24,9 @@ local LUA = prefix and exists(prefix .. "/bin/lua")
     and prefix .. "/bin/lua" or "lua"
 
 local PROBE_SOURCE = [[
+local fs = import "fs"
+local str = import "string"
+local timer = import "timer"
 local tlua = import "titan.lua"
 
 local record TrackingReader
@@ -63,6 +66,70 @@ function empty_reader_result(): value
   local chunk = tlua.load_from_reader(reader, "=empty-reader", nil)
   return chunk()
 end
+
+-- This reader receives bytes from one completed filesystem read, then makes
+-- its second read an ordinary bounded async wait. The exported phase is a
+-- test-only handshake: observing "waiting" proves load_from_reader consumed
+-- the byte-bearing first result before cancellation is requested.
+local blocking_phase = "idle"
+local blocking_transformed = false
+
+local record BlockingReader
+  local bytes: string
+  local index: integer
+end
+
+local function BlockingReader:read(): string?
+  self.index = self.index + 1
+  if self.index == 1 then return self.bytes end
+  blocking_phase = "waiting"
+  timer.sleep(5000)
+  return nil
+end
+
+local function BlockingReader:read_until(_delimiter: string,
+                                          _chop: boolean?): string?
+  raise "unused read_until"
+end
+
+local function BlockingReader:close()
+end
+
+function blocking_source_phase(): string
+  return blocking_phase
+end
+
+function blocking_source_transformed(): boolean
+  return blocking_transformed
+end
+
+function load_blocking_source(path: string)
+  blocking_phase = "opening"
+  blocking_transformed = false
+  local file = fs.open(path, "r")
+  local file_open = true
+  defer if file_open then file:close() end
+
+  blocking_phase = "reading"
+  local maybe_bytes? = file:read()
+  if not maybe_bytes then raise "blocking source file was empty" end
+  local bytes = maybe_bytes as string
+  file:close()
+  file_open = false
+  blocking_phase = "consumed"
+
+  local reader = BlockingReader.new(bytes, 0)
+  do
+    tlua.load_from_reader(reader, "@" .. path, nil)
+  catch
+    -- Match the source searcher's error translation boundary. Task
+    -- cancellation remains authoritative over this transformed error.
+    blocking_transformed = true
+    raise "error loading module 'lua_spec_blocking' from file '" ..
+          path .. "':\n\t" .. str.tostring(error)
+  end
+  raise "blocking source reader unexpectedly reached EOF"
+end
 ]]
 
 local REQUIRED_TITAN_SOURCE = [[
@@ -80,7 +147,6 @@ describe("titan.lua", function()
             "run make lpeglabel before titan.lua specs")
         workspace = async_stdlib.workspace("lua")
         layout = async_stdlib.exact_layout(workspace)
-        async_stdlib.prepare_async_core(workspace, layout)
         async_stdlib.prepare_gc(workspace, layout)
 
         for _, name in ipairs({
@@ -110,6 +176,7 @@ describe("titan.lua", function()
             cppflags = "",
         })
         async_stdlib.register_exact_provider(layout, "titan.string")
+        async_stdlib.prepare_async_core(workspace, layout)
 
         for _, name in ipairs({ "os", "io", "fs", "lua", "timer" }) do
             async_stdlib.write_source(
@@ -140,21 +207,62 @@ describe("titan.lua", function()
         async_stdlib.cleanup(workspace)
     end)
 
-    local function run(source)
+    local function run(source, watchdog_seconds)
         local lua_path = workspace .. "/?.lua;;"
         local cpath = workspace .. "/?.so;" ..
             workspace .. "/titan-runtime/bootstrap/?.so;;"
-        local command = table.concat({
-            "env -u LUA_PATH -u LUA_CPATH" ..
-                " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-            "TITAN_PATH_0_20=" .. quote(workspace),
+        local command_words = {
+            "env", "-u", "LUA_PATH", "-u", "LUA_CPATH",
+            "-u", "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5",
+            "TITAN_PATH_0_20=" .. workspace,
             "TITAN_PATH=",
-            "LUA_PATH=" .. quote(lua_path),
-            "LUA_PATH_5_5=" .. quote(lua_path),
-            "LUA_CPATH=" .. quote(cpath),
-            "LUA_CPATH_5_5=" .. quote(cpath),
-            quote(LUA) .. " -e " .. quote(source),
-        }, " ")
+            "LUA_PATH=" .. lua_path,
+            "LUA_PATH_5_5=" .. lua_path,
+            "LUA_CPATH=" .. cpath,
+            "LUA_CPATH_5_5=" .. cpath,
+            LUA, "-e", source,
+        }
+        local quoted_words = {}
+        for index, word in ipairs(command_words) do
+            quoted_words[index] = quote(word)
+        end
+        local command = table.concat(quoted_words, " ")
+        if watchdog_seconds then
+            -- Run the exact argv under a portable external watchdog. The env
+            -- process execs Lua, so TERM/KILL always targets the process that
+            -- owns stdout; even a broken async cancellation cannot leave
+            -- async_stdlib.run's read("*a") waiting indefinitely.
+            local watchdog = string.format([[
+"$@" &
+test_pid=$!
+(
+  delay_pid=
+  trap 'if [ -n "$delay_pid" ]; then
+          kill -TERM "$delay_pid" 2>/dev/null || :
+        fi
+        exit 0' TERM HUP INT
+  sleep %d </dev/null >/dev/null 2>&1 &
+  delay_pid=$!
+  wait "$delay_pid"
+  delay_pid=
+  printf 'titan.lua fixture timed out after %d seconds\n' >&2
+  kill -TERM "$test_pid" 2>/dev/null || exit 0
+  sleep 2 </dev/null >/dev/null 2>&1 &
+  delay_pid=$!
+  wait "$delay_pid"
+  delay_pid=
+  kill -KILL "$test_pid" 2>/dev/null || :
+) &
+watchdog_pid=$!
+wait "$test_pid"
+test_status=$?
+kill -TERM "$watchdog_pid" 2>/dev/null || :
+wait "$watchdog_pid" 2>/dev/null || :
+exit "$test_status"
+]], watchdog_seconds, watchdog_seconds)
+            command = "/bin/sh -c " .. quote(watchdog) ..
+                " titan-lua-watchdog " .. command
+        end
         local ok, status, output = async_stdlib.run(command, workspace)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
@@ -214,7 +322,7 @@ local task = async.run(function()
     completed = true
 end)
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(completed)
 ]])
     end)
@@ -273,7 +381,7 @@ local task = async.run(function()
     completed = true
 end)
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(completed)
 assert(os.remove(%q))
 assert(os.remove(%q))
@@ -319,8 +427,15 @@ assert(false_calls == 2)
         local source = workspace .. "/lua_spec_source.lua"
         local concurrent = workspace .. "/lua_spec_concurrent.lua"
         local cancel_retry = workspace .. "/lua_spec_cancel_retry.lua"
+        local cancel_source = workspace .. "/lua_spec_cancel_source.fifo"
+        local blocking_source = workspace .. "/lua_spec_blocking.lua"
+        local fifo_ok, fifo_status, fifo_output =
+            async_stdlib.run("mkfifo " .. quote(cancel_source))
+        assert.truthy(fifo_ok,
+            "mkfifo exit " .. tostring(fifo_status) .. "\n" .. fifo_output)
         run(string.format([[
 local async = require "titan.async"
+local probe = require "lua_probe"
 local tlua = require "titan.lua"
 local timer = require "titan.timer"
 
@@ -330,12 +445,13 @@ local function write(path, contents)
     assert(file:close())
 end
 local function active(task)
-    local status = task:status()
-    return status == "ready" or status == "running" or status == "waiting"
+    return not task:status():has_finished()
 end
 write(%q, "return { name = ..., filename = select(2, ...) }")
 write(%q, "return { loaded = true }")
 write(%q, "return { retried = true }")
+write(%q, "return { bounded = true }")
+local cancel_source = %q
 
 local phase = 0
 local completed = false
@@ -347,7 +463,7 @@ local coordinator = async.run(function()
     end)
     local result = tlua.require("lua_spec_source")
     assert(phase == 2)
-    assert(observer:status() == "succeeded", observer:status())
+    assert(observer:status():as_string() == "succeeded", observer:status():as_string())
     assert(result.name == "lua_spec_source")
     assert(result.filename == %q)
     assert(tlua.require("lua_spec_source") == result)
@@ -367,40 +483,87 @@ local coordinator = async.run(function()
         duplicate = tostring(err)
     end)
     while active(first) or active(second) do timer.yield() end
-    assert(first:status() == "succeeded", first:status())
-    assert(second:status() == "succeeded", second:status())
+    assert(first:status():as_string() == "succeeded", first:status():as_string())
+    assert(second:status():as_string() == "succeeded", second:status():as_string())
     assert(first_loaded)
     assert(duplicate:find("already being loaded", 1, true), duplicate)
 
+    -- First prove cancellation after a byte-bearing filesystem read has
+    -- completed and load_from_reader has requested its next chunk. The probe's
+    -- five-second fallback keeps this path bounded even if cancellation is not
+    -- delivered; this whole child also has an external watchdog.
+    local post_read = async.run(function()
+        probe.load_blocking_source(%q)
+    end)
+    local probes = 0
+    while probe.blocking_source_phase() ~= "waiting" and
+          active(post_read) and probes < 5000 do
+        timer.sleep(1)
+        probes = probes + 1
+    end
+    local consumed_read = probe.blocking_source_phase() == "waiting"
+    local post_read_waiting =
+        post_read:status():as_string() == "waiting"
+    if active(post_read) then post_read:cancel() end
+    local post_cancel_waiting =
+        post_read:status():as_string() == "waiting"
+    while active(post_read) do timer.yield() end
+    assert(consumed_read, probe.blocking_source_phase())
+    assert(post_read_waiting, post_read:status():as_string())
+    assert(post_cancel_waiting,
+        "reader cancellation abandoned its accepted read")
+    assert(post_read:status():as_string() == "cancelled",
+        post_read:status():as_string())
+    assert(probe.blocking_source_transformed(),
+        "source wrapper did not transform the injected cancellation")
+
     local saved_path = package.path
-    package.path = "/dev/zero"
+    package.path = cancel_source
     local cancelled_started = false
     local cancelled = async.run(function()
         cancelled_started = true
         tlua.require("lua_spec_cancel_retry")
     end)
-    local canceller = async.run(function()
-        while not cancelled_started do timer.yield() end
-        timer.sleep(10)
-        assert(cancelled:status() == "waiting", cancelled:status())
-        cancelled:cancel("cancel-source-read")
-        assert(cancelled:status() == "waiting",
-            "filesystem cancellation resumed synchronously")
-    end)
-    while active(cancelled) or active(canceller) do timer.yield() end
+    local open_probes = 0
+    while (not cancelled_started or
+           cancelled:status():as_string() == "ready" or
+           cancelled:status():as_string() == "running") and
+          open_probes < 5000 do
+        timer.sleep(1)
+        open_probes = open_probes + 1
+    end
+    local reached_open_wait =
+        cancelled_started and cancelled:status():as_string() == "waiting"
+    if reached_open_wait then cancelled:cancel() end
+    local open_cancel_waiting =
+        cancelled:status():as_string() == "waiting"
+
+    -- A waiting require has no earlier async boundary: its FIFO read-side open
+    -- is already submitted. Only now is a synchronous writer opened, so this
+    -- call has a guaranteed counterpart and cannot be the blocking edge that
+    -- strands the test. Closing it supplies bounded EOF to the accepted open.
+    if reached_open_wait then
+        local source_writer = assert(io.open(cancel_source, "w"))
+        assert(source_writer:close())
+    end
+    while active(cancelled) do timer.yield() end
     package.path = saved_path
-    assert(canceller:status() == "succeeded", canceller:status())
-    assert(cancelled:status() == "cancelled", cancelled:status())
+    assert(reached_open_wait, cancelled:status():as_string())
+    assert(open_cancel_waiting,
+        "filesystem-open cancellation abandoned its accepted request")
+    assert(cancelled:status():as_string() == "cancelled", cancelled:status():as_string())
 
     local retry = tlua.require("lua_spec_cancel_retry")
     assert(retry.retried == true)
     completed = true
 end)
 async.loop()
-assert(coordinator:status() == "succeeded", coordinator:status())
+assert(coordinator:status():as_string() == "succeeded", coordinator:status():as_string())
 assert(completed)
 assert(os.remove(%q))
-]], source, concurrent, cancel_retry, source, cancel_retry))
+assert(os.remove(cancel_source))
+]], source, concurrent, cancel_retry, blocking_source, cancel_source,
+            source, blocking_source, cancel_retry), 20)
     end)
 
     it("loads Titan shims, C modules, and appended custom searchers", function()
@@ -436,7 +599,7 @@ local task = async.run(function()
     completed = true
 end)
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(completed)
 ]])
     end)
@@ -472,7 +635,7 @@ local task = async.run(function()
     completed = true
 end)
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(completed)
 ]])
     end)

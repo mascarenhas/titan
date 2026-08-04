@@ -1,8 +1,64 @@
-local TASK_SUCCEEDED = "succeeded"
-
 local type CancelAction = () -> ()
 
+union CancellationReason
+  simple: string
+  complex: value
+end
+
+union TaskStatus
+  ready
+  running
+  waiting
+  succeeded: value
+  failed: Error
+  cancelled: CancellationReason
+end
+
+function TaskStatus:as_string(): string
+  case self
+  when ready then return "ready"
+  when running then return "running"
+  when waiting then return "waiting"
+  when succeeded then return "succeeded"
+  when failed then return "failed"
+  when cancelled then return "cancelled"
+  end
+end
+
+function TaskStatus:has_finished(): boolean
+  case self
+  when succeeded then return true
+  when failed then return true
+  when cancelled then return true
+  else return false
+  end
+end
+
+function TaskStatus:has_succeeded(): (boolean, value?)
+  case self
+  when succeeded: result then return true, result
+  else return false, nil
+  end
+end
+
+function TaskStatus:has_failed(): (boolean, Error?)
+  case self
+  when failed: failure then return true, failure
+  else return false, nil
+  end
+end
+
+function TaskStatus:has_cancelled(): (boolean, CancellationReason?)
+  case self
+  when cancelled: reason then return true, reason
+  else return false, nil
+  end
+end
+
 local record TurnCall
+end
+
+local record SuspendCall
 end
 
 local record SleepCall
@@ -26,6 +82,7 @@ end
 -- router; each record owns its operation-specific dispatch method.
 local union Call
   turn: TurnCall
+  suspend: SuspendCall
   sleep: SleepCall
   ticker_tick: TickerTickCall
   ticker_close: TickerCloseCall
@@ -62,7 +119,24 @@ local union Call
   cleanup_step: CleanupStepCall
 end
 
--- The callback closure retains the Task and result until this timer fires.
+-- Cancellation-sensitive calls are suspension points at which a pending
+-- cancellation is injected instead of submitting new work. Cleanup calls
+-- must still be submitted, and their ordinary completion must be delivered,
+-- so one deferred cleanup can continue through several asynchronous closes.
+local function Call:is_cancellation_affected(): boolean
+  case self
+  when ticker_close then return false
+  when fs_close then return false
+  when tcp_close then return false
+  when stream_close then return false
+  when process_spawn_failure then return false
+  when cleanup_step then return false
+  else return true
+  end
+end
+
+-- The callback closure retains the Task and result through the timer's close
+-- callback, which is the completion point for every one-shot timer.
 local record TimerOwner
   local handle: owned *libuv.uv_timer_t
   local callback: (TimerOwner) -> ()
@@ -82,30 +156,61 @@ end
 record Task
   local root: coroutine.Coro
   local runtime: Runtime
-  local state: string
-  local cancel_value: Cancelled?
+  local state: TaskStatus
+  local cancel_value: CancellationReason?
   local cancel_action: CancelAction?
   local pending: value
   local root_index: integer
   local cleanup: boolean
+  local terminal_listeners: {(TaskStatus) -> ()}
+  -- Only async.suspend installs this resumable state. A pending zero-timer
+  -- wake is coalesced so cancellation and terminal listeners cannot queue the
+  -- same continuation twice.
+  local suspended: boolean
+  local resume_pending: boolean
+  -- Policy of the accepted Call whose callback currently owns this Task's
+  -- continuation. The initial next-turn callback is cancellation-sensitive.
+  local pending_cancellation_affected: boolean
 end
 
-local function terminal(state: string): boolean
-  return state == TASK_SUCCEEDED or state == "failed" or
-         state == "cancelled"
+local function terminal(state: TaskStatus): boolean
+  return state:has_finished()
 end
 
-function Task:status(): string
+function Task:status(): TaskStatus
   return self.state
 end
 
-function Task:cancel(reason: value)
+function Task:add_terminal_listener(listener: (TaskStatus) -> ())
+  if terminal(self.state) then return end
+  self.terminal_listeners[#self.terminal_listeners + 1] = listener
+end
+
+function Task:remove_terminal_listener(listener: (TaskStatus) -> ())
+  local listeners = self.terminal_listeners
+  local count = #listeners
+  for index = 1, count do
+    if listeners[index] == listener then
+      for following = index, count - 1 do
+        listeners[following] = listeners[following + 1]
+      end
+      listeners[count] = nil
+      return
+    end
+  end
+end
+
+function Task:cancel(reason: CancellationReason?)
   if terminal(self.state) or self.cleanup or self.cancel_value then return end
-  local actual = reason
-  if actual == nil then actual = "cancelled" end
-  self.cancel_value = Cancelled.new(actual)
+  local actual? = reason
+  if actual == nil then
+    actual = CancellationReason.simple("cancelled")
+  end
+  self.cancel_value = actual as CancellationReason
   local action? = self.cancel_action
-  if action then (action as CancelAction)() end
+  if action and self.pending_cancellation_affected then
+    (action as CancelAction)()
+  end
 end
 
 local function await(call: Call): value
@@ -116,6 +221,7 @@ end
 local function dispatch_call(task: Task, call: Call): Immediate?
   case call
   when turn: operation then return operation:dispatch(task)
+  when suspend: operation then return operation:dispatch(task)
   when sleep: operation then return operation:dispatch(task)
   when ticker_tick: operation then return operation:dispatch(task)
   when ticker_close: operation then return operation:dispatch(task)
@@ -150,37 +256,66 @@ local function dispatch_call(task: Task, call: Call): Immediate?
   when process_spawn_failure: operation then return operation:dispatch(task)
 
   when cleanup_step: operation then return operation:dispatch(task)
-  else
-    raise "unknown libuv operation"
   end
 end
 
-local function retire_task(task: Task, state: string)
+local function retire_task(task: Task, state: TaskStatus)
   task.state = state
   task.pending = nil
   task.cancel_action = nil
   unroot_task(task.runtime, task.root_index)
 end
 
+local function notify_terminal(task: Task, state: TaskStatus)
+  task.state = state
+  -- Detach the terminal snapshot before delivery. A listener may remove
+  -- itself or another listener, but that must not mutate this one terminal
+  -- traversal and skip a later registration.
+  local listeners = task.terminal_listeners
+  task.terminal_listeners = {}
+  for index = 1, #listeners do
+    do
+      listeners[index](state)
+    catch
+    end
+  end
+end
+
 local function finish_cleanup_task(task: Task)
   task.runtime.cleanup_done = true
-  retire_task(task, TASK_SUCCEEDED)
+  retire_task(task, TaskStatus.succeeded(nil))
 end
 
 local function fail_cleanup_task(task: Task, err: value, trace: string)
-  retire_task(task, "failed")
+  retire_task(task, TaskStatus.failed(Error.new(err, trace)))
   report_task_error(err, trace)
 end
 
-local function finish_user_task(task: Task, state: string,
-                                err: value, trace: string)
+local function finish_user_task(task: Task, state: TaskStatus)
   local runtime = task.runtime
+  notify_terminal(task, state)
   retire_task(task, state)
 
   if not has_user_tasks(runtime) and not runtime.closing then
     begin_shutdown(runtime)
   end
-  if state == "failed" then report_task_error(err, trace) end
+  case state
+  when failed: failure then
+    report_task_error(failure.error, failure.traceback)
+  end
+end
+
+-- A cancellation request is authoritative over every terminal user path.
+-- User code may catch or transform the injected reason, but the observable
+-- Task retains the caller's original reason.
+local function finish_user_failure(task: Task, err: value, trace: string)
+  local cancellation? = task.cancel_value
+  if cancellation then
+    finish_user_task(task, TaskStatus.cancelled(
+        cancellation as CancellationReason))
+  else
+    finish_user_task(task, TaskStatus.failed(Error.new(err, trace)))
+  end
 end
 
 -- The callback continuation trampoline. It may consume several immediate
@@ -194,18 +329,21 @@ local function resume_root(task: Task, failed: boolean,
   return task.root:resume(payload, UV_TAG)
 end
 
-local function advance_task(task: Task, failed: boolean, payload: value)
+local function advance_task(task: Task, failed: boolean, payload: value,
+                            cancellation_affected: boolean)
   local next_failed = failed
   local next_payload = payload
+  local next_cancellation_affected = cancellation_affected
 
   while true do
     local cancellation? = task.cancel_value
-    if cancellation and not task.cleanup then
+    if cancellation and not task.cleanup and
+       next_cancellation_affected then
       next_failed = true
       next_payload = cancellation
     end
 
-    task.state = "running"
+    task.state = TaskStatus.running()
     local yielded: value = nil
     do
       yielded = resume_root(task, next_failed, next_payload)
@@ -213,12 +351,7 @@ local function advance_task(task: Task, failed: boolean, payload: value)
       if task.cleanup then
         fail_cleanup_task(task, error, traceback)
       else
-        local cancelled? = task.cancel_value
-        if cancelled and error == cancelled then
-          finish_user_task(task, "cancelled", error, traceback)
-        else
-          finish_user_task(task, "failed", error, traceback)
-        end
+        finish_user_failure(task, error, traceback)
       end
       return
     end
@@ -228,30 +361,46 @@ local function advance_task(task: Task, failed: boolean, payload: value)
       if task.cleanup then
         finish_cleanup_task(task)
       else
-        finish_user_task(task, TASK_SUCCEEDED, nil, "")
+        local requested? = task.cancel_value
+        if requested then
+          finish_user_task(task, TaskStatus.cancelled(
+              requested as CancellationReason))
+        else
+          finish_user_task(task, TaskStatus.succeeded(yielded))
+        end
       end
       return
     end
     if status ~= "suspended" then
-      finish_user_task(task, "failed",
-                       "invalid async coroutine state", "")
+      finish_user_failure(task, "invalid async coroutine state", "")
       return
     end
 
+    local call = yielded as Call
+    local call_cancellation_affected =
+      call:is_cancellation_affected()
     cancellation = task.cancel_value
-    if cancellation and not task.cleanup then
+    if cancellation and not task.cleanup and
+       call_cancellation_affected then
       next_failed = true
       next_payload = cancellation
+      -- This is the deliberate cancellation injection for the yielded Call,
+      -- not a completion that should itself be replaced before resumption.
+      next_cancellation_affected = false
     else
-      task.state = "waiting"
-      local call = yielded as Call
+      task.state = TaskStatus.waiting()
+      next_cancellation_affected = call_cancellation_affected
+      task.pending_cancellation_affected =
+        call_cancellation_affected
       do
         local immediate? = dispatch_call(task, call)
         if not immediate then return end
+        task.pending_cancellation_affected = true
         local completion = immediate as Immediate
         next_failed = completion.failed
         next_payload = completion.payload
       catch
+        task.pending_cancellation_affected = true
         next_failed = true
         next_payload = error
       end
@@ -269,16 +418,20 @@ local function fail_task_at_callback_boundary(task: Task, err: value,
   elseif task.cleanup then
     fail_cleanup_task(task, err, trace)
   else
-    finish_user_task(task, "failed", err, trace)
+    finish_user_failure(task, err, trace)
   end
 end
 
 local function resume_task_from_callback(task: Task, failed: boolean,
                                          payload: value)
+  local cancellation_affected = task.pending_cancellation_affected
+  task.pending_cancellation_affected = true
   task.pending = nil
   task.cancel_action = nil
+  task.suspended = false
+  task.resume_pending = false
   do
-    advance_task(task, failed, payload)
+    advance_task(task, failed, payload, cancellation_affected)
   catch
     fail_task_at_callback_boundary(task, error, traceback)
   end
@@ -288,7 +441,11 @@ local function ticker_callback(ticker: uv_timer_t)
   local waiter? = ticker.waiting
   if waiter then
     ticker.waiting = nil
-    resume_task_from_callback(waiter as Task, false, true)
+    do
+      resume_task_from_callback(waiter as Task, false, true)
+    catch
+      fail_task_at_callback_boundary(waiter as Task, error, traceback)
+    end
   else
     ticker.fired = true
   end
@@ -324,31 +481,53 @@ local function activate_timer(runtime: Runtime,
   return root_index
 end
 
+-- A one-shot timer callback submits uv_close but never resumes its Task. The
+-- close callback releases the native owner and then delivers the stored
+-- result, so no Task continues while its timer remains in libuv's close queue.
 local function start_timer(task: Task, milliseconds: integer,
                            failed: boolean,
                            payload: value): TimerOwner
   local runtime = task.runtime
   local native = libuv.uv_timer_t.new()
+  local completion = function ()
+    do
+      resume_task_from_callback(task, failed, payload)
+    catch
+      fail_task_at_callback_boundary(task, error, traceback)
+    end
+  end
   local callback = function (owner: TimerOwner)
-    local completion_failed = failed
-    local completion_payload = payload
     local timer_handle: *libuv.uv_timer_t = owner.handle
     do
-      close_handle(runtime, timer_handle as *libuv.uv_handle_t,
-                   owner, owner.root_index, nil, nil)
+      task.cancel_action = nil
+      begin_close(runtime, timer_handle as *libuv.uv_handle_t,
+                  owner, owner.root_index, completion)
       owner.root_index = 0
     catch
-      completion_failed = true
-      completion_payload = error
+      fail_task_at_callback_boundary(task, error, traceback)
     end
-    resume_task_from_callback(
-        task, completion_failed, completion_payload)
   end
   local owner = TimerOwner.new(native, callback, 0)
   owner.root_index = activate_timer(
       runtime, native, owner, owner as ffi.titan_ffi_void_ptr,
       milliseconds, 0)
   return owner
+end
+
+-- Resume is meaningful only for an explicit async.suspend. It is synchronous:
+-- terminal listeners run in the main-thread scheduler, so they only install
+-- the target Task's ordinary zero-timer continuation and return. Multiple
+-- requests before that timer fires coalesce.
+function Task:resume()
+  if not self.suspended or self.resume_pending or
+     terminal(self.state) then return end
+  self.resume_pending = true
+  do
+    start_timer(self, 0, false, nil)
+  catch
+    self.resume_pending = false
+    raise
+  end
 end
 
 local function start_ticker(task: Task,
@@ -374,6 +553,15 @@ end
 
 local function TurnCall:dispatch(task: Task): Immediate?
   start_timer(task, 0, false, nil)
+  return nil
+end
+
+local function SuspendCall:dispatch(task: Task): Immediate?
+  task.suspended = true
+  task.resume_pending = false
+  task.cancel_action = function ()
+    task:resume()
+  end
   return nil
 end
 
@@ -460,8 +648,8 @@ local function begin_shutdown(runtime: Runtime)
   local root = coroutine.create(function (_arg: value): value
     return cleanup_runtime(runtime)
   end, UV_TAG)
-  local task = Task.new(root, runtime, "ready",
-                        nil, nil, nil, 0, true)
+  local task = Task.new(root, runtime, TaskStatus.ready(),
+                        nil, nil, nil, 0, true, {}, false, false, true)
   task.root_index = root_task(runtime, task)
   start_timer(task, 0, false, nil)
 end
@@ -472,14 +660,14 @@ local function run_internal(func: () -> value): Task
   local root = coroutine.create(function (_arg: value): value
     return func()
   end, UV_TAG)
-  local task = Task.new(root, runtime, "ready",
-                        nil, nil, nil, 0, false)
+  local task = Task.new(root, runtime, TaskStatus.ready(),
+                        nil, nil, nil, 0, false, {}, false, false, true)
   task.root_index = root_task(runtime, task)
 
   do
     start_timer(task, 0, false, nil)
   catch
-    finish_user_task(task, "failed", error, traceback)
+    finish_user_failure(task, error, traceback)
     raise
   end
   return task
@@ -491,6 +679,14 @@ end
 
 function _yield()
   await(Call.turn(TurnCall.new()))
+end
+
+function _running(): Task
+  return running_task()
+end
+
+function _suspend()
+  await(Call.suspend(SuspendCall.new()))
 end
 
 function _sleep(milliseconds: integer)
@@ -524,9 +720,9 @@ function _os_exit(code: integer)
   while index < runtime.next_task_root do
     local other? = runtime.task_roots[index]
     if other and not (other as Task).cleanup then
-      (other as Task):cancel("program exit")
+      (other as Task):cancel(CancellationReason.simple("program exit"))
     end
     index = index + 1
   end
-  raise task.cancel_value as Cancelled
+  raise task.cancel_value as CancellationReason
 end

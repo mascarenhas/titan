@@ -50,7 +50,7 @@ function File:read_until(delimiter: string,
     raise "read delimiter must not be empty"
   end
 
-  local builder = str.writer(false)
+  local builder = str.writer()
   local tail = ""
   for chunk in self:read do
     local boundary = chunk
@@ -106,7 +106,7 @@ function read_file(path: string): string
   local file = open(path, "r")
   defer file:close()
 
-  local builder = str.writer(false)
+  local builder = str.writer()
   for bytes in file:read do
     builder:write(bytes)
   end

@@ -86,7 +86,7 @@ end
 
 function load_from_reader(reader: io.Reader, name: string?, env: value):
     (...: value) -> (...: value)
-  local builder = str.writer(false)
+  local builder = str.writer()
   for chunk in reader:read do
     builder:write(chunk)
   end
@@ -95,7 +95,7 @@ end
 
 local function replace_literal(subject: string, needle: string,
                                replacement: string): string
-  local builder = str.writer(false)
+  local builder = str.writer()
   local position = 1
   while position <= #subject do
     local found: integer? = str.find(subject, needle, position)
@@ -120,7 +120,7 @@ local function open_source_candidate(filename: string): fs.File?
   catch
     -- Lua's source searcher treats every failure to open a candidate as a
     -- non-match. Cancellation and non-filesystem errors still propagate.
-    if error is async.Error then return nil end
+    if error is async.OperationError then return nil end
     raise
   end
   return opened
@@ -129,7 +129,7 @@ end
 local function source_search(modname: string, path: string):
     (value, value, string)
   local module_path = replace_literal(modname, ".", "/")
-  local messages = str.writer(false)
+  local messages = str.writer()
   local position = 1
   local finished = false
 
@@ -154,7 +154,6 @@ local function source_search(modname: string, path: string):
       do
         loaded = load_from_reader(file, "@" .. filename, nil)
       catch
-        if error is async.Cancelled then raise end
         raise "error loading module '" .. modname ..
               "' from file '" .. filename .. "':\n\t" ..
               str.tostring(error)
@@ -182,7 +181,7 @@ end
 local function find_loader(modname: string,
                            searchers: {integer: value},
                            path: string): (value, value)
-  local messages = str.writer(false)
+  local messages = str.writer()
 
   -- Slot 1 is Lua's preload searcher and remains replaceable by a custom
   -- searcher. Slot 2 is deliberately reserved for the asynchronous source pass

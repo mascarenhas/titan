@@ -73,8 +73,10 @@ function symtab:hidden_from_initializer(decl)
 end
 
 -- Titan type aliases live in a distinct, module-wide type namespace. They are
--- intentionally absent from `blocks`: an alias is not a run-time value and
--- must never resolve through VarName/VarDot or reach code generation.
+-- intentionally absent from `blocks`: an alias is not a first-class run-time
+-- value. The checker consults this table explicitly only when an otherwise
+-- unbound VarName is used as the preserved static namespace of an aliased
+-- record or union.
 function symtab:add_type_alias(name, decl)
     self.type_aliases[name] = decl
 end

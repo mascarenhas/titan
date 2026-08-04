@@ -26,27 +26,31 @@ generated object, and one `titan/string.lua` shim.
 The dependency direction is:
 
 ```text
-titan.coroutine --> titan.uv --> titan.async --> titan.string --> titan.net
-                                                   |
-                                                   `-----------> titan.os
-titan.gc ---------------------------------------> titan.string
-titan.gc --> titan.peg -------------------------> titan.string
-private namespaced LPegLabel archive ----------> titan.peg
+titan.coroutine --> titan.uv --> titan.async
+titan.peg --> titan.string -----> titan.async
+                    | `--------> titan.net
+                    `----------> titan.os
+titan.gc ----------------------> titan.string
+titan.gc --> titan.peg
+private namespaced LPegLabel archive --> titan.peg
 ```
 
 `titan.peg` does not import `titan.string`; its relabel implementation retains
 small private byte/diagnostic helpers to avoid a cycle. Both modules import the
 public `titan.gc` surface to configure their weak caches. `titan.string` uses
-the typed PEG surface and imports the public `titan.async` facade solely for
-the explicit fairness turn in its in-memory streams. It never reaches the
-embedded PEG engine or private uv continuation layer through a raw escape
-hatch. Both
+the typed PEG surface but has no async-runtime dependency. The dependency runs
+the other way: `titan.async` uses this module's public byte operations and
+synchronous writer for its channel-backed string adapters. `titan.string`
+never reaches the embedded PEG engine or private uv continuation layer through
+a raw escape hatch. Both
 `titan.net` and `titan.os` dogfood the literal
 `titan.string.find` and byte-preserving `titan.string.sub` operations.
 The independent `titan.url` module imports both public modules: `titan.peg`
 compiles and executes its labeled grammar, while `titan.string` supplies its
 writer and byte-preserving normalization helpers. Neither dependency exposes
 private engine or storage state to URL.
+The adapter state and close rules are documented with their owner in
+[The libuv continuation runtime](libuv-runtime.md#string-specialized-channel-adapters).
 Production places all seventeen logical modules and LPegLabel in one static
 bundle.
 
@@ -76,8 +80,8 @@ The request order keeps `titan.io` before its concrete stream users, places
 the high-level SSL, URL, and HTTP layers after `titan.net`, retains the four
 independent qualified utility modules, and remains
 non-topological. Recursive import loading resolves both the
-`titan.net`/`titan.os` to `titan.string` to `titan.peg` chains and the
-`titan.url` PEG/string dependencies while those facades are processed.
+`titan.async`/`titan.net`/`titan.os` to `titan.string` to `titan.peg` chains
+and the `titan.url` PEG/string dependencies while those facades are processed.
 
 The paired `titan.so`/`titan.a` therefore contains seventeen logical protocols
 and seventeen archive metadata keys. The DSO exposes eighteen Lua openers: bare
@@ -343,9 +347,11 @@ backtracking behavior. Ordered choice preserves left bias. Whole-expression
 anchors wrap the completed alternation instead of attaching to one branch.
 Position lookup, nullability, backreference validation, projected-size
 accounting, and continuation lowering dispatch through `case`/`when`. Each
-arm is an ordinary block and may bind the payload record; the defensive
-compiler passes retain `else` errors because `case` is intentionally
-non-exhaustive rather than acquiring an exhaustiveness proof.
+arm is an ordinary block and may bind the payload record. The total compiler
+passes list every local `RegexNode` variant, so closed-union control-flow
+analysis proves those cases non-fallthrough without defensive impossible
+`else` errors. Backreference validation deliberately remains a partial case
+whose unmatched variants continue normally.
 The translated construction follows `pegex.lua` from ta-regex commit
 `857e48682791ba55c98a7dd99c5fc7d71c02597d` and the algorithm in Marcelo
 Oikawa, Roberto Ierusalimschy, and Ana Lucia de Moura, [“Converting regexes to
@@ -443,22 +449,19 @@ adjacent empty fields.
 
 ## In-memory stream state
 
-`StringReader` retains a string, one-based cursor, and construction-time
-`yielding` policy. Omitted or nil policy becomes true. Its `read` and literal
-`read_until` methods call `async.yield()` before every result, including EOF,
-only when that policy is true, then update the cursor without retaining
+`StringReader` retains only a string and one-based cursor. Its `read` and
+literal `read_until` methods synchronously update that cursor without retaining
 borrowed pointers. Delimiter search and slicing reuse the module's binary-safe
 `find` and `sub`.
 
 `StringWriter` is the checked accumulator used by formatting, packing,
 substitution, and other bounded joins. The record itself stores rooted chunks
-plus their checked aggregate length and the same construction-time yielding
-policy. Each public `write` yields before appending only when that policy is
-true. Internal formatting, packing, substitution, and literal rendering use a
-non-yielding writer because those synchronous producers own the complete
-operation. `drain` performs one exact-size allocation and copy, then replaces
-the chunk array and resets the length to zero. This avoids quadratic repeated
-concatenation while allowing the same writer to be reused after a drain.
+plus their checked aggregate length. Every public and internal `write` is
+synchronous; Task synchronization belongs to the channel-backed adapter owned
+by `async`. `drain` performs one exact-size allocation and copy, then replaces
+the chunk array and resets the length to zero. This
+avoids quadratic repeated concatenation while allowing the same writer to be
+reused after a drain.
 Neither close method owns a native resource. `StringReader:close` nevertheless
 discards its backing string and resets the cursor so it releases unread data
 promptly; subsequent reads return `nil`. `StringWriter:close` is a no-op.

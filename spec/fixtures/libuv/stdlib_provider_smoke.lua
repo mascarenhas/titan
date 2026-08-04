@@ -50,7 +50,7 @@ local task = async.run(function()
     task_finished = true
 end)
 async.loop()
-assert(task:status() == "succeeded")
+assert(task:status():as_string() == "succeeded")
 assert(task_finished)
 
 assert(peg.literal("peg"):match("peg") == 4)

@@ -176,8 +176,8 @@ bodies, so a lambda written inside a catch does not inherit re-raise
 permission.
 
 `raise <exp>` checks the expression normally and coerces it to `value`.
-`StatRaise` is an always-returning statement for the purpose of "function
-must return" analysis.
+`StatRaise` is non-fallthrough for the purpose of checking that a function
+with fixed nonnil returns cannot fall off the end.
 
 `finally` blocks are not allowed to transfer control out explicitly:
 
@@ -188,18 +188,18 @@ must return" analysis.
 * `raise <exp>` is allowed in finally, because ordinary run-time errors
   can always occur during cleanup and must override pending control flow.
 
-The always-returns rule for a try is:
+The non-fallthrough rule for a try is:
 
 ```text
-(finally exists and finally always-returns)
+(finally exists and finally is non-fallthrough)
 or
-(body always-returns and (no catch or catch always-returns))
+(body is non-fallthrough and (no catch or catch is non-fallthrough))
 ```
 
 As with `StatBlock`, `StatIf`, and `StatCase`, `checkstat` records that result
-on the node as `_always_returns`. Statement-list code generation consumes this
-decoration when stopping at a dead tail; it does not recognize only direct
-`return`, `break`, or `raise` tags.
+on the node under the historical name `_always_returns`. Statement-list code
+generation consumes this decoration when stopping at a dead tail; it does not
+recognize only direct `return`, `break`, or `raise` tags.
 
 ## Code generator overview
 
@@ -446,7 +446,7 @@ The highest-value regression tests are:
 * `spec/coder/so_trace_names_spec.lua` — dlopened module trace-name
   registration and libbacktrace state invalidation.
 * `spec/checker/error_handling_spec.lua` — catch/finally scopes, bare
-  raise legality, finally transfer bans, always-returns.
+  raise legality, finally transfer bans, and non-fallthrough analysis.
 * `spec/coder/error_handling_spec.lua` — catch, fresh raise vs. re-raise,
   trace clearing, pending actions, finally override, nested finally order,
   GC-valued pending returns, including flexible tails across allocating/nested

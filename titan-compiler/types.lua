@@ -551,6 +551,60 @@ function types.Module(modname, members, type_members)
         type_members = type_members }
 end
 
+-- Enumerate the ABI-visible prefix of a Titan module userdata. Producers and
+-- consumers must derive the same order without relying on source ASTs: public
+-- variables, public top-level function closures, then public nominal static
+-- closures by module-member and bytewise static-name order. Keeping this in
+-- the type layer also lets the checker decorate a transitively recovered
+-- nominal owner's statics before code generation needs a first-class closure
+-- through a re-exported type alias.
+function types.public_module_prefix_layout(modtype)
+    assert(modtype and modtype._tag == "Type.Module")
+    local layout = {}
+    for _, member in ipairs(modtype.members or {}) do
+        if member._tag == "Type.ModuleVariable" then
+            layout[#layout + 1] = {
+                kind = "variable",
+                value = member,
+                key = "variable:" .. member.name,
+            }
+        end
+    end
+    for _, member in ipairs(modtype.members or {}) do
+        if member._tag == "Type.ModuleMember"
+           and member.type._tag == "Type.Function" then
+            layout[#layout + 1] = {
+                kind = "function",
+                value = member,
+                key = "function:" .. member.name,
+            }
+        end
+    end
+    for _, member in ipairs(modtype.members or {}) do
+        local owner = member._tag == "Type.ModuleMember" and member.type
+        if owner and (owner._tag == "Type.Record"
+                      or owner._tag == "Type.Union") then
+            local names = {}
+            for name, static in pairs(owner.functions or {}) do
+                if not static.islocal then
+                    names[#names + 1] = name
+                end
+            end
+            table.sort(names, util.bytewise_less)
+            for _, name in ipairs(names) do
+                local static = owner.functions[name]
+                layout[#layout + 1] = {
+                    kind = "static",
+                    value = static,
+                    owner = owner,
+                    key = "static:" .. static.fqtn .. "." .. static.name,
+                }
+            end
+        end
+    end
+    return layout
+end
+
 --- Check if two pointer types are different and can be coerced.
 local function can_coerce_pointer(source, target)
     if types.equals(source, target) then

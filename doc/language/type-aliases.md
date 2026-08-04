@@ -54,31 +54,51 @@ end
 same fields.
 
 Likewise `type Event = messages.Message` denotes that exact union. It does not
-create new variants or constructor namespace, and
-`type Write = messages.Message.write` is invalid because a variant is not a
-first-class type.
+create new variants or a second constructor namespace: `Event.write(...)`
+selects the original `messages.Message.write` constructor. `type Write =
+messages.Message.write` is still invalid because a variant is not a first-class
+type.
 
 Likewise, `type Input = io.Reader` denotes that exact nominal Interface. It
 does not copy the method set into a structurally interchangeable new type and
 does not create an `Input` run-time namespace.
 
-## Type names are not values
+## Nominal static namespaces
 
 Aliases occupy a type-only namespace. They may share a spelling with a
 variable or function, but not with another alias, record type, union type, or
-Interface. An alias can
-appear in annotations and casts; it cannot be evaluated, assigned, called, or
-used as a record/union namespace:
+Interface. An alias can appear in annotations and casts; it cannot itself be
+evaluated, assigned, or called.
+
+An alias to a record or union does, however, preserve the original nominal
+type's static namespace. This is selector syntax resolved at compile time, not
+a first-class alias value or a new run-time namespace:
 
 ```titan
 type Point = geometry.Point
+type Event = messages.Message
 
--- Point.new(...) is invalid: Point is not a run-time module member.
--- Construct through the module that owns the record instead.
-local p: Point = geometry.Point.new(1.0, 2.0)
+local p: Point = Point.new(1.0, 2.0)
+local make_point: (float, float) -> Point = Point.new
+local event: Event = Event.write("hello")
 ```
 
-This also means a Lua caller never sees a member created for an alias.
+Record aliases expose the original record's visible record functions,
+including its synthesized `new` when that constructor is public. A record with
+one or more `local` fields has a local synthesized `new`, so an alias in another
+module does not expose it. Union aliases likewise expose the original union's
+visible variant constructors and public union functions. Ordinary visibility
+still applies: an alias never makes a local record function or local variant
+constructor public.
+
+Interfaces have methods on values but no static namespace, so an Interface
+alias is usable only as a type. Aliases to non-nominal types likewise do not
+become expressions. If an ordinary value has the same spelling as an alias,
+ordinary expression lookup selects that value.
+
+No alias member is added to the run-time module object. Consequently a Lua
+caller never sees a member created for an alias, even though Titan code can use
+the compile-time nominal selector syntax above.
 
 ## Visibility and re-exports
 
@@ -91,7 +111,7 @@ local geometry = import "geometry"
 type Point = geometry.Point
 
 function origin(): Point
-    return geometry.Point.new(0.0, 0.0)
+    return Point.new(0.0, 0.0)
 end
 ```
 
@@ -100,16 +120,18 @@ end
 local shapes = import "shapes"
 
 function draw_origin()
-    local p: shapes.Point = shapes.origin()
+    local make_point: (float, float) -> shapes.Point = shapes.Point.new
+    local p = make_point(0.0, 0.0)
     p:move(10.0, 5.0)
 end
 ```
 
-Only `shapes` is an explicit import of `draw`; the alias still resolves to the
-nominal type owned by `geometry`. When these modules are separate shared libraries,
-initializing `shapes` loads `geometry` globally before `draw` resolves the
-nominal method entry points. `draw` therefore does not separately open
-`geometry`.
+Only `shapes` is an explicit import of `draw`; both the constructor and methods
+still belong to the nominal type owned by `geometry`. When these modules are
+separate shared libraries, initializing `shapes` loads and initializes
+`geometry` before `draw` resolves its native entry points and original module
+state. `draw` therefore does not separately open `geometry`. The same ownership
+is preserved through static providers and chains of aliases.
 
 A `local type` alias is visible only inside its defining module and is omitted
 from the compiled interface. As with other exported declarations, the target

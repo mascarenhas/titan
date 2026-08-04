@@ -54,16 +54,20 @@ The pieces:
   parenthesized list may instead end in a flexible tail, such as
   `: (...: string)` or `: (boolean, ...: integer)`, whose run-time length is
   chosen by each call; see [Flexible returns](flexible-returns.md).
-* **Functions whose first fixed return is not `nil` must return on every
-  control path.** If some path can fall off the end of the body, the
-  compiler rejects the function with the compile-time error `function can
-  return nil but return type is not nil`. Zero-return (`()`) functions and
-  `nil`-returning functions may simply fall off the end. A function with only
+* **Functions whose first fixed return is not `nil` must not fall through on
+  any control path.** A reachable path may return or may provably never reach
+  the end (for example, an unbreakable literal `while true`). If some path can
+  fall off the end of the body, the compiler rejects the function with the
+  compile-time error `function can return nil but return type is not nil`.
+  Zero-return (`()`) functions and `nil`-returning functions may simply fall
+  off the end. A function with only
   a flexible return tail may also fall off, producing an empty run. A `return`
   statement can only appear as the last statement of a block — see
   [Statements](statements.md).
-  A `case` counts exactly like `if`/`elseif`/`else`: it needs an explicit
-  `else` and every arm must terminate to establish this fact.
+  A `case` establishes this fact when every `when` arm terminates and either
+  those arms cover every variant of the statically known closed union or a
+  terminating `else` handles the remainder. Imported hidden variants prevent
+  consumer-side complete coverage by visible arms alone.
 * Declaring two top-level functions (or a function and a variable) with
   the same name is a compile-time error (`duplicate declaration for f,
   previous one at path/to/source.titan:N:C`). Folder modules use the same

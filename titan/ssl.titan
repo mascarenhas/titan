@@ -228,9 +228,9 @@ end
 local function fail_connection(connection: Connection, failure: value)
   connection.state = STATE_FAILED
   free_engine(connection)
-  -- A cancelled Task remains cancellation-sticky, so this best-effort close
-  -- can itself be cancelled before net dispatches it. Preserve the original
-  -- failure; the net Runtime still owns its eventual handle cleanup.
+  -- Transport close is cancellation-insensitive and still runs for a Task
+  -- with pending cancellation. Preserve the original TLS failure if the close
+  -- itself reports a transport error.
   do
     close_transport(connection)
   catch
@@ -460,9 +460,9 @@ local function read_locked(connection: Connection): string?
           -- hide cancellation or another transport failure merely because the
           -- TLS state reached SHUTDOWN before net.shutdown reported it.
           if not (connection.state == STATE_SHUTDOWN and
-                  shutdown_failure is async.Error and
-                  (shutdown_failure as async.Error).name == "ENOTCONN" and
-                  (shutdown_failure as async.Error).operation ==
+                  shutdown_failure is async.OperationError and
+                  (shutdown_failure as async.OperationError).name == "ENOTCONN" and
+                  (shutdown_failure as async.OperationError).operation ==
                     "net.shutdown") then
             raise shutdown_failure
           end
@@ -1105,7 +1105,7 @@ function Connection:read_until(delimiter: string,
   defer self.busy = false
 
   do
-    local builder = str.writer(false)
+    local builder = str.writer()
     local tail = ""
     while true do
       local chunk? = read_locked(self)
@@ -1193,9 +1193,9 @@ function Connection:close()
       -- the peer closes in that narrow window, libuv reports ENOTCONN for
       -- the redundant TCP half-close. Closing this TLS owner is still
       -- complete; explicit shutdown keeps reporting the same error.
-      if not (shutdown_failure is async.Error and
-              (shutdown_failure as async.Error).name == "ENOTCONN" and
-              (shutdown_failure as async.Error).operation ==
+      if not (shutdown_failure is async.OperationError and
+              (shutdown_failure as async.OperationError).name == "ENOTCONN" and
+              (shutdown_failure as async.OperationError).operation ==
                 "net.shutdown") then
         failed = true
         failure = shutdown_failure

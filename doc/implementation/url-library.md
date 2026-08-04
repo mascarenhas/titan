@@ -65,8 +65,8 @@ between the two entry points.
 `normalize_component` walks immutable Titan strings through `string.byte`. It
 decodes percent-encoded RFC 3986 unreserved bytes, uppercases the hexadecimal
 digits of every retained escape, and optionally applies ASCII lowercase to a
-scheme or registered-name host. A `string.writer(false)` accumulates each
-result without introducing an asynchronous yield into the synchronous parse.
+scheme or registered-name host. A synchronous `string.writer()` accumulates
+each result without introducing an asynchronous yield into the parse.
 Host normalization caches its first-byte tests instead of repeating byte
 lookups.
 

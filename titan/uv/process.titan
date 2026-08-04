@@ -93,7 +93,6 @@ local function stream_native(stdio: uv_stdio_t): *libuv.uv_stream_t
   when tty: native then
     return (native as *libuv.uv_tty_t) as *libuv.uv_stream_t
   end
-  raise "invalid stdio native handle"
 end
 
 local function stream_handle(stdio: uv_stdio_t): *libuv.uv_handle_t
@@ -106,7 +105,6 @@ local function slot_child(slot: SpawnSlot): uv_stdio_t
   when capture: stream then return stream
   when merged: streams then return streams.child
   end
-  raise "invalid spawn stdio slot"
 end
 
 local function slot_parent(slot: SpawnSlot): uv_stdio_t?
@@ -115,7 +113,6 @@ local function slot_parent(slot: SpawnSlot): uv_stdio_t?
   when capture: stream then return stream
   when merged: streams then return streams.parent
   end
-  raise "invalid spawn stdio slot"
 end
 
 local function slot_merged_child(slot: SpawnSlot): uv_stdio_t?
@@ -587,8 +584,8 @@ local function prepare_inherited_stdio(state: uv_spawn_config,
   do
     prepared = initialize_parent_stdio(state.runtime, descriptor)
   catch
-    if error is Error then
-      local failure = error as Error
+    if error is OperationError then
+      local failure = error as OperationError
       return failure.code, nil
     end
     raise

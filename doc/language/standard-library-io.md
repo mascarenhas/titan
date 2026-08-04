@@ -19,8 +19,8 @@ module exposes `print`, `lines`, and `popen`. Lua can still pass an Interface
 wrapper it received from Titan back to a Titan function expecting that exact
 Interface type.
 
-Operations in this module that reach a stream, process, or yielding string
-builder must run inside an async Task. In particular, `print`, iteration over a
+Operations in this module that reach a stream or process must run inside an
+async Task. In particular, `print`, iteration over a
 tuple returned by `lines`, `popen`, and the resulting process stream's methods
 can suspend. Merely constructing the iterator tuple with `lines(reader)` does
 not read or close the Reader. A standalone Titan program that imports `io`
@@ -207,6 +207,8 @@ Satisfaction is structural at each coercion site; none of these records has an
 | `io.InputOutputStream` | all seven | exact |
 | `string.StringReader` | `Reader`, `Closer`, `ReaderCloser` | exact |
 | `string.StringWriter` | `Writer`, `Closer`, `WriterCloser` | exact |
+| `async.ChannelReader` | `Reader`, `Closer`, `ReaderCloser` | exact |
+| `async.ChannelWriter` | `Writer`, `Closer`, `WriterCloser` | exact |
 | `net.Server` | `Closer` | exact |
 | `ssl.Server` | `Closer` | exact |
 | `http.ClientResponse` | `Reader`, `Closer`, `ReaderCloser` | exact |

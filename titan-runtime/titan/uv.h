@@ -40,14 +40,6 @@ struct uv_timer_s;
 struct uv_write_s;
 
 /*
- * Libuv's write APIs borrow but do not modify payload bytes, while the
- * historical uv_buf_t surface still spells base as char *. Keep the one
- * deliberate const cast in C so Titan owners can retain strings directly.
- */
-void titan_uvshim_buf_init_const(struct uv_buf_t *buf, const char *base,
-                                 size_t len);
-
-/*
  * Every native callback owner keeps its primary callback as its second record
  * field. Titan record fields live at the corresponding zero-based Udata.uv
  * index in the native trampoline. The callback closure retains its suspended

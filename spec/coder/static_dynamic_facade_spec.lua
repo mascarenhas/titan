@@ -163,7 +163,7 @@ local owner = import "dynamic.owner"
 type Box = owner.Box
 
 function make(n: integer): Box
-    return owner.Box.make(n)
+    return Box.make(n)
 end
 ]])
         ok, output, why, code =
@@ -174,6 +174,9 @@ end
         local facade_c = read_file(source_root .. "/dynamic/facade.c")
         assert.truthy(facade_c:find(
             'loadlib(L, "dynamic/owner.so")', 1, true), facade_c)
+        assert.truthy(facade_c:find(
+            'loadsym(L, dynamic_owner_handle, "dynamic_owner_Box_make_titanstatic")',
+            1, true), facade_c)
         local facade_archive = workspace .. "/dynamic/facade.a"
         local facade, facade_err =
             staticmetadata.scan_archive(facade_archive, metadata_options())
@@ -196,8 +199,9 @@ end
 local facade = import "dynamic.facade"
 
 function main(args: {string}): integer
-    local box: facade.Box = facade.make(40)
-    if box:add(2) == 42 then
+    local make: (integer) -> facade.Box = facade.Box.make
+    local box = make(40)
+    if box:add(2) == 42 and facade.make(39).n == 39 then
         return 0
     else
         return 1
@@ -221,6 +225,9 @@ end
         local generated = read_file(source_root .. "/app.c")
         assert.truthy(generated:find(
             'loadglobalsym(L, "dynamic_owner_Box_add_titanmethod")',
+            1, true), generated)
+        assert.truthy(generated:find(
+            'lua_getfield(L, LUA_REGISTRYINDEX, "Titan module dynamic.owner")',
             1, true), generated)
 
         local final_link

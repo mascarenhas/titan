@@ -452,10 +452,27 @@ behavior: one outer loop, captured Task outcomes, independent one-shot
 requests, one waiter plus buffered state for multi-shot handles, Task-local
 uncaught errors, and final Runtime cleanup. Do not recreate the retired
 `uv_states`/`uv_late_callbacks` source variants, delayed-callback transformers,
-generation fencing, join coverage, Titan-side operation queues, or reentrant
-loop scenarios. Cancellation coverage should prove that a detached waiter is
-woken by its own later libuv callback rather than synchronously from the Task
-that cancels it.
+generation fencing, scheduler-owned joiner lists, Titan-side operation queues,
+or reentrant loop scenarios. Public `async.join*` coverage belongs here: those
+functions scan their fixed named operands, install per-operand Task terminal
+listeners, suspend once, and remove every registration in `defer`; they do not
+add a scheduler join protocol or collect operands into a Task Array. Terminal
+publication stores the final `TaskStatus`, detaches the listener Array as a
+stable snapshot, installs an empty live list, then invokes the snapshot
+sequentially on the main thread with per-listener empty catches. A
+deciding listener calls `Task:resume()`, which synchronously installs one
+coalesced target-owned zero timer. Its `timer_cb` submits `uv_close`, and only
+`close_cb` resumes the target. The same wake must handle external cancellation
+of an explicitly suspended Task, and `resume()` must work from either terminal
+notification or another running Task without resuming inline. Coverage must
+prove `async.running`, explicit suspend/resume, listener order/error isolation/
+removal including removal during delivery, cancellation-time defer cleanup,
+coalescing, and close-before-resume.
+HTTP idle-timeout coverage must preserve its ownership asymmetry: reader-win
+paths cancel and detach the timer-only deadline, while deadline-win paths
+cancel and join the reader before parser/connection/TLS-busy teardown.
+Do not introduce a public Waiter, `uv_check_t`, Runtime `uv_idle_t`, Task polling
+loop, taskless timer, or exact-next-libuv-iteration promise for this protocol.
 
 `titanc` takes dot-separated **module names**, not file paths (dots map to
 directory separators under `--tree`, default `.`). For logical `M`, slash path
@@ -570,8 +587,13 @@ nil-fill/surplus adjustment. Imported union visibility exactly follows record
 frontiers. Each case arm/else is a full ordinary block with its own
 `catch`/`finally`, and the normal recursive `defer` transformation remains
 clause-bounded. A `Union?` scrutinee is auto-forced before dispatch; cases are
-non-exhaustive, unmatched/no-else is a no-op, and the always-return rule is the
-same as `if`/`elseif`/`else` (explicit else plus every arm/else returning).
+not required to be exhaustive, and unmatched/no-else is a no-op. For control
+flow, a case is non-fallthrough when every `when` arm is non-fallthrough and
+either those arms cover every variant of the statically known closed union or
+an explicit `else` is non-fallthrough. Imported hidden variants count in the
+union's total, so a consumer that cannot name them needs the `else` route; when
+all variants are covered, a redundant falling-through `else` is unreachable
+and does not defeat the proof.
 Record fields and union payloads share `types.has_tvalue_representation`:
 ordinary boxed Titan values including functions are legal; direct C
 aggregates/arrays/functions/function pointers are not, and only Option recurses.
@@ -774,7 +796,7 @@ AST nodes (`ast.lua`) and types (`types.lua`) are plain tables created by `typed
 
 ### Frontend (`lexer.lua`, `parser.lua`, `syntax_errors.lua`)
 
-Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` exports raw LPeg patterns referenced as `%TOKEN` terminals (no token stream). Every AST constructor is auto-injected into the grammar's defs table, so grammar actions like `-> TopLevelFunc` call constructors directly. Every error label used in the grammar (`^Label`, `%{Label}`) or lexer (`lpeg.T`) **must** have an entry in `syntax_errors.errors` or error formatting breaks. The parser is not reentrant (module-global `THIS_FILENAME`, asserted nil on entry). `record` declarations are desugared at parse time into a `TopLevelRecord` plus an adjacent synthesized `new` static marked `_record_constructor`. `union` declarations emit `TopLevelUnion` plus one adjacent synthesized static per variant, marked `_union_constructor`/`_union_variant`; explicit nominal functions carry neither marker. `case`/`when` arms consume the ordinary full block production. `[local] type Name = T` produces a compile-time-only `TopLevelTypeAlias`; `interface Name ... end` produces a nonempty type-only `TopLevelInterface` with ordered bodyless methods. Short standard-library imports are also parser sugar: `coroutine`, `uv`, `async`, `timer`, `io`, `fs`, `net`, `ssl`, `url`, `http`, `os`, `peg`, and `string` become the ordinary qualified module names under `titan.*` before module resolution.
+Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` exports raw LPeg patterns referenced as `%TOKEN` terminals (no token stream). Every AST constructor is auto-injected into the grammar's defs table, so grammar actions like `-> TopLevelFunc` call constructors directly. Every error label used in the grammar (`^Label`, `%{Label}`) or lexer (`lpeg.T`) **must** have an entry in `syntax_errors.errors` or error formatting breaks. The parser is not reentrant (module-global `THIS_FILENAME`, asserted nil on entry). `record` declarations are desugared at parse time into a `TopLevelRecord` plus an adjacent synthesized `new` static marked `_record_constructor`. `union` declarations emit `TopLevelUnion` plus one adjacent synthesized static per variant, marked `_union_constructor`/`_union_variant`; explicit nominal functions carry neither marker. `case`/`when` arms consume the ordinary full block production. `[local] type Name = T` produces a transparent `TopLevelTypeAlias`; it is not a standalone value, but a record/union alias preserves the canonical nominal namespace and its visible constructors/statics. `interface Name ... end` produces a nonempty type-only `TopLevelInterface` with ordered bodyless methods. Short standard-library imports are also parser sugar: `coroutine`, `uv`, `async`, `timer`, `io`, `fs`, `net`, `ssl`, `url`, `http`, `os`, `peg`, and `string` become the ordinary qualified module names under `titan.*` before module resolution.
 
 ### Checker (`checker.lua`, `types.lua`, `symtab.lua`)
 
@@ -856,7 +878,7 @@ AST order, as does `makemoduletype`.
   `TValue`, or nullable C pointer sentinel; close callables accept zero or one
   state argument.
 
-`checkstat` handlers return a boolean "always returns", used to enforce that non-nil-returning functions return on all paths. Imports go through a `loader` callback (`driver.defaultloader` for real lookup, `driver.tableloader` for in-memory sources in tests); source deps are recursively typechecked, while compiled-provider deps probe the requested `<mangled>_abi`/`<mangled>_types` pair before recovering the interface.
+`checkstat` handlers return a boolean "cannot fall through", stored in the historical `_always_returns` field and used to enforce that functions with fixed nonnil returns cannot fall off the end. Imports go through a `loader` callback (`driver.defaultloader` for real lookup, `driver.tableloader` for in-memory sources in tests); source deps are recursively typechecked, while compiled-provider deps probe the requested `<mangled>_abi`/`<mangled>_types` pair before recovering the interface.
 
 Titan aliases occupy a module-wide type-only namespace in `symtab`, resolve
 transparently to their RHS `Type.*` value, and never create a run-time member.
@@ -1292,10 +1314,12 @@ bind, and connect submission. The retained native boundary is deliberately
 narrow: the plain-C libuv-shaped callback trampolines declared by
 `titan-runtime/titan/uv.h`, one common helper that only extracts the Lua main
 state/module/native Titan entry, and deliberately overprovisioned opaque
-normalized-address storage, plus the tiny const-preserving `uv_buf_t`
-initializer used to root Titan write strings without copying them. Each
-trampoline selects and invokes its exact Titan callback handler; there is no
-generic dispatcher or event-kind argument.
+normalized-address storage. Titan initializes public `uv_buf_t` fields directly
+through the FFI, using Titan's documented direct `string`-to-`char *`
+conversion for libuv's historically mutable spelling of borrowed write bytes.
+The callback owner retains the original string throughout that exceptional
+asynchronous borrow. Each trampoline selects and invokes its exact Titan
+callback handler; there is no generic dispatcher or event-kind argument.
 
 The conditional inherited-`SIGPIPE` policy is implemented in
 `titan/uv/uv.titan` through direct `signal.h`/`errno.h` FFI calls and
@@ -1316,8 +1340,9 @@ FFI value and retain values required through its callbacks. Multi-shot handles
 may also carry their natural buffer/latest result and at most one waiter.
 One-shot request owners retain the native request and exact callback; the
 callback closure captures the suspended Task and borrowed arguments until
-completion. Writes retain the original Titan string, while libuv copies the
-submitted `uv_buf_t`; do not allocate a duplicate payload string. Libuv copies
+completion. Write callbacks retain the original immutable Titan strings while
+libuv borrows their bytes; libuv copies the submitted `uv_buf_t` descriptors,
+not their payloads. Libuv copies
 asynchronous filesystem paths and DNS text during submission, while `uv_spawn`
 consumes file/argv synchronously, so keep originals rooted only for the actual
 borrow interval. A direct alloc callback cannot unwind an allocation exception
@@ -1340,9 +1365,35 @@ user code catches it and is injected again before the next yielded operation
 can be dispatched. Do not reintroduce a parallel active-Task counter.
 
 Only top-level `async.loop` or the standalone bootstrap may call `uv_run`; the
-loop is non-reentrant, and a callback resumes one continuation, dispatches the
-next yielded operation, and returns. An uncaught error retires and logs only
-its Task; the task-root set decides whether it was the last user Task.
+loop is non-reentrant, and an operation callback normally resumes one
+continuation, dispatches the next yielded operation, and returns. Every
+one-shot timer callback instead submits `uv_close`; only `close_cb`, after the
+native owner is released, resumes its suspended Task. Explicit Task resume,
+external cancellation of `async.suspend`, repeating-ticker delivery, and other
+deferred continuations may use such a Task-owned one-shot timer. The delivery
+is callback-deferred but does not promise one exact libuv iteration. An uncaught
+error retires and logs only its Task; the task-root set decides whether it was
+the last user Task. Public Task state is the `TaskStatus` union with live
+`ready`/`running`/`waiting` variants plus exact success, `Error` failure, and
+terminal `CancellationReason` payloads. `Task:cancel` stores its first reason
+privately until terminal `cancelled` and invokes the current cancellation
+action without a public `cancelling` state.
+
+Task terminal publication first stores the final status, detaches the listener
+Array as a stable snapshot, and installs an empty live list. It then runs that
+snapshot sequentially in registration order on the main thread and ignores
+each listener error independently; removal during delivery cannot mutate the
+snapshot or skip a later callback. Fixed-arity async
+combinators scan their named operands directly, install a separate listener for
+each still-relevant operand, suspend once, and defer removal of every
+registration. The deciding listener calls the suspended Task's synchronous,
+coalescing `resume()`, which installs its target-owned close-before-resume zero
+timer and returns. There is no public Waiter, `uv_check_t`, Runtime `uv_idle_t`,
+polling loop, phase bridge, taskless timer, scheduler queue, join protocol, or
+generation fence. Never collapse the separate typed operands into a `{Task}`
+helper. Only `join`
+has a unary form; unary `any`/`race`/`all` would be mere result repackaging and
+are intentionally absent. The combinators do not cancel unfinished inputs.
 
 Runtime cleanup discovers handles exclusively with `uv_walk` and closes them
 with `uv_close`. A `uv_file` is a process descriptor, crosses Runtime sessions,

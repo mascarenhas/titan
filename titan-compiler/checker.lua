@@ -165,6 +165,13 @@ local check_generic_result_limit
 -- nesting depth of enclosing loops, so `break` can be rejected outside a loop
 local loop_depth = 0
 
+-- One frame per enclosing loop. Besides making the target of `break`
+-- explicit, the frame records whether a reachable break can leave that loop.
+-- The statement-list checker stops visiting a dead tail after a proven
+-- terminator, so every legal break that reaches this bookkeeping is reachable
+-- under the checker's conservative branch analysis.
+local loop_frames = {}
+
 -- Error-handling context counters (B.2), mirroring `loop_depth`: each is bumped
 -- only while checking the relevant block and is saved/reset to 0 across every
 -- nested function body (see `checkfuncbody`) and at `checker.check` entry, so a
@@ -1535,6 +1542,23 @@ end
 
 local function is_nominal_member_visible_from(st, member)
     return not member.islocal or nominal_module(member.fqtn) == st.modname
+end
+
+-- A type alias remains type-only as a value, but an alias whose transparent
+-- target is a record or union may serve as that nominal's static namespace.
+-- Return the canonical owner descriptor so selector lookup keeps the original
+-- nominal identity, visibility, native symbols, and module userdata.
+local function alias_namespace_type(typ, st)
+    local owner = typ
+    if typ and typ._tag == "Type.Nominal" then
+        owner = types.registry[typ.fqtn]
+    end
+    if not owner
+       or (owner._tag ~= "Type.Record" and owner._tag ~= "Type.Union")
+       or not is_nominal_visible_from(st, owner.name) then
+        return nil
+    end
+    return owner
 end
 
 local function visible_record_fields(record, st)
@@ -3744,7 +3768,7 @@ end
 --   node: StatRepeat AST node
 --   st: symbol table
 --   errors: list of compile-time errors
---   returns whether statement always returns from its function (always false for repeat/until)
+--   returns whether the statement cannot fall through (always false here)
 local function checkrepeat(node, st, errors)
     for _, stat in ipairs(node.block.stats) do
         checkstat(stat, st, errors)
@@ -3757,7 +3781,7 @@ end
 --   node: StatFor AST node
 --   st: symbol table
 --   errors: list of compile-time errors
---   returns whether statement always returns from its function (always false for 'for' loop)
+--   returns whether the statement cannot fall through (always false here)
 local function checkfor(node, st, errors)
     checkexp(node.start, st, errors)
     node.start = tryforce(node.start)
@@ -4261,7 +4285,7 @@ end
 --   node: StatBlock AST node
 --   st: symbol table
 --   errors: list of compile-time errors
---   returns whether the block always returns from the containing function
+--   returns whether the block cannot fall through to its following statement
 local function checkblock(node, st, errors)
     local ret = false
     for _, stat in ipairs(node.stats) do
@@ -4282,7 +4306,7 @@ end
 --   node: A DeclDecl or Stat_* AST node
 --   st: symbol table
 --   errors: list of compile-time errors
---   returns whether statement always returns from its function (always false for repeat/until)
+--   returns whether the statement cannot fall through
 local checkstat_visitor = util.make_visitor({
     ["Ast.StatDecl"] = function(node, st, errors)
         -- The parser reserves an empty RHS for the one-declaration automatic
@@ -4396,33 +4420,54 @@ local checkstat_visitor = util.make_visitor({
 
     ["Ast.StatWhile"] = function(node, st, errors)
         checkexp(node.condition, st, errors, types.Boolean())
+        local frame = { has_break = false }
         loop_depth = loop_depth + 1
+        table.insert(loop_frames, frame)
         st:with_block(checkstat, node.block, st, errors)
+        table.remove(loop_frames)
         loop_depth = loop_depth - 1
+
+        -- A literal-true while cannot fall through unless a reachable break
+        -- targets it. Errors still compose soundly: a surrounding StatTry
+        -- requires its catch to be non-fallthrough too.
+        return node.condition._tag == "Ast.ExpBool"
+            and node.condition.value == true
+            and not frame.has_break
     end,
 
     ["Ast.StatRepeat"] = function(node, st, errors)
         loop_depth = loop_depth + 1
+        table.insert(loop_frames, { has_break = false })
         st:with_block(checkrepeat, node, st, errors)
+        table.remove(loop_frames)
         loop_depth = loop_depth - 1
+        return false
     end,
 
     ["Ast.StatFor"] = function(node, st, errors)
+        local frame = { has_break = false }
         loop_depth = loop_depth + 1
+        table.insert(loop_frames, frame)
         st:with_block(checkfor, node, st, errors)
+        table.remove(loop_frames)
         loop_depth = loop_depth - 1
     end,
 
     ["Ast.StatForIn"] = function(node, st, errors)
+        local frame = { has_break = false }
         loop_depth = loop_depth + 1
+        table.insert(loop_frames, frame)
         st:with_block(checkforin, node, st, errors)
+        table.remove(loop_frames)
         loop_depth = loop_depth - 1
     end,
 
     ["Ast.StatBreak"] = function(node, _, errors)
+        local valid = true
         if loop_depth == 0 then
             checker.typeerror(errors, node.loc,
                 "'break' outside a loop")
+            valid = false
         elseif in_finally > 0 and loop_depth <= finally_loop_floor then
             -- Inside a finally with no loop opened *inside* it: the target loop
             -- encloses the finally, so this `break` would escape it (forbidden).
@@ -4430,6 +4475,13 @@ local checkstat_visitor = util.make_visitor({
             -- the floor) is contained and legal.
             checker.typeerror(errors, node.loc,
                 "'break' cannot escape a finally block")
+            valid = false
+        end
+        if valid then
+            local frame = loop_frames[#loop_frames]
+            if frame then
+                frame.has_break = true
+            end
         end
         return false
     end,
@@ -4524,10 +4576,11 @@ local checkstat_visitor = util.make_visitor({
             st.blocks[saved_block_index] = saved_body_block
         end
 
-        -- Always-returns (B.2): the construct returns on every path iff the
-        -- finally unconditionally returns, OR the body returns and (there is no
-        -- catch, or the catch also returns). `raise` counts as a terminator, so
-        -- a finally that unconditionally `raise`s satisfies `fret`.
+        -- Non-fallthrough (B.2): the construct cannot reach its successor iff
+        -- the finally cannot fall through, OR the body cannot fall through and
+        -- (there is no catch, or the catch also cannot fall through). `raise`
+        -- counts as a terminator, so an unconditional finally raise satisfies
+        -- `fret`.
         return (node.finallyblock and fret)
             or (bret and (not node.catchblock or cret))
     end,
@@ -4693,7 +4746,8 @@ local checkstat_visitor = util.make_visitor({
         end
 
         local seen_variants = {}
-        local all_return = true
+        local covered_variants = 0
+        local all_arms_return = true
         for _, arm in ipairs(node.arms) do
             st:open_block()
             local variant = union and union.variants[arm.name] or nil
@@ -4714,6 +4768,7 @@ local checkstat_visitor = util.make_visitor({
                         arm.name, location.format(previous.loc))
                 else
                     seen_variants[variant] = arm
+                    covered_variants = covered_variants + 1
                 end
                 arm._variant = variant
                 arm._variant_index = variant.index
@@ -4734,17 +4789,17 @@ local checkstat_visitor = util.make_visitor({
             end
 
             local arm_returns = checkstat(arm.block, st, errors)
-            if not arm_returns then all_return = false end
+            if not arm_returns then all_arms_return = false end
             st:close_block()
         end
 
+        local else_returns = false
         if node.elseblock then
-            local else_returns = checkstat(node.elseblock, st, errors)
-            if not else_returns then all_return = false end
-        else
-            all_return = false
+            else_returns = checkstat(node.elseblock, st, errors)
         end
-        return all_return
+        local variants_exhausted = union ~= nil
+            and covered_variants == union.nvariants
+        return all_arms_return and (variants_exhausted or else_returns)
     end,
 
     ["Ast.StatIf"] = function(node, st, errors)
@@ -4764,7 +4819,8 @@ local checkstat_visitor = util.make_visitor({
 
 -- Preserve the existing reachability result on every checked statement.
 -- Compound coders need the same fact even when checkblock short-circuits after
--- an earlier always-returning child.
+-- an earlier non-fallthrough child. `_always_returns` is the historical field
+-- name for this generalized fact.
 checkstat = function(node, st, errors)
     local ret = checkstat_visitor(node, st, errors)
     node._always_returns = ret and true or false
@@ -4786,9 +4842,16 @@ checkvar = util.make_visitor({
     ["Ast.VarName"] = function(node, st, errors, _)
         local decl = st:find_symbol(node.name)
         if not decl then
+            local alias = st:find_type_alias(node.name)
+            local namespace = alias and alias_namespace_type(
+                resolve_type_alias(alias, st, errors), st)
             local interface = st.interface_declarations
                 and st.interface_declarations[node.name]
-            if interface then
+            if namespace then
+                node._alias_namespace = true
+                node._alias_decl = alias
+                node._type = namespace
+            elseif interface then
                 node._type = invalid(errors, node.loc,
                     "interface '%s' is a type and has no runtime value",
                     node.name)
@@ -4872,11 +4935,22 @@ checkvar = util.make_visitor({
                 node._type = node._decl.type
                 node._ctype_namespace = true
             elseif ltype._tag == "Type.Module" and mod.type_members
-                   and mod.type_members[node.name]
-                   and mod.type_members[node.name]._tag == "Type.Interface" then
-                node._type = invalid(errors, node.loc,
-                    "interface '%s' is a type and has no runtime value",
-                    node.name)
+                   and mod.type_members[node.name] then
+                local member = mod.type_members[node.name]
+                local namespace = alias_namespace_type(member, st)
+                if namespace then
+                    node._alias_namespace = true
+                    node._alias_type = member
+                    node._type = namespace
+                elseif member._tag == "Type.Interface" then
+                    node._type = invalid(errors, node.loc,
+                        "interface '%s' is a type and has no runtime value",
+                        node.name)
+                else
+                    node._type = invalid(errors, node.loc,
+                        "member '%s' not found inside module '%s'",
+                        node.name, mod.name)
+                end
             elseif not mod.members[node.name] then
                 node._type = invalid(errors, node.loc,
                     "member '%s' not found inside module '%s'",
@@ -4904,6 +4978,9 @@ checkvar = util.make_visitor({
                     -- stable decoration once checking has resolved the static.
                     local namespace = node.exp._tag == "Ast.ExpVar"
                         and node.exp.var or nil
+                    if namespace and namespace._alias_namespace then
+                        node._alias_namespace = true
+                    end
                     local import_var = namespace
                         and namespace._tag == "Ast.VarDot"
                         and namespace.exp
@@ -7004,13 +7081,14 @@ checkexp = util.make_visitor({
 -- Shared body-check for top-level functions, methods, and lambdas. Pushes a
 -- function frame (so captures of enclosing locals are detected), declares the
 -- parameters (stamping their nesting depth at this function's own depth), checks
--- the body, and enforces the all-paths-return rule. The caller is responsible
+-- the body, and enforces the cannot-fall-off-the-end rule. The caller is
+-- responsible
 -- for having an open block and (for methods) declaring `self` before calling.
 --   node: a node carrying `_type` (Function), `params`, `block`, and (for the
 --         duplicate-parameter message) `name`. For lambdas, `node.rettypes` may
 --         be `false`/a list; `node._type.rettypes` is authoritative here.
 --   opts (optional): { self_decl = Decl }. Returns (ret, frame): `ret` is
---         whether the body always returns; `frame` carries `captures`.
+--         whether the body cannot fall through; `frame` carries `captures`.
 local function annotate_lua_function_boundary(node)
     local targets = {}
     if node._type._tag == "Type.Method" then
@@ -7151,15 +7229,18 @@ function checkfuncbody(node, st, errors, opts)
     -- around the body, restoring on the way out so the enclosing context is
     -- unaffected. (`loop_depth` predates this; `break` already cannot target a
     -- loop across a function boundary, so it is reset here too for consistency.)
-    local saved_catch, saved_in_finally, saved_floor, saved_loop =
-        catch_depth, in_finally, finally_loop_floor, loop_depth
+    local saved_catch, saved_in_finally, saved_floor, saved_loop,
+          saved_loop_frames =
+        catch_depth, in_finally, finally_loop_floor, loop_depth, loop_frames
     catch_depth, in_finally, finally_loop_floor, loop_depth = 0, 0, 0, 0
+    loop_frames = {}
     local ret = st:with_block(checkstat, node.block, st, errors)
     catch_depth, in_finally, finally_loop_floor, loop_depth =
         saved_catch, saved_in_finally, saved_floor, saved_loop
+    loop_frames = saved_loop_frames
     -- A zero-return `() -> ()` function (empty rettypes) may fall off the end,
     -- exactly like a `nil`-returning one; only a function whose first declared
-    -- return type is some non-`nil` value must return on every path.
+    -- return type is some non-`nil` value must not fall off the end.
     local firstret = node._type.rettypes[1]
     if not ret and firstret and firstret._tag ~= "Type.Nil" then
         checker.typeerror(errors, node.loc,
@@ -8383,6 +8464,21 @@ function checker.register_module_interface(
     if interface_seen[interface_key] then return end
     interface_seen[interface_key] = true
 
+    -- Type-only re-exports do not copy a nominal's static closures into the
+    -- facade module. Stamp the canonical descriptors with their deterministic
+    -- owner-userdata prefix slots while the complete owner interface is in
+    -- hand, so first-class static references through direct or chained aliases
+    -- can recover the closure from that owner after initialization.
+    for slot, entry in ipairs(
+            types.public_module_prefix_layout(type_or_error)) do
+        local index = slot - 1
+        if entry.kind == "variable" then
+            entry.value._upvalue = index
+        else
+            entry.value._closure_upvalue = index
+        end
+    end
+
     -- Interfaces are type-only module entries. Register every direct
     -- descriptor before traversing any signature so mutually referring
     -- Interfaces have their complete nominal environment available.
@@ -8574,6 +8670,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
     in_finally = 0
     finally_loop_floor = 0
     loop_depth = 0
+    loop_frames = {}
     local st = symtab.new(modname)
     local previous_check_state = active_check_state
     active_check_state = st

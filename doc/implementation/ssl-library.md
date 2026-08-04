@@ -169,9 +169,9 @@ nominal direction consume input and produce output.
 
 A raised OpenSSL, network, or cancellation value moves the connection to the
 failed state, frees its SSL/BIO engine, and best-effort closes the net
-transport. Cancellation is sticky in the async runtime, so that cleanup close
-may itself be cancelled; the original failure remains authoritative and the
-net Runtime still owns eventual native-handle cleanup.
+transport. The close call is cancellation-insensitive, so pending Task
+cancellation does not suppress that cleanup; if close itself reports a
+transport error, the original TLS failure remains authoritative.
 
 On transport EOF, the input memory BIO changes from retry semantics to a real
 zero return. OpenSSL `SSL_ERROR_ZERO_RETURN` records authenticated peer

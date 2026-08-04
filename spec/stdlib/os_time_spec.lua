@@ -97,7 +97,7 @@ function find(subject: string, needle: string,
   return nil, nil
 end
 
-function writer(_yielding: boolean?): StringWriter
+function writer(): StringWriter
   return StringWriter.new("")
 end
 

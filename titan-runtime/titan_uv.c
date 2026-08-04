@@ -69,11 +69,6 @@ static void titan_uvshim_callback_context_release(
   lua_settop(context->L, context->stack_top);
 }
 
-void titan_uvshim_buf_init_const(uv_buf_t *buf, const char *base, size_t len) {
-  buf->base = (char *)base;
-  buf->len = len;
-}
-
 void titan_uvshim_signal_cb(uv_signal_t *signal, int signum) {
   Udata *owner = (Udata *)uv_handle_get_data((uv_handle_t *)signal);
   titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
@@ -216,11 +211,10 @@ void titan_uvshim_walk_cb(uv_handle_t *handle, void *arg) {
 
 void titan_uvshim_fs_cb(uv_fs_t *req) {
   Udata *owner = (Udata *)uv_req_get_data((uv_req_t *)req);
-  lua_Integer result = (lua_Integer)uv_fs_get_result(req);
   titan_uvshim_callback_context context = titan_uvshim_callback_context_for(
       req->loop, owner, TITAN_UV_PRIMARY_CALLBACK_C_INDEX);
-  titan_uv_integer_callback_func callback = titan_cast_func(
-      titan_uv_integer_callback_func, context.entry);
-  callback(context.L, context.module, context.closure, owner, result);
+  titan_uv_noarg_callback_func callback = titan_cast_func(
+      titan_uv_noarg_callback_func, context.entry);
+  callback(context.L, context.module, context.closure, owner);
   titan_uvshim_callback_context_release(&context);
 }

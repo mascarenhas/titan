@@ -20,14 +20,15 @@ local active_runtime: Runtime? = nil
 local program_args_ready = false
 
 record Error
+  error: value
+  traceback: string
+end
+
+record OperationError
   code: integer
   name: string
   message: string
   operation: string
-end
-
-record Cancelled
-  reason: value
 end
 
 local function bootstrap(main_callable: ({string}) -> integer,
@@ -40,7 +41,8 @@ local function bootstrap(main_callable: ({string}) -> integer,
   _loop()
   local exit_code? = task.runtime.exit_code
   if exit_code then return exit_code as integer end
-  if task.state == TASK_SUCCEEDED then return result end
+  local succeeded = task:status():has_succeeded()
+  if succeeded then return result end
   -- An uncaught Task error has already been reported with its traceback. The
   -- standalone bootstrap still needs a conventional unsuccessful exit code.
   return 1

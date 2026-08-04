@@ -12,8 +12,7 @@ local function check(condition: boolean, message: string)
 end
 
 local function active(task: async.Task): boolean
-  local status = task:status()
-  return status == "ready" or status == "running" or status == "waiting"
+  return not task:status():has_finished()
 end
 
 function result(): string
@@ -30,7 +29,7 @@ function start_turns(): async.Task
     do
       timer.sleep(-1)
     catch
-      local failure = error as async.Error
+      local failure = error as async.OperationError
       check(failure.operation == "timer.sleep",
             "negative sleep reported the wrong operation")
       rejected = true
@@ -75,8 +74,8 @@ function start_pending_close(): async.Task
       return nil
     end)
 
-    while waiter:status() == "ready" do timer.yield() end
-    check(waiter:status() == "waiting",
+    while waiter:status():as_string() == "ready" do timer.yield() end
+    check(waiter:status():as_string() == "waiting",
           "Ticker waiter did not suspend")
     local competing_waiter_rejected = false
     do
@@ -88,7 +87,7 @@ function start_pending_close(): async.Task
           "Ticker accepted a second waiting Task")
     ticker:close()
     while active(waiter) do timer.yield() end
-    check(waiter:status() == "succeeded",
+    check(waiter:status():as_string() == "succeeded",
           "closing Ticker failed its waiter")
     check(not ticked, "closing Ticker resumed its waiter with true")
 
@@ -124,7 +123,7 @@ local async = require "titan.async"
 local cases = require "timer_cases"
 local task = assert(cases.%s())
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(cases.result() == %q, cases.result())
 ]==]):format(function_name, expected)
         local ok, status, output =

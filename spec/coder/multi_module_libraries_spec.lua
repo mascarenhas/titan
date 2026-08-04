@@ -1480,7 +1480,8 @@ local owner = import "base.owner"
 type Box = owner.Box
 
 function get(): integer
-    return owner.make(40).n
+    local make: (integer) -> Box = Box.new
+    return make(40).n
 end
 ]])
         local ok, output, why, code = compile(
@@ -1492,6 +1493,7 @@ end
 
         write_file(source_b .. "/bundle/api.titan", [[
 local facade = import "base.facade"
+type Box = facade.Box
 
 function get(): integer
     return facade.get() + 2
@@ -1521,7 +1523,8 @@ end
 local api = import "bundle.api"
 
 function main(args: {string}): integer
-    if api.get() == 42 then
+    local make: (integer) -> api.Box = api.Box.new
+    if api.get() == 42 and make(42).n == 42 then
         return 0
     else
         return 1

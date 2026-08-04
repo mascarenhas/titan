@@ -51,7 +51,7 @@ record InputOutputStream
 end
 
 function print(...: value)
-  local builder = str.writer(false)
+  local builder = str.writer()
   local index = 1
   while index <= #... do
     local rendered = str.tostring(...[index])

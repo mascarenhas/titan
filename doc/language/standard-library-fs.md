@@ -240,7 +240,7 @@ change is temporary.
 
 ## Errors and current scope
 
-Libuv failures raise [`async.Error`](async-io.md#errors-and-cancellation).
+Libuv failures raise [`async.OperationError`](async-io.md#errors-and-cancellation).
 Its `operation` identifies the failing action (for example, `fs.open` or
 `fs.rename`). The library does not print errors.
 

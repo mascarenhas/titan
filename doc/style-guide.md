@@ -202,12 +202,11 @@ after a successful match.
 ## Reuse the standard string writer
 
 When a module already imports `string`, accumulate a result with
-`string.writer(false)` instead of defining a local chunk array plus a
+`string.writer()` instead of defining a local chunk array plus a
 `join_chunks` helper or repeatedly concatenating a growing result. The writer
-centralizes string-size checks and linear-time assembly. Passing false is
-appropriate when the producer is synchronous or already yields at its real I/O
-boundary. Use the default yielding mode when the string-backed writer is meant
-to imitate an asynchronous stream.
+centralizes string-size checks and linear-time assembly. It is always
+synchronous; use `async.reader_writer_channel` when the communication itself
+needs Task synchronization.
 
 The string module's own builder implementation and low-level modules that
 cannot import `string` because of the dependency graph are implementation
@@ -247,11 +246,19 @@ module is likewise application-level. The low-level `uv` module is runtime
 plumbing, not the general application API.
 
 `async.run` schedules a Task and returns before its function runs. Observe
-spawned Tasks through intentional shared state and `status`, or give them an
-intentional cancellation policy. An uncaught Task error is logged with its
-traceback and ends only that Task. Application code runs directly inside a
-libuv callback until it finishes or starts another asynchronous operation;
-use `async.yield()` when a CPU loop should explicitly cede a turn.
+spawned Tasks through their structured `status`, the bounded `any`/`race`/
+`all`/`join` combinators, or intentional shared state, and give unfinished
+Tasks an intentional cancellation policy. A combinator does not cancel its
+losers. An uncaught Task error is logged with its traceback and ends only that
+Task. `Task:cancel` keeps the first reason private while the status remains in
+its current live variant; terminal `cancelled(reason)` publishes it only after
+the continuation has received cancellation.
+
+Application code normally runs directly inside a libuv operation callback
+until it finishes or starts another asynchronous operation. A one-shot timer
+must close in `timer_cb` and resume its Task only from `close_cb`. Deferred close
+and repeating-ticker continuations may use such a Task-owned timer; use
+`async.yield()` when a CPU loop should explicitly cede a turn.
 
 Cancellation is often logical before it is physical. A callback owner and
 every GC value or native allocation it hands to libuv must remain rooted until
@@ -259,9 +266,19 @@ the terminal callback and cleanup complete, even when the waiting Task has
 been cancelled. Do not implement cancellation by dropping the last Titan
 reference or by allowing a Lua GC finalizer to race libuv. Keep one traced
 request record per one-shot callback, and keep only buffered/latest state plus
-one waiter on a multi-shot handle. The callback resumes its continuation,
-dispatches the next yielded operation, and returns; no callback or Task may
-re-enter `uv_run`.
+one waiter on a multi-shot handle. The callback delivers its continuation
+directly or through its documented Task-owned one-shot timer, dispatches the
+next yielded operation, and returns; no callback or Task may re-enter `uv_run`.
+
+Use Task terminal listeners for bounded Task composition. Inspect initial
+statuses first, register a distinct listener directly on each still-relevant
+named Task, defer removal of every registration, then call `async.suspend()`
+once. A deciding listener calls `Task:resume()`, which synchronously installs a
+coalesced target-owned zero timer and never resumes the target inline. That
+timer starts close from `timer_cb` and resumes only from `close_cb`; external
+cancellation of the suspended Task uses the same wake. Do not collect
+heterogeneously typed combinator operands into a Task Array or add a native
+polling/phase-fence protocol or scheduler join protocol.
 
 Low-level contributors must classify a new libuv binding as synchronous,
 one-shot, or persistent multi-shot before adding state. Follow

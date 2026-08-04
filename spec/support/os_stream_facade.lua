@@ -26,7 +26,6 @@ end
 -- process fixture keeps its native build graph to coroutine/uv/async plus the
 -- two facades under test.
 local STRING_SUPPORT = [====[
-local async = import "async"
 local lua = foreign import "lua.h"
 local lual = foreign import "lauxlib.h"
 local ffi = foreign import "titan/ffi.h"
@@ -34,17 +33,13 @@ local cstring = foreign import "string.h"
 
 record StringWriter
   local contents: string
-  local yielding: boolean
 end
 
-function writer(yielding: boolean?): StringWriter
-  local actual_yielding = true
-  if yielding ~= nil then actual_yielding = yielding end
-  return StringWriter.new("", actual_yielding)
+function writer(): StringWriter
+  return StringWriter.new("")
 end
 
 function StringWriter:write(data: string)
-  if self.yielding then async.yield() end
   self.contents = self.contents .. data
 end
 
@@ -134,7 +129,6 @@ end
 function M.prepare(workspace, include_io)
     local layout = async_stdlib.exact_layout(workspace)
     async_stdlib.refresh_private_runtime(workspace)
-    async_stdlib.prepare_async_core(workspace, layout)
 
     async_stdlib.write_source(workspace, "titan.string", STRING_SUPPORT)
     async_stdlib.compile(workspace, "titan.string", {
@@ -142,6 +136,7 @@ function M.prepare(workspace, include_io)
         cppflags = "",
     })
     async_stdlib.register_exact_provider(layout, "titan.string")
+    async_stdlib.prepare_async_core(workspace, layout)
 
     async_stdlib.write_source(
         workspace, "titan.os", async_stdlib.read("titan/os.titan"))

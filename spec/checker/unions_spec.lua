@@ -96,8 +96,6 @@ describe("unions (typechecker)", function()
                     return #read()
                 when quit then
                     return 0
-                else
-                    return -1
                 end
             end
         ]])
@@ -140,15 +138,17 @@ describe("unions (typechecker)", function()
         ]])
     end)
 
-    it("keeps case arms optional and requires else for always-return",
+    it("uses complete variant coverage or else for always-return",
     function()
-        assert_error("function can return nil but return type is not nil", [[
+        local ast = assert_check([[
             union Message
                 one
-                two
+                local two
             end
 
-            function incomplete(message: Message): integer
+            type MessageAlias = Message
+
+            function complete(message: Message): integer
                 case message
                 when one then
                     return 1
@@ -156,6 +156,63 @@ describe("unions (typechecker)", function()
                     return 2
                 end
             end
+
+            function complete_alias(message: MessageAlias): integer
+                case message
+                when one then
+                    return 1
+                when two then
+                    return 2
+                end
+            end
+
+            function complete_with_dead_else(message: Message): integer
+                case message
+                when one then
+                    return 1
+                when two then
+                    return 2
+                else
+                    local unreachable = 0
+                end
+            end
+
+            function fallback(message: Message): integer
+                case message
+                when one then
+                    return 1
+                else
+                    return 2
+                end
+            end
+        ]])
+
+        local complete = find_toplevel(
+            ast, "Ast.TopLevelFunc", "complete")
+        assert.truthy(complete.block.stats[1]._always_returns)
+        local complete_alias = find_toplevel(
+            ast, "Ast.TopLevelFunc", "complete_alias")
+        assert.truthy(complete_alias.block.stats[1]._always_returns)
+        local complete_with_dead_else = find_toplevel(
+            ast, "Ast.TopLevelFunc", "complete_with_dead_else")
+        assert.truthy(
+            complete_with_dead_else.block.stats[1]._always_returns)
+        local fallback = find_toplevel(
+            ast, "Ast.TopLevelFunc", "fallback")
+        assert.truthy(fallback.block.stats[1]._always_returns)
+
+        assert_error("function can return nil but return type is not nil", [[
+            union Message
+                one
+                two
+            end
+
+            function incomplete(message: Message): integer
+                case message
+                when one then
+                    return 1
+                end
+            end
         ]])
 
         assert_error("function can return nil but return type is not nil", [[
@@ -169,11 +226,29 @@ describe("unions (typechecker)", function()
                 when one then
                     return 1
                 when two then
-                else
-                    return 0
                 end
             end
         ]])
+    end)
+
+    it("does not count duplicate arms toward exhaustive coverage", function()
+        local err = assert_error("duplicate case arm for variant 'one'", [[
+            union Message
+                one
+                two
+            end
+
+            function duplicate_only(message: Message): integer
+                case message
+                when one then
+                    return 1
+                when one then
+                    return 2
+                end
+            end
+        ]])
+        assert.match(
+            "function can return nil but return type is not nil", err)
     end)
 
     it("diagnoses invalid arms without creating variant value types",
@@ -437,7 +512,30 @@ describe("unions (typechecker)", function()
     end)
 
     it("rehydrates public variants and hides local variants", function()
-        local ok, err, imported = run_checker_modules({
+        local ok, err = run_checker_modules({
+            provider = [[
+                union Message
+                    quit
+                    write: string
+                end
+            ]],
+            consumer = [[
+                local provider = import "provider"
+
+                function inspect(message: provider.Message): integer
+                    case message
+                    when quit then
+                        return 0
+                    when write: text then
+                        return #text
+                    end
+                end
+            ]],
+        }, "consumer")
+        assert.truthy(ok, err)
+
+        local imported
+        ok, err, imported = run_checker_modules({
             provider = [[
                 union Message
                     quit
@@ -475,6 +573,31 @@ describe("unions (typechecker)", function()
         assert.equal(2, union.variants.write.index)
         assert.is_nil(union.variants.secret)
         assert.is_nil(union.functions.secret)
+
+        ok, err = run_checker_modules({
+            provider = [[
+                union Message
+                    quit
+                    local secret: integer
+                    write: string
+                end
+            ]],
+            consumer = [[
+                local provider = import "provider"
+
+                function inspect(message: provider.Message): integer
+                    case message
+                    when quit then
+                        return 0
+                    when write: text then
+                        return #text
+                    end
+                end
+            ]],
+        }, "consumer")
+        assert.falsy(ok)
+        assert.match(
+            "function can return nil but return type is not nil", err)
 
         ok, err = run_checker_modules({
             provider = [[

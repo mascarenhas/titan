@@ -13,8 +13,7 @@ local function check(condition: boolean, message: string)
 end
 
 local function active(task: async.Task): boolean
-  local status = task:status()
-  return status == "ready" or status == "running" or status == "waiting"
+  return not task:status():has_finished()
 end
 
 local function expect_failure(func: () -> value, message: string)
@@ -37,8 +36,8 @@ local function listen_available(first_port: integer): (net.Server, integer)
       local server = net.listen("127.0.0.1", port)
       return server, port
     catch
-      if error is async.Error then
-        local failure = error as async.Error
+      if error is async.OperationError then
+        local failure = error as async.OperationError
         if failure.name == "EADDRINUSE" then
           port = port + 1
           if port > 60999 then port = 20000 end
@@ -103,7 +102,7 @@ function start_exchange(first_port: integer): async.Task
     end, "closed Connection accepted a write")
 
     while active(peer) do timer.yield() end
-    check(peer:status() == "succeeded", "TCP peer Task failed")
+    check(peer:status():as_string() == "succeeded", "TCP peer Task failed")
     local closer: stream.Closer = server
     closer:close()
     closer:close()
@@ -154,15 +153,15 @@ function start_validation(first_port: integer): async.Task
       do
         server:accept()
       catch
-        local failure = error as async.Error
+        local failure = error as async.OperationError
         check(failure.operation == "net.accept",
               "closed accept reported the wrong operation")
         accept_failed = true
       end
       return nil
     end)
-    while waiter:status() == "ready" do timer.yield() end
-    check(waiter:status() == "waiting",
+    while waiter:status():as_string() == "ready" do timer.yield() end
+    check(waiter:status():as_string() == "waiting",
           "accept Task did not reach its callback wait")
     local competing_accept_rejected = false
     do
@@ -175,7 +174,7 @@ function start_validation(first_port: integer): async.Task
     server:close()
     server:close()
     while active(waiter) do timer.yield() end
-    check(waiter:status() == "succeeded" and accept_failed,
+    check(waiter:status():as_string() == "succeeded" and accept_failed,
           "Server close did not fail its accept continuation")
 
     -- Connecting first lets the listener callback retain one accepted client
@@ -230,7 +229,7 @@ local async = require "titan.async"
 local cases = require "net_cases"
 local task = assert(cases.%s(%d))
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(cases.result() == %q, cases.result())
 ]==]):format(function_name, first_port, expected)
         local ok, status, output =

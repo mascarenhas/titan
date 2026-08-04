@@ -80,10 +80,12 @@ function Response:close()
 record Server
 
 function listen(host: string, handler: Handler,
-                port: integer?, backlog: integer?): Server
+                port: integer?, backlog: integer?,
+                idle_timeout: integer?): Server
 function listen_tls(host: string, certificate_file: string, handler: Handler,
                     private_key_file: string?, port: integer?,
-                    backlog: integer?): Server
+                    backlog: integer?, idle_timeout: integer?): Server
+function Server:idle_timeout(timeout: integer?): integer
 function Server:serve()
 function Server:close()
 ```
@@ -92,10 +94,13 @@ function Server:close()
 and `Response` satisfies both `io.Writer` and `io.Closer` through their exact
 method shapes. The optional trailing arguments may be omitted. Plain `listen`
 defaults to port 80, `listen_tls` defaults to port 443, and both default to a
-backlog of 128. A supplied port must be in `0..65535`, where 0 requests an
-ephemeral port, and a supplied backlog must be in `1..2147483647`. When
-`private_key_file` is omitted, TLS reads the private key from the same PEM
-bundle named by `certificate_file`; a separate key path remains supported.
+backlog of 128. The server idle timeout defaults to 0, meaning no deadline. A
+supplied port must be in `0..65535`, where 0 requests an ephemeral port, and a
+supplied backlog must be in `1..2147483647`. A supplied idle timeout is in
+milliseconds and must be non-negative. It is validated before opening a
+listener or reading TLS PEM input. When `private_key_file` is omitted, TLS
+reads the private key from the same PEM bundle named by `certificate_file`; a
+separate key path remains supported.
 
 ## Headers
 
@@ -175,10 +180,10 @@ caller discard the remaining response and is idempotent. The client has no
 connection pool and never reuses its connection.
 
 The response becomes logically closed before its transport close can suspend.
-If Task cancellation prevents that call from recording completion, later
-reads still return EOF and a later `close()` retries the idempotent transport
-cleanup. Only a close call that returns records completion and makes every
-later call a no-op.
+Transport close is cancellation-insensitive: if Task cancellation is pending
+or arrives while it is suspended, cleanup completes and `close()` records
+completion before terminal cancellation is published. Every later `close()`
+is an immediate no-op.
 
 Redirect status codes are returned unchanged; the client never follows them.
 Content codings such as gzip are likewise returned unchanged. The caller owns
@@ -196,10 +201,35 @@ it; requests on the same persistent connection remain serial and ordered.
 not maintain a registry of already accepted connection Tasks, so those
 connections finish or fail according to their own HTTP/transport lifecycle.
 The Server becomes logically closed before the wrapped listener close can
-suspend. If cancellation prevents that call from recording completion,
-another `close()` retries the idempotent listener operation and releases a
-blocked `serve()` call. Only a close call that returns makes later calls
-immediate no-ops.
+suspend. Listener close is cancellation-insensitive: cleanup completes and
+releases a blocked `serve()` call before terminal cancellation is published.
+Every later `close()` is an immediate no-op.
+
+`Server:idle_timeout(timeout)` changes the deadline used to acquire the next
+request line and headers. A nonnil value is validated, installed, and the
+previous value is returned. Nil only reads the current value (which is also
+the returned previous value). Zero waits indefinitely. A positive value is an
+absolute millisecond deadline measured from the start of each request-loop
+iteration; partial header bytes do not reset it. A setter call affects the
+next request on an existing keep-alive connection, not a read already in
+progress. Expiration closes that accepted connection without invoking the
+handler or reporting an uncaught timeout error; the listener and other
+connections remain active.
+
+When headers arrive first, the server cancels the timer-only deadline Task and
+continues while that cancellation finishes in the background. When the
+deadline arrives first, it cancels and joins the reader Task before releasing
+the parser and connection state owned by that read. This asymmetry keeps the
+ordinary success path moving without letting timeout cleanup race the
+connection teardown.
+
+For HTTPS, the timeout cancels the in-flight high-level SSL read. The SSL
+connection's documented cancellation rule terminalizes its TLS engine, so the
+peer observes `ssl.Error` with name `TLS_TRUNCATED_EOF`, not authenticated
+`close_notify` EOF. There is currently no high-level SSL operation that can
+interrupt a busy read and then perform graceful TLS shutdown; adding that
+capability is an SSL-composition gap, not a reason for HTTP to reach into
+`uv`.
 
 The handler is called as soon as the request line and headers are complete,
 without waiting for the HTTP parser to consume the complete body.
@@ -261,13 +291,13 @@ normal disconnect. EOF after any byte of a next request is a parse error,
 including after only empty request lines or a dangling CR. Empty request lines
 remain accepted when an actual request follows them.
 
-The server supports ordered HTTP/1.1 request pipelining: a peer may send later
-requests before reading the current response. Each connection dispatches
-handlers strictly one at a time; the current handler returns, its response is
-finished, and any unread request body is drained before the next handler runs.
-Bytes already read beyond the current message are retained for that next
-iteration. Responses remain in request order and never interleave; there is no
-concurrent per-connection handler scheduler.
+The server promises serial HTTP/1.1 keep-alive processing, not a concurrent
+pipelining facility. Each connection dispatches one handler at a time; the
+current handler returns, its response is finished, and any unread request body
+is drained before the next request is acquired. Bytes a transport read already
+obtained beyond the current message are retained for that next serial
+iteration so input is not lost. There is no per-connection request queue or
+concurrent handler scheduler.
 
 If a handler raises or parsing/framing fails, that connection Task terminates
 and its connection closes. Other accepted connection Tasks and the listening
@@ -293,15 +323,12 @@ API. Body data remains streaming, so the handler can impose its own accepted
 body size while reading. Deployments that require an earlier header cap must
 enforce it outside this Server abstraction.
 
-Persistent connections have no library-owned idle timeout. Titan's current
-public async facade can create/cancel Tasks and wait on timers, but it has no
-current-Task accessor, join, race, or deadline primitive. Implementing a safe
-timeout entirely in `titan.http` would therefore require a connection-local
-watchdog plus generation fencing rather than simple high-level composition.
-This is a known API blocker, not a reason for HTTP to reach into or modify the
-private `titan.uv` substrate. Applications that require an idle deadline must
-currently enforce it outside this Server abstraction or close connections by
-another policy.
+The server timeout covers only request-line and header acquisition. It does
+not cover handler work, request-body reads, automatic body drain, or response
+writes. Applications can compose their own Task/timer policy around those
+operations with the public `async` combinators. A body timeout must also
+unwind the handler; merely closing the listener does not stop an accepted
+connection or bypass the automatic drain performed after a handler returns.
 
 ## Example
 

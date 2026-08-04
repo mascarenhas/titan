@@ -75,7 +75,7 @@ end
 -- the Task and any pointed-to read or write data through completion.
 local record uv_fs_t
   local handle: owned *libuv.uv_fs_t
-  local callback: (uv_fs_t, integer) -> ()
+  local callback: (uv_fs_t) -> ()
 end
 
 local type FsResult = (Task, uv_fs_t, integer, value) -> value
@@ -124,7 +124,8 @@ local function new_fs_request(task: Task,
                               success: FsResult): uv_fs_t
   accepting_work(task.runtime, operation)
   local native = libuv.uv_fs_t.new()
-  local callback = function (owner: uv_fs_t, result: integer)
+  local callback = function (owner: uv_fs_t)
+    local result = libuv.uv_fs_get_result(owner.handle) as integer
     complete_fs(task, owner, result, operation, keepalive, success)
   end
   local owner = uv_fs_t.new(native, callback)
@@ -280,10 +281,9 @@ end
 
 local function FsWriteCall:dispatch(task: Task): Immediate?
   local descriptor: libuv.uv_buf_t
-  local bytes = self.data as const *ffi.titan_ffi_char
-  shim.titan_uvshim_buf_init_const(
-      descriptor, bytes + self.offset,
-      (#self.data - self.offset) as libuv.size_t)
+  local base: *ffi.titan_ffi_char = self.data
+  descriptor.base = base + self.offset
+  descriptor.len = (#self.data - self.offset) as libuv.size_t
   local owner = new_fs_request(
       task, "fs.write", self.data, write_result)
   local status = libuv.uv_fs_write {
@@ -403,9 +403,10 @@ end
 
 function _fs_write(file: uv_file, data: string): integer
   validate_file(file)
-  if #data == 0 then return 0 end
+  local length = #data
+  if length == 0 then return 0 end
   local offset = 0
-  while offset < #data do
+  while offset < length do
     local written = await(
         Call.fs_write(FsWriteCall.new(file, data, offset))) as integer
     offset = offset + written

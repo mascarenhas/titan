@@ -20,8 +20,7 @@ local function check(condition: boolean, message: string)
 end
 
 local function active(task: async.Task): boolean
-  local status = task:status()
-  return status == "ready" or status == "running" or status == "waiting"
+  return not task:status():has_finished()
 end
 
 local function listen_available(first_port: integer,
@@ -36,8 +35,8 @@ local function listen_available(first_port: integer,
       return ssl.listen("127.0.0.1", port,
                         certificate, private_key as string), port
     catch
-      if error is async.Error then
-        local failure = error as async.Error
+      if error is async.OperationError then
+        local failure = error as async.OperationError
         if failure.name == "EADDRINUSE" then
           port = port + 1
           if port > 60999 then port = 20000 end
@@ -100,7 +99,7 @@ function start_exchange(first_port: integer): async.Task
           "closed TLS connection did not stay at EOF")
 
     while active(peer) do timer.yield() end
-    check(peer:status() == "succeeded", "TLS peer Task failed")
+    check(peer:status():as_string() == "succeeded", "TLS peer Task failed")
     server:close()
     server:close()
     outcome = "exchange-ok"
@@ -130,7 +129,7 @@ function start_lazy_accept(first_port: integer): async.Task
     first:close()
     stalled:close()
     while active(second_peer) do timer.yield() end
-    check(second_peer:status() == "succeeded",
+    check(second_peer:status():as_string() == "succeeded",
           "second accepted TLS connection failed")
     server:close()
     outcome = "lazy-ok"
@@ -166,7 +165,7 @@ function start_verification_failure(first_port: integer): async.Task
     end
     check(failed, "wrong DNS identity was accepted")
     while active(peer) do timer.yield() end
-    check(peer:status() == "succeeded" and peer_failed,
+    check(peer:status():as_string() == "succeeded" and peer_failed,
           "server did not retire the rejected TLS handshake")
     server:close()
     outcome = "verify-ok"
@@ -195,13 +194,14 @@ function start_truncated_eof(first_port: integer): async.Task
     end)
     local client = ssl.connect("127.0.0.1", port, TRUST_ROOT)
     while not handshake_done do timer.yield() end
-    peer:cancel("intentional abrupt TLS peer")
+    peer:cancel(async.CancellationReason.simple(
+      "intentional abrupt TLS peer"))
     -- TCP read cancellation is physical only when its own callback arrives.
     -- One application record supplies that callback without changing the TLS
     -- truncation boundary being tested.
     client:write("wake-cancelled-peer")
     while active(peer) do timer.yield() end
-    check(peer:status() == "cancelled",
+    check(peer:status():as_string() == "cancelled",
           "abrupt TLS peer did not finish through cancellation")
     if accepted == nil then raise "TLS server never accepted the client" end
     local server_connection = accepted as ssl.Connection
@@ -236,9 +236,9 @@ function start_loading_failures(first_port: integer): async.Task
     do
       ssl.connect("127.0.0.1", first_port, missing)
     catch
-      check(error is async.Error,
+      check(error is async.OperationError,
             "missing CA path raised a non-filesystem error")
-      local failure = error as async.Error
+      local failure = error as async.OperationError
       check(failure.name == "ENOENT" and failure.operation == "fs.open",
             "missing CA path did not fail through fs.open")
       missing_ca = true
@@ -249,9 +249,9 @@ function start_loading_failures(first_port: integer): async.Task
     do
       ssl.listen("127.0.0.1", first_port, missing, PRIVATE_KEY)
     catch
-      check(error is async.Error,
+      check(error is async.OperationError,
             "missing certificate path raised a non-filesystem error")
-      local failure = error as async.Error
+      local failure = error as async.OperationError
       check(failure.name == "ENOENT" and failure.operation == "fs.open",
             "missing certificate path did not fail through fs.open")
       missing_certificate = true
@@ -262,9 +262,9 @@ function start_loading_failures(first_port: integer): async.Task
     do
       ssl.listen("127.0.0.1", first_port, CERTIFICATE, missing)
     catch
-      check(error is async.Error,
+      check(error is async.OperationError,
             "missing private-key path raised a non-filesystem error")
-      local failure = error as async.Error
+      local failure = error as async.OperationError
       check(failure.name == "ENOENT" and failure.operation == "fs.open",
             "missing private-key path did not fail through fs.open")
       missing_key = true
@@ -391,7 +391,7 @@ local async = require "titan.async"
 local cases = require "ssl_cases"
 local task = assert(cases.%s(%d))
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(cases.result() == %q, cases.result())
 ]==]):format(function_name, first_port, expected)
         local ok, status, output =

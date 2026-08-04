@@ -308,10 +308,12 @@ statically checked and compile to direct stores, with no run-time type
 check. Exported record and union declarations serve two roles: their types are
 referenced as `alias.Name` in annotations, and their run-time nominal
 functions as `alias.Name.new(...)`, `alias.Name.make(...)`, or a union variant
-constructor. An exported type alias is only
-the first of these: `alias.Name` is valid as a type but creates no run-time
-nominal-function namespace. Construct a re-exported nominal value through the
-module that owns its declaration.
+constructor. An exported type alias to a record or union preserves both roles:
+`alias.Name` is valid as a type, and Titan resolves
+`alias.Name.new(...)`, public record/union functions, and public union variant
+constructors directly to the original nominal owner. This does not add a
+run-time member or a second namespace to the re-exporting module, and it does
+not make any local constructor or function public.
 
 An exported Interface is type-only. Importers may write `alias.Name` in a type
 position and may convert visible satisfying records or unions to it, but

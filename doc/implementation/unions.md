@@ -12,8 +12,8 @@ cross-cutting invariants are:
 * every variant has an absolute, zero-based declaration-order tag;
 * empty values have only a tag user value, payload values have one additional
   user value;
-* `case` is non-exhaustive and has the same always-returns rule as
-  `if`/`elseif`/`else`;
+* `case` coverage is optional, while complete coverage of the closed static
+  union can prove non-fallthrough without an `else`;
 * arms and `else` are ordinary full blocks, so existing
   `catch`/`finally`/`defer` machinery applies unchanged; and
 * imported first-class nominal statics require the ABI-visible public module
@@ -211,12 +211,18 @@ inside the protected body retain the error-handling rule that keeps them out
 of those sibling clauses.
 
 `checkstat` records its boolean result on every statement as
-`node._always_returns`. A case returns true only when it has an explicit
-`else` and every arm and the else block returns true. This deliberately does
-not infer exhaustiveness from the current variant set. It is the same rule as
-`Ast.StatIf`; the coder consumes the same decoration for direct terminators
-and compound `StatBlock`, `StatIf`, `StatTry`, and `StatCase` nodes rather than
-re-deriving reachability from their immediate tags.
+`node._always_returns`. The case checker counts unique valid visible arms and
+compares them with `Type.Union.nvariants`, which is the total declaration count
+and includes variants hidden from an imported interface. A case returns true
+when every arm returns true and either the count covers that closed set or the
+optional `else` returns true. Complete coverage makes a redundant `else`
+unreachable, so its fallthrough does not defeat the result; the block is still
+checked. Conversely, an importer cannot name hidden variants and therefore
+needs a non-fallthrough `else` to establish the same fact. This proof does not
+require case coverage or diagnose omitted variants. The coder consumes the
+shared decoration for direct terminators and compound `StatBlock`, `StatIf`,
+`StatTry`, and `StatCase` nodes rather than re-deriving reachability from their
+immediate tags.
 
 The case checker annotates:
 

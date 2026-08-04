@@ -503,10 +503,11 @@ unchanged.
 Statement-list generation stops after `break` or the first statement whose
 checker decoration has `_always_returns = true`. The coder therefore consumes
 one shared reachability result for direct `return`/`raise` and for compound
-blocks, `if`, `try`, and `case`; it does not try to rediscover termination from
-only the immediate AST tag. This boundary is necessary because the checker
-does not visit a dead tail after an always-returning compound, so those nodes
-have no type/declaration decorations to generate safely.
+blocks, `if`, `try`, `case`, and a proven non-fallthrough literal-true `while`;
+it does not try to rediscover termination from only the immediate AST tag. This
+boundary is necessary because the checker does not visit a dead tail after a
+non-fallthrough statement, so those nodes have no type/declaration decorations
+to generate safely.
 
 ## Strings
 

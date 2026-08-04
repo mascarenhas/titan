@@ -100,9 +100,9 @@ Connection available to another Task.
 
 Writes are ordered per Connection by libuv itself. Titan submits one
 `uv_write_t` per call instead of maintaining another queue. `write` returns
-only after that request's callback, and the complete binary input remains
-rooted until then. An empty write still checks that the Connection and its
-write side are usable.
+only after that request's callback and retains the original immutable input
+while libuv borrows its complete binary payload. An empty write still checks
+that the Connection and its write side are usable.
 
 `shutdown` uses libuv's `uv_shutdown`, which completes after earlier writes,
 then leaves the read side open until EOF, error, or `close`. Repeated shutdown
@@ -117,9 +117,8 @@ native handle closes. Runtime shutdown likewise closes a Connection or Server
 left open by the application.
 
 Cancellation never releases an active write request or its bytes early. Its
-terminal callback performs native cleanup, and the Task receives the
-provider-owned cancellation record whose type-only facade name is
-`async.Cancelled`.
+terminal callback performs native cleanup, then the Task finishes with the
+`cancelled` status and its original `async.CancellationReason` value.
 
 ## Accepting
 
@@ -136,10 +135,12 @@ accept waiter with an error.
 ## Errors
 
 Immediate and asynchronous libuv failures raise the same provider-owned error
-record, re-exported under the type-only facade name `async.Error`. Its fields
-are `code: integer`, `name: string`, `message: string`, and
-`operation: string`; the alias is not a constructible `async.Error` runtime
-namespace.
+record, re-exported through the transparent facade alias
+`async.OperationError`. Its fields are `code: integer`, `name: string`,
+`message: string`, and `operation: string`. Like every alias to a record with a
+public constructor, its nominal namespace also exposes
+`async.OperationError.new`; ordinary callers normally receive these values
+from the operation that failed.
 
 DNS errors use libuv's `EAI_*` names. EOF is normal for both `read` and
 `read_until`; an unterminated final batch is returned before sticky EOF.
