@@ -640,11 +640,15 @@ avoid falling off the end on every control path; otherwise the compiler rejects
 it. A
 nil-returning function, a zero-return function, and a function with only a
 flexible tail may instead fall off the end; the last case produces an empty
-run. The analysis understands `if`/`elseif`/`else` chains and `case`
-statements where an explicit `else` exists and every arm is non-fallthrough.
-Merely listing all current variants is not exhaustive proof. A literal
-`while true` also counts as non-fallthrough when no reachable `break` targets
-that loop; a `break` in a
+run. The analysis understands `if`/`elseif`/`else` chains and `case` statements.
+A case is non-fallthrough when every `when` arm is non-fallthrough and either
+the arms cover every variant of the statically known closed union or an
+explicit `else` is non-fallthrough. A redundant `else` after complete coverage
+is unreachable and need not terminate. Imported hidden variants still count
+in the union total, so an importer cannot prove complete coverage merely by
+listing every visible arm. Coverage is never required: an unmatched case with
+no `else` simply continues. A literal `while true` also counts as
+non-fallthrough when no reachable `break` targets that loop; a `break` in a
 nested loop targets only the nested loop. An enclosing `catch` that can
 intercept an error from the loop must itself be non-fallthrough, because a
 falling-through catch creates a path past the protected loop. `while false`

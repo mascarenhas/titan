@@ -777,10 +777,24 @@ with `_type = node._type`, the surrounding context applies its usual
 Every `checkstat` handler returns whether control is guaranteed not to reach
 the following statement. `StatReturn` and `StatRaise` return `true`; `StatIf`
 returns `true` only if every then-block is non-fallthrough *and* an `else`
-exists and is non-fallthrough. `StatCase` uses exactly that rule: it requires
-an explicit `else` and every arm plus the else must be non-fallthrough; the
-checker does not infer exhaustiveness. `StatTry` uses its body/catch/finally
-rule from
+exists and is non-fallthrough. `StatCase` can additionally use the closed
+variant set of its statically resolved `Type.Union`. It checks every arm block,
+counts each unique valid visible variant, and compares that count with
+`union.nvariants`. Its result is:
+
+```text
+every arm is non-fallthrough
+and (covered variants == union.nvariants
+     or the else block is non-fallthrough)
+```
+
+`nvariants` retains the total declaration count in compiled interfaces even
+when local variants are omitted from the public variant map. An importer
+therefore cannot get a false complete-coverage proof by listing every visible
+variant. When the arms do cover the full closed set, an optional `else` is
+unreachable and its fallthrough does not change the result, although the
+checker still visits it. This is a control-flow proof, not an exhaustiveness
+requirement or diagnostic. `StatTry` uses its body/catch/finally rule from
 [Error handling](error-handling.md#checker-rules). The result is cached on
 every statement as `_always_returns`, which is the shared checker-to-coder
 reachability fact for direct terminators and compound `StatBlock`, `StatIf`,

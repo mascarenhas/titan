@@ -317,7 +317,6 @@ function any_two(first: Task, second: Task): AnyTwoResult
   when cancelled then
     first_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   local second_terminal = false
@@ -329,7 +328,6 @@ function any_two(first: Task, second: Task): AnyTwoResult
   when cancelled then
     second_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   if terminal_count == 2 then return AnyTwoResult.none() end
@@ -358,7 +356,6 @@ function any_two(first: Task, second: Task): AnyTwoResult
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer first:remove_terminal_listener(first_listener)
@@ -383,7 +380,6 @@ function any_two(first: Task, second: Task): AnyTwoResult
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer second:remove_terminal_listener(second_listener)
@@ -412,7 +408,6 @@ function any_three(first: Task, second: Task,
   when cancelled then
     first_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   local second_terminal = false
@@ -424,7 +419,6 @@ function any_three(first: Task, second: Task,
   when cancelled then
     second_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   local third_terminal = false
@@ -436,7 +430,6 @@ function any_three(first: Task, second: Task,
   when cancelled then
     third_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   if terminal_count == 3 then return AnyThreeResult.none() end
@@ -465,7 +458,6 @@ function any_three(first: Task, second: Task,
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer first:remove_terminal_listener(first_listener)
@@ -490,7 +482,6 @@ function any_three(first: Task, second: Task,
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer second:remove_terminal_listener(second_listener)
@@ -515,7 +506,6 @@ function any_three(first: Task, second: Task,
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer third:remove_terminal_listener(third_listener)
@@ -546,7 +536,6 @@ function any_four(first: Task, second: Task, third: Task,
   when cancelled then
     first_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   local second_terminal = false
@@ -558,7 +547,6 @@ function any_four(first: Task, second: Task, third: Task,
   when cancelled then
     second_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   local third_terminal = false
@@ -570,7 +558,6 @@ function any_four(first: Task, second: Task, third: Task,
   when cancelled then
     third_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   local fourth_terminal = false
@@ -582,7 +569,6 @@ function any_four(first: Task, second: Task, third: Task,
   when cancelled then
     fourth_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   if terminal_count == 4 then return AnyFourResult.none() end
@@ -611,7 +597,6 @@ function any_four(first: Task, second: Task, third: Task,
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer first:remove_terminal_listener(first_listener)
@@ -636,7 +621,6 @@ function any_four(first: Task, second: Task, third: Task,
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer second:remove_terminal_listener(second_listener)
@@ -661,7 +645,6 @@ function any_four(first: Task, second: Task, third: Task,
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer third:remove_terminal_listener(third_listener)
@@ -686,7 +669,6 @@ function any_four(first: Task, second: Task, third: Task,
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer fourth:remove_terminal_listener(fourth_listener)
@@ -719,7 +701,6 @@ function any_five(first: Task, second: Task, third: Task,
   when cancelled then
     first_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   local second_terminal = false
@@ -731,7 +712,6 @@ function any_five(first: Task, second: Task, third: Task,
   when cancelled then
     second_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   local third_terminal = false
@@ -743,7 +723,6 @@ function any_five(first: Task, second: Task, third: Task,
   when cancelled then
     third_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   local fourth_terminal = false
@@ -755,7 +734,6 @@ function any_five(first: Task, second: Task, third: Task,
   when cancelled then
     fourth_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   local fifth_terminal = false
@@ -767,7 +745,6 @@ function any_five(first: Task, second: Task, third: Task,
   when cancelled then
     fifth_terminal = true
     terminal_count = terminal_count + 1
-  else
   end
 
   if terminal_count == 5 then return AnyFiveResult.none() end
@@ -796,7 +773,6 @@ function any_five(first: Task, second: Task, third: Task,
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer first:remove_terminal_listener(first_listener)
@@ -821,7 +797,6 @@ function any_five(first: Task, second: Task, third: Task,
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer second:remove_terminal_listener(second_listener)
@@ -846,7 +821,6 @@ function any_five(first: Task, second: Task, third: Task,
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer third:remove_terminal_listener(third_listener)
@@ -871,7 +845,6 @@ function any_five(first: Task, second: Task, third: Task,
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer fourth:remove_terminal_listener(fourth_listener)
@@ -896,7 +869,6 @@ function any_five(first: Task, second: Task, third: Task,
         winner = -1
         waiting:resume()
       end
-    else
     end
   end
   defer fifth:remove_terminal_listener(fifth_listener)
@@ -1208,7 +1180,6 @@ function all_two(first: Task, second: Task): (value, value)
     completed = completed + 1
   when failed then raise AllTwoError.first(first_status)
   when cancelled then raise AllTwoError.first(first_status)
-  else
   end
 
   local second_succeeded = false
@@ -1221,7 +1192,6 @@ function all_two(first: Task, second: Task): (value, value)
     completed = completed + 1
   when failed then raise AllTwoError.second(second_status)
   when cancelled then raise AllTwoError.second(second_status)
-  else
   end
 
   if completed == 2 then return first_result, second_result end
@@ -1246,7 +1216,6 @@ function all_two(first: Task, second: Task): (value, value)
       rejected = 1
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer first:remove_terminal_listener(first_listener)
@@ -1267,7 +1236,6 @@ function all_two(first: Task, second: Task): (value, value)
       rejected = 2
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer second:remove_terminal_listener(second_listener)
@@ -1301,7 +1269,6 @@ function all_three(first: Task, second: Task,
     completed = completed + 1
   when failed then raise AllThreeError.first(first_status)
   when cancelled then raise AllThreeError.first(first_status)
-  else
   end
 
   local second_succeeded = false
@@ -1314,7 +1281,6 @@ function all_three(first: Task, second: Task,
     completed = completed + 1
   when failed then raise AllThreeError.second(second_status)
   when cancelled then raise AllThreeError.second(second_status)
-  else
   end
 
   local third_succeeded = false
@@ -1327,7 +1293,6 @@ function all_three(first: Task, second: Task,
     completed = completed + 1
   when failed then raise AllThreeError.third(third_status)
   when cancelled then raise AllThreeError.third(third_status)
-  else
   end
 
   if completed == 3 then
@@ -1354,7 +1319,6 @@ function all_three(first: Task, second: Task,
       rejected = 1
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer first:remove_terminal_listener(first_listener)
@@ -1375,7 +1339,6 @@ function all_three(first: Task, second: Task,
       rejected = 2
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer second:remove_terminal_listener(second_listener)
@@ -1396,7 +1359,6 @@ function all_three(first: Task, second: Task,
       rejected = 3
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer third:remove_terminal_listener(third_listener)
@@ -1434,7 +1396,6 @@ function all_four(first: Task, second: Task, third: Task,
     completed = completed + 1
   when failed then raise AllFourError.first(first_status)
   when cancelled then raise AllFourError.first(first_status)
-  else
   end
 
   local second_succeeded = false
@@ -1447,7 +1408,6 @@ function all_four(first: Task, second: Task, third: Task,
     completed = completed + 1
   when failed then raise AllFourError.second(second_status)
   when cancelled then raise AllFourError.second(second_status)
-  else
   end
 
   local third_succeeded = false
@@ -1460,7 +1420,6 @@ function all_four(first: Task, second: Task, third: Task,
     completed = completed + 1
   when failed then raise AllFourError.third(third_status)
   when cancelled then raise AllFourError.third(third_status)
-  else
   end
 
   local fourth_succeeded = false
@@ -1473,7 +1432,6 @@ function all_four(first: Task, second: Task, third: Task,
     completed = completed + 1
   when failed then raise AllFourError.fourth(fourth_status)
   when cancelled then raise AllFourError.fourth(fourth_status)
-  else
   end
 
   if completed == 4 then
@@ -1500,7 +1458,6 @@ function all_four(first: Task, second: Task, third: Task,
       rejected = 1
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer first:remove_terminal_listener(first_listener)
@@ -1521,7 +1478,6 @@ function all_four(first: Task, second: Task, third: Task,
       rejected = 2
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer second:remove_terminal_listener(second_listener)
@@ -1542,7 +1498,6 @@ function all_four(first: Task, second: Task, third: Task,
       rejected = 3
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer third:remove_terminal_listener(third_listener)
@@ -1563,7 +1518,6 @@ function all_four(first: Task, second: Task, third: Task,
       rejected = 4
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer fourth:remove_terminal_listener(fourth_listener)
@@ -1606,7 +1560,6 @@ function all_five(first: Task, second: Task, third: Task,
     completed = completed + 1
   when failed then raise AllFiveError.first(first_status)
   when cancelled then raise AllFiveError.first(first_status)
-  else
   end
 
   local second_succeeded = false
@@ -1619,7 +1572,6 @@ function all_five(first: Task, second: Task, third: Task,
     completed = completed + 1
   when failed then raise AllFiveError.second(second_status)
   when cancelled then raise AllFiveError.second(second_status)
-  else
   end
 
   local third_succeeded = false
@@ -1632,7 +1584,6 @@ function all_five(first: Task, second: Task, third: Task,
     completed = completed + 1
   when failed then raise AllFiveError.third(third_status)
   when cancelled then raise AllFiveError.third(third_status)
-  else
   end
 
   local fourth_succeeded = false
@@ -1645,7 +1596,6 @@ function all_five(first: Task, second: Task, third: Task,
     completed = completed + 1
   when failed then raise AllFiveError.fourth(fourth_status)
   when cancelled then raise AllFiveError.fourth(fourth_status)
-  else
   end
 
   local fifth_succeeded = false
@@ -1658,7 +1608,6 @@ function all_five(first: Task, second: Task, third: Task,
     completed = completed + 1
   when failed then raise AllFiveError.fifth(fifth_status)
   when cancelled then raise AllFiveError.fifth(fifth_status)
-  else
   end
 
   if completed == 5 then
@@ -1686,7 +1635,6 @@ function all_five(first: Task, second: Task, third: Task,
       rejected = 1
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer first:remove_terminal_listener(first_listener)
@@ -1707,7 +1655,6 @@ function all_five(first: Task, second: Task, third: Task,
       rejected = 2
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer second:remove_terminal_listener(second_listener)
@@ -1728,7 +1675,6 @@ function all_five(first: Task, second: Task, third: Task,
       rejected = 3
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer third:remove_terminal_listener(third_listener)
@@ -1749,7 +1695,6 @@ function all_five(first: Task, second: Task, third: Task,
       rejected = 4
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer fourth:remove_terminal_listener(fourth_listener)
@@ -1770,7 +1715,6 @@ function all_five(first: Task, second: Task, third: Task,
       rejected = 5
       rejection = status
       waiting:resume()
-    else
     end
   end
   defer fifth:remove_terminal_listener(fifth_listener)

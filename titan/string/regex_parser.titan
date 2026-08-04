@@ -132,8 +132,6 @@ local function RegexNode:position(): integer
     return position
   when word_end: position then
     return position
-  else
-    raise "internal regular-expression AST node is invalid"
   end
 end
 
@@ -192,8 +190,6 @@ local function regex_nullable(node: RegexNode): boolean
     return true
   when word_end then
     return true
-  else
-    raise "internal regular-expression AST node is invalid"
   end
 end
 

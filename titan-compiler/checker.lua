@@ -4746,7 +4746,8 @@ local checkstat_visitor = util.make_visitor({
         end
 
         local seen_variants = {}
-        local all_return = true
+        local covered_variants = 0
+        local all_arms_return = true
         for _, arm in ipairs(node.arms) do
             st:open_block()
             local variant = union and union.variants[arm.name] or nil
@@ -4767,6 +4768,7 @@ local checkstat_visitor = util.make_visitor({
                         arm.name, location.format(previous.loc))
                 else
                     seen_variants[variant] = arm
+                    covered_variants = covered_variants + 1
                 end
                 arm._variant = variant
                 arm._variant_index = variant.index
@@ -4787,17 +4789,17 @@ local checkstat_visitor = util.make_visitor({
             end
 
             local arm_returns = checkstat(arm.block, st, errors)
-            if not arm_returns then all_return = false end
+            if not arm_returns then all_arms_return = false end
             st:close_block()
         end
 
+        local else_returns = false
         if node.elseblock then
-            local else_returns = checkstat(node.elseblock, st, errors)
-            if not else_returns then all_return = false end
-        else
-            all_return = false
+            else_returns = checkstat(node.elseblock, st, errors)
         end
-        return all_return
+        local variants_exhausted = union ~= nil
+            and covered_variants == union.nvariants
+        return all_arms_return and (variants_exhausted or else_returns)
     end,
 
     ["Ast.StatIf"] = function(node, st, errors)

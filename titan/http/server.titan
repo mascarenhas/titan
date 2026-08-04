@@ -305,7 +305,6 @@ local function read_request_with_idle_timeout(
   when first: status then
     deadline:cancel(async.CancellationReason.simple(
       "HTTP request headers arrived before idle timeout"))
-    async.join(deadline)
     local succeeded, request_value? = status:has_succeeded()
     if succeeded then return request_value as Request? end
     return nil
@@ -318,9 +317,6 @@ local function read_request_with_idle_timeout(
     -- connection Task only performs peer cleanup and returns.
     return nil
   end
-  -- Titan case statements remain non-exhaustive even when every current
-  -- variant is named, so the optional return needs an explicit fallback.
-  return nil
 end
 
 local function serve_connection(connection: io.ReaderWriterCloser,

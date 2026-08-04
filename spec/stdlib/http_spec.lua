@@ -1319,6 +1319,8 @@ function start_idle_timeout_plain(first_port: integer): async.Task
   return async.run(function (): value
     local handled = 0
     local body_read_started = false
+    local detached_deadline_marker: async.Task? = nil
+    local detached_deadline_marker_done = false
     local handler: http.Handler = function (request: http.Request,
                                             response: http.Response)
       handled = handled + 1
@@ -1336,6 +1338,22 @@ function start_idle_timeout_plain(first_port: integer): async.Task
               "handler-side body read received the wrong contents")
         response:set_header("Content-Length", "1")
         response:write("R")
+      elseif request.target == "/buffered-one" then
+        response:set_header("Content-Length", "0")
+        response:close()
+        detached_deadline_marker = async.run(function (): value
+          timer.yield()
+          timer.yield()
+          detached_deadline_marker_done = true
+          return nil
+        end)
+      elseif request.target == "/buffered-two" then
+        response:set_header("Content-Length", "0")
+        check(detached_deadline_marker ~= nil,
+              "buffered request did not install its scheduling marker")
+        check(not detached_deadline_marker_done,
+              "reader winner joined its cancelled idle deadline")
+        async.join(detached_deadline_marker as async.Task)
       else
         response:set_header("Content-Length", "0")
       end
@@ -1365,6 +1383,7 @@ function start_idle_timeout_plain(first_port: integer): async.Task
     check(handled == 1, "zero-timeout request did not reach its handler")
 
     local server, port = http_listen(first_port + 101, handler, 30)
+    defer server:close()
     local serving = async.run(function (): value
       server:serve()
       return nil
@@ -1447,8 +1466,8 @@ function start_idle_timeout_plain(first_port: integer): async.Task
     check(handled == 1,
           "partial timed-out headers dispatched an HTTP handler")
 
-    -- A parser failure belongs to the reader child. The connection Task joins
-    -- that child and closes the peer without raising the same failure again.
+    -- A parser failure belongs to the reader child. The race observes that
+    -- already-terminal failure and closes the peer without raising it again.
     -- The Lua-side assertion for this scenario requires exactly one uncaught
     -- Task report, catching either suppression or duplicate reporting.
     local malformed = net.connect("127.0.0.1", port)
@@ -1461,7 +1480,9 @@ function start_idle_timeout_plain(first_port: integer): async.Task
           "malformed positive-timeout request reached its handler")
 
     -- A next request already buffered behind the first is acquired before
-    -- the timer even though each request gets its own absolute deadline.
+    -- the timer even though each request gets its own absolute deadline. The
+    -- scheduling marker also proves the reader-wins path only requests
+    -- cancellation of that deadline; it does not wait for deadline cleanup.
     local buffered = net.connect("127.0.0.1", port)
     buffered:write(
       "GET /buffered-one HTTP/1.1\r\nHost: localhost\r\n\r\n" ..

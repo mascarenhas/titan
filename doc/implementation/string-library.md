@@ -347,9 +347,11 @@ backtracking behavior. Ordered choice preserves left bias. Whole-expression
 anchors wrap the completed alternation instead of attaching to one branch.
 Position lookup, nullability, backreference validation, projected-size
 accounting, and continuation lowering dispatch through `case`/`when`. Each
-arm is an ordinary block and may bind the payload record; the defensive
-compiler passes retain `else` errors because `case` is intentionally
-non-exhaustive rather than acquiring an exhaustiveness proof.
+arm is an ordinary block and may bind the payload record. The total compiler
+passes list every local `RegexNode` variant, so closed-union control-flow
+analysis proves those cases non-fallthrough without defensive impossible
+`else` errors. Backreference validation deliberately remains a partial case
+whose unmatched variants continue normally.
 The translated construction follows `pegex.lua` from ta-regex commit
 `857e48682791ba55c98a7dd99c5fc7d71c02597d` and the algorithm in Marcelo
 Oikawa, Roberto Ierusalimschy, and Ana Lucia de Moura, [“Converting regexes to

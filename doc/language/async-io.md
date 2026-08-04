@@ -330,7 +330,11 @@ wait for itself. Returning or raising from a combinator never cancels
 unfinished inputs.
 
 For example, a read with a five-second deadline can wait for the first
-successful Task, then explicitly cancel and join the loser:
+successful Task, then clean up the loser according to what it owns. The timer
+deadline owns no connection state, so after a successful read its cancellation
+may finish in the background. The read owns the parser or connection operation,
+so after the deadline wins its cancellation is joined before that shared state
+is released:
 
 ```titan
 local reading = async.run(function (): value return connection:read() end)
@@ -343,7 +347,6 @@ local result = async.any_two(reading, deadline)
 case result
 when first: data then
   deadline:cancel(async.CancellationReason.simple("read completed"))
-  async.join(deadline)
   consume(data as string?)
 when second then
   reading:cancel(async.CancellationReason.simple("read timed out"))

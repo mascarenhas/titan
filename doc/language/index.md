@@ -61,7 +61,7 @@ use the chapters below for the normative language reference.
 | [Variadic parameters](variadic-parameters.md) | The trailing `...: t` parameter, `#...`, the raising `...[e]` index, spreading `...` into calls, returns, and positional Array/integer-Map constructors, slot-driven adjust-up, variadic functions as values, and the limits and bans. |
 | [Flexible returns](flexible-returns.md) | Runtime-sized homogeneous result tails, finite option projection, open sinks, contextual calls through `value`, surplus adjustment, and directional callable adjustment. |
 | [Records](records.md) | Nominal record types, constructors, fields, methods, record functions, and records as seen from Lua. |
-| [Unions](unions.md) | Nominal tagged unions, positional variant constructors, full-block `when` arms, non-exhaustive `case`, payload binding, and Lua visibility. |
+| [Unions](unions.md) | Nominal tagged unions, positional variant constructors, full-block `when` arms, optional case coverage with closed-union control-flow proof, payload binding, and Lua visibility. |
 | [Arrays and maps](arrays-maps.md) | Distinct structural containers: positive-only, holed Arrays with deterministic highest-present length and canonical Lua userdata proxies; ordinary Maps, positional integer-Map construction, integer-Map border length, conversions, and performance. |
 | [Modules](modules.md) | Logical modules, `import`, visibility, module variables, initialization, and the compilation model (shared libraries, executables, search paths). |
 | [Multi-module libraries](multi-module-libraries.md) | Separating logical modules from physical providers: common-prefix library output, prefix lookup, generated Lua loaders, and the combined standard library. |
@@ -78,7 +78,7 @@ use the chapters below for the normative language reference.
 | [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads, libuv-ordered writes, shutdown, close, and cancellation. |
 | [TLS standard library](standard-library-ssl.md) | Verified TLS 1.2+ clients and certificate-backed servers composed over high-level TCP with memory BIOs, explicit trust overrides, authenticated shutdown, and serialized connection operations. |
 | [URL standard library](standard-library-url.md) | Nonthrowing parsing and normalization of absolute HTTP(S) URLs or separate request components, with structured labeled errors and public component records. |
-| [HTTP/1.1 standard library](standard-library-http.md) | Strict HTTP and HTTPS clients, ordered duplicate-preserving headers, standalone URL-module integration, streaming response/request bodies, per-connection server Tasks, and sequential keep-alive request processing without pipelining support. |
+| [HTTP/1.1 standard library](standard-library-http.md) | Strict HTTP and HTTPS clients, ordered duplicate-preserving headers, standalone URL-module integration, streaming response/request bodies, per-connection server Tasks, ownership-aware request-header idle deadlines, and sequential keep-alive request processing without pipelining support. |
 | [Operating-system standard library](standard-library-os.md) | Portable clocks and timestamps, ISO C calendars/locales, plus environment, parent stdio, signals, graceful exit, and configurable direct child processes. |
 | [PEG standard library](standard-library-peg.md) | Typed parsing-expression constructors and combinators, labeled failure/recovery, captures and callback timing, anchored pattern matching and leftmost search, locale controls, and relabel source notation. |
 | [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, synchronous in-memory streams, and compiled byte-regex matching, capture iteration, splitting, and substitution. |
@@ -149,8 +149,9 @@ Lua and `value` never discover an implementation from a bare record or union.
   ([statements](statements.md#break-no-goto)).
 * **Union v1 is deliberately small.** A variant carries at most one payload,
   variants are not first-class types, constructors are positional-only, and
-  `case` is non-exhaustive even when every current variant is listed
-  ([unions](unions.md#version-one-boundaries)).
+  the compiler never requires a `case` to be exhaustive. Complete coverage of
+  the statically known closed union can nevertheless prove that a case does
+  not fall through ([unions](unions.md#version-one-boundaries)).
 
 ### The C FFI
 

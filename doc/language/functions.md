@@ -64,8 +64,10 @@ The pieces:
   a flexible return tail may also fall off, producing an empty run. A `return`
   statement can only appear as the last statement of a block — see
   [Statements](statements.md).
-  A `case` counts exactly like `if`/`elseif`/`else`: it needs an explicit
-  `else` and every arm must terminate to establish this fact.
+  A `case` establishes this fact when every `when` arm terminates and either
+  those arms cover every variant of the statically known closed union or a
+  terminating `else` handles the remainder. Imported hidden variants prevent
+  consumer-side complete coverage by visible arms alone.
 * Declaring two top-level functions (or a function and a variable) with
   the same name is a compile-time error (`duplicate declaration for f,
   previous one at path/to/source.titan:N:C`). Folder modules use the same

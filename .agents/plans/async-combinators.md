@@ -99,6 +99,12 @@ HTTP-composition decisions from the prior review remain in force.
    shutdown. Record that high-level composition blocker; do not reach into
    `uv` or add native state to manufacture a clean TLS close here.
 
+11. Timeout cleanup is intentionally asymmetric. When the reader wins, cancel
+    the timer-only deadline and let its close complete detached. When the
+    deadline wins, cancel and join the reader before connection teardown,
+    because that child owns the parser/connection operation and an SSL read's
+    busy state persists until cancellation cleanup finishes.
+
 ## Public async and Task API
 
 Own these types beside `Task` in `titan.uv` and transparently alias them from
@@ -439,16 +445,18 @@ At 0, call `read_request` directly. At a positive value:
 1. start one Task returning `read_request(parser, encrypted)` and one Task
    sleeping for the snapshot milliseconds;
 2. `race_two` them;
-3. cancel the loser with a `CancellationReason.simple(...)` value and `join`
-   it before inspecting the winner, so parser,
-   transport, timer, and read owners remain live through their terminal
-   callbacks;
-4. on reader success, continue with its `Request?` result;
-5. on timeout success, return silently and let the existing deferred parser
+3. when the reader wins, cancel the timer-only deadline with a
+   `CancellationReason.simple(...)` value and continue without joining it; its
+   close owns no parser or transport state and may finish in the background;
+4. when the deadline wins, cancel and join the reader before unwinding, so its
+   parser/connection ownership and an SSL read's busy state survive through
+   terminal cancellation cleanup;
+5. on reader success, continue with its `Request?` result;
+6. on timeout success, return silently and let the existing deferred parser
    and transport close run; and
-6. on a child failure, avoid re-raising it from the parent connection Task—the
-   failed child already logged its exact error/traceback—clean up its peer and
-   return.
+7. on a child failure, avoid re-raising it from the parent connection Task—the
+   failed child already logged its exact error/traceback—apply the same
+   ownership rule to its peer and return.
 
 This iteration does not add body, drain, or write timeouts. `Server:close`
 still closes only the listener, not accepted connections. An application that
@@ -508,8 +516,10 @@ before listener creation, zero-timeout delayed requests, positive initial and
 keep-alive idle closes, partial-header deadlines, buffered next requests,
 plain/TLS parity, no handler invocation on timeout, no uncaught timeout log,
 the HTTPS peer's documented `TLS_TRUNCATED_EOF`, and complete
-loser/listener-registration/read/timer cleanup. Keep handler/body/drain/write
-work outside this timeout and test that boundary.
+listener-registration/read/timer cleanup. Prove that reader success does not
+wait for its cancelled deadline, while timeout waits for reader cancellation
+before connection teardown. Keep handler/body/drain/write work outside this
+timeout and test that boundary.
 
 Migrate all Task string-status uses in production sources, stdlib specs,
 packaging/production smokes, README, and quick tour to `as_string()` or the

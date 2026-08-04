@@ -237,13 +237,16 @@ same outcome back to an incomplete-message error.
 
 At the start of each serial request iteration, the connection Task snapshots
 the Server's `idle_timeout_ms`. Zero reads directly. A positive value starts a
-header-reader Task and timer Task and uses `async.race_two`. It cancels and
-`async.join`s the loser before inspecting the winner, retaining parser,
-transport, timer, and read ownership until the corresponding terminal callback
-has run. Reader success supplies the `Request?`; timer success is an ordinary
-silent connection return. A failed child has already emitted its Task-local
-error and traceback, so the parent cleans up its peer and returns instead of
-raising the same failure a second time.
+header-reader Task and timer Task and uses `async.race_two`. Reader success
+cancels the timer-only deadline and detaches its cancellation cleanup; its
+libuv timer close can finish in the background because it owns no parser or
+transport state. Deadline success cancels and `async.join`s the reader before
+the parent unwinds, because that child owns the parser/connection operation and
+an SSL read retains the connection's serialized busy state until cancellation
+cleanup completes. Reader success supplies the `Request?`; timer success is an
+ordinary silent connection return. A failed child has already emitted its
+Task-local error and traceback, so the parent applies the same ownership rule
+to its peer and returns instead of raising the same failure a second time.
 
 On HTTPS, cancelling the child read follows `ssl.Connection`'s existing
 terminal cancellation path: it frees the TLS engine and closes the transport
@@ -287,9 +290,12 @@ keep-alive parser reset. Idle-timeout cases validate the public configuration,
 require completion before an unrelated-listener watchdog can wake the loop,
 send periodic partial headers to distinguish the absolute deadline from an
 inactivity timeout, and keep handler-side body reads and automatic draining
-outside that deadline. Plain and TLS cases cover initial and keep-alive waits;
-TLS additionally proves partial-header cancellation and the peer's exact
-`TLS_TRUNCATED_EOF`. They also prove listener/response close completion under
-cancellation without a retry. The focused sanitizer boundary drives the same
-timeout-induced SSL-read cancellation and serial HTTP path through public TLS
-and llhttp, rather than a private test transport.
+outside that deadline. A buffered follow-up request proves that reader success
+does not wait for the cancelled timer, while timeout coverage proves that the
+connection does wait for reader cancellation before teardown. Plain and TLS
+cases cover initial and keep-alive waits; TLS additionally proves partial-header
+cancellation and the peer's exact `TLS_TRUNCATED_EOF`. They also prove
+listener/response close completion under cancellation without a retry. The
+focused sanitizer boundary drives the same timeout-induced SSL-read
+cancellation and serial HTTP path through public TLS and llhttp, rather than a
+private test transport.

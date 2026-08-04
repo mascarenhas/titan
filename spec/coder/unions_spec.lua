@@ -77,8 +77,6 @@ describe("unions (end-to-end)", function()
                     return "count:" .. n
                 when quit then
                     return "quit"
-                else
-                    return "other"
                 end
             end
 
@@ -142,8 +140,6 @@ describe("unions (end-to-end)", function()
                     case moved
                     when move: delta then
                         return delta.x + delta.y
-                    else
-                        return -1.0
                     end
                 end
             ]],
@@ -253,7 +249,6 @@ describe("unions (end-to-end)", function()
                     out = #text
                 when quit then
                     out = 1
-                else
                 end
                 return out
             end
@@ -299,7 +294,6 @@ describe("unions (end-to-end)", function()
                     raise "raised arm"
                 finally
                     cleanup_effects = cleanup_effects + 10
-                else
                 end
             end
 
@@ -442,7 +436,6 @@ describe("unions (end-to-end)", function()
                     differential_trace = differential_trace + 100
                 finally
                     differential_trace = differential_trace + 1000
-                else
                 end
                 return differential_trace
             end
@@ -542,7 +535,6 @@ describe("unions (end-to-end)", function()
                         if n >= limit then
                             break
                         end
-                    else
                     end
                 end
                 return n
@@ -601,8 +593,6 @@ describe("unions (end-to-end)", function()
                     return 1
                 when count: n then
                     return n
-                else
-                    raise "invalid"
                 end
                 return variable_in_unchecked_dead_tail
             end
@@ -726,7 +716,6 @@ describe("unions (end-to-end)", function()
                 when many: values then
                     values[1] = 40
                     values = {1, 2}
-                else
                 end
                 case numbers
                 when many: values then
@@ -905,13 +894,11 @@ describe("unions (end-to-end)", function()
                 case direct
                 when array: values then
                     values[1] = Box.new(40)
-                else
                 end
                 case optional
                 when maybe_array: maybe then
                     local values: {Box} = maybe
                     values[1] = Box.new(31)
-                else
                 end
             end
 
@@ -1029,7 +1016,6 @@ describe("unions (end-to-end)", function()
                 case payload
                 when maybe_array: maybe then
                     result = not maybe
-                else
                 end
                 lua.lua_gc(L, lua.LUA_GCINC)
                 return result

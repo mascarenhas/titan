@@ -22,7 +22,6 @@ function TaskStatus:as_string(): string
   when succeeded then return "succeeded"
   when failed then return "failed"
   when cancelled then return "cancelled"
-  else raise "invalid TaskStatus"
   end
 end
 
@@ -257,8 +256,6 @@ local function dispatch_call(task: Task, call: Call): Immediate?
   when process_spawn_failure: operation then return operation:dispatch(task)
 
   when cleanup_step: operation then return operation:dispatch(task)
-  else
-    raise "unknown libuv operation"
   end
 end
 
@@ -305,7 +302,6 @@ local function finish_user_task(task: Task, state: TaskStatus)
   case state
   when failed: failure then
     report_task_error(failure.error, failure.traceback)
-  else
   end
 end
 

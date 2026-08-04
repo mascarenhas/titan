@@ -266,14 +266,24 @@ require every variant to be listed, and it does not insert an implicit error.
 If no arm matches and there is no `else`, the case statement does nothing and
 execution continues after it.
 
-For control-flow analysis, a case statement is exactly like an
-`if`/`elseif`/`else` chain. It is considered non-fallthrough only when:
+Control-flow analysis can nevertheless use the closed set of variants in the
+scrutinee's static union type. A case statement is considered non-fallthrough
+when every `when` arm is non-fallthrough and either:
 
-1. it has an explicit `else`; and
-2. every `when` arm and the `else` block is non-fallthrough.
+1. the arms cover every variant in that closed union; or
+2. an explicit `else` exists and is non-fallthrough.
 
-Listing every currently declared variant does not substitute for the explicit
-`else`.
+The first route does not make exhaustive coverage mandatory; it only proves
+that execution cannot reach the following statement when coverage happens to
+be complete. If complete coverage is followed by a redundant `else`, that
+block is unreachable, so its ability to fall through does not defeat the
+proof. The compiler still checks the block normally.
+
+An imported public union can have variants that are local to its defining
+module. Those hidden variants still count in the closed union's total but
+cannot be named by the importer, so listing every visible variant is not
+complete coverage there. Such a consumer needs a non-fallthrough `else` to
+prove that the case cannot fall through.
 
 ## Option scrutinees
 
@@ -376,7 +386,8 @@ Union version one deliberately keeps the model small:
 * each variant carries zero or one payload value;
 * variants are not first-class types;
 * constructors are positional-only;
-* case analysis is non-exhaustive;
+* case coverage is not required (complete coverage is only a control-flow
+  proof);
 * no variant/tag/payload reflection is exposed to Titan or Lua;
 * there is no structural conversion to a C union; and
 * equality is identity equality rather than derived value equality.

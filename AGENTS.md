@@ -468,6 +468,9 @@ notification or another running Task without resuming inline. Coverage must
 prove `async.running`, explicit suspend/resume, listener order/error isolation/
 removal including removal during delivery, cancellation-time defer cleanup,
 coalescing, and close-before-resume.
+HTTP idle-timeout coverage must preserve its ownership asymmetry: reader-win
+paths cancel and detach the timer-only deadline, while deadline-win paths
+cancel and join the reader before parser/connection/TLS-busy teardown.
 Do not introduce a public Waiter, `uv_check_t`, Runtime `uv_idle_t`, Task polling
 loop, taskless timer, or exact-next-libuv-iteration promise for this protocol.
 
@@ -584,9 +587,13 @@ nil-fill/surplus adjustment. Imported union visibility exactly follows record
 frontiers. Each case arm/else is a full ordinary block with its own
 `catch`/`finally`, and the normal recursive `defer` transformation remains
 clause-bounded. A `Union?` scrutinee is auto-forced before dispatch; cases are
-non-exhaustive, unmatched/no-else is a no-op, and it is non-fallthrough only
-with an explicit else and every arm/else non-fallthrough, just like
-`if`/`elseif`/`else`.
+not required to be exhaustive, and unmatched/no-else is a no-op. For control
+flow, a case is non-fallthrough when every `when` arm is non-fallthrough and
+either those arms cover every variant of the statically known closed union or
+an explicit `else` is non-fallthrough. Imported hidden variants count in the
+union's total, so a consumer that cannot name them needs the `else` route; when
+all variants are covered, a redundant falling-through `else` is unreachable
+and does not defeat the proof.
 Record fields and union payloads share `types.has_tvalue_representation`:
 ordinary boxed Titan values including functions are legal; direct C
 aggregates/arrays/functions/function pointers are not, and only Option recurses.

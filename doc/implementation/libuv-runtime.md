@@ -445,8 +445,10 @@ arity two.
 Because failure reporting remains owned by the failed Task, a later
 `race`/`all`/`join` inspection does not suppress its already emitted report.
 The combinators likewise do not cancel unfinished inputs; HTTP's timeout
-composition explicitly cancels and joins its losing child before releasing
-the parser or transport it shares.
+composition applies ownership-specific cleanup itself. A winning reader
+cancels and detaches its timer-only deadline, whose close can finish in the
+background. A winning deadline cancels and joins the reader before releasing
+the parser, transport, and TLS busy state owned by that operation.
 
 Cancellation never releases native request storage early or suppresses an
 accepted request's terminal callback. For a watcher whose event callback can

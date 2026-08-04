@@ -216,6 +216,13 @@ progress. Expiration closes that accepted connection without invoking the
 handler or reporting an uncaught timeout error; the listener and other
 connections remain active.
 
+When headers arrive first, the server cancels the timer-only deadline Task and
+continues while that cancellation finishes in the background. When the
+deadline arrives first, it cancels and joins the reader Task before releasing
+the parser and connection state owned by that read. This asymmetry keeps the
+ordinary success path moving without letting timeout cleanup race the
+connection teardown.
+
 For HTTPS, the timeout cancels the in-flight high-level SSL read. The SSL
 connection's documented cancellation rule terminalizes its TLS engine, so the
 peer observes `ssl.Error` with name `TLS_TRUNCATED_EOF`, not authenticated
