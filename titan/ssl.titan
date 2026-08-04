@@ -291,12 +291,31 @@ local function set_memory_bio_eof_return(bio: *openssl.BIO,
                    result as ffi.titan_ffi_long, nil)
 end
 
+local function mark_transport_eof(connection: Connection)
+  connection.transport_eof = true
+  set_memory_bio_eof_return(connection.input, 0)
+end
+
 local function feed_input(connection: Connection)
   if connection.transport_eof then return end
-  local encrypted? = connection.transport:read()
+  local encrypted: string? = nil
+  do
+    encrypted = connection.transport:read()
+  catch
+    if error is async.OperationError then
+      local failure = error as async.OperationError
+      if failure.name == "ECONNRESET" and
+         failure.operation == "net.read" then
+        -- FIN and RST are different TCP presentations of the same TLS
+        -- truncation boundary when no authenticated close_notify arrived.
+        mark_transport_eof(connection)
+        return
+      end
+    end
+    raise error
+  end
   if not encrypted then
-    connection.transport_eof = true
-    set_memory_bio_eof_return(connection.input, 0)
+    mark_transport_eof(connection)
     return
   end
 

@@ -171,8 +171,11 @@ observed; output after shutdown is rejected.
 
 A received `close_notify` is normal EOF, so `read` and `read_until` eventually
 return `nil`. A bare transport EOF without `close_notify` is instead a
-`TLS_TRUNCATED_EOF` error. The distinction prevents an unauthenticated TCP
-close from silently truncating a protected byte stream.
+`TLS_TRUNCATED_EOF` error. A TCP reset observed while TLS is waiting for more
+protected input is normalized to the same error: FIN and RST are different
+transport presentations of the same unauthenticated TLS truncation. The
+distinction from clean TLS EOF prevents either form from silently truncating a
+protected byte stream.
 
 `close()` best-effort sends shutdown when the negotiated state permits it,
 frees the TLS engine, and closes the wrapped `net.Connection`. It is
@@ -191,8 +194,9 @@ failed layer and whose `name` distinguishes such outcomes as
 conditions. `code` is the corresponding OpenSSL error or verification code
 when one exists. Argument/state errors may remain strings. Errors while reading
 explicit CA, certificate, or key paths and errors from the wrapped TCP
-connection retain the [`async.OperationError`](async-io.md) value supplied by `fs` or
-`net`.
+connection retain the [`async.OperationError`](async-io.md) value supplied by
+`fs` or `net`, except that `ECONNRESET` from a TLS input read is normalized to
+`TLS_TRUNCATED_EOF` as described above.
 
 ## Example
 
