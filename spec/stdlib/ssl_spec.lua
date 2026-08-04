@@ -212,10 +212,18 @@ function start_truncated_eof(first_port: integer): async.Task
     do
       client:read()
     catch
+      local detail = str.tostring(error)
+      if error is async.OperationError then
+        local transport_failure = error as async.OperationError
+        detail = transport_failure.name .. " from " ..
+          transport_failure.operation
+      end
       check(error is ssl.Error,
-            "truncated TLS transport raised a non-TLS error")
+            "truncated TLS transport raised a non-TLS error: " .. detail)
       local failure = error as ssl.Error
       check(failure.name == "TLS_TRUNCATED_EOF" and
+            failure.message ==
+              "TLS transport closed without close_notify" and
             failure.operation == "ssl.read",
             "truncated TLS transport reported " .. failure.name ..
               " from " .. failure.operation)

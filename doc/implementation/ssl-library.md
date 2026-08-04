@@ -174,17 +174,22 @@ cancellation does not suppress that cleanup; if close itself reports a
 transport error, the original TLS failure remains authoritative.
 
 On transport EOF, the input memory BIO changes from retry semantics to a real
-zero return. `ECONNRESET` from `net.read` takes the same path: once TLS needs
-more protected input, FIN and RST both mean that the peer terminated without
-an authenticated TLS boundary. OpenSSL `SSL_ERROR_ZERO_RETURN` records an
-authenticated peer `close_notify` and becomes ordinary Reader EOF. An
-underlying EOF or normalized reset observed while OpenSSL still needs
-protected bytes becomes the distinct `TLS_TRUNCATED_EOF` failure. Other
-network failures remain their original `async.OperationError`. Shutdown drains
-the local alert before asking the public net connection to half-close its
-write side. During terminal `close` only, `ENOTCONN` from that half-close is
-benign once the alert output has already been drained: it means the peer won
-the close race. Explicit `shutdown` and every other failure remain observable.
+zero return. OpenSSL `SSL_ERROR_ZERO_RETURN` records an authenticated peer
+`close_notify` and becomes ordinary Reader EOF. An underlying EOF observed
+while OpenSSL still needs protected bytes becomes the distinct
+`TLS_TRUNCATED_EOF` failure.
+
+`ECONNRESET` from `net.read` is converted directly to that same failure with
+`SSL_ERROR_SYSCALL` and the active TLS operation. It is not fed back through
+the memory BIO as EOF: OpenSSL turns unexpected BIO EOF into a fatal decode
+alert, and attempting to drain that alert to an already reset transport could
+replace the authoritative truncation error with a second network failure.
+Other network failures remain their original `async.OperationError`. Shutdown
+drains the local alert before asking the public net connection to half-close
+its write side. During terminal `close` only, `ENOTCONN` from that half-close
+is benign once the alert output has already been drained: it means the peer
+won the close race. Explicit `shutdown` and every other failure remain
+observable.
 
 ## Trust-path boundary
 
