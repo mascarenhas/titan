@@ -432,11 +432,11 @@ both forms in either libuv mode. Seventeen generated Lua loaders expose the
 qualified logical entries.
 Its source is the reviewed folder ensemble rooted at `titan/uv/uv.titan`, with
 `file.titan`, `os.titan`, `process.titan`, `runtime.titan`, `task.titan`, and
-`tcp.titan` as contributors. The main file is the shared prelude and sole
-initializer, retaining the common imports, shared constants, module state, and
-bootstrap. Exported declarations and private records live with their related
-contributor implementations. That deliberate member reorder is the
-compatibility boundary recorded for
+`tcp.titan` as contributors. The main file is the shared
+prelude and sole initializer, retaining the common imports, shared constants,
+module state, and bootstrap. Exported declarations and private records live
+with their related contributor implementations. That deliberate member
+reorder is the compatibility boundary recorded for
 compiled-module ABI 0.15: at that historical boundary the files compiled to
 one `titan/uv.so`, never one image per contributor. ABI 0.16 keeps that folder
 as one logical object and loader, then links it with the other standard objects
@@ -519,15 +519,27 @@ local task = async.run(function()
     timer.yield()
     result = "done"
 end)
-assert(task:status() == "ready") -- `run` has not executed it
+assert(task:status():as_string() == "ready") -- `run` has not executed it
 async.loop()
-assert(task:status() == "succeeded")
+assert(task:status():as_string() == "succeeded")
 assert(result == "done")
 ```
 
-A libuv callback directly resumes its Titan Task and application code runs in
-that callback until it finishes or starts another async operation and yields.
-There is no extra protected callback wrapper or implicit ready queue;
+A Task's terminal status retains its returned value, raised value plus
+traceback, or cancellation reason. Cancellation retains its reason privately
+while the Task remains in its current live status, then publishes terminal
+`cancelled`. The `async.any_*`, `race_*`, `all_*`, and `join*` combinators wait
+for bounded groups through terminal listeners and explicit suspension without
+adding a second scheduler; see the async chapter for their fixed-arity result
+unions. `async.running()` returns the current Task, while `async.suspend()` and
+`Task:resume()` support an explicitly resumed suspension.
+
+An ordinary libuv operation callback directly resumes its Titan Task, and
+application code runs in that callback until it finishes or starts another
+async operation and yields. A one-shot timer instead closes from `timer_cb` and
+resumes only from `close_cb`. Explicit resume, cancellation wake, deferred
+close, and repeating-ticker continuations may use a Task-owned one-shot timer;
+there is no polling phase fence, taskless timer, or implicit ready queue.
 `timer.yield()` explicitly cedes an event-loop turn. See
 [Asynchronous I/O and tasks](doc/language/async-io.md) and the
 [timer](doc/language/standard-library-timer.md),

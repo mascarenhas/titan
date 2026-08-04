@@ -5,6 +5,7 @@ local async = import "async"
 local fs = import "fs"
 local http = import "http"
 local net = import "net"
+local ssl = import "ssl"
 local str = import "string"
 local timer = import "timer"
 local url = import "url"
@@ -25,13 +26,12 @@ local function contains(subject: string, needle: string): boolean
 end
 
 local function active(task: async.Task): boolean
-  local status = task:status()
-  return status == "ready" or status == "running" or status == "waiting"
+  return not task:status():has_finished()
 end
 
 local function read_exact(connection: net.Connection,
                           length: integer): string
-  local builder = str.writer(false)
+  local builder = str.writer()
   local received = 0
   while received < length do
     local chunk? = connection:read()
@@ -47,7 +47,7 @@ local function read_exact(connection: net.Connection,
 end
 
 local function read_response(response: http.ClientResponse): string
-  local builder = str.writer(false)
+  local builder = str.writer()
   for chunk in response:read do builder:write(chunk) end
   return builder:drain()
 end
@@ -58,8 +58,8 @@ local function raw_listen(first_port: integer): (net.Server, integer)
     do
       return net.listen("127.0.0.1", port, 8), port
     catch
-      if error is async.Error and
-         (error as async.Error).name == "EADDRINUSE" then
+      if error is async.OperationError and
+         (error as async.OperationError).name == "EADDRINUSE" then
         port = port + 1
       else
         raise error
@@ -70,14 +70,19 @@ local function raw_listen(first_port: integer): (net.Server, integer)
 end
 
 local function http_listen(first_port: integer,
-                           handler: http.Handler): (http.Server, integer)
+                           handler: http.Handler,
+                           idle_timeout: integer?): (http.Server, integer)
   local port = first_port
   for _ = 1, 100 do
     do
-      return http.listen("127.0.0.1", handler, port), port
+      if idle_timeout == nil then
+        return http.listen("127.0.0.1", handler, port), port
+      end
+      return http.listen("127.0.0.1", handler, port, nil,
+                         idle_timeout), port
     catch
-      if error is async.Error and
-         (error as async.Error).name == "EADDRINUSE" then
+      if error is async.OperationError and
+         (error as async.OperationError).name == "EADDRINUSE" then
         port = port + 1
       else
         raise error
@@ -85,6 +90,26 @@ local function http_listen(first_port: integer,
     end
   end
   raise "could not find an available HTTP loopback port"
+end
+
+local function https_listen(first_port: integer, handler: http.Handler,
+                            idle_timeout: integer):
+    (http.Server, integer)
+  local port = first_port
+  for _ = 1, 100 do
+    do
+      return http.listen_tls("127.0.0.1", CERTIFICATE, handler,
+                             PRIVATE_KEY, port, nil, idle_timeout), port
+    catch
+      if error is async.OperationError and
+         (error as async.OperationError).name == "EADDRINUSE" then
+        port = port + 1
+      else
+        raise error
+      end
+    end
+  end
+  raise "could not find an available HTTPS loopback port"
 end
 
 function result(): string
@@ -152,14 +177,14 @@ function start_client(first_port: integer): async.Task
           "HTTP client removed content encoding")
     check(response:read_until("\n", true) == "a\0b",
           "HTTP client did not decode the first chunk")
-    local remaining = str.writer(false)
+    local remaining = str.writer()
     for chunk in response:read do remaining:write(chunk) end
     check(remaining:drain() == "trail",
           "HTTP client did not decode the second chunk")
     check(response.headers:get("X-Trailer") == "done",
           "HTTP client did not retain a trailer")
     while active(peer) do timer.yield() end
-    check(peer:status() == "succeeded", "raw HTTP peer failed")
+    check(peer:status():has_succeeded(), "raw HTTP peer failed")
     outcome = "client-ok"
     return nil
   end)
@@ -222,7 +247,7 @@ function start_client_host_validation(first_port: integer): async.Task
           "HTTP client did not accept a valid supplied IP-literal Host")
     response:close()
     while active(peer) do timer.yield() end
-    check(peer:status() == "succeeded", "Host validation peer failed")
+    check(peer:status():has_succeeded(), "Host validation peer failed")
 
     expect_client_url_rejected(source_url, "", "host")
     expect_client_url_rejected(source_url, "user@example.com", "userinfo")
@@ -402,7 +427,7 @@ function start_header_validation(first_port: integer): async.Task
             "HTTP client accepted a forbidden reason-phrase byte")
     end
     while active(peer) do timer.yield() end
-    check(peer:status() == "succeeded",
+    check(peer:status():has_succeeded(),
           "reason-validation peer failed")
 
     outcome = "header-validation-ok"
@@ -480,14 +505,14 @@ function start_server_streaming(first_port: integer): async.Task
     check(contains(response_text, "HTTP/1.1 201 Created\r\n") and
           contains(response_text, "Transfer-Encoding: chunked\r\n"),
           "HTTP server sent the wrong response headers")
-    local body = str.writer(false)
+    local body = str.writer()
     for chunk in client:read do body:write(chunk) end
     check(body:drain() ==
           "5\r\nfirst\r\n6\r\nsecond\r\n0\r\n\r\n",
           "HTTP server sent the wrong chunked body")
     client:close()
     while active(serving) do timer.yield() end
-    check(serving:status() == "succeeded", "HTTP serve Task failed")
+    check(serving:status():has_succeeded(), "HTTP serve Task failed")
     outcome = "server-streaming-ok"
     return nil
   end)
@@ -502,7 +527,7 @@ function start_expect_continue(first_port: integer): async.Task
       handled = handled + 1
       check(request.target == "/continue",
             "HTTP Expect request reached the wrong handler path")
-      local body = str.writer(false)
+      local body = str.writer()
       for chunk in request:read do body:write(chunk) end
       check(body:drain() == "body",
             "HTTP Expect request body was not delivered after 100 Continue")
@@ -546,7 +571,7 @@ function start_expect_continue(first_port: integer): async.Task
           "HTTP server did not acknowledge 100-continue before the body")
     outcome = "expect-sending-body"
     client:write("body")
-    local final = str.writer(false)
+    local final = str.writer()
     for chunk in client:read do final:write(chunk) end
     local final_text = final:drain()
     check(contains(final_text, "HTTP/1.1 200 OK\r\n") and
@@ -571,7 +596,7 @@ function start_expect_continue(first_port: integer): async.Task
         "Content-Length: 4\r\n" .. rejected[index] .. "\r\n")
       -- No body follows. A final 417 must arrive and close the connection
       -- without entering the handler or trying to drain the declared body.
-      local refusal = str.writer(false)
+      local refusal = str.writer()
       for chunk in rejected_client:read do refusal:write(chunk) end
       check(refusal:drain() ==
               "HTTP/1.1 417 Expectation Failed\r\n" ..
@@ -583,24 +608,25 @@ function start_expect_continue(first_port: integer): async.Task
 
     check(handled == 1,
           "HTTP server dispatched a rejected expectation to the handler")
-    watchdog:cancel("Expect matrix completed")
+    watchdog:cancel(async.CancellationReason.simple(
+      "Expect matrix completed"))
     check(not timed_out, "HTTP Expect matrix timed out")
     server:close()
     while active(serving) do timer.yield() end
-    check(serving:status() == "succeeded", "HTTP Expect serve Task failed")
+    check(serving:status():has_succeeded(), "HTTP Expect serve Task failed")
     outcome = "expect-ok"
     return nil
   end)
 end
 
-function start_pipelining(first_port: integer): async.Task
+function start_buffered_next_requests(first_port: integer): async.Task
   outcome = "running"
   return async.run(function (): value
     local handled = 0
     local handler: http.Handler = function (request: http.Request,
                                             response: http.Response)
       handled = handled + 1
-      outcome = "pipeline-handler-" .. str.tostring(handled)
+      outcome = "buffered-handler-" .. str.tostring(handled)
       response:set_header("Content-Length", "1")
       response:write(str.tostring(handled))
     end
@@ -614,7 +640,7 @@ function start_pipelining(first_port: integer): async.Task
     local watchdog = async.run(function (): value
       timer.sleep(5000)
       watchdog_fired = true
-      outcome = "pipeline-timeout-after-" .. outcome
+      outcome = "buffered-timeout-after-" .. outcome
       client:close()
       server:close()
       return nil
@@ -623,13 +649,14 @@ function start_pipelining(first_port: integer): async.Task
       "GET /one HTTP/1.1\r\nHost: localhost\r\n\r\n" ..
       "GET /two HTTP/1.1\r\nHost: localhost\r\n" ..
       "Connection: close\r\n\r\n")
-    outcome = "pipeline-reading"
-    local all = str.writer(false)
+    outcome = "buffered-reading"
+    local all = str.writer()
     for chunk in client:read do all:write(chunk) end
     server:close()
-    watchdog:cancel("pipeline completed")
+    watchdog:cancel(async.CancellationReason.simple(
+      "buffered requests completed"))
     check(not watchdog_fired,
-          "HTTP pipeline required the watchdog: " .. outcome)
+          "buffered HTTP requests required the watchdog: " .. outcome)
     local responses = all:drain()
     local first: integer? = str.find(responses, "HTTP/1.1 200 OK")
     local second: integer? = nil
@@ -638,16 +665,16 @@ function start_pipelining(first_port: integer): async.Task
                         (first as integer) + 1)
     end
     check(first ~= nil and second ~= nil and handled == 2,
-          "HTTP server lost a pipelined request")
+          "HTTP server lost a buffered next-request suffix")
     check(contains(responses, "Content-Length: 1\r\n\r\n1") and
           contains(responses,
                    "Content-Length: 1\r\nConnection: close\r\n\r\n2"),
-          "HTTP pipelined responses were not ordered or framed")
+          "serial HTTP responses were not ordered or framed")
     client:close()
     while active(serving) do timer.yield() end
-    check(serving:status() == "succeeded",
-          "pipelined HTTP serve Task failed")
-    outcome = "pipeline-ok"
+    check(serving:status():has_succeeded(),
+          "buffered-request HTTP serve Task failed")
+    outcome = "buffered-suffix-ok"
     return nil
   end)
 end
@@ -716,10 +743,11 @@ local function start_keep_alive_eof(first_port: integer,
     current = nil
 
     server:close()
-    watchdog:cancel("keep-alive EOF completed")
+    watchdog:cancel(async.CancellationReason.simple(
+      "keep-alive EOF completed"))
     check(not timed_out, "HTTP keep-alive EOF matrix timed out")
     while active(serving) do timer.yield() end
-    check(serving:status() == "succeeded",
+    check(serving:status():has_succeeded(),
           "HTTP listener failed during keep-alive EOF handling")
     check(handled == 1,
           "HTTP server dispatched an incomplete second request")
@@ -895,9 +923,10 @@ function start_client_framing(first_port: integer): async.Task
           "HTTP client accepted EOF after only an informational response")
 
     while active(peer) do timer.yield() end
-    watchdog:cancel("client framing completed")
+    watchdog:cancel(async.CancellationReason.simple(
+      "client framing completed"))
     check(not timed_out, "HTTP client framing matrix timed out")
-    check(peer:status() == "succeeded", "raw framing peer failed")
+    check(peer:status():has_succeeded(), "raw framing peer failed")
     outcome = "client-framing-ok"
     return nil
   end)
@@ -914,7 +943,7 @@ function start_unread_request_drain(first_port: integer): async.Task
       targets[handled] = request.target
       -- The first two bodies are intentionally unread. The connection Task
       -- must drain both fixed and chunked framing before advancing to the
-      -- already-buffered pipelined suffix.
+      -- already-buffered next-request suffix.
       response:set_header("Content-Length", "1")
       response:write(str.char(64 + handled))
     end
@@ -942,11 +971,12 @@ function start_unread_request_drain(first_port: integer): async.Task
       "GET /last HTTP/1.1\r\nHost: localhost\r\n" ..
       "Connection: close\r\n\r\n")
     outcome = "request-drain-reading"
-    local all = str.writer(false)
+    local all = str.writer()
     for chunk in client:read do all:write(chunk) end
     client:close()
     server:close()
-    watchdog:cancel("request drain completed")
+    watchdog:cancel(async.CancellationReason.simple(
+      "request drain completed"))
     check(not timed_out, "HTTP unread-body drain matrix timed out")
     check(handled == 3 and targets[1] == "/fixed" and
           targets[2] == "/chunked" and targets[3] == "/last",
@@ -958,7 +988,7 @@ function start_unread_request_drain(first_port: integer): async.Task
                    "Content-Length: 1\r\nConnection: close\r\n\r\nC"),
           "HTTP server framed unread-body responses incorrectly")
     while active(serving) do timer.yield() end
-    check(serving:status() == "succeeded",
+    check(serving:status():has_succeeded(),
           "unread-body HTTP serve Task failed")
     outcome = "request-drain-ok"
     return nil
@@ -1016,7 +1046,7 @@ function start_server_failure_isolation(first_port: integer): async.Task
       local connection = net.connect("127.0.0.1", port)
       current = connection
       connection:write(request_text)
-      local received = str.writer(false)
+      local received = str.writer()
       for chunk in connection:read do received:write(chunk) end
       connection:close()
       current = nil
@@ -1085,10 +1115,11 @@ function start_server_failure_isolation(first_port: integer): async.Task
           "HTTP 205 response emitted body bytes")
 
     server:close()
-    watchdog:cancel("server failure matrix completed")
+    watchdog:cancel(async.CancellationReason.simple(
+      "server failure matrix completed"))
     check(not timed_out, "HTTP server failure matrix timed out")
     while active(serving) do timer.yield() end
-    check(serving:status() == "succeeded",
+    check(serving:status():has_succeeded(),
           "HTTP listener failed with a connection Task")
     outcome = "server-failures-ok"
     return nil
@@ -1108,41 +1139,40 @@ function start_cancelled_server_close(first_port: integer): async.Task
       server:serve()
       return nil
     end)
-    while serving:status() == "ready" do timer.yield() end
-    check(serving:status() == "waiting",
+    while serving:status():as_string() == "ready" do timer.yield() end
+    check(serving:status():as_string() == "waiting",
           "HTTP serve Task did not suspend in accept")
 
     local closer: async.Task? = nil
     local close_returned = false
     closer = async.run(function (): value
-      (closer as async.Task):cancel(
-        "cancel before HTTP listener transport close")
+      (closer as async.Task):cancel(async.CancellationReason.simple(
+        "cancel before HTTP listener transport close"))
       server:close()
       close_returned = true
       return nil
     end)
     local close_task = closer as async.Task
     while active(close_task) do timer.yield() end
-    check(close_task:status() == "cancelled" and not close_returned,
-          "cancelled HTTP Server close crossed its suspension boundary")
-    check(active(serving),
-          "skipped listener close unexpectedly released accept")
+    check(close_task:status():has_cancelled() and close_returned,
+          "Task cancellation interrupted HTTP Server close")
 
     local timed_out = false
     local watchdog = async.run(function (): value
       timer.sleep(5000)
       timed_out = true
-      serving:cancel("HTTP Server close retry timed out")
+      serving:cancel(async.CancellationReason.simple(
+        "cancelled HTTP Server close timed out"))
       return nil
     end)
-    server:close()
     while active(serving) do timer.yield() end
-    watchdog:cancel("HTTP Server close retry completed")
-    check(not timed_out, "HTTP Server close retry left accept stranded")
-    check(serving:status() == "succeeded",
-          "HTTP Server close retry did not stop serve cleanly")
+    watchdog:cancel(async.CancellationReason.simple(
+      "cancelled HTTP Server close completed"))
+    check(not timed_out, "cancelled HTTP Server close left accept stranded")
+    check(serving:status():has_succeeded(),
+          "cancelled HTTP Server close did not stop serve cleanly")
     server:close()
-    outcome = "server-close-retry-ok"
+    outcome = "server-close-cancel-ok"
     return nil
   end)
 end
@@ -1185,16 +1215,16 @@ function start_cancelled_client_close(first_port: integer): async.Task
     local closer: async.Task? = nil
     local close_returned = false
     closer = async.run(function (): value
-      (closer as async.Task):cancel(
-        "cancel before HTTP client transport close")
+      (closer as async.Task):cancel(async.CancellationReason.simple(
+        "cancel before HTTP client transport close"))
       response:close()
       close_returned = true
       return nil
     end)
     local close_task = closer as async.Task
     while active(close_task) do timer.yield() end
-    check(close_task:status() == "cancelled" and not close_returned,
-          "cancelled HTTP response close crossed its suspension boundary")
+    check(close_task:status():has_cancelled() and close_returned,
+          "Task cancellation interrupted HTTP response close")
     check(response:read() == nil,
           "logically closed HTTP response remained readable")
 
@@ -1202,17 +1232,438 @@ function start_cancelled_client_close(first_port: integer): async.Task
     local watchdog = async.run(function (): value
       timer.sleep(5000)
       timed_out = true
-      peer:cancel("HTTP client close retry timed out")
+      peer:cancel(async.CancellationReason.simple(
+        "cancelled HTTP response close timed out"))
       return nil
     end)
-    response:close()
     while active(peer) do timer.yield() end
-    watchdog:cancel("HTTP client close retry completed")
-    check(not timed_out, "HTTP client close retry left its peer stranded")
-    check(peer:status() == "succeeded" and peer_saw_eof,
-          "HTTP client close retry did not close its transport")
+    watchdog:cancel(async.CancellationReason.simple(
+      "cancelled HTTP response close completed"))
+    check(not timed_out,
+          "cancelled HTTP response close left its peer stranded")
+    check(peer:status():has_succeeded() and peer_saw_eof,
+          "cancelled HTTP response close did not close its transport")
     response:close()
-    outcome = "client-close-retry-ok"
+    outcome = "client-close-cancel-ok"
+    return nil
+  end)
+end
+
+function start_idle_timeout_api(first_port: integer): async.Task
+  outcome = "running"
+  return async.run(function (): value
+    local handler: http.Handler = function (_request: http.Request,
+                                            _response: http.Response)
+    end
+
+    -- A negative timeout wins over a listener error, proving that validation
+    -- happens before the socket is opened.
+    local occupied, occupied_port = raw_listen(first_port)
+    local plain_rejected = false
+    do
+      http.listen("127.0.0.1", handler, occupied_port, nil, -1)
+    catch
+      plain_rejected =
+        str.tostring(error) == "HTTP idle timeout must be non-negative"
+    end
+    occupied:close()
+    check(plain_rejected,
+          "HTTP plain listener did not validate idle timeout first")
+
+    -- TLS must likewise reject before attempting synchronous PEM input.
+    local tls_rejected = false
+    do
+      http.listen_tls("127.0.0.1",
+                      "/definitely/missing/http-idle-timeout.pem",
+                      handler, nil, nil, nil, -1)
+    catch
+      tls_rejected =
+        str.tostring(error) == "HTTP idle timeout must be non-negative"
+    end
+    check(tls_rejected,
+          "HTTPS listener read PEM input before timeout validation")
+
+    local default_server, _default_port =
+      http_listen(first_port + 101, handler, nil)
+    check(default_server:idle_timeout(nil) == 0,
+          "HTTP Server default idle timeout was not zero")
+    check(default_server:idle_timeout(75) == 0 and
+          default_server:idle_timeout(nil) == 75,
+          "HTTP Server idle-timeout setter did not return the previous value")
+    check(default_server:idle_timeout(0) == 75 and
+          default_server:idle_timeout(nil) == 0,
+          "HTTP Server idle-timeout setter did not accept zero")
+    local setter_rejected = false
+    do
+      default_server:idle_timeout(-2)
+    catch
+      setter_rejected =
+        str.tostring(error) == "HTTP idle timeout must be non-negative"
+    end
+    check(setter_rejected and default_server:idle_timeout(nil) == 0,
+          "HTTP Server mutated its timeout after rejecting a value")
+    default_server:close()
+
+    local configured, _configured_port =
+      http_listen(first_port + 202, handler, 43)
+    check(configured:idle_timeout(nil) == 43,
+          "HTTP listener did not retain its configured idle timeout")
+    configured:close()
+    outcome = "idle-timeout-api-ok"
+    return nil
+  end)
+end
+
+function start_idle_timeout_plain(first_port: integer): async.Task
+  outcome = "running"
+  return async.run(function (): value
+    local handled = 0
+    local body_read_started = false
+    local handler: http.Handler = function (request: http.Request,
+                                            response: http.Response)
+      handled = handled + 1
+      if request.target == "/boundary" then
+        -- Header deadlines do not cover handler work or response writes.
+        timer.sleep(90)
+        response:set_header("Content-Length", "1")
+        response:write("B")
+      elseif request.target == "/body-read" then
+        -- The header deadline is gone before the handler starts reading the
+        -- body. A delayed body therefore remains an application-level wait.
+        body_read_started = true
+        local body? = request:read()
+        check(body == "x",
+              "handler-side body read received the wrong contents")
+        response:set_header("Content-Length", "1")
+        response:write("R")
+      else
+        response:set_header("Content-Length", "0")
+      end
+    end
+
+    -- Zero preserves the original indefinite header wait.
+    local zero_server, zero_port = http_listen(first_port, handler, nil)
+    local zero_serving = async.run(function (): value
+      zero_server:serve()
+      return nil
+    end)
+    local delayed = net.connect("127.0.0.1", zero_port)
+    timer.sleep(75)
+    delayed:write(
+      "GET /zero HTTP/1.1\r\nHost: localhost\r\n" ..
+      "Connection: close\r\n\r\n")
+    local delayed_response? = delayed:read_until("\r\n\r\n", false)
+    check(delayed_response ~= nil,
+          "zero idle timeout closed a delayed request")
+    check(delayed:read() == nil,
+          "zero-timeout response did not close with its request")
+    delayed:close()
+    zero_server:close()
+    while active(zero_serving) do timer.yield() end
+    check(zero_serving:status():has_succeeded(),
+          "zero-timeout HTTP listener failed")
+    check(handled == 1, "zero-timeout request did not reach its handler")
+
+    local server, port = http_listen(first_port + 101, handler, 30)
+    local serving = async.run(function (): value
+      server:serve()
+      return nil
+    end)
+
+    -- Read immediately instead of sleeping before the assertion. The distant
+    -- watchdog is deliberately the only later timer: if the deadline's
+    -- reader cancellation or join waits for unrelated live work, it records
+    -- the delay before providing that later wakeup. Sending a complete request
+    -- also bounds the failure mode where the timeout never closes the peer.
+    local prompt = net.connect("127.0.0.1", port)
+    local prompt_watchdog_fired = false
+    local prompt_watchdog = async.run(function (): value
+      timer.sleep(1000)
+      prompt_watchdog_fired = true
+      do
+        prompt:write(
+          "GET /late-idle HTTP/1.1\r\nHost: localhost\r\n" ..
+          "Connection: close\r\n\r\n")
+      catch
+      end
+      return nil
+    end)
+    check(prompt:read() == nil,
+          "positive idle timeout left an initial request open")
+    prompt_watchdog:cancel(async.CancellationReason.simple(
+      "HTTP idle timeout completed promptly"))
+    async.join(prompt_watchdog)
+    check(not prompt_watchdog_fired,
+          "HTTP idle timeout needed unrelated live work to complete")
+    prompt:close()
+
+    -- Exercise repeated reader/check/timer loser cleanup. None of these idle
+    -- connections may dispatch a handler.
+    for _ = 1, 2 do
+      local idle = net.connect("127.0.0.1", port)
+      timer.sleep(90)
+      check(idle:read() == nil,
+            "positive idle timeout left an initial request open")
+      idle:close()
+    end
+    check(handled == 1,
+          "initial idle timeout dispatched an HTTP handler")
+
+    -- Prove that this is one absolute acquisition deadline, not an inactivity
+    -- timer. The periodic fragments arrive before 200 ms, but completing the
+    -- headers is delayed until after that original deadline. A reset-on-byte
+    -- implementation would dispatch the deliberately late request instead.
+    check(server:idle_timeout(200) == 30,
+          "HTTP Server did not expose the previous timeout")
+    local partial = net.connect("127.0.0.1", port)
+    partial:write("GET /partial HTTP/1.1\r\nHost: local")
+    local partial_feeder = async.run(function (): value
+      timer.sleep(70)
+      do partial:write("h") catch end
+      timer.sleep(70)
+      do partial:write("o") catch end
+      return nil
+    end)
+    local partial_late = false
+    local partial_watchdog = async.run(function (): value
+      timer.sleep(250)
+      partial_late = true
+      do
+        partial:write("st\r\nConnection: close\r\n\r\n")
+      catch
+      end
+      return nil
+    end)
+    check(partial:read() == nil,
+          "idle timeout reset or ignored a partial header deadline")
+    partial_watchdog:cancel(async.CancellationReason.simple(
+      "absolute HTTP header deadline completed"))
+    async.join_two(partial_feeder, partial_watchdog)
+    check(not partial_late,
+          "partial bytes reset the absolute HTTP header deadline")
+    partial:close()
+    check(server:idle_timeout(30) == 200,
+          "HTTP Server did not restore the focused timeout")
+    check(handled == 1,
+          "partial timed-out headers dispatched an HTTP handler")
+
+    -- A parser failure belongs to the reader child. The connection Task joins
+    -- that child and closes the peer without raising the same failure again.
+    -- The Lua-side assertion for this scenario requires exactly one uncaught
+    -- Task report, catching either suppression or duplicate reporting.
+    local malformed = net.connect("127.0.0.1", port)
+    malformed:write(
+      "GET /malformed HTTP/1.1\r\nBad Header: value\r\n\r\n")
+    check(malformed:read() == nil,
+          "malformed positive-timeout request remained open")
+    malformed:close()
+    check(handled == 1,
+          "malformed positive-timeout request reached its handler")
+
+    -- A next request already buffered behind the first is acquired before
+    -- the timer even though each request gets its own absolute deadline.
+    local buffered = net.connect("127.0.0.1", port)
+    buffered:write(
+      "GET /buffered-one HTTP/1.1\r\nHost: localhost\r\n\r\n" ..
+      "GET /buffered-two HTTP/1.1\r\nHost: localhost\r\n" ..
+      "Connection: close\r\n\r\n")
+    local buffered_output = str.writer()
+    for chunk in buffered:read do buffered_output:write(chunk) end
+    local rendered = buffered_output:drain()
+    local first_response? = str.find(rendered, "HTTP/1.1 200 OK")
+    local second_response: integer? = nil
+    if first_response then
+      second_response = str.find(
+        rendered, "HTTP/1.1 200 OK", (first_response as integer) + 1)
+    end
+    check(first_response ~= nil and second_response ~= nil,
+          "idle timeout lost a buffered next request")
+    buffered:close()
+    check(handled == 3,
+          "buffered requests did not each reach the handler")
+
+    -- A handler-side body read is also outside the header deadline. Delay the
+    -- sole body byte for three complete timeout intervals before allowing the
+    -- handler and response to finish.
+    local body_read = net.connect("127.0.0.1", port)
+    body_read:write(
+      "POST /body-read HTTP/1.1\r\nHost: localhost\r\n" ..
+      "Content-Length: 1\r\nConnection: close\r\n\r\n")
+    while not body_read_started do timer.yield() end
+    timer.sleep(90)
+    body_read:write("x")
+    local body_headers? = body_read:read_until("\r\n\r\n", false)
+    check(body_headers ~= nil and read_exact(body_read, 1) == "R",
+          "idle timeout covered a handler-side request-body read")
+    check(body_read:read() == nil,
+          "handler-side body-read response did not close")
+    body_read:close()
+    check(handled == 4,
+          "handler-side body read did not reach its handler")
+
+    -- The handler may outlive the idle deadline, and automatic request-body
+    -- draining remains application-controlled rather than deadline-bound.
+    local boundary = net.connect("127.0.0.1", port)
+    boundary:write(
+      "POST /boundary HTTP/1.1\r\nHost: localhost\r\n" ..
+      "Content-Length: 1\r\n\r\n")
+    local boundary_headers? = boundary:read_until("\r\n\r\n", false)
+    check(boundary_headers ~= nil and read_exact(boundary, 1) == "B",
+          "idle timeout covered handler or response work")
+    timer.sleep(90)
+    boundary:write(
+      "xGET /after-drain HTTP/1.1\r\nHost: localhost\r\n" ..
+      "Connection: close\r\n\r\n")
+    local after_drain? = boundary:read_until("\r\n\r\n", false)
+    check(after_drain ~= nil,
+          "idle timeout covered automatic request-body draining")
+    check(boundary:read() == nil,
+          "post-drain HTTP response did not close")
+    boundary:close()
+    check(handled == 6,
+          "body-drain boundary did not preserve the next request")
+
+    server:close()
+    while active(serving) do timer.yield() end
+    check(serving:status():has_succeeded(),
+          "positive-timeout HTTP listener failed")
+
+    -- A setter change does not rewrite the deadline of a read already in
+    -- progress; it becomes visible on the following keep-alive iteration.
+    local snapshot_server, snapshot_port =
+      http_listen(first_port + 202, handler, nil)
+    local snapshot_serving = async.run(function (): value
+      snapshot_server:serve()
+      return nil
+    end)
+    local snapshot = net.connect("127.0.0.1", snapshot_port)
+    timer.sleep(10)
+    check(snapshot_server:idle_timeout(30) == 0,
+          "HTTP Server setter did not expose the prior snapshot")
+    timer.sleep(90)
+    snapshot:write("GET /snapshot HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    check(snapshot:read_until("\r\n\r\n", false) ~= nil,
+          "timeout setter changed an in-flight header read")
+    timer.sleep(90)
+    check(snapshot:read() == nil,
+          "timeout setter did not affect the next keep-alive read")
+    snapshot:close()
+    snapshot_server:close()
+    while active(snapshot_serving) do timer.yield() end
+    check(snapshot_serving:status():has_succeeded(),
+          "snapshot-timeout HTTP listener failed")
+    check(handled == 7,
+          "snapshot timeout dispatched an unexpected handler")
+
+    outcome = "idle-timeout-plain-ok"
+    return nil
+  end)
+end
+
+function start_idle_timeout_tls(first_port: integer): async.Task
+  outcome = "running"
+  return async.run(function (): value
+    local handled = 0
+    local handler: http.Handler = function (_request: http.Request,
+                                            response: http.Response)
+      handled = handled + 1
+      response:set_header("Content-Length", "0")
+    end
+    local server, port = https_listen(first_port, handler, 30)
+    defer server:close()
+    check(server:idle_timeout(nil) == 30,
+          "HTTPS listener did not retain its idle timeout")
+    local serving = async.run(function (): value
+      server:serve()
+      return nil
+    end)
+
+    local expect_tls_timeout = function (connection: ssl.Connection,
+                                         label: string)
+      local observed = "not-read"
+      local reader = async.run(function (): value
+        do
+          local chunk? = connection:read()
+          if chunk then
+            observed = "unexpected TLS data"
+          else
+            observed = "authenticated TLS EOF"
+          end
+        catch
+          if error is ssl.Error then
+            observed = (error as ssl.Error).name
+          else
+            raise error
+          end
+        end
+        return nil
+      end)
+      local watchdog_fired = false
+      local watchdog = async.run(function (): value
+        timer.sleep(1000)
+        watchdog_fired = true
+        reader:cancel(async.CancellationReason.simple(
+          label .. " watchdog expired"))
+        return nil
+      end)
+      local reader_status = async.join(reader)
+      watchdog:cancel(async.CancellationReason.simple(
+        label .. " completed promptly"))
+      async.join(watchdog)
+      check(not watchdog_fired,
+            label .. " needed unrelated live work to complete")
+      check(reader_status:has_succeeded(),
+            label .. " peer reader did not succeed")
+      check(observed == "TLS_TRUNCATED_EOF",
+            label .. " reported " .. observed)
+    end
+
+    local idle = ssl.connect("127.0.0.1", port, TRUST_ROOT)
+    expect_tls_timeout(idle, "initial HTTPS idle timeout")
+    idle:close()
+    check(handled == 0,
+          "HTTPS idle timeout dispatched a handler")
+
+    -- Apply the same policy after one successful keep-alive request. Reading
+    -- immediately leaves the listener as unrelated live I/O while the next
+    -- request's deadline cancels and joins its SSL reader.
+    local keep_alive = ssl.connect("127.0.0.1", port, TRUST_ROOT)
+    keep_alive:write(
+      "GET /secure-keep-alive HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    local keep_alive_response? = keep_alive:read_until("\r\n\r\n", false)
+    check(keep_alive_response ~= nil,
+          "HTTPS keep-alive request received no response")
+    expect_tls_timeout(keep_alive, "HTTPS keep-alive idle timeout")
+    keep_alive:close()
+    check(handled == 1,
+          "HTTPS keep-alive timeout dispatched an extra handler")
+
+    -- Header bytes do not exempt TLS connections from the same deadline.
+    local partial = ssl.connect("127.0.0.1", port, TRUST_ROOT)
+    partial:write("GET /secure-partial HTTP/1.1\r\nHost: local")
+    expect_tls_timeout(partial, "partial-header HTTPS idle timeout")
+    partial:close()
+    check(handled == 1,
+          "partial HTTPS headers dispatched a handler")
+
+    local immediate = ssl.connect("127.0.0.1", port, TRUST_ROOT)
+    immediate:write(
+      "GET /secure-timeout HTTP/1.1\r\nHost: localhost\r\n" ..
+      "Connection: close\r\n\r\n")
+    local response? = immediate:read_until("\r\n\r\n", false)
+    check(response ~= nil,
+          "HTTPS idle timeout rejected an immediate request")
+    check(immediate:read() == nil,
+          "HTTPS timeout response did not close")
+    immediate:close()
+    check(handled == 2,
+          "HTTPS immediate request did not reach its handler")
+
+    server:close()
+    while active(serving) do timer.yield() end
+    check(serving:status():has_succeeded(),
+          "HTTPS idle-timeout listener failed")
+    outcome = "idle-timeout-tls-ok"
     return nil
   end)
 end
@@ -1244,8 +1695,8 @@ function start_https(first_port: integer): async.Task
                                  certificate_bundle, handler, nil, port)
         break
       catch
-        if error is async.Error and
-           (error as async.Error).name == "EADDRINUSE" then
+        if error is async.OperationError and
+           (error as async.OperationError).name == "EADDRINUSE" then
           port = port + 1
         else
           raise error
@@ -1254,6 +1705,8 @@ function start_https(first_port: integer): async.Task
     end
     if server == nil then raise "could not find an HTTPS loopback port" end
     local exact_server = server as http.Server
+    check(exact_server:idle_timeout(nil) == 0,
+          "HTTPS Server default idle timeout was not zero")
     defer exact_server:close()
     local serving = async.run(function (): value
       exact_server:serve()
@@ -1272,8 +1725,8 @@ function start_https(first_port: integer): async.Task
         response_status = response.status
         body = read_response(response)
       catch
-        if error is async.Error then
-          local failure = error as async.Error
+        if error is async.OperationError then
+          local failure = error as async.OperationError
           client_failure = failure.name .. ": " .. failure.message ..
             " (" .. failure.operation .. ")"
         else
@@ -1286,14 +1739,16 @@ function start_https(first_port: integer): async.Task
     local watchdog = async.run(function (): value
       timer.sleep(5000)
       timed_out = true
-      requesting:cancel("HTTPS public test timed out")
+      requesting:cancel(async.CancellationReason.simple(
+        "HTTPS public test timed out"))
       do exact_server:close() catch end
       return nil
     end)
     while active(requesting) do timer.yield() end
-    watchdog:cancel("HTTPS request completed")
+    watchdog:cancel(async.CancellationReason.simple(
+      "HTTPS request completed"))
     check(not timed_out, "HTTPS public API case timed out")
-    check(requesting:status() == "succeeded",
+    check(requesting:status():has_succeeded(),
           "HTTPS request Task did not succeed")
     check(#client_failure == 0,
           "HTTPS response read failed with " .. client_failure)
@@ -1302,7 +1757,7 @@ function start_https(first_port: integer): async.Task
     check(handled, "HTTPS handler did not run")
     exact_server:close()
     while active(serving) do timer.yield() end
-    check(serving:status() == "succeeded", "HTTPS serve Task failed")
+    check(serving:status():has_succeeded(), "HTTPS serve Task failed")
     outcome = "https-ok"
     return nil
   end)
@@ -1340,8 +1795,8 @@ local async = require "titan.async"
 local cases = require "http_cases"
 local task = assert(cases.%s(%d))
 async.loop()
-assert(task:status() == "succeeded",
-       task:status() .. ":" .. cases.result())
+assert(task:status():has_succeeded(),
+       task:status():as_string() .. ":" .. cases.result())
 assert(cases.result() == %q, cases.result())
 ]==]):format(function_name, first_port, expected)
         local ok, status, output =
@@ -1375,8 +1830,9 @@ assert(cases.result() == %q, cases.result())
         run("start_expect_continue", "expect", "expect-ok")
     end)
 
-    it("preserves and orders pipelined HTTP/1.1 requests", function()
-        run("start_pipelining", "pipeline", "pipeline-ok")
+    it("preserves buffered next requests across serial handlers", function()
+        run("start_buffered_next_requests", "buffered-suffix",
+            "buffered-suffix-ok")
     end)
 
     it("treats only idle keep-alive EOF as a clean disconnect", function()
@@ -1433,14 +1889,34 @@ assert(cases.result() == %q, cases.result())
             "server-failures-ok")
     end)
 
-    it("retries a listener close skipped by Task cancellation", function()
-        run("start_cancelled_server_close", "server-close-retry",
-            "server-close-retry-ok")
+    it("completes a listener close despite Task cancellation", function()
+        run("start_cancelled_server_close", "server-close-cancel",
+            "server-close-cancel-ok")
     end)
 
-    it("retries a client close skipped by Task cancellation", function()
-        run("start_cancelled_client_close", "client-close-retry",
-            "client-close-retry-ok")
+    it("completes a client close despite Task cancellation", function()
+        run("start_cancelled_client_close", "client-close-cancel",
+            "client-close-cancel-ok")
+    end)
+
+    it("validates and updates the HTTP Server idle-timeout API", function()
+        run("start_idle_timeout_api", "idle-timeout-api",
+            "idle-timeout-api-ok")
+    end)
+
+    it("bounds only plain HTTP request-header acquisition", function()
+        local output = run("start_idle_timeout_plain", "idle-timeout-plain",
+            "idle-timeout-plain-ok")
+        local _, reports = output:gsub("uncaught error in async Task:", "")
+        assert.equals(1, reports, output)
+        assert.truthy(output:find("HTTP parse error", 1, true), output)
+    end)
+
+    it("applies the same idle timeout to HTTPS connections", function()
+        local output = run("start_idle_timeout_tls", "idle-timeout-tls",
+            "idle-timeout-tls-ok")
+        local _, reports = output:gsub("uncaught error in async Task:", "")
+        assert.equals(0, reports, output)
     end)
 
     it("serves and requests verified HTTPS through the public API", function()

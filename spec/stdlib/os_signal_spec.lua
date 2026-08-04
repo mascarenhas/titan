@@ -13,15 +13,14 @@ local function check(condition: boolean, message: string)
 end
 
 local function active(task: async.Task): boolean
-  local status = task:status()
-  return status == "ready" or status == "running" or status == "waiting"
+  return not task:status():has_finished()
 end
 
 local function wait_until_waiting(task: async.Task)
-  while task:status() == "ready" or task:status() == "running" do
+  while task:status():as_string() == "ready" or task:status():as_string() == "running" do
     async.yield()
   end
-  check(task:status() == "waiting",
+  check(task:status():as_string() == "waiting",
         "signal Task did not suspend for its callback")
 end
 
@@ -72,7 +71,7 @@ function start(): async.Task
     wait_until_waiting(waiter)
     send_signal("usr1")
     while active(waiter) do async.yield() end
-    check(waiter:status() == "succeeded" and received == "usr1",
+    check(waiter:status():as_string() == "succeeded" and received == "usr1",
           "one-shot signal continuation returned the wrong result")
 
     local cancelled_resumed = false
@@ -82,11 +81,12 @@ function start(): async.Task
       return nil
     end)
     wait_until_waiting(cancelled)
-    cancelled:cancel("discard signal wait")
-    check(cancelled:status() == "waiting",
-          "signal cancellation resumed synchronously")
+    cancelled:cancel(async.CancellationReason.simple("discard signal wait"))
+    check(cancelled:status():as_string() == "waiting" and
+          not cancelled_resumed,
+          "signal cancellation resumed before its later callback")
     while active(cancelled) do async.yield() end
-    check(cancelled:status() == "cancelled" and not cancelled_resumed,
+    check(cancelled:status():as_string() == "cancelled" and not cancelled_resumed,
           "cancelled signal continuation resumed")
 
     local replacement_received = ""
@@ -97,7 +97,7 @@ function start(): async.Task
     wait_until_waiting(replacement)
     send_signal("usr2")
     while active(replacement) do async.yield() end
-    check(replacement:status() == "succeeded" and
+    check(replacement:status():as_string() == "succeeded" and
           replacement_received == "usr2",
           "replacement one-shot signal watcher failed")
 
@@ -129,7 +129,7 @@ local async = require "titan.async"
 local cases = require "os_signal_cases"
 local task = assert(cases.start())
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(cases.result() == "signals-ok", cases.result())
 ]==])
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)

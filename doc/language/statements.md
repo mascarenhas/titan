@@ -512,7 +512,7 @@ A bare `raise` is a re-raise and is legal only inside a `catch` block; it
 preserves the original caught error value and traceback. Outside a catch,
 bare `raise` is a compile-time error. `raise` always terminates the
 current control-flow path, like `return` for the purpose of checking that
-a function with return values always returns. Full propagation and
+a function with return values cannot fall off the end. Full propagation and
 `finally` semantics are in [Error handling](error-handling.md).
 
 ## `defer`
@@ -636,14 +636,20 @@ explicit `: nil` annotation is how you ask for a function that returns a
 single `nil`.
 
 A function whose first fixed return exists and is not `nil` must provably
-return on every control path; otherwise the compiler rejects it. A
+avoid falling off the end on every control path; otherwise the compiler rejects
+it. A
 nil-returning function, a zero-return function, and a function with only a
 flexible tail may instead fall off the end; the last case produces an empty
 run. The analysis understands `if`/`elseif`/`else` chains and `case`
-statements where an explicit `else` and every arm return. Merely listing all
-current variants is not exhaustive proof. It does not credit loops — a
-`return` inside a `while` body
-does not count as "always returns".
+statements where an explicit `else` exists and every arm is non-fallthrough.
+Merely listing all current variants is not exhaustive proof. A literal
+`while true` also counts as non-fallthrough when no reachable `break` targets
+that loop; a `break` in a
+nested loop targets only the nested loop. An enclosing `catch` that can
+intercept an error from the loop must itself be non-fallthrough, because a
+falling-through catch creates a path past the protected loop. `while false`
+and a `while` with any non-literal condition receive no such credit. `repeat`,
+numeric `for`, and generic `for` loops remain fallthrough.
 
 ## `break` (no `goto`)
 

@@ -49,6 +49,7 @@ while IFS= read -r test_file; do
             # inspect shared root artifacts out of the parallel workers below.
             library_serial_tests+=("$test_file")
             ;;
+        spec/stdlib/async*_spec.lua | \
         spec/stdlib/uv*_spec.lua | \
         spec/stdlib/timer*_spec.lua | \
         spec/stdlib/fs*_spec.lua)
@@ -204,7 +205,7 @@ case "$group" in
         "$BUSTED" -o gtest -v "${library_serial_tests[@]}"
         ;;
     library-uv-fs)
-        echo "Running ${#library_uv_fs_tests[@]} uv/timer/fs spec files" \
+        echo "Running ${#library_uv_fs_tests[@]} async/uv/timer/fs spec files" \
             "without LuaCov"
         "$BUSTED" -o gtest -v "${library_uv_fs_tests[@]}"
         ;;
@@ -252,9 +253,9 @@ case "$group" in
         wait "$peg_string_pid" || peg_string_status=$?
 
         if [[ ${GITHUB_ACTIONS:-} == true ]]; then
-            echo "::group::Library uv/timer/fs worker"
+            echo "::group::Library async/uv/timer/fs worker"
         else
-            echo "Library uv/timer/fs worker"
+            echo "Library async/uv/timer/fs worker"
         fi
         cat "$uv_fs_log"
         if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::endgroup::"; fi

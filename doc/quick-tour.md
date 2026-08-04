@@ -294,8 +294,11 @@ titanc concurrent
 libuv callback until it finishes, raises, or starts another asynchronous
 operation and yields. `async.yield()` is an explicit fairness turn; CPU-heavy
 code that never yields blocks the loop. An uncaught Task error is logged with
-its traceback and ends only that Task; the other Tasks continue. Close
-resources explicitly. Runtime shutdown drains and closes its libuv handles,
+its traceback and ends only that Task; `Task:status()` retains that exact
+failure and traceback. Fixed-arity `any`, `race`, `all`, and `join`
+combinators coordinate bounded Task groups without cancelling unfinished
+inputs. The other Tasks continue. Close resources explicitly. Runtime
+shutdown drains and closes its libuv handles,
 but closing a process watcher does not terminate or reap its child, and raw
 File descriptors remain caller-owned.
 
@@ -312,7 +315,7 @@ local task = async.run(function()
     result = "done"
 end)
 async.loop()
-assert(task:status() == "succeeded")
+assert(task:status():as_string() == "succeeded")
 assert(result == "done")
 ```
 

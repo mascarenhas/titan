@@ -463,7 +463,7 @@ end
 local function parser_read_until(parser: Parser, delimiter: string,
                                   chop: boolean?): string?
   if #delimiter == 0 then raise "read delimiter must not be empty" end
-  local builder = str.writer(false)
+  local builder = str.writer()
   local tail = ""
   while true do
     local chunk? = parser_read(parser)

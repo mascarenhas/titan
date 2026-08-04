@@ -93,6 +93,7 @@ local DIRECT_LIBUV_CALLS = {
     "uv_accept",
     "uv_close",
     "uv_freeaddrinfo",
+    "uv_fs_get_result",
     "uv_fs_get_statbuf",
     "uv_getaddrinfo",
     "uv_handle_set_data",
@@ -157,6 +158,7 @@ local RETIRED_UV_HELPERS = {
     "titan_uvshim_signal_number",
     "titan_uvshim_signal_name",
     "titan_uvshim_buf_max_length",
+    "titan_uvshim_buf_init_const",
     "titan_uvshim_buf_init_slice",
     "titan_uvshim_bytes_copy",
     "titan_uvshim_bytes_find",
@@ -702,7 +704,7 @@ describe("libuv Makefile configuration", function()
     end)
 
     it("exports callbacks and records direct libuv archive references",
-        function()
+    function()
             local runtime_object = "titan-runtime/titan_uv.o"
             assert.truthy(file_exists(runtime_object), runtime_object)
             local ok, output, why, code = run_argv(tool_argv(
@@ -712,6 +714,8 @@ describe("libuv Makefile configuration", function()
             for _, callback in ipairs(DIRECT_CALLBACKS) do
                 assert.truthy(nm_has_symbol(output, callback), callback)
             end
+            assert.falsy(nm_has_symbol(output, "uv_fs_get_result"),
+                "filesystem result extraction belongs in Titan")
             for _, wrapper in ipairs(RETIRED_UV_WRAPPERS) do
                 assert.falsy(nm_has_symbol(output, wrapper), wrapper)
             end
@@ -924,6 +928,44 @@ describe("libuv Makefile configuration", function()
         end
     end)
 
+    it("resumes one-shot timer Tasks only from close completion", function()
+        local task_source = read_file("titan/uv/task.titan")
+        local timer_start = assert(task_source:find(
+            "local function start_timer(", 1, true))
+        local timer_stop = assert(task_source:find(
+            "\n-- Resume is meaningful only for an explicit async.suspend.",
+            timer_start, true))
+        local timer_body = task_source:sub(timer_start, timer_stop - 1)
+        local completion_start = assert(timer_body:find(
+            "local completion = function ()", 1, true))
+        local callback_start = assert(timer_body:find(
+            "local callback = function (owner: TimerOwner)", 1, true))
+        local completion = timer_body:sub(
+            completion_start, callback_start - 1)
+        local timer_callback = timer_body:sub(callback_start)
+
+        assert.matches("resume_task_from_callback", completion, 1, true)
+        assert.matches("begin_close", timer_callback, 1, true)
+        assert.matches("owner.root_index, completion", timer_callback, 1,
+            true)
+        assert.not_matches("resume_task_from_callback", timer_callback, 1,
+            true)
+
+        local runtime_source = read_file("titan/uv/runtime.titan")
+        local close_start = assert(runtime_source:find(
+            "local function begin_close(", 1, true))
+        local close_stop = assert(runtime_source:find(
+            "\nlocal function close_handle(", close_start, true))
+        local close_body = runtime_source:sub(close_start, close_stop - 1)
+        local unroot = assert(close_body:find(
+            "unroot_handle(runtime, owner.root_index)", 1, true))
+        local complete = assert(close_body:find("completion()", 1, true))
+        local submit = assert(close_body:find(
+            "libuv.uv_close(handle, shim.titan_uvshim_close_cb)", 1, true))
+        assert.is_true(unroot < complete)
+        assert.is_true(complete < submit)
+    end)
+
     it("keeps SSL path loading high-level and PEM owners private", function()
         local ssl = read_file("titan/ssl.titan")
         local openssl_headers = {}
@@ -1098,6 +1140,21 @@ describe("libuv Makefile configuration", function()
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
             assert.equal(17, #STDLIB_ROOTS)
+
+            for _, record_name in ipairs({
+                "ChannelReader", "ChannelWriter",
+            }) do
+                local qualified = "titan.async." .. record_name
+                assert.truthy(expected.async:find(
+                    "Record('" .. qualified .. "',{},{},{", 1, true),
+                    record_name .. " is missing from async metadata")
+                assert.falsy(expected.async:find(
+                    "Field('" .. qualified .. "'", 1, true),
+                    record_name .. " exposed a local field")
+                assert.falsy(expected.async:find(
+                    "StaticMethod('" .. qualified .. "', 'new'", 1, true),
+                    record_name .. " exposed its local constructor")
+            end
 
             local support = require "titan"
             local container = installed_stdlib_container()

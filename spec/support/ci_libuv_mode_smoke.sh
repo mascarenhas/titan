@@ -510,7 +510,7 @@ local function check(condition: boolean, message: string)
 end
 
 local function active(task: async.Task): boolean
-  local status = task:status()
+  local status = task:status():as_string()
   return status == "ready" or status == "running" or status == "waiting"
 end
 
@@ -526,7 +526,7 @@ local function listen_available(): (net.Server, integer)
     do
       return net.listen("127.0.0.1", port, 8), port
     catch
-      local failure = error as async.Error
+      local failure = error as async.OperationError
       if failure.name ~= "EADDRINUSE" then raise error end
     end
     attempts = attempts + 1
@@ -615,7 +615,7 @@ function main(args: {string}): integer
           "static net client received the wrong payload")
     connection:close()
     while active(peer) do timer.yield() end
-    check(peer:status() == "succeeded" and peer_result == "peer-ready",
+    check(peer:status():as_string() == "succeeded" and peer_result == "peer-ready",
           "static async peer Task failed")
     server:close()
 

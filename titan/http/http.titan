@@ -4,6 +4,7 @@ local math = import "titan.math"
 local net = import "net"
 local ssl = import "ssl"
 local str = import "string"
+local timer = import "timer"
 local url = import "url"
 local ffi = foreign import "titan/ffi.h"
 

@@ -61,7 +61,7 @@ After EOF the collected bytes are compiled with the same name, environment,
 error, and flexible-call rules as `load`.
 
 Reader methods may yield; each accepted chunk is appended through a
-non-yielding `titan.string` writer so loading adds no scheduling boundary of
+synchronous `titan.string` writer so loading adds no scheduling boundary of
 its own. When the supplied Reader yields, the function must run in an async
 Task with the usual loop discipline. It never closes the Reader, whether
 reading or compilation succeeds or raises; ownership remains with the caller.
@@ -125,8 +125,10 @@ Missing source candidates contribute `no file` lines, and diagnostic strings
 from other searchers are accumulated into the final
 `module ... not found` error. Once a source candidate opens, a read or
 compilation failure is terminal instead of being treated as another miss.
-Task cancellation during open or reading remains an `async.Cancelled` value;
-it is not rewritten as a source-load diagnostic.
+Task cancellation during open or reading remains authoritative: the Task's
+terminal status is `cancelled` with its original
+`async.CancellationReason`, and no contextual source-load failure is reported
+as an uncaught Task error.
 
 Source lookup can yield between the start of a load and installing its cache
 entry. A simultaneous or recursive `titan.lua.require` for that same module

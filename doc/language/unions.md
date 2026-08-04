@@ -259,7 +259,7 @@ into another arm.
 `if`/`elseif`/`else` block. There is no implicit loop and no fallthrough
 between arms.
 
-## Non-exhaustiveness and return analysis
+## Non-exhaustiveness and control-flow analysis
 
 Case statements are intentionally non-exhaustive. The compiler does not
 require every variant to be listed, and it does not insert an implicit error.
@@ -267,10 +267,10 @@ If no arm matches and there is no `else`, the case statement does nothing and
 execution continues after it.
 
 For control-flow analysis, a case statement is exactly like an
-`if`/`elseif`/`else` chain. It is considered always-returning only when:
+`if`/`elseif`/`else` chain. It is considered non-fallthrough only when:
 
 1. it has an explicit `else`; and
-2. every `when` arm and the `else` block always terminates.
+2. every `when` arm and the `else` block is non-fallthrough.
 
 Listing every currently declared variant does not substitute for the explicit
 `else`.

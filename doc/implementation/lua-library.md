@@ -34,7 +34,7 @@ upvalue's debug name.
 ## Reader and File ownership
 
 `load_from_reader` uses `Reader:read` directly as a generic-for iterator and
-passes every yielded chunk, including `""`, to a non-yielding
+passes every yielded chunk, including `""`, to a synchronous
 `string.StringWriter`, the same checked accumulator used by the string
 library's formatting, packing, and substitution paths. `Reader:read` owns the
 scheduling boundary. Each writer call checks aggregate growth; nonempty inputs
@@ -80,13 +80,15 @@ semicolon-separated path template, and attempts `fs.open`. A filesystem open
 error is a candidate miss. Cancellation and non-filesystem errors retain their
 own types and propagate. After a candidate has opened, a read or load error is
 wrapped with the module and filename and is terminal. A deferred close owns the
-opened candidate on every path. The post-open wrapper explicitly re-raises
-`async.Cancelled` first, preserving Task cancellation from `File:read`
-instead of converting it into an ordinary string failure.
+opened candidate on every path. Cancellation uses the nominal
+`async.CancellationReason` union rather than an exception-wrapper record: even
+if the post-open context wrapper transforms the injected union value, the
+Task's stored cancellation request remains authoritative and terminalizes it
+as `cancelled` with the original reason rather than reporting a load failure.
 
 Literal module-name and `?` substitutions, Reader chunk loading, ordered
 source-miss diagnostics, and the final cross-searcher diagnostic accumulation
-all use non-yielding `string.StringWriter` instances. This removes local
+all use synchronous `string.StringWriter` instances. This removes local
 chunk-array joins and incremental concatenation while retaining binary strings
 and encounter order. Actual Reader and File operations remain the cooperative
 boundaries; pure substitution and diagnostic assembly do not create extra
@@ -150,5 +152,5 @@ and Lua providers, then exercises text and binary chunks, embedded zero
 handling, Reader ownership, File error cleanup, cache states, asynchronous
 source loads, the duplicate-load guard, preload/C/Titan/custom loaders, and
 diagnostics. Its cancellation case reads an unbounded source candidate, cancels
-the waiting Task, checks the terminal cancellation identity, and then retries
+the waiting Task, checks the terminal cancelled status, and then retries
 the same module name from a finite source to prove deferred guard cleanup.

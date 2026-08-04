@@ -587,8 +587,8 @@ local function prepare_inherited_stdio(state: uv_spawn_config,
   do
     prepared = initialize_parent_stdio(state.runtime, descriptor)
   catch
-    if error is Error then
-      local failure = error as Error
+    if error is OperationError then
+      local failure = error as OperationError
       return failure.code, nil
     end
     raise

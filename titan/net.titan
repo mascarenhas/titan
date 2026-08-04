@@ -70,7 +70,7 @@ function Connection:read_until(delimiter: string,
   end
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
-  local builder = str.writer(false)
+  local builder = str.writer()
   local tail = ""
   while true do
     local chunk? = read(self)

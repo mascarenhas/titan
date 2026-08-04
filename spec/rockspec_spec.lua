@@ -788,7 +788,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 transitive_result = "transitive"
             end)
             async.loop()
-            assert(transitive:status() == "succeeded")
+            assert(transitive:status():as_string() == "succeeded")
             assert(transitive_result == "transitive")
 
             local uv = require "titan.uv"
@@ -873,7 +873,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 installed_result = inner:resume(nil, nil)
             end)
             async.loop()
-            assert(task:status() == "succeeded")
+            assert(task:status():as_string() == "succeeded")
             assert(installed_result == "installed")
 
             local direct_result
@@ -882,7 +882,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 direct_result = "direct"
             end)
             async.loop()
-            assert(direct:status() == "succeeded")
+            assert(direct:status():as_string() == "succeeded")
             assert(direct_result == "direct")
         ]], STDLIB_PROVIDER, STDLIB_SHIMDIR)
         ok, output, why, code = run(clean_environment({

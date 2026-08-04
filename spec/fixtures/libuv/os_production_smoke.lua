@@ -135,7 +135,7 @@ if process_child then
     end)
 
     async.loop()
-    assert(main:status() == "succeeded")
+    assert(main:status():as_string() == "succeeded")
     assert(main_result == payload)
     assert(require "os" == builtin)
     assert(package.loaded.os == builtin)

@@ -377,9 +377,9 @@ any Interface.
 Each nonempty write to a captured `process.stdin` immediately submits its own
 `uv_write_t` and returns only after that request's callback. Libuv supplies
 stream write ordering; Titan adds no operation queue. An empty write is a
-checked no-op. The request retains the original Titan string, without a second
-payload copy, until its eventual callback. Cancelling the Task does not release
-that owner early or kill the child.
+checked no-op. The request retains the original immutable string until its
+eventual callback while libuv borrows, but does not mutate, its bytes.
+Cancelling the Task does not release that owner early or kill the child.
 On Unix, loading `titan.uv` changes a default `SIGPIPE` disposition to ignored
 so a child that closes stdin produces the ordinary libuv write error instead
 of terminating the parent process. An already ignored signal or an
@@ -405,7 +405,7 @@ An `InputStream:read()` returns that stream's oldest facade excess first.
 Otherwise it returns one oldest buffered native chunk, or waits for the next
 positive callback. A positive chunk is nonempty, binary, and timing-dependent.
 EOF returns `nil` permanently. A read error closes that output pipe; after
-completed chunks have drained, later reads raise its stored `async.Error`.
+completed chunks have drained, later reads raise its stored `async.OperationError`.
 
 `InputStream:read_until(delimiter, chop)` rejects an empty delimiter and
 consumes through its first occurrence. With `chop` absent or false, an actual
@@ -481,7 +481,7 @@ output stream, see [`io.popen`](standard-library-io.md#shell-commands).
 
 ## Errors
 
-Libuv failures raise [`async.Error`](async-io.md#errors-and-cancellation)
+Libuv failures raise [`async.OperationError`](async-io.md#errors-and-cancellation)
 with an operation name identifying the failed helper. A platform
 `UV_ENOSYS` result is exposed as that error; the library does not silently
 fall back to a POSIX-specific implementation.

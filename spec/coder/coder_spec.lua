@@ -338,6 +338,42 @@ describe("Titan code generator", function()
         ]])
     end)
 
+    it("generates literal-true while flow with target-specific breaks", function()
+        run_coder([[
+            -- No source-level raise or return is needed after this loop: its
+            -- literal condition and lack of a reachable targeted break prove
+            -- that this non-nil function cannot fall off the end.
+            function spin(): integer
+                while true do
+                end
+            end
+
+            -- A break in a nested loop does not make the outer loop
+            -- fallthrough.
+            function nested_break(): integer
+                while true do
+                    while true do
+                        break
+                    end
+                end
+            end
+
+            -- A reachable break targeting the outer loop does make it
+            -- fallthrough, so the explicit return remains reachable and is
+            -- generated.
+            function breakable(stop: boolean): integer
+                while true do
+                    if stop then
+                        break
+                    end
+                end
+                return 7
+            end
+        ]], [[
+            assert(test.breakable(true) == 7)
+        ]])
+    end)
+
     it("unwraps an option-typed variable to its base type", function()
         run_coder([[
             function unwrap_present(): integer

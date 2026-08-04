@@ -318,7 +318,7 @@ local async = require "titan.async"
 local cases = require "uv_process_stdio_cases"
 local task = assert(cases.start_processes(%q))
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(cases.result() == "processes-ok", cases.result())
 ]==]):format(child))
     end)
@@ -336,7 +336,7 @@ if not finish_ok then
   error(("%%s\ncaptured stdout (%%d bytes): %%q"):format(
         tostring(finish_error), #captured, captured), 0)
 end
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(cases.result() == %q, cases.result())
 ]==]):format(start_name, finish_name, expected))
     end

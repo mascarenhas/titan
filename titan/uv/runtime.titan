@@ -45,10 +45,11 @@ local function main_thread_state(): *lua.lua_State
   return thread
 end
 
-local function make_error(code: integer, operation: string): Error
+local function make_error(code: integer,
+                          operation: string): OperationError
   local status = code as ffi.titan_ffi_int
-  return Error.new(code, libuv.uv_err_name(status) as string,
-                   libuv.uv_strerror(status) as string, operation)
+  return OperationError.new(code, libuv.uv_err_name(status) as string,
+                            libuv.uv_strerror(status) as string, operation)
 end
 
 local function immediate_ok(payload: value): Immediate
@@ -108,12 +109,11 @@ local function submit_stream_write(task: Task,
                                     data: string,
                                     operation: string): Immediate?
   local descriptor: libuv.uv_buf_t
-  local bytes = data as const *ffi.titan_ffi_char
-  shim.titan_uvshim_buf_init_const(
-      descriptor, bytes, #data as libuv.size_t)
+  descriptor.base = data
+  descriptor.len = #data as libuv.size_t
   local native = libuv.uv_write_t.new()
   local callback = function (_owner: StreamWriteOwner, status: integer)
-    -- The closure is the request owner for bytes borrowed through write_cb.
+    -- Libuv borrows the string bytes through write_cb, so retain the string.
     local _data = data
     complete_status(task, status, operation)
   end
@@ -255,25 +255,38 @@ local function ensure_runtime(): Runtime
   return created
 end
 
-local function close_handle(runtime: Runtime, handle: *libuv.uv_handle_t,
-                            keepalive: value, old_root_index: integer,
-                            task: Task?, payload: value)
+local function begin_close(runtime: Runtime, handle: *libuv.uv_handle_t,
+                           keepalive: value, old_root_index: integer,
+                           completion: () -> ())
   local callback = function (owner: CloseOwner)
     -- Capturing the native owner keeps its FFI handle alive through close_cb.
     local _keepalive = keepalive
     unroot_handle(runtime, owner.root_index)
-    if task then
-      resume_task_from_callback(task as Task, false, payload)
-    end
+    completion()
   end
   local owner = CloseOwner.new(0, callback)
   owner.root_index = root_handle(runtime, owner)
   if old_root_index > 0 then unroot_handle(runtime, old_root_index) end
+  libuv.uv_handle_set_data(handle, owner as ffi.titan_ffi_void_ptr)
+  libuv.uv_close(handle, shim.titan_uvshim_close_cb)
+end
+
+local function close_handle(runtime: Runtime, handle: *libuv.uv_handle_t,
+                            keepalive: value, old_root_index: integer,
+                            task: Task?, payload: value)
+  local completion = function ()
+    if task then
+      do
+        resume_task_from_callback(task as Task, false, payload)
+      catch
+        fail_task_at_callback_boundary(task as Task, error, traceback)
+      end
+    end
+  end
   if task then
     (task as Task).cancel_action = nil
   end
-  libuv.uv_handle_set_data(handle, owner as ffi.titan_ffi_void_ptr)
-  libuv.uv_close(handle, shim.titan_uvshim_close_cb)
+  begin_close(runtime, handle, keepalive, old_root_index, completion)
 end
 
 local function walk_callback(owner: WalkOwner,

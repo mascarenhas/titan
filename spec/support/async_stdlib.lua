@@ -302,10 +302,9 @@ function M.compile(workspace, modname, options)
     assert.truthy(ok, output)
 end
 
--- Build the exact coroutine/uv/async dependency chain needed by source
--- variants that now yield through the public async facade. Keeping this in
--- one helper prevents PEG/string specs from silently falling back to the
--- checkout's combined provider while TITAN_PATH_0_20 names a private root.
+-- Build the exact coroutine/uv/async dependency chain. The caller first
+-- registers its exact titan.string provider because async owns the
+-- string-specialized channel ReaderCloser/WriterCloser adapter.
 function M.prepare_async_core(workspace, layout)
     M.write_source(workspace, "titan.coroutine",
         M.read("titan/coroutine.titan"))

@@ -11,8 +11,7 @@ local first_port = mode == "system" and 45000 or 45032
 local last_port = first_port + 31
 
 local function active(task)
-    local status = task:status()
-    return status == "ready" or status == "running" or status == "waiting"
+    return not task:status():has_finished()
 end
 
 local main_result
@@ -54,7 +53,7 @@ local main = async.run(function()
     client:close()
 
     while active(peer_task) do timer.yield() end
-    assert(peer_task:status() == "succeeded")
+    assert(peer_task:status():as_string() == "succeeded")
     assert(peer_result == payload)
 
     if mode == "sanitizer" then
@@ -83,19 +82,19 @@ local main = async.run(function()
             return "cancelled write result must not win"
         end)
         local turns = 0
-        while writer:status() == "ready" and turns < 100 do
+        while writer:status():as_string() == "ready" and turns < 100 do
             timer.yield()
             turns = turns + 1
         end
-        assert(writer:status() == "waiting",
+        assert(writer:status():as_string() == "waiting",
             "large write did not remain physically pending")
         owned_payload = nil
-        writer:cancel("sanitizer-inflight-write")
-        assert(writer:status() == "waiting",
-            "write cancellation resumed synchronously")
+        writer:cancel()
+        assert(writer:status():as_string() == "waiting",
+            "write cancellation abandoned its accepted callback")
         collectgarbage("collect")
         while active(writer) do timer.yield() end
-        assert(writer:status() == "cancelled")
+        assert(writer:status():as_string() == "cancelled")
 
         assert(stress_client:read_until("\n", true) == "ready")
         stress_client:write(followup .. "\n")
@@ -103,7 +102,7 @@ local main = async.run(function()
         stress_client:shutdown()
         stress_client:close()
         while active(slow_peer) do timer.yield() end
-        assert(slow_peer:status() == "succeeded")
+        assert(slow_peer:status():as_string() == "succeeded")
         assert(slow_peer_finished)
         print("RESULT net production cancelled-write smoke sanitizer passed")
     end
@@ -113,5 +112,5 @@ local main = async.run(function()
 end)
 
 async.loop()
-assert(main:status() == "succeeded")
+assert(main:status():as_string() == "succeeded")
 assert(main_result == payload)

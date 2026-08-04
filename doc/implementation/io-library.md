@@ -12,7 +12,7 @@ they add no compiler intrinsic, Lua C API operation, or native runtime support.
 `print(...: value)` converts indexed variadic arguments in a forward loop, so
 calls to `string.tostring` and any conversion error occur left to right. It
 appends each converted value, its leading tab when needed, and the final
-newline to `string.writer(false)`. Stdout's eventual write is the scheduling
+newline to `string.writer()`. Stdout's eventual write is the scheduling
 boundary, so assembly itself does not yield. This reuses the string module's
 bounded builder instead of maintaining a second chunk-array/join
 implementation in `io`.

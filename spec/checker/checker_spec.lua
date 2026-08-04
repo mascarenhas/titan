@@ -893,6 +893,115 @@ describe("Titan type checker", function()
         end
     end)
 
+    it("treats an unbreakable literal-true while as non-fallthrough", function()
+        local ok, err, tree = run_checker([[
+            function spin(): integer
+                while true do
+                end
+            end
+
+            function nested_break(): integer
+                while true do
+                    while true do
+                        break
+                    end
+                end
+            end
+
+            function dead_break(): integer
+                while true do
+                    raise "done"
+                    break
+                end
+            end
+        ]])
+        assert.truthy(ok, err)
+        assert.is_true(tree[1].block.stats[1]._always_returns)
+        assert.is_true(tree[2].block.stats[1]._always_returns)
+        assert.is_true(tree[3].block.stats[1]._always_returns)
+    end)
+
+    it("keeps breakable and non-literal-true while loops fallthrough", function()
+        local cases = {
+            [[
+                function breakable(stop: boolean): integer
+                    while true do
+                        if stop then
+                            break
+                        end
+                    end
+                end
+            ]],
+            [[
+                function never_runs(): integer
+                    while false do
+                    end
+                end
+            ]],
+            [[
+                function conditioned(run: boolean): integer
+                    while run do
+                    end
+                end
+            ]],
+        }
+        for _, code in ipairs(cases) do
+            local ok, err = run_checker(code)
+            assert.falsy(ok)
+            assert.match("function can return nil", err)
+        end
+    end)
+
+    it("composes literal-true while flow with enclosing catches", function()
+        local falling_catches = {
+            [[
+                function caught_do(): integer
+                    do
+                        while true do
+                            raise "stop"
+                        end
+                    catch
+                        nop(1)
+                    end
+                end
+            ]],
+            [[
+                function caught_function(): integer
+                    while true do
+                        raise "stop"
+                    end
+                catch
+                    nop(1)
+                end
+            ]],
+        }
+        for _, code in ipairs(falling_catches) do
+            local ok, err = run_checker(code)
+            assert.falsy(ok)
+            assert.match("function can return nil", err)
+        end
+
+        assert_type_check([[
+            function terminating_do_catch(): integer
+                do
+                    while true do
+                        raise "stop"
+                    end
+                catch
+                    return 1
+                end
+            end
+
+            function terminating_function_catch(): integer
+                while true do
+                    raise "stop"
+                end
+            catch
+                return 2
+            end
+        ]])
+    end)
+
     it("checks return type against declared type for one return value", function()
         local code = [[
             function fn(): integer

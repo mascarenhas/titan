@@ -772,31 +772,43 @@ with `_type = node._type`, the surrounding context applies its usual
   never a source-resolvable type, so annotations, aliases, `as`, and `is` may
   name `Message` but not `Message.move`; `case` is the only v1 variant test.
 
-## The "always returns" analysis
+## Non-fallthrough analysis
 
-Every `checkstat` handler returns whether the statement is guaranteed to
-return from the enclosing function. `StatReturn` returns `true`; `StatIf`
-returns `true` only if every then-block returns *and* an `else` exists and
-returns. `StatCase` uses exactly that rule: it requires an explicit `else` and
-every arm plus the else must return; the checker does not infer exhaustiveness.
-`StatTry` uses its body/catch/finally rule from
+Every `checkstat` handler returns whether control is guaranteed not to reach
+the following statement. `StatReturn` and `StatRaise` return `true`; `StatIf`
+returns `true` only if every then-block is non-fallthrough *and* an `else`
+exists and is non-fallthrough. `StatCase` uses exactly that rule: it requires
+an explicit `else` and every arm plus the else must be non-fallthrough; the
+checker does not infer exhaustiveness. `StatTry` uses its body/catch/finally
+rule from
 [Error handling](error-handling.md#checker-rules). The result is cached on
 every statement as `_always_returns`, which is the shared checker-to-coder
 reachability fact for direct terminators and compound `StatBlock`, `StatIf`,
-`StatTry`, and `StatCase` nodes. A bare `do … end` propagates its own fold, so
-`do return 1 end` counts as returning (verified); loops and ordinary
-fallthrough statements return `false`/`nil`. `checkblock` folds
+`StatTry`, and `StatCase` nodes. The field retains its historical name even
+though raising and a proven infinite loop also satisfy it. A bare `do … end`
+propagates its own fold, so `do return 1 end` is non-fallthrough.
+
+`StatWhile` is non-fallthrough only when its condition is the literal `true`
+and no reachable `break` targets that loop. The checker maintains one flow
+frame per enclosing loop, so a break in a nested loop marks only that nested
+frame. Since statement-list checking stops after a proven terminator, a break
+in a dead tail is not recorded. Other `while` conditions and every other loop
+form remain fallthrough. The ordinary `StatTry` composition is essential: if a
+catch covers the loop, a falling-through catch keeps the construct fallthrough,
+while a non-fallthrough catch preserves the proof.
+
+`checkblock` folds
 the results with `ret = ret or checkstat(stat, st, errors)` — and note the
 short-circuit: once `ret` is true, **later statements in the block are not
 visited at all**. A plain `return` can only be a block's final statement (the
-grammar enforces it), but an always-returning `if`/`else` mid-block makes the
-case reachable. *Limitation:* statements after such an `if` are dead code and
-go completely unchecked — a type error placed there is not reported (verified
-experimentally). The checker performs no dead-code analysis to flag or prune
-them.
+grammar enforces it), but a non-fallthrough `if`/`else` mid-block makes the
+case reachable. The same now applies to proven non-fallthrough literal-true
+`while` loops. *Limitation:* statements in such a dead tail go completely
+unchecked — a type error placed there is not reported. The checker performs no
+dead-code analysis to flag or prune them.
 
-`checkfuncbody` consumes the result: if the body does not always return and
-the function's **first fixed** result exists and is not `Type.Nil`, it reports
+`checkfuncbody` consumes the result: if the body can fall through and the
+function's **first fixed** result exists and is not `Type.Nil`, it reports
 `function can return nil but return type is not nil`. Zero-return functions,
 nil-first functions, and flex-only functions may fall through; the last case
 produces an empty run. Functions declared without a return annotation default
@@ -824,6 +836,11 @@ error list. `checkimport` first registers direct `Type.Interface` descriptors
 from `type_members`, then walks both namespaces and registers referenced
 nominal owners in `types.registry`. Value members unwrap their
 `Type.ModuleMember` wrapper; records and unions are stored under their fqtn.
+For each complete recovered module interface it also derives the deterministic
+public module-userdata prefix and stamps public nominal static descriptors with
+their closure slots. A later record/union selector through a type alias can
+therefore use the original owner's constructor or public static as either a
+direct call or first-class function without creating an alias-side value slot.
 This is what makes a record, union, or Interface
 imported through a compiled interface — one with no `.titan` source to
 re-check — usable by nominal type. For a dependency *with* source the same

@@ -191,7 +191,7 @@ failed layer and whose `name` distinguishes such outcomes as
 conditions. `code` is the corresponding OpenSSL error or verification code
 when one exists. Argument/state errors may remain strings. Errors while reading
 explicit CA, certificate, or key paths and errors from the wrapped TCP
-connection retain the [`async.Error`](async-io.md) value supplied by `fs` or
+connection retain the [`async.OperationError`](async-io.md) value supplied by `fs` or
 `net`.
 
 ## Example

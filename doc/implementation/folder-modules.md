@@ -283,10 +283,11 @@ schema, not contributor identity or composition.
 
 The production `titan.uv` source is the folder ensemble
 `titan/uv/uv.titan`, `file.titan`, `os.titan`, `process.titan`,
-`runtime.titan`, `task.titan`, and `tcp.titan`. The main file owns shared
-imports, shared constants, module state, bootstrap setup, program-argument
-setup, and the sole initializer. Each contributor owns its public API and both
-public and private records alongside the related implementation. The main file
+`runtime.titan`, `task.titan`, and `tcp.titan`. The main file
+owns shared imports, shared constants, module state, bootstrap setup,
+program-argument setup, and the sole initializer. Each contributor owns its
+public API and both public and private records alongside the related
+implementation. The main file
 exports no member and declares no record. The Makefile
 declares this set explicitly as `UV_TITAN_SOURCES`; it does not use a
 wildcard, so adding a production source changes the reviewed build graph.

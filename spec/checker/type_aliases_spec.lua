@@ -81,6 +81,46 @@ describe("Titan type aliases", function()
         assert.match("variable 'Count' not declared", err)
     end)
 
+    it("keeps a nominal alias itself out of the first-class value namespace", function()
+        local ok, err = run_checker([[
+            record Box
+                n: integer
+            end
+            type Alias = Box
+
+            function bad(): value
+                return Alias
+            end
+        ]])
+        assert.falsy(ok)
+        assert.match(
+            "trying to access record type 'test%.Box' as a first%-class value",
+            err)
+
+        ok, err = run_checker_modules({
+            provider = [[
+                record Box
+                    n: integer
+                end
+            ]],
+            facade = [[
+                local provider = import "provider"
+                type Box = provider.Box
+            ]],
+            consumer = [[
+                local facade = import "facade"
+
+                function bad(): value
+                    return facade.Box
+                end
+            ]],
+        }, "consumer")
+        assert.falsy(ok)
+        assert.match(
+            "trying to access record type 'provider%.Box' as a first%-class value",
+            err)
+    end)
+
     it("rejects duplicate aliases and aliases that collide with records", function()
         local ok, err = run_checker([[
             type Count = integer
@@ -152,27 +192,135 @@ describe("Titan type aliases", function()
         assert.truthy(ok, err)
     end)
 
-    it("does not turn a qualified imported alias into a run-time member", function()
+    it("preserves nominal constructors and public statics through qualified alias chains", function()
         local ok, err = run_checker_modules({
             base = [[
                 record Error
                     code: integer
                 end
+
+                function Error.from(code: integer): Error
+                    return Error.new(code)
+                end
+
+                union Reason
+                    simple: string
+                    empty
+                end
+
+                function Reason.describe(reason: Reason): string
+                    case reason
+                    when simple: message then
+                        return message
+                    else
+                        return "empty"
+                    end
+                end
             ]],
             facade = [[
                 local base = import "base"
                 type Error = base.Error
+                type ErrorAgain = Error
+                type Reason = base.Reason
             ]],
             consumer = [[
                 local facade = import "facade"
 
-                function make(): facade.Error
-                    return facade.Error.new(1)
+                function make(): (facade.Error, facade.Reason, string)
+                    local new_error: (integer) -> facade.Error =
+                        facade.ErrorAgain.new
+                    local from: (integer) -> facade.Error =
+                        facade.Error.from
+                    local simple: (string) -> facade.Reason =
+                        facade.Reason.simple
+                    local describe: (facade.Reason) -> string =
+                        facade.Reason.describe
+                    local reason = simple("cancelled")
+                    return new_error(from(1).code), reason, describe(reason)
+                end
+            ]],
+        }, "consumer")
+        assert.truthy(ok, err)
+    end)
+
+    it("uses unqualified local and public aliases as the original nominal namespace", function()
+        local ok, err = run_checker([[
+            record Box
+                n: integer
+            end
+
+            function Box.from(n: integer): Box
+                return Box.new(n)
+            end
+
+            union Result
+                success: Box
+                failure: string
+            end
+
+            type PublicBox = Box
+            local type PrivateBox = PublicBox
+            type PublicResult = Result
+
+            function make(n: integer): PublicResult
+                local new_box: (integer) -> Box = PrivateBox.new
+                local from: (integer) -> Box = PublicBox.from
+                local success: (Box) -> Result = PublicResult.success
+                return success(new_box(from(n).n))
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("does not expose nominal members that are local to the owner", function()
+        local ok, err = run_checker_modules({
+            provider = [[
+                record Box
+                    local hidden: integer
+                end
+
+                function Box.visible(n: integer): integer
+                    return n
+                end
+
+                local function Box.secret(n: integer): integer
+                    return n
+                end
+
+                union Choice
+                    shown: integer
+                    local hidden: integer
+                end
+            ]],
+            facade = [[
+                local provider = import "provider"
+                type Box = provider.Box
+                type Choice = provider.Choice
+            ]],
+            consumer = [[
+                local facade = import "facade"
+
+                function good_static(): integer
+                    return facade.Box.visible(1)
+                end
+
+                function bad_box(): facade.Box
+                    return facade.Box.new(1)
+                end
+
+                function bad_static(): integer
+                    return facade.Box.secret(1)
+                end
+
+                function bad_variant(): facade.Choice
+                    return facade.Choice.hidden(1)
                 end
             ]],
         }, "consumer")
         assert.falsy(ok)
-        assert.match("member 'Error' not found inside module 'facade'", err)
+        assert.match("trying to access invalid record function 'new'", err)
+        assert.match("trying to access invalid record function 'secret'", err)
+        assert.match("trying to access invalid union function 'hidden'", err)
     end)
 
     it("supports aliases to later records and recursion through an alias", function()

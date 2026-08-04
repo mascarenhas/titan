@@ -1,8 +1,105 @@
 local uv = import "uv"
+local str = import "string"
 
 type Error = uv.Error
-type Cancelled = uv.Cancelled
+type OperationError = uv.OperationError
+type CancellationReason = uv.CancellationReason
+type TaskStatus = uv.TaskStatus
 type Task = uv.Task
+
+record ChannelReader
+  local receive: () -> value
+  local close_channel: () -> ()
+  local excess: string?
+  local closed: boolean
+end
+
+record ChannelWriter
+  local send: (value) -> ()
+  local close_channel: () -> ()
+end
+
+union AnyTwoResult
+  first: value
+  second: value
+  none
+end
+
+union AnyThreeResult
+  first: value
+  second: value
+  third: value
+  none
+end
+
+union AnyFourResult
+  first: value
+  second: value
+  third: value
+  fourth: value
+  none
+end
+
+union AnyFiveResult
+  first: value
+  second: value
+  third: value
+  fourth: value
+  fifth: value
+  none
+end
+
+union RaceTwoResult
+  first: TaskStatus
+  second: TaskStatus
+end
+
+union RaceThreeResult
+  first: TaskStatus
+  second: TaskStatus
+  third: TaskStatus
+end
+
+union RaceFourResult
+  first: TaskStatus
+  second: TaskStatus
+  third: TaskStatus
+  fourth: TaskStatus
+end
+
+union RaceFiveResult
+  first: TaskStatus
+  second: TaskStatus
+  third: TaskStatus
+  fourth: TaskStatus
+  fifth: TaskStatus
+end
+
+union AllTwoError
+  first: TaskStatus
+  second: TaskStatus
+end
+
+union AllThreeError
+  first: TaskStatus
+  second: TaskStatus
+  third: TaskStatus
+end
+
+union AllFourError
+  first: TaskStatus
+  second: TaskStatus
+  third: TaskStatus
+  fourth: TaskStatus
+end
+
+union AllFiveError
+  first: TaskStatus
+  second: TaskStatus
+  third: TaskStatus
+  fourth: TaskStatus
+  fifth: TaskStatus
+end
 
 function run(func: () -> value): Task
   return uv._run(func)
@@ -16,6 +113,2000 @@ function yield()
   uv._yield()
 end
 
+function running(): Task
+  return uv._running()
+end
+
+function suspend()
+  uv._suspend()
+end
+
 function version(): string
   return uv._version()
+end
+
+function channel(size: integer?):
+    ((value) -> (), () -> value, () -> ())
+  local capacity = 1
+  if size ~= nil then capacity = size end
+  if capacity < 1 then raise "channel size must be at least 1" end
+
+  -- Count is authoritative because a channel may carry nil. The array slots
+  -- only retain the live values in the bounded circular buffer.
+  local transfer: {value} = {}
+  local first = 1
+  local next = 1
+  local count = 0
+  local send_waiter: Task? = nil
+  local receive_waiter: Task? = nil
+  local closed = false
+
+  local send: (value) -> () = function (item: value)
+    if closed then raise "channel is closed" end
+    if send_waiter ~= nil then
+      raise "channel already has a blocked sender"
+    end
+    if count == capacity then
+      local current = running()
+      send_waiter = current
+      defer do
+        if send_waiter == current then send_waiter = nil end
+      end
+      -- A caller that holds this Task may also request a wake. Recheck the
+      -- channel condition so such a coalesced wake cannot overwrite a full
+      -- buffer.
+      while not closed and count == capacity do suspend() end
+      send_waiter = nil
+      if closed then raise "channel is closed" end
+    end
+
+    transfer[next] = item
+    next = next + 1
+    if next > capacity then next = 1 end
+    count = count + 1
+    if receive_waiter ~= nil then receive_waiter:resume() end
+  end
+
+  local receive: () -> value = function (): value
+    if closed then raise "channel is closed" end
+    if receive_waiter ~= nil then
+      raise "channel already has a blocked receiver"
+    end
+    if count == 0 then
+      local current = running()
+      receive_waiter = current
+      defer do
+        if receive_waiter == current then receive_waiter = nil end
+      end
+      -- As with send, a direct Task:resume is only a wake request. The buffer
+      -- condition remains the authority for whether receive may continue.
+      while not closed and count == 0 do suspend() end
+      receive_waiter = nil
+      if closed then raise "channel is closed" end
+    end
+
+    local item = transfer[first]
+    transfer[first] = nil
+    first = first + 1
+    if first > capacity then first = 1 end
+    count = count - 1
+    if send_waiter ~= nil then send_waiter:resume() end
+    return item
+  end
+
+  local close: () -> () = function ()
+    if closed then return end
+    closed = true
+    transfer = {}
+    first = 1
+    next = 1
+    count = 0
+    if send_waiter ~= nil then send_waiter:resume() end
+    if receive_waiter ~= nil then receive_waiter:resume() end
+  end
+
+  return send, receive, close
+end
+
+function ChannelReader:read(): string?
+  if self.closed then return nil end
+  if self.excess then
+    local excess = self.excess
+    self.excess = nil
+    return excess
+  end
+  return self.receive() as string?
+end
+
+function ChannelReader:read_until(delimiter: string,
+                                  chop: boolean?): string?
+  if self.closed then return nil end
+  if #delimiter == 0 then raise "read delimiter must not be empty" end
+
+  local builder = str.writer()
+  local tail = ""
+  while true do
+    local chunk? = self:read()
+    if not chunk then
+      if #tail > 0 then builder:write(tail) end
+      local result = builder:drain()
+      if #result == 0 then return nil end
+      return result
+    end
+    local bytes = chunk as string
+    local boundary = bytes
+    if #tail > 0 then boundary = tail .. bytes end
+    local match: integer? = str.find(boundary, delimiter)
+    if match then
+      local match_first = match as integer
+      local match_end = match_first + #delimiter - 1
+      local result_end = match_end
+      if chop then result_end = match_first - 1 end
+      if result_end > 0 then
+        builder:write(str.sub(boundary, 1, result_end))
+      end
+      local excess = str.sub(boundary, match_end + 1)
+      if #excess > 0 then
+        self.excess = excess
+      else
+        self.excess = nil
+      end
+      return builder:drain()
+    end
+    local keep = #delimiter - 1
+    if keep > #boundary then keep = #boundary end
+    local committed = #boundary - keep
+    if committed > 0 then
+      if committed == #boundary then
+        builder:write(boundary)
+      else
+        builder:write(str.sub(boundary, 1, committed))
+      end
+    end
+    tail = str.sub(boundary, committed + 1)
+  end
+end
+
+function ChannelReader:close()
+  if self.closed then return end
+  self.closed = true
+  self.excess = nil
+  self.close_channel()
+end
+
+function ChannelWriter:write(data: string)
+  self.send(data)
+end
+
+function ChannelWriter:close()
+  self.close_channel()
+end
+
+function reader_writer_channel(size: integer?):
+    (ChannelReader, ChannelWriter)
+  local send, receive, close = channel(size)
+  return ChannelReader.new(receive, close, nil, false),
+         ChannelWriter.new(send, close)
+end
+
+-- The Runtime never runs two Tasks reentrantly, so a named operand equal to
+-- the current Task is exactly the self-dependency that cannot become terminal
+-- while this combinator is suspended.
+local function reject_running(current: Task, task: Task)
+  if current == task then
+    raise "async combinator cannot wait for its running Task"
+  end
+end
+
+-- Keep the fixed-arity bodies expanded over their named operands: collecting
+-- Tasks into one array would erase the independent result/cancellation type
+-- positions needed by a future polymorphic Task.
+
+function any_two(first: Task, second: Task): AnyTwoResult
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+
+  local terminal_count = 0
+  local first_terminal = false
+  case first:status()
+  when succeeded: result then return AnyTwoResult.first(result)
+  when failed then
+    first_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    first_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  local second_terminal = false
+  case second:status()
+  when succeeded: result then return AnyTwoResult.second(result)
+  when failed then
+    second_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    second_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  if terminal_count == 2 then return AnyTwoResult.none() end
+
+  local waiting? = current
+  defer waiting = nil
+  local winner = 0
+  local result: value = nil
+
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 1
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 2 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 2 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer first:remove_terminal_listener(first_listener)
+  if not first_terminal then first:add_terminal_listener(first_listener) end
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 2
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 2 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 2 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer second:remove_terminal_listener(second_listener)
+  if not second_terminal then second:add_terminal_listener(second_listener) end
+
+  suspend()
+  if winner == 1 then return AnyTwoResult.first(result) end
+  if winner == 2 then return AnyTwoResult.second(result) end
+  return AnyTwoResult.none()
+end
+
+function any_three(first: Task, second: Task,
+                   third: Task): AnyThreeResult
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+  reject_running(current, third)
+
+  local terminal_count = 0
+  local first_terminal = false
+  case first:status()
+  when succeeded: result then return AnyThreeResult.first(result)
+  when failed then
+    first_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    first_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  local second_terminal = false
+  case second:status()
+  when succeeded: result then return AnyThreeResult.second(result)
+  when failed then
+    second_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    second_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  local third_terminal = false
+  case third:status()
+  when succeeded: result then return AnyThreeResult.third(result)
+  when failed then
+    third_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    third_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  if terminal_count == 3 then return AnyThreeResult.none() end
+
+  local waiting? = current
+  defer waiting = nil
+  local winner = 0
+  local result: value = nil
+
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 1
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 3 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 3 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer first:remove_terminal_listener(first_listener)
+  if not first_terminal then first:add_terminal_listener(first_listener) end
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 2
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 3 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 3 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer second:remove_terminal_listener(second_listener)
+  if not second_terminal then second:add_terminal_listener(second_listener) end
+
+  local third_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 3
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 3 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 3 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer third:remove_terminal_listener(third_listener)
+  if not third_terminal then third:add_terminal_listener(third_listener) end
+
+  suspend()
+  if winner == 1 then return AnyThreeResult.first(result) end
+  if winner == 2 then return AnyThreeResult.second(result) end
+  if winner == 3 then return AnyThreeResult.third(result) end
+  return AnyThreeResult.none()
+end
+
+function any_four(first: Task, second: Task, third: Task,
+                  fourth: Task): AnyFourResult
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+  reject_running(current, third)
+  reject_running(current, fourth)
+
+  local terminal_count = 0
+  local first_terminal = false
+  case first:status()
+  when succeeded: result then return AnyFourResult.first(result)
+  when failed then
+    first_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    first_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  local second_terminal = false
+  case second:status()
+  when succeeded: result then return AnyFourResult.second(result)
+  when failed then
+    second_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    second_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  local third_terminal = false
+  case third:status()
+  when succeeded: result then return AnyFourResult.third(result)
+  when failed then
+    third_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    third_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  local fourth_terminal = false
+  case fourth:status()
+  when succeeded: result then return AnyFourResult.fourth(result)
+  when failed then
+    fourth_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    fourth_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  if terminal_count == 4 then return AnyFourResult.none() end
+
+  local waiting? = current
+  defer waiting = nil
+  local winner = 0
+  local result: value = nil
+
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 1
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 4 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 4 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer first:remove_terminal_listener(first_listener)
+  if not first_terminal then first:add_terminal_listener(first_listener) end
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 2
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 4 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 4 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer second:remove_terminal_listener(second_listener)
+  if not second_terminal then second:add_terminal_listener(second_listener) end
+
+  local third_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 3
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 4 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 4 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer third:remove_terminal_listener(third_listener)
+  if not third_terminal then third:add_terminal_listener(third_listener) end
+
+  local fourth_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 4
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 4 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 4 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer fourth:remove_terminal_listener(fourth_listener)
+  if not fourth_terminal then fourth:add_terminal_listener(fourth_listener) end
+
+  suspend()
+  if winner == 1 then return AnyFourResult.first(result) end
+  if winner == 2 then return AnyFourResult.second(result) end
+  if winner == 3 then return AnyFourResult.third(result) end
+  if winner == 4 then return AnyFourResult.fourth(result) end
+  return AnyFourResult.none()
+end
+
+function any_five(first: Task, second: Task, third: Task,
+                  fourth: Task, fifth: Task): AnyFiveResult
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+  reject_running(current, third)
+  reject_running(current, fourth)
+  reject_running(current, fifth)
+
+  local terminal_count = 0
+  local first_terminal = false
+  case first:status()
+  when succeeded: result then return AnyFiveResult.first(result)
+  when failed then
+    first_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    first_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  local second_terminal = false
+  case second:status()
+  when succeeded: result then return AnyFiveResult.second(result)
+  when failed then
+    second_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    second_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  local third_terminal = false
+  case third:status()
+  when succeeded: result then return AnyFiveResult.third(result)
+  when failed then
+    third_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    third_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  local fourth_terminal = false
+  case fourth:status()
+  when succeeded: result then return AnyFiveResult.fourth(result)
+  when failed then
+    fourth_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    fourth_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  local fifth_terminal = false
+  case fifth:status()
+  when succeeded: result then return AnyFiveResult.fifth(result)
+  when failed then
+    fifth_terminal = true
+    terminal_count = terminal_count + 1
+  when cancelled then
+    fifth_terminal = true
+    terminal_count = terminal_count + 1
+  else
+  end
+
+  if terminal_count == 5 then return AnyFiveResult.none() end
+
+  local waiting? = current
+  defer waiting = nil
+  local winner = 0
+  local result: value = nil
+
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 1
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 5 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 5 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer first:remove_terminal_listener(first_listener)
+  if not first_terminal then first:add_terminal_listener(first_listener) end
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 2
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 5 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 5 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer second:remove_terminal_listener(second_listener)
+  if not second_terminal then second:add_terminal_listener(second_listener) end
+
+  local third_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 3
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 5 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 5 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer third:remove_terminal_listener(third_listener)
+  if not third_terminal then third:add_terminal_listener(third_listener) end
+
+  local fourth_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 4
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 5 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 5 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer fourth:remove_terminal_listener(fourth_listener)
+  if not fourth_terminal then fourth:add_terminal_listener(fourth_listener) end
+
+  local fifth_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    case status
+    when succeeded: payload then
+      winner = 5
+      result = payload
+      waiting:resume()
+    when failed then
+      terminal_count = terminal_count + 1
+      if terminal_count == 5 then
+        winner = -1
+        waiting:resume()
+      end
+    when cancelled then
+      terminal_count = terminal_count + 1
+      if terminal_count == 5 then
+        winner = -1
+        waiting:resume()
+      end
+    else
+    end
+  end
+  defer fifth:remove_terminal_listener(fifth_listener)
+  if not fifth_terminal then fifth:add_terminal_listener(fifth_listener) end
+
+  suspend()
+  if winner == 1 then return AnyFiveResult.first(result) end
+  if winner == 2 then return AnyFiveResult.second(result) end
+  if winner == 3 then return AnyFiveResult.third(result) end
+  if winner == 4 then return AnyFiveResult.fourth(result) end
+  if winner == 5 then return AnyFiveResult.fifth(result) end
+  return AnyFiveResult.none()
+end
+
+function race_two(first: Task, second: Task): RaceTwoResult
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+
+  local first_status = first:status()
+  if first_status:has_finished() then
+    return RaceTwoResult.first(first_status)
+  end
+  local second_status = second:status()
+  if second_status:has_finished() then
+    return RaceTwoResult.second(second_status)
+  end
+
+  local waiting? = current
+  defer waiting = nil
+  local winner = 0
+  local result?: TaskStatus = nil
+
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 1
+    result = status
+    waiting:resume()
+  end
+  defer first:remove_terminal_listener(first_listener)
+  first:add_terminal_listener(first_listener)
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 2
+    result = status
+    waiting:resume()
+  end
+  defer second:remove_terminal_listener(second_listener)
+  second:add_terminal_listener(second_listener)
+
+  suspend()
+  if winner == 1 then
+    return RaceTwoResult.first(result as TaskStatus)
+  end
+  return RaceTwoResult.second(result as TaskStatus)
+end
+
+function race_three(first: Task, second: Task,
+                    third: Task): RaceThreeResult
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+  reject_running(current, third)
+
+  local first_status = first:status()
+  if first_status:has_finished() then
+    return RaceThreeResult.first(first_status)
+  end
+  local second_status = second:status()
+  if second_status:has_finished() then
+    return RaceThreeResult.second(second_status)
+  end
+  local third_status = third:status()
+  if third_status:has_finished() then
+    return RaceThreeResult.third(third_status)
+  end
+
+  local waiting? = current
+  defer waiting = nil
+  local winner = 0
+  local result?: TaskStatus = nil
+
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 1
+    result = status
+    waiting:resume()
+  end
+  defer first:remove_terminal_listener(first_listener)
+  first:add_terminal_listener(first_listener)
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 2
+    result = status
+    waiting:resume()
+  end
+  defer second:remove_terminal_listener(second_listener)
+  second:add_terminal_listener(second_listener)
+
+  local third_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 3
+    result = status
+    waiting:resume()
+  end
+  defer third:remove_terminal_listener(third_listener)
+  third:add_terminal_listener(third_listener)
+
+  suspend()
+  if winner == 1 then
+    return RaceThreeResult.first(result as TaskStatus)
+  end
+  if winner == 2 then
+    return RaceThreeResult.second(result as TaskStatus)
+  end
+  return RaceThreeResult.third(result as TaskStatus)
+end
+
+function race_four(first: Task, second: Task, third: Task,
+                   fourth: Task): RaceFourResult
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+  reject_running(current, third)
+  reject_running(current, fourth)
+
+  local first_status = first:status()
+  if first_status:has_finished() then
+    return RaceFourResult.first(first_status)
+  end
+  local second_status = second:status()
+  if second_status:has_finished() then
+    return RaceFourResult.second(second_status)
+  end
+  local third_status = third:status()
+  if third_status:has_finished() then
+    return RaceFourResult.third(third_status)
+  end
+  local fourth_status = fourth:status()
+  if fourth_status:has_finished() then
+    return RaceFourResult.fourth(fourth_status)
+  end
+
+  local waiting? = current
+  defer waiting = nil
+  local winner = 0
+  local result?: TaskStatus = nil
+
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 1
+    result = status
+    waiting:resume()
+  end
+  defer first:remove_terminal_listener(first_listener)
+  first:add_terminal_listener(first_listener)
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 2
+    result = status
+    waiting:resume()
+  end
+  defer second:remove_terminal_listener(second_listener)
+  second:add_terminal_listener(second_listener)
+
+  local third_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 3
+    result = status
+    waiting:resume()
+  end
+  defer third:remove_terminal_listener(third_listener)
+  third:add_terminal_listener(third_listener)
+
+  local fourth_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 4
+    result = status
+    waiting:resume()
+  end
+  defer fourth:remove_terminal_listener(fourth_listener)
+  fourth:add_terminal_listener(fourth_listener)
+
+  suspend()
+  if winner == 1 then
+    return RaceFourResult.first(result as TaskStatus)
+  end
+  if winner == 2 then
+    return RaceFourResult.second(result as TaskStatus)
+  end
+  if winner == 3 then
+    return RaceFourResult.third(result as TaskStatus)
+  end
+  return RaceFourResult.fourth(result as TaskStatus)
+end
+
+function race_five(first: Task, second: Task, third: Task,
+                   fourth: Task, fifth: Task): RaceFiveResult
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+  reject_running(current, third)
+  reject_running(current, fourth)
+  reject_running(current, fifth)
+
+  local first_status = first:status()
+  if first_status:has_finished() then
+    return RaceFiveResult.first(first_status)
+  end
+  local second_status = second:status()
+  if second_status:has_finished() then
+    return RaceFiveResult.second(second_status)
+  end
+  local third_status = third:status()
+  if third_status:has_finished() then
+    return RaceFiveResult.third(third_status)
+  end
+  local fourth_status = fourth:status()
+  if fourth_status:has_finished() then
+    return RaceFiveResult.fourth(fourth_status)
+  end
+  local fifth_status = fifth:status()
+  if fifth_status:has_finished() then
+    return RaceFiveResult.fifth(fifth_status)
+  end
+
+  local waiting? = current
+  defer waiting = nil
+  local winner = 0
+  local result?: TaskStatus = nil
+
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 1
+    result = status
+    waiting:resume()
+  end
+  defer first:remove_terminal_listener(first_listener)
+  first:add_terminal_listener(first_listener)
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 2
+    result = status
+    waiting:resume()
+  end
+  defer second:remove_terminal_listener(second_listener)
+  second:add_terminal_listener(second_listener)
+
+  local third_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 3
+    result = status
+    waiting:resume()
+  end
+  defer third:remove_terminal_listener(third_listener)
+  third:add_terminal_listener(third_listener)
+
+  local fourth_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 4
+    result = status
+    waiting:resume()
+  end
+  defer fourth:remove_terminal_listener(fourth_listener)
+  fourth:add_terminal_listener(fourth_listener)
+
+  local fifth_listener = function (status: TaskStatus)
+    if waiting == nil or winner ~= 0 then return end
+    winner = 5
+    result = status
+    waiting:resume()
+  end
+  defer fifth:remove_terminal_listener(fifth_listener)
+  fifth:add_terminal_listener(fifth_listener)
+
+  suspend()
+  if winner == 1 then
+    return RaceFiveResult.first(result as TaskStatus)
+  end
+  if winner == 2 then
+    return RaceFiveResult.second(result as TaskStatus)
+  end
+  if winner == 3 then
+    return RaceFiveResult.third(result as TaskStatus)
+  end
+  if winner == 4 then
+    return RaceFiveResult.fourth(result as TaskStatus)
+  end
+  return RaceFiveResult.fifth(result as TaskStatus)
+end
+
+function all_two(first: Task, second: Task): (value, value)
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+
+  local completed = 0
+  local first_succeeded = false
+  local first_result: value = nil
+  local first_status = first:status()
+  case first_status
+  when succeeded: result then
+    first_succeeded = true
+    first_result = result
+    completed = completed + 1
+  when failed then raise AllTwoError.first(first_status)
+  when cancelled then raise AllTwoError.first(first_status)
+  else
+  end
+
+  local second_succeeded = false
+  local second_result: value = nil
+  local second_status = second:status()
+  case second_status
+  when succeeded: result then
+    second_succeeded = true
+    second_result = result
+    completed = completed + 1
+  when failed then raise AllTwoError.second(second_status)
+  when cancelled then raise AllTwoError.second(second_status)
+  else
+  end
+
+  if completed == 2 then return first_result, second_result end
+
+  local waiting? = current
+  defer waiting = nil
+  local rejected = 0
+  local rejection?: TaskStatus = nil
+
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      first_result = result
+      completed = completed + 1
+      if completed == 2 then waiting:resume() end
+    when failed then
+      rejected = 1
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 1
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer first:remove_terminal_listener(first_listener)
+  if not first_succeeded then first:add_terminal_listener(first_listener) end
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      second_result = result
+      completed = completed + 1
+      if completed == 2 then waiting:resume() end
+    when failed then
+      rejected = 2
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 2
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer second:remove_terminal_listener(second_listener)
+  if not second_succeeded then second:add_terminal_listener(second_listener) end
+
+  suspend()
+  if rejected == 1 then
+    raise AllTwoError.first(rejection as TaskStatus)
+  end
+  if rejected == 2 then
+    raise AllTwoError.second(rejection as TaskStatus)
+  end
+  return first_result, second_result
+end
+
+function all_three(first: Task, second: Task,
+                   third: Task): (value, value, value)
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+  reject_running(current, third)
+
+  local completed = 0
+  local first_succeeded = false
+  local first_result: value = nil
+  local first_status = first:status()
+  case first_status
+  when succeeded: result then
+    first_succeeded = true
+    first_result = result
+    completed = completed + 1
+  when failed then raise AllThreeError.first(first_status)
+  when cancelled then raise AllThreeError.first(first_status)
+  else
+  end
+
+  local second_succeeded = false
+  local second_result: value = nil
+  local second_status = second:status()
+  case second_status
+  when succeeded: result then
+    second_succeeded = true
+    second_result = result
+    completed = completed + 1
+  when failed then raise AllThreeError.second(second_status)
+  when cancelled then raise AllThreeError.second(second_status)
+  else
+  end
+
+  local third_succeeded = false
+  local third_result: value = nil
+  local third_status = third:status()
+  case third_status
+  when succeeded: result then
+    third_succeeded = true
+    third_result = result
+    completed = completed + 1
+  when failed then raise AllThreeError.third(third_status)
+  when cancelled then raise AllThreeError.third(third_status)
+  else
+  end
+
+  if completed == 3 then
+    return first_result, second_result, third_result
+  end
+
+  local waiting? = current
+  defer waiting = nil
+  local rejected = 0
+  local rejection?: TaskStatus = nil
+
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      first_result = result
+      completed = completed + 1
+      if completed == 3 then waiting:resume() end
+    when failed then
+      rejected = 1
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 1
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer first:remove_terminal_listener(first_listener)
+  if not first_succeeded then first:add_terminal_listener(first_listener) end
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      second_result = result
+      completed = completed + 1
+      if completed == 3 then waiting:resume() end
+    when failed then
+      rejected = 2
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 2
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer second:remove_terminal_listener(second_listener)
+  if not second_succeeded then second:add_terminal_listener(second_listener) end
+
+  local third_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      third_result = result
+      completed = completed + 1
+      if completed == 3 then waiting:resume() end
+    when failed then
+      rejected = 3
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 3
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer third:remove_terminal_listener(third_listener)
+  if not third_succeeded then third:add_terminal_listener(third_listener) end
+
+  suspend()
+  if rejected == 1 then
+    raise AllThreeError.first(rejection as TaskStatus)
+  end
+  if rejected == 2 then
+    raise AllThreeError.second(rejection as TaskStatus)
+  end
+  if rejected == 3 then
+    raise AllThreeError.third(rejection as TaskStatus)
+  end
+  return first_result, second_result, third_result
+end
+
+function all_four(first: Task, second: Task, third: Task,
+                  fourth: Task): (value, value, value, value)
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+  reject_running(current, third)
+  reject_running(current, fourth)
+
+  local completed = 0
+  local first_succeeded = false
+  local first_result: value = nil
+  local first_status = first:status()
+  case first_status
+  when succeeded: result then
+    first_succeeded = true
+    first_result = result
+    completed = completed + 1
+  when failed then raise AllFourError.first(first_status)
+  when cancelled then raise AllFourError.first(first_status)
+  else
+  end
+
+  local second_succeeded = false
+  local second_result: value = nil
+  local second_status = second:status()
+  case second_status
+  when succeeded: result then
+    second_succeeded = true
+    second_result = result
+    completed = completed + 1
+  when failed then raise AllFourError.second(second_status)
+  when cancelled then raise AllFourError.second(second_status)
+  else
+  end
+
+  local third_succeeded = false
+  local third_result: value = nil
+  local third_status = third:status()
+  case third_status
+  when succeeded: result then
+    third_succeeded = true
+    third_result = result
+    completed = completed + 1
+  when failed then raise AllFourError.third(third_status)
+  when cancelled then raise AllFourError.third(third_status)
+  else
+  end
+
+  local fourth_succeeded = false
+  local fourth_result: value = nil
+  local fourth_status = fourth:status()
+  case fourth_status
+  when succeeded: result then
+    fourth_succeeded = true
+    fourth_result = result
+    completed = completed + 1
+  when failed then raise AllFourError.fourth(fourth_status)
+  when cancelled then raise AllFourError.fourth(fourth_status)
+  else
+  end
+
+  if completed == 4 then
+    return first_result, second_result, third_result, fourth_result
+  end
+
+  local waiting? = current
+  defer waiting = nil
+  local rejected = 0
+  local rejection?: TaskStatus = nil
+
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      first_result = result
+      completed = completed + 1
+      if completed == 4 then waiting:resume() end
+    when failed then
+      rejected = 1
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 1
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer first:remove_terminal_listener(first_listener)
+  if not first_succeeded then first:add_terminal_listener(first_listener) end
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      second_result = result
+      completed = completed + 1
+      if completed == 4 then waiting:resume() end
+    when failed then
+      rejected = 2
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 2
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer second:remove_terminal_listener(second_listener)
+  if not second_succeeded then second:add_terminal_listener(second_listener) end
+
+  local third_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      third_result = result
+      completed = completed + 1
+      if completed == 4 then waiting:resume() end
+    when failed then
+      rejected = 3
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 3
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer third:remove_terminal_listener(third_listener)
+  if not third_succeeded then third:add_terminal_listener(third_listener) end
+
+  local fourth_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      fourth_result = result
+      completed = completed + 1
+      if completed == 4 then waiting:resume() end
+    when failed then
+      rejected = 4
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 4
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer fourth:remove_terminal_listener(fourth_listener)
+  if not fourth_succeeded then fourth:add_terminal_listener(fourth_listener) end
+
+  suspend()
+  if rejected == 1 then
+    raise AllFourError.first(rejection as TaskStatus)
+  end
+  if rejected == 2 then
+    raise AllFourError.second(rejection as TaskStatus)
+  end
+  if rejected == 3 then
+    raise AllFourError.third(rejection as TaskStatus)
+  end
+  if rejected == 4 then
+    raise AllFourError.fourth(rejection as TaskStatus)
+  end
+  return first_result, second_result, third_result, fourth_result
+end
+
+function all_five(first: Task, second: Task, third: Task,
+                  fourth: Task, fifth: Task):
+                  (value, value, value, value, value)
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+  reject_running(current, third)
+  reject_running(current, fourth)
+  reject_running(current, fifth)
+
+  local completed = 0
+  local first_succeeded = false
+  local first_result: value = nil
+  local first_status = first:status()
+  case first_status
+  when succeeded: result then
+    first_succeeded = true
+    first_result = result
+    completed = completed + 1
+  when failed then raise AllFiveError.first(first_status)
+  when cancelled then raise AllFiveError.first(first_status)
+  else
+  end
+
+  local second_succeeded = false
+  local second_result: value = nil
+  local second_status = second:status()
+  case second_status
+  when succeeded: result then
+    second_succeeded = true
+    second_result = result
+    completed = completed + 1
+  when failed then raise AllFiveError.second(second_status)
+  when cancelled then raise AllFiveError.second(second_status)
+  else
+  end
+
+  local third_succeeded = false
+  local third_result: value = nil
+  local third_status = third:status()
+  case third_status
+  when succeeded: result then
+    third_succeeded = true
+    third_result = result
+    completed = completed + 1
+  when failed then raise AllFiveError.third(third_status)
+  when cancelled then raise AllFiveError.third(third_status)
+  else
+  end
+
+  local fourth_succeeded = false
+  local fourth_result: value = nil
+  local fourth_status = fourth:status()
+  case fourth_status
+  when succeeded: result then
+    fourth_succeeded = true
+    fourth_result = result
+    completed = completed + 1
+  when failed then raise AllFiveError.fourth(fourth_status)
+  when cancelled then raise AllFiveError.fourth(fourth_status)
+  else
+  end
+
+  local fifth_succeeded = false
+  local fifth_result: value = nil
+  local fifth_status = fifth:status()
+  case fifth_status
+  when succeeded: result then
+    fifth_succeeded = true
+    fifth_result = result
+    completed = completed + 1
+  when failed then raise AllFiveError.fifth(fifth_status)
+  when cancelled then raise AllFiveError.fifth(fifth_status)
+  else
+  end
+
+  if completed == 5 then
+    return first_result, second_result, third_result, fourth_result,
+           fifth_result
+  end
+
+  local waiting? = current
+  defer waiting = nil
+  local rejected = 0
+  local rejection?: TaskStatus = nil
+
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      first_result = result
+      completed = completed + 1
+      if completed == 5 then waiting:resume() end
+    when failed then
+      rejected = 1
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 1
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer first:remove_terminal_listener(first_listener)
+  if not first_succeeded then first:add_terminal_listener(first_listener) end
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      second_result = result
+      completed = completed + 1
+      if completed == 5 then waiting:resume() end
+    when failed then
+      rejected = 2
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 2
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer second:remove_terminal_listener(second_listener)
+  if not second_succeeded then second:add_terminal_listener(second_listener) end
+
+  local third_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      third_result = result
+      completed = completed + 1
+      if completed == 5 then waiting:resume() end
+    when failed then
+      rejected = 3
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 3
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer third:remove_terminal_listener(third_listener)
+  if not third_succeeded then third:add_terminal_listener(third_listener) end
+
+  local fourth_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      fourth_result = result
+      completed = completed + 1
+      if completed == 5 then waiting:resume() end
+    when failed then
+      rejected = 4
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 4
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer fourth:remove_terminal_listener(fourth_listener)
+  if not fourth_succeeded then fourth:add_terminal_listener(fourth_listener) end
+
+  local fifth_listener = function (status: TaskStatus)
+    if waiting == nil or rejected ~= 0 then return end
+    case status
+    when succeeded: result then
+      fifth_result = result
+      completed = completed + 1
+      if completed == 5 then waiting:resume() end
+    when failed then
+      rejected = 5
+      rejection = status
+      waiting:resume()
+    when cancelled then
+      rejected = 5
+      rejection = status
+      waiting:resume()
+    else
+    end
+  end
+  defer fifth:remove_terminal_listener(fifth_listener)
+  if not fifth_succeeded then fifth:add_terminal_listener(fifth_listener) end
+
+  suspend()
+  if rejected == 1 then
+    raise AllFiveError.first(rejection as TaskStatus)
+  end
+  if rejected == 2 then
+    raise AllFiveError.second(rejection as TaskStatus)
+  end
+  if rejected == 3 then
+    raise AllFiveError.third(rejection as TaskStatus)
+  end
+  if rejected == 4 then
+    raise AllFiveError.fourth(rejection as TaskStatus)
+  end
+  if rejected == 5 then
+    raise AllFiveError.fifth(rejection as TaskStatus)
+  end
+  return first_result, second_result, third_result, fourth_result,
+         fifth_result
+end
+
+function join(task: Task): TaskStatus
+  local current = running()
+  reject_running(current, task)
+  local status = task:status()
+  if status:has_finished() then return status end
+
+  local waiting? = current
+  defer waiting = nil
+  local result?: TaskStatus = nil
+  local listener = function (terminal_status: TaskStatus)
+    if waiting == nil then return end
+    result = terminal_status
+    waiting:resume()
+  end
+  defer task:remove_terminal_listener(listener)
+  task:add_terminal_listener(listener)
+
+  suspend()
+  return result as TaskStatus
+end
+
+function join_two(first: Task, second: Task): (TaskStatus, TaskStatus)
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+
+  local completed = 0
+  local first_result?: TaskStatus = nil
+  local first_status = first:status()
+  if first_status:has_finished() then
+    first_result = first_status
+    completed = completed + 1
+  end
+  local second_result?: TaskStatus = nil
+  local second_status = second:status()
+  if second_status:has_finished() then
+    second_result = second_status
+    completed = completed + 1
+  end
+  if completed == 2 then
+    return first_result as TaskStatus, second_result as TaskStatus
+  end
+
+  local waiting? = current
+  defer waiting = nil
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or first_result ~= nil then return end
+    first_result = status
+    completed = completed + 1
+    if completed == 2 then waiting:resume() end
+  end
+  defer first:remove_terminal_listener(first_listener)
+  if first_result == nil then first:add_terminal_listener(first_listener) end
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or second_result ~= nil then return end
+    second_result = status
+    completed = completed + 1
+    if completed == 2 then waiting:resume() end
+  end
+  defer second:remove_terminal_listener(second_listener)
+  if second_result == nil then second:add_terminal_listener(second_listener) end
+
+  suspend()
+  return first_result as TaskStatus, second_result as TaskStatus
+end
+
+function join_three(first: Task, second: Task,
+                    third: Task): (TaskStatus, TaskStatus, TaskStatus)
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+  reject_running(current, third)
+
+  local completed = 0
+  local first_result?: TaskStatus = nil
+  local first_status = first:status()
+  if first_status:has_finished() then
+    first_result = first_status
+    completed = completed + 1
+  end
+  local second_result?: TaskStatus = nil
+  local second_status = second:status()
+  if second_status:has_finished() then
+    second_result = second_status
+    completed = completed + 1
+  end
+  local third_result?: TaskStatus = nil
+  local third_status = third:status()
+  if third_status:has_finished() then
+    third_result = third_status
+    completed = completed + 1
+  end
+  if completed == 3 then
+    return first_result as TaskStatus, second_result as TaskStatus,
+           third_result as TaskStatus
+  end
+
+  local waiting? = current
+  defer waiting = nil
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or first_result ~= nil then return end
+    first_result = status
+    completed = completed + 1
+    if completed == 3 then waiting:resume() end
+  end
+  defer first:remove_terminal_listener(first_listener)
+  if first_result == nil then first:add_terminal_listener(first_listener) end
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or second_result ~= nil then return end
+    second_result = status
+    completed = completed + 1
+    if completed == 3 then waiting:resume() end
+  end
+  defer second:remove_terminal_listener(second_listener)
+  if second_result == nil then second:add_terminal_listener(second_listener) end
+
+  local third_listener = function (status: TaskStatus)
+    if waiting == nil or third_result ~= nil then return end
+    third_result = status
+    completed = completed + 1
+    if completed == 3 then waiting:resume() end
+  end
+  defer third:remove_terminal_listener(third_listener)
+  if third_result == nil then third:add_terminal_listener(third_listener) end
+
+  suspend()
+  return first_result as TaskStatus, second_result as TaskStatus,
+         third_result as TaskStatus
+end
+
+function join_four(first: Task, second: Task, third: Task,
+                   fourth: Task):
+                   (TaskStatus, TaskStatus, TaskStatus, TaskStatus)
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+  reject_running(current, third)
+  reject_running(current, fourth)
+
+  local completed = 0
+  local first_result?: TaskStatus = nil
+  local first_status = first:status()
+  if first_status:has_finished() then
+    first_result = first_status
+    completed = completed + 1
+  end
+  local second_result?: TaskStatus = nil
+  local second_status = second:status()
+  if second_status:has_finished() then
+    second_result = second_status
+    completed = completed + 1
+  end
+  local third_result?: TaskStatus = nil
+  local third_status = third:status()
+  if third_status:has_finished() then
+    third_result = third_status
+    completed = completed + 1
+  end
+  local fourth_result?: TaskStatus = nil
+  local fourth_status = fourth:status()
+  if fourth_status:has_finished() then
+    fourth_result = fourth_status
+    completed = completed + 1
+  end
+  if completed == 4 then
+    return first_result as TaskStatus, second_result as TaskStatus,
+           third_result as TaskStatus, fourth_result as TaskStatus
+  end
+
+  local waiting? = current
+  defer waiting = nil
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or first_result ~= nil then return end
+    first_result = status
+    completed = completed + 1
+    if completed == 4 then waiting:resume() end
+  end
+  defer first:remove_terminal_listener(first_listener)
+  if first_result == nil then first:add_terminal_listener(first_listener) end
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or second_result ~= nil then return end
+    second_result = status
+    completed = completed + 1
+    if completed == 4 then waiting:resume() end
+  end
+  defer second:remove_terminal_listener(second_listener)
+  if second_result == nil then second:add_terminal_listener(second_listener) end
+
+  local third_listener = function (status: TaskStatus)
+    if waiting == nil or third_result ~= nil then return end
+    third_result = status
+    completed = completed + 1
+    if completed == 4 then waiting:resume() end
+  end
+  defer third:remove_terminal_listener(third_listener)
+  if third_result == nil then third:add_terminal_listener(third_listener) end
+
+  local fourth_listener = function (status: TaskStatus)
+    if waiting == nil or fourth_result ~= nil then return end
+    fourth_result = status
+    completed = completed + 1
+    if completed == 4 then waiting:resume() end
+  end
+  defer fourth:remove_terminal_listener(fourth_listener)
+  if fourth_result == nil then fourth:add_terminal_listener(fourth_listener) end
+
+  suspend()
+  return first_result as TaskStatus, second_result as TaskStatus,
+         third_result as TaskStatus, fourth_result as TaskStatus
+end
+
+function join_five(first: Task, second: Task, third: Task,
+                   fourth: Task, fifth: Task):
+                   (TaskStatus, TaskStatus, TaskStatus,
+                    TaskStatus, TaskStatus)
+  local current = running()
+  reject_running(current, first)
+  reject_running(current, second)
+  reject_running(current, third)
+  reject_running(current, fourth)
+  reject_running(current, fifth)
+
+  local completed = 0
+  local first_result?: TaskStatus = nil
+  local first_status = first:status()
+  if first_status:has_finished() then
+    first_result = first_status
+    completed = completed + 1
+  end
+  local second_result?: TaskStatus = nil
+  local second_status = second:status()
+  if second_status:has_finished() then
+    second_result = second_status
+    completed = completed + 1
+  end
+  local third_result?: TaskStatus = nil
+  local third_status = third:status()
+  if third_status:has_finished() then
+    third_result = third_status
+    completed = completed + 1
+  end
+  local fourth_result?: TaskStatus = nil
+  local fourth_status = fourth:status()
+  if fourth_status:has_finished() then
+    fourth_result = fourth_status
+    completed = completed + 1
+  end
+  local fifth_result?: TaskStatus = nil
+  local fifth_status = fifth:status()
+  if fifth_status:has_finished() then
+    fifth_result = fifth_status
+    completed = completed + 1
+  end
+  if completed == 5 then
+    return first_result as TaskStatus, second_result as TaskStatus,
+           third_result as TaskStatus, fourth_result as TaskStatus,
+           fifth_result as TaskStatus
+  end
+
+  local waiting? = current
+  defer waiting = nil
+  local first_listener = function (status: TaskStatus)
+    if waiting == nil or first_result ~= nil then return end
+    first_result = status
+    completed = completed + 1
+    if completed == 5 then waiting:resume() end
+  end
+  defer first:remove_terminal_listener(first_listener)
+  if first_result == nil then first:add_terminal_listener(first_listener) end
+
+  local second_listener = function (status: TaskStatus)
+    if waiting == nil or second_result ~= nil then return end
+    second_result = status
+    completed = completed + 1
+    if completed == 5 then waiting:resume() end
+  end
+  defer second:remove_terminal_listener(second_listener)
+  if second_result == nil then second:add_terminal_listener(second_listener) end
+
+  local third_listener = function (status: TaskStatus)
+    if waiting == nil or third_result ~= nil then return end
+    third_result = status
+    completed = completed + 1
+    if completed == 5 then waiting:resume() end
+  end
+  defer third:remove_terminal_listener(third_listener)
+  if third_result == nil then third:add_terminal_listener(third_listener) end
+
+  local fourth_listener = function (status: TaskStatus)
+    if waiting == nil or fourth_result ~= nil then return end
+    fourth_result = status
+    completed = completed + 1
+    if completed == 5 then waiting:resume() end
+  end
+  defer fourth:remove_terminal_listener(fourth_listener)
+  if fourth_result == nil then fourth:add_terminal_listener(fourth_listener) end
+
+  local fifth_listener = function (status: TaskStatus)
+    if waiting == nil or fifth_result ~= nil then return end
+    fifth_result = status
+    completed = completed + 1
+    if completed == 5 then waiting:resume() end
+  end
+  defer fifth:remove_terminal_listener(fifth_listener)
+  if fifth_result == nil then fifth:add_terminal_listener(fifth_listener) end
+
+  suspend()
+  return first_result as TaskStatus, second_result as TaskStatus,
+         third_result as TaskStatus, fourth_result as TaskStatus,
+         fifth_result as TaskStatus
 end

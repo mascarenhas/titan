@@ -31,6 +31,7 @@ record Server
   local secure: ssl.Server?
   local encrypted: boolean
   local handler: Handler
+  local idle_timeout_ms: integer
   local closed: boolean
   local listener_closed: boolean
 end
@@ -220,7 +221,7 @@ function Response:send_headers()
   if self.headers_sent then return end
   if self.closed then raise "HTTP response is closed" end
   prepare_response_headers(self)
-  local builder = str.writer(false)
+  local builder = str.writer()
   builder:write("HTTP/1.1 " .. str.tostring(self.status_number) ..
                 " " .. self.reason_text .. "\r\n")
   builder:write(render_headers(self.response_headers))
@@ -286,13 +287,51 @@ local function accept_request_expectation(
   return false
 end
 
+local function read_request_with_idle_timeout(
+    parser: Parser, server: Server): Request?
+  local encrypted = server.encrypted
+  local timeout = server.idle_timeout_ms
+  if timeout == 0 then return read_request(parser, encrypted) end
+
+  local reader = async.run(function (): value
+    return read_request(parser, encrypted)
+  end)
+  local deadline = async.run(function (): value
+    timer.sleep(timeout)
+    return nil
+  end)
+  local raced = async.race_two(reader, deadline)
+  case raced
+  when first: status then
+    deadline:cancel(async.CancellationReason.simple(
+      "HTTP request headers arrived before idle timeout"))
+    async.join(deadline)
+    local succeeded, request_value? = status:has_succeeded()
+    if succeeded then return request_value as Request? end
+    return nil
+  when second: status then
+    reader:cancel(async.CancellationReason.simple(
+      "HTTP idle timeout expired"))
+    async.join(reader)
+    -- A successful deadline is the ordinary idle-timeout path. A failed or
+    -- cancelled child has already reported its exact failure, so this
+    -- connection Task only performs peer cleanup and returns.
+    return nil
+  end
+  -- Titan case statements remain non-exhaustive even when every current
+  -- variant is named, so the optional return needs an explicit fallback.
+  return nil
+end
+
 local function serve_connection(connection: io.ReaderWriterCloser,
-                                encrypted: boolean, handler: Handler)
+                                server: Server)
   local parser = new_request_parser(connection)
   defer close_parser(parser)
   defer connection:close()
   while true do
-    local request? = read_request(parser, encrypted)
+    -- Snapshot the current setting for this request-header acquisition.
+    -- Setter calls affect the next loop iteration, never an in-flight read.
+    local request? = read_request_with_idle_timeout(parser, server)
     if not request then return end
     local request_value = request as Request
     local response = new_response(connection, request_value)
@@ -300,7 +339,7 @@ local function serve_connection(connection: io.ReaderWriterCloser,
         connection, request_value, response) then
       return
     end
-    handler(request_value, response)
+    server.handler(request_value, response)
     response:close()
     drain_request(request_value)
     if not parser.keep_alive or not response.keep_alive then return end
@@ -320,22 +359,43 @@ local function accept_connection(server: Server): io.ReaderWriterCloser
 end
 
 function listen(host: string, handler: Handler, port: integer?,
-                backlog: integer?): Server
+                backlog: integer?, idle_timeout: integer?): Server
+  local actual_idle_timeout = 0
+  if idle_timeout then actual_idle_timeout = idle_timeout end
+  if actual_idle_timeout < 0 then
+    raise "HTTP idle timeout must be non-negative"
+  end
   local actual_port = 80
   if port then actual_port = port as integer end
   return Server.new(net.listen(host, actual_port, backlog), nil,
-                    false, handler, false, false)
+                    false, handler, actual_idle_timeout, false, false)
 end
 
 function listen_tls(host: string, certificate_file: string, handler: Handler,
                     private_key_file: string?, port: integer?,
-                    backlog: integer?): Server
+                    backlog: integer?, idle_timeout: integer?): Server
+  local actual_idle_timeout = 0
+  if idle_timeout then actual_idle_timeout = idle_timeout end
+  if actual_idle_timeout < 0 then
+    raise "HTTP idle timeout must be non-negative"
+  end
   local actual_port = 443
   if port then actual_port = port as integer end
   return Server.new(nil, ssl.listen(host, actual_port,
                                    certificate_file, private_key_file,
                                    backlog),
-                    true, handler, false, false)
+                    true, handler, actual_idle_timeout, false, false)
+end
+
+function Server:idle_timeout(timeout: integer?): integer
+  local previous = self.idle_timeout_ms
+  if timeout then
+    if timeout < 0 then
+      raise "HTTP idle timeout must be non-negative"
+    end
+    self.idle_timeout_ms = timeout
+  end
+  return previous
 end
 
 function Server:serve()
@@ -349,10 +409,9 @@ function Server:serve()
       raise
     end
     local connection = accepted as io.ReaderWriterCloser
-    local encrypted = self.encrypted
-    local handler = self.handler
+    local server = self
     async.run(function (): value
-      serve_connection(connection, encrypted, handler)
+      serve_connection(connection, server)
       return nil
     end)
   end

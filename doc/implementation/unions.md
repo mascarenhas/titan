@@ -12,7 +12,7 @@ cross-cutting invariants are:
 * every variant has an absolute, zero-based declaration-order tag;
 * empty values have only a tag user value, payload values have one additional
   user value;
-* `case` is non-exhaustive and has the same always-returns rule as
+* `case` is non-exhaustive and has the same non-fallthrough rule as
   `if`/`elseif`/`else`;
 * arms and `else` are ordinary full blocks, so existing
   `catch`/`finally`/`defer` machinery applies unchanged; and

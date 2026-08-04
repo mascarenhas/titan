@@ -31,8 +31,7 @@ local function expect_failure(func: () -> value, message: string)
 end
 
 local function active(task: async.Task): boolean
-  local status = task:status()
-  return status == "ready" or status == "running" or status == "waiting"
+  return not task:status():has_finished()
 end
 
 function result(): string
@@ -195,7 +194,7 @@ function start_paths(root: string, target: string,
     do
       fs.stat(root .. "/missing")
     catch
-      local failure = error as async.Error
+      local failure = error as async.OperationError
       check(failure.operation == "fs.stat",
             "missing stat reported the wrong operation")
       missing_error = true
@@ -253,8 +252,8 @@ function start_parallel(root: string): async.Task
     end)
 
     while active(first) or active(second) do timer.yield() end
-    check(first:status() == "succeeded" and
-          second:status() == "succeeded",
+    check(first:status():as_string() == "succeeded" and
+          second:status():as_string() == "succeeded",
           "independent filesystem Tasks did not succeed")
     check(fs.read_file(first_path) == "first" and
           fs.read_file(second_path) == "second",
@@ -294,7 +293,7 @@ local async = require "titan.async"
 local cases = require "fs_cases"
 local task = assert(cases.%s(%s))
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(cases.result() == %q, cases.result())
 ]==]):format(function_name, arguments, expected)
     end

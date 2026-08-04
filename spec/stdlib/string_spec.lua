@@ -76,6 +76,7 @@ function interface_streams(): string
   reader:close()
   return result or ""
 end
+
 ]]
 
 describe("titan.string", function()
@@ -95,7 +96,6 @@ describe("titan.string", function()
                 async_stdlib.read("titan/peg/" .. name .. ".titan"))
         end
         layout = async_stdlib.exact_layout(workspace)
-        async_stdlib.prepare_async_core(workspace, layout)
         async_stdlib.prepare_gc(workspace, layout)
         async_stdlib.compile(workspace, "titan.peg", {
             layout = layout,
@@ -151,117 +151,55 @@ describe("titan.string", function()
         assert.equals(0, status, output)
     end
 
-    it("provides configurable in-memory ReaderCloser and WriterCloser streams",
+    it("provides synchronous in-memory ReaderCloser and WriterCloser streams",
     function()
         run([[
-            local async = require "titan.async"
             local str = require "titan.string"
             local probe = require "string_core_probe"
-            local phase = 0
-            local completed = false
-            local observers = {}
-            local function observe(expected, following)
-                local observer = async.run(function()
-                    assert(phase == expected)
-                    phase = following
-                end)
-                observers[#observers + 1] = observer
-            end
-            local task = async.run(function()
-                local reader = str.reader("alpha\0beta\nlast")
-                phase = 1
-                observe(1, 2)
-                assert(reader:read_until("\n", true) == "alpha\0beta")
-                assert(phase == 2)
-                assert(reader:read() == "last")
+            local reader = str.reader("alpha\0beta\nlast")
+            assert(reader:read_until("\n", true) == "alpha\0beta")
+            assert(reader:read() == "last")
+            assert(reader:read() == nil)
+            reader:close()
+            reader:close()
 
-                phase = 3
-                observe(3, 4)
-                assert(reader:read() == nil)
-                assert(phase == 4)
-                reader:close()
-                reader:close()
+            local closed = str.reader("unread\0suffix")
+            closed:close()
+            closed:close()
+            assert(closed:read() == nil)
+            assert(closed:read_until("suffix", true) == nil)
+            assert(closed:read_until("", true) == nil)
 
-                local closed = str.reader("unread\0suffix")
-                closed:close()
-                closed:close()
-                assert(closed:read() == nil)
-                assert(closed:read_until("suffix", true) == nil)
-                assert(closed:read_until("", true) == nil)
+            local boundaries = str.reader("::a::::")
+            assert(boundaries:read_until("::", true) == "")
+            assert(boundaries:read_until("::", false) == "a::")
+            assert(boundaries:read_until("::", true) == "")
+            assert(boundaries:read_until("::", true) == nil)
 
-                local boundaries = str.reader("::a::::")
-                assert(boundaries:read_until("::", true) == "")
-                assert(boundaries:read_until("::", false) == "a::")
-                assert(boundaries:read_until("::", true) == "")
-                assert(boundaries:read_until("::", true) == nil)
+            local absent = str.reader("tail\0bytes")
+            local invalid = str.reader("still-open")
+            local delimiter_ok, delimiter_err =
+                pcall(invalid.read_until, invalid, "", true)
+            assert(not delimiter_ok)
+            assert(tostring(delimiter_err):find(
+                "delimiter must not be empty", 1, true), delimiter_err)
+            assert(absent:read_until("missing", false) == "tail\0bytes")
+            assert(absent:read_until("missing", true) == nil)
+            assert(absent:read_until("", true) == nil)
 
-                local absent = str.reader("tail\0bytes")
-                local invalid = str.reader("still-open")
-                local delimiter_ok, delimiter_err =
-                    pcall(invalid.read_until, invalid, "", true)
-                assert(not delimiter_ok)
-                assert(tostring(delimiter_err):find(
-                    "delimiter must not be empty", 1, true), delimiter_err)
-                assert(absent:read_until("missing", false) == "tail\0bytes")
-                assert(absent:read_until("missing", true) == nil)
-                assert(absent:read_until("", true) == nil)
+            local writer = str.writer()
+            writer:write("")
+            assert(writer:drain() == "")
+            writer:write("left\0")
+            writer:write("right")
+            assert(writer:drain() == "left\0right")
+            assert(writer:drain() == "")
+            writer:write("reused")
+            assert(writer:drain() == "reused")
+            writer:close()
+            writer:close()
 
-                local writer = str.writer()
-                phase = 5
-                observe(5, 6)
-                writer:write("")
-                assert(phase == 6)
-                assert(writer:drain() == "")
-
-                phase = 7
-                observe(7, 8)
-                writer:write("left\0")
-                assert(phase == 8)
-                writer:write("right")
-                assert(writer:drain() == "left\0right")
-                assert(writer:drain() == "")
-                writer:write("reused")
-                assert(writer:drain() == "reused")
-                writer:close()
-                writer:close()
-
-                phase = 9
-                observe(9, 10)
-                local nil_policy_reader = str.reader("nil-policy", nil)
-                assert(nil_policy_reader:read_until("-", true) == "nil")
-                assert(phase == 10)
-
-                phase = 11
-                observe(11, 12)
-                local true_policy_writer = str.writer(true)
-                true_policy_writer:write("true-policy")
-                assert(phase == 12)
-                assert(true_policy_writer:drain() == "true-policy")
-
-                phase = 13
-                observe(13, 14)
-                local direct_reader = str.reader("direct\0reader", false)
-                assert(direct_reader:read_until("\0", true) == "direct")
-                assert(direct_reader:read() == "reader")
-                assert(direct_reader:read() == nil)
-                local direct_writer = str.writer(false)
-                direct_writer:write("")
-                direct_writer:write("direct\0")
-                direct_writer:write("writer")
-                assert(direct_writer:drain() == "direct\0writer")
-                assert(phase == 13)
-                async.yield()
-                assert(phase == 14)
-
-                assert(probe.interface_streams() == "interface\0stream")
-                completed = true
-            end)
-            async.loop()
-            assert(task:status() == "succeeded", task:status())
-            assert(completed)
-            for _, observer in ipairs(observers) do
-                assert(observer:status() == "succeeded", observer:status())
-            end
+            assert(probe.interface_streams() == "interface\0stream")
         ]])
     end)
 

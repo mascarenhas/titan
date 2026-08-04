@@ -99,7 +99,7 @@ error. The checker has five such visitors (`checker.lua`):
 | Visitor | Dispatches over | Returns |
 | --- | --- | --- |
 | `typefromnode` | `Ast.Type*` annotation nodes | the corresponding `Type.*` value |
-| `checkstat` | `Ast.Stat*` | boolean "this statement always returns", used by the return-path analysis |
+| `checkstat` | `Ast.Stat*` | boolean "this statement cannot fall through", stored in the historical `_always_returns` field and used by control-flow analysis |
 | `checkvar` | `Ast.Var*` lvalues | nothing (annotates the node) |
 | `checkexp` | `Ast.Exp*` | nothing (annotates the node) |
 | `toplevel_visitor` | `Ast.TopLevel*` | nothing (called by the staged declaration collector) |
@@ -362,7 +362,7 @@ of these are declared anywhere; this table is the inventory.
 | `_record` | `TopLevelStatic`, `TopLevelMethod` | checker nominal-member declaration stages | checker (`checkmethod`, for `self`'s type) | the `Ast.TopLevelRecord` or `Ast.TopLevelUnion` node the member belongs to; the historical field name is retained |
 | `_union` | `StatCase` | checker | coder | the resolved `Type.Union` owner of the case scrutinee |
 | `_variant`, `_variant_index` | `CaseArm` | checker | coder | the resolved `Type.Variant` and its absolute zero-based dispatch tag |
-| `_always_returns` | every statement | checker | checker, coder | cached result of statement return-path analysis; a case is true only with an explicit else and every arm/else true, and statement-list generation stops after any direct or compound true result |
+| `_always_returns` | every statement | checker | checker, coder | historical name for cached non-fallthrough analysis; a case is true only with an explicit else and every arm/else true, a literal-true `while` is true only when no reachable `break` targets it, and statement-list generation stops after any direct or compound true result |
 | `_method` | `ExpCall` (method calls) | checker | coder | the resolved `Type.Method` |
 | `_paramnames` | `TopLevelFunc` | checker callable-signature stage | checker, module-interface builder | dense names of fixed declared parameters; kept on the declaration rather than `Type.Function` |
 | `_named_arg_order`, `_named_call_kind` | checked named `ExpCall` | checker | coder | formal indexes of explicit expressions in lexical order, plus `"titan"` or `"foreign"`; the `Args*` payload itself has already been normalized to formal order |
@@ -427,7 +427,7 @@ change. This is the checklist.
    entry in `syntax_errors.errors`, or error formatting crashes (see
    [lexer and parser](lexer-parser.md)).
 3. **`checker.lua`** — add a handler to every `make_visitor` table the
-   node can reach: `checkstat` (returning the correct "always returns"
+   node can reach: `checkstat` (returning the correct non-fallthrough
    boolean), `checkexp`, `checkvar`, `typefromnode`, or
    `toplevel_visitor`. A new top-level kind must also be placed in the correct
    declaration stage and body-validation path, with `_ignore` handling in

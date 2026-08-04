@@ -243,7 +243,7 @@ local function read_input_until(stream: InputStream, delimiter: string,
   if captured_input_is_closed(stream) then return nil end
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
-  local builder = str.writer(false)
+  local builder = str.writer()
   local tail = ""
   while true do
     local chunk? = read_stream(stream)

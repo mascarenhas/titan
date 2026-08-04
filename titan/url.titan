@@ -225,7 +225,7 @@ local HEX_UPPER = "0123456789ABCDEF"
 -- additionally use the case-insensitive normalization from lpeg_patterns.
 local function normalize_component(source: string,
                                    lowercase: boolean): string
-  local builder = str.writer(false)
+  local builder = str.writer()
   local index = 1
   while index <= #source do
     local byte = str.byte(source, index)

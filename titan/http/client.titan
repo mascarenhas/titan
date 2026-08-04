@@ -88,7 +88,7 @@ function request(method: string, source_url: string,
   local connection = client_connection(parsed_url, ca_file)
   local parser: Parser? = nil
   do
-    local builder = str.writer(false)
+    local builder = str.writer()
     builder:write(method .. " " .. parsed_url.target ..
                   " HTTP/1.1\r\n")
     builder:write(render_headers(request_headers))

@@ -21,8 +21,7 @@ local function expect_failure(func: () -> value, message: string)
 end
 
 local function active(task: async.Task): boolean
-  local status = task:status()
-  return status == "ready" or status == "running" or status == "waiting"
+  return not task:status():has_finished()
 end
 
 local function required_input(candidate: os.InputStream?,
@@ -181,23 +180,23 @@ function start_spawn_and_streams(child: string,
       detached_stdout:read()
       return nil
     end)
-    while waiter:status() == "ready" or
-          reader:status() == "ready" or
-          waiter:status() == "running" or
-          reader:status() == "running" do
+    while waiter:status():as_string() == "ready" or
+          reader:status():as_string() == "ready" or
+          waiter:status():as_string() == "running" or
+          reader:status():as_string() == "running" do
       async.yield()
     end
-    check(waiter:status() == "waiting" and
-          reader:status() == "waiting",
+    check(waiter:status():as_string() == "waiting" and
+          reader:status():as_string() == "waiting",
           "process waiters did not suspend")
-    waiter:cancel("detach process waiter")
-    reader:cancel("detach process reader")
-    check(waiter:status() == "waiting" and
-          reader:status() == "waiting",
-          "cancellation resumed a process waiter synchronously")
+    waiter:cancel(async.CancellationReason.simple("detach process waiter"))
+    reader:cancel(async.CancellationReason.simple("detach process reader"))
+    check(waiter:status():as_string() == "waiting" and
+          reader:status():as_string() == "waiting",
+          "process waiters left their accepted operations before callbacks")
     while active(waiter) or active(reader) do async.yield() end
-    check(waiter:status() == "cancelled" and
-          reader:status() == "cancelled",
+    check(waiter:status():as_string() == "cancelled" and
+          reader:status():as_string() == "cancelled",
           "detached waiters did not receive their own later callbacks")
     check(detached:is_running(),
           "detaching waiters unexpectedly terminated the child")
@@ -242,7 +241,7 @@ local async = require "titan.async"
 local cases = require "os_process_cases"
 local task = assert(cases.start_spawn_and_streams(%q, %q))
 async.loop()
-assert(task:status() == "succeeded", task:status())
+assert(task:status():as_string() == "succeeded", task:status():as_string())
 assert(cases.result() == "spawn-and-streams-ok", cases.result())
 ]==]):format(child, "TITAN_PROCESS_DIRECT_ENV"))
     end)

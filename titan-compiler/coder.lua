@@ -2482,7 +2482,8 @@ local function cfunctiondecl(rettype, name, params, is_pointer)
     return (rettype and ctype(rettype) or "void") .. " " .. declarator
 end
 
--- A statement after which control never falls through (return/break/raise). The
+-- A statement after which control never falls through (return/break/raise or a
+-- checker-proven infinite loop). The
 -- checker does NOT type-check statements that follow such a terminator within a
 -- block (they are dead code: their var uses get no `_decl`/`_type`), so the coder
 -- MUST NOT attempt to generate them — doing so dereferences those nil
@@ -2905,15 +2906,16 @@ local function analyze_try_spills(block)
 end
 
 -- A non-void/non-nil function whose last reachable statement is something other
--- than a plain `StatReturn` (a `raise`, or a `StatTry`/`if` whose arms all
--- return) falls off the end of the generated C even though Titan control never
--- reaches there: the returns live inside an inner C scope or after a `lua_error`
--- (which Lua 5.5 declares returning `int`, NOT `l_noret`), so the C compiler
--- cannot prove no-fall-through and warns "control reaches end of non-void
--- function". The checker has already proven the function always-returns, so emit
--- an unreachable trailing `return` of the zero value to satisfy the C control-
--- flow check (dead code; never executed). A function whose last reachable
--- statement IS a `StatReturn` needs nothing (the C return is right there).
+-- than a plain `StatReturn` (a `raise`, a proven infinite loop, or a
+-- `StatTry`/`if` whose arms do not fall through) falls off the end of the
+-- generated C even though Titan control never reaches there: the returns live
+-- inside an inner C scope or after a `lua_error` (which Lua 5.5 declares
+-- returning `int`, NOT `l_noret`), so the C compiler cannot always prove
+-- no-fall-through and warns "control reaches end of non-void function". The
+-- checker has already proven the function non-fallthrough, so emit an
+-- unreachable trailing `return` of the zero value to satisfy the C control-flow
+-- check (dead code; never executed). A function whose last reachable statement
+-- IS a `StatReturn` needs nothing (the C return is right there).
 local function unreachable_return(rettype, block)
     if not rettype or rettype._tag == "Type.Nil" then return nil end
     local last = last_reachable_stat(block)
@@ -2921,8 +2923,8 @@ local function unreachable_return(rettype, block)
     -- A braced initializer (`{ {0}, 0 }` for TValue-boxed types) is illegal in a
     -- bare `return`, so zero a temp first and return it.
     return render([[
-        /* unreachable: every path above already returned/raised; this satisfies
-        ** the C control-flow check (Titan never falls through here) */
+        /* unreachable: no Titan path above falls through; this satisfies the C
+        ** control-flow check */
         {
             $DECL = $INIT;
             L->top.p = _base;
@@ -3263,11 +3265,11 @@ local function materialize(ctx, node)
     return materialize_code(ctx, node._type, stats, exp)
 end
 
-function coder._interface_owner_module_expr(ctx, owner)
-    assert(owner and type(owner.name) == "string",
-        "Interface concrete/owner descriptor has no qualified name")
-    local module = assert(owner.name:match("^(.*)%.[^.]+$"),
-        "nominal owner is not module-qualified: " .. owner.name)
+function coder._nominal_owner_module_expr(ctx, fqtn)
+    assert(type(fqtn) == "string",
+        "nominal owner descriptor has no qualified name")
+    local module = assert(fqtn:match("^(.*)%.[^.]+$"),
+        "nominal owner is not module-qualified: " .. fqtn)
     if module == ctx.module then return "_mod" end
     if not ctx.modules[module] then
         ctx.modules[module] = nextupvalue(ctx.tlcontext)
@@ -3275,6 +3277,12 @@ function coder._interface_owner_module_expr(ctx, owner)
     return render("uvalue(&_mod->uv[$INDEX].uv)", {
         INDEX = c_integer_literal(ctx.modules[module]),
     })
+end
+
+function coder._interface_owner_module_expr(ctx, owner)
+    assert(owner and type(owner.name) == "string",
+        "Interface concrete/owner descriptor has no qualified name")
+    return coder._nominal_owner_module_expr(ctx, owner.name)
 end
 
 function coder._interface_closed_record(value, allowed, use)
@@ -9370,7 +9378,6 @@ local function codecall(ctx, node)
                 fname = static_name(fnode._decl)
                 local mod, record = fnode._decl.fqtn:match("^(.*)%.([^.]+)$")
                 if mod ~= ctx.module then
-                    assert(fnode.exp.var._tag == "Ast.VarDot")
                     ctx.functions[fnode._decl.fqtn .. "." .. fnode._decl.name] = {
                         module = mod,
                         record = record,
@@ -9378,9 +9385,16 @@ local function codecall(ctx, node)
                         name = fnode._decl.name,
                         mangled = fname
                     }
-                    modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
-                        INDEX = c_integer_literal(fnode.exp.var.exp.var._decl._upvalue) -- whew!
-                    })
+                    if fnode._alias_namespace then
+                        modarg = coder._nominal_owner_module_expr(
+                            ctx, fnode._decl.fqtn)
+                    else
+                        assert(fnode.exp.var._tag == "Ast.VarDot")
+                        modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
+                            INDEX = c_integer_literal(
+                                fnode.exp.var.exp.var._decl._upvalue) -- whew!
+                        })
+                    end
                 end
             else
                 assert(fnode._decl._tag == "Type.ModuleMember")
@@ -11372,6 +11386,21 @@ local function codevar(ctx, node)
             return "", getslot(node._type, nil, render("&_mod->uv[$SLOT].uv", {
                 SLOT = c_integer_literal(
                     ctx.tlcontext.static_slots[node._decl.fqtn .. "." .. node._decl.name]),
+            }))
+        elseif node._decl._tag == "Type.StaticMethod"
+               and node._alias_namespace then
+            -- A type alias preserves the nominal owner's static namespace; it
+            -- does not manufacture a closure slot in the facade. Recover the
+            -- initialized owner module from Titan's registry and index its
+            -- ordinary ABI-visible static prefix.
+            assert(node._decl._closure_upvalue ~= nil,
+                "aliased public static lacks an owner prefix slot")
+            local owner = coder._nominal_owner_module_expr(
+                ctx, node._decl.fqtn)
+            return "", getslot(node._type, nil, render(
+                "&(($OWNER)->uv[$FNINDEX].uv)", {
+                OWNER = owner,
+                FNINDEX = c_integer_literal(node._decl._closure_upvalue),
             }))
         elseif node._decl._tag == "Type.StaticMethod"
                and node._import_decl then
@@ -15002,50 +15031,7 @@ static const unsigned char $METADATANAME[] = $METADATA;
 -- function closures, then public nominal static closures by module-member and
 -- bytewise static-name order.
 function coder._public_prefix_layout(modtype)
-    assert(modtype and modtype._tag == "Type.Module")
-    local layout = {}
-    for _, member in ipairs(modtype.members or {}) do
-        if member._tag == "Type.ModuleVariable" then
-            layout[#layout + 1] = {
-                kind = "variable",
-                value = member,
-                key = "variable:" .. member.name,
-            }
-        end
-    end
-    for _, member in ipairs(modtype.members or {}) do
-        if member._tag == "Type.ModuleMember"
-           and member.type._tag == "Type.Function" then
-            layout[#layout + 1] = {
-                kind = "function",
-                value = member,
-                key = "function:" .. member.name,
-            }
-        end
-    end
-    for _, member in ipairs(modtype.members or {}) do
-        local owner = member._tag == "Type.ModuleMember" and member.type
-        if owner and (owner._tag == "Type.Record"
-                      or owner._tag == "Type.Union") then
-            local names = {}
-            for name, static in pairs(owner.functions or {}) do
-                if not static.islocal then
-                    names[#names + 1] = name
-                end
-            end
-            table.sort(names, util.bytewise_less)
-            for _, name in ipairs(names) do
-                local static = owner.functions[name]
-                layout[#layout + 1] = {
-                    kind = "static",
-                    value = static,
-                    owner = owner,
-                    key = "static:" .. static.fqtn .. "." .. static.name,
-                }
-            end
-        end
-    end
-    return layout
+    return types.public_module_prefix_layout(modtype)
 end
 
 -- Generates the code for importing the module, and storing it
