@@ -253,6 +253,13 @@ APPLY(a+b)
 PASS(a EMPTY+b) PASS(a+EMPTY_CALL( )+b) PASS(a+EMPTY_CALL(x  , y)+b)
 ]]))
         end)
+        it("parses an object macro if there is whitespace before the opening parenthesis", function ()
+            assert.equal('(42)(A)', expand([[
+#define VALUE 42
+#define OBJ (VALUE)
+OBJ(A)
+]]))
+        end)
         it("keeps raw digraph spelling while expanding canonical tokens",
         function()
             assert.equal('"a %: b" "a <: b :>"', expand([[
