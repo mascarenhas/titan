@@ -294,9 +294,9 @@ describe("private vendored LPegLabel build", function()
             write_file(ranlib_log, "")
             executable_script(ar_wrapper, string.format([[#!/bin/sh
 printf '%%s\n' "$*" >> %s
-if [ "${1-}" = qD ]; then
+if [ "${1-}" = qDc ]; then
   shift
-  set -- q "$@"
+  set -- qc "$@"
 fi
 exec %s "$@"
 ]], quote(ar_log), command_string(original_ar)))
@@ -323,7 +323,7 @@ exec %s "$@"
             assert.truthy(config:find(
                 "RANLIB_MODE=ordinary\n", 1, true), config)
             assert.truthy(config:find("DETERMINISTIC=no\n", 1, true), config)
-            assert.truthy(read_file(ar_log):find("qD", 1, true))
+            assert.truthy(read_file(ar_log):find("qDc", 1, true))
             assert.truthy(read_file(ranlib_log):find("-D", 1, true))
 
             local archive_mtime =
@@ -340,7 +340,7 @@ exec %s "$@"
             for _, word in ipairs(original_ar) do
                 corrupt_argv[#corrupt_argv + 1] = word
             end
-            for _, word in ipairs({ "q", archive, extra_object }) do
+            for _, word in ipairs({ "qc", archive, extra_object }) do
                 corrupt_argv[#corrupt_argv + 1] = word
             end
             ok, output, why, code = run(corrupt_argv)
