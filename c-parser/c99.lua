@@ -39,7 +39,7 @@ c99.tracing = false
 defs["trace"] = function(s, i)
     if c99.tracing then
         local line, col = location.get_line_number(s, i)
-        print("TRACE", line, col, "[[" ..s:sub(i, i+ 256):gsub("\n.*", "") .. "]]")
+        print("TRACE", line, col, "[[" .. s:sub(i, i + 256):gsub("\n.*", "") .. "]]")
     end
     return true
 end
@@ -673,7 +673,7 @@ directive <- {| {:directive: "if"      :} S {:exp: preprocessingTokenList :} |}
            / {| {:directive: "else"    :} |}
            / {| {:directive: "endif"   :} |}
            / {| {:directive: "include" :} S {:exp: headerName :} |}
-           / {| {:directive: "define"  :} S {:id: IDENTIFIER :} "(" _ {:args: defineArgList :} _ ")" _ {:repl: replacementList :} |}
+           / {| {:directive: "define"  :} S {:id: IDENTIFIER :} "(" _ {:args: defineArgList :} _ ")" _ {:repl: requiredReplacementList :} |}
            / {| {:directive: "define"  :} S {:id: IDENTIFIER :} _ {:repl: replacementList :} |}
            / {| {:directive: "undef"   :} S {:id: IDENTIFIER :} |}
            / {| {:directive: "line"    :} S {:line: preprocessingTokenList :} |}
@@ -692,6 +692,8 @@ defineArgList <- {| { "..." } |}
                / empty
 
 replacementList <- {| (preprocessingToken _)* |}
+
+requiredReplacementList <- {| (preprocessingToken _)+ |}
 
 preprocessingToken <- preprocessingNumber
                     / CHARACTER_CONSTANT
@@ -822,7 +824,7 @@ local function match(grammar, subject)
     end
     if res == nil then
         local l, c = re.calcline(subject, pos)
-        local fragment = subject:sub(pos, pos+20)
+        local fragment = subject:sub(pos, pos + 20)
         return res, err, l, c, fragment
     end
     return res
