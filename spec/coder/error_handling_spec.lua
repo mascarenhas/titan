@@ -1193,10 +1193,10 @@ describe("catch", function()
                 return n
             end
         ]])
-        assert.not_match("volatile%s+lua_Integer%s+_param_n", csrc)
-        assert.not_match("volatile%s+lua_Integer%s+_local_m_1", csrc)
-        assert.match("volatile%s+lua_Integer%s+_spill_param_n", csrc)
-        assert.match("volatile%s+lua_Integer%s+_spill_local_m_1", csrc)
+        assert.not_match("lua_Integer%s+volatile%s+_param_n", csrc)
+        assert.not_match("lua_Integer%s+volatile%s+_local_m_1", csrc)
+        assert.match("lua_Integer%s+volatile%s+_spill_param_n", csrc)
+        assert.match("lua_Integer%s+volatile%s+_spill_local_m_1", csrc)
     end)
 
     it("does not spill locals and params just because a function contains catch", function()
@@ -1212,8 +1212,8 @@ describe("catch", function()
         ]])
         assert.not_match("_spill_param_n", csrc)
         assert.not_match("_spill_local_m_1", csrc)
-        assert.not_match("volatile%s+lua_Integer%s+_param_n", csrc)
-        assert.not_match("volatile%s+lua_Integer%s+_local_m_1", csrc)
+        assert.not_match("lua_Integer%s+volatile%s+_param_n", csrc)
+        assert.not_match("lua_Integer%s+volatile%s+_local_m_1", csrc)
     end)
 
     it("installs a trailing catch target before allocating in a native entry",

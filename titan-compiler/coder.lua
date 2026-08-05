@@ -3127,7 +3127,7 @@ local function spill_decl_init(ctx, decl)
     end
     if types.is_c_aggregate(decl._type) then
         return render([[
-            volatile unsigned char $SPILL[sizeof($CVAR)];
+            unsigned char volatile $SPILL[sizeof($CVAR)];
             $COPY
         ]], {
             SPILL = spill_cvar(decl),
@@ -3136,7 +3136,7 @@ local function spill_decl_init(ctx, decl)
         })
     end
     return render([[
-        volatile $CT $SPILL = $CVAR;
+        $CT volatile $SPILL = $CVAR;
     ]], {
         CT = ctype(decl._type),
         SPILL = spill_cvar(decl),
@@ -3150,14 +3150,14 @@ local function spill_decl_zero(ctx, decl)
     if types.is_gc(decl._type) then return "" end
     if types.is_c_aggregate(decl._type) then
         return render([[
-            volatile unsigned char $SPILL[sizeof($CVAR)] = {0};
+            unsigned char volatile $SPILL[sizeof($CVAR)] = {0};
         ]], {
             SPILL = spill_cvar(decl),
             CVAR = decl._cvar,
         })
     end
     return render([[
-        volatile $CT $SPILL = $INIT;
+        $CT volatile $SPILL = $INIT;
     ]], {
         CT = ctype(decl._type),
         SPILL = spill_cvar(decl),
@@ -9742,7 +9742,7 @@ local function make_return_frame(ctx, id)
             -- Non-GC saved return: a plain C temp. The whole native function is a
             -- setjmp scope, so mark it volatile (the value is set before the
             -- finally — which may longjmp out on a raise — and read in dispatch).
-            table.insert(decls, render("volatile $CT $CVAR = $INIT;", {
+            table.insert(decls, render("$CT volatile $CVAR = $INIT;", {
                 CT = ctype(typ), CVAR = cvar, INIT = initval(typ),
             }))
         end
@@ -9763,7 +9763,7 @@ local function make_return_frame(ctx, id)
         end
         table.insert(decls, render([[
             $ELEM $ARGS[TITAN_VARARG_MAX] = {0};
-            volatile int $COUNT = 0;
+            int volatile $COUNT = 0;
             (void)$ARGS;
             (void)$COUNT;
         ]], {
