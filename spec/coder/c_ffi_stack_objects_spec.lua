@@ -234,7 +234,7 @@ describe("automatic C object code generation", function()
                 "ffi_anonymous_holder _local_holder_%d+ = %{0%};",
                 csrc)
             assert.match(
-                "volatile unsigned char _spill_local_holder_%d+"
+                "unsigned char volatile _spill_local_holder_%d+"
                     .. "%[sizeof%(_local_holder_%d+%)%];",
                 csrc)
 
@@ -438,11 +438,11 @@ describe("automatic C object code generation", function()
 
             local csrc = h.compile_and_read_c(source, MODULE)
             assert.match(
-                "volatile unsigned char _spill_local_point_%d+"
+                "unsigned char volatile _spill_local_point_%d+"
                     .. "%[sizeof%(_local_point_%d+%)%];",
                 csrc)
             assert.match(
-                "volatile unsigned char _spill_local_values_%d+"
+                "unsigned char volatile _spill_local_values_%d+"
                     .. "%[sizeof%(_local_values_%d+%)%];",
                 csrc)
             assert.match(
