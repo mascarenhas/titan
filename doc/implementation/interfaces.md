@@ -410,7 +410,8 @@ add serialized metadata or public symbols.
 
 ## ABI, GC, and failure boundaries
 
-Interfaces are part of compiled-module ABI 0.20. The ABI boundary covers:
+Interfaces entered the compiled-module contract in ABI 0.20. That boundary
+covers:
 
 - `Type.Interface` and ordered `Type.Method` metadata in
   `Module.type_members`;
@@ -419,10 +420,12 @@ Interfaces are part of compiled-module ABI 0.20. The ABI boundary covers:
 - the concrete-owner module retention rule; and
 - the exported bound native/Lua/strict trampoline set.
 
-ABI 0.20 also contains the two-user-value Array proxy and strict generic
-function entry. A 0.19 provider is rejected before its metadata is decoded or
-any native value crosses the boundary; there is no compatibility adapter or
-in-place migration.
+ABI 0.20 also introduced the two-user-value Array proxy and strict generic
+function entry. ABI 0.21 retains those layouts while advancing the matched Lua
+runtime. A 0.20 provider is rejected before its metadata is decoded or any
+native value crosses the boundary; there is no compatibility adapter,
+migration, or cleanup path, and separately versioned 0.20 artifacts remain
+preserved.
 
 The wrapper, concrete module, and concrete value use stock Lua reachability.
 The two user values are strong traced edges with ordinary backward barriers;

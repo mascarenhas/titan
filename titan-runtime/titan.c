@@ -347,9 +347,12 @@ Table *titan_array_metatable(lua_State *L) {
     };
     Table *metatable;
 
-    if (luaL_newmetatable(L, TITAN_ARRAY_METATABLE)) {
+    luaL_getmetatable(L, TITAN_ARRAY_METATABLE);
+    if (lua_isnil(L, -1)) {
         TValue value;
 
+        lua_pop(L, 1);
+        lua_newtable(L);
         lua_pushliteral(L, TITAN_ARRAY_METATABLE);
         lua_setfield(L, -2, "__name");
         lua_pushliteral(L, TITAN_ARRAY_METATABLE);
@@ -360,6 +363,10 @@ Table *titan_array_metatable(lua_State *L) {
         value = lua_totvalue(L, -1);
         lua_assert(ttistable(&value));
         metatable = hvalue(&value);
+
+        /* Publish only after all allocating initialization has succeeded. */
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, TITAN_ARRAY_METATABLE);
     }
     else {
         TValue value = lua_totvalue(L, -1);

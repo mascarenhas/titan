@@ -1,5 +1,27 @@
 # Third-party notices
 
+## GNU Readline
+
+Lua's interactive `linux-readline` and `macosx` targets link the prefix-local
+Lua interpreter through the Readline API. When the host probe succeeds, they
+use the separately installed compatible system provider, whose own license
+terms apply. Otherwise, the bundled mode downloads GNU Readline 8.3 from
+<https://ftp.gnu.org/gnu/readline/>, applies the exact vendored combination of
+official patches 001-003, and statically links the resulting private archive
+into that interpreter.
+
+GNU Readline is Copyright (C) 1987-2025 Free Software Foundation, Inc. and is
+distributed under the GNU General Public License, version 3 or later. The exact
+license text from the audited Readline 8.3 source is checked in as
+`LICENSES/readline-LICENSE`. A bundled installation also copies it to
+`$PREFIX/lib/titan/deps/readline/8.3-p3/share/licenses/COPYING`.
+
+Anyone distributing a Lua interpreter through the bundled mode, or through a
+system mode that selected GNU Readline, must satisfy the applicable GNU
+Readline license and corresponding-source requirements. A different compatible
+system provider remains governed by that provider's terms. Neither mode
+incorporates the provider into Titan's compiler or standard-library artifacts.
+
 ## libuv
 
 Titan's standard-library binary artifacts may statically incorporate libuv
@@ -74,6 +96,6 @@ Marcelo Oikawa, Roberto Ierusalimschy, and Ana Lucia de Moura,
 ## Lua
 
 The format and pack/unpack parsers and semantics in `titan.string` are
-translated and adapted from `lstrlib.c` in Lua 5.5.0. Lua is Copyright (C)
-1994-2025 Lua.org, PUC-Rio, and is distributed under the MIT license
+translated and adapted from `lstrlib.c` in Lua 5.5.1. Lua is Copyright (C)
+1994-2026 Lua.org, PUC-Rio, and is distributed under the MIT license
 reproduced in `LICENSES/lua-LICENSE`.

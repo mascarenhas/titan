@@ -3,7 +3,7 @@
 
 /*
 ** ===========================================================================
-** VENDORED FROM Lua 5.5.0 src/ldo.c lines 61-109 (keep VERBATIM; re-sync on
+** VENDORED FROM Lua 5.5.1 src/ldo.c lines 61-109 (keep VERBATIM; re-sync on
 ** every Lua upgrade). The struct must stay byte-compatible with the linked
 ** liblua.a: lstate.h only forward-declares `struct lua_longjmp`, so providing
 ** the full definition here is conflict-free, and the generated module C uses it
@@ -21,7 +21,7 @@
 
 #include "llimits.h"   /* TStatus, l_uint32 */
 
-/* --- BEGIN verbatim from lua-5.5.0/src/ldo.c:61-65 --- */
+/* --- BEGIN verbatim from lua-5.5.1/src/ldo.c:61-65 --- */
 
 /* chained list of long jump buffers */
 typedef struct lua_longjmp {
@@ -34,7 +34,7 @@ typedef struct lua_longjmp {
 
 /*
 ** Statement-form setjmp selector, mirroring the upstream LUAI_THROW/LUAI_TRY
-** #ifdef ladder (lua-5.5.0/src/ldo.c:74-107) but expressed as a value usable in
+** #ifdef ladder (lua-5.5.1/src/ldo.c:74-107) but expressed as a value usable in
 ** an `if (TITAN_SETJMP(buf) == 0) { ... }` boundary (the upstream LUAI_TRY is
 ** function-form and takes a Pfunc; we cannot use it for inline straight-line C).
 ** The same selection (_setjmp on POSIX, setjmp otherwise) keeps the buffer

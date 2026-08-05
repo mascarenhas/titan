@@ -269,7 +269,7 @@ describe("C FFI cdriver", function()
                 },
                 compiler_include_dirs = {
                     "titan-runtime",
-                    "lua-5.5.0/src",
+                    "lua-5.5.1/src",
                 },
             })
 
@@ -304,7 +304,7 @@ describe("C FFI cdriver", function()
                 cppflags = {},
                 compiler_include_dirs = {
                     "titan-runtime",
-                    "lua-5.5.0/src",
+                    "lua-5.5.1/src",
                 },
             })
 
@@ -597,7 +597,7 @@ typedef double lua_Number;
                 cppflags = {},
                 compiler_include_dirs = {
                     "titan-runtime",
-                    "lua-5.5.0/src",
+                    "lua-5.5.1/src",
                 },
             }))
 
@@ -615,7 +615,7 @@ typedef double lua_Number;
             assert.same({ "23" }, inputs.macros.TITAN_PROFILE_FLAG)
             assert.same({
                 "titan-runtime",
-                "lua-5.5.0/src",
+                "lua-5.5.1/src",
             }, inputs.fixed_include_dirs)
             assert.equal("lua.h", inputs.lua_header.original)
             assert.matches("/lua%.h$", inputs.lua_header.resolved)

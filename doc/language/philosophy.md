@@ -187,15 +187,16 @@ and every arm is an ordinary full block. The first version therefore reuses
 the existing nominal, function, option, and error-handling models instead of
 creating parallel ones.
 
-The 0.20 prototype separates gradual consistency from direct and written
-coercions. Typed Array/Map observations and non-exact branded Titan calls now
-use strict guards, while written `value as/is T` and genuine Lua boundaries
-share a broader target-directed conversion. Arrays carry their Lua-write
+Starting with 0.20, the prototype separates gradual consistency from direct
+and written coercions. Typed Array/Map observations and non-exact branded Titan
+calls now use strict guards, while written `value as/is T` and genuine Lua
+boundaries share a broader target-directed conversion. Arrays carry their Lua-write
 policy, and function closures distinguish exact native, strict Titan-generic,
 and coercive Lua entries. It also adds nominal Interface declarations,
 structural record/union satisfaction at statically known conversion sites,
 fresh wrappers, concrete downcasts, and exact-wrapper-only dynamic boundaries.
-These coordinated representation changes account for the ABI advance.
+These coordinated representation changes accounted for that ABI advance; ABI
+0.21 retains the language model while advancing the matched Lua runtime.
 
 ## Principles, distilled
 

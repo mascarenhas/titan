@@ -269,9 +269,18 @@ function create(func: (value) -> value, default_tag: value): Coro
 end
 
 do
-  local res = lual.luaL_newmetatable(L, "titan.coroutine")
-  if res == 1 then
+  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, "titan.coroutine")
+  local kind = lua.lua_type(L, -1)
+  if kind == lua.LUA_TNIL then
+    lua.lua_settop(L, -2)
+    lua.lua_createtable(L, 0, 2)
+    lua.lua_pushstring(L, "titan.coroutine")
+    lua.lua_setfield(L, -2, "__name")
     ffi.lua_pushtvalue(L, coro_gc)
     lua.lua_setfield(L, -2, "__gc")
+    lua.lua_pushvalue(L, -1)
+    lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, "titan.coroutine")
+  elseif kind ~= lua.LUA_TTABLE then
+    raise "invalid Titan coroutine metatable registry entry"
   end
 end

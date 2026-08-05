@@ -44,9 +44,9 @@ Two facts shape everything downstream of the checker:
   headers (`lobject.h`, `ltable.h`, `lvm.h`, …) and manipulates values,
   tables and the stack directly. That is where Titan's speed comes from,
   and it ties each compiler version to one specific Lua version —
-  currently **Lua 5.5.0**. Installed compilers use the matching internal
-  source tree staged in the Titan SDK at `<root>/src/lua-5.5.0`; repository checkout mode uses
-  `./lua-5.5.0/src` (see the migration reports below).
+  currently **Lua 5.5.1**. Installed compilers use the matching internal
+  source tree staged in the Titan SDK at `<root>/src/lua-5.5.1`; repository checkout mode uses
+  `./lua-5.5.1/src` (see the migration reports below).
 * **Titan data is Lua data.** Every Titan value is representable as a
   Lua value, every allocation is a Lua-GC allocation, and the generated
   code maintains the invariants Lua's (now generational) collector
@@ -99,11 +99,13 @@ Two facts shape everything downstream of the checker:
 ## Lua-version migration reports
 
 The cost of building against Lua's internals is paid at Lua upgrades.
-These reports document the 5.3 → 5.5 migration and double as a catalogue
-of every internal Lua API the generated code touches:
+These reports document the 5.3 → 5.5 migration and the 5.5.1 point-release
+audit. They double as a catalogue of every internal Lua API the generated code
+touches:
 
 * [Lua 5.3 → 5.5: internal differences that affect Titan](../lua-5.3-to-5.5-internals.md)
 * [Titan's migration from Lua 5.3 to Lua 5.5](../lua-5.5-migration.md)
+* [Lua 5.5.0 → 5.5.1: exhaustive update audit](lua-5.5.1-update.md)
 
 ## Known limitations and quirks
 
@@ -119,7 +121,7 @@ in; follow the link for the full discussion.
 | [Lexer and parser](lexer-parser.md#non-reentrancy) | The parser is **not reentrant** (`THIS_FILENAME`) and runs `grammar:match` unprotected, so an error in a semantic action poisons later parses. `break` and generic `for ... in` are real syntax; reserved `goto`/`::` remain [recognized but unused](lexer-parser.md#one-grammar-no-token-stream). A [missing `syntax_errors` entry](lexer-parser.md#from-label-to-message) shows the user "nil". [Several preserved label quirks](lexer-parser.md#quirks-to-know-about) (`ExpAssign` defined twice, unreachable `AssignImport`). The [location weak-cache](lexer-parser.md#location-tracking) never actually releases entries. |
 | [The type checker](checker.md#the-relations-and-plans-in-typeslua) | Computed Map keys/values, record fields, named arguments, and parenthesized expressions are deliberately finite scalar consumers; they never become open-result sinks. [Dead code after a proven non-fallthrough statement](checker.md#non-fallthrough-analysis) is not analyzed, so a type error there goes unreported. [First-class functions, closures and bound methods are supported](checker.md#per-construct-notes-for-contributors) but foreign (FFI) functions, record types and modules remain non-values; re-declaring a name in the same block silently shadows. [Process-global state](checker.md#process-global-state) must be reset by callers. |
 | [Union implementation](unions.md#case-checking-and-control-flow) | Case coverage is optional, but complete coverage of the statically known closed union proves non-fallthrough when every arm terminates; imported hidden variants remain in `nvariants`, so visible arms alone cannot falsely establish that proof. `Type.Variant` is validated union-owned interface metadata, never a source or value-facing type. |
-| [Code generator: overview](codegen-overview.md#no-c-ast-templates-utilrender-and-prettylua) | A missing template variable is a hard "Internal compiler error" abort; `reindent_c` is heuristic only. Each release is [pinned to one Lua version](codegen-overview.md#anatomy-of-a-generated-translation-unit) (5.5.0). The [`$LOADMODULES2` re-init branch](codegen-overview.md#prefix_init-idempotent-at-two-levels) is emitted only for more than one dynamic dependency. |
+| [Code generator: overview](codegen-overview.md#no-c-ast-templates-utilrender-and-prettylua) | A missing template variable is a hard "Internal compiler error" abort; `reindent_c` is heuristic only. Each release is [pinned to one Lua version](codegen-overview.md#anatomy-of-a-generated-translation-unit) (5.5.1). The [`$LOADMODULES2` re-init branch](codegen-overview.md#prefix_init-idempotent-at-two-levels) is emitted only for more than one dynamic dependency. |
 | [Variadic parameters](variadic-parameters.md#code-generator-the-seven-structs-and-the-native-abi) | `...` is non-first-class (cannot be captured/stored/escape, invisible to inner lambdas) though the declaring function is a normal value; the homogeneous count is capped at `TITAN_VARARG_MAX = 200` (`lu_byte n_args`, an *intentional* cap, runtime-enforced). `...[i]` is typed `t` and **raises** out of range — a deliberate divergence from array `a[i]` (`t?`). `return ...` is finite projection in a fixed-result function, but it preserves a runtime-sized remainder when the enclosing function declares a flexible output tail. Descriptor payloads are untraced, so collectable elements need independent Lua-stack roots. |
 | [Code generator: constructs](codegen-constructs.md#operators-with-inlined-lua-semantics) | Numeric operators reproduce Lua 5.5 exactly: integer `+ - *`/unary `-` emit `intop(...)` for defined two's-complement wrap (no signed-overflow UB, `-fwrapv` irrelevant); mixed `integer`/`float` comparisons use the unboxed `titan_*_intfloat`/`titan_eq_intfloat` helpers and compare by mathematical value (**no promotion**). The remaining gap: the general binop fall-through evaluates its two operands in C's unspecified order, not Lua's strict left-to-right (observable only when both operands have side effects). |
 | [Values and the GC](values-and-gc.md#gc-discipline-the-invariants) | Under the generational collector a missing barrier or unanchored fresh object is a reliably reproducible use-after-free, not a rare race — the discipline the whole chapter exists to enforce. Private Array writer user values and function-entry trailers add traced edges that must follow the same rooting/barrier rules. |

@@ -116,7 +116,7 @@ module key:
 ```lua
 return {
     ["geometry.shape"] = {
-        abi = "0.20",
+        abi = "0.21",
         types = "Module(...)",
     },
 }
@@ -129,7 +129,7 @@ containers, duplicate logical keys, incompatible ABIs, invalid type
 interfaces, or disagreement between the embedded and callable forms before
 publishing or consuming an artifact.
 
-ABI 0.20 adds Interfaces, the two-user-value Array proxy, and the
+ABI 0.20 introduced Interfaces, the two-user-value Array proxy, and the
 fixed-brand/strict-trailer function-closure protocol. Interface schemas,
 per-state nominal metatables, wrapper payloads, vtables, and method trampolines
 are part of the same compiled contract. Its generated layout cannot be mixed
@@ -145,7 +145,7 @@ backing/proxy contract even though `Array(...)` serialization and exact native
 pointer widths stayed unchanged. A separately installed 0.17 archive remains
 in its versioned directory but is rejected as a dependency.
 
-Interface descriptors in ABI-0.20 metadata preserve nominal owner and
+Interface descriptors introduced in ABI-0.20 metadata preserve nominal owner and
 declaration-order method signatures. A consumer can therefore validate and use
 an imported Interface without seeing a concrete implementation; concrete
 record/union-to-Interface wrapper construction remains a statically known
@@ -225,12 +225,12 @@ behavior, not a hidden dependency manifest.
 The canonical installed ABI directory contains:
 
 ```text
-$ROCKS_TREE/lib/titan/0.20/titan.so
-$ROCKS_TREE/lib/titan/0.20/titan.a
+$ROCKS_TREE/lib/titan/0.21/titan.so
+$ROCKS_TREE/lib/titan/0.21/titan.a
 ```
 
 Both contain the seventeen `titan.*` logical standard modules, including
-`titan.io`, `titan.ssl`, `titan.url`, and `titan.http`, under ABI 0.20. The DSO also
+`titan.io`, `titan.ssl`, `titan.url`, and `titan.http`, under ABI 0.21. The DSO also
 contains bare native `require "titan"` support, and the archive carries that
 support object without inventing a logical module named `titan`.
 

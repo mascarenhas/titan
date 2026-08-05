@@ -138,7 +138,7 @@ describe("titan.string", function()
         local command = table.concat({
             "env -u LUA_PATH -u LUA_CPATH" ..
                 " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-            "TITAN_PATH_0_20=" .. quote(workspace),
+            "TITAN_PATH_0_21=" .. quote(workspace),
             "TITAN_PATH=",
             "LUA_PATH=" .. quote(lua_path),
             "LUA_PATH_5_5=" .. quote(lua_path),
@@ -662,6 +662,7 @@ describe("titan.string", function()
                 table.pack("=i2", -100),
                 table.pack("!4bXi4i4", 1, 12345),
                 table.pack("!8bXd d", 1, 1.5, 2.5),
+                table.pack("!bXi16i16", 1, 2),
                 table.pack("x b x B", -2, 200),
                 table.pack("<i2 c3 z s2 f d",
                            -5, "xy", "abc", "qq", 1.5, -2.25),
@@ -714,7 +715,7 @@ describe("titan.string", function()
 
             local fixed = {
                 "", "bBhHlLjJTfnd", "i1i2i4i8i16I1I16",
-                "c0c3x", "!4bXi4i4", "!8bXd d",
+                "c0c3x", "!4bXi4i4", "!8bXd d", "!bXi16i16",
                 "<i2I4", ">i2I4", "i2\0?",
             }
             for _, format in ipairs(fixed) do

@@ -112,6 +112,7 @@ function rep(subject: string, count: integer,
   if separator then actual_separator = separator end
   local subject_length = #subject
   local separator_length = #actual_separator
+  if subject_length == 0 and separator_length == 0 then return "" end
   local maximum_length = MAXIMUM_STRING_BYTES
 
   if subject_length > maximum_length - separator_length then

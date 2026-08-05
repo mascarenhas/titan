@@ -6,9 +6,9 @@ local cstring = foreign import "string.h"
 local ffi = foreign import "titan/ffi.h"
 
 -- Time/date behavior is translated and adapted from src/loslib.c in the
--- immutable Lua 5.5.0 release:
--- https://www.lua.org/ftp/lua-5.5.0.tar.gz
--- Copyright (C) 1994-2025 Lua.org, PUC-Rio. MIT terms are reproduced in
+-- immutable Lua 5.5.1 release:
+-- https://www.lua.org/ftp/lua-5.5.1.tar.gz
+-- Copyright (C) 1994-2026 Lua.org, PUC-Rio. MIT terms are reproduced in
 -- LICENSES/lua-LICENSE.
 
 -- Portable operating-system helpers. The low-level uv module owns native

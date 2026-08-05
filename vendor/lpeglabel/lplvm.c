@@ -37,6 +37,8 @@ static const char *utf8_decode (const char *o, int *val) {
   unsigned int res = 0;  /* final result */
   if (c < 0x80)  /* ascii? */
     res = c;
+  else if (c >= 0xF8)  /* would need four or more continuation bytes */
+    return NULL;
   else {
     int count = 0;  /* to count number of continuation bytes */
     while (c & 0x40) {  /* still have continuation bytes? */
@@ -495,5 +497,3 @@ const char *match (lua_State *L, const char *o, const char *s, const char *e,
 }
 
 /* }====================================================== */
-
-

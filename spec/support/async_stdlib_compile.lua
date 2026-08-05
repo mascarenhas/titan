@@ -7,7 +7,7 @@ local checker = require "titan-compiler.checker"
 local driver = require "titan-compiler.driver"
 
 driver.TITAN_SOURCE_PATH = source_root
-driver.LUA_SOURCE_PATH = repo .. "/lua-5.5.0/src/"
+driver.LUA_SOURCE_PATH = repo .. "/lua-5.5.1/src/"
 driver.TITAN_RUNTIME_PATH = assert(arg[4]) .. "/"
 driver.LIBBACKTRACE_PATH = repo .. "/libbacktrace"
 driver.configure_foreign_c()

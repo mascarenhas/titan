@@ -19,7 +19,7 @@ The source compiles under the qualified Titan identity `titan.coroutine`.
 Titan code uses `import "coroutine"`, which the parser desugars to that name;
 Lua uses the ordinary `luaopen_titan_coroutine` entry through
 `require "titan.coroutine"`. Titan prefix lookup claims that logical module
-from `<root>/lib/titan/0.20/titan.so`; Lua finds the generated
+from `<root>/lib/titan/0.21/titan.so`; Lua finds the generated
 `<root>/share/lua/5.5/titan/coroutine.lua` shim, promotes/maps the same provider
 through `titan._loadlibglobal`, and invokes `luaopen_titan_coroutine`. The
 module keeps its own state and initializer beside the other logical standard
@@ -31,7 +31,7 @@ Coroutine payloads use `value`, so an Array crossing `resume`, `yield`, or
 `error` remains its canonical proxy Udata; the private backing Table never
 leaks through the coroutine boundary. Exact typed Array paths elsewhere still
 use backing `Table *`. This internal/boxed distinction was introduced by ABI
-0.17 and remains part of ABI 0.20; see
+0.17, remained part of ABI 0.20, and is retained by ABI 0.21; see
 [Dense Arrays](dense-arrays.md#exact-and-generic-call-paths).
 
 ## Public Wrapper
@@ -65,6 +65,13 @@ metatable whose `__gc` finalizer pushes its owner-userdata argument,
 reads the payload through `lua_touserdata`, and passes the recovered
 pointer to `mco_destroy`. `handle` caches the pointer with its native C
 type, so normal operations use `self.handle` directly.
+
+The module initializer constructs this private metatable off-registry, installs
+`__gc`, and only then publishes it under `"titan.coroutine"`. If an allocating
+initialization step raises, the registry therefore does not retain a partially
+initialized canonical table. A pre-existing non-table entry is rejected
+explicitly. This narrow metatable rule does not change the generated module
+initializer's broader caching and transaction model.
 
 Because `minicoro.h` is imported directly, Titan can read the private
 `mco_coro` fields it needs, such as `stacked_co`, without a C helper for

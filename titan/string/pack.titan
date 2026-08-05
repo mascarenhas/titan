@@ -1,7 +1,7 @@
 -- Pack/unpack parsing and semantics translated and adapted from src/lstrlib.c
--- in the immutable Lua 5.5.0 release:
--- https://www.lua.org/ftp/lua-5.5.0.tar.gz
--- Copyright (C) 1994-2025 Lua.org, PUC-Rio. MIT terms are reproduced in
+-- in the immutable Lua 5.5.1 release:
+-- https://www.lua.org/ftp/lua-5.5.1.tar.gz
+-- Copyright (C) 1994-2026 Lua.org, PUC-Rio. MIT terms are reproduced in
 -- LICENSES/lua-LICENSE.
 
 local PACK_INT = 1
@@ -43,18 +43,12 @@ local function host_is_little_endian(): boolean
 end
 
 local function native_maximum_alignment(): integer
-  local alignment = lua.lua_Number.alignof as integer
-  if ffi.titan_ffi_double.alignof > alignment then
-    alignment = ffi.titan_ffi_double.alignof as integer
-  end
+  local alignment = ffi.titan_ffi_long_double.alignof as integer
   if ffi.titan_ffi_void_ptr.alignof > alignment then
     alignment = ffi.titan_ffi_void_ptr.alignof as integer
   end
-  if lua.lua_Integer.alignof > alignment then
-    alignment = lua.lua_Integer.alignof as integer
-  end
-  if ffi.titan_ffi_long.alignof > alignment then
-    alignment = ffi.titan_ffi_long.alignof as integer
+  if ffi.titan_ffi_long_long.alignof > alignment then
+    alignment = ffi.titan_ffi_long_long.alignof as integer
   end
   return alignment
 end

@@ -105,7 +105,8 @@ Unicode case transforms. For deterministic ASCII behavior, run under the
 
 `rep` repeats `subject` `count` times, placing `separator` between adjacent
 copies. Omitted or nil `separator` means `""`; a nonpositive count returns
-`""`. Result-size arithmetic is checked before allocation.
+`""`. Empty subject and separator also return `""` for any count.
+Result-size arithmetic is checked before allocation.
 
 `byte` defaults `first` to 1 and defaults `last` to that same raw
 supplied/defaulted `first` before normalizing either endpoint. This detail
@@ -197,7 +198,7 @@ The binary format language is the Lua 5.5 language:
 | Options | Meaning |
 | --- | --- |
 | `<`, `>`, `=` | little endian, big endian, or native endian |
-| `![n]` | set maximum alignment; omitted `n` uses the target's native maximum |
+| `![n]` | set maximum alignment; omitted `n` uses Lua's target-native `LUAI_MAXALIGN` maximum |
 | `b`, `B` | signed or unsigned byte |
 | `h`, `H` | signed or unsigned C `short` |
 | `l`, `L` | signed or unsigned C `long` |

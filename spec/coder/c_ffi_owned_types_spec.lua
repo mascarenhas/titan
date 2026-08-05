@@ -34,6 +34,58 @@ describe("source-written owned C type code generation", function()
         end
     end)
 
+    it("publishes owned-C metatables only after initialization succeeds",
+    function()
+        with_header([[
+            typedef struct ffi_item {
+                int value;
+            } ffi_item;
+        ]], function(header)
+            local csrc = h.compile_and_read_c([[
+                local c = foreign import "]] .. header .. [["
+                local type Item = owned *c.ffi_item
+                local item: Item = c.ffi_item.new()
+                function ready(): boolean
+                    return true
+                end
+                function make(): value
+                    local made: Item = c.ffi_item.new()
+                    return made
+                end
+            ]])
+            local lookup = assert(csrc:find(
+                "luaL_getmetatable(L, \"Titan owned C", 1, true))
+            local construct = assert(csrc:find(
+                "lua_newtable(L);", lookup, true))
+            local name = assert(csrc:find(
+                "lua_setfield(L, -2, \"__name\");", construct, true))
+            local metatable_key = assert(csrc:find(
+                "lua_pushliteral(L, \"__metatable\");", name, true))
+            local metatable = assert(csrc:find(
+                "lua_settable(L, -3);", metatable_key, true))
+            local publish = assert(csrc:find(
+                "lua_setfield(L, LUA_REGISTRYINDEX", name, true))
+            assert.is_true(lookup < construct and construct < name)
+            assert.is_true(name < metatable_key and
+                metatable_key < metatable and metatable < publish)
+            assert.truthy(csrc:find(
+                "invalid Titan owned C metatable registry entry", publish,
+                true))
+
+            local ok, err = h.call("test", [[
+                local item = test.make()
+                local public_name = getmetatable(item)
+                local metatable = debug.getmetatable(item)
+                assert(type(public_name) == "string")
+                assert(type(metatable) == "table")
+                assert(metatable.__name == public_name)
+                assert(tostring(item):sub(1, #public_name + 2) ==
+                       public_name .. ": ")
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
     it("uses source annotations for scalar, counted, and pointer payloads",
     function()
         with_header([[

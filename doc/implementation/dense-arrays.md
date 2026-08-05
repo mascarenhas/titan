@@ -2,9 +2,10 @@
 
 Titan ABI 0.17 introduced `Type.Array(T)`'s deterministic, positive-only
 dense backing while preserving its native C representation as `Table *`.
-ABI 0.20 keeps that hot representation and one shared proxy metatable, but
-adds a construction-selected Lua writer as the proxy's second traced user
-value. Typed Titan reads are strict; non-nil writes through Lua's
+ABI 0.20 kept that hot representation and one shared proxy metatable, but
+added a construction-selected Lua writer as the proxy's second traced user
+value. ABI 0.21 retains that representation while advancing the embedded Lua
+contract. Typed Titan reads are strict; non-nil writes through Lua's
 `__newindex` run the writer's target-directed dynamic coercion before any
 mutation.
 
@@ -178,6 +179,11 @@ Lua state. It installs closures for:
   growth/hole/length transitions;
 - `__len`, which reads the guarded authoritative length; and
 - protected `__name`/`__metatable` text `"Titan array metatable"`.
+
+Creation is build-then-publish: the runtime fills a private table completely
+and writes the registry entry only after every allocating setup step succeeds.
+An error therefore cannot leave a partially initialized canonical table for a
+later load, and a pre-existing non-table registry value is rejected.
 
 There is no `__pairs`. The callbacks capture the canonical metatable, so a
 nested-backing probe does not query the registry on each access.
@@ -482,7 +488,7 @@ module's Lua entry wrapper. The wrapper validates/unboxes it before calling
 the exact native `main` with `Table *`. Consequently the executable name is
 not in the Array, `args[0]` is nil, and `#args == argc - 1`.
 
-## ABI 0.17 and 0.20 boundaries
+## ABI 0.17, 0.20, and 0.21 boundaries
 
 ABI 0.17 is a semantic and boundary-protocol break even though serialized
 `Array(...)` text, native pointer width, exact `Table *` signatures, and
@@ -506,17 +512,19 @@ ABI-0.17 providers lived under `lib/titan/0.17`, used
 provider ABI protocol. ABI 0.18 preserved the same Array contract while
 advancing the standard-library archive/runtime native-symbol boundary.
 ABI 0.19 still preserved that one-user-value proxy and had no strict callable
-trailer. ABI 0.20 changes the proxy shape to exactly two user values, adds the
-construction writer, adds the three-entry function closure protocol, and
+trailer. ABI 0.20 changed the proxy shape to exactly two user values, added the
+construction writer, added the three-entry function closure protocol, and
 carries the coordinated Interface wrapper/metadata contract. Interface
 satisfaction remains an outer scalar coercion: it does not make `{R}` and
 `{I}` consistent, and typed Array reads only accept an already wrapped exact
 Interface element.
-Current providers live under `lib/titan/0.20` and use `TITAN_PATH_0_20`.
-An ABI-0.20 compiler/runtime rejects ABI-0.19 DSOs and archives before any
-Array or function value can cross the provider boundary. Separately installed
-0.17, 0.18, and 0.19 trees remain versioned predecessors and are not treated
-as compatible.
+Current ABI-0.21 providers live under `lib/titan/0.21` and use
+`TITAN_PATH_0_21`. They retain the ABI-0.20 Array and function layouts while
+advancing the matched Lua internal-header/runtime contract. An ABI-0.21
+compiler/runtime rejects ABI-0.20 DSOs and archives before any Array or
+function value can cross the provider boundary. Separately installed 0.17,
+0.18, 0.19, and 0.20 trees remain versioned predecessors and are not migrated,
+cleaned up, or treated as compatible.
 
 ## Failure and performance boundaries
 
@@ -530,8 +538,8 @@ as compatible.
   reference to a module-cached writer closure in addition to its Table array
   storage. Closures are reused per constructed element type within a module.
 - Oversized construction/growth fails before narrowing or Table overflow.
-- The backing/length contract introduced in ABI 0.17 and retained in ABI 0.20
-  has no shrinking resize.
+- The backing/length contract introduced in ABI 0.17 and retained through ABI
+  0.21 has no shrinking resize.
 
 ### Raw and stock table-library boundary
 

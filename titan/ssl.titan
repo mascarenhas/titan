@@ -181,14 +181,19 @@ local function ssl_error(code: integer, operation: string): Error
                    error_reason("TLS operation failed"), operation)
 end
 
+local function truncated_eof_error(code: integer,
+                                   operation: string): Error
+  return Error.new(code, "TLS_TRUNCATED_EOF",
+                   "TLS transport closed without close_notify", operation)
+end
+
 local function operation_error(connection: Connection, code: integer,
                                operation: string): Error
   local failure = ssl_error(code, operation)
   if connection.transport_eof and
      (code == openssl.SSL_ERROR_SSL or
       code == openssl.SSL_ERROR_SYSCALL) then
-    return Error.new(code, "TLS_TRUNCATED_EOF",
-                     "TLS transport closed without close_notify", operation)
+    return truncated_eof_error(code, operation)
   end
   return failure
 end
@@ -291,12 +296,33 @@ local function set_memory_bio_eof_return(bio: *openssl.BIO,
                    result as ffi.titan_ffi_long, nil)
 end
 
-local function feed_input(connection: Connection)
+local function mark_transport_eof(connection: Connection)
+  connection.transport_eof = true
+  set_memory_bio_eof_return(connection.input, 0)
+end
+
+local function feed_input(connection: Connection, operation: string)
   if connection.transport_eof then return end
-  local encrypted? = connection.transport:read()
+  local encrypted: string? = nil
+  do
+    encrypted = connection.transport:read()
+  catch
+    if error is async.OperationError then
+      local failure = error as async.OperationError
+      if failure.name == "ECONNRESET" and
+         failure.operation == "net.read" then
+        -- FIN and RST are different TCP presentations of the same TLS
+        -- truncation boundary when no authenticated close_notify arrived.
+        -- Convert the reset here: feeding EOF back through OpenSSL queues a
+        -- fatal alert whose write to the reset transport could otherwise
+        -- replace this authoritative TLS failure.
+        raise truncated_eof_error(openssl.SSL_ERROR_SYSCALL, operation)
+      end
+    end
+    raise error
+  end
   if not encrypted then
-    connection.transport_eof = true
-    set_memory_bio_eof_return(connection.input, 0)
+    mark_transport_eof(connection)
     return
   end
 
@@ -322,10 +348,9 @@ local function want_retry(connection: Connection, code: integer,
                           operation: string, drained: integer): boolean
   if code == openssl.SSL_ERROR_WANT_READ then
     if connection.transport_eof then
-      raise Error.new(code, "TLS_TRUNCATED_EOF",
-                      "TLS transport closed without close_notify", operation)
+      raise truncated_eof_error(code, operation)
     end
-    feed_input(connection)
+    feed_input(connection, operation)
     return true
   elseif code == openssl.SSL_ERROR_WANT_WRITE then
     if drained == 0 then

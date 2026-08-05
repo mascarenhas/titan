@@ -4,7 +4,7 @@
 -- setjmp-boundary spill/reload behavior, Lua callback unwinding, Lua
 -- to-be-closed variables, and standalone top-level reporting. The tests
 -- generate C, compile it, and run the result under stock Lua or as a standalone
--- executable, so they need the full lua-5.5.0 + libbacktrace setup.
+-- executable, so they need the full lua-5.5.1 + libbacktrace setup.
 --
 -- `raise <exp>` evaluates its operand to a Lua value, pushes it as the error
 -- object, and calls lua_error(L). The entry wrapper has errorhandler installed

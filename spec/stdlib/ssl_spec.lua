@@ -186,9 +186,9 @@ function start_truncated_eof(first_port: integer): async.Task
       connection:handshake()
       handshake_done = true
       -- This read is deliberately cancelled below. Cancellation terminalizes
-      -- the TLS connection without fabricating a native peer or rewriting the
-      -- SSL source; the captured public Connection can then close its TCP
-      -- transport without a close_notify.
+      -- the TLS connection and closes its TCP transport without fabricating a
+      -- native peer or rewriting the SSL source. The captured public
+      -- Connection later proves that close remains idempotent.
       connection:read()
       return nil
     end)
@@ -196,9 +196,10 @@ function start_truncated_eof(first_port: integer): async.Task
     while not handshake_done do timer.yield() end
     peer:cancel(async.CancellationReason.simple(
       "intentional abrupt TLS peer"))
-    -- TCP read cancellation is physical only when its own callback arrives.
-    -- One application record supplies that callback without changing the TLS
-    -- truncation boundary being tested.
+    -- Cancellation detaches the pending TCP reader and schedules its Task
+    -- wake. Keep one application record in flight while that peer closes:
+    -- kernels may expose the unauthenticated termination as FIN or RST, and
+    -- the TLS layer must normalize both to the same truncation boundary.
     client:write("wake-cancelled-peer")
     while active(peer) do timer.yield() end
     check(peer:status():as_string() == "cancelled",
@@ -211,14 +212,25 @@ function start_truncated_eof(first_port: integer): async.Task
     do
       client:read()
     catch
+      local detail = str.tostring(error)
+      if error is async.OperationError then
+        local transport_failure = error as async.OperationError
+        detail = transport_failure.name .. " from " ..
+          transport_failure.operation
+      end
       check(error is ssl.Error,
-            "truncated TLS transport raised a non-TLS error")
+            "truncated TLS transport raised a non-TLS error: " .. detail)
       local failure = error as ssl.Error
-      check(failure.name == "TLS_TRUNCATED_EOF",
-            "truncated TLS transport reported " .. failure.name)
+      check(failure.name == "TLS_TRUNCATED_EOF" and
+            failure.message ==
+              "TLS transport closed without close_notify" and
+            failure.operation == "ssl.read",
+            "truncated TLS transport reported " .. failure.name ..
+              " from " .. failure.operation)
       truncated = true
     end
-    check(truncated, "bare TCP EOF was accepted as clean TLS EOF")
+    check(truncated,
+          "unauthenticated TCP termination was accepted as clean TLS EOF")
     client:close()
     server:close()
     outcome = "truncated-ok"

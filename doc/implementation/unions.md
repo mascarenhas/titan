@@ -343,7 +343,7 @@ the original union Udata in user value 1; a written Interface-to-union cast
 checks that payload's exact union metatable. No union tag or payload is exposed
 through Interface dispatch. See [Interfaces](interfaces.md).
 
-## Serialized interfaces: ABI 0.19 origin and current 0.20 boundary
+## Serialized interfaces: ABI 0.19 origin and current 0.21 boundary
 
 `types.serialize` adds canonical schemas:
 
@@ -398,20 +398,23 @@ canonical first-class closure without loading a Lua namespace table or
 inventing another identity.
 
 The union schemas, userdata/tag protocol, and public-prefix change formed the
-ABI 0.19 compatibility boundary. ABI 0.20 retains those schemas and prefix
+ABI 0.19 compatibility boundary. ABI 0.20 retained those schemas and prefix
 unchanged while changing Array proxies and first-class function closures and
-adding Interface descriptors, wrappers, and bound-method symbols.
-`TITAN_VER` is now `0.20`, its suffix is `_0_20`, the versioned search variable
-is `TITAN_PATH_0_20`, the installed provider namespace is
-`lib/titan/0.20`, and the generated standard-library support namespace is
-`stdlib_0_20`. A 0.19 interface is rejected before type rehydration or native
+adding Interface descriptors, wrappers, and bound-method symbols. ABI 0.21
+retains those Titan layouts while advancing the embedded Lua contract from
+5.5.0 to 5.5.1.
+`TITAN_VER` is now `0.21`, its suffix is `_0_21`, the versioned search variable
+is `TITAN_PATH_0_21`, the installed provider namespace is
+`lib/titan/0.21`, and the generated standard-library support namespace is
+`stdlib_0_21`. A 0.20 interface is rejected before type rehydration or native
 linking.
 
-ABI 0.20 is a clean-start prototype boundary, not a migration layer. Installed
-0.18 and 0.19 trees remain separately versioned predecessors. Build
-preparation creates or replaces only exact known active-0.20 Titan artifacts,
-establishes its ABI-keyed caches, and verifies that `package.cpath` selects
-0.20 rather than 0.19.
+ABI 0.21 is a new versioned prototype boundary, not a migration layer.
+Installed 0.18, 0.19, and 0.20 trees remain separately versioned predecessors.
+Build preparation creates or replaces only exact known active-0.21 Titan
+artifacts, establishes its ABI-keyed caches, and verifies that
+`package.cpath` selects 0.21 rather than 0.20. It does not migrate or clean up
+the preserved 0.20 state.
 
 ## Standard-library dogfooding
 

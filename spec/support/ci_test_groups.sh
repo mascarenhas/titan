@@ -42,6 +42,7 @@ while IFS= read -r test_file; do
         spec/stdlib/loadlibglobal_spec.lua | \
         spec/stdlib_installer_spec.lua | \
         spec/lpeglabel_build_spec.lua | \
+        spec/readline_build_spec.lua | \
         spec/libuv_build_spec.lua | \
         spec/minicoro_spec.lua | \
         spec/rockspec_spec.lua)

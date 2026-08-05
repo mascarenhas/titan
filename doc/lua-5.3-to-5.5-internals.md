@@ -1,5 +1,9 @@
 # Lua 5.3 → 5.5 internal differences that affect Titan
 
+> This is the historical Lua 5.3.5-to-5.5.0 internal-difference catalogue. For
+> the current Lua 5.5.1 and Titan ABI 0.21 follow-up, see the
+> [Lua 5.5.1 Update Audit](implementation/lua-5.5.1-update.md).
+
 Titan's generated C code and its runtime support library compile against
 Lua's *internal* headers (`lobject.h`, `ltable.h`, `lvm.h`, `lgc.h`,
 `ldo.h`, `lstring.h`, ...), not just the public API. This document records

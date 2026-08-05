@@ -536,6 +536,22 @@ describe("Titan code generator", function()
         ]])
     end)
 
+    it("uses Lua's configured arithmetic hook for float-loop stepping", function()
+        local csrc = compile_and_read_c([[
+            function sum(): float
+                local total: float = 0.0
+                for i: float = 1.0, 3.0, 0.5 do
+                    total = total + i
+                end
+                return total
+            end
+        ]])
+        assert.truthy(csrc:find(
+            "_foridx = luai_numadd(L, _foridx, _forstep);", 1, true),
+            csrc)
+        assert.falsy(csrc:find("_foridx += _forstep;", 1, true), csrc)
+    end)
+
     it("terminates a for loop at the integer limits (issue #59)", function()
         -- Stepping past LUA_MAXINTEGER (or below LUA_MININTEGER) must not wrap
         -- around into a non-terminating loop; the unsigned trip count prevents
@@ -616,6 +632,24 @@ describe("Titan code generator", function()
         ]], [[
             assert(test.f() == 1)
         ]])
+    end)
+
+    it("initializes every generated Lua stack slot through stack-aware macros",
+    function()
+        local csrc = compile_and_read_c([[
+            function anchored(flag: boolean): string
+                local text: string = "kept"
+                if flag then return text end
+                return text .. " alive"
+            end
+        ]])
+        assert.truthy(csrc:find("setnilvalue2s(_s);", 1, true), csrc)
+
+        local file = assert(io.open("titan-compiler/coder.lua", "rb"))
+        local source = assert(file:read("*a"))
+        assert.truthy(file:close())
+        assert.falsy(source:find(
+            "setnilvalue%s*%(%s*s2v%s*%(", 1), source)
     end)
 
     it("accepts a bare return in a nil-returning function", function()
@@ -1853,7 +1887,7 @@ describe("Titan code generator", function()
         local header = "tmp_titan_ffi_tvalue_runtime_" .. suffix .. ".h"
         local f = assert(io.open(header, "w"))
         f:write([[
-            #include "lua-5.5.0/src/lobject.h"
+            #include "lua-5.5.1/src/lobject.h"
 
             typedef void *ffi_vptr;
             typedef int *ffi_iptr;

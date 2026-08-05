@@ -14,7 +14,7 @@ if direct then
     package.path = source_root .. "/?.lua;" ..
         source_root .. "/?/init.lua;" .. package.path
     package.cpath = cli_stage .. "/?.so;" ..
-        cli_root .. "/lib/titan/0.20/?.so;" ..
+        cli_root .. "/lib/titan/0.21/?.so;" ..
         cli_root .. "/lib/lua/5.5/?.so;" .. package.cpath
 end
 
@@ -556,7 +556,7 @@ function installer.publish(options)
         options.image_validator or validate_native_pair, options)
     if not valid then return nil, validation_err end
 
-    local abi_dir = join(root, "lib/titan/0.20")
+    local abi_dir = join(root, "lib/titan/0.21")
     local shim_dir = join(root, "share/lua/5.5/titan")
     local shim_root = join(root, "share/lua/5.5")
     local lua_cdir = join(root, "lib/lua/5.5")
@@ -590,7 +590,7 @@ function installer.publish(options)
 
     -- A valid old self-describing archive is the only authority for retiring
     -- generated shims which no longer belong to this provider. Never scan the
-    -- public Lua tree or infer ownership from a DSO-only predecessor.
+    -- public Lua tree or infer ownership from a bootstrap-only predecessor.
     local prior_entries = valid_prior_archive_entries(
         public_archive, options.prior_archive_scanner or scan_archive)
     local retired_names = {}
@@ -619,7 +619,7 @@ function installer.publish(options)
             join(abi_dir, "titan/" .. module .. ".so"),
             join(abi_dir, module .. ".so"),
             join(lua_cdir, "titan/" .. module .. ".so"),
-            join(lua_cdir, "titan/stdlib_0_20/" .. module .. ".so"),
+            join(lua_cdir, "titan/stdlib_0_21/" .. module .. ".so"),
         }) do
             stale[#stale + 1] = path
             stale[#stale + 1] = path .. ".dSYM"
@@ -633,7 +633,7 @@ function installer.publish(options)
 
     -- The archive is published after shims/dSYM and before the DSO commit
     -- point. A caught failure at either native artifact restores the exact
-    -- bootstrap, legacy DSO-only, or prior-pair state.
+    -- supported bootstrap-only or prior-pair state.
     add_entry(entries, seen, public_archive,
         join(stage, "titan.a"), "file", "titan.a")
 
