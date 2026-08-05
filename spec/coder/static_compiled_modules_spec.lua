@@ -127,11 +127,11 @@ end
 
 local function make_archive(path, inputs)
     os.remove(path)
-    local argv = tool_command(driver.AR, "qD", path)
+    local argv = tool_command(driver.AR, "qDc", path)
     for _, input in ipairs(inputs) do argv[#argv + 1] = input end
     local ok, output = run(argv)
     if not ok then
-        argv = tool_command(driver.AR, "q", path)
+        argv = tool_command(driver.AR, "qc", path)
         for _, input in ipairs(inputs) do argv[#argv + 1] = input end
         ok, output = run(argv)
     end
@@ -377,7 +377,7 @@ describe("static compiled-module native containers", function()
         write_file(raw, "titan metadata is not an object file\n")
         local raw_archive = workspace .. "/raw member.a"
         local archived, archive_output =
-            run(tool_command(driver.AR, "q", raw_archive, raw))
+            run(tool_command(driver.AR, "qc", raw_archive, raw))
         assert.truthy(archived, archive_output)
         assert.truthy(read_file(raw_archive):find(
             "titan metadata is not an object file", 1, true))
@@ -510,7 +510,7 @@ exec %s "$@"
 
         local calls = 0
         for mode, length in read_file(marker):gmatch("(%S+) (%d+)\n") do
-            if mode == "qD" or mode == "q" then
+            if mode == "qDc" or mode == "qc" then
                 calls = calls + 1
                 assert.is_true(tonumber(length) <= 71680)
             end
@@ -527,7 +527,7 @@ exec %s "$@"
         local ranlib_wrapper = workspace .. "/configured ranlib"
         executable_script(ar_wrapper, string.format([[#!/bin/sh
 printf '%%s\n' "$*" >> %s
-if [ "$1" = "qD" ]; then exit 64; fi
+if [ "$1" = "qDc" ]; then exit 64; fi
 exec %s "$@"
 ]], assert(cdriver.shell_quote(ar_marker)),
             assert(cdriver.shell_quote(configured_words(original_ar)[1]))))
@@ -549,8 +549,8 @@ exec %s "$@"
         assert.is_false(result.deterministic)
         local ar_calls = read_file(ar_marker)
         local ranlib_calls = read_file(ranlib_marker)
-        assert.match("qD", ar_calls, 1, true)
-        assert.match("q ", ar_calls, 1, true)
+        assert.match("qDc", ar_calls, 1, true)
+        assert.match("qc ", ar_calls, 1, true)
         assert.match("-D", ranlib_calls, 1, true)
     end)
 

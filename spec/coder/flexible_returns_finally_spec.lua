@@ -65,7 +65,7 @@ describe("flexible returns through finally", function()
 
         assert.match("TString%* _pa_flexargs_1%[TITAN_VARARG_MAX%] = {0};",
             csrc)
-        assert.match("volatile int _pa_flexcount_1 = 0;", csrc)
+        assert.match("int volatile _pa_flexcount_1 = 0;", csrc)
         assert.match("%(void%)_pa_flexargs_1;", csrc)
         assert.match("%(void%)_pa_flexcount_1;", csrc)
 

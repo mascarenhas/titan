@@ -1510,7 +1510,7 @@ describe("libuv Makefile configuration", function()
                 tostring(code) .. ")")
 
             write_file(stale, "stale archive member\n")
-            ok, output, why, code = run_argv({ "ar", "q", archive, stale })
+            ok, output, why, code = run_argv({ "ar", "qc", archive, stale })
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
 

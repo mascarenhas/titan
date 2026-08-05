@@ -937,13 +937,13 @@ On every supported host, create the output with the configured archiver's
 order-preserving quick append:
 
 ```text
-ar qD <temporary.a> <ordered staged objects...>
+ar qDc <temporary.a> <ordered staged objects...>
 ranlib -D <temporary.a>
 ```
 
-Batch `qD` invocations below `ARG_MAX` while preserving sequence. Capability
+Batch `qDc` invocations below `ARG_MAX` while preserving sequence. Capability
 probe the configured tools once per invocation: if deterministic `D` is not
-supported, use `q` and ordinary `ranlib`, preserve content/order, and disable
+supported, use `qc` and ordinary `ranlib`, preserve content/order, and disable
 only the byte-identical-rebuild assertion. Do not silently substitute a
 different `AR`/`RANLIB`.
 

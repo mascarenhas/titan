@@ -490,7 +490,7 @@ end
         })
         -- Verbose output includes capability probes even when they fail.
         -- Inspect only the real staged output command, never tool-probe.a.
-        if final_archive_command_uses(output, "qD") and
+        if final_archive_command_uses(output, "qDc") and
            final_archive_command_uses(output, "-D") then
             assert.equal(before, read_file(workspace .. "/pkg.a"))
         end

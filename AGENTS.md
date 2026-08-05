@@ -287,7 +287,7 @@ not add epicycles around what may be a misunderstood simpler design.
   may be configured command strings, are parsed into argv, and must remain the
   same tools recorded by the prefix's LuaRocks configuration through source
   build, post-install validation, and later consumer builds. The archive
-  builder prefers deterministic `ar qD`/`ranlib -D`, falls back to portable
+  builder prefers deterministic `ar qDc`/`ranlib -D`, falls back to portable
   `q`/ordinary `ranlib`, and then rescans the regular output and exact ordered
   member manifest; do not infer success from tool exit status alone. The FFI
   uses the same C99 mode and parsed `TITAN_EXTRA_CPPFLAGS` as generated C. The

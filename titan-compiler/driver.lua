@@ -2949,17 +2949,17 @@ end
 
 local function archive_tool_capabilities(ar, ranlib, probe, object, verbose)
     os.remove(probe)
-    local ar_args = { "qD", probe }
+    local ar_args = { "qDc", probe }
     if object then ar_args[#ar_args + 1] = object end
     local ar_d = run_archive_tool(ar, ar_args, verbose)
     if not ar_d then
         os.remove(probe)
-        ar_args[1] = "q"
+        ar_args[1] = "qc"
         local ar_ok, ar_term, ar_code =
             run_archive_tool(ar, ar_args, verbose)
         if not ar_ok then
             os.remove(probe)
-            return nil, "configured AR supports neither qD nor q (" ..
+            return nil, "configured AR supports neither qDc nor qc (" ..
                 tostring(ar_term) .. ", exit " .. tostring(ar_code) .. ")"
         end
     end
@@ -2978,7 +2978,7 @@ local function archive_tool_capabilities(ar, ranlib, probe, object, verbose)
     os.remove(probe)
     return {
         deterministic = ar_d and ranlib_d and true or false,
-        ar_mode = ar_d and ranlib_d and "qD" or "q",
+        ar_mode = ar_d and ranlib_d and "qDc" or "qc",
         ranlib_d = ar_d and ranlib_d and true or false,
     }
 end

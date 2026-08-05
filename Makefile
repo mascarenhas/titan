@@ -1367,20 +1367,20 @@ $(LLHTTP_ARCHIVE_CONFIG): FORCE $(firstword $(LLHTTP_OBJECTS))
 	@set -e; \
 	probe="$(@D)/.titan-llhttp-tool-probe.a"; tmp="$@.tmp"; \
 	rm -f "$$probe" "$$tmp"; \
-	if $(AR) qD "$$probe" "$(firstword $(LLHTTP_OBJECTS))" \
+	if $(AR) qDc "$$probe" "$(firstword $(LLHTTP_OBJECTS))" \
 			>/dev/null 2>&1 && \
 	   $(RANLIB) -D "$$probe" >/dev/null 2>&1; then \
-	  ar_mode=qD; ranlib_mode=-D; deterministic=yes; \
+	  ar_mode=qDc; ranlib_mode=-D; deterministic=yes; \
 	else \
 	  rm -f "$$probe"; \
-	  $(AR) q "$$probe" "$(firstword $(LLHTTP_OBJECTS))" \
+	  $(AR) qc "$$probe" "$(firstword $(LLHTTP_OBJECTS))" \
 			>/dev/null 2>&1 || { \
-	    echo "ERROR: configured AR supports neither qD nor q" >&2; exit 1; \
+	    echo "ERROR: configured AR supports neither qDc nor qc" >&2; exit 1; \
 	  }; \
 	  $(RANLIB) "$$probe" >/dev/null 2>&1 || { \
 	    echo "ERROR: configured RANLIB is unusable" >&2; exit 1; \
 	  }; \
-	  ar_mode=q; ranlib_mode=ordinary; deterministic=no; \
+	  ar_mode=qc; ranlib_mode=ordinary; deterministic=no; \
 	fi; \
 	rm -f "$$probe"; \
 	{ printf '%s\n' \
@@ -1615,7 +1615,7 @@ $(LPEGLABEL_BUILD_DIR)/%.o: $(LPEGLABEL_VENDOR_DIR)/%.c \
 		$(TITAN_EXTRA_CFLAGS) -c "$<" -o "$@"
 
 # Probe the configured archive commands rather than assuming GNU flags. Use
-# deterministic qD/-D only when both tools support that pair; otherwise verify
+# deterministic qDc/-D only when both tools support that pair; otherwise verify
 # the portable q/ordinary-ranlib pair. The selected mode is a stamped input to
 # archive construction.
 $(LPEGLABEL_ARCHIVE_CONFIG): FORCE $(firstword $(LPEGLABEL_OBJECTS))
@@ -1624,22 +1624,22 @@ $(LPEGLABEL_ARCHIVE_CONFIG): FORCE $(firstword $(LPEGLABEL_OBJECTS))
 	probe="$(@D)/.titan-lpeglabel-tool-probe.a"; \
 	tmp="$@.tmp"; \
 	rm -f "$$probe" "$$tmp"; \
-	if $(AR) qD "$$probe" "$(firstword $(LPEGLABEL_OBJECTS))" \
+	if $(AR) qDc "$$probe" "$(firstword $(LPEGLABEL_OBJECTS))" \
 			>/dev/null 2>&1 && \
 	   $(RANLIB) -D "$$probe" >/dev/null 2>&1; then \
-	  ar_mode=qD; ranlib_mode=-D; deterministic=yes; \
+	  ar_mode=qDc; ranlib_mode=-D; deterministic=yes; \
 	else \
 	  rm -f "$$probe"; \
-	  if ! $(AR) q "$$probe" "$(firstword $(LPEGLABEL_OBJECTS))" \
+	  if ! $(AR) qc "$$probe" "$(firstword $(LPEGLABEL_OBJECTS))" \
 			>/dev/null 2>&1; then \
-	    echo "ERROR: configured AR supports neither qD nor q" >&2; \
+	    echo "ERROR: configured AR supports neither qDc nor qc" >&2; \
 	    exit 1; \
 	  fi; \
 	  if ! $(RANLIB) "$$probe" >/dev/null 2>&1; then \
 	    echo "ERROR: configured RANLIB supports neither -D nor ordinary mode" >&2; \
 	    exit 1; \
 	  fi; \
-	  ar_mode=q; ranlib_mode=ordinary; deterministic=no; \
+	  ar_mode=qc; ranlib_mode=ordinary; deterministic=no; \
 	fi; \
 	rm -f "$$probe"; \
 	{ printf '%s\n' \

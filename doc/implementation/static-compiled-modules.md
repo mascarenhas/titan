@@ -274,7 +274,7 @@ The paired static archive flattens the identical logical/native payload:
 
 Runtime, backtrace, Lua, `-l`, and final flags are not copied into the archive.
 
-The configured `AR` creates a regular archive with order-preserving `qD`
+The configured `AR` creates a regular archive with order-preserving `qDc`
 operations, batched below `ARG_MAX`; configured `RANLIB -D` indexes it. A
 capability fallback drops only deterministic `D`, never the configured tool.
 Each input member is staged in a unique numbered directory so duplicate leaf

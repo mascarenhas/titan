@@ -454,7 +454,7 @@ stamps that record:
 - archive member order and deterministic-tool mode.
 
 Use the configured commands parsed by the existing Make conventions. Prefer
-deterministic `ar qD`/`ranlib -D`, use the existing portable fallbacks, then
+deterministic `ar qDc`/`ranlib -D`, use the existing portable fallbacks, then
 rescan the archive and exact ordered member manifest. A successful exit status
 without correct membership is not completion.
 
