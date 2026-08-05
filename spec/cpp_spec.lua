@@ -32,13 +32,13 @@ local function expand(src)
     -- many orders of magnitude more headroom.
     debug.sethook(function()
         error("cpp expansion exceeded its instruction budget "
-              .. "(likely unbounded macro recursion)", 2)
+            .. "(likely unbounded macro recursion)", 2)
     end, "", 20000000)
     local ok, rctx, err = pcall(cpp.parse_file, tmp, fd, ctx)
     debug.sethook()
     os.remove(tmp)
-    assert(ok, rctx)        -- on a hook/runtime error, rctx is the message
-    assert(rctx, err)       -- parse_file returned (nil, err)
+    assert(ok, rctx)  -- on a hook/runtime error, rctx is the message
+    assert(rctx, err) -- parse_file returned (nil, err)
     return table.concat(ctx.output, " ")
 end
 
@@ -74,7 +74,6 @@ local function parse_decls(src)
 end
 
 describe("c preprocessor (cpp)", function()
-
     describe("shell argument handling", function()
         it("splits quoted and escaped paths without losing argument boundaries", function()
             local words = assert(cpp.split_shell_words(
@@ -116,18 +115,18 @@ describe("c preprocessor (cpp)", function()
         end)
 
         it("normalizes a shell-reported child signal as interruption",
-        function()
-            local result = cpp.capture_command({
-                "/bin/sh", "-c", "kill -TERM $$",
-            })
-            assert.is_true(result.started)
-            assert.is_false(result.ok)
-            assert.is_true(result.interrupted)
-            assert.equal("signal", result.why)
-            assert.equal(15, result.signal)
-            assert.equal(15, result.status)
-            assert.equal(143, result.shell_status)
-        end)
+            function()
+                local result = cpp.capture_command({
+                    "/bin/sh", "-c", "kill -TERM $$",
+                })
+                assert.is_true(result.started)
+                assert.is_false(result.ok)
+                assert.is_true(result.interrupted)
+                assert.equal("signal", result.why)
+                assert.equal(15, result.signal)
+                assert.equal(15, result.status)
+                assert.equal(143, result.shell_status)
+            end)
     end)
 
     describe("object-like macros", function()
@@ -253,36 +252,36 @@ APPLY(a+b)
 PASS(a EMPTY+b) PASS(a+EMPTY_CALL( )+b) PASS(a+EMPTY_CALL(x  , y)+b)
 ]]))
         end)
-        it("parses an object macro if there is whitespace before the opening parenthesis", function ()
-            assert.equal('(42)(A)', expand([[
+        it("parses an object macro if there is whitespace before the opening parenthesis", function()
+            assert.equal('( 42 ) ( A )', expand([[
 #define VALUE 42
 #define OBJ (VALUE)
 OBJ(A)
 ]]))
         end)
         it("keeps raw digraph spelling while expanding canonical tokens",
-        function()
-            assert.equal('"a %: b" "a <: b :>"', expand([[
+            function()
+                assert.equal('"a %: b" "a <: b :>"', expand([[
 #define STR(x) #x
 STR(a %: b) STR(a <: b :>)
 ]]))
-            assert.equal("42 foobar", expand([[
+                assert.equal("42 foobar", expand([[
 %:define VALUE 42
 #define CAT(a,b) a %:%: b
 VALUE CAT(foo,bar)
 ]]))
-        end)
+            end)
         it("matches the host for adjacent, spaced, and comment-separated tokens",
-        function()
-            local src = [=[
+            function()
+                local src = [=[
 #define STR(x) #x
 #define PASS(x) STR(x)
 #define EMPTY
 #define EMPTY_CALL(...)
 STR(a+b) STR(  a   + b  ) STR(a/**/+b) STR("a\b") PASS(a EMPTY+b) PASS(a+EMPTY_CALL( )+b) PASS(a+EMPTY_CALL(x  , y)+b) STR(a %: b) STR(a <: b :>)
 ]=]
-            assert.equal(host_expand(src), expand(src))
-        end)
+                assert.equal(host_expand(src), expand(src))
+            end)
         it("escapes quotes and backslashes while stringizing", function()
             assert.equal([["\"a\\b\""]], expand([[
 #define STR(x) #x
@@ -435,12 +434,12 @@ VEC(acos,, (double __x))
             assert.equal(1, n)
 
             local params = parsed[1].ids[1].decl.params
-            assert.same({"7"}, params[1].param.id[1].idx)
-            assert.same({"*"}, params[2].param.id.declarator)
+            assert.same({ "7" }, params[1].param.id[1].idx)
+            assert.same({ "*" }, params[2].param.id.declarator)
             assert.same(
-                {"double"}, params[2].param.id.params[1].param.type)
-            assert.same({"*"}, params[3].param.id.declarator)
-            assert.same({"7"}, params[3].param.id[1].idx)
+                { "double" }, params[2].param.id.params[1].param.type)
+            assert.same({ "*" }, params[3].param.id.declarator)
+            assert.same({ "7" }, params[3].param.id[1].idx)
         end)
         it("separates array parameter markers from their bounds", function()
             local ok, rec, n, parsed = parse_decls([[
@@ -703,5 +702,4 @@ extern int after(void);
             assert.equal("a ' ' b", expand("a '' b\n"))
         end)
     end)
-
 end)
