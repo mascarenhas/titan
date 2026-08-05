@@ -179,7 +179,8 @@ empty <- ("" => empty_table)
 --------------------------------------------------------------------------------
 -- Identifiers
 
-IDENTIFIER <- { identifierNondigit (identifierNondigit / [0-9])* } _
+MACRONAME <- { identifierNondigit (identifierNondigit / [0-9])* }
+IDENTIFIER <- MACRONAME _
 identifierNondigit <- [a-zA-Z_]
                     / universalCharacterName
 
@@ -673,8 +674,8 @@ directive <- {| {:directive: "if"      :} S {:exp: preprocessingTokenList :} |}
            / {| {:directive: "else"    :} |}
            / {| {:directive: "endif"   :} |}
            / {| {:directive: "include" :} S {:exp: headerName :} |}
-           / {| {:directive: "define"  :} S {:id: IDENTIFIER :} "(" _ {:args: defineArgList :} _ ")" _ {:repl: requiredReplacementList :} |}
-           / {| {:directive: "define"  :} S {:id: IDENTIFIER :} _ {:repl: replacementList :} |}
+           / {| {:directive: "define"  :} S {:id: MACRONAME :} "(" _ {:args: defineArgList :} _ ")" _ {:repl: replacementList :} |}
+           / {| {:directive: "define"  :} S {:id: MACRONAME :} _ {:repl: replacementList :} |}
            / {| {:directive: "undef"   :} S {:id: IDENTIFIER :} |}
            / {| {:directive: "line"    :} S {:line: preprocessingTokenList :} |}
            / {| {:directive: "error"   :} S {:error: preprocessingTokenList / empty :} |}
@@ -692,8 +693,6 @@ defineArgList <- {| { "..." } |}
                / empty
 
 replacementList <- {| (preprocessingToken _)* |}
-
-requiredReplacementList <- {| (preprocessingToken _)+ |}
 
 preprocessingToken <- preprocessingNumber
                     / CHARACTER_CONSTANT
