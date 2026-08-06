@@ -107,18 +107,18 @@ jobs:
         run: |
           make lua
           grep -qx 'provider=bundled' \
-            "$PREFIX/etc/titan/readline-8.3-p3.config"
+            "lua-5.5.1/.titan-readline-8.3-p3.config"
           test -f \
-            "$PREFIX/lib/titan/deps/readline/8.3-p3/lib/libreadline.a"
+            "readline-build/.titan-readline-8.3-p3/lib/libreadline.a"
           cmp LICENSES/readline-LICENSE \
-            "$PREFIX/lib/titan/deps/readline/8.3-p3/share/licenses/COPYING"
+            "readline-build/.titan-readline-8.3-p3/share/licenses/COPYING"
           make luarocks
 
       - name: Verify bundled Readline warm reuse and repair
         run: |
-          config="$PREFIX/etc/titan/readline-8.3-p3.config"
-          stamp="$PREFIX/etc/titan/readline-8.3-p3.installed"
-          archive="$PREFIX/lib/titan/deps/readline/8.3-p3/lib/libreadline.a"
+          config="lua-5.5.1/.titan-readline-8.3-p3.config"
+          stamp="lua-5.5.1/.titan-readline-8.3-p3.installed"
+          archive="readline-build/.titan-readline-8.3-p3/lib/libreadline.a"
           config_mtime="$(stat -c %Y "$config")"
           stamp_mtime="$(stat -c %Y "$stamp")"
           archive_mtime="$(stat -c %Y "$archive")"
@@ -135,7 +135,7 @@ jobs:
           cmp "$config" "$RUNNER_TEMP/readline.config"
           cmp "$stamp" "$RUNNER_TEMP/readline.installed"
           cmp LICENSES/readline-LICENSE \
-            "$PREFIX/lib/titan/deps/readline/8.3-p3/share/licenses/COPYING"
+            "readline-build/.titan-readline-8.3-p3/share/licenses/COPYING"
 
           clean_titan_environment() {
             env \
@@ -528,11 +528,11 @@ jobs:
         run: |
           make lua LUA_PLATFORM=macosx
           grep -qx 'provider=bundled' \
-            "$PREFIX/etc/titan/readline-8.3-p3.config"
+            "lua-5.5.1/.titan-readline-8.3-p3.config"
           test -f \
-            "$PREFIX/lib/titan/deps/readline/8.3-p3/lib/libreadline.a"
+            "readline-build/.titan-readline-8.3-p3/lib/libreadline.a"
           cmp LICENSES/readline-LICENSE \
-            "$PREFIX/lib/titan/deps/readline/8.3-p3/share/licenses/COPYING"
+            "readline-build/.titan-readline-8.3-p3/share/licenses/COPYING"
 
       # Every generated module and executable links the separate
       # ./libbacktrace/.libs/libbacktrace.a (unified stack traces). CI
@@ -676,7 +676,7 @@ jobs:
         run: |
           bash spec/support/ci_sanitizer_capture.sh native-lua make lua
           grep -qx 'provider=system' \
-            "$PREFIX/etc/titan/readline-8.3-p3.config"
+            "lua-5.5.1/.titan-readline-8.3-p3.config"
           bash spec/support/ci_sanitizer_capture.sh native-libbacktrace \
             make libbacktrace
           bash spec/support/ci_sanitizer_capture.sh native-libuv make libuv

@@ -613,7 +613,7 @@ $(READLINE_SELECTION_CONFIG):
 	    done; \
 	  fi; \
 	  if test "$$termcap_found" != yes; then \
-	    echo "ERROR: prefix-local Readline needs a usable curses, tinfo, or termcap library." >&2; \
+	    echo "ERROR: local Readline needs a usable curses, tinfo, or termcap library." >&2; \
 	    echo "  Install the platform terminal-library development package or set READLINE_TERMCAP_LIB." >&2; \
 	    exit 1; \
 	  fi; \
@@ -621,7 +621,6 @@ $(READLINE_SELECTION_CONFIG):
 	{ printf 'provider=%s\n' "$$provider"; \
 	  printf 'termcap=%s\n' "$$termcap"; \
 	  printf '%s\n' \
-	    $(call make_shell_quote,PREFIX=$(PREFIX)) \
 	    $(call make_shell_quote,LUA_PLATFORM=$(LUA_PLATFORM)) \
 	    $(call make_shell_quote,READLINE_MODE=$(READLINE_MODE)) \
 	    $(call make_shell_quote,READLINE_VERSION=$(READLINE_VERSION)) \
@@ -887,7 +886,7 @@ $(LUA_EXTRACTED): $(LUA_TARBALL)
 # objects whenever that configuration or any effective native-build input
 # changes. An unchanged invocation preserves the stamp mtime and leaves the
 # already-built interpreter warm. loadlib.c remains the pristine upstream file.
-$(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) $(READLINE_SELECTION_CONFIG)
+$(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) $(READLINE_SELECTION_CONFIG) FORCE
 	@tmp="$@.tmp"; header="$(LUA_DIR)/src/luaconf.h"; \
 	tmp_header="$$header.titan.tmp"; \
 	changed="$@.changed"; \
@@ -1871,7 +1870,7 @@ stage-titan-bootstrap: $(TITAN_BOOTSTRAP_SO)
 # just-installed compiler. No Titan stdlib source is compiled before LuaRocks
 # deploys titanc, and the private bootstrap never shares a timestamp with the
 # final paired standard-library provider.
-titan: libbacktrace libuv $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) ## Build Titan's native runtime and Lua bootstrap
+titan: lpeglabel libbacktrace libuv openssl llhttp $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) ## Build Titan's native runtime and Lua bootstrap
 	@if test -n "$(strip $(ROCKS_TREE))"; then \
 	  $(MAKE) --no-print-directory install-titan-sdk \
 		ROCKS_TREE=$(call make_shell_quote,$(ROCKS_TREE)) \
@@ -2186,13 +2185,19 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 # longer builds stdlib before LuaRocks has deployed the compiler.
 rock-build: titan
 
-test: luarocks libbacktrace libuv llhttp openssl ## Build/install the rock and run the suite via `luarocks test`
+test: lua luarocks ## Build/install the rock and run the suite via `luarocks test`
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	  PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
 	  "$(PREFIX)/bin/luarocks" make --force
+ifneq ($(strip $(EXTRA_TEST_FLAGS)),)
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	  PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
-	  "$(PREFIX)/bin/luarocks" test
+		echo $(EXTRA_TEST_FLAGS) | PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
+		xargs "$(PREFIX)/bin/luarocks" test --
+else
+	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+		PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
+		"$(PREFIX)/bin/luarocks" test
+endif
 
 examples: lua ## Compile the example Titan modules (SDL examples need SDL2 headers)
 	$(MAKE) -C examples all

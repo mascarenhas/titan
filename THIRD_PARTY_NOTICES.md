@@ -14,7 +14,7 @@ GNU Readline is Copyright (C) 1987-2025 Free Software Foundation, Inc. and is
 distributed under the GNU General Public License, version 3 or later. The exact
 license text from the audited Readline 8.3 source is checked in as
 `LICENSES/readline-LICENSE`. A bundled installation also copies it to
-`$PREFIX/lib/titan/deps/readline/8.3-p3/share/licenses/COPYING`.
+`readline-build/.titan-readline-8.3-p3/share/licenses/COPYING`.
 
 Anyone distributing a Lua interpreter through the bundled mode, or through a
 system mode that selected GNU Readline, must satisfy the applicable GNU

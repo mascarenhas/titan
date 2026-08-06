@@ -131,7 +131,7 @@ describe("compiled-module ABI version", function()
         assert.truthy(workflow:find(
             "readline-8.3-p3.config", 1, true))
         assert.truthy(workflow:find(
-            "lib/titan/deps/readline/8.3-p3/lib/libreadline.a", 1, true))
+            "readline-build/.titan-readline-8.3-p3/lib/libreadline.a", 1, true))
         assert.truthy(workflow:find(
             "cmp LICENSES/readline-LICENSE", 1, true))
         assert.truthy(workflow:find(

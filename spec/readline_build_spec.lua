@@ -136,9 +136,16 @@ local function sha256(path)
         table.concat(failures, "\n"))
 end
 
+local function prefix_from_cpath(cpath)
+    for template in (cpath .. ";"):gmatch("(.-);") do
+        local root = template:match("^(.*)/lib/lua/5%.5/%?%.so$")
+        if root then return root end
+    end
+end
+
 describe("GNU Readline selection", function()
     local workspace
-    local prefix
+    local prefix = (os.getenv("PREFIX") or prefix_from_cpath(package.cpath) or ""):gsub("/+$", "")
     local selection_config
 
     before_each(function()

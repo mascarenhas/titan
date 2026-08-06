@@ -19,7 +19,7 @@ The base archive's `COPYING` is unchanged by those patches and has SHA-256
 `8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903`.
 Its exact text is checked in as `LICENSES/readline-LICENSE`; the bundled build
 also installs that text at
-`$PREFIX/lib/titan/deps/readline/8.3-p3/share/licenses/COPYING`.
+`readline-build/.titan-readline-8.3-p3/share/licenses/COPYING`.
 
 The release archive is from
 <https://ftp.gnu.org/gnu/readline/readline-8.3.tar.gz>. The original context

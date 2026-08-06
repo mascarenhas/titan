@@ -28,10 +28,6 @@ export PATH="$PREFIX/bin:$PATH"
 
 make lua
 make luarocks
-make lpeglabel
-make libuv
-make openssl
-make llhttp
 "$PREFIX/bin/luarocks" make
 ```
 
@@ -623,12 +619,6 @@ The simplest way to run it in an isolated installation is:
 ```sh
 $ export PREFIX="/tmp/titan-$USER-test"
 $ export PATH="$PREFIX/bin:$PATH"
-$ make lua
-$ make luarocks
-$ make lpeglabel
-$ make libuv
-$ make openssl
-$ make llhttp
 $ make test
 ```
 

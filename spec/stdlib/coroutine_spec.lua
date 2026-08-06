@@ -24,10 +24,21 @@ local function file_exists(path)
     return false
 end
 
-local prefix_lua = os.getenv("PREFIX") and
-    (os.getenv("PREFIX") .. "/bin/lua") or nil
-local LUA = prefix_lua and file_exists(prefix_lua) and prefix_lua
-    or "lua"
+local function prefix_from_cpath(cpath)
+    for template in (cpath .. ";"):gmatch("(.-);") do
+        local root = template:match("^(.*)/lib/lua/5%.5/%?%.so$")
+        if root then return root end
+    end
+end
+
+local PREFIX = (os.getenv("PREFIX") or prefix_from_cpath(package.cpath) or "")
+    :gsub("/+$", "")
+assert.equal("/", PREFIX:sub(1, 1),
+    "coroutine specs require an absolute standalone Titan PREFIX")
+
+local LUA = PREFIX .. "/bin/lua"
+assert(file_exists(LUA), "No Lua found")
+
 local TITANC = LUA ..
     [[ -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc]]
 local COROUTINE_VARIANT_ROOT = os.tmpname() .. "-titan-coroutine-exact"
@@ -57,9 +68,9 @@ local function quote(word)
     return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
 end
 local function test_env(root, so)
-    return "env -u PREFIX -u LUA_PATH -u LUA_CPATH " ..
-        "-u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1 " ..
-        "TITAN_PATH=" .. quote(root) .. " " ..
+    return "env -u LUA_PATH -u LUA_CPATH " ..
+        "-u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1 PREFIX=" .. quote(PREFIX) ..
+        " TITAN_PATH=" .. quote(root) .. " " ..
         "LUA_PATH=" .. quote(root .. "/?.lua;./?.lua;;") ..
         " LUA_CPATH=" .. quote(root .. "/?.so;./?.so;;") .. " " ..
         "TITAN_COROUTINE_TEST_SO=" .. quote(so) .. " "
