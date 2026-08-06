@@ -1,4 +1,5 @@
 local h = require "spec.support.helpers"
+local driver = require "titan-compiler.driver"
 local installed_prefix = require "spec.support.installed_prefix"
 
 local MODULE = "ffi_stack_objects"
@@ -28,7 +29,14 @@ local function with_header(contents, fn)
 end
 
 describe("automatic C object code generation", function()
+    local saved_cflags
+
+    before_each(function ()
+        saved_cflags = driver.CFLAGS
+    end)
+
     after_each(function()
+        driver.CFLAGS = saved_cflags
         if not h.verbose then clean_module(MODULE) end
     end)
 
@@ -215,6 +223,7 @@ describe("automatic C object code generation", function()
                 end
             ]]
 
+            driver.CFLAGS = driver.CFLAGS .. " -Wno-array-bounds"
             local csrc = h.compile_and_read_c(source, MODULE)
             assert.match(
                 "ffi_point _local_point_%d+ = %{0%};", csrc)

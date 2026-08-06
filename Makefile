@@ -61,7 +61,7 @@ READLINE_PATCH_001_SHA256 := 21f0a03106dbe697337cd25c70eb0edbaa2bdb6d595b45f8328
 READLINE_PATCH_002_SHA256 := e27364396ba9f6debf7cbaaf1a669e2b2854241ae07f7eca74ca8a8ba0c97472
 READLINE_PATCH_003_SHA256 := 72dee13601ce38f6746eb15239999a7c56f8e1ff5eb1ec8153a1f213e4acdb29
 READLINE_EXTRACTED   := $(READLINE_DIR)/.titan-extracted-p$(READLINE_PATCHLEVEL)
-READLINE_PRIVATE_ROOT := $(PREFIX)/lib/titan/deps/readline/$(READLINE_RELEASE)
+READLINE_PRIVATE_ROOT := $(READLINE_BUILD_DIR)/.titan-readline-$(READLINE_RELEASE)
 READLINE_PRIVATE_INCLUDEDIR := $(READLINE_PRIVATE_ROOT)/include
 READLINE_PRIVATE_LIBDIR := $(READLINE_PRIVATE_ROOT)/lib
 READLINE_PRIVATE_DATADIR := $(READLINE_PRIVATE_ROOT)/share
@@ -71,8 +71,8 @@ READLINE_HISTORY_HEADER := $(READLINE_PRIVATE_INCLUDEDIR)/readline/history.h
 READLINE_LICENSE     := $(READLINE_PRIVATE_DATADIR)/licenses/COPYING
 READLINE_LICENSE_SOURCE := LICENSES/readline-LICENSE
 READLINE_LICENSE_SHA256 := 8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903
-READLINE_INSTALL_STAMP := $(PREFIX)/etc/titan/readline-$(READLINE_RELEASE).installed
-READLINE_SELECTION_CONFIG := $(PREFIX)/etc/titan/readline-$(READLINE_RELEASE).config
+READLINE_INSTALL_STAMP := $(LUA_DIR)/.titan-readline-$(READLINE_RELEASE).installed
+READLINE_SELECTION_CONFIG := $(LUA_DIR)/.titan-readline-$(READLINE_RELEASE).config
 READLINE_BUILD_PROFILE := static-pic-private-staged-prefix-p3-v4
 READLINE_CFLAGS      ?= $(LUA_MYCFLAGS)
 READLINE_CPPFLAGS    ?=
@@ -282,7 +282,7 @@ RANLIB    ?= ranlib
 LUA_CC    ?= $(CC)
 LUA_AR    ?= $(AR) rcu
 LUA_RANLIB ?= $(RANLIB)
-CFLAGS    ?= --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls
+CFLAGS    ?= --std=c99 -O2 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g
 LUA_MYCFLAGS  ?= -fPIC
 LUA_MYLDFLAGS ?=
 LUA_MYLIBS    ?=
@@ -492,7 +492,7 @@ lua: $(LUA_INSTALL_STAMP) ## Build and install Titan's prefix-configured Lua
 # warm `make lua` quiet while noticing a host development package appearing or
 # disappearing. The system probe deliberately omits PREFIX: a previously
 # provisioned fallback is not misclassified as a host installation.
-$(READLINE_SELECTION_CONFIG): FORCE
+$(READLINE_SELECTION_CONFIG):
 	@set -e; \
 	mkdir -p "$(@D)"; \
 	base="$@.base"; probe="$@.probe"; probe_source="$@.probe.c"; \
@@ -672,9 +672,8 @@ $(READLINE_SELECTION_CONFIG): FORCE
 	    fallback_current=yes; \
 	  fi; \
 	  if test "$$fallback_current" != yes; then \
-	    echo "==> System Readline development files unavailable; provisioning $(READLINE_RELEASE) in $(PREFIX)"; \
+	    echo "==> System Readline development files unavailable; provisioning $(READLINE_RELEASE)"; \
 	    $(MAKE) --no-print-directory readline-bundled-install \
-	      PREFIX=$(call make_shell_quote,$(PREFIX)) \
 	      LUA_CC=$(call make_shell_quote,$(LUA_CC)) \
 	      AR=$(call make_shell_quote,$(AR)) \
 	      RANLIB=$(call make_shell_quote,$(RANLIB)) \
@@ -800,10 +799,10 @@ readline-bundled-install: check-readline-tools $(READLINE_EXTRACTED)
 	mkdir -p "$(READLINE_BUILD_DIR)"; \
 	( cd "$(READLINE_BUILD_DIR)" && \
 	  "$(abspath $(READLINE_DIR))/configure" \
-	    --prefix="$(PREFIX)" \
-	    --includedir="$$stage/include" \
-	    --libdir="$$stage/lib" \
-	    --datarootdir="$$stage/share" \
+	    --prefix="$(abspath $$stage)" \
+	    --includedir="$(abspath $$stage)/include" \
+	    --libdir="$(abspath $$stage)/lib" \
+	    --datarootdir="$(abspath $$stage)/share" \
 	    --disable-shared --enable-static \
 	    $(if $(strip $(READLINE_HOST)),--host=$(call make_shell_quote,$(READLINE_HOST)),) \
 	    CC=$(call make_shell_quote,$(LUA_CC)) \
@@ -888,7 +887,7 @@ $(LUA_EXTRACTED): $(LUA_TARBALL)
 # objects whenever that configuration or any effective native-build input
 # changes. An unchanged invocation preserves the stamp mtime and leaves the
 # already-built interpreter warm. loadlib.c remains the pristine upstream file.
-$(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) $(READLINE_SELECTION_CONFIG) FORCE
+$(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) $(READLINE_SELECTION_CONFIG)
 	@tmp="$@.tmp"; header="$(LUA_DIR)/src/luaconf.h"; \
 	tmp_header="$$header.titan.tmp"; \
 	changed="$@.changed"; \
@@ -950,8 +949,8 @@ $(LUA_LIB): $(LUA_BUILD_CONFIG)
 	lua_myldflags=$(call make_shell_quote,$(LUA_MYLDFLAGS)); \
 	lua_mylibs=$(call make_shell_quote,$(LUA_MYLIBS)); \
 	if test "$$readline_provider" = bundled; then \
-	  lua_mycflags="-I$(READLINE_PRIVATE_INCLUDEDIR) $$lua_mycflags"; \
-	  lua_myldflags="-L$(READLINE_PRIVATE_LIBDIR) $$lua_myldflags"; \
+	  lua_mycflags="-I$(abspath $(READLINE_PRIVATE_INCLUDEDIR)) $$lua_mycflags"; \
+	  lua_myldflags="-L$(abspath $(READLINE_PRIVATE_LIBDIR)) $$lua_myldflags"; \
 	  lua_mylibs="$$lua_mylibs $$readline_termcap"; \
 	elif test "$$readline_provider" = system; then \
 	  lua_mycflags="$$lua_mycflags $(READLINE_SYSTEM_CPPFLAGS)"; \
@@ -1795,11 +1794,7 @@ $(UV_O): titan-runtime/titan_uv.c titan-runtime/titan/uv.h \
 		-I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-I $(LIBBT_DIR) -o $@
 
-# Record the archive tools and exact member contract on every Make invocation,
-# while preserving this stamp's mtime on a warm build. Archive membership is
-# validated by the archive target itself below, independently of filesystem
-# timestamp granularity.
-$(RUNTIME_ARCHIVE_CONFIG): FORCE
+$(RUNTIME_ARCHIVE_CONFIG):
 	@tmp="$@.tmp"; \
 	{ printf '%s\n' \
 		$(call make_shell_quote,AR=$(AR)) \
@@ -1812,28 +1807,10 @@ $(RUNTIME_ARCHIVE_CONFIG): FORCE
 		mv -f "$$tmp" "$@"; \
 	fi
 
-$(TITAN_RUNTIME_LIB):: $(TITAN_RUNTIME_OBJECTS) $(RUNTIME_ARCHIVE_CONFIG)
+$(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS) $(RUNTIME_ARCHIVE_CONFIG)
 	rm -f "$@"
 	$(AR) rcs "$@" $(TITAN_RUNTIME_OBJECTS)
 	$(RANLIB) "$@"
-
-# A second, forced rule makes exact membership a content invariant instead of
-# relying on a refreshed prerequisite being observably newer than the archive.
-# GNU Make runs double-colon recipes for one target serially, so this remains
-# safe under `make -j` and becomes a no-op for a valid warm archive.
-$(TITAN_RUNTIME_LIB):: FORCE
-	@set -e; \
-	expected="$$(printf '%s\n' $(notdir $(TITAN_RUNTIME_OBJECTS)))"; \
-	actual=""; \
-	if test -r "$@"; then \
-		actual="$$( $(AR) t "$@" 2>/dev/null | \
-			awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
-	fi; \
-	if test "$$actual" != "$$expected"; then \
-		rm -f "$@"; \
-		$(AR) rcs "$@" $(TITAN_RUNTIME_OBJECTS); \
-		$(RANLIB) "$@"; \
-	fi
 
 $(TITANLIB_O): titan-runtime/titanlib.c $(TITANLIB_BUILD_CONFIG)
 	$(CC) $(ROCK_CFLAGS) $(TITAN_EXTRA_CFLAGS) \

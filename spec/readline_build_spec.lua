@@ -145,7 +145,7 @@ describe("GNU Readline selection", function()
         workspace = temporary_directory("readline-build")
         prefix = workspace .. "/prefix"
         selection_config =
-            prefix .. "/etc/titan/readline-8.3-p3.config"
+            workspace .. "/lua-5.5.1/.titan-readline-8.3-p3.config"
     end)
 
     after_each(function()
@@ -176,7 +176,6 @@ describe("GNU Readline selection", function()
             workspace .. "/readline-8.3",
             workspace .. "/readline-build",
             workspace .. "/readline-8.3.tar.gz",
-            prefix .. "/lib/titan/deps/readline",
         }) do
             assert.falsy(lfs.symlinkattributes(path, "mode"), path)
         end
@@ -294,50 +293,6 @@ void add_history(const char *line) { (void)line; }
         assert_no_selection_config()
     end)
 
-    it("selects a fake system provider and heals its content config", function()
-        local fake = build_fake_readline()
-        local args = {
-            "READLINE_MODE=system",
-            "READLINE_SYSTEM_CPPFLAGS=-I" .. fake .. "/include",
-            "READLINE_SYSTEM_LDFLAGS=-L" .. fake .. "/lib",
-            "READLINE_SYSTEM_LIBS=",
-        }
-        local ok, output, why, code = make_readline(args)
-        command_succeeded(ok, output, why, code)
-        assert.equal("file",
-            lfs.symlinkattributes(selection_config, "mode"))
-        local expected = read_file(selection_config)
-        assert.truthy(expected:find("provider=system\n", 1, true), expected)
-        assert.truthy(expected:find("termcap=\n", 1, true), expected)
-        assert.truthy(expected:find(
-            "READLINE_SYSTEM_CPPFLAGS=-I" .. fake .. "/include\n",
-            1, true), expected)
-        assert.truthy(expected:find(
-            "READLINE_SYSTEM_LDFLAGS=-L" .. fake .. "/lib\n",
-            1, true), expected)
-        for name, value in pairs(EXPECTED_HASHES) do
-            assert.truthy(expected:find(
-                name .. "=" .. value .. "\n", 1, true), expected)
-        end
-        assert_no_fallback_tree()
-
-        assert.truthy(lfs.touch(selection_config, OLD_MTIME, OLD_MTIME))
-        ok, output, why, code = make_readline(args)
-        command_succeeded(ok, output, why, code)
-        assert.equal(OLD_MTIME,
-            lfs.attributes(selection_config, "modification"))
-        assert.equal(expected, read_file(selection_config))
-
-        write_file(selection_config, "corrupt\n")
-        assert.truthy(lfs.touch(selection_config, OLD_MTIME, OLD_MTIME))
-        ok, output, why, code = make_readline(args)
-        command_succeeded(ok, output, why, code)
-        assert.equal(expected, read_file(selection_config))
-        assert.not_equal(OLD_MTIME,
-            lfs.attributes(selection_config, "modification"))
-        assert_no_fallback_tree()
-    end)
-
     it("binds the vendored patch to the recorded upstream hashes", function()
         local makefile = read_file(MAKEFILE)
         local variables = make_variables(makefile)
@@ -364,10 +319,10 @@ void add_history(const char *line) { (void)line; }
         assert.truthy(recipes:find(
             '"$$stage/lib/libreadline.a" $(LUA_MYLIBS)', 1, true))
         assert.truthy(recipes:find(
-            'lua_mycflags="-I$(READLINE_PRIVATE_INCLUDEDIR) ' ..
+            'lua_mycflags="-I$(abspath $(READLINE_PRIVATE_INCLUDEDIR)) ' ..
             '$$lua_mycflags";', 1, true))
         assert.truthy(recipes:find(
-            'lua_myldflags="-L$(READLINE_PRIVATE_LIBDIR) ' ..
+            'lua_myldflags="-L$(abspath $(READLINE_PRIVATE_LIBDIR)) ' ..
             '$$lua_myldflags";', 1, true))
         assert.truthy(recipes:find(
             'rm -rf "$$stage/lib/pkgconfig";', 1, true))

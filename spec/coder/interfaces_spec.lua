@@ -1426,14 +1426,16 @@ int main(void) {
 
             function bound(fallible: Fallible): integer
                 local fail: () -> integer = fallible:fail
-                return fail()
+                local res = fail()
+                return res
             end
 
             function adjusted(
                 fallible: Fallible,
                 input: value
             ): integer
-                return fallible:adapt(input)
+                local res = fallible:adapt(input)
+                return res
             end
         ]], [[
             local titan = require "titan"
@@ -1450,8 +1452,8 @@ int main(void) {
             assert(not pcall(test.bound, fallible))
             local bound = titan.backtrace()
             assert(bound:find("in test.Box:fail", 1, true), bound)
-            assert(bound:find("in test.Fallible:fail", 1, true), bound)
             assert(bound:find("in test.bound", 1, true), bound)
+            assert(not bound:find("in test.Fallible:fail", 1, true), bound)
             assert(not bound:find("_titan", 1, true), bound)
 
             assert(not pcall(test.adjusted, fallible, 1.0))

@@ -147,10 +147,7 @@ driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.LIBBACKTRACE_PATH = "libbacktrace"
 driver.INCLUDE_PATH = driver.INSTALLED and driver.INSTALL_PATHS and
     driver.INSTALL_PATHS.include or nil
--- -g emits DWARF (carries the #line file/line a traceback needs) and
--- -fno-optimize-sibling-calls keeps tail frames on the stack so libbacktrace
--- can unwind them.
-driver.CFLAGS = "--std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls"
+driver.CFLAGS = "--std=c99 -O2 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g"
 driver.CC = os.getenv("CC") or "cc"
 driver.AR = os.getenv("AR") or "ar"
 driver.RANLIB = os.getenv("RANLIB") or "ranlib"
@@ -2086,7 +2083,7 @@ end
 local runtime_checked = false
 
 local function check_runtime(verbose)
-    if driver.INSTALLED then return true end
+    runtime_checked = runtime_checked or driver.INSTALLED
     if runtime_checked then return true end
     local runtime_lib = driver.TITAN_RUNTIME_PATH .. "libtitan.a"
     if os.getenv("TITAN_RUNTIME_PREBUILT") ~= "1" then
@@ -2122,8 +2119,8 @@ function driver.installed_link_inputs(paths, is_darwin)
     local inputs = {
         paths.libtitan,
         paths.libbacktrace,
+        paths.liblua
     }
-    table.insert(inputs, paths.liblua)
     if not is_darwin then
         table.insert(inputs, "-ldl")
     end

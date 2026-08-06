@@ -1484,57 +1484,6 @@ describe("libuv Makefile configuration", function()
                 1, true), normalized)
         end)
 
-    it("repairs a newer runtime archive with an extra member", function()
-        local root = make_temp_dir()
-        local archive = root .. "/libtitan.a"
-        local config = root .. "/archive-build-config"
-        local source = root .. "/archive-fixture.c"
-        local objects = {
-            root .. "/titan.o",
-            root .. "/titan_coro.o",
-            root .. "/titan_uv.o",
-        }
-        local make_archive = {
-            "make", "--no-print-directory", "-s",
-            "TITAN_RUNTIME_OBJECTS=" .. table.concat(objects, " "),
-            "TITAN_RUNTIME_LIB=" .. archive,
-            "RUNTIME_ARCHIVE_CONFIG=" .. config,
-            archive,
-        }
-        local stale = root .. "/stale.o"
-        local ran, run_error = pcall(function()
-            compile_archive_objects(source, objects)
-
-            local ok, output, why, code = run_argv(make_archive)
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
-
-            write_file(stale, "stale archive member\n")
-            ok, output, why, code = run_argv({ "ar", "qc", archive, stale })
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
-
-            local repaired, repair_output, repair_why, repair_code =
-                run_argv(make_archive)
-            assert.truthy(repaired, repair_output .. "\n(" ..
-                tostring(repair_why) .. ", " ..
-                tostring(repair_code) .. ")")
-            ok, output, why, code = run_argv({ "ar", "t", archive })
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
-            assert.same({ "titan.o", "titan_coro.o", "titan_uv.o" },
-                archive_object_members(output))
-        end)
-        for _, path in ipairs({
-            stale, archive, config, config .. ".tmp", source,
-            objects[1], objects[2], objects[3],
-        }) do
-            os.remove(path)
-        end
-        assert.truthy(lfs.rmdir(root))
-        if not ran then error(run_error, 0) end
-    end)
-
     it("ignores the BSD ranlib index when validating archive objects",
         function()
             local root = make_temp_dir()

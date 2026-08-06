@@ -57,7 +57,7 @@ local function quote(word)
     return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
 end
 local function test_env(root, so)
-    return "env -u LUA_PATH -u LUA_CPATH " ..
+    return "env -u PREFIX -u LUA_PATH -u LUA_CPATH " ..
         "-u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1 " ..
         "TITAN_PATH=" .. quote(root) .. " " ..
         "LUA_PATH=" .. quote(root .. "/?.lua;./?.lua;;") ..
@@ -698,7 +698,6 @@ end
 describe("coroutine standard module", function()
     setup(function()
         preserve_root_artifacts()
-        os.remove("titan-runtime/libtitan.a")
         -- This suite deliberately exercises an exact child image. Hide the
         -- production shallow container from the suite's Titan path by putting
         -- the temporary exact DSO/shim in a private root. The production
@@ -878,8 +877,8 @@ describe("coroutine standard module", function()
     end)
 
     it("rejects a poisoned metatable entry without replacing it",
-    function()
-        local out = run_lua([==[
+        function()
+            local out = run_lua([==[
             local registry = debug.getregistry()
             registry["titan.coroutine"] = "poisoned"
             local ok, err = pcall(require, "titan.coroutine")
@@ -890,36 +889,36 @@ describe("coroutine standard module", function()
             assert(registry["titan.coroutine"] == "poisoned")
             print("OK")
         ]==])
-        assert.match("OK", out)
-    end)
+            assert.match("OK", out)
+        end)
 
     it("publishes a complete coroutine metatable and preserves its type name",
-    function()
-        local source = read_file(COROUTINE_VARIANT_SOURCE)
-        local lookup = assert(source:find(
-            'lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, "titan.coroutine")',
-            1, true))
-        local construct = assert(source:find(
-            "lua.lua_createtable(L, 0, 2)", lookup, true))
-        local name = assert(source:find(
-            'lua.lua_setfield(L, -2, "__name")', construct, true))
-        local gc = assert(source:find(
-            'lua.lua_setfield(L, -2, "__gc")', name, true))
-        local publish = assert(source:find(
-            'lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, "titan.coroutine")',
-            name, true))
-        assert.is_true(lookup < construct and construct < name)
-        assert.is_true(name < gc and gc < publish)
+        function()
+            local source = read_file(COROUTINE_VARIANT_SOURCE)
+            local lookup = assert(source:find(
+                'lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, "titan.coroutine")',
+                1, true))
+            local construct = assert(source:find(
+                "lua.lua_createtable(L, 0, 2)", lookup, true))
+            local name = assert(source:find(
+                'lua.lua_setfield(L, -2, "__name")', construct, true))
+            local gc = assert(source:find(
+                'lua.lua_setfield(L, -2, "__gc")', name, true))
+            local publish = assert(source:find(
+                'lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, "titan.coroutine")',
+                name, true))
+            assert.is_true(lookup < construct and construct < name)
+            assert.is_true(name < gc and gc < publish)
 
-        local out = run_lua([==[
+            local out = run_lua([==[
             local coroutine = require "titan.coroutine"
             local metatable = debug.getregistry()["titan.coroutine"]
             assert(type(metatable) == "table")
             assert(metatable.__name == "titan.coroutine")
             print("OK")
         ]==])
-        assert.match("OK", out)
-    end)
+            assert.match("OK", out)
+        end)
 
     it("anchors a popped payload before clearing its transfer root", function()
         local generated = read_file(COROUTINE_VARIANT_C)

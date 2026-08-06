@@ -97,7 +97,7 @@ describe("compiled-module ABI version", function()
             1, true))
         assert.truthy(makefile:find(
             "$(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) " ..
-            "$(READLINE_SELECTION_CONFIG) FORCE", 1, true))
+            "$(READLINE_SELECTION_CONFIG)", 1, true))
         assert.truthy(makefile:find(
             "System Readline development files unavailable; provisioning",
             1, true))
