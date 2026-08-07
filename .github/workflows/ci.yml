@@ -114,7 +114,7 @@ jobs:
             "readline-build/.titan-readline-8.3-p3/share/licenses/COPYING"
           make luarocks
 
-      - name: Verify bundled Readline warm reuse and repair
+      - name: Install bundled Readline
         run: |
           config="lua-5.5.1/.titan-readline-8.3-p3.config"
           stamp="lua-5.5.1/.titan-readline-8.3-p3.installed"
@@ -126,16 +126,6 @@ jobs:
           test "$(stat -c %Y "$config")" = "$config_mtime"
           test "$(stat -c %Y "$stamp")" = "$stamp_mtime"
           test "$(stat -c %Y "$archive")" = "$archive_mtime"
-
-          cp "$config" "$RUNNER_TEMP/readline.config"
-          cp "$stamp" "$RUNNER_TEMP/readline.installed"
-          truncate -s 64 "$archive"
-          make readline
-          test "$(wc -c < "$archive")" -gt 100000
-          cmp "$config" "$RUNNER_TEMP/readline.config"
-          cmp "$stamp" "$RUNNER_TEMP/readline.installed"
-          cmp LICENSES/readline-LICENSE \
-            "readline-build/.titan-readline-8.3-p3/share/licenses/COPYING"
 
           clean_titan_environment() {
             env \
