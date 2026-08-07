@@ -106,16 +106,15 @@ function InputOutputStream:close()
   if self.closed then return end
   self.input:close()
   local process_cleanup_complete = false
-  do
-    if not self.status and self.process:is_running() then
-      self.process:kill("term")
-      self:wait()
-    end
-    process_cleanup_complete = true
-  finally
+  defer do
     self.output:close()
     if process_cleanup_complete then self.closed = true end
   end
+  if not self.status and self.process:is_running() then
+    self.process:kill("term")
+    self:wait()
+  end
+  process_cleanup_complete = true
 end
 
 function popen(command: string): InputOutputStream

@@ -233,17 +233,16 @@ describe("standalone uncaught errors", function()
     end)
 end)
 
-describe("finally", function()
+describe("finally / defer cleanup", function()
     after_each(clean)
 
-    it("runs the finally on normal completion", function()
+    it("runs deferred cleanup on normal completion", function()
         local out = compile_and_run([[
             function run(): integer
                 local n: integer = 1
                 do
+                    defer n = n + 10
                     n = 2
-                finally
-                    n = n + 10
                 end
                 return n
             end
@@ -254,15 +253,11 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("runs the finally then returns when the body returns", function()
+    it("runs deferred cleanup then returns when the body returns", function()
         local out = compile_and_run([[
             function run(): string
-                do
-                    return "from-body"
-                finally
-                    -- side effect proves the finally ran before the return landed
-                    raise_if_seen()
-                end
+                defer raise_if_seen()
+                return "from-body"
             end
             seen: boolean = false
             function raise_if_seen()
@@ -279,18 +274,17 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("runs the finally on a break out of a try inside a for loop", function()
+    it("runs deferred cleanup on a break out of a try inside a for loop", function()
         local out = compile_and_run([[
             function run(): integer
                 local sum: integer = 0
                 for i = 1, 5 do
                     do
+                        defer sum = sum + 100
                         if i == 3 then
                             break
                         end
                         sum = sum + i
-                    finally
-                        sum = sum + 100
                     end
                 end
                 return sum
@@ -305,7 +299,7 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("runs the finally on a raise propagating through it", function()
+    it("runs deferred cleanup on a raise propagating through it", function()
         local out = compile_and_run([[
             ran: boolean = false
             function mark()
@@ -316,9 +310,8 @@ describe("finally", function()
             end
             function run(): integer
                 do
+                    defer mark()
                     raise "boom"
-                finally
-                    mark()
                 end
                 return 0
             end
@@ -340,9 +333,8 @@ describe("finally", function()
             end
             function run(): integer
                 do
+                    defer local x: integer = 1
                     return deep()
-                finally
-                    local x: integer = 1
                 end
             end
         ]], [==[
@@ -360,7 +352,7 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("runs the finally then returns the caught value", function()
+    it("runs deferred cleanup then returns the caught value", function()
         local out = compile_and_run([[
             log: integer = 0
             function note()
@@ -371,11 +363,10 @@ describe("finally", function()
             end
             function run(): string
                 do
+                    defer note()
                     raise "x"
                 catch
                     return "handled"
-                finally
-                    note()
                 end
             end
         ]], [==[
@@ -386,14 +377,11 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("a finally that raises overrides a pending return", function()
+    it("a deferred raise overrides a pending return", function()
         local out = compile_and_run([[
             function run(): integer
-                do
-                    return 7
-                finally
-                    raise "overridden"
-                end
+                defer raise "overridden"
+                return 7
             end
         ]], [==[
             local ok, err = pcall(test.run)
@@ -404,15 +392,14 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("a finally that raises overrides a pending catch return", function()
+    it("a deferred raise overrides a pending catch return", function()
         local out = compile_and_run([[
             function run(): integer
+                defer raise "from-finally"
                 do
                     raise "body"
                 catch
                     return 7
-                finally
-                    raise "from-finally"
                 end
             end
         ]], [==[
@@ -424,15 +411,14 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("a finally that raises overrides a pending break", function()
+    it("a deferred raise overrides a pending break", function()
         local out = compile_and_run([[
             function run(): integer
                 local n: integer = 0
                 while true do
                     do
+                        defer raise "no-break"
                         break
-                    finally
-                        raise "no-break"
                     end
                 end
                 return n
@@ -446,13 +432,12 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("a finally that raises overrides a pending raise", function()
+    it("a deferred raise overrides a pending raise", function()
         local out = compile_and_run([[
             function run(): integer
                 do
+                    defer raise "replacement"
                     raise "original"
-                finally
-                    raise "replacement"
                 end
                 return 0
             end
@@ -465,7 +450,7 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("a bare re-raise in a catch that has a finally preserves the original trace", function()
+    it("a bare re-raise in a catch with deferred cleanup preserves the original trace", function()
         local out = compile_and_run([[
             function deep(): integer
                 raise "deep-boom"
@@ -483,11 +468,10 @@ describe("finally", function()
             end
             function run(): integer
                 do
+                    defer mark()
                     return mid()
                 catch
                     raise
-                finally
-                    mark()
                 end
             end
         ]], [==[
@@ -504,18 +488,16 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("runs nested finallys inside-out", function()
+    it("runs nested defers inside-out (LIFO)", function()
         local out = compile_and_run([[
             function order(): string
                 local s: string = ""
                 do
+                    defer s = s .. "outer "
                     do
+                        defer s = s .. "inner "
                         s = s .. "body "
-                    finally
-                        s = s .. "inner "
                     end
-                finally
-                    s = s .. "outer "
                 end
                 return s
             end
@@ -527,18 +509,16 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("a return chains through nested finallys", function()
+    it("a return chains through nested defers", function()
         local out = compile_and_run([[
             function nested(): string
                 local s: string = ""
                 do
+                    defer s = s .. "outer "
                     do
+                        defer s = s .. "inner "
                         return "RET"
-                    finally
-                        s = s .. "inner "
                     end
-                finally
-                    s = s .. "outer "
                 end
             end
         ]], [==[
@@ -549,7 +529,7 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("catch gets its own boundary: a raise in catch still runs the finally", function()
+    it("catch gets its own boundary: a raise in catch still runs deferred cleanup", function()
         local out = compile_and_run([[
             log: integer = 0
             function note()
@@ -560,11 +540,10 @@ describe("finally", function()
             end
             function run(): integer
                 do
+                    defer note()
                     raise "body"
                 catch
                     raise "from-catch"
-                finally
-                    note()
                 end
                 return 0
             end
@@ -578,7 +557,7 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("catch-boundary recovery closes Lua to-be-closed variables before finally", function()
+    it("catch-boundary recovery closes Lua to-be-closed variables before deferred cleanup", function()
         local out = compile_and_run([[
             log: integer = 0
             function note()
@@ -592,11 +571,10 @@ describe("finally", function()
             end
             function run(f: () -> integer): integer
                 do
+                    defer note()
                     raise "body"
                 catch
                     return f()
-                finally
-                    note()
                 end
                 return 0
             end
@@ -630,7 +608,7 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("preserves a non-GC enclosing local across the finally", function()
+    it("preserves a non-GC enclosing local across deferred cleanup", function()
         local out = compile_and_run([[
             function boom(): integer
                 raise "boom"
@@ -639,12 +617,11 @@ describe("finally", function()
             function run(): integer
                 local n: integer = 1
                 do
+                    defer n = n + 1000
                     n = 5
                     n = n + boom()
                 catch
                     n = n + 100
-                finally
-                    n = n + 1000
                 end
                 return n
             end
@@ -656,7 +633,7 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("reloads a non-GC local assigned in catch before a catch raise reaches finally", function()
+    it("reloads a non-GC local assigned in catch before a catch raise reaches deferred cleanup", function()
         local out = compile_and_run([[
             seen: integer = 0
             function seen_value(): integer
@@ -664,13 +641,12 @@ describe("finally", function()
             end
             function run()
                 local n: integer = 1
+                defer seen = n
                 do
                     raise "body"
                 catch
                     n = 7
                     raise "catch"
-                finally
-                    seen = n
                 end
             end
         ]], [==[
@@ -683,14 +659,11 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("preserves a multi-return through a finally", function()
+    it("preserves a multi-return through deferred cleanup", function()
         local out = compile_and_run([[
             function run(): (integer, string)
-                do
-                    return 42, "hi"
-                finally
-                    local x: integer = 0
-                end
+                defer local x: integer = 0
+                return 42, "hi"
             end
         ]], [==[
             local a, b = test.run()
@@ -701,7 +674,7 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("keeps GC-valued pending returns rooted while the finally allocates", function()
+    it("keeps GC-valued pending returns rooted while deferred cleanup allocates", function()
         local out = compile_and_run([[
             record R
                 s: string
@@ -717,14 +690,11 @@ describe("finally", function()
             end
 
             function ret(a: string, b: string): (string, {string}, R, value)
-                do
-                    local arr: {string} = { a, b }
-                    local r: R = { s = b }
-                    local v: value = r
-                    return a, arr, r, v
-                finally
-                    churn()
-                end
+                local arr: {string} = { a, b }
+                local r: R = { s = b }
+                local v: value = r
+                defer churn()
+                return a, arr, r, v
             end
         ]], [==[
             collectgarbage("generational")
@@ -741,17 +711,16 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("runs finally before a break issued from a catch", function()
+    it("runs deferred cleanup before a break issued from a catch", function()
         local out = compile_and_run([[
             function run(): integer
                 local n: integer = 0
                 while n < 10 do
                     do
+                        defer n = n + 100
                         raise "stop"
                     catch
                         break
-                    finally
-                        n = n + 100
                     end
                     n = n + 1
                 end
@@ -764,7 +733,7 @@ describe("finally", function()
         assert.match("OK", out)
     end)
 
-    it("cascades nested finally blocks on a propagating raise", function()
+    it("cascades nested deferred cleanup blocks on a propagating raise", function()
         local out = compile_and_run([[
             log: string = ""
             function resetlog()
@@ -779,28 +748,24 @@ describe("finally", function()
 
             function cascade(): integer
                 do
+                    defer note("outer ")
                     do
+                        defer note("inner ")
                         raise "x"
-                    finally
-                        note("inner ")
                     end
-                finally
-                    note("outer ")
                 end
                 return 0
             end
 
             function override_inside_finally(): integer
+                defer do
+                    defer note("cleanup ")
+                    raise "inner"
+                end
                 do
                     raise "body"
                 catch
                     note("catch ")
-                finally
-                    do
-                        raise "inner"
-                    finally
-                        note("cleanup ")
-                    end
                 end
                 return 0
             end

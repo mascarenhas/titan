@@ -22,9 +22,8 @@ end
 local function default_exit(marker: string): integer
   defer append(marker, "defer;")
   do
+    defer append(marker, "finally;")
     system.exit()
-  finally
-    append(marker, "finally;")
   end
   append(marker, "after;")
   return 99

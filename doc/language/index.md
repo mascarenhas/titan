@@ -54,7 +54,7 @@ use the chapters below for the normative language reference.
 | [Option types](option-types.md) | `T?`: nil-tolerant types — syntax, semantics, defaulting with `or`, and how `nil` flows through arrays, maps, and the Lua boundary. |
 | [Expressions](expressions.md) | Literals and escapes, operators and precedence, Lua-faithful arithmetic, concatenation, `and`/`or`, explicit casts with `as`, non-raising type tests with `is`, constructors, calls. |
 | [Statements](statements.md) | Declarations and inference, assignment and multiple assignment, control flow, the numeric `for`, `defer`, `return`. |
-| [Defer](defer.md) | `defer <statement>` cleanup, its block transformation model, scoping, LIFO order, and interaction with return, break, raise, catch, and finally. |
+| [Defer](defer.md) | `defer <statement>` cleanup, scoping, LIFO order, and interaction with return, break, raise, and catch. |
 | [Functions](functions.md) | Declarations, argument adjustment, multiple return values, visibility, functions as values, and the `main` convention for standalone programs. |
 | [Named arguments](named-arguments.md) | Declaration-based `f { name = value }` and method-call syntax, omissions, evaluation order, record construction, direct C prototype names, and Lua's positional-only boundary. |
 | [Anonymous functions and closures](closures.md) | Lambda expressions, parameter/return type inference, lexical capture of enclosing locals, fresh-value-per-evaluation semantics, and bound method references `obj:method`. |
@@ -176,10 +176,10 @@ Lua and `value` never discover an implementation from a bare record or union.
 
 ### Other
 
-* **Error handling is intentionally small.** Titan has `raise`,
-  `catch`, and `finally`, but errors are still plain Lua values plus an
+* **Error handling is intentionally small.** Titan has `raise` and
+  `catch`, but errors are still plain Lua values plus an
   out-of-band traceback: there is no exception class hierarchy and no
-  chaining/cause mechanism. A new error in a catch or finally replaces the
+  chaining/cause mechanism. A new error in a catch handler replaces the
   previous one ([error handling](error-handling.md)).
 * **Titan ships a focused standard library.** It includes stackful
   `coroutine`; the libuv-backed `async` Task facade and `timer`; `io`

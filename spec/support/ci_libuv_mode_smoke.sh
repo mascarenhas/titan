@@ -541,6 +541,12 @@ function main(args: {string}): integer
   local process_child = args[2]
   local envname = "TITAN_STATIC_LIBUV_MODE_SMOKE"
   local original: string? = system.getenv(envname)
+  defer
+    if original then
+      system.setenv(envname, original as string)
+    else
+      system.unsetenv(envname)
+    end
   do
     system.setenv(envname, "os-ready")
     check(system.getenv(envname) == "os-ready",
@@ -678,12 +684,6 @@ function main(args: {string}): integer
     check(not process:is_running(),
           "static process remained running after wait")
     fs.unlink(marker)
-  finally
-    if original then
-      system.setenv(envname, original as string)
-    else
-      system.unsetenv(envname)
-    end
   end
   return 0
 end

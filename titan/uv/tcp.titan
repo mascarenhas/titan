@@ -335,6 +335,7 @@ local function complete_getaddrinfo(task: Task, status: integer,
   local addresses: AddressList? = nil
   local failure: value = nil
   do
+    defer libuv.uv_freeaddrinfo(result)
     if status < 0 then
       failure = make_error(status, "net.resolve")
     else
@@ -346,8 +347,6 @@ local function complete_getaddrinfo(task: Task, status: integer,
     end
   catch
     failure = error
-  finally
-    libuv.uv_freeaddrinfo(result)
   end
 
   if failure ~= nil then
@@ -425,6 +424,7 @@ local function tcp_connection_dispatch(server: uv_tcp_t, status: integer)
   if server.runtime.closing then return end
   local client: uv_tcp_t? = nil
   do
+    defer if client then begin_tcp_close(client as uv_tcp_t, nil) end
     check_status(status, "net.accept")
     client = new_tcp(server.runtime, new_connection_role())
     local accepted = client as uv_tcp_t
@@ -438,8 +438,6 @@ local function tcp_connection_dispatch(server: uv_tcp_t, status: integer)
     client = nil
   catch
     fail_server(server, error)
-  finally
-    if client then begin_tcp_close(client as uv_tcp_t, nil) end
   end
 catch
   local failure = error
@@ -604,13 +602,12 @@ function _net_connect(host: string, port: integer): uv_tcp_t
     local tcp = new_tcp(task.runtime, new_connection_role())
     local connected = false
     do
+      defer if not connected then begin_tcp_close(tcp, nil) end
       await(Call.tcp_connect(
           TcpConnectCall.new(tcp, addresses, address_index)))
       connected = true
     catch
       last_failure = error
-    finally
-      if not connected then begin_tcp_close(tcp, nil) end
     end
     if connected then return tcp end
     local cancelled? = task.cancel_value

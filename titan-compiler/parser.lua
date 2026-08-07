@@ -152,15 +152,14 @@ function defs.adjust_exp(pos, exp)
     end
 end
 
--- A `block` with optional `(catch …)? (finally …)?` trailers. When neither is
--- present the block is the plain `StatBlock` (the common case, so no wrapper
--- node is introduced); when either is present we wrap it in a `StatTry` whose
--- `catchblock`/`finallyblock` are the clause bodies (false when absent).
-function defs.trywrap(pos, block, catchblock, finallyblock)
-    if not catchblock and not finallyblock then
+-- A `block` with optional `(catch …)?` trailer. When not present the block is
+-- the plain `StatBlock` (the common case, so no wrapper node is introduced);
+-- when present we wrap it in a `StatTry` whose `catchblock` is the clause body.
+function defs.trywrap(pos, block, catchblock)
+    if not catchblock then
         return block
     end
-    return ast.StatTry(pos, block, catchblock, finallyblock)
+    return ast.StatTry(pos, block, catchblock, false)
 end
 
 function defs.deferstat(pos, stat)
@@ -929,16 +928,11 @@ local grammar = re.compile([[
 
     unionpayloadopt <- ((COLON type^TypeUnionVariant)?)          -> opt
 
-    -- A `block` may optionally absorb `(catch <block>)? (finally <block>)?`
-    -- trailers. When either is present `trywrap` builds a `StatTry` wrapper;
-    -- otherwise it returns the plain `StatBlock`. Since every construct (function
-    -- body, loop body, if branch, bare `do`) consumes `block`, catch/finally
-    -- become available everywhere with no per-construct edits. The catch/finally
-    -- clause bodies are `simpleblock`s (plain statement lists with no trailers),
-    -- so an inner catch-block cannot greedily swallow the outer `finally`.
+    -- A `block` may optionally absorb `(catch <block>)?` trailer.
+    -- When present `trywrap` builds a `StatTry` wrapper; otherwise it returns
+    -- the plain `StatBlock`.
     block           <- (P  simpleblock
-                            ((CATCH simpleblock^CatchBlock)? -> opt)
-                            ((FINALLY simpleblock^FinallyBlock)? -> opt)) -> trywrap
+                            ((CATCH simpleblock^CatchBlock)? -> opt)) -> trywrap
 
     simpleblock     <- (P  {| statement* returnstat? |})         -> simpleblock
 

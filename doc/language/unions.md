@@ -225,8 +225,7 @@ every other alias.
 
 The binding is scoped to that arm. Each arm and the `else` clause is a regular
 Titan block, not merely a list of simple statements. It can therefore contain
-nested declarations and control flow and can carry its own `catch` and
-`finally` clauses:
+nested declarations and control flow and can carry its own `catch` clause:
 
 ```titan
 case message
@@ -235,21 +234,15 @@ when write: text then
     consume(text)
 catch
     report(text)
-finally
-    finish(text)
 when quit then
     stop()
-finally
-    release()
 else
     ignore()
 end
 ```
 
-The arm binding is visible in that arm's protected body, `catch`, and
-`finally`. Locals declared inside the protected body follow the ordinary
-error-handling scope rule and are not visible in sibling `catch` or `finally`
-clauses.
+The arm binding is visible in that arm's protected body and `catch`. Locals declared inside the protected body follow the ordinary
+error-handling scope rule and are not visible in the sibling `catch` clause.
 
 `defer` needs no case-specific behavior: it is transformed within the arm or
 `else` block that contains it, runs at that block's exit, and never extends

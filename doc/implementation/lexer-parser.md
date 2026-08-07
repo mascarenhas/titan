@@ -356,7 +356,7 @@ The parser performs several rewrites that later passes rely on:
 
 * **The root module initializer keeps an explicit parser role.** The optional
   final root `do ... end` produces the ordinary `Ast.StatBlock`, or the
-  `Ast.StatTry` already used when its block has `catch`/`finally` trailers.
+  `Ast.StatTry` already used when its block has a `catch` trailer.
   The small `moduleinit` action sets `_module_initializer` and changes the
   node location to the `do` keyword. Folder assembly can therefore remove the
   main initializer and append it after all contributor roots, or report a
@@ -371,8 +371,8 @@ The parser performs several rewrites that later passes rely on:
 * **`case` arms are ordinary blocks.** The grammar requires one or more
   `when Name [: binding] then block` arms and an optional `else block`.
   It builds `Ast.StatCase` and `Ast.CaseArm` directly. Each `block` is the
-  same production used elsewhere, including its trailing `catch` and
-  `finally` support and the normal recursive `defer` transformation. There is
+  same production used elsewhere, including its trailing `catch`
+  support and the normal recursive `defer` transformation. There is
   no fallthrough-oriented or statement-list-only arm grammar.
 
 * **Numeric and generic `for` share their prefix.** The grammar parses

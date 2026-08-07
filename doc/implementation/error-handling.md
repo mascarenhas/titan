@@ -125,16 +125,18 @@ be used. This keeps the cache per Lua state without mutable per-DSO C globals.
 
 ## Frontend representation
 
-`catch`, `finally`, and `raise` are reserved words.
+`catch`, `finally`, and `raise` are reserved words (`finally` is reserved in the lexer, though surface syntax `finally` blocks have been removed from the language).
 
 The grammar has no `try` keyword. The `block` production parses a normal
-statement block and then optionally absorbs a `catch` block and/or a
-`finally` block. If neither trailer is present, the AST is the normal
-`Ast.StatBlock`; otherwise the parser wraps it in:
+statement block and then optionally absorbs a `catch` block trailer.
+If no catch trailer is present (and no `defer` statements were lowered into `finallyblock`),
+the AST is the normal `Ast.StatBlock`; otherwise the parser builds:
 
 ```lua
 Ast.StatTry(loc, block, catchblock_or_false, finallyblock_or_false)
 ```
+
+Lowered `defer` statements produce `Ast.StatTry` nodes with `finallyblock` set to an `Ast.StatBlock` containing the deferred statement.
 
 `raise <exp>` and bare `raise` parse as:
 
@@ -142,12 +144,11 @@ Ast.StatTry(loc, block, catchblock_or_false, finallyblock_or_false)
 Ast.StatRaise(loc, exp_or_false)
 ```
 
-The catch/finally clause bodies are plain statement lists, not full
-trailer-consuming blocks. That prevents an inner catch body from greedily
-swallowing an outer `finally`.
+The catch clause body is a plain statement list, not a full
+trailer-consuming block.
 
 Every `case` arm and its optional `else` consume the ordinary full `block`
-production. An arm can therefore carry its own `catch` and/or `finally`, and
+production. An arm can therefore carry its own `catch` trailer or `defer` statements, and
 the parser produces the same `Ast.StatTry` wrapper used anywhere else. There
 is no case-specific error-handling form.
 

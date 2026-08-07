@@ -114,7 +114,7 @@ describe("unions (typechecker)", function()
         assert.equal(0, statement.arms[2]._variant_index)
     end)
 
-    it("keeps a binding visible through its arm's catch, finally, and defer",
+    it("keeps a binding visible through its arm's catch and defer",
     function()
         assert_check([[
             union Message
@@ -130,8 +130,6 @@ describe("unions (typechecker)", function()
                     defer use(text)
                     use(text)
                 catch
-                    use(text)
-                finally
                     use(text)
                 end
             end

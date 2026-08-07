@@ -392,14 +392,13 @@ describe("automatic C object code generation", function()
                 function catch_finally(): integer
                     local point: c.ffi_point
                     do
+                        defer point.y =
+                            (point.x as integer + 19) as c.ffi_int
                         do
                             raise "body"
                         catch
                             point.x = 17
                             raise "catch"
-                        finally
-                            point.y =
-                                (point.x as integer + 19) as c.ffi_int
                         end
                     catch
                         return point.y as integer

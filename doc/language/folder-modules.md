@@ -116,8 +116,8 @@ folder module it may appear only at the end of the main source. Contributor
 files may contain ordinary nested `do` statements inside functions and other
 blocks, but may not contain a root module initializer.
 
-Like any Titan block, that main initializer may have `catch` and `finally`
-trailers. Those trailers remain part of the one initializer; they do not let a
+Like any Titan block, that main initializer may have a `catch`
+trailer. That trailer remains part of the one initializer; it does not let a
 contributor define another root initialization block.
 
 ```lua

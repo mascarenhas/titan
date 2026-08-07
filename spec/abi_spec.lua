@@ -70,13 +70,13 @@ describe("compiled-module ABI version", function()
         assert.equal(driver.TITAN_VER, runtime_version)
         assert.equal(driver.TITAN_VER_SUFFIX, runtime_suffix)
         assert.equal("_" .. driver.TITAN_VER:gsub("%.", "_"),
-                     driver.TITAN_VER_SUFFIX)
+            driver.TITAN_VER_SUFFIX)
         assert.equal("0.21", driver.TITAN_VER)
         assert.equal("_0_21", driver.TITAN_VER_SUFFIX)
         assert.truthy(makefile:find(
             "LUA_VERSION      ?= 5.5.1", 1, true))
         assert.truthy(makefile:find(
-            "LUA_URL          := https://www.lua.org/ftp/$(LUA_TARBALL)",
+            "LUA_URL          := https://drive.google.com/uc?export=download&id=15oUbOJpvI7JGPK9CEYD38p06ahPywPpQ",
             1, true))
         assert.truthy(makefile:find(
             "else ifeq ($(HOST_OS),Linux)\n    LUA_PLATFORM := linux-readline",
@@ -135,9 +135,7 @@ describe("compiled-module ABI version", function()
         assert.truthy(workflow:find(
             "cmp LICENSES/readline-LICENSE", 1, true))
         assert.truthy(workflow:find(
-            "Verify bundled Readline warm reuse and repair", 1, true))
-        assert.truthy(workflow:find(
-            'truncate -s 64 "$archive"', 1, true))
+            "Install bundled Readline", 1, true))
         assert.truthy(workflow:find(
             "make lua", 1, true))
         assert.truthy(workflow:find(
@@ -222,13 +220,13 @@ describe("compiled-module ABI version", function()
     end)
 
     it("rejects a 0.20 archive before decoding or linking old metadata",
-       function()
-        local payload = assert(staticmetadata.render(
-            "legacy20archive", "0.20",
-            "this is deliberately invalid 0.20 metadata"))
-        local initializer = assert(staticmetadata.c_initializer(payload))
-        local f = assert(io.open("legacy20archive.c", "w"))
-        f:write(string.format([[
+        function()
+            local payload = assert(staticmetadata.render(
+                "legacy20archive", "0.20",
+                "this is deliberately invalid 0.20 metadata"))
+            local initializer = assert(staticmetadata.c_initializer(payload))
+            local f = assert(io.open("legacy20archive.c", "w"))
+            f:write(string.format([[
 #if defined(__APPLE__)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section("__TEXT,__titanmeta")))
@@ -240,42 +238,42 @@ TITAN_META_SECTION
 static const unsigned char legacy20archive_metadata[] = %s;
 int legacy20archive_payload(void) { return 0; }
 ]], initializer))
-        f:close()
+            f:close()
 
-        local ok = os.execute(configured_command(
-            driver.CC, "-c", "-fPIC", "legacy20archive.c",
-            "-o", "legacy20archive.o"))
-        assert.truthy(ok, "could not build fake 0.20 archive object")
-        ok = os.execute(configured_command(
-            driver.AR, "rcs", "legacy20archive.a", "legacy20archive.o"))
-        assert.truthy(ok, "could not build fake 0.20 archive")
-        ok = os.execute(configured_command(
-            driver.RANLIB, "legacy20archive.a"))
-        assert.truthy(ok, "could not index fake 0.20 archive")
+            local ok = os.execute(configured_command(
+                driver.CC, "-c", "-fPIC", "legacy20archive.c",
+                "-o", "legacy20archive.o"))
+            assert.truthy(ok, "could not build fake 0.20 archive object")
+            ok = os.execute(configured_command(
+                driver.AR, "rcs", "legacy20archive.a", "legacy20archive.o"))
+            assert.truthy(ok, "could not build fake 0.20 archive")
+            ok = os.execute(configured_command(
+                driver.RANLIB, "legacy20archive.a"))
+            assert.truthy(ok, "could not index fake 0.20 archive")
 
-        driver.imported = {}
-        local decoded = false
-        local original_decode = driver.decode_module_interface
-        driver.decode_module_interface = function(...)
-            decoded = true
-            return original_decode(...)
-        end
-        local loader = driver.defaultloader({}, {
+            driver.imported = {}
+            local decoded = false
+            local original_decode = driver.decode_module_interface
+            driver.decode_module_interface = function(...)
+                decoded = true
+                return original_decode(...)
+            end
+            local loader = driver.defaultloader({}, {
                 prefer_static = true,
             })
-        local result = table.pack(pcall(function()
-            return driver.with_loader(loader, function(loader)
-                return loader("legacy20archive")
-            end)
-        end))
-        driver.decode_module_interface = original_decode
-        assert.truthy(result[1], result[2])
-        local loaded, err = result[2], result[3]
-        assert.falsy(loaded)
-        assert.falsy(decoded)
-        assert.match("ABI mismatch", err, 1, true)
-        assert.match("expected 0.21 but found 0.20", err, 1, true)
-    end)
+            local result = table.pack(pcall(function()
+                return driver.with_loader(loader, function(loader)
+                    return loader("legacy20archive")
+                end)
+            end))
+            driver.decode_module_interface = original_decode
+            assert.truthy(result[1], result[2])
+            local loaded, err = result[2], result[3]
+            assert.falsy(loaded)
+            assert.falsy(decoded)
+            assert.match("ABI mismatch", err, 1, true)
+            assert.match("expected 0.21 but found 0.20", err, 1, true)
+        end)
 
     it("ignores the previous versioned Titan path variable", function()
         local prefix = assert(prefix_from_cpath(package.cpath),

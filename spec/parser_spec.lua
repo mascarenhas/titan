@@ -263,11 +263,10 @@ describe("Titan parser", function()
 
         local protected = assert(parser.parse("protected-initializer.titan", [[
 do
+    defer local cleaned: boolean = true
     raise "expected"
 catch
     local caught: value = error
-finally
-    local cleaned: boolean = true
 end
 ]]))
         assert.equal("Ast.StatTry", protected[#protected]._tag)
@@ -1231,9 +1230,6 @@ end
                 catch
                     defer cleanup_catch()
                     recover()
-                finally
-                    defer cleanup_finally()
-                    finish()
                 when second then
                     if ready then
                         nested()
@@ -1246,9 +1242,6 @@ end
                 catch
                     defer cleanup_else_catch()
                     recover_else()
-                finally
-                    defer cleanup_else_finally()
-                    finish_else()
                 end
             ]], {
                 {
@@ -1270,17 +1263,6 @@ end
                                     },
                                 },
                                 catchblock = {
-                                    _tag = "Ast.StatBlock",
-                                    stats = {
-                                        {
-                                            _tag = "Ast.StatTry",
-                                            finallyblock = {
-                                                _tag = "Ast.StatBlock",
-                                            },
-                                        },
-                                    },
-                                },
-                                finallyblock = {
                                     _tag = "Ast.StatBlock",
                                     stats = {
                                         {
@@ -1331,17 +1313,6 @@ end
                                 },
                             },
                         },
-                        finallyblock = {
-                            _tag = "Ast.StatBlock",
-                            stats = {
-                                {
-                                    _tag = "Ast.StatTry",
-                                    finallyblock = {
-                                        _tag = "Ast.StatBlock",
-                                    },
-                                },
-                            },
-                        },
                     },
                 },
             })
@@ -1351,6 +1322,7 @@ end
             assert_statements_ast([[
                 while running do
                     do
+                        defer cleanup()
                         case outer
                         when item then
                             case inner
@@ -1358,8 +1330,6 @@ end
                                 break
                             end
                         end
-                    finally
-                        cleanup()
                     end
                 end
             ]], {
@@ -1369,17 +1339,22 @@ end
                         _tag = "Ast.StatBlock",
                         stats = {
                             {
-                                _tag = "Ast.StatTry",
-                                block = {
-                                    stats = {
-                                        {
-                                            _tag = "Ast.StatCase",
-                                            arms = {
+                                _tag = "Ast.StatBlock",
+                                stats = {
+                                    {
+                                        _tag = "Ast.StatTry",
+                                        block = {
+                                            stats = {
                                                 {
-                                                    block = {
-                                                        stats = {
-                                                            {
-                                                                _tag = "Ast.StatCase",
+                                                    _tag = "Ast.StatCase",
+                                                    arms = {
+                                                        {
+                                                            block = {
+                                                                stats = {
+                                                                    {
+                                                                        _tag = "Ast.StatCase",
+                                                                    },
+                                                                },
                                                             },
                                                         },
                                                     },
@@ -3655,46 +3630,12 @@ end]])
             })
         end)
 
-        it("parses a `do` block with only a finally", function()
-            assert_statements_ast([[
-                do
-                    print(1)
-                finally
-                    print(2)
-                end
-            ]], {
-                { _tag = "Ast.StatTry",
-                  block = { _tag = "Ast.StatBlock" },
-                  catchblock = false,
-                  finallyblock = { _tag = "Ast.StatBlock" } }
-            })
-        end)
-
-        it("parses a `do` block with both catch and finally", function()
-            assert_statements_ast([[
-                do
-                    print(1)
-                catch
-                    print(error, traceback)
-                finally
-                    print(2)
-                end
-            ]], {
-                { _tag = "Ast.StatTry",
-                  block = { _tag = "Ast.StatBlock" },
-                  catchblock = { _tag = "Ast.StatBlock" },
-                  finallyblock = { _tag = "Ast.StatBlock" } }
-            })
-        end)
-
-        it("attaches catch/finally to a function body", function()
+        it("attaches catch to a function body", function()
             assert_program_ast([[
                 function f(): nil
                     print(1)
                 catch
                     print(error)
-                finally
-                    print(2)
                 end
             ]], {
                 { _tag = "Ast.TopLevelFunc",
@@ -3702,7 +3643,7 @@ end]])
                   block = { _tag = "Ast.StatTry",
                             block = { _tag = "Ast.StatBlock" },
                             catchblock = { _tag = "Ast.StatBlock" },
-                            finallyblock = { _tag = "Ast.StatBlock" } } }
+                            finallyblock = false } }
             })
         end)
 
@@ -3721,46 +3662,14 @@ end]])
             })
         end)
 
-        it("attaches finally to an if branch", function()
-            assert_statements_ast([[
-                if true then
+        it("rejects `finally` as a block trailer", function()
+            assert_statements_syntax_error([[
+                do
                     print(1)
                 finally
                     print(2)
                 end
-            ]], {
-                { _tag = "Ast.StatIf",
-                  thens = {
-                      { _tag = "Ast.Then",
-                        block = { _tag = "Ast.StatTry",
-                                  catchblock = false,
-                                  finallyblock = { _tag = "Ast.StatBlock" } } }
-                  } }
-            })
-        end)
-
-        it("nests try blocks (inner catch does not swallow outer finally)", function()
-            assert_statements_ast([[
-                do
-                    do
-                        raise "x"
-                    catch
-                        print("inner")
-                    end
-                finally
-                    print("outer")
-                end
-            ]], {
-                { _tag = "Ast.StatTry",
-                  block = { _tag = "Ast.StatBlock",
-                            stats = {
-                                { _tag = "Ast.StatTry",
-                                  catchblock = { _tag = "Ast.StatBlock" },
-                                  finallyblock = false }
-                            } },
-                  catchblock = false,
-                  finallyblock = { _tag = "Ast.StatBlock" } }
-            })
+            ]], "EndBlock")
         end)
 
         it("lowers `defer <statement>` over the rest of its simpleblock", function()

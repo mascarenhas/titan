@@ -58,24 +58,22 @@ describe("error handling (typechecker)", function()
             ]])
         end)
 
-        it("typechecks a try+catch+finally", function()
+        it("typechecks a try+catch with defer", function()
             ok([[
                 function f(): nil
+                    defer nop(3)
                     nop(1)
                 catch
                     nop(2)
-                finally
-                    nop(3)
                 end
             ]])
         end)
 
-        it("typechecks a finally-only block", function()
+        it("typechecks a deferred cleanup", function()
             ok([[
                 function f(): nil
+                    defer nop(2)
                     nop(1)
-                finally
-                    nop(2)
                 end
             ]])
         end)
@@ -132,40 +130,39 @@ describe("error handling (typechecker)", function()
             ]])
         end)
 
-        it("accepts `raise <exp>` in a finally", function()
+        it("accepts `raise <exp>` in a defer", function()
             ok([[
                 function f(): nil
+                    defer raise "boom"
                     nop(1)
-                finally
-                    raise "boom"
                 end
             ]])
         end)
 
-        it("accepts a break to a loop written INSIDE a finally", function()
+        it("accepts a break to a loop written INSIDE a defer", function()
             ok([[
                 function f(): nil
-                    nop(1)
-                finally
-                    while true do
+                    defer while true do
                         break
                     end
+                    nop(1)
                 end
             ]])
         end)
 
-        it("accepts return/break inside a lambda defined in a finally", function()
+        it("accepts return/break inside a lambda defined in a defer", function()
             ok([[
                 function f(): nil
-                    nop(1)
-                finally
-                    local g: () -> integer = function(): integer
-                        while true do
-                            break
+                    defer do
+                        local g: () -> integer = function(): integer
+                            while true do
+                                break
+                            end
+                            return 1
                         end
-                        return 1
+                        nop(g())
                     end
-                    nop(g())
+                    nop(1)
                 end
             ]])
         end)
@@ -195,28 +192,24 @@ describe("error handling (typechecker)", function()
             ]])
         end)
 
-        it("needs no trailing return when an unconditional finally raise terminates",
+        it("needs no trailing return when an unconditional defer raise terminates",
         function()
             ok([[
                 function f(): integer
+                    defer raise "always"
                     nop(1)
-                finally
-                    raise "always"
                 end
             ]])
         end)
 
         it("body+catch returning satisfies always-returns through a straight-line "
-           .. "finally", function()
-            -- A finally with no terminator falls through, so always-returns comes
-            -- from body+catch both returning (the second always-returns disjunct).
+           .. "defer", function()
             ok([[
                 function f(): integer
+                    defer nop(3)
                     return 1
                 catch
                     return 2
-                finally
-                    nop(3)
                 end
             ]])
         end)
@@ -241,14 +234,11 @@ describe("error handling (typechecker)", function()
             ]])
         end)
 
-        it("rejects a bare raise in a finally", function()
+        it("rejects a bare raise in a defer statement", function()
             bad("bare 'raise'", [[
                 function f(): nil
-                    nop(1)
-                catch
-                    nop(2)
-                finally
-                    raise
+                    defer raise
+                    return
                 end
             ]])
         end)
@@ -268,23 +258,23 @@ describe("error handling (typechecker)", function()
             ]])
         end)
 
-        it("rejects a return inside a finally", function()
+        it("rejects a return inside a defer", function()
             bad("cannot 'return' from inside a finally", [[
                 function f(): integer
+                    defer do
+                        return 2
+                    end
                     return 1
-                finally
-                    return 2
                 end
             ]])
         end)
 
-        it("rejects a break that escapes a finally", function()
+        it("rejects a break that escapes a defer", function()
             bad("'break' cannot escape a finally", [[
                 function f(): nil
                     while true do
+                        defer break
                         nop(1)
-                    finally
-                        break
                     end
                 end
             ]])
@@ -296,17 +286,6 @@ describe("error handling (typechecker)", function()
                     local x: integer = 1
                     nop(x)
                 catch
-                    nop(x)
-                end
-            ]])
-        end)
-
-        it("rejects a body local referenced in the finally (sibling scope)", function()
-            bad("variable 'x' not declared", [[
-                function f(): nil
-                    local x: integer = 1
-                    nop(x)
-                finally
                     nop(x)
                 end
             ]])
