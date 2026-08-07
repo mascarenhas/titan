@@ -9,7 +9,7 @@ programmer intent are run-time errors.
 
 Run-time errors are ordinary Lua errors. They can be caught by Lua
 `pcall`/`xpcall`, they can be raised from Titan with `raise`, and they can
-be handled inside Titan with `catch` and `finally` block trailers.
+be handled inside Titan with `catch` block trailers.
 
 ## Compile-time and run-time errors
 
@@ -71,47 +71,34 @@ end
 
 Using bare `raise` anywhere else is a compile-time error.
 
-## `catch` and `finally`
+## `catch`
 
-Titan does not have a `try` keyword. Instead, `catch` and `finally`
-attach to a block. A `do ... end` block is the most explicit spelling:
+Titan does not have a `try` keyword. Instead, `catch` attaches to a block. A `do ... end` block is the most explicit spelling:
 
-```lua
+```titan
 do
     risky()
 catch
     handle(error, traceback)
-finally
-    cleanup()
 end
 ```
 
-The same trailers may appear on any construct whose body is a block:
+The same trailer may appear on any construct whose body is a block:
 function bodies, `while` bodies, `repeat` bodies, numeric `for` bodies,
 `if`/`elseif`/`else` arms, union `when` arms and their `else`, anonymous
-function bodies, and nested
-`do ... end` blocks. Either clause may appear by itself; if both appear,
-`catch` comes before `finally`.
+function bodies, and nested `do ... end` blocks.
 
-```lua
+```titan
 function parse(s: string): integer
     return parse_integer(s)
 catch
     return 0
-finally
-    bump_attempt_counter()
-end
-
-while running do
-    poll()
-finally
-    close_socket()
 end
 ```
 
 A union case binding is established outside its arm's protected block, so it
-is visible in that arm's body, catch, and finally. Locals declared inside the
-body remain hidden from those sibling clauses. Each arm is an independent
+is visible in that arm's body and catch. Locals declared inside the body
+remain hidden from the sibling catch clause. Each arm is an independent
 error-handling boundary.
 
 The `catch` block has two implicit locals:
@@ -124,11 +111,11 @@ The `catch` block has two implicit locals:
 These locals are read-only snapshots. Assigning to `error` or `traceback`
 inside the catch is a compile-time error.
 
-The body, catch, and finally are sibling scopes. Locals declared in the
-body are not visible in the catch or finally, because the body may have
-failed before those locals were initialized:
+The body and catch are sibling scopes. Locals declared in the body are not
+visible in the catch, because the body may have failed before those locals
+were initialized:
 
-```lua
+```titan
 do
     local tmp = compute()
     risky(tmp)
@@ -138,70 +125,12 @@ catch
 end
 ```
 
-## Propagation and cleanup semantics
+## Propagation semantics
 
 `catch` handles errors raised by the body. If the catch completes normally,
 the error is swallowed and execution continues after the whole construct.
-If there is no catch, the error keeps propagating after any finally runs.
-
-`finally` runs on every exit from its body or catch:
-
-* normal fallthrough;
-* a caught or uncaught run-time error;
-* `return`;
-* `break`.
-
-If the finally completes normally, Titan resumes the pending action: it
-falls through, returns the saved return values, breaks out of the target
-loop, or re-raises the saved error.
-
-If the finally raises — either with `raise <exp>` or by triggering another
-run-time error — that new error overrides the pending action. There is no
-exception chaining: errors are plain Lua values plus an out-of-band
-traceback, so a new error in a catch or finally replaces the previous one.
-
-```lua
-function f(): integer
-    return 10
-finally
-    raise "cleanup failed"   -- overrides the pending return
-end
-```
-
-To keep that rule simple and predictable, Titan forbids explicit control
-transfers that would leave a finally:
-
-* `return` inside a finally is a compile-time error.
-* `break` inside a finally is a compile-time error if it would break a
-  loop outside the finally.
-* A `break` that targets a loop written inside the finally is allowed.
-* `raise <exp>` inside a finally is allowed, because run-time errors can
-  always happen during cleanup and must propagate.
-
-The rule is lexical to the finally block itself. Nested anonymous
-functions are checked as their own function bodies, so a `return` inside
-such a nested function is legal and returns from that function, not from
-the enclosing finally.
-
-```lua
-while true do
-    risky()
-finally
-    -- compile-time error: this break would leave the finally
-    break
-end
-
-do
-    risky()
-finally
-    while true do
-        break       -- ok: breaks the loop inside the finally
-    end
-end
-```
-
-Nested finally blocks run inside-out. A re-raised error keeps the original
-trace as it passes through each cleanup.
+If there is no catch, the error keeps propagating. Automatic cleanup via
+`defer` statements is described in [Defer](defer.md).
 
 ## Interacting with Lua
 

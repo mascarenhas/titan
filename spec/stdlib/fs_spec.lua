@@ -214,14 +214,13 @@ function start_paths(root: string, target: string,
 
     local original = fs.pwd()
     do
+      defer fs.chdir(original)
       fs.chdir(cwd)
       local changed = fs.pwd()
       check(changed ~= original and fs.read_file("marker") == "cwd",
             "chdir did not select the requested directory")
       check(fs.read_file(changed .. "/marker") == "cwd",
             "pwd did not identify the current directory")
-    finally
-      fs.chdir(original)
     end
     check(fs.pwd() == original, "chdir did not restore pwd")
 

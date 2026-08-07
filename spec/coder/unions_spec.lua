@@ -175,13 +175,12 @@ describe("unions (end-to-end)", function()
             function inspect(present: boolean): integer
                 case optional(present)
                 when some: n then
+                    defer finally_runs = finally_runs + 1
                     arm_runs = arm_runs + 1
                     return n
                 catch
                     catch_runs = catch_runs + 1
                     return -2
-                finally
-                    finally_runs = finally_runs + 1
                 when none then
                     return 0
                 else
@@ -225,16 +224,16 @@ describe("unions (end-to-end)", function()
                 local out = 0
                 case message
                 when write: text then
-                    out = #text
-                    raise "boom"
-                catch
-                    out = out + #text + 10
-                finally
-                    out = out + #text + 100
+                    defer out = out + #text + 100
+                    do
+                        out = #text
+                        raise "boom"
+                    catch
+                        out = out + #text + 10
+                    end
                 when quit then
+                    defer out = out + 1000
                     out = 1
-                finally
-                    out = out + 1000
                 else
                     out = -1
                 end
@@ -256,18 +255,18 @@ describe("unions (end-to-end)", function()
             function cleanup_fallthrough(message: Message): integer
                 case message
                 when write: text then
+                    defer cleanup_effects = cleanup_effects + 10
                     defer cleanup_effects = cleanup_effects + 1
                     cleanup_effects = cleanup_effects + #text
-                finally
-                    cleanup_effects = cleanup_effects + 10
                 else
-                    defer cleanup_effects = cleanup_effects + 100
-                    cleanup_effects = cleanup_effects + 1000
-                    raise "caught else"
-                catch
-                    cleanup_effects = cleanup_effects + 10000
-                finally
-                    cleanup_effects = cleanup_effects + 100000
+                    defer cleanup_effects = cleanup_effects + 100000
+                    do
+                        defer cleanup_effects = cleanup_effects + 100
+                        cleanup_effects = cleanup_effects + 1000
+                        raise "caught else"
+                    catch
+                        cleanup_effects = cleanup_effects + 10000
+                    end
                 end
                 return cleanup_effects
             end
@@ -275,25 +274,22 @@ describe("unions (end-to-end)", function()
             function cleanup_return(message: Message): integer
                 case message
                 when write: text then
+                    defer cleanup_effects = cleanup_effects + 10
                     defer cleanup_effects = cleanup_effects + 1
                     return #text
-                finally
-                    cleanup_effects = cleanup_effects + 10
                 else
+                    defer cleanup_effects = cleanup_effects + 1000
                     defer cleanup_effects = cleanup_effects + 100
                     return -1
-                finally
-                    cleanup_effects = cleanup_effects + 1000
                 end
             end
 
             function cleanup_raise(message: Message)
                 case message
                 when write then
+                    defer cleanup_effects = cleanup_effects + 10
                     defer cleanup_effects = cleanup_effects + 1
                     raise "raised arm"
-                finally
-                    cleanup_effects = cleanup_effects + 10
                 end
             end
 
@@ -307,13 +303,9 @@ describe("unions (end-to-end)", function()
                 when write then
                 catch
                     cleanup_effects = cleanup_effects + 100
-                finally
-                    cleanup_effects = cleanup_effects + 1000
                 else
                 catch
                     cleanup_effects = cleanup_effects + 10000
-                finally
-                    cleanup_effects = cleanup_effects + 100000
                 end
             end
         ]], [[
@@ -366,15 +358,13 @@ describe("unions (end-to-end)", function()
                 differential_trace = 0
                 case branch
                 when selected: n then
+                    defer differential_trace = differential_trace + 10
                     defer differential_trace = differential_trace + 1
                     differential_trace = differential_trace + n
-                finally
-                    differential_trace = differential_trace + 10
                 else
+                    defer differential_trace = differential_trace + 10000
                     defer differential_trace = differential_trace + 100
                     differential_trace = differential_trace + 1000
-                finally
-                    differential_trace = differential_trace + 10000
                 end
                 return differential_trace
             end
@@ -382,15 +372,13 @@ describe("unions (end-to-end)", function()
             function if_fallthrough(selected: boolean, n: integer): integer
                 differential_trace = 0
                 if selected then
+                    defer differential_trace = differential_trace + 10
                     defer differential_trace = differential_trace + 1
                     differential_trace = differential_trace + n
-                finally
-                    differential_trace = differential_trace + 10
                 else
+                    defer differential_trace = differential_trace + 10000
                     defer differential_trace = differential_trace + 100
                     differential_trace = differential_trace + 1000
-                finally
-                    differential_trace = differential_trace + 10000
                 end
                 return differential_trace
             end
@@ -399,30 +387,26 @@ describe("unions (end-to-end)", function()
                 differential_trace = 0
                 case branch
                 when selected: n then
+                    defer differential_trace = differential_trace + 10
                     defer differential_trace = differential_trace + 1
                     return n
-                finally
-                    differential_trace = differential_trace + 10
                 else
+                    defer differential_trace = differential_trace + 1000
                     defer differential_trace = differential_trace + 100
                     return -1
-                finally
-                    differential_trace = differential_trace + 1000
                 end
             end
 
             function if_return(selected: boolean, n: integer): integer
                 differential_trace = 0
                 if selected then
+                    defer differential_trace = differential_trace + 10
                     defer differential_trace = differential_trace + 1
                     return n
-                finally
-                    differential_trace = differential_trace + 10
                 else
+                    defer differential_trace = differential_trace + 1000
                     defer differential_trace = differential_trace + 100
                     return -1
-                finally
-                    differential_trace = differential_trace + 1000
                 end
             end
 
@@ -430,12 +414,13 @@ describe("unions (end-to-end)", function()
                 differential_trace = 0
                 case branch
                 when selected: n then
-                    differential_trace = differential_trace + n
-                    raise "case"
-                catch
-                    differential_trace = differential_trace + 100
-                finally
-                    differential_trace = differential_trace + 1000
+                    defer differential_trace = differential_trace + 1000
+                    do
+                        differential_trace = differential_trace + n
+                        raise "case"
+                    catch
+                        differential_trace = differential_trace + 100
+                    end
                 end
                 return differential_trace
             end
@@ -443,12 +428,13 @@ describe("unions (end-to-end)", function()
             function if_raise(selected: boolean, n: integer): integer
                 differential_trace = 0
                 if selected then
-                    differential_trace = differential_trace + n
-                    raise "if"
-                catch
-                    differential_trace = differential_trace + 100
-                finally
-                    differential_trace = differential_trace + 1000
+                    defer differential_trace = differential_trace + 1000
+                    do
+                        differential_trace = differential_trace + n
+                        raise "if"
+                    catch
+                        differential_trace = differential_trace + 100
+                    end
                 else
                 end
                 return differential_trace
@@ -459,16 +445,13 @@ describe("unions (end-to-end)", function()
                 while true do
                     case branch
                     when selected: n then
-                        defer differential_trace =
-                            differential_trace + 1
+                        defer differential_trace = differential_trace + 10
+                        defer differential_trace = differential_trace + 1
                         differential_trace = differential_trace + n
                         break
-                    finally
-                        differential_trace = differential_trace + 10
                     else
+                        defer differential_trace = differential_trace + 100
                         break
-                    finally
-                        differential_trace = differential_trace + 100
                     end
                 end
                 return differential_trace
@@ -478,16 +461,13 @@ describe("unions (end-to-end)", function()
                 differential_trace = 0
                 while true do
                     if selected then
-                        defer differential_trace =
-                            differential_trace + 1
+                        defer differential_trace = differential_trace + 10
+                        defer differential_trace = differential_trace + 1
                         differential_trace = differential_trace + n
                         break
-                    finally
-                        differential_trace = differential_trace + 10
                     else
+                        defer differential_trace = differential_trace + 100
                         break
-                    finally
-                        differential_trace = differential_trace + 100
                     end
                 end
                 return differential_trace
@@ -561,11 +541,10 @@ describe("unions (end-to-end)", function()
                 while true do
                     case message
                     when quit then
+                        defer n = n + 10
                         defer n = n + 100
                         n = 1
                         break
-                    finally
-                        n = n + 10
                     else
                         break
                     end
@@ -619,13 +598,12 @@ describe("unions (end-to-end)", function()
 
             function terminating_try(flag: boolean): integer
                 do
+                    defer local completed = true
                     if flag then
                         return 6
                     else
                         return 7
                     end
-                finally
-                    local completed = true
                 end
                 return variable_in_unchecked_dead_tail
             end

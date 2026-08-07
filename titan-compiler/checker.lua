@@ -4564,10 +4564,13 @@ local checkstat_visitor = util.make_visitor({
             -- saving/restoring the outer floor for nested constructs.
             st:open_block()
             in_finally = in_finally + 1
+            local saved_catch = catch_depth
+            catch_depth = 0
             local saved_floor = finally_loop_floor
             finally_loop_floor = loop_depth
             fret = checkstat(node.finallyblock, st, errors)
             finally_loop_floor = saved_floor
+            catch_depth = saved_catch
             in_finally = in_finally - 1
             st:close_block()
         end

@@ -547,11 +547,10 @@ finally_log: string = ""
 
 function finally_body(arg: value): value
     do
+        defer finally_log = finally_log .. "finally;"
         finally_log = finally_log .. "body;"
         coroutine.yield("pause", "tag")
         finally_log = finally_log .. "after;"
-    finally
-        finally_log = finally_log .. "finally;"
     end
     return finally_log
 end

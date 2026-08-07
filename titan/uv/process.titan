@@ -802,12 +802,9 @@ function _os_process_spawn_with_config(file: string, args: {string},
       state.runtime.loop, process_handle, state.options)
 
   if spawn_status < 0 then
-    do
-      await(Call.process_spawn_failure(
-          ProcessSpawnFailureCall.new(process)))
-    finally
-      discard_config_streams(state)
-    end
+    defer discard_config_streams(state)
+    await(Call.process_spawn_failure(
+        ProcessSpawnFailureCall.new(process)))
     raise make_error(spawn_status, "process.spawn")
   end
 

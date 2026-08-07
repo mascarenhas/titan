@@ -145,8 +145,7 @@ local s5: string = [==[ contains ]] safely ]==]
 A flat Titan source, or each independently parsed file of a
 [folder module](folder-modules.md), is a sequence of top-level declarations.
 The canonical source may end with one root `do ... end` module initializer;
-for a folder module only its main source may contain that initializer. Its
-`block` may use the ordinary optional `catch` and `finally` trailers.
+for a folder module only its main source may contain that initializer. Its `block` may use the ordinary optional `catch` trailer.
 
 ```
 program  ::= {tldecl} [moduleinit]
@@ -338,7 +337,7 @@ written directly. See [the type system](types.md#function-types).
 ## Statements
 
 ```
-block      ::= simpleblock ['catch' simpleblock] ['finally' simpleblock]
+block      ::= simpleblock ['catch' simpleblock]
 simpleblock::= {statement} [returnstat]
 statement  ::= ';'
             |  do block end
@@ -366,8 +365,7 @@ var        ::= Name
 ```
 
 A `case` must contain at least one `when` arm. Every arm and its optional
-`else` consumes a full `block`, so each may have its own `catch` and
-`finally`; a `defer` inside that block is transformed normally. The checker
+`else` consumes a full `block`, so each may have its own `catch`; a `defer` inside that block is transformed normally. The checker
 requires a union scrutinee, rejects duplicate arms and binding an empty
 variant, but does not require exhaustive coverage. See
 [Unions](unions.md#case-statements).
@@ -546,10 +544,8 @@ confused rule is not syntax at all:
 2. **`return` only at the end of a block.** As in Lua, `returnstat` is
    the optional final element of `simpleblock`; a statement after `return`
    (even another `return`) is a syntax error.
-3. **`catch`/`finally` are block trailers.** There is no `try` keyword.
-   A block may have a `catch`, a `finally`, or both in that order; the
-   clause bodies are `simpleblock`s so an inner catch cannot consume an
-   outer finally.
+3. **`catch` is a block trailer.** There is no `try` keyword.
+   A block may have a `catch` trailer; its clause body is a `simpleblock`.
 4. **`defer` cannot directly defer another `defer`.** The grammar
    production is guarded like `defer !defer statement`, so
    `defer defer cleanup()` is a syntax error. Use two separate defers for

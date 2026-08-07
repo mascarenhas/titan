@@ -306,12 +306,12 @@ not add epicycles around what may be a misunderstood simpler design.
 path:
 
 ```sh
-export PREFIX="$HOME/.local/titan/titan-dev"
+export PREFIX="/tmp/titan-$USER-test"
 export PATH="$PREFIX/bin:$PATH"
 ```
 
 For throwaway verification, use an isolated absolute prefix under `/tmp`
-(for example `/tmp/titan-$USER-check`) rather than relying on checkout-local
+(for example `/tmp/titan-$USER-test`) rather than relying on checkout-local
 `.lua` or `lua_modules` trees. Give concurrent workers distinct prefixes; this
 keeps their installed compiler snapshots and native SDKs independent and makes
 parallel isolated builds possible.
@@ -324,16 +324,9 @@ every generated fixture's C preprocessing, or source-line attribution;
 erase these explicit build-policy inputs.
 
 ```sh
-make lua                                            # build/install prefix-configured Lua and matching source headers
-make luarocks                                       # build/install LuaRocks for that Lua
-make lpeglabel                                      # build/validate private five-member PEG payload
-make libuv                                          # build pinned static PIC libuv (bundled default)
-make openssl                                        # build pinned static PIC OpenSSL (bundled default)
-make llhttp                                         # build/validate private three-member HTTP parser payload
-"$PREFIX/bin/luarocks" make                        # build/install Titan runtime, compiler, and stdlib
-make stdlib                                         # checkout-only titan.so/titan.a standard pair plus seventeen generated shims
-make test                                           # `luarocks make` + `luarocks test`: (re)install the rock, then run the full suite
+make test                                           # builds prefix dependencies recursively if missing, installs rock, and runs full busted suite
 luarocks test                                       # test an already current install; with its bin on PATH, PREFIX/ROCKS_TREE are not required
+PREFIX=/tmp/my-tmp-test-dir EXTRA_TEST_FLAGS="-o gtest" make test  # pass extra busted flags
 luarocks make && bash spec/support/ci_test_groups.sh compiler  # CI's covered compiler/language group
 bash spec/support/ci_test_groups.sh libraries       # CI's complete uncovered library group
 make clean                                           # remove generated artifacts; `make distclean` also removes downloaded Lua/Readline/LuaRocks/libbacktrace/libuv/OpenSSL/llhttp trees

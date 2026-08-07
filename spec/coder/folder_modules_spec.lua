@@ -157,11 +157,10 @@ function explode(): integer
 end
 
 do
+    defer total = total + 0
     raise "expected during initialization"
 catch
     total = initialize_total()
-finally
-    total = total + 0
 end
 ]]
         write_file(module_folder .. "/foldercase.titan", main_source)

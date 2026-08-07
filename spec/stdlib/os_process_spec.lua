@@ -79,6 +79,7 @@ function start_spawn_and_streams(child: string,
     local original: string? = os.getenv(envname)
     local environment = "direct-continuation-process"
     do
+      defer restore_environment(envname, original)
       os.setenv(envname, environment)
       local cwd = os.cwd()
       local process = os.spawn(child, {
@@ -98,8 +99,6 @@ function start_spawn_and_streams(child: string,
       check(stdout == expected,
             "spawn changed argv, environment, or cwd")
       check(stderr == "", "metadata child wrote stderr")
-    finally
-      restore_environment(envname, original)
     end
 
     local payload = "head\0middle\ntrail"

@@ -204,7 +204,7 @@ synchronous cleanup, but it does not clear the exit request, and the
 cancellation is injected again before that Task can submit another
 asynchronous operation. A later `exit` call cannot replace the first code.
 
-The request settles the other Tasks, runs their `defer` and `finally` cleanup,
+The request settles the other Tasks, runs their `defer` cleanup,
 drains accepted callbacks and requests, closes the loop's handles, and then
 closes the event loop. File descriptors are closed only by application cleanup
 such as `defer file:close()`; the Runtime does not register or close them.

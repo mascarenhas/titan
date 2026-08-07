@@ -65,14 +65,13 @@ local function fixture_source()
         function run(p: string): integer
             local keep = p
             do
+                defer growstack()
                 growstack()
                 keep = keep .. "!"
                 raise {10, 20}
             catch
                 local e: {integer} = error as {integer}
                 return #keep + e[2]
-            finally
-                growstack()
             end
         end
     ]]

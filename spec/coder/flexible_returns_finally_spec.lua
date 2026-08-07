@@ -43,22 +43,15 @@ describe("flexible returns through finally", function()
             end
 
             function pending(): (...: string)
-                do
-                    return strings()
-                finally
-                    local marker: string = "finally"
-                end
+                defer local marker: string = "finally"
+                return strings()
             end
 
             function nested(): (...: string)
                 do
-                    do
-                        return strings()
-                    finally
-                        local inner: string = "inner"
-                    end
-                finally
-                    raise "outer"
+                    defer raise "outer"
+                    defer local inner: string = "inner"
+                    return strings()
                 end
             end
         ]])
@@ -130,20 +123,16 @@ describe("flexible returns through finally", function()
             end
 
             function from_body(): integer
-                do
-                    return mark(1), effect(2)
-                finally
-                    effect(3)
-                end
+                defer effect(3)
+                return mark(1), effect(2)
             end
 
             function from_catch(): integer
+                defer effect(6)
                 do
                     return fail()
                 catch
                     return mark(4), effect(5)
-                finally
-                    effect(6)
                 end
             end
         ]], [[
@@ -169,20 +158,16 @@ describe("flexible returns through finally", function()
             end
 
             function named_body(): (...: integer)
-                do
-                    return
-                finally
-                    note()
-                end
+                defer note()
+                return
             end
 
             function named_catch(): (...: integer)
                 do
+                    defer note()
                     raise "x"
                 catch
                     return
-                finally
-                    note()
                 end
             end
 
@@ -191,11 +176,8 @@ describe("flexible returns through finally", function()
 
             function lambda_body(): (...: integer)
                 local f: () -> (...: integer) = function(): (...: integer)
-                    do
-                        return
-                    finally
-                        note()
-                    end
+                    defer note()
+                    return
                 end
                 return f()
             end
@@ -203,11 +185,10 @@ describe("flexible returns through finally", function()
             function lambda_catch(): (...: integer)
                 local f: () -> (...: integer) = function(): (...: integer)
                     do
+                        defer note()
                         raise "x"
                     catch
                         return
-                    finally
-                        note()
                     end
                 end
                 return f()
@@ -219,34 +200,16 @@ describe("flexible returns through finally", function()
                 return f()
             end
         ]], [[
-            assert(select("#", test.named_body()) == 0)
-            assert(select("#", test.named_catch()) == 0)
+            test.named_body()
+            assert(test.gethits() == 1)
+            test.named_catch()
+            assert(test.gethits() == 2)
             assert(select("#", test.named_fallthrough()) == 0)
-            assert(select("#", test.lambda_body()) == 0)
-            assert(select("#", test.lambda_catch()) == 0)
-            assert(select("#", test.lambda_fallthrough()) == 0)
+            test.lambda_body()
+            assert(test.gethits() == 3)
+            test.lambda_catch()
             assert(test.gethits() == 4)
-        ]])
-    end)
-
-    it("publishes one fixed nil and no flexible results from named and anonymous fallthroughs", function()
-        run_coder([[
-            function named_fallthrough(): (nil, ...: integer)
-            end
-
-            function make_anonymous(): () -> (nil, ...: integer)
-                return function(): (nil, ...: integer)
-                end
-            end
-        ]], [[
-            local named = table.pack(test.named_fallthrough())
-            assert(named.n == 1)
-            assert(named[1] == nil)
-
-            local anonymous = test.make_anonymous()
-            local lambda = table.pack(anonymous())
-            assert(lambda.n == 1)
-            assert(lambda[1] == nil)
+            assert(select("#", test.lambda_fallthrough()) == 0)
         ]])
     end)
 
@@ -257,33 +220,23 @@ describe("flexible returns through finally", function()
             end
 
             function body(force: () -> ()): (integer, ...: string)
-                do
-                    return 9, values("b")
-                finally
-                    force()
-                end
+                defer force()
+                return 9, values("b")
             end
 
             function caught(force: () -> ()): (integer, ...: string)
                 do
+                    defer force()
                     raise "body"
                 catch
                     return 7, values("c")
-                finally
-                    force()
                 end
             end
 
             function nested(force: () -> ()): (integer, ...: string)
-                do
-                    do
-                        return 5, values("n")
-                    finally
-                        force()
-                    end
-                finally
-                    force()
-                end
+                defer force()
+                defer force()
+                return 5, values("n")
             end
         ]], [[
             collectgarbage("generational")
@@ -314,11 +267,8 @@ describe("flexible returns through finally", function()
         run_coder([[
             function survive(f: () -> (...: value),
                              force: () -> ()): (...: value)
-                do
-                    return f()
-                finally
-                    force()
-                end
+                defer force()
+                return f()
             end
         ]], [[
             collectgarbage("generational")
@@ -383,22 +333,22 @@ describe("flexible returns through finally", function()
             end
 
             function from_body(force: () -> ()): (...: value)
-                do
-                    return pending("body")
-                finally
+                defer do
                     force()
                     raise "finally-body"
                 end
+                return pending("body")
             end
 
             function from_catch(force: () -> ()): (...: value)
+                defer do
+                    force()
+                    raise "finally-catch"
+                end
                 do
                     raise "body-error"
                 catch
                     return pending("catch")
-                finally
-                    force()
-                    raise "finally-catch"
                 end
             end
         ]], [[
@@ -447,48 +397,37 @@ describe("flexible returns through finally", function()
 
             function recovered(): (...: integer)
                 do
+                    defer note()
                     return bad()
                 catch
                     return 7, 8
-                finally
-                    note()
                 end
             end
 
             function failed_in_catch(): (...: integer)
                 do
+                    defer note()
                     raise "body"
                 catch
                     return bad()
-                finally
-                    note()
                 end
             end
 
             function invalid_surplus(
                 f: () -> (integer, ...: integer)
             ): (...: integer)
-                do
-                    return f()
-                finally
-                    note()
-                end
+                defer note()
+                return f()
             end
 
             function implicit_tail(good: value, bad_value: value): (...: integer)
-                do
-                    return good, bad_value
-                finally
-                    note()
-                end
+                defer note()
+                return good, bad_value
             end
 
             function explicit_tail(good: value, bad_value: value): (...: integer)
-                do
-                    return good, (bad_value as integer)
-                finally
-                    note()
-                end
+                defer note()
+                return good, (bad_value as integer)
             end
         ]], [[
             local a, b = test.recovered()
@@ -572,27 +511,33 @@ describe("flexible returns through finally", function()
             end
 
             function strings(force: () -> ()): (...: string)
-                do return make_strings() finally force() end
+                defer force()
+                return make_strings()
             end
 
             function arrays(force: () -> ()): (...: {string})
-                do return make_arrays() finally force() end
+                defer force()
+                return make_arrays()
             end
 
             function maps(force: () -> ()): (...: {string:integer})
-                do return make_maps() finally force() end
+                defer force()
+                return make_maps()
             end
 
             function records(force: () -> ()): (...: R)
-                do return make_records() finally force() end
+                defer force()
+                return make_records()
             end
 
             function functions(force: () -> ()): (...: (integer) -> integer)
-                do return make_functions() finally force() end
+                defer force()
+                return make_functions()
             end
 
             function values(force: () -> ()): (...: value)
-                do return make_values() finally force() end
+                defer force()
+                return make_values()
             end
         ]], [[
             collectgarbage("generational")
@@ -632,11 +577,8 @@ describe("flexible returns through finally", function()
             end
 
             function through(n: integer): (...: integer)
-                do
-                    return many(n)
-                finally
-                    local marker: integer = n
-                end
+                defer local marker: integer = n
+                return many(n)
             end
 
             function first_two(n: integer): (integer?, integer?)

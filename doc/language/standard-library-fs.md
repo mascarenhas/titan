@@ -235,7 +235,7 @@ async Task.
 process-wide directory, so it affects relative paths used by every Task and by
 the embedding host. These two helpers are synchronous and do not require an
 active async Task. Coordinate `chdir` externally when Tasks can run
-concurrently, and restore the previous directory with `finally` when the
+concurrently, and restore the previous directory with `defer` when the
 change is temporary.
 
 ## Errors and current scope

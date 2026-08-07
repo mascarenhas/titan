@@ -1560,11 +1560,10 @@ describe("compiler module loader", function()
         write_file(folder .. "/part.titan", [[
 
 do
+    defer local cleaned: boolean = true
     raise "expected"
 catch
     local caught: value = error
-finally
-    local cleaned: boolean = true
 end
 ]])
 
@@ -1586,11 +1585,10 @@ end
 answer: integer = 0
 
 do
+    defer answer = answer + 1
     raise "expected"
 catch
     answer = contributor_answer()
-finally
-    answer = answer + 1
 end
 ]])
         write_file(folder .. "/part.titan", [[

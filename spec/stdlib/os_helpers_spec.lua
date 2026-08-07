@@ -27,6 +27,7 @@ function exercise_environment(name: string): string
   local original: string? = os.getenv(name)
   local long_value = long_environment_value()
   do
+    defer restore_environment(name, original)
     os.unsetenv(name)
     local missing: string? = os.getenv(name)
     check(not missing,
@@ -41,8 +42,6 @@ function exercise_environment(name: string): string
     local copied: string? = os.getenv(name)
     check(copied and (copied as string) == long_value,
           "long environment value was truncated during resize")
-  finally
-    restore_environment(name, original)
   end
 
   local restored: string? = os.getenv(name)
@@ -107,10 +106,9 @@ end
 function exercise_paths_and_identity(temp: string): string
   local original = os.cwd()
   do
+    defer os.chdir(original)
     os.chdir(temp)
     check(os.cwd() ~= original, "chdir did not update cwd")
-  finally
-    os.chdir(original)
   end
   check(os.cwd() == original, "cwd was not restored after chdir")
 

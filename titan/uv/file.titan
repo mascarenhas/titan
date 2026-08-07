@@ -234,13 +234,12 @@ local function complete_fs(task: Task, owner: uv_fs_t, result: integer,
   local failed = false
   local payload: value = nil
   do
+    defer libuv.uv_fs_req_cleanup(owner.handle)
     if result < 0 then raise make_error(result, operation) end
     payload = success(task, owner, result, keepalive)
   catch
     failed = true
     payload = error
-  finally
-    libuv.uv_fs_req_cleanup(owner.handle)
   end
   resume_task_from_callback(task, failed, payload)
 catch

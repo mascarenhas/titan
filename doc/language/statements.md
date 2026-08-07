@@ -34,9 +34,9 @@ earlier variable in the same block) is allowed and not diagnosed. As in
 Lua, a lone semicolon is an empty statement, and statements need no other
 separator.
 
-Any block may have `catch` and/or `finally` trailers. These are Titan's
-error-handling construct; there is no `try` keyword. The body, catch, and
-finally are sibling scopes, and the catch has implicit `error: value` and
+Any block may have a `catch` trailer. This is Titan's
+error-handling construct; there is no `try` keyword. The body and
+catch are sibling scopes, and the catch has implicit `error: value` and
 `traceback: string` locals. Those catch locals are read-only snapshots.
 See [Error handling](error-handling.md).
 
@@ -257,9 +257,9 @@ errors. A `Union?` scrutinee uses the normal automatic option unwrap, so nil
 raises before dispatch rather than selecting `else`.
 
 Every arm and the else clause is a complete block with its own scope and may
-have its own `catch` and `finally`. `defer` therefore transforms and runs
+have its own `catch`. `defer` therefore transforms and runs
 inside its containing arm exactly as it does in any other block. The payload
-binding is visible in that arm's protected body, catch, and finally.
+binding is visible in that arm's protected body and catch.
 
 ## `while`
 
@@ -513,40 +513,29 @@ preserves the original caught error value and traceback. Outside a catch,
 bare `raise` is a compile-time error. `raise` always terminates the
 current control-flow path, like `return` for the purpose of checking that
 a function with return values cannot fall off the end. Full propagation and
-`finally` semantics are in [Error handling](error-handling.md).
+Full propagation semantics are in [Error handling](error-handling.md).
 
 ## `defer`
 
-`defer <statement>` schedules a statement to run when the rest of the
-current statement-list finishes. It is equivalent to wrapping the rest of
-that `simpleblock` in a `do ... finally ... end` block:
+`defer <statement>` schedules a statement to run when leaving the current block (whether by reaching the end of the block, or by break, return, or an exception).
 
-```lua
-defer cleanup()
-body()
-return result()
-```
-
-behaves like:
-
-```lua
-do
-    body()
-    return result()
-finally
-    cleanup()
+```titan
+function read_one(path: string): string
+    local f = open_file(path)
+    defer f:close()
+    return f:read()
 end
 ```
 
 The deferred statement runs on normal fallthrough, `return`, `break`, or
 a propagating error. If the deferred statement raises, that new error
-overrides the pending action exactly like a `finally` raise. Fixed return
+overrides the pending action. Fixed return
 values and any run-time flexible tail are evaluated and saved before the
 deferred statement runs, so cleanup side effects do not change them.
 
 Multiple defers in the same block run in last-in-first-out order:
 
-```lua
+```titan
 defer first()
 defer second()
 work()
@@ -563,23 +552,20 @@ The statement after `defer` may not itself be another `defer` statement.
 Write two separate defers for LIFO cleanup, or use `defer do ... end` to
 defer multiple statements:
 
-```lua
+```titan
 defer do
     flush()
     close()
 end
 ```
 
-Because `defer` lowers to `finally`, the same control-transfer limits
-apply to the deferred statement: it may not `return`, and a `break` inside
-it may only target a loop written inside that deferred statement. See the
-full [Defer](defer.md) chapter for details.
+A deferred statement cannot contain `return`, and a `break` inside it may only target a loop written inside that deferred statement. See the full [Defer](defer.md) chapter for details.
 
 ## `return`
 
 `return` ends the function, supplying its return values:
 
-```lua
+```titan
 function divmod(a: integer, b: integer): (integer, string)
     return a // b, "ok"
 end
@@ -589,14 +575,6 @@ Like in Lua, `return` may only appear as the **last** statement of a
 block — of the function body, or of any inner block such as an `if` arm or
 a loop body. A statement after a `return` in the same block is a syntax
 error. An optional `;` may follow the statement.
-
-`return` is forbidden inside a `finally` block, because explicit control
-transfer out of cleanup would otherwise override a pending return, break,
-or error. Use a normal fallthrough from finally, or raise a new error if
-cleanup failure should replace the pending action. This restriction applies
-to the finally block's own statements; a nested anonymous function defined
-inside a finally has its own body and may return normally from that nested
-function.
 
 Every fixed declared return position must be filled, or the checker reports
 `returned N value(s) but function expected M`. Each delivered value is

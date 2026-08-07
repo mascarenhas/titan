@@ -1,9 +1,8 @@
 # Defer
 
-`defer <statement>` is Titan's compact cleanup form. It schedules one
-statement to run when the rest of the current statement-list exits.
+`defer <statement>` is Titan's compact cleanup statement. It executes its statement when leaving the current block (whether by reaching the end of the block, or by break, return, or an exception).
 
-```lua
+```titan
 function read_one(path: string): string
     local f = open_file(path)
     defer f:close()
@@ -11,68 +10,35 @@ function read_one(path: string): string
 end
 ```
 
-The exact model is a source-level transformation. A `defer` wraps the
-rest of the `simpleblock` it appears in with a `finally`:
-
-```lua
-defer cleanup()
-body()
-return value()
-```
-
-behaves like:
-
-```lua
-do
-    body()
-    return value()
-finally
-    cleanup()
-end
-```
-
 ## What Counts As The Current Block
 
-The current block is the statement list being parsed: a function body, a
-`do ... end` body, a loop body, an `if`/`elseif`/`else` arm, or a union
-`when`/`else` arm. In a loop,
-the deferred statement runs before that iteration leaves the loop body:
+The current block is the statement list being parsed: a function body, a `do ... end` body, a loop body, an `if`/`elseif`/`else` arm, or a union `when`/`else` arm. In a loop, the deferred statement runs before that iteration leaves the loop body:
 
-```lua
+```titan
 while more() do
     defer close_current_item()
     process_current_item()
 end
 ```
 
-Case arms are ordinary full blocks. A defer in one arm wraps only the
-remainder of that arm; it cannot run in, capture declarations from, or
-fall through to another arm. If the arm also has `catch` or `finally`, the
-ordinary nested-finally transformation and cleanup order apply. A payload
-binding is already in scope when the arm is transformed, so deferred cleanup
-may use it.
+Case arms are ordinary full blocks. A defer in one arm applies only when leaving that arm; it cannot capture declarations from or fall through to another arm. A payload binding is already in scope when the arm executes, so deferred cleanup may use it.
 
 ## Ordering
 
-Multiple defers in one block run in last-in-first-out order, because each
-defer wraps the rest of the block:
+Multiple `defer` statements in the same block execute in last-in-first-out (LIFO) order:
 
-```lua
+```titan
 defer first()
 defer second()
 work()
 -- on exit: work(), second(), first()
 ```
 
-This is true for normal fallthrough, `return`, `break`, and errors. If a
-deferred statement raises, it overrides the pending action just like an
-ordinary `finally` block.
+This is true for normal fallthrough, `return`, `break`, and errors. If a deferred statement raises an exception, it overrides the pending action.
 
-Return expressions are evaluated before cleanup runs. For example, this
-returns `"body"` even though the deferred statement mutates `log` before
-control reaches the caller:
+Return expressions are evaluated before cleanup runs. For example, this returns `"body"` even though the deferred statement mutates `log` before control reaches the caller:
 
-```lua
+```titan
 function f(): string
     local log = "body"
     defer log = log .. ":cleanup"
@@ -82,54 +48,43 @@ end
 
 ## Scope
 
-The deferred statement is checked where the `defer` appears. It can use
-locals that are already in scope, and it cannot use locals declared later
-in the rest of the block:
+The deferred statement is checked where the `defer` appears. It can use locals that are already in scope, and it cannot use locals declared later in the rest of the block:
 
-```lua
+```titan
 local n = 1
 defer use(n)       -- ok
 local later = 2
 ```
 
-```lua
+```titan
 defer use(later)   -- compile-time error
 local later = 2
 ```
 
-In a `repeat ... until` loop, the `until` condition still has Titan's
-normal repeat-loop scope: it can see locals declared in the body after the
-`defer`.
+In a `repeat ... until` loop, the `until` condition still has Titan's normal repeat-loop scope: it can see locals declared in the body after the `defer`.
 
 ## Multiple Cleanup Statements
 
-The grammar accepts exactly one statement after `defer`. Use a `do` block
-when cleanup needs several statements:
+The grammar accepts exactly one statement after `defer`. Use a `do` block when cleanup needs several statements:
 
-```lua
+```titan
 defer do
     flush()
     close()
 end
 ```
 
-A `defer` may not directly defer another `defer` statement. Write the
-two defers separately:
+A `defer` may not directly defer another `defer` statement. Write the two defers separately:
 
-```lua
+```titan
 defer first()
 defer second()
 ```
 
 ## Control Flow In Cleanup
 
-Because `defer` is implemented as a `finally`, the deferred statement
-uses the same cleanup restrictions:
+A deferred statement has the following control-flow restrictions:
 
 * `return` inside the deferred statement is a compile-time error.
-* `break` inside the deferred statement is a compile-time error if it
-  would break a loop outside that deferred statement.
-* `raise <exp>` is allowed and overrides any pending fallthrough,
-  return, break, or error.
-
-See [Error handling](error-handling.md) for the full `finally` semantics.
+* `break` inside the deferred statement is a compile-time error if it would break a loop outside that deferred statement.
+* `raise <exp>` is allowed and overrides any pending fallthrough, return, break, or error.
