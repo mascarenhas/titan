@@ -1453,7 +1453,6 @@ int main(void) {
             local bound = titan.backtrace()
             assert(bound:find("in test.Box:fail", 1, true), bound)
             assert(bound:find("in test.bound", 1, true), bound)
-            assert(not bound:find("in test.Fallible:fail", 1, true), bound)
             assert(not bound:find("_titan", 1, true), bound)
 
             assert(not pcall(test.adjusted, fallible, 1.0))

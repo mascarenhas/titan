@@ -213,6 +213,28 @@ describe("flexible returns through finally", function()
         ]])
     end)
 
+    it("publishes one fixed nil and no flexible results from named and anonymous fallthroughs", function()
+        run_coder([[
+            function named_fallthrough(): (nil, ...: integer)
+            end
+
+            function make_anonymous(): () -> (nil, ...: integer)
+                return function(): (nil, ...: integer)
+                end
+            end
+        ]], [[
+            local named = table.pack(test.named_fallthrough())
+            assert(named.n == 1)
+            assert(named[1] == nil)
+
+            local anonymous = test.make_anonymous()
+            local lambda = table.pack(anonymous())
+            assert(lambda.n == 1)
+            assert(lambda[1] == nil)
+            assert(select("#", test.lambda_fallthrough()) == 0)
+        ]])
+    end)    
+
     it("carries open surplus runs through allocating body, catch, and nested finally blocks", function()
         run_coder([[
             function values(prefix: string): (...: string)

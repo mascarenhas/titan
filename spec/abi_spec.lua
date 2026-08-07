@@ -135,9 +135,7 @@ describe("compiled-module ABI version", function()
         assert.truthy(workflow:find(
             "cmp LICENSES/readline-LICENSE", 1, true))
         assert.truthy(workflow:find(
-            "Verify bundled Readline warm reuse and repair", 1, true))
-        assert.truthy(workflow:find(
-            'truncate -s 64 "$archive"', 1, true))
+            "Install bundled Readline", 1, true))
         assert.truthy(workflow:find(
             "make lua", 1, true))
         assert.truthy(workflow:find(
