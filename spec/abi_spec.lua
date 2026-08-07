@@ -97,7 +97,7 @@ describe("compiled-module ABI version", function()
             1, true))
         assert.truthy(makefile:find(
             "$(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) " ..
-            "$(READLINE_SELECTION_CONFIG) FORCE", 1, true))
+            "$(READLINE_SELECTION_CONFIG)", 1, true))
         assert.truthy(makefile:find(
             "System Readline development files unavailable; provisioning",
             1, true))
@@ -131,7 +131,7 @@ describe("compiled-module ABI version", function()
         assert.truthy(workflow:find(
             "readline-8.3-p3.config", 1, true))
         assert.truthy(workflow:find(
-            "lib/titan/deps/readline/8.3-p3/lib/libreadline.a", 1, true))
+            "readline-build/.titan-readline-8.3-p3/lib/libreadline.a", 1, true))
         assert.truthy(workflow:find(
             "cmp LICENSES/readline-LICENSE", 1, true))
         assert.truthy(workflow:find(
