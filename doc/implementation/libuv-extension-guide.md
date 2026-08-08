@@ -605,7 +605,7 @@ its exact serialized interface and compare it with
 `spec/fixtures/libuv/titan_uv_types.lua`:
 
 ```sh
-TITAN_UV_PROVIDER="$PREFIX/lib/titan/0.21/titan.so" \
+TITAN_UV_PROVIDER="$PREFIX/lib/titan/0.22/titan.so" \
 "$PREFIX/bin/lua" -e '
 local support = require "titan"
 local types = assert(support._loadlib(

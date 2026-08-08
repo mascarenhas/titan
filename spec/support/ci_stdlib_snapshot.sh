@@ -30,7 +30,7 @@ case "$prefix" in
         ;;
 esac
 
-provider=$prefix_rel/lib/titan/0.21/titan.so
+provider=$prefix_rel/lib/titan/0.22/titan.so
 static_archive=${provider%.so}.a
 shim_dir=$prefix_rel/share/lua/5.5/titan
 

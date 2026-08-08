@@ -269,8 +269,8 @@ and absolute variant tags, plus the reconstructible public nominal-static slot
 prefix. Folder order therefore remains authoritative for public owner/member
 order and for variant tags, while keyed static maps use bytewise ordering.
 
-ABI 0.20 left folder composition unchanged, and ABI 0.21 does likewise. Array
-writer inventories, callable strict entries, Interface descriptors, and
+ABI 0.20 and ABI 0.21 left folder composition unchanged, and ABI 0.22 does
+likewise. Array writer inventories, callable strict entries, Interface descriptors, and
 concrete/Interface pair obligations are collected only after the contributors
 have become one checked AST, then emitted once per logical module. Their
 module-private slots follow the same importer-reconstructible public prefix

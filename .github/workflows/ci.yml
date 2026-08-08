@@ -28,7 +28,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
-      TITAN_ABI_VERSION: "0.21"
+      TITAN_ABI_VERSION: "0.22"
       # Exercise the immutable/minimal-host path in the regular Linux build.
       READLINE_MODE: bundled
       LIBUV_VERSION: "1.52.1"
@@ -103,7 +103,7 @@ jobs:
       - name: Install regular build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake curl libssl-dev libtinfo-dev libuv1-dev perl pkg-config
 
-      - name: Prepare the ABI-0.21 standalone prefix
+      - name: Prepare the ABI-0.22 standalone prefix
         run: |
           make lua
           grep -qx 'provider=bundled' \
@@ -143,6 +143,7 @@ jobs:
               -u TITAN_PATH_0_19 \
               -u TITAN_PATH_0_20 \
               -u TITAN_PATH_0_21 \
+              -u TITAN_PATH_0_22 \
               -u TITAN_ROCKS_ROOT \
               "$@"
           }
@@ -169,9 +170,9 @@ jobs:
           clean_titan_environment "$PREFIX/bin/lua" -E -e '
             local cpath = package.cpath
             local current = assert(os.getenv("PREFIX")) ..
-              "/lib/titan/0.21/?.so"
+              "/lib/titan/0.22/?.so"
             local previous = assert(os.getenv("PREFIX")) ..
-              "/lib/titan/0.20/?.so"
+              "/lib/titan/0.21/?.so"
             assert(cpath:find(current, 1, true), cpath)
             assert(not cpath:find(previous, 1, true), cpath)
           '
@@ -199,14 +200,14 @@ jobs:
         # titan dev-1. Force this checkout through both source-install phases.
         run: |
           luarocks make --force
-          provider="$PREFIX/lib/titan/0.21/titan.so"
+          provider="$PREFIX/lib/titan/0.22/titan.so"
           static_archive="${provider%.so}.a"
           test -f "$provider" && test ! -L "$provider"
           test -f "$static_archive" && test ! -L "$static_archive"
 
-      - name: Verify bare support loading through the ABI-0.21 path
+      - name: Verify bare support loading through the ABI-0.22 path
         run: |
-          provider="$PREFIX/lib/titan/0.21/titan.so"
+          provider="$PREFIX/lib/titan/0.22/titan.so"
           TITAN_EXPECTED_PROVIDER="$provider" env \
             -u LUA_PATH \
             -u LUA_CPATH \
@@ -222,6 +223,7 @@ jobs:
             -u TITAN_PATH_0_19 \
             -u TITAN_PATH_0_20 \
             -u TITAN_PATH_0_21 \
+            -u TITAN_PATH_0_22 \
             -u TITAN_ROCKS_ROOT \
             "$PREFIX/bin/lua" -E -e '
               local expected = assert(os.getenv("TITAN_EXPECTED_PROVIDER"))
@@ -442,7 +444,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
-      TITAN_ABI_VERSION: "0.21"
+      TITAN_ABI_VERSION: "0.22"
       # Keep the one complete cross-platform gate on the same fallback path.
       READLINE_MODE: bundled
       LIBUV_VERSION: "1.52.1"
@@ -561,7 +563,7 @@ jobs:
           bash spec/support/ci_retry_luarocks_dependencies.sh \
             luarocks make --only-deps
           luarocks make --force
-          provider="$PREFIX/lib/titan/0.21/titan.so"
+          provider="$PREFIX/lib/titan/0.22/titan.so"
           static_archive="${provider%.so}.a"
           test -f "$provider" && test ! -L "$provider"
           test -f "$static_archive" && test ! -L "$static_archive"
@@ -689,7 +691,7 @@ jobs:
         run: |
           bash spec/support/ci_sanitizer_capture.sh titan-artifacts \
             luarocks make --force
-          provider="$PREFIX/lib/titan/0.21/titan.so"
+          provider="$PREFIX/lib/titan/0.22/titan.so"
           static_archive="${provider%.so}.a"
           snapshot_provider="$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/provider.so"
           test -f "$provider" && test ! -L "$provider"
@@ -792,16 +794,16 @@ jobs:
         run: |
           bash spec/support/ci_sanitizer_capture.sh net-production-smoke \
             env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_21="$PREFIX/lib/titan/0.21" \
+            TITAN_PATH_0_22="$PREFIX/lib/titan/0.22" \
             LUA_PATH="$PREFIX/share/lua/5.5/?.lua;$PREFIX/share/lua/5.5/?/init.lua;;" \
-            LUA_CPATH="$PREFIX/lib/titan/0.21/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
+            LUA_CPATH="$PREFIX/lib/titan/0.22/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/net_production_smoke.lua \
               sanitizer
           bash spec/support/ci_sanitizer_capture.sh os-production-smoke \
             env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_21="$PREFIX/lib/titan/0.21" \
+            TITAN_PATH_0_22="$PREFIX/lib/titan/0.22" \
             LUA_PATH="$PREFIX/share/lua/5.5/?.lua;$PREFIX/share/lua/5.5/?/init.lua;;" \
-            LUA_CPATH="$PREFIX/lib/titan/0.21/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
+            LUA_CPATH="$PREFIX/lib/titan/0.22/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua \
               sanitizer "$TITAN_PROCESS_SMOKE_CHILD"
 

@@ -24,7 +24,7 @@ if [[ $PREFIX != /* ]]; then PREFIX=$PWD/$PREFIX; fi
 PREFIX=$(CDPATH= cd "$PREFIX" && pwd -P)
 LUA="$PREFIX/bin/lua"
 TITANC="$PREFIX/bin/titanc"
-ABI_ROOT="$PREFIX/lib/titan/0.21"
+ABI_ROOT="$PREFIX/lib/titan/0.22"
 SHIM_ROOT="$PREFIX/share/lua/5.5"
 PROVIDER="$ABI_ROOT/titan.so"
 STATIC_ARCHIVE="$ABI_ROOT/titan.a"
@@ -464,18 +464,18 @@ run_mode_smoke() {
     local lua_cpath="$ABI_ROOT/?.so"
 
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_21="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_22="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/stdlib_provider_smoke.lua "$mode"
 
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_21="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_22="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/net_production_smoke.lua "$mode"
     # The os facade intentionally supports only pipe and TTY parent streams;
     # CI and noninteractive shells may otherwise supply a regular-file stdin.
     printf '' | env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_21="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_22="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/os_production_smoke.lua "$mode" \
         "$TITAN_PROCESS_SMOKE_CHILD"
@@ -715,7 +715,7 @@ TITAN
         cd "$mode_dir"
         env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
             TITAN_ROCKS_ROOT="$PREFIX" \
-            TITAN_PATH_0_21="$ABI_ROOT" TITAN_PATH= \
+            TITAN_PATH_0_22="$ABI_ROOT" TITAN_PATH= \
             TITAN_RUNTIME_PREBUILT=1 \
             TITAN_EXTRA_CPPFLAGS="$cppflags" \
             TITAN_EXTRA_CFLAGS="-fno-strict-aliasing" \

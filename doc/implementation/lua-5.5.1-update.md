@@ -5,6 +5,10 @@ Titan compiles generated C against Lua's private headers and links the matching
 than only a public-API compatibility check. This chapter records the complete
 5.5.0 to 5.5.1 audit that established Titan ABI 0.21.
 
+> ABI 0.22 retains this Lua 5.5.1 contract and the other ABI-0.21 layouts. Its
+> version boundary is the source-local `titan.uv` surface/private-provider
+> change to the serialized public schema and reconstructible module prefix.
+
 ## Scope and evidence
 
 The primary source was Lua.org's

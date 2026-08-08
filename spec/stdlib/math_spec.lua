@@ -65,7 +65,7 @@ describe("titan.math", function()
         local command = table.concat({
             "env -u LUA_PATH -u LUA_CPATH" ..
                 " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-            "TITAN_PATH_0_21=" .. quote(workspace),
+            "TITAN_PATH_0_22=" .. quote(workspace),
             "TITAN_PATH=",
             "LUA_PATH=" .. quote(lua_path),
             "LUA_PATH_5_5=" .. quote(lua_path),
