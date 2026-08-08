@@ -322,7 +322,7 @@ function M.compile_bundle(workspace, roots, options)
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
-        "TITAN_PATH_0_21=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_22=" .. quote(layout.abi_root),
         "TITAN_PATH=",
     }
     if options.cppflags and #options.cppflags > 0 then
