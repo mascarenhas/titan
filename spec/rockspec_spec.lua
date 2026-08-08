@@ -985,8 +985,9 @@ local probe = foreign import "provider_probe.h"
 local uv = import "uv"
 
 function check(): boolean
+  local marker = uv.Error.new(nil, "")
   return (probe.titan_uv_provider_probe() as integer) == 0 and
-         #uv._version() > 0
+         marker.traceback == ""
 end
 ]])
         write_file(workspace .. "/lua_direct_uv.titan", [[
@@ -1078,7 +1079,7 @@ assert(package.searchpath("titan.uv", package.cpath) == nil)
 local uv = require "titan.uv"
 local direct_uv = require "lua_direct_uv"
 assert(direct_uv.check())
-assert(type(uv._version()) == "string")
+assert(type(uv.Error.new) == "function")
 ]], STDLIB_SHIMDIR .. "/uv.lua", STDLIB_PROVIDER)
         local lua_path = table.concat({
             LUA_SHAREDIR .. "/?.lua",

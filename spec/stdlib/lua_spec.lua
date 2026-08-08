@@ -176,9 +176,10 @@ describe("titan.lua", function()
             cppflags = "",
         })
         async_stdlib.register_exact_provider(layout, "titan.string")
-        async_stdlib.prepare_async_core(workspace, layout)
+        async_stdlib.prepare_async_core(
+            workspace, layout, { "os", "fs", "timer" })
 
-        for _, name in ipairs({ "os", "io", "fs", "lua", "timer" }) do
+        for _, name in ipairs({ "io", "lua" }) do
             async_stdlib.write_source(
                 workspace, "titan." .. name,
                 async_stdlib.read("titan/" .. name .. ".titan"))

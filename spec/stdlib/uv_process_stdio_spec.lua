@@ -37,7 +37,8 @@ end
 
 local PROCESS_STDIO_CASES = [====[
 local probe = foreign import "uv_stdio_probe.h"
-local uv = import "uv"
+local async = import "async"
+local system = import "os"
 
 local outcome = "not-run"
 
@@ -45,33 +46,30 @@ local function check(condition: boolean, message: string)
   if not condition then raise message end
 end
 
-local function configured(status: integer, label: string)
-  check(status == 0, label .. " spawn option failed")
-end
-
-local function default_config(): uv.uv_spawn_config
-  local config = uv._os_spawn_config_new()
-  configured(uv._os_spawn_config_with_stdin(config), "stdin")
-  configured(uv._os_spawn_config_with_stdout(config), "stdout")
-  configured(uv._os_spawn_config_with_stderr(config), "stderr")
-  return config
-end
-
-local function required(candidate: uv.uv_stdio_t?,
-                        label: string): uv.uv_stdio_t
+local function required_input(candidate: system.InputStream?,
+                              label: string): system.InputStream
   if not candidate then raise label .. " was not captured" end
-  return candidate as uv.uv_stdio_t
+  return candidate as system.InputStream
 end
 
-local function read_all(stdio: uv.uv_stdio_t): string
+local function required_output(candidate: system.OutputStream?,
+                               label: string): system.OutputStream
+  if not candidate then raise label .. " was not captured" end
+  return candidate as system.OutputStream
+end
+
+local function read_all(stream: system.InputStream): string
   local result = ""
-  for chunk in uv._os_stdio_read, stdio do result = result .. chunk end
-  return result
+  while true do
+    local chunk? = stream:read()
+    if not chunk then return result end
+    result = result .. (chunk as string)
+  end
 end
 
-local function normal(process: uv.uv_process_t, label: string)
-  local code, signal_number = uv._os_process_wait(process)
-  check(code == 0 and signal_number == 0,
+local function normal(process: system.Process, label: string)
+  local status = process:wait()
+  check(status.code == 0 and status.signal_number == 0,
         label .. " did not exit normally")
 end
 
@@ -95,105 +93,88 @@ function captured_stdout(): string
   return probe.titan_uv_test_stdio_output(1) as string
 end
 
-function start_processes(child: string): uv.Task
+function start_processes(child: string): async.Task
   outcome = "running"
-  return uv._run(function (): value
-    local process, raw_stdin?, raw_stdout?, raw_stderr? =
-      uv._os_process_spawn_with_config(
-        child, {"echo"}, default_config())
-    local stdin = required(raw_stdin, "stdin")
-    local stdout = required(raw_stdout, "stdout")
-    local stderr = required(raw_stderr, "stderr")
+  return async.run(function (): value
+    local process = system.spawn(child, {"echo"})
+    local stdin = required_output(process.stdin, "stdin")
+    local stdout = required_input(process.stdout, "stdout")
+    local stderr = required_input(process.stderr, "stderr")
     local payload = "low\0level\nstream"
-    uv._os_stdio_write(stdin, payload)
-    uv._os_stdio_close(stdin)
+    stdin:write(payload)
+    stdin:close()
     check(read_all(stdout) == payload,
           "low-level process stream changed binary bytes")
     check(read_all(stderr) == "", "low-level echo child wrote stderr")
     normal(process, "low-level echo")
-    uv._os_stdio_close(stdout)
-    uv._os_stdio_close(stderr)
+    stdout:close()
+    stderr:close()
 
-    local merged_config = default_config()
-    configured(uv._os_spawn_config_with_merged_output(merged_config),
-               "merged output")
-    local merged, merged_stdin?, raw_merged_stdout?, raw_merged_stderr? =
-      uv._os_process_spawn_with_config(
-        child, {"dual", "32"}, merged_config)
-    uv._os_stdio_close(required(merged_stdin, "merged stdin"))
-    local merged_stdout = required(raw_merged_stdout, "merged stdout")
-    local merged_stderr = required(raw_merged_stderr, "merged stderr")
+    local merged = system.spawn(
+        child, {"dual", "32"}, system.with_merged_output)
+    required_output(merged.stdin, "merged stdin"):close()
+    local merged_stdout = required_input(merged.stdout, "merged stdout")
+    local merged_stderr = required_input(merged.stderr, "merged stderr")
     check(merged_stdout == merged_stderr,
           "merged low-level output used two owners")
     check(#read_all(merged_stdout) == 64,
           "merged low-level output returned the wrong byte count")
     normal(merged, "merged low-level child")
+    merged_stdout:close()
 
-    local half_merged_config = default_config()
-    configured(uv._os_spawn_config_with_merged_output(half_merged_config),
-               "half-merged initial output")
-    configured(uv._os_spawn_config_with_stdout(half_merged_config),
-               "half-merged final stdout")
-    local half_merged, half_merged_stdin?, raw_half_stdout?,
-          raw_half_stderr? = uv._os_process_spawn_with_config(
-      child, {"early-output-exit"}, half_merged_config)
-    uv._os_stdio_close(required(half_merged_stdin, "half-merged stdin"))
-    local half_stdout = required(raw_half_stdout, "half-merged stdout")
-    local half_stderr = required(raw_half_stderr, "half-merged stderr")
+    local half_merged = system.spawn(
+        child, {"early-output-exit"},
+        system.with_merged_output, system.with_stdout)
+    required_output(half_merged.stdin, "half-merged stdin"):close()
+    local half_stdout = required_input(
+        half_merged.stdout, "half-merged stdout")
+    local half_stderr = required_input(
+        half_merged.stderr, "half-merged stderr")
     check(half_stdout ~= half_stderr,
           "replacing one merged output kept one shared owner")
     check(read_all(half_stdout) == "early\0stdout" and
           read_all(half_stderr) == "early\0stderr",
           "half-merged output changed or retained the child endpoint")
-    local half_code, half_signal = uv._os_process_wait(half_merged)
-    check(half_code == 23 and half_signal == 0,
+    local half_status = half_merged:wait()
+    check(half_status.code == 23 and half_status.signal_number == 0,
           "half-merged process status changed")
+    half_stdout:close()
+    half_stderr:close()
 
-    local separate_config = default_config()
-    configured(uv._os_spawn_config_with_merged_output(separate_config),
-               "initial merge")
-    configured(uv._os_spawn_config_with_stdout(separate_config),
-               "final stdout capture")
-    configured(uv._os_spawn_config_with_stderr(separate_config),
-               "final stderr capture")
-    local separate, separate_stdin?, raw_separate_stdout?,
-          raw_separate_stderr? = uv._os_process_spawn_with_config(
-      child, {"early-output-exit"}, separate_config)
-    uv._os_stdio_close(required(separate_stdin, "separate stdin"))
-    local separate_stdout = required(
-      raw_separate_stdout, "separate stdout")
-    local separate_stderr = required(
-      raw_separate_stderr, "separate stderr")
+    local separate = system.spawn(
+        child, {"early-output-exit"},
+        system.with_merged_output, system.with_stdout, system.with_stderr)
+    required_output(separate.stdin, "separate stdin"):close()
+    local separate_stdout = required_input(
+        separate.stdout, "separate stdout")
+    local separate_stderr = required_input(
+        separate.stderr, "separate stderr")
     check(separate_stdout ~= separate_stderr,
           "final separate captures retained merged identity")
     check(read_all(separate_stdout) == "early\0stdout" and
           read_all(separate_stderr) == "early\0stderr",
           "final separate captures changed output")
-    local code, signal_number = uv._os_process_wait(separate)
-    check(code == 23 and signal_number == 0,
+    local separate_status = separate:wait()
+    check(separate_status.code == 23 and
+          separate_status.signal_number == 0,
           "low-level process status changed")
+    separate_stdout:close()
+    separate_stderr:close()
 
     outcome = "processes-ok"
     return nil
   end)
 end
 
-function start_parent_inheritance(): uv.Task
+function start_parent_inheritance(): async.Task
   outcome = "running"
   setup(probe.TITAN_UV_TEST_STDIO_PIPE_ALL)
-  return uv._run(function (): value
-    local config = default_config()
-    configured(uv._os_spawn_config_with_parent_stdin(config),
-               "parent stdin")
-    configured(uv._os_spawn_config_with_parent_stdout(config),
-               "parent stdout")
-    configured(uv._os_spawn_config_with_parent_stderr(config),
-               "parent stderr")
-    local process, inherited_stdin?, inherited_stdout?, inherited_stderr? =
-      uv._os_process_spawn_with_config(
-        "/bin/sh", {"-c", ":"}, config)
-    check(not inherited_stdin and not inherited_stdout and
-          not inherited_stderr,
+  return async.run(function (): value
+    local process = system.spawn(
+        "/bin/sh", {"-c", ":"},
+        system.with_parent_stdin, system.with_parent_stdout,
+        system.with_parent_stderr)
+    check(not process.stdin and not process.stdout and not process.stderr,
           "inherited descriptors exposed captured endpoints")
     normal(process, "inherited low-level child")
     outcome = "parent-inheritance-ready"
@@ -206,21 +187,18 @@ function finish_parent_inheritance()
   outcome = "parent-inheritance-ok"
 end
 
-function start_parent_pipes(): uv.Task
+function start_parent_pipes(): async.Task
   outcome = "running"
   setup(probe.TITAN_UV_TEST_STDIO_PIPE_ALL)
-  return uv._run(function (): value
-    local input = uv._os_parent_stdin()
-    local output = uv._os_parent_stdout()
-    local diagnostics = uv._os_parent_stderr()
-    check(not uv._os_stdio_is_tty(input) and
-          not uv._os_stdio_is_tty(output) and
-          not uv._os_stdio_is_tty(diagnostics),
+  return async.run(function (): value
+    check(not system.stdin:is_tty() and
+          not system.stdout:is_tty() and
+          not system.stderr:is_tty(),
           "pipe parent stdio was misclassified")
-    check(read_all(input) == "parent-pipe-input",
+    check(read_all(system.stdin) == "parent-pipe-input",
           "parent stdin changed bytes")
-    uv._os_stdio_write(output, "pipe-stdout")
-    uv._os_stdio_write(diagnostics, "pipe-stderr")
+    system.stdout:write("pipe-stdout")
+    system.stderr:write("pipe-stderr")
     outcome = "parent-pipes-ready"
     return nil
   end)
@@ -234,16 +212,41 @@ function finish_parent_pipes()
 end
 
 local function reject_parent_stdout(mode: integer,
-                                    expected: string): uv.Task
+                                    expected: string): async.Task
   outcome = "running"
   setup(mode)
-  return uv._run(function (): value
+  return async.run(function (): value
+    local warm = system.spawn("/bin/sh", {"-c", ":"})
+    required_output(warm.stdin, "warm stdin"):close()
+    local warm_stdout = required_input(warm.stdout, "warm stdout")
+    local warm_stderr = required_input(warm.stderr, "warm stderr")
+    read_all(warm_stdout)
+    read_all(warm_stderr)
+    normal(warm, "warm child")
+    warm_stdout:close()
+    warm_stderr:close()
+    async.yield()
+
     local before = probe.titan_uv_test_stdio_open_fd_count()
     check(before >= 0, "could not count descriptors before rejection")
-    local config = uv._os_spawn_config_new()
-    local status = uv._os_spawn_config_with_parent_stdout(config)
-    uv._os_spawn_config_close(config)
-    check(status < 0, "unsupported parent stdout was accepted")
+    local rejected = false
+    do
+      local process = system.spawn(
+          "/bin/sh", {"-c", ":"}, system.with_parent_stdout)
+      if process.stdin then
+        (process.stdin as system.OutputStream):close()
+      end
+      if process.stdout then
+        (process.stdout as system.InputStream):close()
+      end
+      if process.stderr then
+        (process.stderr as system.InputStream):close()
+      end
+      process:wait()
+    catch
+      rejected = true
+    end
+    check(rejected, "unsupported parent stdout was accepted")
     check(probe.titan_uv_test_stdio_open_fd_count() == before,
           "parent stdout rejection leaked a descriptor")
     outcome = expected
@@ -251,12 +254,12 @@ local function reject_parent_stdout(mode: integer,
   end)
 end
 
-function start_parent_file_rejection(): uv.Task
+function start_parent_file_rejection(): async.Task
   return reject_parent_stdout(probe.TITAN_UV_TEST_STDIO_FILE_STDOUT,
                               "parent-file-rejected")
 end
 
-function start_parent_socket_rejection(): uv.Task
+function start_parent_socket_rejection(): async.Task
   return reject_parent_stdout(probe.TITAN_UV_TEST_STDIO_SOCKET_STDOUT,
                               "parent-socket-rejected")
 end
@@ -265,14 +268,13 @@ function finish_parent_rejection()
   finish(0)
 end
 
-function start_parent_tty(): uv.Task
+function start_parent_tty(): async.Task
   outcome = "running"
   setup(probe.TITAN_UV_TEST_STDIO_TTY_SLAVE)
-  return uv._run(function (): value
-    local output = uv._os_parent_stdout()
-    check(uv._os_stdio_is_tty(output),
+  return async.run(function (): value
+    check(system.stdout:is_tty(),
           "PTY stdout was not classified as a TTY")
-    uv._os_stdio_write(output, "tty-output")
+    system.stdout:write("tty-output")
     outcome = "parent-tty-ready"
     return nil
   end)

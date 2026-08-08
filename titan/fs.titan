@@ -17,7 +17,7 @@ record Stat
 end
 
 function open(path: string, mode: string): File
-  return File.new(uv._fs_open(path, mode), "")
+  return File.new(uv.fs_open(path, mode), "")
 end
 
 function File:read(max_bytes: integer?): string?
@@ -26,7 +26,7 @@ function File:read(max_bytes: integer?): string?
   if requested <= 0 then
     raise "file read size must be positive"
   end
-  if uv._fs_is_closed(self.handle) then
+  if self.handle.handle < 0 then
     self.excess = ""
     return nil
   end
@@ -37,12 +37,12 @@ function File:read(max_bytes: integer?): string?
     self.excess = str.sub(self.excess, length + 1)
     return result
   end
-  return uv._fs_read(self.handle, requested)
+  return uv.fs_read(self.handle, requested)
 end
 
 function File:read_until(delimiter: string,
                          chop: boolean?): string?
-  if uv._fs_is_closed(self.handle) then
+  if self.handle.handle < 0 then
     self.excess = ""
     return nil
   end
@@ -86,20 +86,20 @@ function File:read_until(delimiter: string,
 end
 
 function File:write(data: string): integer
-  return uv._fs_write(self.handle, data)
+  return uv.fs_write(self.handle, data)
 end
 
 function File:flush()
-  uv._fs_flush(self.handle)
+  uv.fs_flush(self.handle)
 end
 
 function File:close()
   self.excess = ""
-  uv._fs_close(self.handle)
+  uv.fs_close(self.handle)
 end
 
 function File:is_closed(): boolean
-  return uv._fs_is_closed(self.handle)
+  return self.handle.handle < 0
 end
 
 function read_file(path: string): string
@@ -121,52 +121,52 @@ end
 
 function stat(path: string): Stat
   local size, kind, mode, modified_seconds, modified_nanoseconds =
-    uv._fs_stat(path)
+    uv.fs_stat(path)
   return Stat.new(size, kind, mode, modified_seconds, modified_nanoseconds)
 end
 
 function lstat(path: string): Stat
   local size, kind, mode, modified_seconds, modified_nanoseconds =
-    uv._fs_lstat(path)
+    uv.fs_lstat(path)
   return Stat.new(size, kind, mode, modified_seconds, modified_nanoseconds)
 end
 
 function tmpname(): string
-  return uv._fs_tmpname()
+  return uv.fs_tmpname()
 end
 
 function tmpdir(): string
-  return uv._os_tmpdir()
+  return uv.os_tmpdir()
 end
 
 function homedir(): string
-  return uv._os_homedir()
+  return uv.os_homedir()
 end
 
 function pwd(): string
-  return uv._fs_pwd()
+  return uv.current_directory("fs.pwd")
 end
 
 function chdir(path: string)
-  uv._fs_chdir(path)
+  uv.change_directory(path, "fs.chdir")
 end
 
 function mkdir(path: string)
-  uv._fs_mkdir(path)
+  uv.fs_mkdir(path)
 end
 
 function unlink(path: string)
-  uv._fs_unlink(path)
+  uv.fs_unlink(path)
 end
 
 function rmdir(path: string)
-  uv._fs_rmdir(path)
+  uv.fs_rmdir(path)
 end
 
 function rename(from: string, to: string)
-  uv._fs_rename(from, to)
+  uv.fs_rename(from, to)
 end
 
 function list(path: string): {string}
-  return uv._fs_list(path)
+  return uv.fs_list(path)
 end

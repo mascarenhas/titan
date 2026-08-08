@@ -10,7 +10,7 @@ local union StdioNative
   tty: owned *libuv.uv_tty_t
 end
 
-record uv_stdio_t
+local record uv_stdio_t
   local native: StdioNative
   local alloc_callback: (uv_stdio_t, libuv.size_t,
                          ffi.titan_ffi_void_ptr) -> ()
@@ -29,7 +29,7 @@ local record ProcessExitResult
   local signal_number: integer
 end
 
-record uv_process_t
+local record uv_process_t
   local handle: owned *libuv.uv_process_t
   local exit_callback: (uv_process_t, integer, integer) -> ()
   local runtime: Runtime
@@ -49,7 +49,7 @@ local union SpawnSlot
   merged: MergedSpawnSlot
 end
 
-record uv_spawn_config
+local record uv_spawn_config
   local runtime: Runtime
   local options: owned *libuv.uv_process_options_t
   local stdio: owned libuv.uv_stdio_container_t[]
@@ -635,7 +635,7 @@ local function config_merged_output(state: uv_spawn_config):
       MergedSpawnSlot.new(child_stream, parent_stream))
 end
 
-function _os_spawn_config_new(): uv_spawn_config
+local function os_spawn_config_new(): uv_spawn_config
   local task = running_task()
   accepting_work(task.runtime, "configure a Process")
   local options = libuv.uv_process_options_t.new()
@@ -670,18 +670,6 @@ local function configure_capture(config: uv_spawn_config,
   return 0
 end
 
-function _os_spawn_config_with_stdin(config: uv_spawn_config): integer
-  return configure_capture(config, 0)
-end
-
-function _os_spawn_config_with_stdout(config: uv_spawn_config): integer
-  return configure_capture(config, 1)
-end
-
-function _os_spawn_config_with_stderr(config: uv_spawn_config): integer
-  return configure_capture(config, 2)
-end
-
 local function configure_parent(config: uv_spawn_config,
                                 descriptor: integer): integer
   local status = validate_config(config)
@@ -694,22 +682,7 @@ local function configure_parent(config: uv_spawn_config,
   return 0
 end
 
-function _os_spawn_config_with_parent_stdin(
-    config: uv_spawn_config): integer
-  return configure_parent(config, 0)
-end
-
-function _os_spawn_config_with_parent_stdout(
-    config: uv_spawn_config): integer
-  return configure_parent(config, 1)
-end
-
-function _os_spawn_config_with_parent_stderr(
-    config: uv_spawn_config): integer
-  return configure_parent(config, 2)
-end
-
-function _os_spawn_config_with_merged_output(
+local function os_spawn_config_with_merged_output(
     config: uv_spawn_config): integer
   local status = validate_config(config)
   if status < 0 then return status end
@@ -723,7 +696,7 @@ function _os_spawn_config_with_merged_output(
   return status
 end
 
-function _os_spawn_config_close(config: uv_spawn_config)
+local function os_spawn_config_close(config: uv_spawn_config)
   if config.consumed then return end
   local task = running_task()
   if config.runtime ~= task.runtime then
@@ -733,8 +706,8 @@ function _os_spawn_config_close(config: uv_spawn_config)
   discard_config_streams(config)
 end
 
-function _os_spawn_config_error(config: uv_spawn_config, status: integer)
-  _os_spawn_config_close(config)
+local function os_spawn_config_error(config: uv_spawn_config, status: integer)
+  os_spawn_config_close(config)
   raise make_error(status, "process.spawn.config")
 end
 
@@ -750,18 +723,18 @@ local function new_process(runtime: Runtime): uv_process_t
   }
 end
 
-function _os_process_spawn_with_config(file: string, args: {string},
+local function os_process_spawn_with_config(file: string, args: {string},
                                        config: uv_spawn_config):
                                        (uv_process_t, uv_stdio_t?,
                                         uv_stdio_t?, uv_stdio_t?)
   local state = config
   local status = validate_config(state)
-  if status < 0 then _os_spawn_config_error(config, status) end
+  if status < 0 then os_spawn_config_error(config, status) end
   local stdin_slot? = config_slot(state, 0)
   local stdout_slot? = config_slot(state, 1)
   local stderr_slot? = config_slot(state, 2)
   if not stdin_slot or not stdout_slot or not stderr_slot then
-    _os_spawn_config_error(config, libuv.UV_EINVAL)
+    os_spawn_config_error(config, libuv.UV_EINVAL)
   end
   accepting_work(state.runtime, "spawn a Process")
 
@@ -835,14 +808,14 @@ local function validate_process(process: uv_process_t)
   end
 end
 
-function _os_process_wait(process: uv_process_t): (integer, integer)
+local function os_process_wait(process: uv_process_t): (integer, integer)
   validate_process(process)
   local result = await(Call.process_wait(
       ProcessWaitCall.new(process))) as ProcessExitResult
   return result.code, result.signal_number
 end
 
-function _os_process_kill(process: uv_process_t, signal: string)
+local function os_process_kill(process: uv_process_t, signal: string)
   validate_process(process)
   local signum = signal_number(signal)
   if signum <= 0 then
@@ -858,25 +831,17 @@ function _os_process_kill(process: uv_process_t, signal: string)
   end
 end
 
-function _os_process_is_running(process: uv_process_t): boolean
+local function os_process_is_running(process: uv_process_t): boolean
   validate_process(process)
   local native: *libuv.uv_process_t = process.handle
   return libuv.uv_is_active(native as *libuv.uv_handle_t) ~= 0
 end
 
-function _os_parent_stdin(): uv_stdio_t
-  return initialize_parent_stdio(running_task().runtime, 0)
+local function os_parent_stdio(descriptor: integer): uv_stdio_t
+  return initialize_parent_stdio(running_task().runtime, descriptor)
 end
 
-function _os_parent_stdout(): uv_stdio_t
-  return initialize_parent_stdio(running_task().runtime, 1)
-end
-
-function _os_parent_stderr(): uv_stdio_t
-  return initialize_parent_stdio(running_task().runtime, 2)
-end
-
-function _os_stdio_is_tty(stdio: uv_stdio_t): boolean
+local function os_stdio_is_tty(stdio: uv_stdio_t): boolean
   validate_stdio(stdio)
   case stdio.native
   when tty then return true
@@ -884,17 +849,17 @@ function _os_stdio_is_tty(stdio: uv_stdio_t): boolean
   end
 end
 
-function _os_stdio_read(stdio: uv_stdio_t): string?
+local function os_stdio_read(stdio: uv_stdio_t): string?
   validate_stdio(stdio)
   return await(Call.stream_read(StreamReadCall.new(stdio)))
 end
 
-function _os_stdio_write(stdio: uv_stdio_t, data: string)
+local function os_stdio_write(stdio: uv_stdio_t, data: string)
   validate_stdio(stdio)
   await(Call.stream_write(StreamWriteCall.new(stdio, data)))
 end
 
-function _os_stdio_close(stdio: uv_stdio_t)
+local function os_stdio_close(stdio: uv_stdio_t)
   validate_stdio(stdio)
   await(Call.stream_close(StreamCloseCall.new(stdio)))
 end

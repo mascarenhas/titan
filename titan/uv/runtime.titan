@@ -319,7 +319,7 @@ local function loop_owns_handle(runtime: Runtime,
   return owner.handle ~= nil
 end
 
-function _loop()
+local function loop()
   if L ~= main_thread then
     raise "async.loop must be driven from the Lua main thread"
   end
@@ -346,6 +346,6 @@ function _loop()
   active_runtime = nil
 end
 
-function _version(): string
+local function version(): string
   return libuv.uv_version_string() as string
 end

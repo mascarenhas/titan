@@ -9,7 +9,7 @@ local record FsStatResult
 end
 
 -- A uv_file is a process descriptor, not a Runtime-owned uv_handle_t.
-record uv_file
+local record uv_file
   local handle: libuv.uv_file
 end
 
@@ -390,17 +390,17 @@ local function FsListCall:dispatch(task: Task): Immediate?
   return submitted_fs_request(task, owner, status, "fs.list")
 end
 
-function _fs_open(path: string, mode: string): uv_file
+local function fs_open(path: string, mode: string): uv_file
   return await(Call.fs_open(FsOpenCall.new(
       checked_text(path, "fs.open"), fs_open_flags(mode)))) as uv_file
 end
 
-function _fs_read(file: uv_file, max_bytes: integer): string?
+local function fs_read(file: uv_file, max_bytes: integer): string?
   validate_file(file)
   return await(Call.fs_read(FsReadCall.new(file, max_bytes)))
 end
 
-function _fs_write(file: uv_file, data: string): integer
+local function fs_write(file: uv_file, data: string): integer
   validate_file(file)
   local length = #data
   if length == 0 then return 0 end
@@ -413,63 +413,61 @@ function _fs_write(file: uv_file, data: string): integer
   return offset
 end
 
-function _fs_flush(file: uv_file)
+local function fs_flush(file: uv_file)
   validate_file(file)
   await(Call.fs_flush(FsFlushCall.new(file)))
 end
 
-function _fs_is_closed(file: uv_file): boolean
-  return file.handle < 0
-end
-
-function _fs_close(file: uv_file)
+local function fs_close(file: uv_file)
   if file.handle < 0 then return end
   validate_file(file)
   await(Call.fs_close(FsCloseCall.new(file)))
 end
 
-function _fs_stat(path: string): (integer, string, integer, integer, integer)
+local function fs_stat(path: string):
+    (integer, string, integer, integer, integer)
   local result = await(Call.fs_stat(FsStatCall.new(
       checked_text(path, "fs.stat")))) as FsStatResult
   return result.size, result.kind, result.mode,
          result.modified_seconds, result.modified_nanoseconds
 end
 
-function _fs_lstat(path: string): (integer, string, integer, integer, integer)
+local function fs_lstat(path: string):
+    (integer, string, integer, integer, integer)
   local result = await(Call.fs_lstat(FsLstatCall.new(
       checked_text(path, "fs.lstat")))) as FsStatResult
   return result.size, result.kind, result.mode,
          result.modified_seconds, result.modified_nanoseconds
 end
 
-function _fs_tmpname(): string
+local function fs_tmpname(): string
   local template = fs_tmpname_template()
   return await(Call.fs_tmpname(FsTmpnameCall.new(
       checked_text(template, "fs.tmpname")))) as string
 end
 
-function _fs_mkdir(path: string)
+local function fs_mkdir(path: string)
   await(Call.fs_mkdir(FsMkdirCall.new(
       checked_text(path, "fs.mkdir"))))
 end
 
-function _fs_unlink(path: string)
+local function fs_unlink(path: string)
   await(Call.fs_unlink(FsUnlinkCall.new(
       checked_text(path, "fs.unlink"))))
 end
 
-function _fs_rmdir(path: string)
+local function fs_rmdir(path: string)
   await(Call.fs_rmdir(FsRmdirCall.new(
       checked_text(path, "fs.rmdir"))))
 end
 
-function _fs_rename(from: string, to: string)
+local function fs_rename(from: string, to: string)
   checked_text(from, "fs.rename")
   checked_text(to, "fs.rename")
   await(Call.fs_rename(FsRenameCall.new(from, to)))
 end
 
-function _fs_list(path: string): {string}
+local function fs_list(path: string): {string}
   return await(Call.fs_list(FsListCall.new(
       checked_text(path, "fs.list")))) as {string}
 end

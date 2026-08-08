@@ -136,15 +136,7 @@ function M.prepare(workspace, include_io)
         cppflags = "",
     })
     async_stdlib.register_exact_provider(layout, "titan.string")
-    async_stdlib.prepare_async_core(workspace, layout)
-
-    async_stdlib.write_source(
-        workspace, "titan.os", async_stdlib.read("titan/os.titan"))
-    async_stdlib.compile(workspace, "titan.os", {
-        layout = layout,
-        cppflags = "",
-    })
-    async_stdlib.register_exact_provider(layout, "titan.os")
+    async_stdlib.prepare_async_core(workspace, layout, { "os" })
 
     if include_io then
         async_stdlib.write_source(

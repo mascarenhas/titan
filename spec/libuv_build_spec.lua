@@ -558,6 +558,29 @@ describe("libuv Makefile configuration", function()
             assert.same(discovered_uv_sources(), normalized)
         end)
 
+    it("keeps only async's nominal dependencies public in uv", function()
+        assert.same({
+            "Error", "Error.new", "OperationError", "OperationError.new",
+        }, public_declarations("titan/uv/uv.titan"))
+        assert.same({
+            "CancellationReason", "CancellationReason.simple",
+            "CancellationReason.complex", "TaskStatus", "TaskStatus.ready",
+            "TaskStatus.running", "TaskStatus.waiting",
+            "TaskStatus.succeeded", "TaskStatus.failed",
+            "TaskStatus.cancelled", "TaskStatus:as_string",
+            "TaskStatus:has_finished", "TaskStatus:has_succeeded",
+            "TaskStatus:has_failed", "TaskStatus:has_cancelled", "Task",
+            "Task:status", "Task:add_terminal_listener",
+            "Task:remove_terminal_listener", "Task:cancel", "Task:resume",
+        }, public_declarations("titan/uv/task.titan"))
+        for _, contributor in ipairs({
+            "file", "os", "process", "runtime", "tcp",
+        }) do
+            assert.same({}, public_declarations(
+                "titan/uv/" .. contributor .. ".titan"))
+        end
+    end)
+
     it("keeps the reviewed HTTP source list equal to the folder ensemble",
         function()
             local listed = makefile_words("STDLIB_HTTP_SOURCES")
@@ -1249,12 +1272,15 @@ describe("libuv Makefile configuration", function()
             }, public_declarations(path))
             assert_ordered(read_file(path),
                 "function tmpname(): string",
-                "return uv._fs_tmpname()",
+                "return uv.fs_tmpname()",
                 "function tmpdir(): string",
-                "return uv._os_tmpdir()",
+                "return uv.os_tmpdir()",
                 "function homedir(): string",
-                "return uv._os_homedir()",
-                "function pwd(): string")
+                "return uv.os_homedir()",
+                "function pwd(): string",
+                'return uv.current_directory("fs.pwd")',
+                "function chdir(path: string)",
+                'uv.change_directory(path, "fs.chdir")')
         end)
 
     it("pins the public os process and stdio facade", function()
@@ -1276,7 +1302,7 @@ describe("libuv Makefile configuration", function()
         }, public_declarations("titan/os.titan"))
 
         assert.falsy(read_file("titan/os.titan"):find(
-            "_os_stdio_is_closed", 1, true))
+            "os_stdio_is_closed", 1, true))
     end)
 
     it("centralizes every peg and string export in the folder main",
