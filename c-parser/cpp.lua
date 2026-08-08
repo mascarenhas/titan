@@ -6,25 +6,6 @@ local c99 = require("c-parser.c99")
 
 local SEP = package.config:sub(1,1)
 
-local shl, shr
-if jit then
-    shl = function(a, b)
-        return bit.lshift(a, b)
-    end
-    shr = function(a, b)
-        return bit.rshift(a, b)
-    end
-else
-    shl, shr = load([[
-        local function shl(a, b)
-            return a << b
-        end
-        local function shr(a, b)
-            return a >> b
-        end
-        return shl, shr
-    ]])()
-end
 
 local function debug() end
 --[[
@@ -988,8 +969,8 @@ eval_exp = typed("Ctx, Exp -> number", function(ctx, exp)
         end
     elseif exp.op == "*"  then return eval_exp(ctx, exp[1]) * eval_exp(ctx, exp[2])
     elseif exp.op == "/"  then return eval_exp(ctx, exp[1]) / eval_exp(ctx, exp[2])
-    elseif exp.op == ">>" then return shr(eval_exp(ctx, exp[1]), eval_exp(ctx, exp[2])) -- FIXME C semantics
-    elseif exp.op == "<<" then return shl(eval_exp(ctx, exp[1]), eval_exp(ctx, exp[2])) -- FIXME C semantics
+    elseif exp.op == ">>" then return eval_exp(ctx, exp[1]) // (1 << eval_exp(ctx, exp[2]))
+    elseif exp.op == "<<" then return eval_exp(ctx, exp[1]) << eval_exp(ctx, exp[2])
     elseif exp.op == "==" then return (eval_exp(ctx, exp[1]) == eval_exp(ctx, exp[2])) and 1 or 0
     elseif exp.op == "!=" then return (eval_exp(ctx, exp[1]) ~= eval_exp(ctx, exp[2])) and 1 or 0
     elseif exp.op == ">=" then return (eval_exp(ctx, exp[1]) >= eval_exp(ctx, exp[2])) and 1 or 0

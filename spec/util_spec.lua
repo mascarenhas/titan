@@ -72,4 +72,30 @@ describe("Titan utils", function()
          assert.equal("missing $MISSING", util.render("missing $MISSING", substs, true))
      end)
 
+     it("curries a function", function()
+         local function add(a, b)
+             return a + b
+         end
+         local add_five = util.curry(add, 5)
+         assert.are.equal(15, add_five(10))
+         assert.are.equal(7, add_five(2))
+     end)
+    
+     it("splits strings", function()
+         assert.same({ "a", "b", "c" }, util.split_string("a,b,c", ","))
+         assert.same({ "abc" }, util.split_string("abc", ","))
+         assert.same({ "" }, util.split_string("", ","))
+         assert.same({ "a", "", "c" }, util.split_string("a,,c", ","))
+         assert.same({ "", "b", "c" }, util.split_string(",b,c", ","))
+         assert.same({ "a", "b", "" }, util.split_string("a,b,", ","))
+         assert.same({ "", "" }, util.split_string(",", ","))
+         assert.same({ "a", "b", "c" }, util.split_string("a;;b;;c", ";;"))
+     end)
+
+     it("checks if any element in a list matches a predicate", function()
+         local is_even = function(x) return x % 2 == 0 end
+         assert.is_true(util.any(is_even, {1, 2, 3}))
+         assert.is_false(util.any(is_even, {1, 3, 5}))
+         assert.is_false(util.any(is_even, {}))
+     end)
 end)
