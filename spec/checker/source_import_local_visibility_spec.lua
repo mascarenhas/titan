@@ -1,53 +1,20 @@
+local checker = require "titan-compiler.checker"
 local driver = require "titan-compiler.driver"
-local lfs = require "lfs"
+local parser = require "titan-compiler.parser"
+local types = require "titan-compiler.types"
 local h = require "spec.support.helpers"
 
-local generated_modules = {}
-
-local function remove_tree(path)
-    local mode = lfs.symlinkattributes(path, "mode")
-    if mode == "directory" then
-        for name in lfs.dir(path) do
-            if name ~= "." and name ~= ".." then
-                remove_tree(path .. "/" .. name)
-            end
-        end
-        assert.truthy(lfs.rmdir(path))
-    elseif mode then
-        assert.truthy(os.remove(path))
-    end
-end
-
-local function clean_generated_modules()
-    for name in pairs(generated_modules) do
-        for _, suffix in ipairs({ ".c", ".o", ".so", ".a" }) do
-            remove_tree(name .. suffix)
-        end
-        remove_tree(name .. ".so.dSYM")
-    end
-    generated_modules = {}
-end
-
 local function check_modules(modules, main)
-    local ok, err = h.run_checker_modules(modules, main)
+    local ok, err = h.run_checker_modules(
+        modules, main, { interface = "source" })
     assert.truthy(ok, err)
-end
-
-local function build_binary_provider(name, source)
-    generated_modules[name] = true
-    local ok, err = h.generate_modules({ [name] = source }, name)
-    assert.truthy(ok, err)
-
-    local target, target_err = driver.derive_target_fingerprint(
-        name .. ".o", name)
-    assert.truthy(target, target_err)
-    local archive, archive_err = driver.build_static_archive(
-        name .. ".a", { name .. ".o" }, {}, target, h.verbose)
-    assert.truthy(archive, archive_err)
 end
 
 describe("source-import local visibility (checker)", function()
-    after_each(clean_generated_modules)
+    after_each(function()
+        types.registry = {}
+        driver.imported = {}
+    end)
 
     it("exposes a direct source module's own local declarations", function()
         check_modules({
@@ -133,27 +100,24 @@ describe("source-import local visibility (checker)", function()
         }, "source_member_consumer")
     end)
 
-    it("keeps local module variables private from direct source imports", function()
-        local ok, err = h.run_checker_modules({
+    it("reads and writes local module variables through a direct source import", function()
+        check_modules({
             source_variable_provider = [[
                 local secret: integer = 41
 
                 function visible(): integer
-                    return secret + 1
+                    return secret
                 end
             ]],
             source_variable_consumer = [[
                 local provider = import "source_variable_provider"
 
                 function inspect(): integer
-                    return provider.visible() + provider.secret
+                    provider.secret = provider.secret + 1
+                    return provider.visible()
                 end
             ]],
         }, "source_variable_consumer")
-        assert.falsy(ok)
-        assert.match(
-            "member 'secret' not found inside module 'source_variable_provider'",
-            err)
     end)
 
     it("does not grant local nominal-member visibility transitively", function()
@@ -190,7 +154,8 @@ describe("source-import local visibility (checker)", function()
         }
 
         local ok, err = h.run_checker_modules(
-            modules, "source_visibility_field_consumer")
+            modules, "source_visibility_field_consumer",
+            { interface = "source" })
         assert.falsy(ok)
         assert.falsy(err:find("type 'Borrowed' not found", 1, true), err)
         assert.match(
@@ -207,11 +172,13 @@ describe("source-import local visibility (checker)", function()
             end
         ]]
         ok, err = h.run_checker_modules(
-            modules, "source_visibility_method_consumer")
+            modules, "source_visibility_method_consumer",
+            { interface = "source" })
         assert.falsy(ok)
         assert.falsy(err:find("type 'Borrowed' not found", 1, true), err)
         assert.match(
-            "method 'reveal' not found in record 'source_visibility_leaf%.Secret'",
+            "method 'source_visibility_leaf%.Secret:reveal' is local to " ..
+                "module 'source_visibility_leaf'",
             err)
 
         modules.source_visibility_method_consumer = nil
@@ -228,97 +195,283 @@ describe("source-import local visibility (checker)", function()
         check_modules(modules, "source_visibility_direct_consumer")
     end)
 
-    it("keeps DSO and static-metadata imports projected to public members", function()
-        local name = "source_visibility_binary"
-        build_binary_provider(name, [[
-            local function hidden(): integer
-                return 1
+    it("does not launder a wholly local nominal through a source facade",
+    function()
+        local modules = {
+            source_local_owner = [[
+                local record Secret
+                    payload: integer
+                end
+
+                local function make(): Secret
+                    return Secret.new(42)
+                end
+            ]],
+            source_local_facade = [[
+                local owner = import "source_local_owner"
+                local type Secret = owner.Secret
+
+                local function make(): Secret
+                    return owner.make()
+                end
+            ]],
+            source_local_facade_consumer = [[
+                local facade = import "source_local_facade"
+
+                function inspect(): integer
+                    return facade.make().payload
+                end
+            ]],
+        }
+        local ok, err = h.run_checker_modules(
+            modules, "source_local_facade_consumer",
+            { interface = "source" })
+        assert.falsy(ok)
+        assert.match(
+            "record type 'source_local_owner%.Secret' is local to module " ..
+                "'source_local_owner'", err)
+
+        modules.source_local_facade_consumer = [[
+            local facade = import "source_local_facade"
+            local owner = import "source_local_owner"
+
+            function inspect(): integer
+                return facade.make().payload + owner.make().payload
             end
+        ]]
+        check_modules(modules, "source_local_facade_consumer")
+    end)
 
-            local type Hidden = integer
+    it("retains the module-variable frontier for a later direct owner import",
+    function()
+        local modules = {
+            source_frontier_owner = [[
+                record Box
+                end
 
-            record Box
-                local hidden: integer
-                shown: integer
+                local function Box.secret(): integer
+                    return 42
+                end
+            ]],
+            source_frontier_facade = [[
+                local owner = import "source_frontier_owner"
+                type Box = owner.Box
+            ]],
+            source_frontier_consumer = [[
+                local facade = import "source_frontier_facade"
+                local before: integer = facade.Box.secret()
+
+                local function body_declared_before_owner_import(): integer
+                    return facade.Box.secret()
+                end
+
+                local owner = import "source_frontier_owner"
+                local after: integer = facade.Box.secret()
+            ]],
+        }
+
+        local ok, err = h.run_checker_modules(
+            modules, "source_frontier_consumer",
+            { interface = "source" })
+        assert.falsy(ok)
+        assert.match(
+            "record function 'source_frontier_owner%.Box%.secret' is local " ..
+                "to module 'source_frontier_owner'", err)
+        local _, count = err:gsub("is local to module", "")
+        assert.equal(1, count, err)
+    end)
+
+    it("preserves pragma-once diamond macro and C-tag context",
+    function()
+        local base = os.tmpname() .. "-source-vis-base.h"
+        local switch = os.tmpname() .. "-source-vis-switch.h"
+        local file = assert(io.open(base, "wb"))
+        assert(file:write([[
+#pragma once
+#define PICK leftbox.value
+struct SourceVisProbe;
+]]))
+        assert(file:close())
+        file = assert(io.open(switch, "wb"))
+        assert(file:write([[
+#undef PICK
+#define PICK rightbox.pointer
+struct SourceVisProbe {
+    struct { int value; } leftbox;
+    struct { void *pointer; } rightbox;
+};
+]]))
+        assert(file:close())
+
+        local modules = {
+            source_macro_owner = string.format([[
+                local header = foreign import %q
+                local type Probe = header.SourceVisProbe
+                local function null(): *Probe return nil end
+            ]], base),
+            source_macro_bridge = string.format([[
+                local owner = import "source_macro_owner"
+                local switch = foreign import %q
+                local function pass(probe: *owner.Probe): *owner.Probe
+                    return probe
+                end
+            ]], switch),
+        }
+        for _, imports in ipairs({
+            [[local bridge = import "source_macro_bridge"
+              local owner = import "source_macro_owner"]],
+            [[local owner = import "source_macro_owner"
+              local bridge = import "source_macro_bridge"]],
+        }) do
+            modules.source_macro_consumer = imports .. [[
+                function inspect(): integer
+                    local probe = owner.null()
+                    return probe.PICK as integer
+                end
+            ]]
+            local ok, err = h.run_checker_modules(
+                modules, "source_macro_consumer",
+                { interface = "source" })
+            assert.falsy(ok)
+            assert.match("cannot cast 'void %*' to 'integer'", err)
+        end
+        os.remove(base)
+        os.remove(switch)
+    end)
+
+    it("keeps a complete source owner canonical across compiled facades",
+    function()
+        local modules = {
+            source_registry_owner = [[
+                record Box
+                    local hidden: integer
+                    shown: integer
+                end
+
+                function make(): Box
+                    return Box.new(40, 2)
+                end
+            ]],
+            source_registry_facade = [[
+                local owner = import "source_registry_owner"
+
+                function get(): owner.Box
+                    return owner.make()
+                end
+            ]],
+        }
+        local imported = {}
+        local source_loader = driver.tableloader(
+            modules, imported, nil, { interface = "source" })
+        local facade_type, facade_errors = checker.checkimport(
+            "source_registry_facade", source_loader)
+        assert.truthy(facade_type, table.concat(facade_errors or {}, "\n"))
+        assert.equal(0, #facade_errors)
+        local source_owner = imported.source_registry_owner.source_type
+
+        local function compiled_projection(modtype, name)
+            local serialized = types.serialize(modtype)
+            assert.falsy(serialized:find("_source_complete", 1, true))
+            local chunk = assert(load(
+                "return " .. serialized, name, "t", types))
+            return assert(chunk())
+        end
+
+        local compiled_owner = compiled_projection(
+            source_owner, "source_registry_owner")
+        local compiled_facade = compiled_projection(
+            facade_type, "source_registry_facade")
+        driver.close_tableloader(source_loader)
+
+        for _, provider_kind in ipairs({ "dynamic", "static" }) do
+            for _, source_first in ipairs({ true, false }) do
+                types.registry = {}
+                driver.imported = {}
+                local imports = source_first and [[
+                    local owner = import "source_registry_owner"
+                    local facade = import "source_registry_facade"
+                ]] or [[
+                    local facade = import "source_registry_facade"
+                    local owner = import "source_registry_owner"
+                ]]
+                local subject = imports .. [[
+                    function inspect(): integer
+                        return owner.make().hidden + facade.get().shown
+                    end
+                ]]
+                local ast = assert(parser.parse(
+                    "source_registry_consumer.titan", subject))
+                local function mixed_loader(name, request)
+                    if name == "source_registry_facade" then
+                        return true, compiled_facade, {},
+                            { kind = provider_kind }
+                    end
+                    assert.equal("source_registry_owner", name)
+                    if request and
+                       request.exposer == "source_registry_facade" then
+                        return true, compiled_owner, {},
+                            { kind = provider_kind }
+                    end
+                    return true, source_owner, {}, { kind = "source" }
+                end
+                local _, errors = checker.check(
+                    "source_registry_consumer", ast, subject,
+                    "source_registry_consumer.titan", mixed_loader)
+                assert.equal(0, #errors, table.concat(errors, "\n"))
             end
+        end
+    end)
 
-            local function Box:secret(): integer
-                return self.hidden
-            end
+    it("keeps compiled projections public-only", function()
+        local modules = {
+            source_visibility_binary = [[
+                local secret: integer = 9
+                local function hidden(): integer return 1 end
+                local type Hidden = integer
 
-            function visible(): integer
-                return 2
-            end
+                record Box
+                    local hidden: integer
+                    shown: integer
+                end
 
-            function make(): Box
-                return Box.new(3, 4)
-            end
-        ]])
+                local function Box:secret(): integer
+                    return self.hidden
+                end
 
-        local function check_projection(kind)
-            local ok, err = h.run_checker([[
+                function visible(): integer return 2 end
+                function make(): Box return Box.new(3, 4) end
+            ]],
+            source_visibility_binary_consumer = [[
                 local provider = import "source_visibility_binary"
-
                 function inspect(): integer
                     local box = provider.make()
                     return provider.visible() + box.shown
                 end
-            ]])
-            assert.truthy(ok, err)
-            assert.equal(kind, driver.imported[name].kind)
+            ]],
+        }
+        local ok, err = h.run_checker_modules(
+            modules, "source_visibility_binary_consumer",
+            { interface = "compiled" })
+        assert.truthy(ok, err)
 
-            local rejected = {
-                {
-                    [[
-                        local provider = import "source_visibility_binary"
-                        function inspect(): integer
-                            return provider.hidden()
-                        end
-                    ]],
-                    "member 'hidden' not found inside module " ..
-                        "'source_visibility_binary'",
-                },
-                {
-                    [[
-                        local provider = import "source_visibility_binary"
-                        function inspect(item: provider.Hidden): integer
-                            return item
-                        end
-                    ]],
-                    "type 'Hidden' not found inside module 'source_visibility_binary'",
-                },
-                {
-                    [[
-                        local provider = import "source_visibility_binary"
-                        function inspect(): integer
-                            return provider.make().hidden
-                        end
-                    ]],
-                    "field 'hidden' not found in record " ..
-                        "'source_visibility_binary%.Box'",
-                },
-                {
-                    [[
-                        local provider = import "source_visibility_binary"
-                        function inspect(): integer
-                            return provider.make():secret()
-                        end
-                    ]],
-                    "method 'secret' not found in record " ..
-                        "'source_visibility_binary%.Box'",
-                },
-            }
-            for _, case in ipairs(rejected) do
-                ok, err = h.run_checker(case[1])
-                assert.falsy(ok)
-                assert.match(case[2], err)
-                assert.equal(kind, driver.imported[name].kind)
-            end
+        local rejected = {
+            "return provider.secret",
+            "return provider.hidden()",
+            "local item: provider.Hidden = 1; return item",
+            "return provider.make().hidden",
+            "return provider.make():secret()",
+        }
+        for _, statement in ipairs(rejected) do
+            modules.source_visibility_binary_consumer = ([=[
+                local provider = import "source_visibility_binary"
+                function inspect(): integer
+                    %s
+                end
+            ]=]):format(statement)
+            ok, err = h.run_checker_modules(
+                modules, "source_visibility_binary_consumer",
+                { interface = "compiled" })
+            assert.falsy(ok, err)
         end
-
-        check_projection("dynamic")
-        remove_tree(name .. ".so")
-        remove_tree(name .. ".so.dSYM")
-        check_projection("static")
     end)
 end)

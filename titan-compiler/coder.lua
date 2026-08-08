@@ -69,6 +69,20 @@ local function c_string_literal(s)
     return table.concat(out)
 end
 
+function coder._foreign_include_line(include, inherited)
+    if inherited and include and include.rendered then
+        return "#include " .. include.rendered
+    end
+    local name = include and include.include_name
+    local kind = include and include.include_kind
+    if kind == "quote" then
+        return '#include "' .. name .. '"'
+    elseif kind == "angle" then
+        return "#include <" .. name .. ">"
+    end
+    error("invalid checked foreign include descriptor")
+end
+
 local function c_integer_literal(n)
     -- The most negative lua_Integer cannot be written as the literal
     -- -9223372036854775808: C parses that as -(9223372036854775808), whose
@@ -193,7 +207,26 @@ end
 -- .titan source.
 local TITAN_ENTRY_TAG = "titanentry"
 
+function coder._source_private_identifier(text)
+    local bytes = {}
+    for index = 1, #text do
+        bytes[index] = string.format("%02x", text:byte(index))
+    end
+    return table.concat(bytes)
+end
+
+function coder._source_private_prefix(owner, name)
+    -- Public ABI names retain Titan's historical mangling. Source-private
+    -- cross-unit entries need an injective owner/member identity because a
+    -- selected archive cannot advertise its locals for collision preflight.
+    return "titan_source_" .. coder._source_private_identifier(owner)
+        .. "_" .. coder._source_private_identifier(name)
+end
+
 local function fname_prefix(typ)
+    if typ.islocal then
+        return coder._source_private_prefix(typ.fqtn, typ.name)
+    end
     return mangle_qn(typ.fqtn) .. "_" .. typ.name
 end
 
@@ -256,16 +289,22 @@ local function modprefix(modname)
     return mangle_qn(modname) .. "_"
 end
 
-local function func_name(modname, name)
-    return modprefix(modname) .. name .. "_titan"
+local function func_name(modname, name, islocal)
+    local prefix = islocal and coder._source_private_prefix(modname, name)
+        or (modprefix(modname) .. name)
+    return prefix .. "_titan"
 end
 
-local function func_luaname(modname, name)
-    return modprefix(modname) .. name .. "_" .. TITAN_ENTRY_TAG .. "_lua"
+local function func_luaname(modname, name, islocal)
+    local prefix = islocal and coder._source_private_prefix(modname, name)
+        or (modprefix(modname) .. name)
+    return prefix .. "_" .. TITAN_ENTRY_TAG .. "_lua"
 end
 
-function coder._func_strictname(modname, name)
-    return modprefix(modname) .. name .. "_" .. TITAN_ENTRY_TAG .. "_strict"
+function coder._func_strictname(modname, name, islocal)
+    local prefix = islocal and coder._source_private_prefix(modname, name)
+        or (modprefix(modname) .. name)
+    return prefix .. "_" .. TITAN_ENTRY_TAG .. "_strict"
 end
 
 function coder._static_strictname(typ)
@@ -279,8 +318,9 @@ end
 -- Return the externally visible C symbols this source module will define.
 -- Library-mode preflight uses the coder's own naming helpers so collisions are
 -- rejected before code generation instead of being discovered by the linker.
--- File-local Lua wrappers, lambdas, module initializers, and local declarations
--- deliberately do not participate.
+-- File-local Lua wrappers, lambdas, and module initializers deliberately do
+-- not participate. Source-visible local native entries have hidden cross-object
+-- linkage and do participate because they can still collide at final link.
 function coder.external_symbols(modname, ast)
     local mangled = mangle_qn(modname)
     local symbols = {
@@ -295,9 +335,9 @@ function coder.external_symbols(modname, ast)
     end
 
     for _, node in ipairs(ast) do
-        if not node._ignore and not node.islocal then
+        if not node._ignore then
             if node._tag == "Ast.TopLevelFunc" then
-                add(func_name(modname, node.name),
+                add(func_name(modname, node.name, node.islocal),
                     "function '" .. modname .. "." .. node.name .. "'")
             elseif node._tag == "Ast.TopLevelStatic" then
                 local owner = types.registry[node._type.fqtn]
@@ -509,7 +549,8 @@ end
 
 local function owned_c_metatable_key(typ)
     assert(typ._tag == "Type.COwned")
-    return types.tostring(typ)
+    local scope = types.c_ffi_scope_key(typ)
+    return (scope and scope .. "\0" or "") .. types.tostring(typ)
 end
 
 local function owned_c_metatable(ctx, typ)
@@ -517,9 +558,11 @@ local function owned_c_metatable(ctx, typ)
     local key = owned_c_metatable_key(typ)
     local entry = tlcontext.owned_c_metatables[key]
     if not entry then
+        local scope = types.c_ffi_scope_key(typ) or tlcontext.module
         entry = {
             slot = nextupvalue(tlcontext),
-            name = "Titan owned C " .. tlcontext.module .. " " .. key .. " metatable",
+            name = "Titan owned C " .. scope .. " "
+                .. types.tostring(typ) .. " metatable",
         }
         tlcontext.owned_c_metatables[key] = entry
     end
@@ -560,10 +603,12 @@ end
 -- additionally include their defining Titan module in the registry key because
 -- imported C typedef identity is module-local; C-free types retain the shared
 -- key so `(integer) -> integer` values keep their cross-module exact fast path.
-function coder._function_type_tag_cache_key(ftype)
+function coder._function_type_tag_cache_key(ftype, fallback_scope)
     local key = types.tostring(ftype)
     local c_bearing = types.first_c_ffi_type(ftype) ~= nil
-    return (c_bearing and "C\0" or "Titan\0") .. key
+    if not c_bearing then return "Titan\0" .. key end
+    local scope = types.c_ffi_scope_key(ftype) or fallback_scope or ""
+    return "C\0" .. scope .. "\0" .. key
 end
 
 local function function_type_tag(tlcontext, ftype --[[:table]])
@@ -574,14 +619,16 @@ local function function_type_tag(tlcontext, ftype --[[:table]])
     -- Keep the two runtime ABI families in distinct local-cache buckets so a
     -- C-bearing callable can never reuse the native tag of a C-free callable
     -- merely because their diagnostics have the same text.
-    local cache_key = coder._function_type_tag_cache_key(ftype)
+    local ffi_scope = types.c_ffi_scope_key(ftype)
+    local cache_key = coder._function_type_tag_cache_key(
+        ftype, tlcontext.module)
     local entry = tlcontext.functags[cache_key]
     if not entry then
         local n = tlcontext.functag_count
         tlcontext.functag_count = n + 1
         local registry_key = key
         if c_bearing then
-            registry_key = tlcontext.module .. " " .. key
+            registry_key = (ffi_scope or tlcontext.module) .. " " .. key
         end
         entry = {
             id = tlcontext.prefix .. "functag_" .. n,
@@ -9370,7 +9417,7 @@ local function codecall(ctx, node)
     local modarg = "_mod"
     if node.args._tag == "Ast.ArgsFunc" then
         if fnode._tag == "Ast.VarName" then
-            fname = func_name(ctx.module, fnode.name)
+            fname = func_name(ctx.module, fnode.name, fnode._decl.islocal)
         elseif fnode._tag == "Ast.VarDot" then
             if fnode.exp._type._tag == "Type.CModule" then
                 return codeforeigncall(ctx, node)
@@ -9398,7 +9445,8 @@ local function codecall(ctx, node)
                 end
             else
                 assert(fnode._decl._tag == "Type.ModuleMember")
-                fname = func_name(fnode._decl.modname, fnode.name)
+                fname = func_name(
+                    fnode._decl.modname, fnode.name, fnode._decl.islocal)
                 local mod = fnode._decl.modname
                 if mod ~= ctx.module then
                     ctx.functions[mod .. "." .. fnode.name] = {
@@ -14114,9 +14162,10 @@ local function codefuncdec(tlcontext, node)
         or node._closure_upvalue
     local fname, luaname, strictname, tracename
     if node._tag == "Ast.TopLevelFunc" then
-        fname = func_name(tlcontext.module, node.name)
-        luaname = func_luaname(tlcontext.module, node.name)
-        strictname = coder._func_strictname(tlcontext.module, node.name)
+        fname = func_name(tlcontext.module, node.name, node.islocal)
+        luaname = func_luaname(tlcontext.module, node.name, node.islocal)
+        strictname = coder._func_strictname(
+            tlcontext.module, node.name, node.islocal)
         tracename = tlcontext.module .. "." .. node.name
         register_trace_name(tlcontext, fname, tracename)
         if has_function_value then
@@ -14274,14 +14323,14 @@ local function codefuncdec(tlcontext, node)
     $ISLOCAL $SIGNATURE {
         $BODY
     }]], {
-        ISLOCAL = node.islocal and "static" or "",
+        ISLOCAL = node.islocal and "TITAN_SOURCE_LOCAL" or "",
         SIGNATURE = nativesig,
         BODY = table.concat(stats, "\n")
     })
     node._sig = render([[
         $ISLOCAL $SIGNATURE;
     ]], {
-        ISLOCAL = node.islocal and "static" or "",
+        ISLOCAL = node.islocal and "TITAN_SOURCE_LOCAL" or "",
         SIGNATURE = nativesig,
     })
     node._luabody = genluaentry(
@@ -14436,14 +14485,14 @@ local function codemethodtrampoline(tlcontext, node)
 
     -- native trampoline signature == function_sig of the self-removed type, but
     -- with named parameters so the body can forward them.
-    local storage = node.islocal and "static TITAN_UNUSED " or ""
+    local storage = node.islocal and "TITAN_SOURCE_LOCAL " or ""
     local strictbody = genluaentry(
         tlcontext, mtype.name, nativename, ftype, node.loc,
         strictname, {
             strict = true,
             strict_name = strictname,
             lua_entry = luaname,
-            storage = node.islocal and "static TITAN_UNUSED" or "",
+            storage = node.islocal and "TITAN_SOURCE_LOCAL" or "",
             strict_plans = node._bound_strict_guard_plans,
             strict_vararg_plan = node._bound_strict_vararg_guard_plan,
         })
@@ -15034,6 +15083,13 @@ function coder._public_prefix_layout(modtype)
     return types.public_module_prefix_layout(modtype)
 end
 
+-- Deterministic compiler-private slots available only on a trusted direct
+-- source edge. They follow the public prefix and unconditional Array-metatable
+-- slot, and never participate in serialized metadata or Lua member maps.
+function coder._source_prefix_layout(modtype)
+    return types.source_module_prefix_layout(modtype)
+end
+
 -- Generates the code for importing the module, and storing it
 -- in the corresponding local state slot
 local function import_module(loadmods, initmods, sigs, mprefixes,
@@ -15076,12 +15132,24 @@ local function import_module(loadmods, initmods, sigs, mprefixes,
         ]], { INIT = mprefix .. "init", INDEX = c_integer_literal(upvalue) }))
     end
     -- Reconstruct the complete ABI-visible prefix, including nominal statics.
-    for slot, entry in ipairs(coder._public_prefix_layout(node._type)) do
+    local public_layout = coder._public_prefix_layout(node._type)
+    for slot, entry in ipairs(public_layout) do
         local index = slot - 1
         if entry.kind == "variable" then
             entry.value._upvalue = index
         else
             entry.value._closure_upvalue = index
+        end
+    end
+    if node._source_import then
+        for slot, entry in ipairs(coder._source_prefix_layout(node._type)) do
+            -- Public slots occupy 0..N-1 and the Array metatable occupies N.
+            local index = #public_layout + slot
+            if entry.kind == "variable" then
+                entry.value._upvalue = index
+            else
+                entry.value._closure_upvalue = index
+            end
         end
     end
 end
@@ -15746,32 +15814,55 @@ local function allocate_upvalues(tlcontext, ast)
             end
         end
     end
-    -- The first private slot is unconditional and ABI-visible: every generated
-    -- module caches the shared per-state Array proxy metatable immediately
-    -- after the importer-reconstructed public prefix.
+
+    -- Every module has exactly one Array-metatable cache immediately after the
+    -- public prefix. This position remains unchanged and reconstructible by
+    -- every binary importer.
     tlcontext.array_metatable_upvalue = nextupvalue(tlcontext)
+
+    -- A trusted source importer additionally reconstructs this deterministic
+    -- compiler-private region. It includes mutable module variables and every
+    -- first-class local callable, but is deliberately absent from metadata and
+    -- Lua member maps.
+    local source_slots = {}
+    for _, entry in ipairs(coder._source_prefix_layout(ast._type)) do
+        local slot = nextupvalue(tlcontext)
+        source_slots[entry.key] = slot
+        if entry.kind == "variable" then
+            entry.value._upvalue = slot
+        else
+            entry.value._closure_upvalue = slot
+        end
+    end
     for _, node in ipairs(ast) do
         if not node._ignore then
-            local tag = node._tag
-            if tag == "Ast.TopLevelVar" and node.islocal then
-                node._upvalue = nextupvalue(tlcontext)
-            elseif tag == "Ast.TopLevelImport" then
-                node._upvalue = nextupvalue(tlcontext)
+            if node._tag == "Ast.TopLevelVar" and node.islocal then
+                node._upvalue = assert(
+                    source_slots["variable:" .. node.decl.name])
+            elseif node._tag == "Ast.TopLevelFunc" and node.islocal then
+                node._closure_upvalue = assert(
+                    source_slots["function:" .. node.name])
+            elseif node._tag == "Ast.TopLevelStatic" and node.islocal then
+                node._closure_upvalue = assert(source_slots[
+                    "static:" .. node._type.fqtn .. "." .. node._type.name])
             end
         end
     end
-    -- Referenced local functions and every static not already in the public
-    -- prefix get private canonical-closure slots. Each nominal also gets a
-    -- private namespace-table slot used by Lua exposure and local selectors.
+
+    -- The remaining slots are private implementation state whose order no
+    -- importer reconstructs.
+    for _, node in ipairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelImport" then
+            node._upvalue = nextupvalue(tlcontext)
+        end
+    end
     for _, node in ipairs(ast) do
         if not node._ignore then
-            if node._tag == "Ast.TopLevelFunc" and node.islocal and node._valref then
-                node._closure_upvalue = nextupvalue(tlcontext)
-            elseif node._tag == "Ast.TopLevelStatic" then
-                if not node._closure_upvalue then
-                    node._closure_upvalue = nextupvalue(tlcontext)
-                end
-                tlcontext.static_slots[node._type.fqtn .. "." .. node._type.name] =
+            if node._tag == "Ast.TopLevelStatic" then
+                assert(node._closure_upvalue,
+                    "static lacks public or source-private closure slot")
+                tlcontext.static_slots[
+                    node._type.fqtn .. "." .. node._type.name] =
                     node._closure_upvalue
             elseif node._tag == "Ast.TopLevelRecord"
                    or node._tag == "Ast.TopLevelUnion" then
@@ -15877,22 +15968,18 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
             if tag == "Ast.TopLevelImport" then
                 import_module(loadmods, initmods, sigs, mprefixes,
                     static_deps[node.modname] ~= true, node)
-            elseif tag == "Ast.TopLevelForeignImport" then
-                local include
-                local include_name = node.headername
-                if node._include then
-                    include_name = node._include.include_name
-                    if node._include.include_kind == "quote" then
-                        include = '#include "' .. include_name .. '"'
-                    else
-                        include = "#include <" .. include_name .. ">"
+                if node._source_import then
+                    -- Splice the checked target's complete ordered header
+                    -- effects at this import edge. Binary imports carry none.
+                    for _, entry in ipairs(
+                            node._type._source_foreign_includes or {}) do
+                        table.insert(foreignimports,
+                            coder._foreign_include_line(entry.include, true))
                     end
-                elseif node.headername:match("^/") then
-                    include = '#include "' .. include_name .. '"'
-                else
-                    include = "#include <" .. include_name .. ">"
                 end
-                table.insert(foreignimports, include)
+            elseif tag == "Ast.TopLevelForeignImport" then
+                table.insert(foreignimports,
+                    coder._foreign_include_line(assert(node._include)))
             elseif tag == "Ast.TopLevelVar" then
                 codevardec(initctx, initvars, switch_get, switch_set, gvar_map, node)
             elseif tag == "Ast.TopLevelRecord" then
@@ -15957,12 +16044,14 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                             luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                             lua_pop(L, 1);
                         ]], {
-                            LUANAME = func_luaname(tlcontext.module, node.name),
+                            LUANAME = func_luaname(
+                                tlcontext.module, node.name, node.islocal),
                             SLOT = c_integer_literal(node._closure_upvalue),
                             FUNCTAG = function_type_tag(tlcontext, node._type),
-                            NATIVE = func_name(tlcontext.module, node.name),
+                            NATIVE = func_name(
+                                tlcontext.module, node.name, node.islocal),
                             STRICTNAME = coder._func_strictname(
-                                tlcontext.module, node.name),
+                                tlcontext.module, node.name, node.islocal),
                         }))
                         register_readonly_member(node.name, node._closure_upvalue)
                     else
@@ -15987,12 +16076,14 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                         luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                         lua_pop(L, 1);
                     ]], {
-                        LUANAME = func_luaname(tlcontext.module, node.name),
+                        LUANAME = func_luaname(
+                            tlcontext.module, node.name, node.islocal),
                         SLOT = c_integer_literal(node._closure_upvalue),
                         FUNCTAG = function_type_tag(tlcontext, node._type),
-                        NATIVE = func_name(tlcontext.module, node.name),
+                        NATIVE = func_name(
+                            tlcontext.module, node.name, node.islocal),
                         STRICTNAME = coder._func_strictname(
-                            tlcontext.module, node.name),
+                            tlcontext.module, node.name, node.islocal),
                     }))
                 elseif tag == "Ast.TopLevelMethod" then
                     table.insert(code, node._luabody)
@@ -16344,6 +16435,9 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         })
     end
 
+    assert(tlcontext.upvalue <= 0xFFFF,
+        ("module '%s' requires %d module-state slots; Lua supports at most %d")
+            :format(modname, tlcontext.upvalue, 0xFFFF))
     table.insert(code, render(init, {
         INITNAME = tlcontext.prefix .. 'init',
         INITMODULES = table.concat(initmods, "\n"),

@@ -52,6 +52,9 @@ describe("source-import local visibility (end-to-end)", function()
        "methods", function()
         generate({
             source_runtime_members = [[
+                local total: integer = 0
+                local messages: {string} = { "" }
+
                 local function combine(left: integer,
                                        right: integer): integer
                     return left + right
@@ -74,7 +77,8 @@ describe("source-import local visibility (end-to-end)", function()
                 local provider = import "source_runtime_members"
 
                 function direct(): integer
-                    return provider.combine(40, 2)
+                    provider.total = 40
+                    return provider.combine(provider.total, 2)
                 end
 
                 function first_class(): integer
@@ -86,12 +90,48 @@ describe("source-import local visibility (end-to-end)", function()
                     local bump: (integer) -> integer = counter:bump
                     return combine(bump(5), 27)
                 end
+
+                function stable_identity(): boolean
+                    return provider.combine == provider.combine
+                        and provider.Counter.from == provider.Counter.from
+                end
+
+                function remember(message: string)
+                    provider.messages = { message }
+                end
+
+                function remembered_length(): integer
+                    return #provider.messages[1]
+                end
             ]],
         }, "source_runtime_member_consumer")
 
         call("source_runtime_member_consumer", [[
             assert(source_runtime_member_consumer.direct() == 42)
             assert(source_runtime_member_consumer.first_class() == 42)
+            assert(source_runtime_member_consumer.stable_identity())
+
+            collectgarbage("collect")
+            collectgarbage("generational")
+            collectgarbage("collect")
+            local message = string.rep("source-private module value", 1024)
+            local expected = #message
+            source_runtime_member_consumer.remember(message)
+            message = nil
+            for i = 1, 20000 do
+                local garbage = { i, tostring(i), {} }
+            end
+            for _ = 1, 20 do collectgarbage("step", 1000) end
+            assert(source_runtime_member_consumer.remembered_length() == expected)
+            collectgarbage("incremental")
+
+            local provider = require "source_runtime_members"
+            assert(not pcall(function() return provider.total end))
+            assert(not pcall(function() return provider.messages end))
+            assert(not pcall(function() return provider.combine end))
+            assert(provider.Counter ~= nil)
+            assert(provider.Counter.new == nil)
+            assert(provider.Counter.from == nil)
         ]])
     end)
 
@@ -173,9 +213,13 @@ describe("source-import local visibility (end-to-end)", function()
                 local bridge = import "source_runtime_ffi_bridge"
 
                 function run(): integer
-                    local file = bridge.open()
-                    local written = bridge.write(file)
-                    local closed = bridge.close(file)
+                    local open = bridge.open
+                    local write = bridge.write
+                    local close = bridge.close
+                    local file = open()
+                    if file == nil then return -1 end
+                    local written = write(file)
+                    local closed = close(file)
                     if written < 0 or closed ~= 0 then
                         return -1
                     end

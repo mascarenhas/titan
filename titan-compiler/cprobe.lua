@@ -2069,6 +2069,17 @@ function cprobe.new_service(options)
     }, Service)
 end
 
+function cprobe.normalize_include_descriptor(descriptor, options)
+    options = options or {}
+    local process_cwd, cwd_error = lfs.currentdir()
+    if not process_cwd then
+        return nil, "cannot determine include cwd: " .. tostring(cwd_error)
+    end
+    local cwd = absolute_path(options.cwd or process_cwd, process_cwd)
+    local source_dir = absolute_path(options.source_dir or cwd, cwd)
+    return normalize_include_descriptor(descriptor, source_dir, cwd)
+end
+
 cprobe.new = cprobe.new_service
 Service.new = cprobe.new_service
 cprobe.Service = Service

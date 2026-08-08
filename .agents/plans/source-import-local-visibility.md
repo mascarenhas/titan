@@ -1,6 +1,6 @@
 # Local module member visibility through source imports
 
-Local module members (functions/records/unions/type aliases/fields) should be visible
+Local module members (variables/functions/records/unions/type aliases/fields) should be visible
 through source imports, so modules that will end up in the same `.so`/`.a` file as other
 modules they import will be able to see and use local members of these imported modules.
 
@@ -63,11 +63,11 @@ local io = import "io"
 local a = import "a"
 
 function test()
-  local f = Foo.new(1) -- can see local record
-  local b: Bar = { hidden = "foo" } -- can construct record with local fields
-  io.print(b:hidden_func()) -- can call local method
+  local f = a.Foo.new(1) -- can see local record through the alias
+  local b: a.Bar = { hidden = "foo" } -- can construct with local fields
+  io.print(b:hidden_method()) -- can call local method
   b.hidden = "bar" -- can access local field
-  io.print(hidden_func()) -- can call local function
+  io.print(a.hidden_func()) -- can call local function
   -- can use FFI types transitively
   local file = a.fopen("test.txt", "w") -- file has type *stdio.FILE
   defer a.fclose(file)
@@ -75,7 +75,7 @@ function test()
   --[[
      The following line would fail to compile because
      stream.process is local to the io module (binary)
-     and the io module does not have visibility into a
+     and this module imported io through a binary provider
   ]]
   -- stream.process:wait()
   for line in io.lines(stream) do
@@ -95,3 +95,22 @@ FFI types for consumption by the high-level stdlib modules should be removed, si
 the high-level stdlib will be able to use the libuv FFI types directly. Do
 a thorough simplification pass and remove trivial wrappers (either record wrappers or
 function wrappers).
+
+## Final implementation decisions
+
+The implemented rule includes local module variables: a direct source consumer
+reads and writes the producer's canonical module-state slot. Titan visibility is
+direct-only and authorized solely by trusted loader provenance; a source
+module's own capabilities are not inherited. The independently transitive FFI
+closure carries ordered headers, macro state, and C tag/prototype context, but
+never exposes a `foreign import` alias.
+
+Binary `.so` and `.a` imports and Lua maps remain public-only. The compiler-only
+source view is not serialized. Co-residence, static linkage, registry state, and
+`static_deps` do not grant local access.
+
+The generic mechanism does not add a metadata constructor. The release still
+advances to ABI 0.22 because dogfooding deliberately localizes most of
+`titan.uv`, changing that module's serialized public members and public closure
+prefix. Existing ABI-0.21 installations are preserved as prior-version state;
+there is no migration or cleanup path.

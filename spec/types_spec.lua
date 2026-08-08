@@ -1872,6 +1872,20 @@ describe("Titan types", function()
             assert.same(nil, types.ForeignModule)
         end)
 
+        it("keeps exact C identity scoped to its defining module", function()
+            local left = types.CPointer(cint(), {})
+            local right = types.CPointer(cint(), {})
+            types.mark_c_ffi_scope(left, "left")
+            types.mark_c_ffi_scope(right, "right")
+
+            assert.falsy(types.equals(left, right))
+            assert.truthy(types.c_declaration_type_equals(left, right))
+            assert.truthy(types.equals(left, types.clone_graph(left)))
+            assert.falsy(types.equals(
+                types.Function({left}, {}, false, false, false),
+                types.Function({right}, {}, false, false, false)))
+        end)
+
         it("compares C types by exact C identity", function()
             local int = cint()
             local uint = types.CInteger("unsigned int", false, 3, 32)

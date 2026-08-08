@@ -42,7 +42,13 @@ static TITAN_UNUSED inline void titan_ensure_stack(lua_State *L, int slots) {
         luaL_error(L, "stack overflow in Titan generated code");
 }]]
 
-cpreamble.after_foreign_imports = [[#ifdef __clang__
+cpreamble.after_foreign_imports = [[#if defined(__GNUC__) || defined(__clang__)
+#define TITAN_SOURCE_LOCAL __attribute__((visibility("hidden")))
+#else
+#define TITAN_SOURCE_LOCAL
+#endif
+
+#ifdef __clang__
 #pragma clang diagnostic ignored "-Wunused-function"
 #pragma clang diagnostic ignored "-Wparentheses-equality"
 #endif]]

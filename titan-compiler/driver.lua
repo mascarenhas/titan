@@ -970,6 +970,9 @@ validate_interface_type = function(typ, context, seen)
     if type(typ) ~= "table" or type(typ._tag) ~= "string" then
         return nil, "type graph contains an invalid descriptor"
     end
+    if typ._source_complete ~= nil or typ._ffi_scope ~= nil then
+        return nil, "type graph contains compiler-only source state"
+    end
     local tag = typ._tag
     if tag == "Type.Variant"
        and (not context or context.kind ~= "union-variant"
@@ -1074,6 +1077,12 @@ function driver.validate_module_interface(modtype, modname)
     if type(modtype) ~= "table" or modtype._tag ~= "Type.Module"
        or modtype.islocal then
         return nil, "metadata did not deserialize to a Type.Module"
+    end
+    if modtype._source ~= nil or modtype.source_members ~= nil
+       or modtype.source_type_members ~= nil
+       or modtype._source_foreign_includes ~= nil
+       or modtype._source_c_context ~= nil then
+        return nil, "metadata contains compiler-only source interface state"
     end
     if modtype.name ~= modname then
         return nil, "returned type metadata for '" .. tostring(modtype.name) ..
@@ -1523,7 +1532,7 @@ function driver.defaultloader(static_deps, options)
             deps = direct_deps,
         }
         static_deps[modname] = true
-        return true, modt, errors
+        return true, modt, errors, { kind = "source" }
     end
 
     local function recover_contextual_owner(modname, request)
@@ -1633,7 +1642,7 @@ function driver.defaultloader(static_deps, options)
             local mod = driver.imported[modname]
             remember_dependency_closure(modname)
             remember_direct_dependency(modname)
-            return true, mod.type, {}
+            return true, mod.type, {}, { kind = mod.kind }
         end
 
         local source, source_err
@@ -1647,9 +1656,10 @@ function driver.defaultloader(static_deps, options)
             if source.kind == "blocked" then
                 return false, blocked_source_error(modname, source)
             end
-            local ok, modt, errors = parse_source(modname, source, loader)
+            local ok, modt, errors, info =
+                parse_source(modname, source, loader)
             if ok then remember_direct_dependency(modname) end
-            return ok, modt, errors
+            return ok, modt, errors, info
         end
 
         local resolved, compiled_err = driver.find_dependency_interface(
@@ -1661,7 +1671,7 @@ function driver.defaultloader(static_deps, options)
                 static_deps[modname] = true
             end
             remember_direct_dependency(modname)
-            return true, resolved.type, {}
+            return true, resolved.type, {}, { kind = resolved.kind }
         elseif compiled_err then
             return false, compiled_err
         end
@@ -1671,9 +1681,10 @@ function driver.defaultloader(static_deps, options)
         if source.kind == "blocked" then
             return false, blocked_source_error(modname, source)
         end
-        local ok, modt, errors = parse_source(modname, source, loader)
+        local ok, modt, errors, info =
+            parse_source(modname, source, loader)
         if ok then remember_direct_dependency(modname) end
-        return ok, modt, errors
+        return ok, modt, errors, info
     end
     context.loader = loader
     loader_contexts[loader] = {
@@ -1938,6 +1949,16 @@ function driver.tableloader(modtable, imported, deps, options)
     options = options or {}
     local owns_context = options.context == nil
     local context = options.context or driver.new_resolver_context(options)
+    local source_view = options.interface == "source"
+
+    local function selected_interface(mod)
+        if source_view and mod.kind == "source" and mod.source_type then
+            return mod.source_type, { kind = "source" }
+        end
+        return mod.type, { kind = mod.kind == "source"
+            and "compiled" or mod.kind }
+    end
+
     local function loader(modname)
         if imported[modname] == CIRCULAR_MARK then
             imported[modname] = nil
@@ -1946,14 +1967,15 @@ function driver.tableloader(modtable, imported, deps, options)
         if imported[modname] then
             local mod = imported[modname]
             deps[modname] = true
-            return true, mod.type, {}
+            local modtype, info = selected_interface(mod)
+            return true, modtype, {}, info
         end
         local modf = "./" .. modname .. ".titan"
         local input = modtable[modname]
-        local ast, err = parser.parse(modf, modtable[modname])
+        local ast, err = parser.parse(modf, input)
         if not ast then return false, parser.error_to_string(err, modf) end
         imported[modname] = CIRCULAR_MARK
-        local modt, errors = checker.check(
+        local source_type, errors = checker.check(
             modname, ast, input, modf, loader, {
                 probe_service_provider = function()
                     return driver.get_probe_service(context)
@@ -1961,22 +1983,30 @@ function driver.tableloader(modtable, imported, deps, options)
             })
         if #errors ~= 0 then
             imported[modname] = {
-                kind = "source", ast = ast, type = modt, filename = modf,
+                kind = "source", ast = ast, type = source_type,
+                source_type = source_type, filename = modf,
             }
             deps[modname] = true
-            return true, modt, errors
+            local modtype, info = selected_interface(imported[modname])
+            return true, modtype, errors, info
         end
-        local mods = types.serialize(modt)
-        local modtf, err = load("return " .. mods, modname, "t", types)
-        if not modtf then return false, err end
+
+        -- Retain both products. The decoded type deliberately strips every
+        -- compiler-only source field and remains the tableloader default for
+        -- existing metadata-projection tests. Callers that explicitly request
+        -- `interface = "source"` receive the trusted raw view plus provenance.
+        local mods = types.serialize(source_type)
+        local modtf, load_err = load("return " .. mods, modname, "t", types)
+        if not modtf then return false, load_err end
         local ok, modt_or_err = pcall(modtf)
         if not ok then return false, modt_or_err end
-        modt = modt_or_err
         imported[modname] = {
-            kind = "source", ast = ast, type = modt, filename = modf,
+            kind = "source", ast = ast, type = modt_or_err,
+            source_type = source_type, filename = modf,
         }
         deps[modname] = true
-        return true, modt, errors
+        local modtype, info = selected_interface(imported[modname])
+        return true, modtype, errors, info
     end
     loader_contexts[loader] = {
         context = context,

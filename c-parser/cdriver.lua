@@ -191,19 +191,90 @@ local function resolve_include(filename, options, incdirs)
     }
 end
 
-local function new_cpp_context(options)
+local function preprocessor_options(options)
     local own_dirs, dirs_error =
         cdriver.resolve_compiler_include_dirs(
             options.compiler_include_dirs)
     if not own_dirs then return nil, dirs_error end
-    return cpp.new_context({
+    return {
         compiler = options.compiler,
         language_mode = options.language_mode,
         language_flag = options.language_flag,
         compile_flags = options.compile_flags,
         cppflags = options.cppflags,
         fixed_include_dirs = own_dirs,
-    })
+    }
+end
+
+local function new_cpp_context(options)
+    local config, err = preprocessor_options(options)
+    if not config then return nil, err end
+    return cpp.new_context(config)
+end
+
+-- Ask the configured compiler for the final macro environment of the exact
+-- generated ordered include preamble. This preserves include guards,
+-- #pragma once identity, undefinitions, and implementation-defined behavior.
+function cdriver.process_include_sequence(includes, options)
+    options = normalize_options(options)
+    if type(includes) ~= "table" then
+        return nil, "C include sequence must be an ordered array"
+    end
+    local config, config_err = preprocessor_options(options)
+    if not config then return nil, config_err end
+
+    local filename = os.tmpname()
+    local file, open_err = io.open(filename, "wb")
+    if not file then
+        return nil, "failed creating ordered C include probe: " .. open_err
+    end
+    local write_ok, write_err = true, nil
+    if options.preamble ~= nil then
+        if type(options.preamble) ~= "string"
+           or options.preamble:find("\0", 1, true) then
+            file:close()
+            os.remove(filename)
+            return nil, "ordered C include probe has an invalid preamble"
+        end
+        local ok, err = file:write(options.preamble, "\n")
+        if not ok then write_ok, write_err = false, err end
+    end
+    for index, include in ipairs(includes) do
+        if not write_ok then break end
+        if type(include) ~= "table" or type(include.rendered) ~= "string" then
+            write_ok = false
+            write_err = "C include sequence entry " .. index ..
+                " is not a normalized descriptor"
+            break
+        end
+        local ok, err = file:write("#include ", include.rendered, "\n")
+        if not ok then
+            write_ok, write_err = false, err
+            break
+        end
+    end
+    if write_ok and options.postamble ~= nil then
+        if type(options.postamble) ~= "string"
+           or options.postamble:find("\0", 1, true) then
+            write_ok = false
+            write_err = "ordered C include probe has an invalid postamble"
+        else
+            local ok, err = file:write(options.postamble, "\n")
+            if not ok then write_ok, write_err = false, err end
+        end
+    end
+    local close_ok, close_err = file:close()
+    if not write_ok or not close_ok then
+        os.remove(filename)
+        return nil, "failed writing ordered C include probe: " ..
+            tostring(write_err or close_err)
+    end
+
+    local definitions, probe_err =
+        cpp.probe_macro_definitions(filename, config)
+    os.remove(filename)
+    if not definitions then return nil, probe_err end
+    return definitions
 end
 
 function cdriver.process_file(filename, options)

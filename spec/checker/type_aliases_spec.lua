@@ -318,9 +318,12 @@ describe("Titan type aliases", function()
             ]],
         }, "consumer")
         assert.falsy(ok)
-        assert.match("trying to access invalid record function 'new'", err)
-        assert.match("trying to access invalid record function 'secret'", err)
-        assert.match("trying to access invalid union function 'hidden'", err)
+        assert.match(
+            "record function 'provider%.Box%.new' is local to module 'provider'", err)
+        assert.match(
+            "record function 'provider%.Box%.secret' is local to module 'provider'", err)
+        assert.match(
+            "union function 'provider%.Choice%.hidden' is local to module 'provider'", err)
     end)
 
     it("supports aliases to later records and recursion through an alias", function()

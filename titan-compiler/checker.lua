@@ -103,7 +103,10 @@ local function ensure_probe_service(st)
         return nil, st.probe_service_error
     end
     st.probe_service = service
-    st.c_profile = service.profile
+    -- C conversion completes canonical tag graphs in place. Give each checker
+    -- its own target-profile leaves so source provenance never mutates the
+    -- service profile shared by nested or later module checks.
+    st.c_profile = types.clone_graph(service.profile)
     return service
 end
 
@@ -1341,6 +1344,17 @@ local function c_field_decl(typ, name, st)
         typ = c_resolve(typ.pointee)
     end
     if typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion" then
+        -- A source-imported C type keeps its producer-owned descriptor, while
+        -- this translation unit may complete the same file-scope tag in a
+        -- later direct header. C has one file-scope tag namespace, so field
+        -- lookup uses that visible completion without mutating the producer.
+        if typ._c_tag_scope == "file" and typ.tagname then
+            local kind = typ._tag == "Type.CStruct" and "struct" or "union"
+            local record = st:find_c_file_tag(typ.tagname, kind)
+            if record and record.canonical and record.canonical.complete then
+                typ = record.canonical
+            end
+        end
         local err = incomplete_c_object_error(typ, st,
             "C field access '" .. name .. "'")
         if err then
@@ -1536,12 +1550,18 @@ end
 
 local function is_nominal_visible_from(st, fqtn)
     local nominal = types.registry[fqtn]
+    local owner = nominal_module(fqtn)
     return nominal
-        and (not nominal.islocal or nominal_module(fqtn) == st.modname)
+        and (not nominal.islocal
+             or owner == st.modname
+             or st:source_import_visible(owner))
 end
 
 local function is_nominal_member_visible_from(st, member)
-    return not member.islocal or nominal_module(member.fqtn) == st.modname
+    local owner = nominal_module(member.fqtn)
+    return not member.islocal
+        or owner == st.modname
+        or st:source_import_visible(owner)
 end
 
 -- A type alias remains type-only as a value, but an alias whose transparent
@@ -2627,8 +2647,9 @@ typefromnode = util.make_visitor({
                 node.name)
         end
         if mod and mod._type and mod._type._tag == "Type.Module" then
-            local type_member = mod._type.type_members
-                and mod._type.type_members[node.name]
+            local type_member =
+                types.module_type_member(
+                    mod._type, node.name, mod._source_import)
             if type_member then
                 if type_member._tag == "Type.Interface" then
                     return types.Nominal(type_member.name)
@@ -2636,7 +2657,8 @@ typefromnode = util.make_visitor({
                 return type_member
             end
             local fqtn = mod._type.name .. "." .. node.name
-            local member = mod._type.members[node.name]
+            local member = types.module_member(
+                mod._type, node.name, mod._source_import)
             if not member then
                 return invalid(errors, node.loc,
                     "type '%s' not found inside module '%s'",
@@ -4921,8 +4943,16 @@ checkvar = util.make_visitor({
         end
         if ltype._tag == "Type.Module" or ltype._tag == "Type.CModule" then
             local mod = ltype
-            if mod.members[node.name] then
-                node._decl = mod.members[node.name]
+            local import_decl = node.exp._tag == "Ast.ExpVar"
+                and node.exp.var and node.exp.var._decl
+            local include_source = import_decl
+                and import_decl._tag == "Ast.TopLevelImport"
+                and import_decl._source_import == true
+            local module_member = ltype._tag == "Type.Module"
+                and types.module_member(mod, node.name, include_source)
+                or mod.members[node.name]
+            if module_member then
+                node._decl = module_member
                 node._type = node._decl.type
                 if ltype._tag == "Type.CModule" and mod.type_members
                    and mod.type_members[node.name] then
@@ -4937,9 +4967,11 @@ checkvar = util.make_visitor({
                 }
                 node._type = node._decl.type
                 node._ctype_namespace = true
-            elseif ltype._tag == "Type.Module" and mod.type_members
-                   and mod.type_members[node.name] then
-                local member = mod.type_members[node.name]
+            elseif ltype._tag == "Type.Module"
+                   and types.module_type_member(
+                       mod, node.name, include_source) then
+                local member = types.module_type_member(
+                    mod, node.name, include_source)
                 local namespace = alias_namespace_type(member, st)
                 if namespace then
                     node._alias_namespace = true
@@ -4954,7 +4986,7 @@ checkvar = util.make_visitor({
                         "member '%s' not found inside module '%s'",
                         node.name, mod.name)
                 end
-            elseif not mod.members[node.name] then
+            elseif not module_member then
                 node._type = invalid(errors, node.loc,
                     "member '%s' not found inside module '%s'",
                     node.name, mod.name)
@@ -6139,7 +6171,7 @@ checkexp = util.make_visitor({
                     return
                 end
                 if record.islocal
-                   and nominal_module(context.fqtn) ~= st.modname then
+                   and not is_nominal_visible_from(st, context.fqtn) then
                     node._type = invalid(errors, node.loc,
                         "record type '%s' is local to module '%s'",
                         context.fqtn, nominal_module(context.fqtn))
@@ -7512,12 +7544,78 @@ local function toplevel_name(node)
     end
 end
 
+-- Source imports propagate the ordered C-header closure needed to render and
+-- probe source-only signatures containing FFI types. They do not import the
+-- dependency's C namespace into Titan: only the C preamble and its macro state
+-- are inherited. Keep this mutation identical to an ordinary foreign import so
+-- a later header invalidates every context built for the earlier prefix.
+function checker._append_source_foreign_include(st, entry)
+    local include = assert(entry and entry.include,
+        "source foreign-include entry has no include descriptor")
+    st.foreign_includes[#st.foreign_includes + 1] = include
+    st.foreign_includes_version = st.foreign_includes_version + 1
+    st.module_probe = nil
+    st.module_probe_error = nil
+    st.module_probe_includes_version = nil
+    st.module_probe_error_includes_version = nil
+end
+
+function checker._finalize_source_foreign_includes(st)
+    if #st.foreign_includes == 0 then
+        st:replace_foreign_macro_definitions({})
+        return true
+    end
+    local service, err = ensure_probe_service(st)
+    local options
+    if service then options, err = service:cdriver_process_options() end
+    if not options then return nil, err end
+    options.source_dir = st.source_dir
+    local generated_preamble = require("titan-compiler.cpreamble")
+    options.preamble = generated_preamble.fixed_prefix
+    options.postamble = generated_preamble.after_foreign_imports
+    local definitions
+    definitions, err = cdriver.process_include_sequence(
+        st.foreign_includes, options)
+    if not definitions then return nil, err end
+    st:replace_foreign_macro_definitions(definitions)
+    return true
+end
+
 -- Typecheck the toplevel node
 local toplevel_visitor = util.make_visitor({
-    ["Ast.TopLevelImport"] = function(node, _, errors, loader)
-        local modtype, errs = checker.checkimport(node.modname, loader)
+    ["Ast.TopLevelImport"] = function(node, st, errors, loader)
+        local modtype, errs, import_info =
+            checker.checkimport(node.modname, loader)
         if modtype then
             node._type = modtype
+            -- Source visibility is trusted loader provenance, never a field a
+            -- binary provider can place in evaluated metadata.
+            node._source_import = import_info
+                and import_info.kind == "source"
+                and modtype._source == true
+            if node._source_import then
+                -- Visibility is direct: importing B never adds B's own source
+                -- dependencies to this set. The C include closure is separate
+                -- and intentionally transitive because generated declarations
+                -- may mention C types inherited through B.
+                -- Keep the earliest direct edge so module-variable frontier
+                -- checks see the owner as soon as any written alias is visible.
+                st.source_imports[node.modname] =
+                    st.source_imports[node.modname] or node
+                local c_context = types.clone_graph(
+                    modtype._source_c_context or {})
+                local context_ok, context_err =
+                    st:merge_source_c_context(c_context)
+                if not context_ok then
+                    checker.typeerror(errors, node.loc,
+                        "cannot merge source-import C context: %s",
+                        context_err)
+                end
+                for _, entry in ipairs(
+                        modtype._source_foreign_includes or {}) do
+                    checker._append_source_foreign_include(st, entry)
+                end
+            end
             for _, err in ipairs(errs) do
                 table.insert(errors, err)
             end
@@ -7547,17 +7645,22 @@ local toplevel_visitor = util.make_visitor({
             end
         end
         if ftypes then
+            local normalized
+            normalized, err = cprobe.normalize_include_descriptor(include, {
+                source_dir = st.source_dir,
+            })
+            if normalized then
+                include = normalized
+            else
+                ftypes = nil
+            end
+        end
+        if ftypes then
             node._include = include
+            node._source_foreign_include = { include = include }
             st.last_foreign_import_node = node
-            st.foreign_includes[#st.foreign_includes + 1] = include
-            st.foreign_includes_version =
-                st.foreign_includes_version + 1
-            st.module_probe = nil
-            st.module_probe_error = nil
-            st.module_probe_includes_version = nil
-            st.module_probe_error_includes_version = nil
-            st:apply_foreign_macro_changes(
-                ftypes.macro_changes, ftypes.macro_definitions)
+            checker._append_source_foreign_include(
+                st, node._source_foreign_include)
             local members = {}
             local type_members = {}
             local ordinary_declarations = {}
@@ -7568,6 +7671,7 @@ local toplevel_visitor = util.make_visitor({
                 local decl, conversion_error, declaration =
                     foreigntypes.convert(st, ftype)
                 if decl then
+                    types.mark_c_ffi_scope(decl, st.modname)
                     local ordinary
                     if is_foreign_ordinary_identifier(fname, ftype) then
                         ordinary = {
@@ -7779,6 +7883,7 @@ local toplevel_visitor = util.make_visitor({
         end
 
         node._type = types.Interface(fqtn, methods)
+        node._type._source_complete = true
         types.registry[fqtn] = node._type
     end,
 
@@ -7836,6 +7941,7 @@ local toplevel_visitor = util.make_visitor({
         end
         node._type = types.Record(fqtn, fields, {}, {}, #fields)
         node._type.islocal = node.islocal and true or false
+        node._type._source_complete = true
         node._dynamic_receiver_plan =
             assert(types.dynamic_coercion(types.Nominal(fqtn)),
                 "record nominal lacks its dynamic receiver plan")
@@ -7872,6 +7978,7 @@ local toplevel_visitor = util.make_visitor({
         node._type = types.Union(
             fqtn, variants, {}, {}, #node.variants)
         node._type.islocal = node.islocal and true or false
+        node._type._source_complete = true
         node._dynamic_receiver_plan =
             assert(types.dynamic_coercion(types.Nominal(fqtn)),
                 "union nominal lacks its dynamic receiver plan")
@@ -8172,6 +8279,13 @@ local function checktoplevel(ast, st, errors, loader)
             visit_toplevel(node, st, errors, loader)
         end
     end
+    local macros_ok, macros_err =
+        checker._finalize_source_foreign_includes(st)
+    if not macros_ok then
+        local diagnostic_node = st.last_foreign_import_node or ast[1]
+        checker.typeerror(errors, diagnostic_node.loc,
+            "cannot preprocess ordered C headers: %s", macros_err)
+    end
     finalize_foreign_redeclarations(st, errors)
 
     for _, node in ipairs(ast) do
@@ -8452,8 +8566,24 @@ local function first_local_nominal_type(typ, seen)
     end
 end
 
+-- A process may encounter the same owner through both a trusted source edge
+-- and a compiled facade. Keep the complete source descriptor canonical in the
+-- process-global nominal registry; visibility checks still require a direct
+-- source import, so retaining the richer descriptor grants no permission by
+-- itself. Unknown `_source_complete` fields are never serialized.
+function checker._register_nominal_descriptor(typ, trusted_source)
+    local current = types.registry[typ.name]
+    if trusted_source then typ._source_complete = true end
+    if not current or trusted_source or not current._source_complete then
+        -- A metadata expression cannot self-assert this compiler-only marker.
+        if not trusted_source then typ._source_complete = nil end
+        types.registry[typ.name] = typ
+    end
+end
+
 function checker.register_module_interface(
-        modname, type_or_error, loader, exposer, interface_seen)
+        modname, type_or_error, loader, exposer, interface_seen,
+        trusted_source)
     exposer = exposer or modname
     interface_seen = interface_seen or {}
     local exposer_key
@@ -8484,67 +8614,144 @@ function checker.register_module_interface(
 
     -- Interfaces are type-only module entries. Register every direct
     -- descriptor before traversing any signature so mutually referring
-    -- Interfaces have their complete nominal environment available.
-    for _, t in pairs(type_or_error.type_members or {}) do
-        if t and t._tag == "Type.Interface" then
-            types.registry[t.name] = t
+    -- Interfaces have their complete nominal environment available. A source
+    -- interface has an additional non-serialized local view; a binary one has
+    -- only the ordinary public collections.
+    local type_views = { type_or_error.type_members or {} }
+    if trusted_source then
+        type_views[#type_views + 1] =
+            type_or_error.source_type_members or {}
+    end
+    for _, view in ipairs(type_views) do
+        for _, t in pairs(view) do
+            if t and t._tag == "Type.Interface" then
+                checker._register_nominal_descriptor(t, trusted_source)
+            end
         end
     end
-    for _, member in ipairs(type_or_error.members) do
-        -- Exported nominals arrive wrapped in a Type.ModuleMember; unwrap so
-        -- the nominal type is registered for `.so`-only imports too
-        -- (the source-import path registers it as a side effect of checking).
-        local t = member.type or member
-        if t and (t._tag == "Type.Record"
-                  or t._tag == "Type.Union") then
-            types.registry[t.name] = t
+
+    local member_views = { type_or_error.members or {} }
+    if trusted_source then
+        member_views[#member_views + 1] =
+            type_or_error.source_members or {}
+    end
+    for _, view in ipairs(member_views) do
+        for _, member in ipairs(view) do
+            -- Nominals arrive wrapped in a Type.ModuleMember. The source view
+            -- additionally registers local owners for direct source importers.
+            local t = member.type or member
+            if t and (t._tag == "Type.Record"
+                      or t._tag == "Type.Union") then
+                checker._register_nominal_descriptor(t, trusted_source)
+            end
         end
     end
+
     local seen = {}
-    for _, member in ipairs(type_or_error.members) do
-        register_referenced_nominals(
-            member.type or member, loader, seen, exposer, interface_seen)
+    for _, view in ipairs(member_views) do
+        for _, member in ipairs(view) do
+            register_referenced_nominals(
+                member.type or member, loader, seen, exposer, interface_seen)
+        end
     end
-    for _, member in pairs(type_or_error.type_members or {}) do
-        register_referenced_nominals(
-            member, loader, seen, exposer, interface_seen)
+    for _, view in ipairs(type_views) do
+        for _, member in pairs(view) do
+            register_referenced_nominals(
+                member, loader, seen, exposer, interface_seen)
+        end
     end
 end
 
 function checker.checkimport(modname, loader, request)
-    local ok, type_or_error, errors = loader(modname, request)
+    local ok, type_or_error, errors, import_info = loader(modname, request)
     if not ok then return nil, type_or_error end
     checker.register_module_interface(
         modname, type_or_error, loader, request and request.exposer,
-        request and request.interface_seen)
-    return type_or_error, errors
+        request and request.interface_seen,
+        import_info and import_info.kind == "source"
+            and type_or_error._source == true)
+    return type_or_error, errors, import_info
 end
 
 -- Builds a type for the module from the types of its public members
 --   modast: AST for the module
 --   returns "Type.Module" type
-local function makemoduletype(modname, modast)
+local function makemoduletype(modname, modast, st)
     local members = {}
     local type_members = {}
+    local source_members = {}
+    local source_type_members = {}
+    local source_foreign_includes = {}
+
+    local function add_source_member(member)
+        member.islocal = true
+        source_members[#source_members + 1] = member
+        source_members[member.name] = member
+    end
+
     for _, tlnode in ipairs(modast) do
-        if tlnode._tag ~= "Ast.TopLevelImport" and not tlnode.islocal and not tlnode._ignore then
+        if not tlnode._ignore then
             local tag = tlnode._tag
-            if tag == "Ast.TopLevelVar" then
-                table.insert(members, types.ModuleVariable(modname, tlnode.decl.name, tlnode._type))
+            if tag == "Ast.TopLevelImport" then
+                if tlnode._source_import then
+                    for _, entry in ipairs(
+                            tlnode._type._source_foreign_includes or {}) do
+                        source_foreign_includes[#source_foreign_includes + 1] =
+                            entry
+                    end
+                end
+            elseif tag == "Ast.TopLevelForeignImport" then
+                if tlnode._source_foreign_include then
+                    source_foreign_includes[#source_foreign_includes + 1] =
+                        tlnode._source_foreign_include
+                end
+            elseif tag == "Ast.TopLevelVar" then
+                local member = types.ModuleVariable(
+                    modname, tlnode.decl.name, tlnode._type)
+                if tlnode.islocal then
+                    add_source_member(member)
+                else
+                    members[#members + 1] = member
+                end
             elseif tag == "Ast.TopLevelFunc" then
-                table.insert(members, types.ModuleMember(modname, tlnode.name,
-                    tlnode._type, tlnode._paramnames))
+                local member = types.ModuleMember(modname, tlnode.name,
+                    tlnode._type, tlnode._paramnames)
+                if tlnode.islocal then
+                    add_source_member(member)
+                else
+                    members[#members + 1] = member
+                end
             elseif tag == "Ast.TopLevelRecord"
-               or tag == "Ast.TopLevelUnion" then
-                table.insert(members, types.ModuleMember(modname, tlnode.name,
-                    tlnode._type, false))
-            elseif tag == "Ast.TopLevelTypeAlias"
-                   or tag == "Ast.TopLevelInterface" then
+                   or tag == "Ast.TopLevelUnion" then
+                local member = types.ModuleMember(
+                    modname, tlnode.name, tlnode._type, false)
+                if tlnode.islocal then
+                    add_source_member(member)
+                else
+                    members[#members + 1] = member
+                end
+            elseif tag == "Ast.TopLevelTypeAlias" then
+                if tlnode.islocal then
+                    source_type_members[tlnode.name] = tlnode._type
+                else
+                    type_members[tlnode.name] = tlnode._type
+                end
+            elseif tag == "Ast.TopLevelInterface" then
                 type_members[tlnode.name] = tlnode._type
             end
         end
     end
-    return types.Module(modname, members, type_members)
+
+    local modtype = types.Module(modname, members, type_members)
+    modtype._source = true
+    modtype.source_members = source_members
+    modtype.source_type_members = source_type_members
+    modtype._source_foreign_includes = source_foreign_includes
+    modtype._source_c_context = {
+        file_tags = st.c_file_tags,
+        prototype_tags = st.c_prototype_tags,
+    }
+    return modtype
 end
 
 local function reject_exported_c_ffi_type(modname, errors, loc, typ)
@@ -8699,7 +8906,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
         end
         reject_exported_c_ffi_types(modname, ast, errors)
         reject_exported_local_nominal_types(modname, ast, errors)
-        ast._type = makemoduletype(modname, ast)
+        ast._type = makemoduletype(modname, ast, st)
         return ast._type, errors
     end
 

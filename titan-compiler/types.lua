@@ -605,6 +605,144 @@ function types.public_module_prefix_layout(modtype)
     return layout
 end
 
+-- A source interface carries a second, non-serialized member view. Its
+-- first-class local functions and local nominal statics need canonical closure
+-- slots just like public callables, but those slots must remain outside the
+-- importer-reconstructible ABI prefix. They occupy a deterministic source-only
+-- prefix immediately after the unconditional Array-metatable slot. Binary
+-- interfaces never have `source_members`, so they expose no such layout.
+function types.source_module_prefix_layout(modtype)
+    assert(modtype and modtype._tag == "Type.Module")
+    local layout = {}
+    if not modtype._source then return layout end
+
+    for _, member in ipairs(modtype.source_members or {}) do
+        if member._tag == "Type.ModuleVariable" then
+            layout[#layout + 1] = {
+                kind = "variable",
+                value = member,
+                key = "variable:" .. member.name,
+            }
+        end
+    end
+
+    for _, member in ipairs(modtype.source_members or {}) do
+        if member._tag == "Type.ModuleMember"
+           and member.type._tag == "Type.Function" then
+            layout[#layout + 1] = {
+                kind = "function",
+                value = member,
+                key = "function:" .. member.name,
+            }
+        end
+    end
+
+    local nominal_members = {}
+    for _, member in ipairs(modtype.members or {}) do
+        nominal_members[#nominal_members + 1] = member
+    end
+    for _, member in ipairs(modtype.source_members or {}) do
+        nominal_members[#nominal_members + 1] = member
+    end
+    for _, member in ipairs(nominal_members) do
+        local owner = member._tag == "Type.ModuleMember" and member.type
+        if owner and (owner._tag == "Type.Record"
+                      or owner._tag == "Type.Union") then
+            local names = {}
+            for name, static in pairs(owner.functions or {}) do
+                if static.islocal then names[#names + 1] = name end
+            end
+            table.sort(names, util.bytewise_less)
+            for _, name in ipairs(names) do
+                local static = owner.functions[name]
+                layout[#layout + 1] = {
+                    kind = "static",
+                    value = static,
+                    owner = owner,
+                    key = "static:" .. static.fqtn .. "." .. static.name,
+                }
+            end
+        end
+    end
+    return layout
+end
+
+function types.module_member(modtype, name, include_source)
+    return modtype.members[name]
+        or (include_source and modtype.source_members
+            and modtype.source_members[name])
+end
+
+function types.module_type_member(modtype, name, include_source)
+    return (modtype.type_members and modtype.type_members[name])
+        or (include_source and modtype.source_type_members
+            and modtype.source_type_members[name])
+end
+
+-- Preserve cycles and sharing while isolating mutable checker inputs. Foreign
+-- conversion completes C graphs in place, so each checker clones the probe
+-- service's otherwise shared target profile before attaching provenance.
+function types.clone_graph(value, memo)
+    if type(value) ~= "table" then return value end
+    memo = memo or {}
+    if memo[value] then return memo[value] end
+    local copy = {}
+    memo[value] = copy
+    for key, child in pairs(value) do
+        copy[types.clone_graph(key, memo)] =
+            types.clone_graph(child, memo)
+    end
+    return copy
+end
+
+-- Source-only FFI graphs remain in memory rather than serialized metadata.
+-- Stamp their defining Titan module on each per-checker C descriptor so function
+-- tags and owned-C identities remain canonical through a source import.
+function types.mark_c_ffi_scope(typ, scope, seen)
+    if type(typ) ~= "table" then return end
+    seen = seen or {}
+    if seen[typ] then return end
+    seen[typ] = true
+    if type(typ._tag) == "string"
+       and typ._tag:match("^Type%.C")
+       and typ._tag ~= "Type.CModule" then
+        typ._ffi_scope = typ._ffi_scope or scope
+    end
+    for key, child in pairs(typ) do
+        if key ~= "_ffi_scope" and type(child) == "table" then
+            types.mark_c_ffi_scope(child, scope, seen)
+        end
+    end
+end
+
+function types.c_ffi_scopes(typ)
+    local scopes, seen_scopes, seen = {}, {}, {}
+    local function visit(value)
+        if type(value) ~= "table" or seen[value] then return end
+        seen[value] = true
+        if type(value._tag) == "string"
+           and value._tag:match("^Type%.C")
+           and value._tag ~= "Type.CModule"
+           and value._ffi_scope
+           and not seen_scopes[value._ffi_scope] then
+            seen_scopes[value._ffi_scope] = true
+            scopes[#scopes + 1] = value._ffi_scope
+        end
+        for key, child in pairs(value) do
+            if key ~= "_ffi_scope" then visit(child) end
+        end
+    end
+    visit(typ)
+    table.sort(scopes, util.bytewise_less)
+    return scopes
+end
+
+function types.c_ffi_scope_key(typ)
+    local scopes = types.c_ffi_scopes(typ)
+    if #scopes == 0 then return nil end
+    return table.concat(scopes, "|")
+end
+
 --- Check if two pointer types are different and can be coerced.
 local function can_coerce_pointer(source, target)
     if types.equals(source, target) then
@@ -1200,10 +1338,15 @@ c_declaration_type_equals = function(
     elseif tag == "Type.CFunction" then
         return c_function_type_equals(ltype, rtype, seen)
     elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
-        -- File/prototype-scope tag binding and the conditional-header
-        -- baseline canonicalize compatible aggregate identities before value
-        -- compatibility reaches this relation.
+        -- Source-imported declarations retain their producer descriptor, but
+        -- generated C places inherited and direct headers in one file-scope
+        -- tag namespace. Equal named file-scope tags therefore denote the same
+        -- C type even when independent extraction allocated two objects.
         return ltype == rtype
+            or (ltype._c_tag_scope == "file"
+                and rtype._c_tag_scope == "file"
+                and ltype.tagname ~= nil
+                and ltype.tagname == rtype.tagname)
     end
     return false
 end
@@ -1311,6 +1454,14 @@ type_equals = function(t1, t2, seen)
 
     local tag1, tag2 = t1._tag, t2._tag
     if tag1 ~= tag2 then
+        return false
+    elseif type(tag1) == "string"
+       and tag1:match("^Type%.C")
+       and tag1 ~= "Type.CModule"
+       and t1._ffi_scope ~= t2._ffi_scope then
+        -- C descriptors are compilation-unit-local. Structural C declaration
+        -- compatibility is handled separately; exact Titan type identity must
+        -- agree with the scope used by runtime function/owned-object tags.
         return false
     end
 

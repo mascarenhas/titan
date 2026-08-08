@@ -269,10 +269,11 @@ end
 -- coder fixtures can address each artifact directly; public `titanc` container
 -- grouping is exercised by its dedicated filesystem specs. With `forapp`, it
 -- emits an executable for `main`. Returns (true) or (nil, message).
-function M.generate_modules(modules, main, forapp)
+function M.generate_modules(modules, main, forapp, options)
     reset(true)
     local imported, deps = {}, {}
-    local loader = driver.tableloader(modules, imported, deps)
+    options = options or { interface = "source" }
+    local loader = driver.tableloader(modules, imported, deps, options)
     return driver.with_loader(loader, function(loader)
         local typ, err = checker.checkimport(main, loader)
         if not typ then return nil, err end
@@ -360,10 +361,11 @@ function M.run_checker(code, probe_session)
     return #errs == 0, table.concat(errs, "\n"), ast, t
 end
 
-function M.run_checker_modules(modules, main)
+function M.run_checker_modules(modules, main, options)
     reset(true)
     local imported = {}
-    local loader = driver.tableloader(modules, imported)
+    options = options or { interface = "compiled" }
+    local loader = driver.tableloader(modules, imported, nil, options)
     local modt, err = driver.with_loader(loader, function(loader)
         return checker.checkimport(main, loader)
     end)

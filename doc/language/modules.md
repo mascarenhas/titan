@@ -190,8 +190,10 @@ the initializer. With an annotation, the usual
 [assignment adjustments](types.md#relations-and-boundaries-no-subtyping)
 apply, so `pi: float = 3` declares a float-typed variable holding `3.0`.
 
-A `local` variable is visible only inside its module. A variable
-without `local` is *exported*: modules that import this one can read
+A `local` variable is hidden from the public module interface; it is available
+inside its owner and through a qualified [direct source collaboration
+import](source-import-visibility.md). A variable without `local` is *exported*:
+modules that import this one can read
 and write it through their import alias, and Lua code that `require`s
 the module can read and write it as a member of the module value (which
 is a userdata; writes from Lua are type-checked at run time — see
