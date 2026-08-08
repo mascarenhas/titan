@@ -1455,14 +1455,6 @@ type_equals = function(t1, t2, seen)
     local tag1, tag2 = t1._tag, t2._tag
     if tag1 ~= tag2 then
         return false
-    elseif type(tag1) == "string"
-       and tag1:match("^Type%.C")
-       and tag1 ~= "Type.CModule"
-       and t1._ffi_scope ~= t2._ffi_scope then
-        -- C descriptors are compilation-unit-local. Structural C declaration
-        -- compatibility is handled separately; exact Titan type identity must
-        -- agree with the scope used by runtime function/owned-object tags.
-        return false
     end
 
     seen = seen or {}

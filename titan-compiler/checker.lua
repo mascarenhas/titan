@@ -655,7 +655,7 @@ local function report_foreign_redeclaration_failure(
 end
 
 local function report_foreign_header_context_failure(st, errors, result)
-    local node = st.last_foreign_import_node
+    local node = st.last_foreign_context_node
     local loc = node and node.loc
     local summary = result and (result.message or result.summary
         or result.diagnostic) or
@@ -7549,10 +7549,11 @@ end
 -- dependency's C namespace into Titan: only the C preamble and its macro state
 -- are inherited. Keep this mutation identical to an ordinary foreign import so
 -- a later header invalidates every context built for the earlier prefix.
-function checker._append_source_foreign_include(st, entry)
+function checker._append_source_foreign_include(st, entry, origin)
     local include = assert(entry and entry.include,
         "source foreign-include entry has no include descriptor")
     st.foreign_includes[#st.foreign_includes + 1] = include
+    st.last_foreign_context_node = origin or st.last_foreign_context_node
     st.foreign_includes_version = st.foreign_includes_version + 1
     st.module_probe = nil
     st.module_probe_error = nil
@@ -7613,7 +7614,7 @@ local toplevel_visitor = util.make_visitor({
                 end
                 for _, entry in ipairs(
                         modtype._source_foreign_includes or {}) do
-                    checker._append_source_foreign_include(st, entry)
+                    checker._append_source_foreign_include(st, entry, node)
                 end
             end
             for _, err in ipairs(errs) do
@@ -7660,7 +7661,7 @@ local toplevel_visitor = util.make_visitor({
             node._source_foreign_include = { include = include }
             st.last_foreign_import_node = node
             checker._append_source_foreign_include(
-                st, node._source_foreign_include)
+                st, node._source_foreign_include, node)
             local members = {}
             local type_members = {}
             local ordinary_declarations = {}
@@ -8282,7 +8283,7 @@ local function checktoplevel(ast, st, errors, loader)
     local macros_ok, macros_err =
         checker._finalize_source_foreign_includes(st)
     if not macros_ok then
-        local diagnostic_node = st.last_foreign_import_node or ast[1]
+        local diagnostic_node = st.last_foreign_context_node or ast[1]
         checker.typeerror(errors, diagnostic_node.loc,
             "cannot preprocess ordered C headers: %s", macros_err)
     end
