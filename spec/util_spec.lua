@@ -42,4 +42,13 @@ describe("Titan utils", function()
          assert.is_false(util.bytewise_less("aa", "a"))
          assert.is_false(util.bytewise_less("same", "same"))
      end)
+
+     it("curries a function", function()
+         local function add(a, b)
+             return a + b
+         end
+         local add_five = util.curry(add, 5)
+         assert.are.equal(15, add_five(10))
+         assert.are.equal(7, add_five(2))
+     end)
 end)
