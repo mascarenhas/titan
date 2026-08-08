@@ -585,10 +585,7 @@ local function regular_file(filename)
     return lfs.attributes(filename, "mode") == "file"
 end
 
-local function source_resolution_in_root(root, modname)
-    local module_path = modname:gsub("[.]", "/")
-    local basename = modname:match("([^.]+)$")
-    if not basename then return nil end
+local function source_resolution_in_root(root, modname, module_path, basename)
     local folder = root .. "/" .. module_path
     local folder_main = folder .. "/" .. basename .. ".titan"
 
@@ -658,8 +655,11 @@ local function source_resolution_in_root(root, modname)
 end
 
 local function resolve_source(paths, modname)
+    local module_path = modname:gsub("[.]", "/")
+    local basename = modname:match("([^.]+)$")
+    if not basename then return nil end
     for root in paths:gmatch("[^;]+") do
-        local source, err = source_resolution_in_root(root, modname)
+        local source, err = source_resolution_in_root(root, modname, module_path, basename)
         if source or err then return source, err end
     end
     return nil
