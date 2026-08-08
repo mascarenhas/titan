@@ -53,4 +53,11 @@ describe("Titan utils", function()
          assert.same({ "", "" }, util.split_string(",", ","))
          assert.same({ "a", "b", "c" }, util.split_string("a;;b;;c", ";;"))
      end)
+
+     it("checks if any element in a list matches a predicate", function()
+         local is_even = function(x) return x % 2 == 0 end
+         assert.is_true(util.any(is_even, {1, 2, 3}))
+         assert.is_false(util.any(is_even, {1, 3, 5}))
+         assert.is_false(util.any(is_even, {}))
+     end)
 end)
