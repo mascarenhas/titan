@@ -43,6 +43,17 @@ describe("Titan utils", function()
          assert.is_false(util.bytewise_less("same", "same"))
      end)
 
+     it("splits strings", function()
+         assert.same({ "a", "b", "c" }, util.split_string("a,b,c", ","))
+         assert.same({ "abc" }, util.split_string("abc", ","))
+         assert.same({ "" }, util.split_string("", ","))
+         assert.same({ "a", "", "c" }, util.split_string("a,,c", ","))
+         assert.same({ "", "b", "c" }, util.split_string(",b,c", ","))
+         assert.same({ "a", "b", "" }, util.split_string("a,b,", ","))
+         assert.same({ "", "" }, util.split_string(",", ","))
+         assert.same({ "a", "b", "c" }, util.split_string("a;;b;;c", ";;"))
+     end)
+
      it("checks if any element in a list matches a predicate", function()
          local is_even = function(x) return x % 2 == 0 end
          assert.is_true(util.any(is_even, {1, 2, 3}))
