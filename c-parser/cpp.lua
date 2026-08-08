@@ -6,30 +6,6 @@ local c99 = require("c-parser.c99")
 
 local SEP = package.config:sub(1,1)
 
-local shl, shr
-if jit then
-    shl = function(a, b)
-        if b < 0 or b >= 64 then return 0 end
-        return bit.lshift(a, b)
-    end
-    shr = function(a, b)
-        if b < 0 or b >= 64 then return 0 end
-        return bit.rshift(a, b)
-    end
-else
-    shl, shr = load([[
-        local function shl(a, b)
-            if b < 0 or b >= 64 then return 0 end
-            return a << b
-        end
-        local function shr(a, b)
-            if b < 0 or b >= 64 then return 0 end
-            return a >> b
-        end
-        return shl, shr
-    ]])()
-end
-
 local function debug() end
 --[[
 local inspect = require("inspect")
@@ -992,8 +968,8 @@ eval_exp = typed("Ctx, Exp -> number", function(ctx, exp)
         end
     elseif exp.op == "*"  then return eval_exp(ctx, exp[1]) * eval_exp(ctx, exp[2])
     elseif exp.op == "/"  then return eval_exp(ctx, exp[1]) / eval_exp(ctx, exp[2])
-    elseif exp.op == ">>" then return shr(eval_exp(ctx, exp[1]), eval_exp(ctx, exp[2]))
-    elseif exp.op == "<<" then return shl(eval_exp(ctx, exp[1]), eval_exp(ctx, exp[2]))
+    elseif exp.op == ">>" then return eval_exp(ctx, exp[1]) // (1 << eval_exp(ctx, exp[2]))
+    elseif exp.op == "<<" then return eval_exp(ctx, exp[1]) << eval_exp(ctx, exp[2])
     elseif exp.op == "==" then return (eval_exp(ctx, exp[1]) == eval_exp(ctx, exp[2])) and 1 or 0
     elseif exp.op == "!=" then return (eval_exp(ctx, exp[1]) ~= eval_exp(ctx, exp[2])) and 1 or 0
     elseif exp.op == ">=" then return (eval_exp(ctx, exp[1]) >= eval_exp(ctx, exp[2])) and 1 or 0
