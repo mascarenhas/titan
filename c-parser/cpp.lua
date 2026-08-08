@@ -942,7 +942,7 @@ eval_exp = typed("Ctx, Exp -> number", function(ctx, exp)
             assert(type(defined) == "table")
             local subexp = parse_expression(defined)
             if not subexp then
-                return 0 -- FIXME
+                error("syntax error in preprocessor expression")
             end
             return eval_exp(ctx, subexp)
         end
