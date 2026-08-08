@@ -67,6 +67,13 @@ function util.split_string(str, delim)
     local n = 1
     local last_pos = 1
     local delim_len = #delim
+    if delim_len == 0 then
+        for i = 1, #str + 2 do
+            result[i] = ""
+        end
+        return result
+    end
+
     while true do
         local pos = string.find(str, delim, last_pos, true)
         if not pos then break end
