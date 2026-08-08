@@ -66,10 +66,13 @@ function util.split_string(str, delim)
     local result = {}
     local n = 1
     local last_pos = 1
-    for part, pos in string.gmatch(str, "(.-)" .. delim .. "()") do
-        result[n] = part
+    local delim_len = #delim
+    while true do
+        local pos = string.find(str, delim, last_pos, true)
+        if not pos then break end
+        result[n] = string.sub(str, last_pos, pos - 1)
         n = n + 1
-        last_pos = pos
+        last_pos = pos + delim_len
     end
     result[n] = string.sub(str, last_pos)
     return result
