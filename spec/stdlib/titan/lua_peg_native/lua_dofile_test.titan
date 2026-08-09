@@ -1,8 +1,8 @@
 function test_lua_dofile_preserves_flexible_values_and_recovers_after_errors(
     context: test.Context)
-  local success = temporary_file(context)
-  local runtime_error = temporary_file(context)
-  local syntax_error = temporary_file(context)
+  local success = temporary_file(context, "-dofile-success.lua")
+  local runtime_error = temporary_file(context, "-dofile-runtime-error.lua")
+  local syntax_error = temporary_file(context, "-dofile-syntax-error.lua")
   fs.write_file(success, "return ...")
   fs.write_file(runtime_error, "error('runtime marker')")
   fs.write_file(syntax_error, "this is not Lua")
@@ -27,7 +27,9 @@ function test_lua_dofile_preserves_flexible_values_and_recovers_after_errors(
   test.assert(syntax_message ~= nil,
               "dofile syntax failure was not a string error")
   local syntax_text: string = syntax_message
-  test.assert(find_literal(syntax_text, syntax_error) ~= nil,
+  -- Lua abbreviates long source paths, notably macOS /var/folders names, but
+  -- preserves the diagnostic filename suffix.
+  test.assert(find_literal(syntax_text, "dofile-syntax-error.lua") ~= nil,
               syntax_text)
 
   -- Both exceptional paths leave dofile usable. The native suite can observe

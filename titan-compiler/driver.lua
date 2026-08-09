@@ -2660,10 +2660,9 @@ int main(int argc, char** argv) {
         if (lua_getfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY) == LUA_TSTRING) {
             const char *trace = lua_tostring(L, -1);
             report_titan_error(errmsg_tostring(L, -2), trace);
-        } else {
-            lua_pop(L, 1);                 /* nil/non-string slot */
-            report = errmsg_tostring(L, -1);
         }
+        lua_pop(L, 1);                     /* nil/non-string trace slot */
+        report = errmsg_tostring(L, -1);
         fatal(report);
     }
     ret = lua_tointeger(L, -1);

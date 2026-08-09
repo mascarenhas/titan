@@ -40,8 +40,14 @@ local function caught_string(action: CheckedAction): string?
   return nil
 end
 
-local function temporary_file(context: test.Context): string
-  local path = fs.tmpname()
+local function temporary_file(context: test.Context,
+                              suffix: string?): string
+  local temporary = fs.tmpname()
+  local path = temporary
+  if suffix then
+    path = temporary .. suffix
+    fs.rename(temporary, path)
+  end
   context:cleanup(function ()
     fs.unlink(path)
   end)
