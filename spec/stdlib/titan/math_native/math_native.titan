@@ -1,0 +1,357 @@
+-- Native behavior tests for titan.math. This folder is one logical test
+-- module, invoked with:
+--   titanc --test --tree spec/stdlib/titan math_native
+local test = import "test"
+local mathlib = import "titan.math"
+
+local lua_api = foreign import "lua.h"
+local lua_aux = foreign import "lauxlib.h"
+local ffi = foreign import "titan/ffi.h"
+local cstring = foreign import "string.h"
+local clocale = foreign import "locale.h"
+local cmath = foreign import "math.h"
+
+local type CheckedAction = () -> ()
+
+-- Lua is used only where the original behavior depends on raw numeric tags,
+-- numeral parsing, or a dynamic call which Titan's checker intentionally
+-- rejects. All assertions remain native Titan code.
+local function lua_helper(source: string): value
+  local top = lua_api.lua_gettop(L)
+  defer lua_api.lua_settop(L, top)
+  if lua_api.lua_checkstack(L, 2) == 0 then
+    raise "cannot reserve Lua stack for native math test helper"
+  end
+  local status = lua_aux.luaL_loadstring(L, source)
+  if status ~= lua_api.LUA_OK then
+    local failure: value = ffi.lua_totvalue(L, -1)
+    raise failure
+  end
+  status = lua_api.lua_pcallk(L, 0, 1, 0, 0, nil)
+  if status ~= lua_api.LUA_OK then
+    local failure: value = ffi.lua_totvalue(L, -1)
+    raise failure
+  end
+  return ffi.lua_totvalue(L, -1)
+end
+
+local function numeric_tag(candidate: value): integer
+  local top = lua_api.lua_gettop(L)
+  defer lua_api.lua_settop(L, top)
+  if lua_api.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for numeric tag probe"
+  end
+  ffi.lua_pushtvalue(L, candidate)
+  if lua_api.lua_isinteger(L, -1) ~= 0 then return 1 end
+  if lua_api.lua_type(L, -1) == lua_api.LUA_TNUMBER then return 2 end
+  return 0
+end
+
+local function same_numeric(actual: value?, expected: value?)
+  if actual == nil or expected == nil then
+    test.assert(actual == nil and expected == nil,
+                "numeric option presence differed")
+    return
+  end
+  local left = actual as value
+  local right = expected as value
+  local equal = left == right
+  if left is float and right is float then
+    local left_float = left as float
+    local right_float = right as float
+    if left_float ~= left_float and right_float ~= right_float then
+      equal = true
+    end
+  end
+  test.assert(equal, "numeric values differed")
+  test.assert(numeric_tag(left) == numeric_tag(right),
+              "integer/float tags differed")
+end
+
+local function error_text(failure: value): string
+  local result = "<unprintable error>"
+  local top = lua_api.lua_gettop(L)
+  defer lua_api.lua_settop(L, top)
+  if lua_api.lua_checkstack(L, 2) ~= 0 then
+    ffi.lua_pushtvalue(L, failure)
+    lua_aux.luaL_tolstring(L, -1, nil)
+    local rendered: value = ffi.lua_totvalue(L, -1)
+    if rendered is string then result = rendered as string end
+  end
+  return result
+end
+
+local function contains(subject: string, fragment: string): boolean
+  return cstring.strstr(subject, fragment) ~= nil
+end
+
+local function assert_raises(action: CheckedAction)
+  local caught = false
+  do
+    action()
+  catch
+    caught = true
+  end
+  test.assert(caught, "expected an error")
+end
+
+local function assert_raises_contains(action: CheckedAction,
+                                      fragment: string)
+  local caught = false
+  do
+    action()
+  catch
+    caught = true
+    local message = error_text(error)
+    test.assert(contains(message, fragment),
+                "expected error containing '" .. fragment ..
+                "', got '" .. message .. "'")
+  end
+  test.assert(caught, "expected an error containing '" .. fragment .. "'")
+end
+
+function test_typed_surface_and_constants(_context: test.Context)
+  -- These declarations keep the original typed probe's exact result shape.
+  local absolute: float = mathlib.abs(-2)
+  local ceiling: float = mathlib.ceil(2.25)
+  local mantissa: float, exponent: integer = mathlib.frexp(12.0)
+  local integral: float, fractional: float = mathlib.modf(-3.25)
+  local unsigned_less: boolean = mathlib.ult(-1, 0)
+  local parsed: value? = mathlib.tonumber("0x2a")
+
+  test.assert(absolute == 2.0 and numeric_tag(absolute) == 2)
+  test.assert(ceiling == 3.0 and numeric_tag(ceiling) == 2)
+  test.assert(mantissa == 0.75 and exponent == 4)
+  test.assert(integral == -3.0 and fractional == -0.25)
+  test.assert(not unsigned_less)
+  test.assert(parsed ~= nil and (parsed as value) as integer == 42)
+
+  test.assert(mathlib.pi == 3.141592653589793)
+  test.assert(mathlib.huge == 1e999)
+  test.assert(mathlib.maxinteger == 9223372036854775807)
+  test.assert(mathlib.mininteger == -9223372036854775807 - 1)
+  test.assert(mathlib.abs(-mathlib.huge) == mathlib.huge)
+
+  local square_root_nan = mathlib.sqrt(-1.0)
+  local remainder_nan = mathlib.fmod(1.0, 0.0)
+  test.assert(square_root_nan ~= square_root_nan)
+  test.assert(remainder_nan ~= remainder_nan)
+
+  test.assert(mathlib.acos(0.5) == cmath.acos(0.5) as float)
+  test.assert(mathlib.asin(0.5) == cmath.asin(0.5) as float)
+  test.assert(mathlib.atan(1.0) == cmath.atan2(1.0, 1.0) as float)
+  test.assert(mathlib.atan(1.0, -1.0) ==
+              cmath.atan2(1.0, -1.0) as float)
+  test.assert(mathlib.cos(0.25) == cmath.cos(0.25) as float)
+  test.assert(mathlib.deg(mathlib.pi) == 180.0)
+  test.assert(mathlib.exp(1.0) == cmath.exp(1.0) as float)
+  test.assert(mathlib.floor(-2.25) == -3.0)
+  test.assert(mathlib.fmod(-5.5, 2.0) == cmath.fmod(-5.5, 2.0) as float)
+  test.assert(mathlib.ldexp(0.75, 4) == 12.0)
+  test.assert(mathlib.log(64.0, 2.0) == 6.0)
+  test.assert(mathlib.log(100.0, 10.0) == 2.0)
+  test.assert(mathlib.log2(64.0) == 6.0)
+  test.assert(mathlib.log10(100.0) == 2.0)
+  local maximum = mathlib.max(-3, 8, 2)
+  local minimum = mathlib.min(-3, 8, 2)
+  test.assert(maximum == 8.0 and numeric_tag(maximum) == 2)
+  test.assert(minimum == -3.0)
+  test.assert(mathlib.rad(180.0) == mathlib.pi)
+  test.assert(mathlib.sin(0.25) == cmath.sin(0.25) as float)
+  test.assert(mathlib.sqrt(81.0) == 9.0)
+  test.assert(mathlib.tan(0.25) == cmath.tan(0.25) as float)
+  test.assert(mathlib.ult(0, -1) and not mathlib.ult(-1, 0))
+  test.assert(mathlib.tointeger(3.0) == 3)
+  test.assert(mathlib.tointeger("4.0") == 4)
+  test.assert(mathlib.tointeger(3.5) == nil)
+
+  -- Raw tag inspection and the absent member require the Lua boundary.
+  -- Inspect the qualified Titan module rather than conflating it with Lua's
+  -- independent global math table.
+  local lua_boundary = lua_helper([[
+return function()
+  local m = require "titan.math"
+  local has_type = pcall(function() return m.type end)
+  return has_type, m.abs(-2), m.ceil(2.25), m.max(-3, 8, 2),
+         m.abs(-m.huge) == m.huge
+end
+]]) as () -> (boolean, value, value, value, boolean)
+  local has_type, boundary_absolute, boundary_ceiling, boundary_maximum,
+        boundary_huge = lua_boundary()
+  test.assert(not has_type)
+  test.assert(boundary_absolute == 2.0 and
+              numeric_tag(boundary_absolute) == 2)
+  test.assert(boundary_ceiling == 3.0 and
+              numeric_tag(boundary_ceiling) == 2)
+  test.assert(boundary_maximum == 8.0 and
+              numeric_tag(boundary_maximum) == 2)
+  test.assert(boundary_huge)
+end
+
+function test_xoshiro256_star_star_matches_lua(_context: test.Context)
+  -- The native test owner is `math_native`, so Lua's independent global math
+  -- library remains available as a live reference implementation.
+  local lua_randomseed = lua_helper([[
+return function(first, second) return math.randomseed(first, second) end
+]]) as (integer, integer) -> (integer, integer)
+  local lua_random_unit = lua_helper([[
+return function() return math.random() end
+]]) as () -> float
+  local lua_random_full = lua_helper([[
+return function() return math.random(0) end
+]]) as () -> integer
+  local lua_random_upper = lua_helper([[
+return function(upper) return math.random(upper) end
+]]) as (integer) -> integer
+  local lua_random_interval = lua_helper([[
+return function(lower, upper) return math.random(lower, upper) end
+]]) as (integer, integer) -> integer
+
+  mathlib.randomseed(0x123456789abcdef, -77)
+  lua_randomseed(0x123456789abcdef, -77)
+  local pinned_unit: {float} = {
+    0.46466756637445317,
+    0.97989383630972426,
+    0.83972835883933472,
+  }
+  local index = 1
+  while index <= 24 do
+    local actual = mathlib.random()
+    local reference = lua_random_unit()
+    same_numeric(actual, reference)
+    if index <= #pinned_unit then
+      same_numeric(actual, pinned_unit[index])
+    end
+    index = index + 1
+  end
+
+  mathlib.randomseed(-1, mathlib.maxinteger)
+  lua_randomseed(-1, mathlib.maxinteger)
+  index = 1
+  while index <= 24 do
+    same_numeric(mathlib.random(0), lua_random_full())
+    index = index + 1
+  end
+
+  mathlib.randomseed(101, 202)
+  lua_randomseed(101, 202)
+  index = 1
+  while index <= 24 do
+    same_numeric(mathlib.random(17), lua_random_upper(17))
+    same_numeric(mathlib.random(-30, 40), lua_random_interval(-30, 40))
+    same_numeric(mathlib.random(mathlib.mininteger, mathlib.maxinteger),
+                 lua_random_interval(mathlib.mininteger,
+                                     mathlib.maxinteger))
+    index = index + 1
+  end
+
+  local first, second = mathlib.randomseed(55, 66)
+  local lua_first, lua_second = lua_randomseed(55, 66)
+  test.assert(first == lua_first and second == lua_second)
+  local sequence: {integer} = {
+    mathlib.random(0) as integer,
+    mathlib.random(0) as integer,
+    mathlib.random(0) as integer,
+  }
+  mathlib.randomseed(first, second)
+  index = 1
+  while index <= #sequence do
+    test.assert((mathlib.random(0) as integer) == sequence[index])
+    index = index + 1
+  end
+end
+
+function test_bounded_numerals_and_explicit_bases(_context: test.Context)
+  local lua_tonumber = lua_helper([[
+return function(candidate) return tonumber(candidate) end
+]]) as (value) -> value?
+  local lua_tonumber_base = lua_helper([[
+return function(candidate, base) return tonumber(candidate, base) end
+]]) as (value, integer) -> value?
+
+  local cases: {value} = {
+    0, 2.0, -3.5, "", " ", "+", "-", "0", "-0", "+17",
+    "  -42  ", "9223372036854775807", "-9223372036854775808",
+    "9223372036854775808", "-9223372036854775809", "1.5", ".5",
+    "4.", "1e2", "1e-4000", "1e4000", "0x0",
+    "0xffffffffffffffff", "-0xffffffffffffffff",
+    "0x10000000000000000", "0x1.8p1", "-0x1p-2", "0x1.2",
+    "nan", "inf", "-inf", "1e", "0x", "0xp1", "1 2", "1\0",
+  }
+  local index = 1
+  while index <= #cases do
+    local candidate: value = cases[index]
+    same_numeric(mathlib.tonumber(candidate), lua_tonumber(candidate))
+    index = index + 1
+  end
+
+  local base = 2
+  local base_cases: {string} = {
+    "0", "10", "-10", "+Z", " z ", "123xyz", "",
+  }
+  while base <= 36 do
+    index = 1
+    while index <= #base_cases do
+      local candidate = base_cases[index]
+      same_numeric(mathlib.tonumber(candidate, base),
+                   lua_tonumber_base(candidate, base))
+      index = index + 1
+    end
+    base = base + 1
+  end
+
+  local parsed_integer = mathlib.tonumber(7)
+  local parsed_float = mathlib.tonumber(7.0)
+  test.assert(parsed_integer ~= nil and
+              numeric_tag(parsed_integer as value) == 1)
+  test.assert(parsed_float ~= nil and
+              numeric_tag(parsed_float as value) == 2)
+
+  local previous_pointer = clocale.setlocale(clocale.LC_NUMERIC, nil)
+  if previous_pointer then
+    -- Copy the previous locale before setlocale may reuse its static buffer.
+    local previous = previous_pointer as string
+    local selected = clocale.setlocale(clocale.LC_NUMERIC, "de_DE.UTF-8")
+    if not selected then
+      selected = clocale.setlocale(clocale.LC_NUMERIC, "de_DE.utf8")
+    end
+    if selected then
+      defer clocale.setlocale(clocale.LC_NUMERIC, previous)
+      local converted = mathlib.tonumber("1.5")
+      local hexadecimal = mathlib.tonumber("0x1.8p1")
+      test.assert(converted ~= nil and
+                  (converted as value) as float == 1.5)
+      test.assert(hexadecimal ~= nil and
+                  (hexadecimal as value) as float == 3.0)
+    end
+  end
+end
+
+function test_rejects_invalid_typed_requests(_context: test.Context)
+  assert_raises_contains(function()
+    mathlib.random(5, 4)
+  end, "random interval is empty")
+  assert_raises_contains(function()
+    mathlib.random(nil, 4)
+  end, "random lower limit is required")
+  assert_raises_contains(function()
+    mathlib.randomseed(nil, 4)
+  end, "randomseed first component is required")
+  assert_raises_contains(function()
+    mathlib.tonumber("10", 1)
+  end, "base out of range")
+  assert_raises_contains(function()
+    mathlib.tonumber(10, 10)
+  end, "base conversion requires a string")
+  assert_raises(function()
+    mathlib.ldexp(1.0, mathlib.maxinteger)
+  end)
+
+  local bad_dynamic_call = lua_helper([[
+return function()
+  local m = require "titan.math"
+  return pcall(m.max, "not a number")
+end
+]]) as () -> boolean
+  test.assert(not bad_dynamic_call())
+end

@@ -1,0 +1,14 @@
+-- Native synchronous public behavior tests for titan.os.
+-- This folder is one logical test module, invoked with:
+--   titanc --test --tree spec/stdlib/titan os_native
+local test = import "test"
+local system = import "os"
+
+-- These boundaries only render caught errors, inspect the public operation
+-- field of an os error, compare one libc-formatted value, and establish a
+-- deterministic process timezone. Public behavior assertions stay in Titan.
+local lua_api = foreign import "lua.h"
+local lua_aux = foreign import "lauxlib.h"
+local ffi = foreign import "titan/ffi.h"
+local cstring = foreign import "string.h"
+local ctime = foreign import "time.h"

@@ -103,6 +103,8 @@ describe("compiler installation discovery", function()
             liblua = "/opt/titan/lib/liblua.a",
             titan_bin = "/opt/titan/lib/titan/0.22",
             lua_cpath = "/opt/titan/lib/titan/0.22/?.so",
+            test_source =
+                "/opt/titan/share/titan/0.22/src/titan/test.titan",
         }, paths)
 
         assert.same({
@@ -117,6 +119,23 @@ describe("compiler installation discovery", function()
             "/opt/titan/lib/liblua.a",
             "-lm",
         }, driver.installed_link_inputs(paths, true))
+    end)
+
+    it("keeps canonical test-support outputs under the logical source path",
+       function()
+        local source = assert(driver.test_support_source_descriptor())
+        assert.equal("titan/test", source.program_output)
+    end)
+
+    it("reports a missing canonical test support source", function()
+        local previous = driver.TEST_SUPPORT_SOURCE_PATH
+        driver.TEST_SUPPORT_SOURCE_PATH = "/nonexistent/titan/test.titan"
+        local source, message = driver.test_support_source_descriptor()
+        driver.TEST_SUPPORT_SOURCE_PATH = previous
+        assert.is_nil(source)
+        assert.match("Titan test support source is missing", message,
+            1, true)
+        assert.match("/nonexistent/titan/test.titan", message, 1, true)
     end)
 
     it("identifies a checkout from driver provenance, not the working directory",
@@ -342,6 +361,7 @@ describe("loader resolver ownership", function()
             ["titan-compiler.coder"] = {},
             ["titan-compiler.parser"] = {},
             ["titan-compiler.driver"] = fake_driver,
+            ["titan-compiler.test_runner"] = {},
             ["titan-compiler.util"] = {},
         }
         local environment = setmetatable({
@@ -424,6 +444,85 @@ describe("loader resolver ownership", function()
     end)
 end)
 
+describe("standalone output ownership", function()
+    it("rejects source and synthetic output collisions before compilation",
+       function()
+        local stems = {
+            "suite__test_support",
+            "suite__test_runner",
+        }
+        for _, stem in ipairs(stems) do
+            local ok, message = driver.validate_program_output_paths({
+                { modname = "generated", output = stem .. ".titan" },
+                { modname = "user", output = stem .. ".titan" },
+            }, "suite", "suite__test_entrypoint.c", {})
+            assert.is_nil(ok)
+            assert.matches("aliases output", message, 1, true)
+        end
+
+        local ok, message = driver.validate_program_output_paths({
+            {
+                modname = "suite__test_entrypoint",
+                output = "suite__test_entrypoint.titan",
+            },
+        }, "suite", "suite__test_entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("standalone entrypoint", message, 1, true)
+
+        ok, message = driver.validate_program_output_paths({},
+            "suite", "suite__test_entrypoint.c",
+            { "suite__test_entrypoint.o" })
+        assert.is_nil(ok)
+        assert.matches("aliases input", message, 1, true)
+    end)
+
+
+    it("accepts a symlinked directory parent and canonicalizes its outputs",
+       function()
+        local root = os.tmpname()
+        assert(os.remove(root))
+        assert(lfs.mkdir(root))
+        local physical = root .. "/physical"
+        local linked = root .. "/linked"
+        assert(lfs.mkdir(physical))
+        assert(lfs.link(physical, linked, true))
+
+        local ok, message = driver.validate_program_output_paths({
+            { modname = "linked", output = linked .. "/module.titan" },
+        }, root .. "/program", root .. "/entrypoint.c", {})
+        assert.truthy(ok, message)
+
+        assert(os.remove(linked))
+        assert(lfs.rmdir(physical))
+        assert(lfs.rmdir(root))
+    end)
+
+    it("rejects hierarchy conflicts and nonregular output leaves", function()
+        local root = os.tmpname()
+        assert(os.remove(root))
+        assert(lfs.mkdir(root))
+
+        local ok, message = driver.validate_program_output_paths({
+            {
+                modname = "suite.child",
+                output = root .. "/suite/child.titan",
+            },
+        }, root .. "/suite", root .. "/entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("path hierarchy conflict", message, 1, true)
+
+        local directory_output = root .. "/support.c"
+        assert(lfs.mkdir(directory_output))
+        ok, message = driver.validate_program_output_paths({
+            { modname = "support", output = root .. "/support.titan" },
+        }, root .. "/suite", root .. "/entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("not a regular nonlink file", message, 1, true)
+
+        remove_tree(root)
+    end)
+end)
+
 describe("compiler module loader", function()
     local root
     local source
@@ -448,6 +547,23 @@ describe("compiler module loader", function()
         table.sort(provider.key_order, util.bytewise_less)
         context.provider_cache[filename] = provider
         return provider
+    end
+
+    local function cache_dynamic_provider(filename, module_types)
+        write_file(filename, "mock dynamic provider\n")
+        titan._loadlib = function(found_filename, symbol)
+            assert.equal(filename, found_filename)
+            for name, modtype in pairs(module_types) do
+                local prefix = driver.mangle_module_name(name)
+                if symbol == prefix .. "_abi" then
+                    return function() return driver.TITAN_VER end
+                elseif symbol == prefix .. "_types" then
+                    local serialized = types.serialize(modtype)
+                    return function() return serialized end
+                end
+            end
+            error("unexpected symbol " .. symbol)
+        end
     end
 
     before_each(function()
@@ -528,6 +644,235 @@ describe("compiler module loader", function()
             driver.imported["titan.timer"].filename)
         assert.equal("titan/timer__main",
             driver.imported["titan.timer"].program_output)
+    end)
+
+    it("prefers source throughout a source-first invocation", function()
+        write_file(source .. "/preferred.titan", [[
+            function marker(): integer
+                return 7
+            end
+        ]])
+        write_file(binary .. "/preferred.so", "broken binary that must not open\n")
+        titan._loadlib = function()
+            error("source-first lookup must not probe an occupied binary")
+        end
+
+        local context = driver.new_resolver_context({ source_first = true })
+        local ok, modtype, errors = driver.defaultloader({}, {
+            context = context,
+        })("preferred")
+        assert.truthy(ok)
+        assert.equal("Type.Module", modtype._tag)
+        assert.equal(0, #errors)
+        assert.equal("source", driver.imported.preferred.kind)
+        assert.equal(source .. "/preferred.titan",
+            driver.imported.preferred.filename)
+    end)
+
+    it("falls back to the preferred compiled format after a source miss",
+       function()
+        write_file(binary .. "/fallback.so", "mock interface\n")
+        titan._loadlib = function(filename, symbol)
+            assert.equal(binary .. "/fallback.so", filename)
+            if symbol == "fallback_abi" then
+                return function() return driver.TITAN_VER end
+            elseif symbol == "fallback_types" then
+                return function() return "Module('fallback',{})" end
+            end
+            error("unexpected symbol " .. symbol)
+        end
+
+        local context = driver.new_resolver_context({ source_first = true })
+        local ok, modtype, errors = driver.defaultloader({}, {
+            context = context,
+        })("fallback")
+        assert.truthy(ok)
+        assert.equal("Type.Module", modtype._tag)
+        assert.equal(0, #errors)
+        assert.equal("dynamic", driver.imported.fallback.kind)
+    end)
+
+    it("honors static preference after a source-first miss", function()
+        local context = driver.new_resolver_context({
+            source_first = true,
+            prefer_static = true,
+        })
+        local archive = binary .. "/fallback_static.a"
+        cache_static_provider(context, archive, {
+            fallback_static = types.Module("fallback_static", {}, {}),
+        })
+
+        local ok, modtype, errors = driver.defaultloader({}, {
+            context = context,
+        })("fallback_static")
+        assert.truthy(ok)
+        assert.equal("Type.Module", modtype._tag)
+        assert.equal(0, #errors)
+        assert.equal("static", driver.imported.fallback_static.kind)
+        assert.equal(archive, driver.imported.fallback_static.filename)
+    end)
+
+    it("skips a static provider that overlaps a forced source", function()
+        local context = driver.new_resolver_context({
+            source_first = true,
+            prefer_static = true,
+        })
+        local archive = binary .. "/fallback_static.a"
+        cache_static_provider(context, archive, {
+            fallback_static = types.Module("fallback_static", {}, {}),
+            ["titan.test"] = types.Module("titan.test", {}, {}),
+        })
+        write_file(binary .. "/fallback_static.so", "mock interface\n")
+        titan._loadlib = function(filename, symbol)
+            assert.equal(binary .. "/fallback_static.so", filename)
+            if symbol == "fallback_static_abi" then
+                return function() return driver.TITAN_VER end
+            elseif symbol == "fallback_static_types" then
+                return function()
+                    return "Module('fallback_static',{})"
+                end
+            end
+            error("unexpected symbol " .. symbol)
+        end
+
+        local ok, modtype, errors = driver.defaultloader({}, {
+            context = context,
+            source_overrides = { ["titan.test"] = {} },
+        })("fallback_static")
+        assert.truthy(ok)
+        assert.equal("Type.Module", modtype._tag)
+        assert.equal(0, #errors)
+        assert.equal("dynamic", driver.imported.fallback_static.kind)
+    end)
+
+    it("rejects a static provider while recursively checking a carried source",
+       function()
+        assert(lfs.mkdir(source .. "/bundle"))
+        write_file(source .. "/root.titan", [[
+            local later = import "bundle.later"
+        ]])
+        write_file(source .. "/bundle/later.titan", [[
+            local fallback = import "bundle.fallback"
+        ]])
+
+        local context = driver.new_resolver_context({
+            source_first = true,
+            prefer_static = true,
+        })
+        local fallback_type = types.Module("bundle.fallback", {}, {})
+        local later_type = types.Module("bundle.later", {}, {})
+        cache_static_provider(context, binary .. "/bundle.a", {
+            ["bundle.fallback"] = fallback_type,
+            ["bundle.later"] = later_type,
+        })
+        cache_dynamic_provider(binary .. "/bundle.so", {
+            ["bundle.fallback"] = fallback_type,
+        })
+
+        local ok, _, errors = driver.defaultloader({}, {
+            context = context,
+            source_roots = { root = true },
+        })("root")
+        assert.truthy(ok)
+        assert.equal(0, #errors)
+        assert.equal("source", driver.imported["bundle.later"].kind)
+        assert.equal("dynamic", driver.imported["bundle.fallback"].kind)
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(context)
+        assert.truthy(finalized, table.concat(finalize_errors or {}, "\n"))
+        assert.equal(0, #context.selected_static_providers)
+    end)
+
+    it("rebinds an earlier static selection when a later source overlaps it",
+       function()
+        assert(lfs.mkdir(source .. "/bundle"))
+        write_file(source .. "/root.titan", [[
+            local fallback = import "bundle.fallback"
+            local later = import "bundle.later"
+        ]])
+        write_file(source .. "/bundle/later.titan", [[
+            local marker: integer = 1
+        ]])
+
+        local context = driver.new_resolver_context({
+            source_first = true,
+            prefer_static = true,
+        })
+        local fallback_type = types.Module("bundle.fallback", {}, {})
+        local later_type = types.Module("bundle.later", {}, {})
+        cache_static_provider(context, binary .. "/bundle.a", {
+            ["bundle.fallback"] = fallback_type,
+            ["bundle.later"] = later_type,
+        })
+        cache_dynamic_provider(binary .. "/bundle.so", {
+            ["bundle.fallback"] = fallback_type,
+        })
+
+        local static_deps = {}
+        local ok, _, errors = driver.defaultloader(static_deps, {
+            context = context,
+            source_roots = { root = true },
+        })("root")
+        assert.truthy(ok)
+        assert.equal(0, #errors)
+        assert.equal("dynamic", driver.imported["bundle.fallback"].kind)
+        assert.equal("bundle.so", driver.imported["bundle.fallback"].type.file)
+        assert.equal("source", driver.imported["bundle.later"].kind)
+        assert.is_nil(static_deps["bundle.fallback"])
+        local finalized, finalize_errors =
+            driver.finalize_resolver_context(context)
+        assert.truthy(finalized, table.concat(finalize_errors or {}, "\n"))
+        assert.equal(0, #context.selected_static_providers)
+    end)
+
+    it("treats a blocked source as terminal before compiled lookup", function()
+        local folder = source .. "/titan/sample"
+        assert(lfs.mkdir(folder))
+        write_file(folder .. "/sample.titan", "local owner: integer = 1\n")
+        write_file(folder .. "/child.titan", "local constituent: integer = 1\n")
+        write_file(binary .. "/titan/sample.so", "occupied binary\n")
+        titan._loadlib = function()
+            error("blocked source must be terminal before compiled lookup")
+        end
+
+        local context = driver.new_resolver_context({ source_first = true })
+        local ok, message = driver.defaultloader({}, {
+            context = context,
+        })("titan.sample.child")
+        assert.falsy(ok)
+        assert.match(folder .. "/child.titan", message, 1, true)
+        assert.match("cannot be loaded directly", message, 1, true)
+    end)
+
+    it("checks generated source overrides with ordinary source provenance",
+       function()
+        local filename = root .. "/generated-suite.titan"
+        local descriptor = {
+            kind = "generated",
+            main = filename,
+            files = { filename },
+            contents = {
+                [filename] = [[
+                    function answer(): integer
+                        return 42
+                    end
+                ]],
+            },
+            program_output = root .. "/generated-suite",
+        }
+        local deps = {}
+        local ok, modtype, errors = driver.defaultloader(deps, {
+            source_overrides = { generated = descriptor },
+        })("generated")
+        assert.truthy(ok)
+        assert.equal("Type.Module", modtype._tag)
+        assert.equal(0, #errors)
+        assert.equal("source", driver.imported.generated.kind)
+        assert.equal(filename, driver.imported.generated.filename)
+        assert.equal(descriptor.program_output,
+            driver.imported.generated.program_output)
+        assert.equal(true, deps.generated)
+        assert.is_nil(lfs.attributes(filename, "mode"))
     end)
 
     it("keeps root precedence ahead of candidate shallowness", function()

@@ -13,7 +13,7 @@ jobs:
   # this warm
   # standard runner.
   # Two consumers restore the pristine tree instead of rebuilding dependencies.
-  # The build-heavy uv/timer/fs behavior uses a standard runner with 30-minute
+  # The build-heavy async/uv/I/O/timer/fs behavior uses a standard runner with 30-minute
   # headroom, while the broad end-to-end, measured C-FFI, and isolated
   # static-provider coverage remains on the 1-core slim runner. Both labels are
   # x86_64 Ubuntu 24.04, so the native artifact does not cross targets.
@@ -156,9 +156,10 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc; do
+          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc test; do
             rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
+          rm -f "$PREFIX/share/titan/0.22/src/titan/test.titan"
           rm -f "$PREFIX/share/lua/5.5/titan.lua" \
             "$PREFIX/lib/lua/5.5/titan.so"
           if clean_titan_environment \
@@ -204,6 +205,8 @@ jobs:
           static_archive="${provider%.so}.a"
           test -f "$provider" && test ! -L "$provider"
           test -f "$static_archive" && test ! -L "$static_archive"
+          test -f "$PREFIX/share/titan/0.22/src/titan/test.titan" &&
+            test ! -L "$PREFIX/share/titan/0.22/src/titan/test.titan"
 
       - name: Verify bare support loading through the ABI-0.22 path
         run: |
@@ -374,7 +377,7 @@ jobs:
 
       # Library suites run in full outside LuaCov because it cannot measure
       # Titan/C library implementations.
-      - name: Run uv/timer/fs library tests without coverage
+      - name: Run async/uv/I/O/timer/fs library tests without coverage
         run: bash spec/support/ci_test_groups.sh library-uv-fs
 
   test-linux:
@@ -700,9 +703,11 @@ jobs:
           test -f "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/manifest.txt"
           test -f "$snapshot_provider" && test ! -L "$snapshot_provider"
           cmp "$snapshot_provider" "$provider"
-          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc; do
+          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc test; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
+          test -f "$PREFIX/share/titan/0.22/src/titan/test.titan" &&
+            test ! -L "$PREFIX/share/titan/0.22/src/titan/test.titan"
           readelf -Ws .lua/bin/lua | grep __asan_
           readelf -Ws .lua/bin/lua | grep __ubsan_
           readelf -Ws "$provider" | grep __asan_
@@ -724,9 +729,8 @@ jobs:
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
           bash spec/support/ci_sanitizer_capture.sh timer-fs \
-            .lua/bin/busted -o gtest -v \
-            spec/stdlib/timer_spec.lua \
-            spec/stdlib/fs_spec.lua
+            bash spec/support/run_titan_stdlib_tests.sh io-fs-timer \
+            --filter='test_timer_' --filter='test_fs_'
 
       - name: Run native async sanitizer gate (core-uv)
         env:
@@ -741,6 +745,8 @@ jobs:
             spec/stdlib/uv_native_handles_spec.lua \
             spec/stdlib/uv_tasks_spec.lua \
             spec/stdlib/uv_bootstrap_spec.lua
+          bash spec/support/ci_sanitizer_capture.sh uv-tasks-native \
+            bash spec/support/run_titan_stdlib_tests.sh uv-tasks
 
       - name: Run coroutine transfer sanitizer gate
         env:
@@ -772,9 +778,8 @@ jobs:
             spec/stdlib/peg_spec.lua \
             --name='titan.peg GC roots patterns and callbacks across repeated collections'
           bash spec/support/ci_sanitizer_capture.sh string-regex-gc \
-            .lua/bin/busted -o gtest -v \
-            spec/stdlib/string_regex_spec.lua \
-            --name='titan.string regex keeps compiled backreferences, iterators, and replacement callbacks rooted across repeated full and generational GC'
+            bash spec/support/run_titan_stdlib_tests.sh string \
+            --filter='test_regex_gc_rooting$'
           bash spec/support/ci_sanitizer_capture.sh peg-string-smoke \
             bash spec/support/ci_peg_string_sanitizer_smoke.sh
 

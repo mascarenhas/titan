@@ -1,0 +1,29 @@
+-- Native behavior tests migrated from timer_spec.lua, fs_spec.lua,
+-- io_spec.lua, and io_process_spec.lua. The folder is one logical test module.
+local test = import "test"
+local async = import "async"
+local fs = import "fs"
+local stream = import "io"
+local timer = import "timer"
+
+local ffi = foreign import "titan/ffi.h"
+local cstdio = foreign import "stdio.h"
+local cstdlib = foreign import "stdlib.h"
+local cstring = foreign import "string.h"
+local lua = foreign import "lua.h"
+local lual = foreign import "lauxlib.h"
+local native = foreign import "native_support.h"
+
+local function cancel_and_join_task(task: async.Task, reason: string)
+  if not task:status():has_finished() then
+    task:cancel(async.CancellationReason.simple(reason))
+  end
+  async.join(task)
+end
+
+local function cleanup_task(context: test.Context, task: async.Task,
+                            reason: string)
+  context:cleanup(function ()
+    cancel_and_join_task(task, reason)
+  end)
+end

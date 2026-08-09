@@ -1,0 +1,275 @@
+local lua = foreign import "lua.h"
+local lual = foreign import "lauxlib.h"
+local ffi = foreign import "titan/ffi.h"
+
+local type Cleanup = () -> ()
+local type TestFunction = (Context) -> ()
+local type TraceScanner =
+  (string, string?) -> (string?, string?, integer?)
+local type PatternMatcher = (string, string) -> boolean
+
+local record RegisteredTest
+  name: string
+  callback: TestFunction
+end
+
+local record SkipMarker
+  reason: string?
+end
+
+local record LocationProbe
+end
+
+local runner_active = false
+local runner_is_verbose = false
+local trace_scanner: TraceScanner? = nil
+local pattern_matcher: PatternMatcher? = nil
+local location_probe = LocationProbe.new()
+
+function testing(): boolean
+  return runner_active
+end
+
+function verbose(): boolean
+  return runner_active and runner_is_verbose
+end
+
+function location(): (string, string, integer)
+  local filename = "<none>"
+  local function_name = "<none>"
+  local line = 0
+  do
+    raise location_probe
+  catch
+    filename, function_name, line = runner_trace_location(traceback, nil)
+  end
+  return filename, function_name, line
+end
+
+function skip(reason: string?)
+  if runner_active then raise SkipMarker.new(reason) end
+  if reason then raise "test skipped: " .. (reason as string) end
+  raise "test skipped"
+end
+
+function assert(check: boolean, message: string?)
+  if not check then
+    raise message or "assertion failed"
+  end
+end
+
+record Context
+  local full_name: string
+  local subtests: {RegisteredTest}
+  local cleanups: {Cleanup}
+  local subtests_open: boolean
+  local cleanups_open: boolean
+end
+
+function Context:cleanup(f: Cleanup)
+  if not self.cleanups_open then
+    raise "cannot register cleanup after test cleanup begins"
+  end
+  self.cleanups[#self.cleanups + 1] = f
+end
+
+function Context:name(): string
+  return self.full_name
+end
+
+function Context:run(name: string, subtest: TestFunction)
+  if not self.subtests_open then
+    raise "cannot register subtest after test body finishes"
+  end
+  self.subtests[#self.subtests + 1] =
+    RegisteredTest.new(self.full_name .. "." .. name, subtest)
+end
+
+local function runner_begin(is_verbose: boolean)
+  if runner_active then raise "Titan test runner is already active" end
+  runner_active = true
+  runner_is_verbose = is_verbose
+end
+
+local function runner_end()
+  runner_is_verbose = false
+  runner_active = false
+end
+
+local function runner_new_context(name: string): Context
+  return Context.new(name, {}, {}, true, true)
+end
+
+local function runner_take_subtests(context: Context): {RegisteredTest}
+  context.subtests_open = false
+  local subtests = context.subtests
+  context.subtests = {}
+  return subtests
+end
+
+local function runner_take_cleanup(context: Context): Cleanup?
+  context.subtests_open = false
+  context.cleanups_open = false
+  local index = #context.cleanups
+  if index == 0 then return nil end
+  local cleanup? = context.cleanups[index]
+  context.cleanups[index] = nil
+  return cleanup
+end
+
+local function runner_skip_reason(failure: value): (boolean, string?)
+  if failure is SkipMarker then
+    local marker = failure as SkipMarker
+    return true, marker.reason
+  end
+  return false, nil
+end
+
+local function ensure_lua_helpers()
+  if trace_scanner and pattern_matcher then return end
+  local scanner, matcher = load_lua_helpers()
+  trace_scanner = scanner
+  pattern_matcher = matcher
+end
+
+local function runner_trace_location(trace: string, preferred: string?):
+    (string, string, integer)
+  ensure_lua_helpers()
+  local scanner = trace_scanner as TraceScanner
+  local filename?, function_name?, line? = scanner(trace, preferred)
+  if filename and function_name and line then
+    return filename, function_name, line
+  end
+  return "<none>", "<none>", 0
+end
+
+local function runner_error_text(failure: value): string
+  local result = "<error while rendering test failure>"
+  do
+    local top = lua.lua_gettop(L)
+    defer lua.lua_settop(L, top)
+    if lua.lua_checkstack(L, 2) ~= 0 then
+      ffi.lua_pushtvalue(L, failure)
+      lual.luaL_tolstring(L, -1, nil)
+      local rendered: value = ffi.lua_totvalue(L, -1)
+      if rendered is string then result = rendered as string end
+    end
+  catch
+    -- Preserve the conservative fallback if __tostring itself raises.
+  end
+  return result
+end
+
+local function runner_matches(name: string, pattern: string): boolean
+  ensure_lua_helpers()
+  local matches = pattern_matcher as PatternMatcher
+  return matches(name, pattern)
+end
+
+local function raw_lua_function(
+    table_index: ffi.titan_ffi_int, name: string): boolean
+  lua.lua_pushstring(L, name)
+  local kind = lua.lua_rawget(L, table_index)
+  lua.lua_settop(L, (lua.lua_gettop(L) - 1) as ffi.titan_ffi_int)
+  return kind == lua.LUA_TFUNCTION
+end
+
+local function lua_helpers_available(): boolean
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if lua.lua_checkstack(L, 3) == 0 then
+    raise "cannot reserve Lua stack for titan.test helper inspection"
+  end
+
+  lua.lua_rawgeti(L, lua.LUA_REGISTRYINDEX,
+                  lua.LUA_RIDX_GLOBALS as lua.lua_Integer)
+  if lua.lua_type(L, -1) ~= lua.LUA_TTABLE then return false end
+  local globals_index = lua.lua_gettop(L)
+
+  lua.lua_pushstring(L, "string")
+  if lua.lua_rawget(L, globals_index) ~= lua.LUA_TTABLE then return false end
+  local string_index = lua.lua_gettop(L)
+  if not raw_lua_function(string_index, "gmatch") or
+      not raw_lua_function(string_index, "match") or
+      not raw_lua_function(string_index, "sub") or
+      not raw_lua_function(string_index, "find") then
+    return false
+  end
+
+  lua.lua_settop(L, globals_index)
+  return raw_lua_function(globals_index, "tonumber")
+end
+
+local function load_lua_helpers(): (TraceScanner, PatternMatcher)
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if lua.lua_checkstack(L, 3) == 0 then
+    raise "cannot reserve Lua stack for titan.test helpers"
+  end
+
+  local source = [[
+local string_gmatch = string.gmatch
+local string_match = string.match
+local string_sub = string.sub
+local string_find = string.find
+local tonumber = tonumber
+return
+  function(trace, preferred)
+    local fallback_file, fallback_name, fallback_line
+    for frame in string_gmatch(trace, "[^\n]+") do
+      local file, line, name =
+        string_match(frame, "^(.-%.titan):(%d+): in (.+)$")
+      if file then
+        local from_test_source =
+          file == "titan/test.titan" or
+          string_match(file, "/titan/test%.titan$") ~= nil
+        local from_test_name =
+          string_match(name, "^titan%.test%.[^%.:]+$") ~= nil or
+          string_match(name, "^titan%.test%.[^%.:]+:[^%.:]+$") ~= nil or
+          string_match(name,
+                       "^titan%.test%.runner%.[^%.:]+$") ~= nil
+        if not from_test_source and not from_test_name then
+          fallback_file = fallback_file or file
+          fallback_name = fallback_name or name
+          fallback_line = fallback_line or tonumber(line)
+          if preferred == nil or
+             string_sub(name, 1, #preferred + 1) == preferred .. "." then
+            return file, name, tonumber(line)
+          end
+        end
+      end
+    end
+    return fallback_file, fallback_name, fallback_line
+  end,
+  function(subject, pattern)
+    return string_find(subject, pattern) ~= nil
+  end
+]]
+  local status = lual.luaL_loadstring(L, source)
+  if status ~= lua.LUA_OK then
+    local failure: value = ffi.lua_totvalue(L, -1)
+    raise failure
+  end
+  status = lua.lua_pcallk(L, 0, 2, 0, 0, nil)
+  if status ~= lua.LUA_OK then
+    local failure: value = ffi.lua_totvalue(L, -1)
+    raise failure
+  end
+
+  local scanner_value: value = ffi.lua_totvalue(L, -2)
+  local matcher_value: value = ffi.lua_totvalue(L, -1)
+  return scanner_value as TraceScanner, matcher_value as PatternMatcher
+end
+
+-- Snapshot standard-library helpers before any test-owner initializer can
+-- mutate their Lua globals. Bare validation states may not have opened the
+-- standard libraries yet, so keep ensure_lua_helpers as the later fallback.
+-- Once every prerequisite is an actual raw function, a loading fault is real
+-- and must fail initialization rather than being silently deferred.
+do
+  if lua_helpers_available() then
+    local scanner, matcher = load_lua_helpers()
+    trace_scanner = scanner
+    pattern_matcher = matcher
+  end
+end

@@ -1,0 +1,6 @@
+local test = import "test"
+local math = import "titan.math"
+
+function test_static_fallback(context: test.Context)
+  test.assert(math.abs(-7) == 7)
+end

@@ -269,65 +269,6 @@ exit "$test_status"
         assert.equals(0, status, output)
     end
 
-    it("loads binary-safe chunks with flexible arguments and environments",
-    function()
-        run([[
-local tlua = require "titan.lua"
-
-local passthrough = tlua.load("return ...", "=passthrough", nil)
-local values = table.pack(passthrough(1, nil, 3))
-assert(values.n == 3)
-assert(values[1] == 1 and values[2] == nil and values[3] == 3)
-
-local binary = tlua.load('return "a\\0b"', "=binary", nil)
-assert(binary() == "a\0b")
-
-local nul_ok, nul_err = pcall(
-    tlua.load, "return 1\0return 2", "=embedded-nul", nil)
-assert(not nul_ok)
-assert(tostring(nul_err):find("embedded-nul", 1, true), nul_err)
-
-local dump_source = function(...) return ... end
-assert(debug.getupvalue(dump_source, 1) == nil)
-local dumped = string.dump(dump_source)
-local dumped_values =
-    table.pack(tlua.load(dumped, "=dumped", { ignored = true })(7, nil, 9))
-assert(dumped_values.n == 3)
-assert(dumped_values[1] == 7 and dumped_values[2] == nil and
-    dumped_values[3] == 9)
-
-local environment = { answer = 42 }
-local scoped = tlua.load("return answer, _G", "=environment", environment)
-local answer, global = scoped()
-assert(answer == 42 and global == nil)
-assert(tlua.load("return _G")() == _G)
-
-local ok, err = pcall(tlua.load, "this is not Lua", "=named-load", nil)
-assert(not ok)
-assert(tostring(err):find("named-load", 1, true), err)
-]])
-    end)
-
-    it("loads Reader chunks through EOF without closing the Reader", function()
-        run([[
-local async = require "titan.async"
-local probe = require "lua_probe"
-local completed = false
-local task = async.run(function()
-    local values = table.pack(probe.reader_results())
-    assert(values.n == 3)
-    assert(values[1] == "left" and values[2] == nil and
-        values[3] == "right")
-
-    assert(probe.empty_reader_result() == "empty-chunks-ok")
-    completed = true
-end)
-async.loop()
-assert(task:status():as_string() == "succeeded", task:status():as_string())
-assert(completed)
-]])
-    end)
-
     it("runs files with flexible arguments/results and closes on errors",
     function()
         local success = workspace .. "/dofile-success.lua"
@@ -390,37 +331,6 @@ assert(os.remove(%q))
 ]], success, runtime_error, syntax_error, success, runtime_error,
             syntax_error, runtime_error, syntax_error,
             success, runtime_error, syntax_error))
-    end)
-
-    it("preserves preload, cache, false reload, and fallback-true semantics",
-    function()
-        run([[
-local tlua = require "titan.lua"
-
-local calls = 0
-package.preload["lua_spec.preloaded"] = function(name, data)
-    calls = calls + 1
-    assert(name == "lua_spec.preloaded" and data == ":preload:")
-    return { calls = calls }
-end
-local first = tlua.require("lua_spec.preloaded")
-assert(first.calls == 1)
-assert(tlua.require("lua_spec.preloaded") == first)
-assert(calls == 1)
-
-package.preload["lua_spec.fallback"] = function() end
-assert(tlua.require("lua_spec.fallback") == true)
-assert(package.loaded["lua_spec.fallback"] == true)
-
-local false_calls = 0
-package.preload["lua_spec.false"] = function()
-    false_calls = false_calls + 1
-    return false
-end
-assert(tlua.require("lua_spec.false") == false)
-assert(tlua.require("lua_spec.false") == false)
-assert(false_calls == 2)
-]])
     end)
 
     it("loads Lua source asynchronously and rejects a concurrent duplicate",
@@ -605,39 +515,4 @@ assert(completed)
 ]])
     end)
 
-    it("reports accumulated asynchronous source and searcher misses", function()
-        run([[
-local async = require "titan.async"
-local tlua = require "titan.lua"
-local completed = false
-local task = async.run(function()
-    local saved_path = package.path
-    local custom_index = #package.searchers + 1
-    package.path = "/titan-lua-spec/first/?/again/?.lua;" ..
-        "/titan-lua-spec/second/?/init.lua"
-    package.searchers[custom_index] = function()
-        return "custom diagnostic last"
-    end
-    local ok, err = pcall(tlua.require, "lua_spec.definitely_missing")
-    package.searchers[custom_index] = nil
-    package.path = saved_path
-    assert(not ok)
-    local message = tostring(err)
-    assert(message:find("module 'lua_spec.definitely_missing' not found", 1,
-        true), message)
-    local first = assert(message:find(
-        "no file '/titan-lua-spec/first/lua_spec/definitely_missing/" ..
-        "again/lua_spec/definitely_missing.lua'", 1, true))
-    local second = assert(message:find(
-        "no file '/titan-lua-spec/second/lua_spec/definitely_missing/" ..
-        "init.lua'", 1, true))
-    local custom = assert(message:find("custom diagnostic last", 1, true))
-    assert(first < second and second < custom, message)
-    completed = true
-end)
-async.loop()
-assert(task:status():as_string() == "succeeded", task:status():as_string())
-assert(completed)
-]])
-    end)
 end)

@@ -12,19 +12,20 @@ local STDLIB_TYPES_FIXTURE =
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "os", "peg", "string", "math", "lua", "iter", "gc",
+    "test",
 }
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
     "titan.http", "titan.os", "titan.peg", "titan.string", "titan.math",
-    "titan.lua", "titan.iter", "titan.gc",
+    "titan.lua", "titan.iter", "titan.gc", "titan.test",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
     "titan/timer.lua", "titan/io.lua", "titan/fs.lua", "titan/net.lua",
     "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/os.lua",
     "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
-    "titan/iter.lua", "titan/gc.lua",
+    "titan/iter.lua", "titan/gc.lua", "titan/test.lua",
 }
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
@@ -885,7 +886,7 @@ describe("libuv Makefile configuration", function()
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
                 "titan/math.titan", "titan/lua.titan",
-                "titan/iter.titan", "titan/gc.titan",
+                "titan/iter.titan", "titan/gc.titan", "titan/test.titan",
             }, expanded)
         end)
 
@@ -908,7 +909,7 @@ describe("libuv Makefile configuration", function()
     function()
         local short = {
             "coroutine", "uv", "async", "timer", "io", "fs", "net",
-            "ssl", "url", "http", "os", "peg", "string",
+            "ssl", "url", "http", "os", "peg", "string", "test",
         }
         for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
             if source ~= "$(UV_TITAN_SOURCES)" and
@@ -1159,10 +1160,10 @@ describe("libuv Makefile configuration", function()
             }, public_declarations(path))
         end)
 
-    it("pins current metadata for all seventeen standard modules",
+    it("pins current metadata for all eighteen standard modules",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
-            assert.equal(17, #STDLIB_ROOTS)
+            assert.equal(18, #STDLIB_ROOTS)
 
             for _, record_name in ipairs({
                 "ChannelReader", "ChannelWriter",
@@ -1198,11 +1199,11 @@ describe("libuv Makefile configuration", function()
             end
         end)
 
-    it("exports eighteen DSO openers for seventeen standard modules",
+    it("exports nineteen DSO openers for eighteen standard modules",
         function()
-            assert.equal(17, #STDLIB_MODULES)
-            assert.equal(17, #STDLIB_ROOTS)
-            assert.equal(17, #STDLIB_SHIMS)
+            assert.equal(18, #STDLIB_MODULES)
+            assert.equal(18, #STDLIB_ROOTS)
+            assert.equal(18, #STDLIB_SHIMS)
 
             local container = installed_stdlib_container()
             local ok, output, why, code = run_argv(tool_argv(
@@ -1226,7 +1227,7 @@ describe("libuv Makefile configuration", function()
                     found[symbol] = true
                 end
             end
-            assert.equal(18, (function()
+            assert.equal(19, (function()
                 local count = 0
                 for _ in pairs(found) do count = count + 1 end
                 return count
@@ -1831,7 +1832,7 @@ esac
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
                 "titan/math.titan", "titan/lua.titan",
-                "titan/iter.titan", "titan/gc.titan",
+                "titan/iter.titan", "titan/gc.titan", "titan/test.titan",
             }
             for _, source in ipairs(makefile_words("UV_TITAN_SOURCES")) do
                 sources[#sources + 1] = source
@@ -2188,7 +2189,10 @@ fi
                 'cmp -s "$manifest" "$restored_manifest"',
                 '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
                 '"$shim_dir/math.lua" "$shim_dir/lua.lua"',
-                '"$shim_dir/iter.lua" "$shim_dir/gc.lua"',
+                '"$shim_dir/iter.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"',
+                'test_source=$prefix_rel/share/titan/0.22/src/titan/test.titan',
+                '"$test_source"',
+                'rm -f "$test_source"',
                 '"$shim_dir/io.lua"',
                 '"$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/ssl.lua"',
                 '"$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/os.lua"',
@@ -2218,6 +2222,8 @@ fi
                 'local lua = import "titan.lua"',
                 'local iter = import "titan.iter"',
                 'local gc = import "titan.gc"',
+                'local testing = import "test"',
+                'not testing.testing() and not testing.verbose()',
                 "local peer = async.run(",
                 "timer.sleep(0)",
                 "fs.write_file(marker,",
@@ -2295,6 +2301,8 @@ fi
                 'local lua = require "titan.lua"',
                 'local iter = require "titan.iter"',
                 'local gc = require "titan.gc"',
+                'local testing = require "titan.test"',
+                'assert(not testing.testing())',
                 'local found = strings.match("regex42", "([0-9]+)")',
                 'strings.find("a\\0b", "\\0b")',
                 'assert(require "io" == builtin_io)',
@@ -2337,15 +2345,17 @@ fi
                 assert.truthy(workflow:find(contract, 1, true), contract)
             end
             assert.truthy(workflow:find(
-                "for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc",
+                "for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc test; do",
                 1, true), workflow)
+            assert.truthy(workflow:find(
+                'share/titan/0.22/src/titan/test.titan', 1, true), workflow)
             assert.truthy(workflow:find(
                 "--name='titan.peg GC roots patterns and callbacks across " ..
                 "repeated collections'", 1, true), workflow)
             assert.truthy(workflow:find(
-                "--name='titan.string regex keeps compiled backreferences, " ..
-                "iterators, and replacement callbacks rooted across repeated " ..
-                "full and generational GC'", 1, true), workflow)
+                "run_titan_stdlib_tests.sh string", 1, true), workflow)
+            assert.truthy(workflow:find(
+                "--filter='test_regex_gc_rooting$'", 1, true), workflow)
             assert.truthy(workflow:find(
                 "bash spec/support/ci_peg_string_sanitizer_smoke.sh",
                 1, true), workflow)
@@ -2532,11 +2542,11 @@ fi
                 },
                 {
                     "Run native async sanitizer gate (timer-fs)",
-                    { ".lua/bin/busted" },
+                    { "run_titan_stdlib_tests.sh" },
                 },
                 {
                     "Run native async sanitizer gate (core-uv)",
-                    { ".lua/bin/busted" },
+                    { ".lua/bin/busted", "run_titan_stdlib_tests.sh" },
                 },
                 {
                     "Run coroutine transfer sanitizer gate",
@@ -2550,6 +2560,7 @@ fi
                     "Run PEG/regex native sanitizer gate",
                     {
                         ".lua/bin/busted",
+                        "run_titan_stdlib_tests.sh",
                         "bash spec/support/ci_peg_string_" ..
                             "sanitizer_smoke.sh",
                     },

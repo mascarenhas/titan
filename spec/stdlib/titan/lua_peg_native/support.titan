@@ -1,0 +1,93 @@
+local type CheckedAction = () -> ()
+local type PackageSearcher = (string) -> (value, value)
+
+local record PackageSearchState
+  local package_table: {string: value}
+  local searchers: {integer: value}
+  local saved_path: string
+  local custom_index: integer
+end
+
+local function find_literal(subject: string, needle: string): integer?
+  if #needle == 0 then return 1 end
+  if #needle > #subject then return nil end
+  local bytes = subject as const *ffi.titan_ffi_unsigned_char
+  local wanted = needle as const *ffi.titan_ffi_unsigned_char
+  local first = 0
+  while first <= #subject - #needle do
+    local equal = true
+    local offset = 0
+    while offset < #needle do
+      if bytes[first + offset] ~= wanted[offset] then
+        equal = false
+        break
+      end
+      offset = offset + 1
+    end
+    if equal then return first + 1 end
+    first = first + 1
+  end
+  return nil
+end
+
+local function caught_string(action: CheckedAction): string?
+  do
+    action()
+  catch
+    if error is string then return error as string end
+    return nil
+  end
+  return nil
+end
+
+local function temporary_file(context: test.Context): string
+  local path = fs.tmpname()
+  context:cleanup(function ()
+    fs.unlink(path)
+  end)
+  return path
+end
+
+local function lua_package_table(): {string: value}
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if lua.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for native package lookup"
+  end
+  lua.lua_getglobal(L, "package")
+  if lua.lua_type(L, -1) ~= lua.LUA_TTABLE then
+    raise "global 'package' is not a table"
+  end
+  local raw_package: value = ffi.lua_totvalue(L, -1)
+  return raw_package as {string: value}
+end
+
+local function install_miss_search(path: string,
+                                   diagnostic: string): PackageSearchState
+  local package_table = lua_package_table()
+  local raw_path: value = package_table["path"]
+  if not (raw_path is string) then
+    raise "'package.path' is not a string"
+  end
+  local raw_searchers: value = package_table["searchers"]
+  if not (raw_searchers is {integer: value}) then
+    raise "'package.searchers' is not a table"
+  end
+  local searchers = raw_searchers as {integer: value}
+  local index = 1
+  while searchers[index] ~= nil do index = index + 1 end
+
+  local custom: PackageSearcher =
+    function (_modname: string): (value, value)
+      return diagnostic, nil
+    end
+  package_table["path"] = path
+  searchers[index] = custom
+  return PackageSearchState.new(
+    package_table, searchers, raw_path as string, index)
+end
+
+local function PackageSearchState:restore()
+  self.searchers[self.custom_index] = nil
+  self.package_table["path"] = self.saved_path
+end

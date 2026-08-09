@@ -9,9 +9,12 @@ any eventual divergence from the draft.
 
 - Branch: `feat/test-runner`
 - Draft-only initial commit: `eed38db` (`Add draft Titan test runner specification`)
-- Phase: initial architecture research
-- ABI decision: pending designer confirmation (see questions below)
-- Implementation divergences: none yet
+- Phase: implementation complete; final full-suite/CI validation pending
+- ABI decision: retain 0.22; the immediately preceding canonical seventeen-key
+  pair is a supported bounded transactional predecessor
+- Architecture decisions: reviewed and closed in
+  `/tmp/titan-test-runner-design-decisions.md`
+- Implementation divergences: recorded below
 
 ## Existing invariants to preserve
 
@@ -228,8 +231,9 @@ Update together:
 - `spec/fixtures/libuv/stdlib_provider_smoke.lua` and static/system smokes:
   require `titan.test` and prove `testing()` is false outside the runner.
 - `spec/libuv_build_spec.lua`, `spec/rockspec_spec.lua`,
-  `spec/stdlib_installer_spec.lua`, snapshot scripts, CI preparation, and all
-  exact seventeen-module/eighteen-entry/count assertions.
+  `spec/stdlib_installer_spec.lua`, snapshot scripts, CI preparation, and the
+  former seventeen-module/eighteen-entry assertions (now eighteen modules and
+  nineteen `luaopen_*` entries).
 - `AGENTS.md`, `README.md`, and manuals: module lists, canonical artifacts,
   clean behavior, CI grouping, and short-import set.
 
@@ -292,6 +296,20 @@ cases rather than running duplicate suites. Integrate Titan suites into
 `spec/support/ci_test_groups.sh` without LuaCov and preserve existing serial,
 uv/fs, net/OS, and PEG/string grouping/time budgets.
 
+
+Final native groups are `pure`, `math`, `peg`, `string`, `lua-peg`,
+`coroutine`, `async`, `uv-tasks`, `io-fs-timer`, `net-ssl`, `http`, `url`,
+`os`, and `os-uv`. The five Busted supervisors preserve the serial,
+async/uv/I/O/timer/fs, net/SSL/URL/HTTP/OS, and PEG/string/math/Lua/iter/GC
+shards and supervise expected Task diagnostics. The current tree deletes the
+fully migrated Lua suites and retains narrow host coverage for coroutine
+rewriting/interposition and Lua calls, loader/global-promotion and private
+engine state, exact `io.print` write/current-stdout observation, parent
+stdio/exit and process status, purpose-built native helpers, sanitizer gates,
+fresh Lua/Runtime state, and cross-Runtime file lifetime. The per-slice `/tmp`
+migration reports are historical work notes; this mapping and the tracked
+suite roots are the final manifest.
+
 ### Completion gates
 
 1. Parse/check touched Titan sources through the current source graph with
@@ -308,28 +326,52 @@ uv/fs, net/OS, and PEG/string grouping/time budgets.
    rerun until green. Run the required manual macOS workflow before declaring
    the branch ready.
 
-## Questions requiring designer confirmation
+## Closed architecture decisions
 
-These are the only initial questions that appear to change architecture rather
-than fill a routine semantic gap:
+The final Titan design review established these invariants:
 
-1. **ABI/provider generation:** adding a new logical key and canonical source
-   artifact does not change existing module calling conventions or state
-   layouts, so the narrow design keeps ABI 0.22. An already installed
-   seventeen-key 0.22 pair is not accepted as the new current complete-pair
-   predecessor; users/CI start from clean active-ABI state rather than gaining a
-   one-off seventeen-to-eighteen migration. Is keeping 0.22 and that clean-start
-   policy intended, or should this feature advance the whole ABI to 0.23?
-2. **Initializer-time `testing()`:** the source-private runner setter runs from
-   synthetic `main`, after imported module initialization. The simple design
-   therefore makes `testing()` true during test bodies/subtests/cleanup but
-   false in module initializers. Making it true while the runner's import graph
-   initializes requires a test-specific pre-initialization signal (entrypoint
-   registry state or compiler specialization of `titan.test`). Does “running in
-   the test runner” require true during imported module initializers?
+1. **ABI/provider generation:** retain ABI 0.22 because the independent
+   `titan.test` key and compiler-data source change no existing serialized,
+   userdata, native-call, or loader contract. The canonical seventeen-key 0.22
+   pair may be replaced transactionally; rollback restores that pair and the
+   prior absence of the new source/shim. This is bounded same-ABI additive
+   publication, not cross-ABI migration.
+2. **Source-first resolution:** source is authoritative for the complete test
+   invocation. A provisionally selected static archive that later overlaps a
+   source identity may be rebound, before finalization only, to ABI-valid DSOs
+   with byte-identical serialized interfaces for every already selected key.
+   Missing or different fallback remains a composition error.
+3. **Runner activation:** `testing()` and `verbose()` remain false during module
+   initialization and CLI help/error handling. They become active only after a
+   successful parse calls the private begin operation, and remain active through
+   bodies, descendants, and cleanup.
+4. **Context phases:** descendant execution may register cleanup on a captured
+   parent. Both registration channels seal immediately before cleanup draining;
+   cleanup cannot extend either stack.
+5. **Executable ownership:** the first deduplicated requested root's ordinary
+   `program_output` owns every synthetic artifact and executable. All input
+   `main` declarations are compiled but ignored in test mode; the generated
+   runner supplies the sole entrypoint.
 
 ## Divergence ledger
 
-No implemented divergence yet. The use of `luaL_loadstring` + `lua_pcallk`
-instead of spelling the function-like `luaL_dostring` macro is the direct FFI
-implementation of the draft's stated technique, not a semantic divergence.
+- The draft's abstract Lua helper technique is implemented with
+  `luaL_loadstring` plus `lua_pcallk`, because `luaL_dostring` is a function-like
+  C macro and therefore not directly importable through Titan's FFI. Semantics
+  are unchanged.
+- The installed private `titan.test` source is snapshotted into and published
+  from the exact native generation stage. It remains compiler data outside the
+  rock manifest and is committed in the same recoverable transaction.
+- Native stdlib behavior is launched by five narrow Busted supervisors. The
+  coroutine suite remains in the serial shard; URL remains in net/OS; string
+  remains in PEG/string. The combined `io_fs_timer` source root runs as one
+  executable in the async/uv/I/O/timer/fs shard rather than duplicating its
+  shared generated paths across parallel workers.
+- Every native executable has a portable process-group deadline. The intentional
+  Runtime-shutdown lifetime oracle runs in its own short, filtered process; this
+  is host supervision rather than a new runner lifecycle API.
+- Direct source-private imports let test-support declarations remain local.
+  Host-side exact-provider coverage is retained only where native redirection
+  cannot observe the number of `io.print` writes/current-output lookup, along
+  with the previously identified loader, process, sanitizer, provider, and
+  cross-Runtime boundaries.

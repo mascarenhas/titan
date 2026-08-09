@@ -84,6 +84,7 @@ build = {
       ["titan-compiler.coder"] = "titan-compiler/coder.lua",
       ["titan-compiler.driver"] = "titan-compiler/driver.lua",
       ["titan-compiler.foreigntypes"] = "titan-compiler/foreigntypes.lua",
+      ["titan-compiler.test_runner"] = "titan-compiler/test_runner.lua",
       ["titan-compiler.lexer"] = "titan-compiler/lexer.lua",
       ["titan-compiler.location"] = "titan-compiler/location.lua",
       ["titan-compiler.typedecl"] = "titan-compiler/typedecl.lua",

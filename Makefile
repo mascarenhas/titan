@@ -344,13 +344,13 @@ STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 	titan/http/server.titan
 UV_CONFIG_STAMP := titan-runtime/.titan-uv-build-config
 STDLIB_MODULES := coroutine uv async timer io fs net ssl url http os peg string \
-	math lua iter gc
+	math lua iter gc test
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.os \
 	titan.peg titan.string \
-	titan.math titan.lua titan.iter titan.gc
+	titan.math titan.lua titan.iter titan.gc titan.test
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
 	titan/net.titan titan/ssl.titan titan/url.titan \
@@ -362,12 +362,13 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/string/format.titan titan/string/pack.titan \
 	titan/string/regex_api.titan titan/string/regex_compile.titan \
 	titan/string/regex_parser.titan \
-	titan/math.titan titan/lua.titan titan/iter.titan titan/gc.titan
+	titan/math.titan titan/lua.titan titan/iter.titan titan/gc.titan \
+	titan/test.titan
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
 	titan/url.lua titan/http.lua titan/os.lua \
 	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
-	titan/iter.lua titan/gc.lua
+	titan/iter.lua titan/gc.lua titan/test.lua
 STDLIB_CONTAINER := titan.so
 STDLIB_STATIC_ARCHIVE := titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
@@ -2028,7 +2029,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 
 # FORCE runs the inexpensive completeness check on every invocation. The
 # compiler itself runs only when an input is newer, configuration changed, or
-# one public output is absent. All seventeen roots are explicit source roots in one
+# one public output is absent. All eighteen roots are explicit source roots in one
 # process, so their internal imports are linked into the paired titan.so/titan.a
 # provider. The warm check rescans the archive without rewriting either output.
 $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
@@ -2126,11 +2127,11 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 STDLIB_STAGED_EXTRA_OBJECTS = $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(abspath $(object)))
 
 # LuaRocks invokes this only after deploying titanc and its Lua compiler
-# modules. Build all seventeen source roots once in a private directory on the
-# destination filesystem. The Lua publisher validates the complete protocol,
-# commits seventeen shims, the archive, and the one macOS dSYM before renaming
-# titan.so last; any caught failure restores the prior pair, the legacy
-# DSO-only installation, or the first-install bootstrap.
+# modules. Build all eighteen source roots once in a private directory on the
+# destination filesystem. The Lua publisher validates the complete protocol
+# and exact staged titan.test compiler source, commits eighteen shims, that
+# source, the archive, and the one macOS dSYM before renaming titan.so last;
+# any caught failure restores the prior pair or first-install bootstrap.
 rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	@test -n "$(strip $(ROCKS_TREE))" || { \
 	  echo "ERROR: rock-post-install requires ROCKS_TREE" >&2; exit 1; \
@@ -2155,6 +2156,8 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	echo "==> Building paired Titan stdlib providers with $(ROCK_TITANC)"; \
 	( cd "$$stage"; \
 	  unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	  mkdir -p titan; \
+	  install -m 0644 "$(CURDIR)/titan/test.titan" titan/test.titan; \
 	  export TITAN_ROCKS_ROOT="$$rocks_tree"; \
 	  export TITAN_PATH_0_22="$$abi_dir"; \
 	  export TITAN_PATH=; \
@@ -2229,6 +2232,174 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 		examples/sdl_demo
 	rm -f testfiles/*.c testfiles/*.o testfiles/*.so \
 		testfiles/selection_sort.a testfiles/sieve.a
+	rm -f spec/stdlib/titan/pure/pure.c spec/stdlib/titan/pure/pure.o \
+		spec/stdlib/titan/math_native/math_native.c \
+		spec/stdlib/titan/math_native/math_native.o \
+		spec/stdlib/titan/peg/tests/tests.c \
+		spec/stdlib/titan/peg/tests/tests.o \
+		spec/stdlib/titan/string_url/string_core_test.c \
+		spec/stdlib/titan/string_url/string_core_test.o \
+		spec/stdlib/titan/string_url/string_format_pack_test.c \
+		spec/stdlib/titan/string_url/string_format_pack_test.o \
+		spec/stdlib/titan/string_url/string_regex_test.c \
+		spec/stdlib/titan/string_url/string_regex_test.o \
+		spec/stdlib/titan/string_url/url_test.c \
+		spec/stdlib/titan/string_url/url_test.o \
+		spec/stdlib/titan/string_url/string_url_support.c \
+		spec/stdlib/titan/string_url/string_url_support.o \
+		spec/stdlib/titan/io_fs_timer/io_fs_timer.c \
+		spec/stdlib/titan/io_fs_timer/io_fs_timer.o \
+		spec/stdlib/titan/uv_tasks_native/uv_tasks_native.c \
+		spec/stdlib/titan/uv_tasks_native/uv_tasks_native.o \
+		spec/stdlib/titan/os_native/os_native.c \
+		spec/stdlib/titan/os_native/os_native.o \
+		spec/stdlib/titan/async_tests/async_tests.c \
+		spec/stdlib/titan/async_tests/async_tests.o \
+		spec/stdlib/titan/net_ssl_native/net_ssl_native.c \
+		spec/stdlib/titan/net_ssl_native/net_ssl_native.o \
+		spec/stdlib/titan/coroutine_native/coroutine_native.c \
+		spec/stdlib/titan/coroutine_native/coroutine_native.o \
+		spec/stdlib/titan/http_native/http_native.c \
+		spec/stdlib/titan/http_native/http_native.o \
+		spec/stdlib/titan/lua_peg_native/lua_peg_native.c \
+		spec/stdlib/titan/lua_peg_native/lua_peg_native.o \
+		spec/stdlib/titan/os_uv_native/os_uv_native.c \
+		spec/stdlib/titan/os_uv_native/os_uv_native.o
+	rm -f pure__main pure__main__test_support.c pure__main__test_support.o \
+		pure__main__test_runner.c pure__main__test_runner.o \
+		pure__main__test_entrypoint.c pure__main__test_entrypoint.o \
+		math_native__main math_native__main__test_support.c \
+		math_native__main__test_support.o math_native__main__test_runner.c \
+		math_native__main__test_runner.o \
+		math_native__main__test_entrypoint.c \
+		math_native__main__test_entrypoint.o \
+		peg/tests__main peg/tests__main__test_support.c \
+		peg/tests__main__test_support.o peg/tests__main__test_runner.c \
+		peg/tests__main__test_runner.o peg/tests__main__test_entrypoint.c \
+		peg/tests__main__test_entrypoint.o \
+		string_core_test string_core_test__test_support.c \
+		string_core_test__test_support.o string_core_test__test_runner.c \
+		string_core_test__test_runner.o string_core_test__test_entrypoint.c \
+		string_core_test__test_entrypoint.o \
+		url_test url_test__test_support.c url_test__test_support.o \
+		url_test__test_runner.c url_test__test_runner.o \
+		url_test__test_entrypoint.c url_test__test_entrypoint.o \
+		lua_peg_native__main lua_peg_native__main__test_support.c \
+		lua_peg_native__main__test_support.o \
+		lua_peg_native__main__test_runner.c \
+		lua_peg_native__main__test_runner.o \
+		lua_peg_native__main__test_entrypoint.c \
+		lua_peg_native__main__test_entrypoint.o \
+		os_uv_native__main os_uv_native__main__test_support.c \
+		os_uv_native__main__test_support.o \
+		os_uv_native__main__test_runner.c \
+		os_uv_native__main__test_runner.o \
+		os_uv_native__main__test_entrypoint.c \
+		os_uv_native__main__test_entrypoint.o \
+		http_native__main http_native__main__test_support.c \
+		http_native__main__test_support.o \
+		http_native__main__test_runner.c \
+		http_native__main__test_runner.o \
+		http_native__main__test_entrypoint.c \
+		http_native__main__test_entrypoint.o \
+		coroutine_native__main coroutine_native__main__test_support.c \
+		coroutine_native__main__test_support.o \
+		coroutine_native__main__test_runner.c \
+		coroutine_native__main__test_runner.o \
+		coroutine_native__main__test_entrypoint.c \
+		coroutine_native__main__test_entrypoint.o \
+		net_ssl_native__main net_ssl_native__main__test_support.c \
+		net_ssl_native__main__test_support.o \
+		net_ssl_native__main__test_runner.c \
+		net_ssl_native__main__test_runner.o \
+		net_ssl_native__main__test_entrypoint.c \
+		net_ssl_native__main__test_entrypoint.o \
+		async_tests__main async_tests__main__test_support.c \
+		async_tests__main__test_support.o async_tests__main__test_runner.c \
+		async_tests__main__test_runner.o \
+		async_tests__main__test_entrypoint.c \
+		async_tests__main__test_entrypoint.o \
+		os_native__main os_native__main__test_support.c \
+		os_native__main__test_support.o os_native__main__test_runner.c \
+		os_native__main__test_runner.o os_native__main__test_entrypoint.c \
+		os_native__main__test_entrypoint.o \
+		uv_tasks_native__main uv_tasks_native__main__test_support.c \
+		uv_tasks_native__main__test_support.o \
+		uv_tasks_native__main__test_runner.c \
+		uv_tasks_native__main__test_runner.o \
+		uv_tasks_native__main__test_entrypoint.c \
+		uv_tasks_native__main__test_entrypoint.o \
+		io_fs_timer__main io_fs_timer__main__test_support.c \
+		io_fs_timer__main__test_support.o \
+		io_fs_timer__main__test_runner.c \
+		io_fs_timer__main__test_runner.o \
+		io_fs_timer__main__test_entrypoint.c \
+		io_fs_timer__main__test_entrypoint.o
+	rm -rf pure__main.dSYM math_native__main.dSYM peg/tests__main.dSYM \
+		string_core_test.dSYM url_test.dSYM lua_peg_native__main.dSYM \
+		os_uv_native__main.dSYM http_native__main.dSYM \
+		coroutine_native__main.dSYM \
+		net_ssl_native__main.dSYM \
+		async_tests__main.dSYM \
+		os_native__main.dSYM \
+		uv_tasks_native__main.dSYM \
+		io_fs_timer__main.dSYM
+	rmdir peg 2>/dev/null || true
+	rm -f spec/fixtures/test_runner/test_runner_fixture.c \
+		spec/fixtures/test_runner/test_runner_fixture.o \
+		spec/fixtures/test_runner/test_runner_dependency.c \
+		spec/fixtures/test_runner/test_runner_dependency.o \
+		spec/fixtures/test_runner/test_runner_edge.c \
+		spec/fixtures/test_runner/test_runner_edge.o \
+		spec/fixtures/test_runner/test_runner_folder/test_runner_folder.c \
+		spec/fixtures/test_runner/test_runner_folder/test_runner_folder.o \
+		spec/fixtures/test_runner/titan/test/user.c \
+		spec/fixtures/test_runner/titan/test/user.o \
+		spec/fixtures/test_runner/titan/test/runner/user.c \
+		spec/fixtures/test_runner/titan/test/runner/user.o \
+		spec/fixtures/test_runner/test_runner_mutation.c \
+		spec/fixtures/test_runner/test_runner_mutation.o \
+		spec/fixtures/test_runner/test_runner_empty.c \
+		spec/fixtures/test_runner/test_runner_empty.o \
+		spec/fixtures/test_runner/test_runner_static.c \
+		spec/fixtures/test_runner/test_runner_static.o \
+		spec/fixtures/test_runner/nested/tests/tests.c \
+		spec/fixtures/test_runner/nested/tests/tests.o
+	rm -f test_runner_fixture__test_support.c test_runner_fixture__test_support.o test_runner_fixture__test_runner.c \
+		test_runner_fixture__test_runner.o test_runner_fixture__test_entrypoint.c test_runner_fixture__test_entrypoint.o \
+		test_runner_empty__test_support.c test_runner_empty__test_support.o test_runner_empty__test_runner.c \
+		test_runner_empty__test_runner.o test_runner_empty__test_entrypoint.c test_runner_empty__test_entrypoint.o \
+		test_runner_static__test_support.c test_runner_static__test_support.o test_runner_static__test_runner.c \
+		test_runner_static__test_runner.o test_runner_static__test_entrypoint.c test_runner_static__test_entrypoint.o \
+		test_runner_collision__test_support.c test_runner_collision__test_support.o test_runner_collision__test_runner.c \
+		test_runner_collision__test_runner.o test_runner_collision__test_entrypoint.c test_runner_collision__test_entrypoint.o \
+		test_runner_hierarchy__test_support.c test_runner_hierarchy__test_support.o test_runner_hierarchy__test_runner.c \
+		test_runner_hierarchy__test_runner.o test_runner_hierarchy__test_entrypoint.c test_runner_hierarchy__test_entrypoint.o \
+		url__test_support.c url__test_support.o url__test_runner.c \
+		url__test_runner.o url__test_entrypoint.c url__test_entrypoint.o \
+		test_runner_collision.c test_runner_collision.o test_runner_hierarchy.c \
+		test_runner_hierarchy.o test_runner_progname__entrypoint.c test_runner_progname__entrypoint.o \
+		titan/test__test_support.c titan/test__test_support.o titan/test__test_runner.c \
+		titan/test__test_runner.o titan/test__test_entrypoint.c titan/test__test_entrypoint.o
+	rm -f test_runner_fixture test_runner_empty test_runner_static \
+		titan/test test_runner_progname__main \
+		test_runner_collision test_runner_collision.titan \
+		test_runner_collision__test_support.titan \
+		test_runner_collision__test_runner.titan \
+		test_runner_collision__test_entrypoint.titan \
+		test_runner_hierarchy.titan url
+	rm -rf test_runner_fixture.dSYM test_runner_empty.dSYM \
+		test_runner_static.dSYM titan/test.dSYM \
+		test_runner_progname__main.dSYM url.dSYM \
+		nested/tests__main.dSYM
+	rm -f nested/tests__main nested/tests__main__test_support.c \
+		nested/tests__main__test_support.o \
+		nested/tests__main__test_runner.c nested/tests__main__test_runner.o \
+		nested/tests__main__test_entrypoint.c \
+		nested/tests__main__test_entrypoint.o \
+		test_runner_hierarchy/child.titan \
+		test_runner_hierarchy/child.c test_runner_hierarchy/child.o
+	rmdir nested test_runner_hierarchy 2>/dev/null || true
 	rm -f *.c *.o *.so test
 	rm -f luacov.stats.out luacov.report.out
 

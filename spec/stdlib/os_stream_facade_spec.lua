@@ -288,15 +288,6 @@ assert(cases.result() == %q, cases.result())
         assert.equals(0, status, output)
     end
 
-    it("adapts captures, merges, inheritance, options, and Interfaces",
-    function()
-        run("start_facades", "facades-ok")
-    end)
-
-    it("wakes a pending captured reader when its stream closes", function()
-        run("start_pending_read_close", "pending-read-close-ok")
-    end)
-
     it("reads binary-safe parent stdin through the stable facade", function()
         run("start_parent_input", "parent-input-ok", {
             exec_prefix = {

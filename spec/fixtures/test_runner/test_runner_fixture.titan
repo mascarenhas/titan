@@ -1,0 +1,88 @@
+local test = import "test"
+local dependency = import "test_runner_dependency"
+
+local type ContextAlias = test.Context
+local cleanup_reached = false
+
+function test_cleanup(context: test.Context)
+  local events: {integer} = {}
+  context:cleanup(function()
+    test.assert(#events == 2 and events[1] == 1 and events[2] == 2,
+                "cleanup order is not LIFO after subtests")
+    events[3] = 3
+  end)
+  context:cleanup(function()
+    test.assert(#events == 1 and events[1] == 1,
+                "subtest did not run before cleanup")
+    events[2] = 2
+  end)
+  context:run("child", function(child: test.Context)
+    test.assert(child:name() == "test_runner_fixture.test_cleanup.child")
+    events[1] = 1
+  end)
+end
+
+function test_cleanup_failure(context: test.Context)
+  cleanup_reached = false
+  context:cleanup(function()
+    cleanup_reached = true
+  end)
+  context:cleanup(function()
+    test.assert(false, "cleanup failed deliberately")
+  end)
+end
+
+function test_cleanup_followup(context: test.Context)
+  test.assert(cleanup_reached, "remaining cleanup did not run")
+end
+
+function test_failure(context: test.Context)
+  test.assert(false, "failed deliberately")
+end
+
+function test_location(context: test.Context)
+  local file, function_name, line = test.location()
+  test.assert(file == "test_runner_fixture.titan")
+  test.assert(function_name == "test_runner_fixture.test_location")
+  test.assert(line > 0)
+end
+
+function test_parent_failure(context: test.Context)
+  context:run("not_run", function(child: test.Context)
+    test.assert(false, "failed child should not run")
+  end)
+  test.assert(false, "parent failed deliberately")
+end
+
+function test_parent_skip(context: test.Context)
+  context:run("not_run", function(child: test.Context)
+    test.assert(false, "skipped child should not run")
+  end)
+  test.skip("parent skip reason")
+end
+
+function test_pass(context: ContextAlias)
+  test.assert(test.testing(), "runner is not active")
+  test.assert(not test.verbose(), "unexpected verbose mode")
+  test.assert(context:name() == "test_runner_fixture.test_pass")
+end
+
+function test_result(context: test.Context): integer
+  return 42
+end
+
+function test_skip(context: test.Context)
+  test.skip("fixture skip")
+end
+
+local function test_local_is_ignored(context: test.Context)
+  test.assert(false, "local test was discovered")
+end
+
+function test_wrong_parameter(context: integer)
+  test.assert(false, "wrong-signature test was discovered")
+end
+
+function main(args: {string}): integer
+  return 99
+end

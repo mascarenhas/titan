@@ -1,0 +1,218 @@
+local function failed_origin(): value
+  timer.yield()
+  raise "task-status-boom"
+  return nil
+end
+
+function test_task_operation_routing_status_and_cancellation(
+    context: test.Context)
+  local path = temporary_file(context)
+  local chain = ""
+  local cancelled_body_started = false
+  local cancelled_body_finished = false
+  local self_cancelled_body_finished = false
+  local waiting_observed = false
+  local cancellation_kept_waiting_status = false
+
+  local chain_task = async.run(function (): value
+    chain = "timer"
+    timer.sleep(0)
+    chain = chain .. ">write"
+    fs.write_file(path, "callback-payload")
+    chain = chain .. ">read"
+    local contents = fs.read_file(path)
+    chain = chain .. ">" .. contents
+    timer.yield()
+    chain = chain .. ">turn"
+    return nil
+  end)
+  cleanup_task(context, chain_task, "chain Task cleanup")
+
+  local cancelled_task = async.run(function (): value
+    cancelled_body_started = true
+    timer.sleep(60000)
+    cancelled_body_finished = true
+    return nil
+  end)
+  cleanup_task(context, cancelled_task, "cancellation target cleanup")
+
+  local failed_task = async.run(failed_origin)
+  cleanup_task(context, failed_task, "failed Task cleanup")
+
+  local self_cancelled_task: async.Task? = nil
+  self_cancelled_task = async.run(function (): value
+    (self_cancelled_task as async.Task):cancel(
+      async.CancellationReason.simple("self cancellation"))
+    -- Pending cancellation is injected here without submitting the long timer.
+    timer.sleep(60000)
+    self_cancelled_body_finished = true
+    return nil
+  end)
+  cleanup_task(context, self_cancelled_task as async.Task,
+               "self-cancelled Task cleanup")
+
+  local canceller = async.run(function (): value
+    while cancelled_task:status():as_string() == "ready" do
+      timer.yield()
+    end
+    waiting_observed = cancelled_task:status():as_string() == "waiting"
+    cancelled_task:cancel(
+      async.CancellationReason.simple("first reason"))
+    cancelled_task:cancel(
+      async.CancellationReason.simple("ignored second reason"))
+    cancellation_kept_waiting_status =
+      cancelled_task:status():as_string() == "waiting" and
+      not cancelled_task:status():has_finished()
+    return nil
+  end)
+  cleanup_task(context, canceller, "cancellation controller cleanup")
+
+  test.assert(chain_task:status():as_string() == "ready",
+              "new operation chain was not ready")
+  test.assert(cancelled_task:status():as_string() == "ready",
+              "new cancellation target was not ready")
+  test.assert(failed_task:status():as_string() == "ready",
+              "new failure Task was not ready")
+  test.assert((self_cancelled_task as async.Task):status():as_string() ==
+              "ready", "new self-cancelling Task was not ready")
+
+  wait_finished(canceller)
+  wait_finished(chain_task)
+  wait_finished(cancelled_task)
+  wait_finished(failed_task)
+  wait_finished(self_cancelled_task as async.Task)
+
+  test.assert(canceller:status():as_string() == "succeeded",
+              "cancellation controller failed")
+  test.assert(chain_task:status():as_string() == "succeeded",
+              "operation chain did not succeed")
+  test.assert(cancelled_task:status():as_string() == "cancelled",
+              "cancelled Task did not become terminal")
+  test.assert(simple_cancellation_reason(cancelled_task) == "first reason",
+              "Task did not retain its first cancellation reason")
+  test.assert(failed_task:status():as_string() == "failed",
+              "raised Task did not become failed")
+  local did_fail, failure? = failed_task:status():has_failed()
+  test.assert(did_fail and failure ~= nil,
+              "failed Task did not publish its Error payload")
+  local detail = failure as async.Error
+  test.assert(detail.error == "task-status-boom",
+              "failed Task changed its error value")
+  test.assert(#detail.traceback > 0,
+              "failed Task did not retain a traceback")
+  test.assert((self_cancelled_task as async.Task):status():as_string() ==
+              "cancelled", "self-cancelled Task did not become terminal")
+  test.assert(chain == "timer>write>read>callback-payload>turn",
+              "callbacks did not route to the Task's next operation")
+  test.assert(fs.read_file(path) == "callback-payload",
+              "operation chain changed its file payload")
+  test.assert(cancelled_body_started,
+              "cancelled Task never entered its body")
+  test.assert(not cancelled_body_finished,
+              "external cancellation crossed the pending operation")
+  test.assert(not self_cancelled_body_finished,
+              "self-cancellation crossed the next operation boundary")
+  test.assert(waiting_observed,
+              "cancellation controller did not observe waiting status")
+  test.assert(cancellation_kept_waiting_status,
+              "cancellation published a terminal status too early")
+end
+
+function test_nested_user_coroutine_routes_single_uv_tag(
+    context: test.Context)
+  local nested_result = "running"
+  local task = async.run(function (): value
+    local child = coroutine.create(function (_argument: value): value
+      timer.sleep(0)
+      return "nested-timer-ok"
+    end, "child")
+    nested_result = child:resume(nil) as string
+    return nil
+  end)
+  cleanup_task(context, task, "nested coroutine Task cleanup")
+
+  wait_finished(task)
+  test.assert(task:status():as_string() == "succeeded",
+              "Task containing a nested coroutine failed")
+  test.assert(nested_result == "nested-timer-ok",
+              "nested coroutine did not route its timer operation")
+end
+
+function test_explicit_resume_runs_after_resumer_returns(
+    context: test.Context)
+  local trace = ""
+  local target = async.run(function (): value
+    trace = trace .. "suspend>"
+    async.suspend()
+    trace = trace .. "target-woke"
+    return nil
+  end)
+  cleanup_task(context, target, "explicit resume target cleanup")
+
+  while target:status():as_string() == "ready" do timer.yield() end
+  test.assert(target:status():as_string() == "waiting",
+              "target did not explicitly suspend")
+  trace = trace .. "resume>"
+  target:resume()
+  test.assert(target:status():as_string() == "waiting",
+              "Task:resume resumed its target synchronously")
+  trace = trace .. "caller-returned>"
+
+  wait_finished(target)
+  test.assert(target:status():as_string() == "succeeded",
+              "explicitly resumed Task did not succeed")
+  test.assert(trace == "suspend>resume>caller-returned>target-woke",
+              "explicit resume ran before its caller returned")
+end
+
+function test_explicit_resume_waits_for_zero_timer_close(
+    context: test.Context)
+  local trace = ""
+  local server, port = listen_available(32000)
+  defer server:close()
+  local accepted: net.Connection? = nil
+  local accepter = async.run(function (): value
+    accepted = server:accept()
+    return nil
+  end)
+  cleanup_task(context, accepter, "accept Task cleanup")
+  local client = net.connect("127.0.0.1", port)
+  defer client:close()
+
+  wait_finished(accepter)
+  test.assert(accepter:status():as_string() == "succeeded" and
+              accepted ~= nil, "loopback accept failed")
+  local peer = accepted as net.Connection
+  defer peer:close()
+
+  local target = async.run(function (): value
+    async.suspend()
+    trace = trace .. "target"
+    return nil
+  end)
+  cleanup_task(context, target, "close-order target cleanup")
+  while target:status():as_string() == "ready" do timer.yield() end
+  test.assert(target:status():as_string() == "waiting",
+              "close-order target did not explicitly suspend")
+
+  -- peer:read resumes this test Task from the poll phase. Its reply write
+  -- completion therefore runs in libuv's post-poll pending phase. Start the
+  -- target's zero timer and the client read from that callback: timer_cb runs
+  -- in the trailing timer phase, while the reply waits for the next poll.
+  -- Resuming from timer_cb would produce target>read; close_cb produces
+  -- read>target.
+  client:write("signal")
+  test.assert(peer:read() == "signal", "loopback signal changed")
+  peer:write("reply")
+  target:resume()
+  test.assert(client:read() == "reply", "loopback reply changed")
+  trace = trace .. "read>"
+
+  peer:close()
+  client:close()
+  server:close()
+  test.assert(target:status():as_string() == "succeeded",
+              "close-order target did not finish")
+  test.assert(trace == "read>target",
+              "suspended Task resumed before its zero timer closed")
+end

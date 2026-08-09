@@ -601,7 +601,7 @@ Those lists are compiled-symbol and build-input checks, not assertions about
 the spelling or internal architecture of Titan source. Do not replace them
 with searches through `titan/uv/*.titan`.
 
-After rebuilding the canonical seventeen-root provider, mechanically extract
+After rebuilding the canonical eighteen-root provider, mechanically extract
 its exact serialized interface and compare it with
 `spec/fixtures/libuv/titan_uv_types.lua`:
 
@@ -635,7 +635,7 @@ library group:
 busted spec/libuv_build_spec.lua
 busted spec/stdlib/uv_tasks_spec.lua
 busted spec/stdlib/uv_native_handles_spec.lua
-busted spec/stdlib/net_spec.lua  # or the high-level facade being extended
+bash spec/support/run_titan_stdlib_tests.sh net-ssl  # or the native facade suite being extended
 bash spec/support/ci_test_groups.sh libraries
 ```
 

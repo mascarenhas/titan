@@ -1,0 +1,131 @@
+function test_net_exchanges_binary_streams_through_tcp(
+    context: test.Context)
+  local server, port = net_listen_available(26000)
+  cleanup_net_server(context, server)
+  local peer = async.run(function (): value
+    local connection = server:accept()
+    defer connection:close()
+    test.assert(connection:read_until("\0END", true) == "alpha",
+                "binary delimiter read returned wrong prefix")
+    test.assert(connection:read() == "tail",
+                "delimiter read did not retain excess")
+    test.assert(not connection:read(),
+                "peer did not observe client write shutdown")
+
+    connection:write("reply\0\nrest")
+    connection:shutdown()
+    connection:shutdown()
+    expect_failure(function ()
+      connection:write("late")
+    end, "Connection accepted a write after shutdown")
+    connection:close()
+    connection:close()
+    return nil
+  end)
+  cleanup_task(context, peer, "net exchange cleanup")
+
+  local connection = net.connect("127.0.0.1", port)
+  cleanup_net_connection(context, connection)
+  local concrete: stream.ReaderWriterCloser = connection
+  concrete:write("alpha\0ENDtail")
+  connection:shutdown()
+  test.assert(concrete:read_until("\n", true) == "reply\0",
+              "binary response delimiter changed")
+  test.assert(concrete:read() == "rest",
+              "response delimiter excess was lost")
+  test.assert(not concrete:read() and not concrete:read_until("missing"),
+              "repeated Connection reads did not return EOF")
+  concrete:close()
+  concrete:close()
+  test.assert(not concrete:read() and not concrete:read_until("missing"),
+              "closed Connection did not behave as Reader EOF")
+  expect_failure(function ()
+    concrete:write("after-close")
+  end, "closed Connection accepted a write")
+
+  while active(peer) do timer.yield() end
+  test.assert(peer:status():as_string() == "succeeded",
+              "TCP peer Task failed")
+  local closer: stream.Closer = server
+  closer:close()
+  closer:close()
+end
+
+function test_net_validates_endpoints_and_wakes_pending_accept(
+    context: test.Context)
+  expect_failure(function ()
+    net.connect("", 1)
+  end, "connect accepted an empty host")
+  expect_failure(function ()
+    net.connect("127.0.0.1", 0)
+  end, "connect accepted port zero")
+  expect_failure(function ()
+    net.connect("127.0.0.1", 65536)
+  end, "connect accepted an oversized port")
+  expect_failure(function ()
+    net.listen("", 1, 8)
+  end, "listen accepted an empty host")
+  expect_failure(function ()
+    net.listen("127.0.0.1", -1, 8)
+  end, "listen accepted a negative port")
+  expect_failure(function ()
+    net.listen("127.0.0.1", 1, 0)
+  end, "listen accepted a nonpositive backlog")
+  expect_failure(function ()
+    net.listen("127.0.0.1", 1, 2147483648)
+  end, "listen accepted a backlog outside libuv's C-int range")
+  expect_failure(function ()
+    net.listen("127.0.0.1\0ignored", 1, 8)
+  end, "listen accepted an embedded-NUL host")
+
+  local server, _port = net_listen_available(27000)
+  cleanup_net_server(context, server)
+  local accept_failed = false
+  local waiter = async.run(function (): value
+    do
+      server:accept()
+    catch
+      local failure = error as async.OperationError
+      test.assert(failure.operation == "net.accept",
+                  "closed accept reported the wrong operation")
+      accept_failed = true
+    end
+    return nil
+  end)
+  cleanup_task(context, waiter, "pending accept cleanup")
+  while waiter:status():as_string() == "ready" do timer.yield() end
+  test.assert(waiter:status():as_string() == "waiting",
+              "accept Task did not reach its callback wait")
+  local competing_accept_rejected = false
+  do
+    server:accept()
+  catch
+    competing_accept_rejected = true
+  end
+  test.assert(competing_accept_rejected,
+              "Server accepted a second waiting Task")
+  server:close()
+  server:close()
+  while active(waiter) do timer.yield() end
+  test.assert(waiter:status():as_string() == "succeeded" and accept_failed,
+              "Server close did not fail its accept continuation")
+
+  -- Connecting and writing first lets the listener retain one accepted client
+  -- until the owning Task asks for it. This is buffered multi-shot state, not
+  -- a Titan-side operation queue. The hostname also exercises address
+  -- resolution and candidate fallback without assuming address order.
+  local buffered_server, buffered_port = net_listen_available(28000)
+  cleanup_net_server(context, buffered_server)
+  local buffered_client = net.connect("localhost", buffered_port)
+  cleanup_net_connection(context, buffered_client)
+  buffered_client:write("buffered-client")
+  buffered_client:shutdown()
+  local buffered_peer = buffered_server:accept()
+  cleanup_net_connection(context, buffered_peer)
+  test.assert(buffered_peer:read() == "buffered-client" and
+              not buffered_peer:read(),
+              "Server did not retain its unwaited accepted client")
+  buffered_peer:close()
+  buffered_client:close()
+  buffered_server:close()
+end

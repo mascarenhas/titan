@@ -38,6 +38,7 @@ while IFS= read -r test_file; do
             ;;
         spec/asan_generated_c_context_spec.lua | \
         spec/dense_array_runtime_spec.lua | \
+        spec/native_stdlib_coroutine_test_spec.lua | \
         spec/stdlib/coroutine_spec.lua | \
         spec/stdlib/loadlibglobal_spec.lua | \
         spec/stdlib_installer_spec.lua | \
@@ -50,12 +51,15 @@ while IFS= read -r test_file; do
             # inspect shared root artifacts out of the parallel workers below.
             library_serial_tests+=("$test_file")
             ;;
+        spec/native_stdlib_async_test_spec.lua | \
         spec/stdlib/async*_spec.lua | \
         spec/stdlib/uv*_spec.lua | \
         spec/stdlib/timer*_spec.lua | \
         spec/stdlib/fs*_spec.lua)
             library_uv_fs_tests+=("$test_file")
             ;;
+        spec/native_stdlib_http_test_spec.lua | \
+        spec/native_stdlib_os_test_spec.lua | \
         spec/stdlib/io*_spec.lua | \
         spec/stdlib/net*_spec.lua | \
         spec/stdlib/ssl*_spec.lua | \
@@ -64,12 +68,14 @@ while IFS= read -r test_file; do
         spec/stdlib/os*_spec.lua)
             library_net_os_tests+=("$test_file")
             ;;
+        spec/native_stdlib_pure_test_spec.lua | \
         spec/stdlib/gc*_spec.lua | \
         spec/stdlib/iter*_spec.lua | \
         spec/stdlib/lua*_spec.lua | \
         spec/stdlib/math*_spec.lua | \
         spec/stdlib/peg*_spec.lua | \
-        spec/stdlib/string*_spec.lua)
+        spec/stdlib/string*_spec.lua | \
+        spec/stdlib/test*_spec.lua)
             library_peg_string_tests+=("$test_file")
             ;;
         spec/coder/coder_spec.lua | \
@@ -206,7 +212,7 @@ case "$group" in
         "$BUSTED" -o gtest -v "${library_serial_tests[@]}"
         ;;
     library-uv-fs)
-        echo "Running ${#library_uv_fs_tests[@]} async/uv/timer/fs spec files" \
+        echo "Running ${#library_uv_fs_tests[@]} async/uv/I/O/timer/fs spec files" \
             "without LuaCov"
         "$BUSTED" -o gtest -v "${library_uv_fs_tests[@]}"
         ;;
@@ -254,9 +260,9 @@ case "$group" in
         wait "$peg_string_pid" || peg_string_status=$?
 
         if [[ ${GITHUB_ACTIONS:-} == true ]]; then
-            echo "::group::Library async/uv/timer/fs worker"
+            echo "::group::Library async/uv/I/O/timer/fs worker"
         else
-            echo "Library async/uv/timer/fs worker"
+            echo "Library async/uv/I/O/timer/fs worker"
         fi
         cat "$uv_fs_log"
         if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::endgroup::"; fi

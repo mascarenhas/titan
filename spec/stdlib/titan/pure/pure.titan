@@ -1,0 +1,12 @@
+-- Native behavior tests for the small synchronous standard modules.
+-- This folder is one logical test module, invoked with:
+--   titanc --test --tree spec/stdlib/titan pure
+local test = import "test"
+local iterlib = import "titan.iter"
+local gclib = import "titan.gc"
+local tlua = import "titan.lua"
+
+local lua_api = foreign import "lua.h"
+local lua_aux = foreign import "lauxlib.h"
+local ffi = foreign import "titan/ffi.h"
+local cstring = foreign import "string.h"

@@ -1,0 +1,20 @@
+function test_runtime_shutdown_closes_native_handles_but_not_files(
+    context: test.Context)
+  local path = temporary_path(context)
+  retained_shutdown_file = fs.open(path, "w")
+  local file = retained_shutdown_file as fs.File
+  file:write("left-open-for-host-teardown")
+
+  -- A File owns a process descriptor rather than a loop handle. Keeping the
+  -- public wrapper reachable proves that merely finishing this user Task does
+  -- not make the File terminal.
+  test.assert(not file:is_closed(),
+              "finishing the owner Task closed its File")
+  test.assert(fs.read_file(path) == "left-open-for-host-teardown",
+              "the retained open File changed its bytes")
+
+  -- A Ticker is a native loop handle. Deliberately retain it without closing;
+  -- successful termination of the generated test executable proves the
+  -- Runtime's public shutdown walk retired it instead of waiting 60 seconds.
+  retained_shutdown_ticker = timer.ticker(60000)
+end

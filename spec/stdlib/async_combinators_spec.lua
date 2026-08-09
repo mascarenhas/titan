@@ -950,42 +950,6 @@ describe("async combinators", function()
         return output
     end
 
-    it("covers every any arity and positional result", function()
-        local output = run_case([[
-            local async = require "titan.async"
-            local cases = require "async_combinator_cases"
-            local task = cases.start_any_variants()
-            async.loop()
-            assert(task:status():as_string() == "succeeded")
-            assert(cases.result() == "any-ok")
-        ]])
-        assert.match("combinator-logged-failure", output, 1, true)
-    end)
-
-    it("covers every race arity, tie, and terminal status", function()
-        local output = run_case([[
-            local async = require "titan.async"
-            local cases = require "async_combinator_cases"
-            local task = cases.start_race_variants()
-            async.loop()
-            assert(task:status():as_string() == "succeeded")
-            assert(cases.result() == "race-ok")
-        ]])
-        assert.match("race-logged-failure", output, 1, true)
-    end)
-
-    it("covers every all arity, value tuple, and error position", function()
-        local output = run_case([[
-            local async = require "titan.async"
-            local cases = require "async_combinator_cases"
-            local task = cases.start_all_variants()
-            async.loop()
-            assert(task:status():as_string() == "succeeded")
-            assert(cases.result() == "all-ok")
-        ]])
-        assert.match("all-logged-failure", output, 1, true)
-    end)
-
     it("joins timer and I/O tasks and preserves complete statuses", function()
         local path = workspace .. "/joined.txt"
         local output = run_case(([=[
@@ -1002,49 +966,4 @@ describe("async combinators", function()
         assert.equals("joined-io", async_stdlib.read(path))
     end)
 
-    it("exposes running, suspend, resume, and terminal listeners", function()
-        local output = run_case([[
-            local async = require "titan.async"
-            local cases = require "async_combinator_cases"
-            local task = cases.start_task_primitives()
-            async.loop()
-            assert(task:status():as_string() == "succeeded")
-            assert(cases.result() == "primitives-ok")
-        ]])
-        assert.not_match("swallowed-listener-error", output, 1, true)
-    end)
-
-    it("cancels a Task suspended inside a combinator", function()
-        run_case([[
-            local async = require "titan.async"
-            local cases = require "async_combinator_cases"
-            local task = cases.start_cancelled_combinator()
-            async.loop()
-            assert(task:status():as_string() == "succeeded")
-            assert(cases.result() == "cancelled-combinator-ok")
-        ]])
-    end)
-
-    it("rejects the current Task after self-cancellation", function()
-        run_case([[
-            local async = require "titan.async"
-            local cases = require "async_combinator_cases"
-            local task = cases.start_cancelled_self_rejection()
-            async.loop()
-            assert(task:status():as_string() == "cancelled")
-            assert(cases.result() == "cancelled-self-rejected")
-        ]])
-    end)
-
-    it("removes cancelled combinator listeners without retaining their Task",
-    function()
-        run_case([[
-            local async = require "titan.async"
-            local cases = require "async_combinator_cases"
-            local task = cases.start_listener_cleanup()
-            async.loop()
-            assert(task:status():as_string() == "succeeded")
-            assert(cases.result() == "listener-cleanup-ok")
-        ]])
-    end)
 end)

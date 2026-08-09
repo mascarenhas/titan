@@ -21,6 +21,7 @@ local math = require "titan.math"
 local lua = require "titan.lua"
 local iter = require "titan.iter"
 local gc = require "titan.gc"
+local testing = require "titan.test"
 
 local path = os.tmpname()
 os.remove(path)
@@ -86,6 +87,9 @@ assert(type(uv) == "userdata")
 assert(type(net) == "userdata")
 assert(type(ssl) == "userdata")
 assert(type(http) == "userdata")
+assert(type(testing) == "userdata")
+assert(not testing.testing())
+assert(not testing.verbose())
 
 local initially_paused = gc.paused()
 gc.pause()

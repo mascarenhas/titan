@@ -101,7 +101,8 @@ waiting raises. The completed bit is set only after process cleanup succeeds,
 so a later call can retry whatever did not reach that point. A later `wait`
 uses either the facade cache or the Process's retained exit status.
 
-The focused non-LuaCov suite in `spec/stdlib/io_spec.lua` compiles an exact
+The focused non-LuaCov native suite in
+`spec/stdlib/titan/io_fs_timer/io_test.titan` compiles an exact
 private `titan.io` provider. Instrumented string and output providers prove
 left-to-right conversion, conversion-before-output, builder result bytes,
 the zero-argument newline, one write, and late lookup of reassigned stdout.
@@ -111,7 +112,8 @@ errors, a retryable raising closer, and repeated manual close-function calls.
 Normal exits reach one terminal physical close; successful EOF gets a harmless
 idempotent repeat, while a close error gets one finalizer retry.
 
-`spec/stdlib/io_process_spec.lua` compiles small consumers against the
+`spec/stdlib/titan/io_fs_timer/io_process_test.titan` compiles small consumers
+against the
 canonical coroutine/uv/async, string, os, and io modules. It covers structural
 Interface conversion, interactive merged output, binary delimiter reads,
 retained exit status, idempotent close, and explicit running-child

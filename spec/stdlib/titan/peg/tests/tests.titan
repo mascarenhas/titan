@@ -1,0 +1,6 @@
+-- Native titan.peg behavior tests. This canonical folder main owns only
+-- the imports shared by its topical contributors.
+local test = import "test"
+local pattern = import "peg"
+local ffi = foreign import "titan/ffi.h"
+local clocale = foreign import "locale.h"

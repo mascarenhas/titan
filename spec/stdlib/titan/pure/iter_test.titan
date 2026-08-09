@@ -1,0 +1,85 @@
+function test_iter_tuple_and_next(context: test.Context)
+  test.assert(context:name() == "pure.test_iter_tuple_and_next")
+
+  local empty: {value: value} = {}
+  local empty_key, empty_item = iterlib.next(empty, nil)
+  test.assert(empty_key == nil and empty_item == nil)
+
+  local map: {value: value} = { ["answer"] = 42 }
+  local next_function, state, initial, close = iterlib.pairs(map)
+  test.assert(state == map)
+  test.assert(initial == nil and close == nil)
+  local key, item = next_function(state, initial)
+  test.assert(key == "answer" and item == 42)
+  local exhausted_key, exhausted_item = next_function(state, key)
+  test.assert(exhausted_key == nil and exhausted_item == nil)
+
+  local object_key: {value: value} = {}
+  local object_value: {value: value} = {}
+  local arbitrary: {value: value} = {
+    [object_key] = object_value,
+  }
+  local actual_key, actual_value = iterlib.next(arbitrary, nil)
+  test.assert(actual_key == object_key and actual_value == object_value)
+end
+
+function test_iter_typed_maps_and_false_key(_context: test.Context)
+  local map: {string: integer} = {
+    ["a"] = 10,
+    ["b"] = 20,
+    ["c"] = 12,
+  }
+  local count = 0
+  local sum = 0
+  for _key: string, item: integer in iterlib.pairs(map) do
+    count = count + 1
+    sum = sum + item
+  end
+  test.assert(count == 3 and sum == 42)
+
+  local dynamic: {value: value} = {
+    [false] = 17,
+    ["other"] = 25,
+  }
+  local saw_false = false
+  count = 0
+  for candidate, _item in iterlib.pairs(dynamic) do
+    count = count + 1
+    if candidate is boolean and not (candidate as boolean) then
+      saw_false = true
+    end
+  end
+  test.assert(saw_false and count == 2)
+end
+
+function test_iter_arrays_include_holes(_context: test.Context)
+  local array: {value} = { "first", nil, "third" }
+  local count = 0
+  local middle_is_nil = false
+  local last = ""
+  for index, item in iterlib.ipairs(array) do
+    count = count + 1
+    if index == 2 then middle_is_nil = item == nil end
+    if index == 3 then last = item as string end
+  end
+  test.assert(count == 3)
+  test.assert(middle_is_nil)
+  test.assert(last == "third")
+
+  local trailing: {value} = { "first", "second", "third" }
+  trailing[3] = nil
+  count = 0
+  for _index, _item in iterlib.ipairs(trailing) do
+    count = count + 1
+  end
+  test.assert(#trailing == 2 and count == 2)
+end
+
+function test_iter_invalid_control_key(_context: test.Context)
+  local map: {value: value} = { ["answer"] = 42 }
+  assert_raises_contains(function()
+    iterlib.next(map, {})
+  end, "invalid key to 'next'")
+  local key, item = iterlib.next(map, nil)
+  test.assert(key == "answer" and item == 42)
+end

@@ -61,24 +61,6 @@ describe("async Runtime native-resource shutdown", function()
 
     teardown(function() async_stdlib.cleanup(workspace) end)
 
-    it("leaves files to host teardown and closes native loop resources",
-    function()
-        local file_path = workspace .. "/retained-file.txt"
-        local source = ([=[
-            local async = require "titan.async"
-            local resources = require "uv_resource_cases"
-            resources.schedule(%q)
-            async.loop()
-            assert(not resources.file_was_closed())
-        ]=]):format(file_path)
-
-        local ok, status, output =
-            async_stdlib.run_lua_source(workspace, source)
-        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
-        assert.equals("left-open-for-host-teardown",
-            async_stdlib.read(file_path))
-    end)
-
     it("keeps an open file descriptor usable in a later Runtime", function()
         local file_path = workspace .. "/cross-runtime-file.txt"
         local source = ([=[

@@ -1,0 +1,192 @@
+local function cancel_join_with_finalizable(
+    operand: async.Task, callback: Finalizer)
+  local sentinel: {string: value} = {}
+  mark_finalizable(sentinel, callback)
+  local joining = async.run(function (): value
+    async.join(operand)
+    return nil
+  end)
+  defer cancel_and_join_task(joining, "listener probe cleanup")
+  wait_until_waiting(joining)
+  joining:cancel(async.CancellationReason.complex(sentinel))
+  local status = async.join(joining)
+  check(status:has_cancelled(),
+        "listener-retention probe did not cancel its combinator")
+end
+
+-- Task identity, explicit suspension, synchronous resume scheduling, and
+-- terminal notification are the primitives beneath every combinator.
+function test_task_primitives_and_terminal_listeners(context: test.Context)
+  local self_task: async.Task? = nil
+  self_task = async.run(function (): value
+    check(async.running() == (self_task as async.Task),
+          "async.running did not return the current Task")
+
+    local rejected = false
+    do
+      async.join(self_task as async.Task)
+    catch
+      rejected = error is string
+    end
+    check(rejected, "combinator accepted its running Task")
+
+    local listener_order = ""
+    local listener_status = ""
+    local listener_ran_in_scheduler = false
+    local removed_listener_ran = false
+    local removed_listener = function (_status: async.TaskStatus)
+      removed_listener_ran = true
+      listener_order = listener_order .. "removed"
+    end
+    local target = async.run(function (): value
+      timer.sleep(2)
+      return "listener-result"
+    end)
+    defer cancel_and_join_task(target, "listener target cleanup")
+    local first_listener = function (status: async.TaskStatus)
+      listener_order = listener_order .. "1"
+      listener_status = status:as_string()
+      do
+        async.running()
+      catch
+        listener_ran_in_scheduler = true
+      end
+    end
+    target:add_terminal_listener(first_listener)
+    target:add_terminal_listener(removed_listener)
+    target:add_terminal_listener(function (_status: async.TaskStatus)
+      listener_order = listener_order .. "2"
+      -- Terminal delivery uses a detached snapshot. Removing an already-run
+      -- listener must not shift that snapshot and skip listener 3.
+      target:remove_terminal_listener(first_listener)
+      raise "swallowed-listener-error"
+    end)
+    target:add_terminal_listener(function (_status: async.TaskStatus)
+      listener_order = listener_order .. "3"
+    end)
+    target:remove_terminal_listener(removed_listener)
+    target:remove_terminal_listener(removed_listener)
+    local target_status = async.join(target)
+    check(success_payload(target_status) == "listener-result",
+          "terminal listener target lost its result")
+    check(listener_order == "123",
+          "terminal listeners were not called sequentially")
+    check(not removed_listener_ran,
+          "removed terminal listener was invoked")
+    check(listener_status == "succeeded",
+          "terminal listener received the wrong status")
+    check(listener_ran_in_scheduler,
+          "terminal listener unexpectedly ran in a user Task")
+
+    local late_listener_ran = false
+    target:add_terminal_listener(function (_status: async.TaskStatus)
+      late_listener_ran = true
+    end)
+    timer.yield()
+    check(not late_listener_ran,
+          "terminal Task retained or reran a listener")
+
+    local suspended_task: async.Task? = nil
+    local resumed_count = 0
+    suspended_task = async.run(function (): value
+      check(async.running() == (suspended_task as async.Task),
+            "async.running changed inside suspended Task")
+      async.suspend()
+      resumed_count = resumed_count + 1
+      return nil
+    end)
+    defer cancel_and_join_task(
+      suspended_task as async.Task, "suspended target cleanup")
+    local target = suspended_task
+    wait_until_waiting(target)
+    target:resume()
+    check(target:status():as_string() == "waiting" and
+          resumed_count == 0,
+          "Task:resume resumed a suspended Task synchronously")
+    -- A second request before the timer fires must coalesce.
+    target:resume()
+    check(async.join(target):has_succeeded() and
+          resumed_count == 1,
+          "suspended Task did not receive exactly one scheduled wake")
+    target:resume()
+    timer.yield()
+    check(resumed_count == 1,
+          "Task:resume restarted a terminal Task")
+    return nil
+  end)
+  cleanup_task(context, self_task as async.Task,
+               "Task primitive probe cleanup")
+  local status = async.join(self_task as async.Task)
+  check(status:has_succeeded(), "Task primitive probe failed")
+end
+
+-- Cancellation of a Task suspended inside a combinator wakes it through the
+-- same explicit resume path. Unwinding removes its operand listener before a
+-- later operand completion.
+function test_cancelled_combinator_removes_its_listener(context: test.Context)
+  local operand = sleeping(60000, "cancelled operand returned")
+  cleanup_task(context, operand, "operand cleanup")
+  local joining = async.run(function (): value
+    async.join(operand)
+    raise "cancelled combinator resumed user code"
+    return nil
+  end)
+  cleanup_task(context, joining, "cancelled combinator cleanup")
+  wait_until_waiting(joining)
+  joining:cancel(async.CancellationReason.simple("cancelled combinator"))
+  check(joining:status():as_string() == "waiting" and
+        not joining:status():has_finished(),
+        "cancel published an intermediate TaskStatus")
+  check(cancelled_payload(async.join(joining)) == "cancelled combinator",
+        "suspended combinator cancellation reason changed")
+
+  operand:cancel(async.CancellationReason.simple("operand cleanup"))
+  check(cancelled_payload(async.join(operand)) == "operand cleanup",
+        "late operand completion disturbed terminal combinator")
+end
+
+-- Identity, rather than an intermediate public cancellation state, rejects a
+-- current Task after it requests its own cancellation.
+function test_self_cancelled_task_is_rejected_by_combinators(
+    context: test.Context)
+  local candidate: async.Task? = nil
+  candidate = async.run(function (): value
+    timer.yield()
+    local current = candidate as async.Task
+    current:cancel(async.CancellationReason.simple("self-cancelled"))
+    check(current:status():as_string() == "running",
+          "self-cancellation published an intermediate TaskStatus")
+    local rejected = false
+    do
+      async.join(current)
+    catch
+      rejected = error is string
+    end
+    check(rejected, "combinator accepted its current Task")
+    return nil
+  end)
+  cleanup_task(context, candidate as async.Task,
+               "self-cancelled Task cleanup")
+  local status = async.join(candidate as async.Task)
+  check(cancelled_with(status, "self-cancelled"),
+        "self-cancelled Task did not publish its reason")
+end
+
+-- The operand remains alive while a finalizable value reachable only through
+-- the cancelled combinator is collected. This proves defer removed the
+-- operand listener instead of merely making its callback inert.
+function test_cancelled_combinator_listener_is_not_retained(context: test.Context)
+  local listener_cleanup_finalized = false
+  local operand = sleeping(60000, "listener cleanup operand returned")
+  cleanup_task(context, operand, "operand cleanup")
+  cancel_join_with_finalizable(
+      operand, function (_candidate: value)
+        listener_cleanup_finalized = true
+      end)
+  collect_garbage()
+  collect_garbage()
+  check(listener_cleanup_finalized,
+        "cancelled combinator remained retained by its operand listener")
+  operand:cancel(async.CancellationReason.simple("operand cleanup"))
+  async.join(operand)
+end

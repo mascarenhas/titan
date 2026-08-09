@@ -14,6 +14,12 @@ trusted provenance with the module type. Only a direct `kind == "source"` edge
 to a descriptor produced by the current checker sets the import AST's
 `_source_import` capability.
 
+Ordinary resolver contexts reach that result only after compiled-provider
+passes. The test runner's invocation-local `source_first` policy changes lookup
+order, not the capability: its generated runner still receives private access
+only because the canonical modules were actually parsed and checked from
+source. See [Native test runner](test-runner.md).
+
 A checked source module retains a compiler-only overlay on its `Type.Module`:
 
 * `source_members` and `source_type_members` hold its own local value and type
