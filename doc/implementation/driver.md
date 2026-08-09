@@ -216,7 +216,9 @@ for first-class Titan functions. ABI 0.21 retained those layouts while
 advancing the embedded Lua contract from 5.5.0 to 5.5.1. ABI 0.22 is the
 source-local `titan.uv` surface/private-provider boundary: its serialized public
 schema and reconstructible module-userdata prefix change while Lua 5.5.1 and
-the other 0.21 layouts remain unchanged. The current marker,
+the other value/native-call layouts remain unchanged. Every generated module
+also gains the fixed physical-provider identity slot used to authenticate
+canonical source-private state. The current marker,
 `TITAN_PATH_0_22`, and `lib/titan/0.22` namespace advance together. A 0.21
 candidate is rejected before type metadata is decoded or native linking begins.
 

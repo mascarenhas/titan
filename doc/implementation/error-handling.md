@@ -415,7 +415,8 @@ first-class function closure, and Interface metadata/wrappers/bound
 trampolines. ABI 0.21 retained this machinery while advancing the matched Lua
 internal-header/runtime contract to 5.5.1. ABI 0.22 retains it; its boundary
 is the source-local `titan.uv` serialized public schema and reconstructible
-module-state prefix. Errors raised by an Interface adapter,
+module-state prefix plus the fixed physical-provider identity slot on every
+module. Errors raised by an Interface adapter,
 strict guard, dynamic conversion, or failed exact downcast still use the same
 Titan error handler; all wrapper and adapter roots are ordinary Lua-traced
 values, so unwinding requires no resource-specific cleanup path.

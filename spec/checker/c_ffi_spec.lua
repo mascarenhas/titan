@@ -1649,6 +1649,347 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("rejects only used enums whose compiler carrier exceeds " ..
+       "lua_Integer", function()
+        with_header([[
+            typedef enum { FFI_SAFE_ZERO = 0,
+                           FFI_SAFE_HIGH = 0xffffffffU } ffi_safe_enum;
+            typedef enum { FFI_WIDE_ZERO = 0,
+                           FFI_WIDE_HIGH = 0x8000000000000000ULL }
+                ffi_wide_enum;
+            enum ffi_named_wide_enum {
+                FFI_NAMED_WIDE_ZERO = 0,
+                FFI_NAMED_WIDE_HIGH = 0x8000000000000000ULL
+            };
+            static enum { FFI_OBJECT_ZERO = 0,
+                          FFI_OBJECT_ONE = 1 } ffi_enum_object;
+            static ffi_safe_enum ffi_safe_take(ffi_safe_enum value) {
+                return value;
+            }
+            static ffi_wide_enum ffi_wide_take(ffi_wide_enum value) {
+                return value;
+            }
+            typedef ffi_wide_enum (*ffi_wide_callback)(void);
+            static ffi_wide_enum ffi_wide_result(void) {
+                return FFI_WIDE_HIGH;
+            }
+            static ffi_wide_callback ffi_wide_pointer(void) {
+                return ffi_wide_result;
+            }
+        ]], function(header)
+            local unused_ok, unused_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer return 1 end
+            ]])
+            assert.truthy(unused_ok, unused_err)
+
+            local safe_ok, safe_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    return c.ffi_safe_take(c.FFI_SAFE_HIGH) as integer
+                end
+            ]])
+            assert.truthy(safe_ok, safe_err)
+
+            local enumerator_ok, enumerator_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    return c.FFI_WIDE_ZERO as integer
+                end
+            ]])
+            assert.truthy(enumerator_ok, enumerator_err)
+
+            local high_ok, high_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    return c.FFI_WIDE_HIGH as integer
+                end
+            ]])
+            assert.falsy(high_ok)
+            assert.truthy(high_err:find(
+                "C enumerator 'FFI_WIDE_HIGH' is outside the range of " ..
+                    "lua_Integer", 1, true), high_err)
+            assert.falsy(high_err:find("cannot cast", 1, true), high_err)
+
+            local named_zero_ok, named_zero_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    return c.FFI_NAMED_WIDE_ZERO as integer
+                end
+            ]])
+            assert.truthy(named_zero_ok, named_zero_err)
+
+            local object_ok, object_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    return c.ffi_enum_object as integer
+                end
+            ]])
+            assert.truthy(object_ok, object_err)
+
+            local named_high_ok, named_high_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    return c.FFI_NAMED_WIDE_HIGH as integer
+                end
+            ]])
+            assert.falsy(named_high_ok)
+            assert.truthy(named_high_err:find(
+                "C enumerator 'FFI_NAMED_WIDE_HIGH' is outside the range " ..
+                    "of lua_Integer", 1, true), named_high_err)
+
+            local wide_ok, wide_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    return c.ffi_wide_take(c.FFI_WIDE_ZERO) as integer
+                end
+            ]])
+            assert.falsy(wide_ok)
+            assert.truthy(wide_err:find(
+                "full range fits in lua_Integer", 1, true), wide_err)
+            assert.falsy(wide_err:find("cannot cast", 1, true), wide_err)
+
+            local address_ok, address_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    local callback: c.ffi_wide_callback = c.ffi_wide_result
+                    return 1
+                end
+            ]])
+            assert.truthy(address_ok, address_err)
+
+            local address_call_ok, address_call_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    local callback: c.ffi_wide_callback = c.ffi_wide_result
+                    return callback() as integer
+                end
+            ]])
+            assert.falsy(address_call_ok)
+            assert.truthy(address_call_err:find(
+                "full range fits in lua_Integer", 1, true),
+                address_call_err)
+
+            local pointer_ok, pointer_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    local callback = c.ffi_wide_pointer()
+                    return callback() as integer
+                end
+            ]])
+            assert.falsy(pointer_ok)
+            assert.truthy(pointer_err:find(
+                "full range fits in lua_Integer", 1, true), pointer_err)
+        end)
+    end)
+
+    it("validates enum carriers at the exact value and declarator boundary",
+    function()
+        with_header([[
+            typedef enum { FFI_PTR_ZERO = 0,
+                           FFI_PTR_WIDE = 0x8000000000000000ULL }
+                ffi_pointer_wide_enum;
+            typedef enum { FFI_OWNER_A = 1 } ffi_owner_a;
+            typedef enum { FFI_OWNER_B = 2 } ffi_owner_b;
+            static ffi_owner_b ffi_take_b(ffi_owner_b value) {
+                return value;
+            }
+            static int ffi_take_int(int value) { return value; }
+            static int ffi_prototype_pointer(enum ffi_local_tag *value) {
+                return value == 0;
+            }
+            typedef int (*ffi_prototype_callback)(
+                enum ffi_callback_local_tag *value);
+            static ffi_prototype_callback ffi_get_prototype_callback(void) {
+                return 0;
+            }
+        ]], function(header)
+            local pointer_ok, pointer_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                local type Wide = c.ffi_pointer_wide_enum
+                local type DirectWidePointer = *c.ffi_pointer_wide_enum
+                local type AliasWidePointer = *Wide
+                local type OptionalWide = Wide?
+                local type ArrayWide = {Wide}
+                local type MapWide = {string: Wide}
+                local type FunctionWide = (Wide) -> integer
+            ]])
+            assert.truthy(pointer_ok, pointer_err)
+
+            local unused_alias_ok, unused_alias_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                local type UnusedWide = c.ffi_pointer_wide_enum
+                function f(): integer return 1 end
+            ]])
+            assert.truthy(unused_alias_ok, unused_alias_err)
+
+            for _, composite in ipairs({
+                [[
+                    local type Composite = {Wide}
+                    function f(): integer
+                        local items: Composite = { c.FFI_PTR_ZERO }
+                        return #items
+                    end
+                ]],
+                [[
+                    local type Composite = {string: Wide}
+                    function f(): integer
+                        local items: Composite = {
+                            ["item"] = c.FFI_PTR_ZERO,
+                        }
+                        return 1
+                    end
+                ]],
+            }) do
+                local composite_ok, composite_err = run_checker(
+                    "local c = foreign import " .. string.format("%q", header)
+                    .. "\nlocal type Wide = c.ffi_pointer_wide_enum\n"
+                    .. composite)
+                assert.falsy(composite_ok)
+                assert.truthy(composite_err:find(
+                    "full range fits in lua_Integer", 1, true),
+                    composite_err)
+            end
+
+            local option_value_ok, option_value_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                local type Wide = c.ffi_pointer_wide_enum
+                local type OptionalWide = Wide?
+                function f(): integer
+                    local item: OptionalWide = nil
+                    return 1
+                end
+            ]])
+            assert.falsy(option_value_ok)
+            assert.truthy(option_value_err:find(
+                "full range fits in lua_Integer", 1, true), option_value_err)
+
+            local alias_value_ok, alias_value_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                local type Wide = c.ffi_pointer_wide_enum
+                function f(): integer
+                    local item: Wide = c.FFI_PTR_ZERO
+                    return item as integer
+                end
+            ]])
+            assert.falsy(alias_value_ok)
+            assert.truthy(alias_value_err:find(
+                "full range fits in lua_Integer", 1, true), alias_value_err)
+
+            local direct_ok, direct_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    return c.ffi_prototype_pointer(nil) as integer
+                end
+            ]])
+            assert.falsy(direct_ok)
+            assert.truthy(direct_err:find(
+                "has no usable declaration spelling", 1, true), direct_err)
+
+            local callback_ok, callback_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    local callback = c.ffi_get_prototype_callback()
+                    return callback(nil) as integer
+                end
+            ]])
+            assert.falsy(callback_ok)
+            assert.truthy(callback_err:find(
+                "has no usable declaration spelling", 1, true), callback_err)
+
+            local owner_ok, owner_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    return c.ffi_take_b(c.FFI_OWNER_A) as integer
+                end
+            ]])
+            assert.falsy(owner_ok)
+            assert.truthy(owner_err:find(
+                "types in argument 1", 1, true), owner_err)
+
+            local integer_ok, integer_err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+                function f(): integer
+                    return c.ffi_take_int(c.FFI_OWNER_A) as integer
+                end
+            ]])
+            assert.falsy(integer_ok)
+            assert.truthy(integer_err:find(
+                "types in argument 1", 1, true), integer_err)
+        end)
+    end)
+
+    it("completes a forward enum in a later ordered header", function()
+        with_header([[
+            #ifndef FFI_FORWARD_ENUM_HEADER
+            #define FFI_FORWARD_ENUM_HEADER
+            enum ffi_forward_enum;
+            typedef enum ffi_forward_enum ffi_forward_enum;
+            #endif
+        ]], function(forward_header)
+            with_header([[
+                enum ffi_forward_enum {
+                    FFI_FORWARD_ZERO = 0,
+                    FFI_FORWARD_ONE = 1
+                };
+                typedef enum ffi_forward_enum ffi_forward_enum;
+                static ffi_forward_enum ffi_forward_take(
+                    ffi_forward_enum value) {
+                    return value;
+                }
+            ]], function(definition_header)
+                local ok, err = run_checker([[
+                    local prior = foreign import "]] .. forward_header .. [["
+                    local complete = foreign import "]] .. definition_header .. [["
+                    function f(): integer
+                        local item: prior.ffi_forward_enum =
+                            complete.FFI_FORWARD_ONE
+                        return complete.ffi_forward_take(item) as integer
+                    end
+                ]])
+                assert.truthy(ok, err)
+            end)
+        end)
+    end)
+
+    it("checks enum carrier spelling in the final direct-header context",
+    function()
+        with_header([[
+            enum ffi_context_tag { FFI_CONTEXT_VALUE = 7 };
+            typedef enum ffi_context_tag ffi_context_typedef;
+            static ffi_context_typedef ffi_context_typedef_value(void) {
+                return FFI_CONTEXT_VALUE;
+            }
+            static enum ffi_context_tag ffi_context_tag_value(void) {
+                return FFI_CONTEXT_VALUE;
+            }
+        ]], function(enum_header)
+            with_header([[
+                #define ffi_context_tag ffi_context_shadow
+            ]], function(shadow_header)
+                local typedef_ok, typedef_err = run_checker([[
+                    local c = foreign import "]] .. enum_header .. [["
+                    local shadow = foreign import "]] .. shadow_header .. [["
+                    function f(): integer
+                        return c.ffi_context_typedef_value() as integer
+                    end
+                ]])
+                assert.truthy(typedef_ok, typedef_err)
+
+                local tag_ok, tag_err = run_checker([[
+                    local c = foreign import "]] .. enum_header .. [["
+                    local shadow = foreign import "]] .. shadow_header .. [["
+                    function f(): integer
+                        return c.ffi_context_tag_value() as integer
+                    end
+                ]])
+                assert.falsy(tag_ok)
+                assert.truthy(tag_err:find(
+                    "C enum type", 1, true), tag_err)
+            end)
+        end)
+    end)
+
     it("reports conflicting ordinary C declarations across foreign imports", function()
         with_header("extern int ffi_conflict;\n", function(header1)
             with_header("extern double ffi_conflict;\n", function(header2)

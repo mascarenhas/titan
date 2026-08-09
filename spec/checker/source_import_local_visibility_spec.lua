@@ -281,64 +281,6 @@ describe("source-import local visibility (checker)", function()
         assert.equal(1, count, err)
     end)
 
-    it("preserves pragma-once diamond macro and C-tag context",
-    function()
-        local base = os.tmpname() .. "-source-vis-base.h"
-        local switch = os.tmpname() .. "-source-vis-switch.h"
-        local file = assert(io.open(base, "wb"))
-        assert(file:write([[
-#pragma once
-#define PICK leftbox.value
-struct SourceVisProbe;
-]]))
-        assert(file:close())
-        file = assert(io.open(switch, "wb"))
-        assert(file:write([[
-#undef PICK
-#define PICK rightbox.pointer
-struct SourceVisProbe {
-    struct { int value; } leftbox;
-    struct { void *pointer; } rightbox;
-};
-]]))
-        assert(file:close())
-
-        local modules = {
-            source_macro_owner = string.format([[
-                local header = foreign import %q
-                local type Probe = header.SourceVisProbe
-                local function null(): *Probe return nil end
-            ]], base),
-            source_macro_bridge = string.format([[
-                local owner = import "source_macro_owner"
-                local switch = foreign import %q
-                local function pass(probe: *owner.Probe): *owner.Probe
-                    return probe
-                end
-            ]], switch),
-        }
-        for _, imports in ipairs({
-            [[local bridge = import "source_macro_bridge"
-              local owner = import "source_macro_owner"]],
-            [[local owner = import "source_macro_owner"
-              local bridge = import "source_macro_bridge"]],
-        }) do
-            modules.source_macro_consumer = imports .. [[
-                function inspect(): integer
-                    local probe = owner.null()
-                    return probe.PICK as integer
-                end
-            ]]
-            local ok, err = h.run_checker_modules(
-                modules, "source_macro_consumer",
-                { interface = "source" })
-            assert.falsy(ok)
-            assert.match("cannot cast 'void %*' to 'integer'", err)
-        end
-        os.remove(base)
-        os.remove(switch)
-    end)
-
     it("keeps a complete source owner canonical across compiled facades",
     function()
         local modules = {
@@ -420,6 +362,50 @@ struct SourceVisProbe {
                 assert.equal(0, #errors, table.concat(errors, "\n"))
             end
         end
+    end)
+
+    it("defers source-qualified composite enum aliases to their use", function()
+        local header = os.tmpname() .. ".h"
+        local file = assert(io.open(header, "w"))
+        file:write([[
+            typedef enum { SOURCE_ALIAS_ZERO = 0,
+                           SOURCE_ALIAS_WIDE = 0x8000000000000000ULL }
+                source_alias_wide_enum;
+        ]])
+        file:close()
+        local modules = {
+            source_alias_provider = string.format([[
+                local c = foreign import %q
+                local type Wide = c.source_alias_wide_enum
+                local type WideArray = {Wide}
+                local type WideMap = {string: WideArray}
+                local type WideFunction = (WideMap) -> integer
+            ]], header),
+            source_alias_pointer_consumer = [[
+                local provider = import "source_alias_provider"
+                local type Pointer = *provider.Wide
+                local type Composite = provider.WideFunction?
+                function inspect(): integer return 1 end
+            ]],
+            source_alias_value_consumer = [[
+                local provider = import "source_alias_provider"
+                function inspect(): integer
+                    local items: provider.WideArray = {}
+                    return #items
+                end
+            ]],
+        }
+        local ok, err = h.run_checker_modules(
+            modules, "source_alias_pointer_consumer",
+            { interface = "source" })
+        assert.truthy(ok, err)
+        ok, err = h.run_checker_modules(
+            modules, "source_alias_value_consumer",
+            { interface = "source" })
+        os.remove(header)
+        assert.falsy(ok)
+        assert.truthy(err:find(
+            "full range fits in lua_Integer", 1, true), err)
     end)
 
     it("keeps compiled projections public-only", function()

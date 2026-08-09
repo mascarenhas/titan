@@ -470,10 +470,10 @@ child, which may outlive the Runtime. Application code that owns a child's
 lifecycle must explicitly call `Process:kill` and/or `Process:wait` as needed
 before its Tasks finish.
 
-A `uv_file` is an operating-system descriptor, not a libuv loop handle. The
-Runtime neither registers nor closes File wrappers during shutdown: application
-code owns explicit `File:close()`, and process teardown reclaims a descriptor
-that was deliberately left open.
+A File owns an operating-system descriptor, not a libuv loop handle. The
+Runtime neither registers nor closes these descriptors during shutdown:
+application code owns explicit `File:close()`, and process teardown reclaims a
+descriptor that was deliberately left open.
 
 The Runtime keeps a sparse Task inventory and a sparse live-owner set for the
 C-to-Titan callback bridge. The former determines when the last Task has

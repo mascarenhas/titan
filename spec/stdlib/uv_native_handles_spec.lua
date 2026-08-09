@@ -29,6 +29,16 @@ local RESOURCE_CASES = [[
       return file:is_closed()
     end
 
+    function close_outside_runtime(): string
+      local file = retained_file as fs.File
+      do
+        file:close()
+      catch
+        return traceback
+      end
+      return ""
+    end
+
     function finish_file_in_later_runtime()
       async.run(function (): value
         local file = retained_file as fs.File
@@ -77,6 +87,12 @@ describe("async Runtime native-resource shutdown", function()
 
             resources.schedule(%q)
             async.loop()
+            assert(not resources.file_was_closed())
+
+            local traceback = resources.close_outside_runtime()
+            assert(traceback:match(
+                "file%%.titan:%%d+: in titan%%.uv%%.fs_close"),
+                traceback)
             assert(not resources.file_was_closed())
 
             resources.finish_file_in_later_runtime()

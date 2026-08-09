@@ -649,7 +649,8 @@ ABI 0.21 retained those layouts while advancing the embedded Lua contract
 from 5.5.0 to 5.5.1. The current compiled-module ABI version is `0.22`: the
 source-local `titan.uv` surface/private-provider boundary changes its serialized
 public schema and reconstructible module-userdata prefix while retaining Lua
-5.5.1 and the other ABI-0.21 layouts. `TITAN_VER`, `_0_22`,
+5.5.1. Every module also gains the fixed source-provider identity slot used by
+co-generated importers. `TITAN_VER`, `_0_22`,
 `TITAN_PATH_0_22`, `lib/titan/0.22`, and `stdlib_0_22` advance together; a
 0.21 provider is rejected before its type metadata is decoded. There is no
 0.21-to-0.22 migration or cleanup path; any separately versioned 0.21 tree
@@ -890,6 +891,13 @@ AST order, as does `makemoduletype`.
 
 `checkstat` handlers return a boolean "cannot fall through", stored in the historical `_always_returns` field and used to enforce that functions with fixed nonnil returns cannot fall off the end. Imports go through a `loader` callback (`driver.defaultloader` for real lookup, `driver.tableloader` for in-memory sources in tests); source deps are recursively typechecked, while compiled-provider deps probe the requested `<mangled>_abi`/`<mangled>_types` pair before recovering the interface.
 
+A direct trusted source import may select the producer's local declarations
+through its qualified alias. This capability is direct-only and comes from the
+loader result, never metadata, registry state, static co-residence, or another
+module's import. Binary module interfaces remain public-only. Source-private
+variables and closures use the canonical producer state; generated importers
+verify the exact physical producer identity before reading a private slot.
+
 Titan aliases occupy a module-wide type-only namespace in `symtab`, resolve
 transparently to their RHS `Type.*` value, and never create a run-time member.
 Public aliases are serialized separately as `Type.Module.type_members`; local
@@ -941,8 +949,9 @@ substitution, recursive; error on missing keys). Key facts:
   Titan-generic function entry/fixed-brand closure protocol. ABI 0.21 advances
   the matched Lua runtime to 5.5.1. ABI 0.22 is the source-local `titan.uv`
   surface/private-provider boundary: its serialized public schema and
-  reconstructible module-userdata prefix change, while the Lua contract and
-  other 0.21 layouts remain unchanged.
+  reconstructible module-userdata prefix change, and every module gains the
+  fixed source-provider identity slot used before a co-generated importer may
+  read source-private state. The Lua contract remains unchanged.
 - Each generated logical module object contains the canonical serialized
   interface twice: callable `<mangled>_types`/`_abi` entries and one
   relocation-free, byte-aligned metadata section rendered by
@@ -1104,7 +1113,7 @@ substitution, recursive; error on missing keys). Key facts:
   publishes the owner's method entry points. The importer then resolves those
   transitive symbols through `RTLD_DEFAULT`; it does not open the owner DSO a
   second time.
-- Module state is a `Udata` (`_mod`), allocated with `luaS_newudata(L, 0, NUPVALS)`. Its ABI-visible prefix is exported variables, exported top-level function closures, then exported static closures of public record/union owners in module-member and bytewise-static order. Private user values hold imported modules, record/union metatables, per-nominal static-namespace tables, one unconditional per-state Array-metatable cache immediately after that reconstructed prefix, and module-local Array-writer closures allocated once per constructed structural element type; there is no distinguished `uv[0]` header. Publish function-type tags before any module-variable initializer can construct a lambda or bound-method closure, and initialize Array writers before module variable initializers. There is **no** Lua-facing module table — `require` returns the module `Udata` itself (so `type(require "m")` is `"userdata"`), and all member access (functions, variables, nominal namespaces such as `m.Rec`/`m.Union`) flows through a metatable `__index`/`__newindex` over a unified name→slot member map; functions and nominal namespaces are served read-only (assigning errors), variables use the same dynamic boundary coercions as Lua function arguments and Array writes, and the "not found" message is "member '%s' does not exist". A record instance is likewise a single `Udata` (fields in `uv[0..N-1]`, type identity is its metatable pointer, no raw payload); Lua field writes use that same dynamic policy. A union instance is a single zero-byte `Udata` with the union metatable identity, integer tag in `uv[0]`, and optional payload in `uv[1]`; empty variants allocate no payload slot and instance Lua access exposes methods only.
+- Module state is a `Udata` (`_mod`), allocated with `luaS_newudata(L, 0, NUPVALS)`. Its ABI-visible prefix is exported variables, exported top-level function closures, then exported static closures of public record/union owners in module-member and bytewise-static order. The unconditional per-state Array-metatable cache follows that prefix, then one lightuserdata source-provider identity token, then the deterministic source-private variable/callable region. A direct source importer compares that token with its exact linked producer's hidden immutable identity entry before reading any private slot; a same-name module state installed by another physical provider is an error. Remaining private user values hold imported modules, record/union metatables, per-nominal static-namespace tables, and module-local Array-writer closures allocated once per constructed structural element type; there is no distinguished `uv[0]` header. Publish function-type tags before any module-variable initializer can construct a lambda or bound-method closure, and initialize Array writers before module variable initializers. There is **no** Lua-facing module table — `require` returns the module `Udata` itself (so `type(require "m")` is `"userdata"`), and all member access (functions, variables, nominal namespaces such as `m.Rec`/`m.Union`) flows through a metatable `__index`/`__newindex` over a unified name→slot member map; functions and nominal namespaces are served read-only (assigning errors), variables use the same dynamic boundary coercions as Lua function arguments and Array writes, and the "not found" message is "member '%s' does not exist". A record instance is likewise a single `Udata` (fields in `uv[0..N-1]`, type identity is its metatable pointer, no raw payload); Lua field writes use that same dynamic policy. A union instance is a single zero-byte `Udata` with the union metatable identity, integer tag in `uv[0]`, and optional payload in `uv[1]`; empty variants allocate no payload slot and instance Lua access exposes methods only.
 - Typedef-resolved pointers to Lua's internal `Udata` are GC-bearing FFI
   values, not ordinary C pointers: boxing a non-NULL `Udata *` emits a full
   userdata `TValue` for that same object, NULL boxes as nil, and unboxing
@@ -1259,6 +1268,36 @@ earlier import belong behind one umbrella header imported once.
 
 `foreigntypes.convert` maps C declarations to the `Type.C*` family (`CVoid`, `CInteger`, `CFloat`, `CPointer`, `CArray`, `CStruct`, `CUnion`, `CFunction`, `CTypedef`, `CModule`, and owned storage wrappers). C imports are namespaces, not first-class values: the checker represents them as `Type.CModule` (renamed from the prototype's foreign-module type), typedef-qualified names such as `c.T` may be used in local annotations, and `types.serialize` rejects any exported function/method/variable type that mentions a C FFI type. An eligible named file-scope tag-only `struct T` or `union T` is published as the base-name Titan type `c.T`, but remains its canonical `CStruct`/`CUnion` and generates exact tag spelling; do not invent a `CTypedef`, header alias, or ordinary C identifier. A real same-name typedef always wins. C aggregate fields, C array indexing, `#` on static arrays and counted owned buffers, and explicit C vararg calls are implemented; C array indexing is 0-based, bounds-checked for `CArray` and counted `COwned`, and null-checked but otherwise unchecked for raw `CPointer`. Object-pointer conversions, C arithmetic, relational/equality, bitwise, and shift operators, C promotions, and mixed Titan/C operands follow the target profile plus the contextual probe policy; they do not reuse Titan's Lua-semantics operator helpers. Titan's `and`/`or`/`not` remain excluded from C-mode operators.
 
+Source modules remain ordinary separate C translation units compiled with the
+same configured compiler and flags. Generated C includes every header directly
+foreign-imported by that module plus normalized origin headers reached from C
+types whose declarations codegen actually renders. Retained typedefs and
+aggregates stop at their own spelling; `owned` values render as `Udata *` and do
+not collect payload origins until a real payload cast/access. C operator and
+unsafe-pointer probes use the same direct-plus-rendered-origin rule. Do not
+propagate a blanket source-module header or preprocessing closure, compare
+cross-TU macro/layout/attribute state, or give header order semantic meaning.
+Direct and supplemental quoted headers must both use the same normalized
+`include.rendered` spelling.
+
+A C enum is nominal and is never lowered through the parser's provisional
+`int`. On first value use, the configured compiler must select an ordinary
+carrier whose complete range fits `lua_Integer`; unused unsafe enums remain
+inert. Probe the exact use surface (retaining an outer typedef) in the
+consumer's direct-plus-rendered-origin context; never let one alias/module
+context cache certification for another. Every enumerator expression, including
+one from a tagged enum, is checked independently through exact
+`__typeof__((NAME))` spelling for an ordinary carrier and exact value range, and
+keeps that carrier through C operators. Only enumerator-to-owning-enum adjusts
+implicitly. Calling a C function pointer triggers the same checks on its
+by-value enum parameter/result graph; a pointer to a spellable wide enum needs
+only spelling validation. Transparent Titan aliases do not force a carrier and
+must defer that choice to their eventual use. Directly named qualified anonymous
+enum objects use an exact unqualified, nonpromoting value spelling while every
+object declarator from one anonymous enum retains the same canonical owner; an
+unspellable prototype enum fails closed even below a pointer. Signed/unsigned
+`__int128` are not candidates and Titan has no wide-enum integer lowering.
+
 Exact C integer and floating values stay in their raw C representation until a
 checker-owned conversion or boxing plan reaches a real Titan/Lua carrier
 boundary. Every potentially lossy crossing must use the shared target-profile
@@ -1412,7 +1451,13 @@ are intentionally absent. The combinators do not cancel unfinished inputs.
 
 Runtime cleanup discovers handles exclusively with `uv_walk` and closes them
 with `uv_close`. A `uv_file` is a process descriptor, crosses Runtime sessions,
-and is never registered for shutdown. Closing a `uv_process_t` watcher neither
+and is never registered for shutdown. `titan.uv` keeps it as a source-local
+alias to `libuv.uv_file`; the high-level `fs.File` facade owns the raw
+descriptor, its closed sentinel, and delimiter excess. It marks the sentinel
+before an accepted close can suspend, restores it only on a pre-commit failure,
+and reloads the field for every short-write submission so a concurrent close
+cannot leave a recycled descriptor integer in use. Closing a `uv_process_t`
+watcher neither
 terminates nor reaps its child; child-lifecycle policy belongs above `titan.uv`.
 
 Spawn configuration owns the actual `uv_process_options_t` and stdio array;

@@ -1906,6 +1906,74 @@ describe("Titan types", function()
             assert.falsy(types.consistent(int, types.Integer()))
             assert.equal("c_integer_to_integer",
                 assert(types.coercion(int, types.Integer())).op)
+
+            local enum_left = cint()
+            enum_left._c_enum_identity = "enum:/tmp/one.h:E"
+            local enum_right = types.CInteger(
+                "unsigned int", false, 3, 32)
+            enum_right._c_enum_identity = "enum:/tmp/one.h:E"
+            local enum_other = cint()
+            enum_other._c_enum_identity = "enum:/tmp/two.h:E"
+            assert.truthy(types.equals(enum_left, enum_right))
+            assert.falsy(types.equals(enum_left, enum_other))
+            assert.falsy(types.equals(enum_left, int))
+
+            local enumerator = cint()
+            enumerator._c_enum_identity = "enumerator:/tmp/one.h:A"
+            enumerator._c_enum_owner = enum_left
+            assert.equal("c_enum_integer",
+                assert(types.coercion(enumerator, enum_left)).op)
+            assert.falsy(types.coercion(enumerator, enum_other))
+            assert.falsy(types.coercion(enumerator, int))
+            assert.falsy(types.coercion(enum_left, enumerator))
+        end)
+
+        it("collects only headers in a rendered C declaration graph",
+        function()
+            local h1 = { rendered = '"/tmp/origin-one.h"' }
+            local h2 = { rendered = '<origin-two.h>' }
+            local h3 = { rendered = '<hidden-field.h>' }
+            local int = cint()
+            local alias = types.CTypedef("origin_int", int)
+            alias._c_origin_header = h1
+            local owner = types.CStruct(
+                nil, "origin_owner", nil, {}, true, false)
+            owner._c_origin_header = h2
+            local pointer = types.CPointer(owner, {})
+            owner.fields[1] = types.CField(
+                owner, "next", pointer, false, false)
+            local callback = types.CFunction(
+                { types.CPointer(alias, {}) },
+                types.CPointer(owner, {}), false, false)
+
+            local includes = types.c_ffi_includes(callback)
+            assert.equal(2, #includes)
+            assert.equal(h1, includes[1])
+            assert.equal(h2, includes[2])
+
+            local hidden = types.CStruct(
+                nil, "hidden_owner", nil, {}, true, false)
+            hidden._c_origin_header = h2
+            local hidden_type = types.CTypedef("hidden_field", int)
+            hidden_type._c_origin_header = h3
+            hidden.fields[1] = types.CField(
+                hidden, "field", hidden_type, false, false)
+            assert.same({ h2 }, types.c_ffi_includes(hidden))
+
+            local owned = types.COwned(hidden, false)
+            owned._c_origin_header = h2
+            assert.same({}, types.c_ffi_includes(owned))
+
+            local function_type = types.Function(
+                { int }, { int }, false, false, false)
+            types.mark_c_ffi_include(function_type, h1)
+            assert.equal(h1, function_type._c_origin_header)
+            assert.is_nil(int._c_origin_header)
+
+            local unrelated = types.Record(
+                "origin.Unrelated", {}, {}, {}, 0)
+            unrelated.hidden = callback
+            assert.same({}, types.c_ffi_includes(unrelated))
         end)
 
         it("compares C function signatures through aliases and qualifiers",

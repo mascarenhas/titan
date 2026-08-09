@@ -357,9 +357,12 @@ There is **no reserved user value**: the module table was removed
 entirely, so member slots are 0-based. The user values hold, in
 allocation order: the importer-reconstructible public prefix (exported module
 variables, ordinary-function canonical closures, then public nominal statics),
-then the shared Array-metatable cache and fixed AST-order private slots for
+then the shared Array-metatable cache, one immutable lightuserdata
+physical-provider identity token, and fixed AST-order private slots for
 locals/imports, remaining canonical closures, and nominal namespace tables.
-The remaining Array-writer, nominal/owned-C metatable, and transitive-owner
+A direct source importer verifies that token against its exact linked producer
+before reading any of those source-private slots. The remaining Array-writer,
+nominal/owned-C metatable, and transitive-owner
 module slots are allocated in inventory/first-use order and may interleave.
 That private order is a coder detail and is not serialized. Array writers are
 initialized before module variable initializers. Callable tags

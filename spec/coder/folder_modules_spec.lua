@@ -278,7 +278,8 @@ end
         assert.falsy(generated:find("foldercase_a_", 1, true))
         assert.falsy(generated:find("foldercase_trace_", 1, true))
         assert.falsy(generated:find("must_not_exist", 1, true))
-        assert.truthy(generated:find('#include "probe.h"', 1, true))
+        assert.truthy(generated:find(
+            '#include "' .. module_folder .. '/probe.h"', 1, true))
     end)
 
     it("shares one API, module state, and cross-constituent Interface",

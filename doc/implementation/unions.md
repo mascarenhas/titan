@@ -404,8 +404,10 @@ adding Interface descriptors, wrappers, and bound-method symbols. ABI 0.21
 retained those Titan layouts while advancing the embedded Lua contract from
 5.5.0 to 5.5.1. ABI 0.22 retains the union schema and Lua contract, but the
 source-local `titan.uv` surface/private-provider boundary changes that module's
-serialized public schema and reconstructible public module-state prefix.
-`TITAN_VER` is now `0.22`, its suffix is `_0_22`, the versioned search variable
+serialized public schema and reconstructible public module-state prefix, and
+every generated module gains the fixed physical-provider identity slot for
+source-private access. `TITAN_VER` is now `0.22`, its suffix is `_0_22`, the
+versioned search variable
 is `TITAN_PATH_0_22`, the installed provider namespace is
 `lib/titan/0.22`, and the generated standard-library support namespace is
 `stdlib_0_22`. A 0.21 interface is rejected before type rehydration or native

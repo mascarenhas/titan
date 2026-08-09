@@ -397,7 +397,9 @@ those layouts while advancing the embedded Lua contract from 5.5.0 to 5.5.1;
 its marker rejects 0.20 before schema decoding or native linking. ABI 0.22 is
 the source-local `titan.uv` surface/private-provider boundary: its public schema
 and reconstructible module-userdata prefix change while Lua 5.5.1 and the other
-0.21 layouts remain unchanged. Its marker rejects 0.21 before schema decoding
+value/native-call layouts remain unchanged. Every generated module additionally
+reserves the fixed physical-provider identity slot that authenticates direct
+source-private state. Its marker rejects 0.21 before schema decoding
 or native linking. The 0.22 publisher does not migrate, clean up, or otherwise
 consume the preserved 0.21 tree, and there is no retained historical cutover
 canary.

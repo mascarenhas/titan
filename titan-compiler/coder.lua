@@ -69,18 +69,30 @@ local function c_string_literal(s)
     return table.concat(out)
 end
 
-function coder._foreign_include_line(include, inherited)
-    if inherited and include and include.rendered then
-        return "#include " .. include.rendered
+function coder._foreign_include_line(include)
+    return "#include " .. assert(include and include.rendered,
+        "foreign include has no normalized spelling")
+end
+
+-- C declarations rendered while generating one module report the origin
+-- headers of their named FFI components. coder.generate installs the collector;
+-- direct unit helpers can still render declarations with no active collector.
+function coder._record_c_type_use(typ)
+    local collect = coder._ffi_include_collector
+    if not collect then return end
+    for _, include in ipairs(types.c_ffi_includes(typ)) do
+        collect(include, false)
     end
-    local name = include and include.include_name
-    local kind = include and include.include_kind
-    if kind == "quote" then
-        return '#include "' .. name .. '"'
-    elseif kind == "angle" then
-        return "#include <" .. name .. ">"
-    end
-    error("invalid checked foreign include descriptor")
+end
+
+function coder._render_c_type_name(typ)
+    coder._record_c_type_use(typ)
+    return cdeclarator.render_type_name(typ)
+end
+
+function coder._render_c_declaration(typ, name)
+    coder._record_c_type_use(typ)
+    return cdeclarator.render_declaration(typ, name)
 end
 
 local function c_integer_literal(n)
@@ -142,20 +154,20 @@ local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     elseif typ._tag == "Type.CInteger" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CInteger") then
         tmpl = "$DST (($CT)ivalue($SRC))"
-        ct = cdeclarator.render_type_name(typ)
+        ct = coder._render_c_type_name(typ)
     elseif typ._tag == "Type.CFloat" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CFloat") then
         tmpl = "$DST (($CT)fltvalue($SRC))"
-        ct = cdeclarator.render_type_name(typ)
+        ct = coder._render_c_type_name(typ)
     elseif types.is_c_udata_pointer(typ) then
         tmpl = "$DST (ttisnil($SRC) ? NULL : (($CT)uvalue($SRC)))"
-        ct = cdeclarator.render_type_name(typ)
+        ct = coder._render_c_type_name(typ)
     elseif typ._tag == "Type.CPointer" or typ._tag == "Type.CArray" or
            (typ._tag == "Type.CTypedef"
             and (types.resolve_c_typedef(typ)._tag == "Type.CPointer"
                  or types.resolve_c_typedef(typ)._tag == "Type.CArray")) then
         tmpl = "$DST (($CT)pvalue($SRC))"
-        ct = cdeclarator.render_type_name(
+        ct = coder._render_c_type_name(
             cdeclarator.adjust_parameter_type(typ))
     elseif typ._tag == "Type.COwned" then
         tmpl = "$DST uvalue($SRC)"
@@ -221,6 +233,12 @@ function coder._source_private_prefix(owner, name)
     -- selected archive cannot advertise its locals for collision preflight.
     return "titan_source_" .. coder._source_private_identifier(owner)
         .. "_" .. coder._source_private_identifier(name)
+end
+
+function coder._source_module_identity_name(modname)
+    -- The suffix cannot collide with a hex-encoded member component.
+    return "titan_source_" .. coder._source_private_identifier(modname)
+        .. "_module_identity"
 end
 
 local function fname_prefix(typ)
@@ -328,6 +346,8 @@ function coder.external_symbols(modname, ast)
         { symbol = mangled .. "_types", owner = "module type entry" },
         { symbol = mangled .. "_init", owner = "module initializer entry" },
         { symbol = "luaopen_" .. mangled, owner = "module Lua entry" },
+        { symbol = coder._source_module_identity_name(modname),
+          owner = "source module identity entry" },
     }
 
     local function add(symbol, owner)
@@ -383,6 +403,8 @@ function coder.interface_external_symbols(modname, modtype)
         { symbol = mangled .. "_types", owner = "module type entry" },
         { symbol = mangled .. "_init", owner = "module initializer entry" },
         { symbol = "luaopen_" .. mangled, owner = "module Lua entry" },
+        { symbol = coder._source_module_identity_name(modname),
+          owner = "source module identity entry" },
     }
 
     local function add(symbol, owner)
@@ -749,7 +771,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         ]], {
             EXP = exp,
             VAR = cvar,
-            CT = cdeclarator.render_type_name(typ),
+            CT = coder._render_c_type_name(typ),
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
@@ -768,7 +790,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         ]], {
             EXP = exp,
             VAR = cvar,
-            CT = cdeclarator.render_type_name(typ),
+            CT = coder._render_c_type_name(typ),
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
@@ -1270,12 +1292,12 @@ end
 
 local function foreigncast(exp, typ --[[:table]])
     return render([[(($CASTTYPE)($CEXP))]], {
-        CASTTYPE = cdeclarator.render_type_name(typ),
+        CASTTYPE = coder._render_c_type_name(typ),
         CEXP = exp,
     })
 end
 
-local function ctype(typ --[[:table]])
+function coder._raw_ctype(typ --[[:table]])
     if typ._tag == "Type.Integer" then return "lua_Integer"
     elseif typ._tag == "Type.Float" then return "lua_Number"
     elseif typ._tag == "Type.Boolean" then return "int"
@@ -1298,9 +1320,14 @@ local function ctype(typ --[[:table]])
     elseif typ._tag == "Type.Function" then return "TValue"
     -- A foreign typedef of a supported scalar (e.g. size_t -> integer) can
     -- leak in via inference; use the C type of its resolved underlying type.
-    elseif typ._tag == "Type.Typedef" then return ctype(typ._type)
+    elseif typ._tag == "Type.Typedef" then return coder._raw_ctype(typ._type)
     else error("invalid type " .. types.tostring(typ))
     end
+end
+
+local function ctype(typ --[[:table]])
+    coder._record_c_type_use(typ)
+    return coder._raw_ctype(typ)
 end
 
 local function initval(typ --[[:table]])
@@ -1315,7 +1342,7 @@ end
 -- local/param C autos ordinary (and avoiding volatile in the function ABI).
 local function cvardecl(ctx, typ, name)
     if types.is_direct_c(typ) or typ._tag == "Type.Pointer" then
-        return cdeclarator.render_declaration(typ, name)
+        return coder._render_c_declaration(typ, name)
     end
     return ctype(typ) .. " " .. name
 end
@@ -1594,6 +1621,9 @@ function coder._checked_coercion_plan_impl(
     if expected_numeric and op == expected_numeric then
         coder._checked_numeric_coercion(
             coercion, source, target, use)
+    elseif op == "c_enum_integer" then
+        assert(types.is_c_enum_integer_conversion(source, target),
+            use .. " has a mismatched C enum/integer operation")
     elseif op == "c_owner_truthiness" then
         assert(source._tag == "Type.COwned"
                and target._tag == "Type.Boolean",
@@ -2505,7 +2535,7 @@ end
 
 local function cpointerdecl(typ, name)
     if types.is_direct_c(typ) or typ._tag == "Type.Pointer" then
-        return cdeclarator.render_declaration(
+        return coder._render_c_declaration(
             types.CPointer(typ, {}), name)
     end
     return ctype(typ) .. " *" .. name
@@ -2513,7 +2543,7 @@ end
 
 local function cpointertype(typ)
     if types.is_direct_c(typ) or typ._tag == "Type.Pointer" then
-        return cdeclarator.render_type_name(types.CPointer(typ, {}))
+        return coder._render_c_type_name(types.CPointer(typ, {}))
     end
     return ctype(typ) .. "*"
 end
@@ -2524,7 +2554,7 @@ local function cfunctiondecl(rettype, name, params, is_pointer)
     if rettype
        and (types.is_direct_c(rettype)
             or rettype._tag == "Type.Pointer") then
-        return cdeclarator.render_declaration(rettype, declarator)
+        return coder._render_c_declaration(rettype, declarator)
     end
     return (rettype and ctype(rettype) or "void") .. " " .. declarator
 end
@@ -5443,6 +5473,7 @@ function coder._numeric_trait(source_type, target_type, typ)
 end
 
 function coder._numeric_c_name(typ, trait)
+    coder._record_c_type_use(typ)
     local resolved = coder._resolve_cast_type(typ)
     if resolved._tag == "Type.Integer" then return "lua_Integer" end
     if resolved._tag == "Type.Float" then return "lua_Number" end
@@ -5827,7 +5858,7 @@ function coder._code_checked_boxed_numeric(
         PREDICATE = predicate,
         SOURCE = source,
         CVAR = cvar,
-        CT = cdeclarator.render_type_name(target),
+        CT = coder._render_c_type_name(target),
         THROW = codethrow(loc,
             "%s:%d:%d: type error, expected representable %s but found %s",
             {
@@ -5862,7 +5893,7 @@ function coder._code_checked_numeric_setslot(typ, dst, src)
             $STORE
         } while (0);
     ]], {
-        DECL = cdeclarator.render_declaration(
+        DECL = coder._render_c_declaration(
             typ, "_titan_numeric_box_source"),
         SRC = src,
         PREDICATE = predicate,
@@ -6090,7 +6121,11 @@ function coder._code_coercion_predicate(
             coercion, source_type, target_type,
             "written numeric coercion type test")
     end
-    if op == "float_to_integer" then
+    if op == "c_enum_integer" then
+        assert(types.is_c_enum_integer_conversion(source_type, target_type),
+            "C enum/integer predicate has mismatched types")
+        return render("(void)($SOURCE);", { SOURCE = source }), "1"
+    elseif op == "float_to_integer" then
         local cvalue, value = newtmp(ctx, types.Float())
         local cfloor, floor = newtmp(ctx, types.Float())
         local cinteger, integer = newtmp(ctx, types.Integer())
@@ -6441,7 +6476,7 @@ local function newforeigntmp(ctx --[[:table]], typ --[[:table]],
         fdecl = "char* " .. tmpname
         finit = " = NULL"
     elseif typ._tag == "Type.Pointer" or types.is_direct_c(typ) then
-        fdecl = cdeclarator.render_declaration(typ, tmpname)
+        fdecl = coder._render_c_declaration(typ, tmpname)
         if typ._tag == "Type.Pointer" or typ._tag == "Type.COwned"
            or rtyp._tag == "Type.CPointer" then
             finit = " = NULL"
@@ -7016,7 +7051,7 @@ local codecindex_parts
 
 local function code_owned_payload(owner, pointee)
     return render("(($CT)getudatamem($OWNER))", {
-        CT = cdeclarator.render_type_name(types.CPointer(pointee, {})),
+        CT = coder._render_c_type_name(types.CPointer(pointee, {})),
         OWNER = owner,
     })
 end
@@ -7077,7 +7112,7 @@ function coder._materialize_c_aggregate(ctx, exp)
         $NAME = $VALUE;
     ]], {
         STATS = stats,
-        DECLARATION = cdeclarator.render_declaration(exp._type, name),
+        DECLARATION = coder._render_c_declaration(exp._type, name),
         NAME = name,
         VALUE = value,
     }), name
@@ -7130,7 +7165,7 @@ function coder._prepare_c_base(ctx, exp, allow_temporary)
         local length = basetype.count and render(
             "((lua_Integer)($OWNER->len / sizeof($TYPE)))", {
                 OWNER = owner,
-                TYPE = cdeclarator.render_declaration(
+                TYPE = coder._render_c_declaration(
                     basetype.pointee, ""),
             }) or nil
         return stats, {
@@ -7867,6 +7902,13 @@ local function nativetoforeignexp(ctx, exp, cexp, target, projection)
     local operation = coercion and coercion.op
         or conversion and (conversion.op or conversion.kind)
 
+    if operation == "c_enum_integer" then
+        coder._checked_coercion_plan(
+            coercion, exp._type, target,
+            "native-to-C enum/integer coercion")
+        return "", foreigncast(cexp, target)
+    end
+
     if projection and target
        and coder._is_numeric_type(exp._type)
        and coder._is_numeric_type(target)
@@ -7903,7 +7945,7 @@ local function nativetoforeignexp(ctx, exp, cexp, target, projection)
 
     if operation == "c_function_pointer_to_void" then
         return "", render("titan_cast_func($TARGET, $SOURCE)", {
-            TARGET = cdeclarator.render_type_name(target),
+            TARGET = coder._render_c_type_name(target),
             SOURCE = cexp,
         })
     end
@@ -11325,7 +11367,7 @@ codecindex_parts = function(ctx, node)
         baseexp = code_owned_payload(bexp, basetype.pointee)
         lenexp = render("((lua_Integer)($OWNER->len / sizeof($CT)))", {
             OWNER = bexp,
-            CT = cdeclarator.render_declaration(basetype.pointee, ""),
+            CT = coder._render_c_declaration(basetype.pointee, ""),
         })
     else
         error("invalid C index base " .. types.tostring(node.exp1._type))
@@ -12143,7 +12185,7 @@ local function codeunaryop(ctx, node, iscondition)
         elseif etype._tag == "Type.COwned" and etype.count then
             return estats, render("((lua_Integer)($OWNER->len / sizeof($CT)))", {
                 OWNER = ecode,
-                CT = cdeclarator.render_declaration(etype.pointee, ""),
+                CT = coder._render_c_declaration(etype.pointee, ""),
             })
         else
             return estats, "tsslen(" .. ecode .. ")"
@@ -12631,8 +12673,8 @@ local function codebinaryop(ctx, node, _)
             return cstats, cmp
         end
     elseif (op == "==" or op == "!=") and
-            ctype(node.lhs._type) == "TValue" and
-            ctype(node.rhs._type) == "TValue" then
+            coder._raw_ctype(node.lhs._type) == "TValue" and
+            coder._raw_ctype(node.rhs._type) == "TValue" then
         local stats, lcode, rcode = ordered_binary_operands(ctx, node)
         if op == "!=" then
             return stats, "!luaV_rawequalobj(&(" .. lcode .. "),&(" .. rcode .. "))"
@@ -12860,7 +12902,7 @@ local function codecpseudonew(ctx, node)
         CTMP = ctmp,
         COUNTDECL = countdecl,
         COUNTASSIGN = countassign,
-        CT = cdeclarator.render_declaration(ctyp, ""),
+        CT = coder._render_c_declaration(ctyp, ""),
         TMPNAME = tmpname,
         TMPSLOT = tmpslot,
         META = c_integer_literal(owned_c_metatable(ctx, ret)),
@@ -15015,6 +15057,7 @@ Udata *$INITNAME(lua_State *L) {
         Udata *_mod = luaS_newudata(L, 0, $NUPVALS);
         titan_pushmodule(L, _mod);
         lua_setfield(L, LUA_REGISTRYINDEX, $MODNAMESTR);
+        $INITSOURCEIDENTITY
         $INITARRAYMETA
         $LOADMODULES1
         $INITMODULES
@@ -15097,7 +15140,30 @@ local function import_module(loadmods, initmods, sigs, mprefixes,
     local modname = node.modname
     local upvalue = node._upvalue
     local mprefix = mangle_qn(modname) .. "_"
+    local public_layout = coder._public_prefix_layout(node._type)
+    local source_check = ""
     mprefixes[modname] = mprefix
+    if node._source_import then
+        assert(not dynamic,
+            "trusted source import cannot use dynamic initialization")
+        local identity = coder._source_module_identity_name(modname)
+        local identity_index = #public_layout + 1
+        table.insert(sigs, render([[
+            TITAN_SOURCE_LOCAL const void *$IDENTITY(void);
+        ]], { IDENTITY = identity }))
+        source_check = render([[
+            if(_m->nuvalue <= $IDENTITY_INDEX
+               || !ttislightuserdata(&_m->uv[$IDENTITY_INDEX].uv)
+               || pvalue(&_m->uv[$IDENTITY_INDEX].uv) != $IDENTITY()) {
+                luaL_error(L, "source import '$MODULE' found canonical "
+                    "module state from a different physical provider");
+            }
+        ]], {
+            IDENTITY = identity,
+            IDENTITY_INDEX = c_integer_literal(identity_index),
+            MODULE = modname,
+        })
+    end
     if dynamic then
         -- The checker may have rehydrated this logical module from an ancestor
         -- container. Its transient file field records that physical provider;
@@ -15118,7 +15184,11 @@ local function import_module(loadmods, initmods, sigs, mprefixes,
                 setuvalue(L, &_mod->uv[$INDEX].uv, _m);
                 luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
             }
-        ]], { HANDLE = mprefix .. "handle", INIT = mprefix .. "init", INDEX = c_integer_literal(upvalue) }))
+        ]], {
+            HANDLE = mprefix .. "handle",
+            INIT = mprefix .. "init",
+            INDEX = c_integer_literal(upvalue),
+        }))
     else
         table.insert(sigs, render("extern Udata *$INIT(lua_State *L);", {
             INIT = mprefix .. "init"
@@ -15126,13 +15196,17 @@ local function import_module(loadmods, initmods, sigs, mprefixes,
         table.insert(initmods, render([[
             {
                 Udata *_m = $INIT(L);
+                $SOURCE_CHECK
                 setuvalue(L, &_mod->uv[$INDEX].uv, _m);
                 luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
             }
-        ]], { INIT = mprefix .. "init", INDEX = c_integer_literal(upvalue) }))
+        ]], {
+            INIT = mprefix .. "init",
+            INDEX = c_integer_literal(upvalue),
+            SOURCE_CHECK = source_check,
+        }))
     end
     -- Reconstruct the complete ABI-visible prefix, including nominal statics.
-    local public_layout = coder._public_prefix_layout(node._type)
     for slot, entry in ipairs(public_layout) do
         local index = slot - 1
         if entry.kind == "variable" then
@@ -15143,8 +15217,9 @@ local function import_module(loadmods, initmods, sigs, mprefixes,
     end
     if node._source_import then
         for slot, entry in ipairs(coder._source_prefix_layout(node._type)) do
-            -- Public slots occupy 0..N-1 and the Array metatable occupies N.
-            local index = #public_layout + slot
+            -- Public slots occupy 0..N-1, the Array metatable occupies N,
+            -- and the source-provider identity occupies N+1.
+            local index = #public_layout + 1 + slot
             if entry.kind == "variable" then
                 entry.value._upvalue = index
             else
@@ -15820,6 +15895,12 @@ local function allocate_upvalues(tlcontext, ast)
     -- every binary importer.
     tlcontext.array_metatable_upvalue = nextupvalue(tlcontext)
 
+    -- A direct source importer must consume the exact co-generated producer,
+    -- not a same-name module state left in the registry by another provider.
+    -- The immutable provider token in this fixed compiler-private slot lets an
+    -- importer prove that ownership before it reads any source-only slot.
+    tlcontext.source_identity_upvalue = nextupvalue(tlcontext)
+
     -- A trusted source importer additionally reconstructs this deterministic
     -- compiler-private region. It includes mutable module variables and every
     -- first-class local callable, but is deliberately absent from metadata and
@@ -15915,7 +15996,21 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     local initvars = {}
     local includes = {}
     local sigs = {}
-    local foreignimports = {}
+    local direct_foreign_includes = {}
+    local direct_foreign_include_keys = {}
+    local supplemental_foreign_includes = {}
+    local function add_foreign_include(include, direct)
+        local key = assert(include.rendered,
+            "foreign include has no normalized spelling")
+        if direct then
+            if direct_foreign_include_keys[key] then return end
+            direct_foreign_include_keys[key] = true
+            direct_foreign_includes[#direct_foreign_includes + 1] = include
+        elseif not supplemental_foreign_includes[key] then
+            supplemental_foreign_includes[key] = include
+        end
+    end
+    coder._ffi_include_collector = add_foreign_include
     local initmods = {}
     local loadmods = {}
     local loadglobals = {}
@@ -15962,24 +16057,22 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
 
     allocate_upvalues(tlcontext, ast)
 
+    local source_identity = coder._source_module_identity_name(modname)
+    table.insert(sigs, render([[
+        TITAN_SOURCE_LOCAL const void *$IDENTITY(void) {
+            static const char token = 0;
+            return &token;
+        }
+    ]], { IDENTITY = source_identity }))
+
     for _, node in ipairs(ast) do
         if not node._ignore then
             local tag = node._tag
             if tag == "Ast.TopLevelImport" then
                 import_module(loadmods, initmods, sigs, mprefixes,
                     static_deps[node.modname] ~= true, node)
-                if node._source_import then
-                    -- Splice the checked target's complete ordered header
-                    -- effects at this import edge. Binary imports carry none.
-                    for _, entry in ipairs(
-                            node._type._source_foreign_includes or {}) do
-                        table.insert(foreignimports,
-                            coder._foreign_include_line(entry.include, true))
-                    end
-                end
             elseif tag == "Ast.TopLevelForeignImport" then
-                table.insert(foreignimports,
-                    coder._foreign_include_line(assert(node._include)))
+                add_foreign_include(assert(node._include), true)
             elseif tag == "Ast.TopLevelVar" then
                 codevardec(initctx, initvars, switch_get, switch_set, gvar_map, node)
             elseif tag == "Ast.TopLevelRecord" then
@@ -16452,6 +16545,12 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         FUNCS = table.concat(funcs, "\n"),
         INITNAMES = initnames,
         MODNAMESTR = c_string_literal("Titan module "..modname),
+        INITSOURCEIDENTITY = render([[
+            setpvalue(&_mod->uv[$INDEX].uv, (void *)$IDENTITY());
+        ]], {
+            INDEX = c_integer_literal(tlcontext.source_identity_upvalue),
+            IDENTITY = source_identity,
+        }),
         INITARRAYMETA = render([[
             {
                 Table *_array_metatable = titan_array_metatable(L);
@@ -16471,6 +16570,23 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
         INITNAME = tlcontext.prefix .. 'init',
     }))
+
+    local foreignimports = {}
+    for _, include in ipairs(direct_foreign_includes) do
+        foreignimports[#foreignimports + 1] =
+            coder._foreign_include_line(include)
+    end
+    local supplemental_keys = {}
+    for key in pairs(supplemental_foreign_includes) do
+        if not direct_foreign_include_keys[key] then
+            supplemental_keys[#supplemental_keys + 1] = key
+        end
+    end
+    table.sort(supplemental_keys, util.bytewise_less)
+    for _, key in ipairs(supplemental_keys) do
+        foreignimports[#foreignimports + 1] = coder._foreign_include_line(
+            supplemental_foreign_includes[key])
+    end
 
     local preamble_substs = {
         FIXEDPREFIX =
@@ -16512,6 +16628,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         end
     end
 
+    coder._ffi_include_collector = nil
     return preamble .. "\n\n" .. table.concat(code, "\n\n"),
         direct_native_modules
 end

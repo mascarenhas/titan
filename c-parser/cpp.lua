@@ -492,16 +492,6 @@ local function probe_default_defines(config)
     return probe_macro_definitions(config, "/dev/null")
 end
 
--- Return the configured compiler's final macro environment for one C source.
--- This is used for generated ordered include preambles, whose #pragma once and
--- implementation-defined preprocessing behavior cannot be modeled exactly by
--- independently replaying headers in the declaration-extraction preprocessor.
-function cpp.probe_macro_definitions(source, options)
-    local config, err = normalize_toolchain(options)
-    if not config then return nil, err end
-    return probe_macro_definitions(config, source)
-end
-
 function cpp.new_context(options)
     local config, err = normalize_toolchain(options)
     if not config then

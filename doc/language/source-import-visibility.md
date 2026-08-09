@@ -59,16 +59,20 @@ into the importing module's lexical scope.
 ## Foreign declarations
 
 A source-visible declaration may contain a C FFI type even though its consumer
-did not write the corresponding `foreign import`. The compiler therefore carries
-the ordered closure of required C headers and C tag/prototype context through
-source imports. That closure is transitive because every generated C translation
-unit must see declarations used by its direct source dependencies.
+did not write the corresponding `foreign import`. Each generated C translation
+unit includes its own direct foreign-import headers plus the normalized origin
+headers of C types for which that unit actually emits declarations. An unused
+source dependency does not contribute a blanket or transitive header closure.
+Quoted origins use the same normalized spelling in producer and consumer, so
+path-sensitive declarations such as `sizeof(__FILE__)` agree.
 
-This C context does **not** grant Titan visibility transitively and does not
-expose the producer's `foreign import` alias as a member. Consumers use C-bearing
-values through the producer's qualified Titan declarations. Header order,
-redefinition, `#undef`, include guards, and `#pragma once` have the same effect as
-in the generated C preamble.
+This does **not** expose the producer's `foreign import` alias or grant Titan
+visibility transitively. Source modules remain ordinary C translation units
+compiled with the same configured compiler and flags. Headers are expected to
+be self-contained and compatible under ordinary C rules; Titan does not compare
+macro environments, layouts, attributes, or preprocessing histories between
+translation units. Import an umbrella header directly when declarations depend
+on a particular include or macro order.
 
 ## Binary imports and Lua
 
@@ -90,7 +94,9 @@ search path. Initialization still follows the ordinary acyclic import graph and
 its topological order.
 
 The generic source overlay is compiler-only and is not a serialized interface
-format. Titan ABI 0.22 nevertheless accompanies this feature because the
-standard-library dogfood pass deliberately made most of `titan.uv` local,
-changing that module's serialized public members and reconstructible public
-closure prefix. Older providers must be rebuilt; no migration is performed.
+format. Titan ABI 0.22 nevertheless accompanies this feature for two concrete
+layout changes: the standard-library dogfood pass deliberately made most of
+`titan.uv` local, changing that module's serialized public members and
+reconstructible public closure prefix, and every generated module now carries
+the fixed physical-provider identity slot used before source-private access.
+Older providers must be rebuilt; no migration is performed.

@@ -767,7 +767,10 @@ retained those 0.20 layouts while advancing the embedded Lua contract from
 5.5.0 to 5.5.1. The active ABI is now **0.22**: the source-local
 `titan.uv` surface/private-provider boundary changes its serialized public
 schema and reconstructible module-userdata prefix while retaining Lua 5.5.1
-and the other 0.21 layouts. The active suffix and provider namespace advance
+and the other value/native-call layouts from 0.21. Every generated module also
+adds one fixed compiler-private, ABI-visible physical-provider identity slot so
+a direct source importer can reject canonical state installed by another
+provider. The active suffix and provider namespace advance
 with the marker (`_0_22`, `TITAN_PATH_0_22`, `lib/titan/0.22`); 0.21 providers
 are rejected before interface rehydration. Existing 0.21 artifacts remain a
 separately versioned prior installation and are not migrated or cleaned up by
@@ -781,8 +784,8 @@ one `Udata` (`_mod`) created by `_init`: the module table's slot is gone
 entirely, and member slots are 0-based with no reserved user value. The user values hold module
 variables, imported modules' `Udata`s, exported-function and
 exported-nominal-static canonical closures, the unconditional Array-metatable
-cache, module-local Array writer closures, cached record/union/Interface
-metatables, and
+cache, the immutable physical-provider identity token, module-local Array
+writer closures, cached record/union/Interface metatables, and
 per-nominal static-namespace tables
 (allocation order below). Every generated function receives this `Udata` as its
 `_mod` parameter; the Lua wrappers recover it from their closure's
@@ -798,6 +801,7 @@ Udata *counter_init(lua_State *L) {
     if(lua_isnil(L, -1)) {
         _initialized = 1;
         /* create and register _mod (luaS_newudata(L, 0, NUPVALS));
+           $INITSOURCEIDENTITY (this translation unit's immutable token),
            $INITARRAYMETA (shared Array metatable/cache),
            $LOADMODULES1 (dlopen dynamic deps), $INITMODULES (dep inits),
            $LOADGLOBALS (symbols published by transitive RTLD_GLOBAL deps),
@@ -941,7 +945,8 @@ layouts require a full boundary even though the metadata container is still
 unchanged. ABI 0.21 retained those layouts and advanced the matched Lua
 internal-header/runtime contract. ABI 0.22 retains them and Lua 5.5.1 while
 changing `titan.uv`'s serialized public schema and reconstructible public
-prefix.
+prefix and adding the fixed physical-provider identity slot to every generated
+module.
 
 ## Static vs dynamic dependency wiring
 
@@ -1022,10 +1027,14 @@ prefix entirely from the serialized interface:
 The producer stamps the corresponding AST declarations and an importer walks
 the same layout, so an imported constructor or nominal function is the exact
 canonical first-class closure. The unconditional per-module Array metatable
-cache is the first private slot, followed by the fixed AST-order allocation
-for local variables/imports, referenced local ordinary-function closures,
-every static not already in the public prefix, and each nominal owner's
-private static-namespace table. Remaining private slots are allocated as
+cache is the first private slot. One fixed lightuserdata slot containing the
+source producer's immutable physical-provider token follows it, before the
+fixed AST-order allocation for local variables/imports, referenced local
+ordinary-function closures, every static not already in the public prefix, and
+each nominal owner's private static-namespace table. A direct source importer
+compares that token with the hidden identity function of its exact linked
+producer before reading any source-private slot. Remaining private slots are
+allocated as
 their inventories or first uses are encountered during code generation:
 module-local Array writers; record/union, Interface, and owned-C metatables;
 concrete-owner module caches needed by wrappers; and transitive module
@@ -1039,9 +1048,10 @@ construct an Array without observing an empty slot. Publishing tags first is
 also required because a variable initializer may construct a lambda or
 bound-method closure and must copy a live exact tag into it. First-use private
 objects are filled by `init_data_from_other_modules` or the module
-initializer. Thus all private slots, beginning with the Array cache, come
-*after* the importer-visible public prefix, so moving or adding them does not
-perturb the importer slot math.
+initializer. Thus all private slots, beginning with the Array cache and fixed
+provider-identity token, come *after* the importer-visible public prefix. Their
+fixed header is part of ABI 0.22, while later inventory/first-use slots remain
+coder-private and do not perturb the public importer slot math.
 
 An importing module never sees this module's AST: it recomputes the complete
 prefix from the `Type.Module` interface. Cross-module variable access then

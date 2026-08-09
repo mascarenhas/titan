@@ -173,11 +173,6 @@ function symtab:apply_foreign_macro_changes(changes, definitions)
     self.foreign_field_macro_cache = {}
 end
 
-function symtab:replace_foreign_macro_definitions(definitions)
-    self.foreign_macro_definitions = definitions or {}
-    self.foreign_field_macro_cache = {}
-end
-
 function symtab:find_foreign_macro_definition(name)
     if not self.foreign_macro_definitions then return nil, false end
     return self.foreign_macro_definitions[name], true
@@ -361,58 +356,6 @@ function symtab:set_c_tag_canonical(record, canonical)
     end
     record.canonical = canonical
     return canonical
-end
-
-local function rebase_source_c_definitions(value, order, seen)
-    if type(value) ~= "table" then return end
-    seen = seen or {}
-    if seen[value] then return end
-    seen[value] = true
-    if (value._tag == "Type.CStruct" or value._tag == "Type.CUnion")
-       and value.complete then
-        value._definition_order = order
-    end
-    for _, child in pairs(value) do
-        rebase_source_c_definitions(child, order, seen)
-    end
-end
-
-local function prefer_complete_c_canonical(target, source)
-    if source and (not target.canonical
-                   or (source.complete and not target.canonical.complete)) then
-        target.canonical = source
-    end
-end
-
--- Merge only the C tag/prototype identity context carried by a direct source
--- import. Titan aliases remain qualified and direct-only; this independent
--- context models the inherited headers present in the generated translation
--- unit and is itself propagated transitively.
-function symtab:merge_source_c_context(context)
-    if type(context) ~= "table" then return true end
-    local order = self.current_toplevel_order or 0
-    rebase_source_c_definitions(context, order)
-
-    for name, source in pairs(context.file_tags or {}) do
-        local record, err = self:register_c_file_tag(
-            name, source.kind, source.provenance, source.canonical)
-        if not record then return nil, err end
-        prefer_complete_c_canonical(record, source.canonical)
-    end
-    for header, scopes in pairs(context.prototype_tags or {}) do
-        for scope_id, names in pairs(scopes) do
-            for name, source in pairs(names) do
-                local provenance = source.provenance or {}
-                provenance.header = header
-                local record, err = self:bind_c_prototype_tag(
-                    name, source.kind, scope_id, provenance,
-                    false, source.canonical)
-                if not record then return nil, err end
-                prefer_complete_c_canonical(record, source.canonical)
-            end
-        end
-    end
-    return true
 end
 
 -- C struct/union objects are canonical and may be completed in place by a

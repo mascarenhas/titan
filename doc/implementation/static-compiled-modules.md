@@ -377,7 +377,8 @@ changed the native runtime representation of Arrays and first-class Titan
 functions. ABI 0.21 again retained the container while advancing the embedded
 Lua contract to 5.5.1. ABI 0.22 retains that container and Lua contract while
 changing `titan.uv`'s serialized public schema and reconstructible module-state
-prefix. The marker is checked before schema decoding or native linking, so
+prefix and adding the fixed physical-provider identity slot to every generated
+module. The marker is checked before schema decoding or native linking, so
 neither a 0.19 archive can be misinterpreted as a two-user-value Array or a
 strict-entry-bearing function closure, a 0.20 archive linked against the Lua
 5.5.1 runtime, nor a 0.21 archive with the old `titan.uv` schema can cross the

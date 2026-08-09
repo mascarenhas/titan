@@ -9,9 +9,7 @@ local record FsStatResult
 end
 
 -- A uv_file is a process descriptor, not a Runtime-owned uv_handle_t.
-local record uv_file
-  local handle: libuv.uv_file
-end
+local type uv_file = libuv.uv_file
 
 local record FsOpenCall
   local path: string
@@ -35,6 +33,7 @@ end
 
 local record FsCloseCall
   local file: uv_file
+  local accepted: boolean
 end
 
 local record FsStatCall
@@ -105,7 +104,7 @@ local function fs_open_flags(mode: string): integer
 end
 
 local function validate_file(file: uv_file)
-  if file.handle < 0 then raise "File is closed" end
+  if file < 0 then raise "File is closed" end
 end
 
 -- Process descriptors are not loop-owned handles. A negative value is the
@@ -201,9 +200,8 @@ local function open_result(task: Task, owner: uv_fs_t, result: integer,
   if task.cancel_value then
     return nil
   end
-  local file = uv_file.new(descriptor)
   transferred = true
-  return file
+  return descriptor
 end
 
 local function read_result(task: Task, owner: uv_fs_t, result: integer,
@@ -269,7 +267,7 @@ local function FsReadCall:dispatch(task: Task): Immediate?
   local status = libuv.uv_fs_read {
     loop = task.runtime.loop,
     req = owner.handle,
-    file = self.file.handle,
+    file = self.file,
     bufs = descriptor,
     nbufs = 1,
     offset = -1,
@@ -288,7 +286,7 @@ local function FsWriteCall:dispatch(task: Task): Immediate?
   local status = libuv.uv_fs_write {
     loop = task.runtime.loop,
     req = owner.handle,
-    file = self.file.handle,
+    file = self.file,
     bufs = descriptor,
     nbufs = 1,
     offset = -1,
@@ -300,20 +298,19 @@ end
 local function FsFlushCall:dispatch(task: Task): Immediate?
   local owner = new_fs_request(task, "fs.flush", nil, unit_result)
   local status = libuv.uv_fs_fsync(task.runtime.loop, owner.handle,
-                                  self.file.handle,
+                                  self.file,
                                   shim.titan_uvshim_fs_cb)
   return submitted_fs_request(task, owner, status, "fs.flush")
 end
 
 local function FsCloseCall:dispatch(task: Task): Immediate?
-  local descriptor = self.file.handle
   local owner = new_fs_request(task, "fs.close", nil, unit_result)
   local status = libuv.uv_fs_close(task.runtime.loop, owner.handle,
-                                  descriptor,
+                                  self.file,
                                   shim.titan_uvshim_fs_cb)
   local immediate? = submitted_fs_request(
       task, owner, status, "fs.close")
-  if not immediate then self.file.handle = -1 as libuv.uv_file end
+  if not immediate then self.accepted = true end
   return immediate
 end
 
@@ -400,17 +397,12 @@ local function fs_read(file: uv_file, max_bytes: integer): string?
   return await(Call.fs_read(FsReadCall.new(file, max_bytes)))
 end
 
-local function fs_write(file: uv_file, data: string): integer
+local function fs_write(file: uv_file, data: string,
+                        offset: integer): integer
   validate_file(file)
-  local length = #data
-  if length == 0 then return 0 end
-  local offset = 0
-  while offset < length do
-    local written = await(
-        Call.fs_write(FsWriteCall.new(file, data, offset))) as integer
-    offset = offset + written
-  end
-  return offset
+  if #data == 0 then return 0 end
+  return await(
+      Call.fs_write(FsWriteCall.new(file, data, offset))) as integer
 end
 
 local function fs_flush(file: uv_file)
@@ -418,10 +410,9 @@ local function fs_flush(file: uv_file)
   await(Call.fs_flush(FsFlushCall.new(file)))
 end
 
-local function fs_close(file: uv_file)
-  if file.handle < 0 then return end
-  validate_file(file)
-  await(Call.fs_close(FsCloseCall.new(file)))
+local function fs_close(operation: FsCloseCall)
+  validate_file(operation.file)
+  await(Call.fs_close(operation))
 end
 
 local function fs_stat(path: string):

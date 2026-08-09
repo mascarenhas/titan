@@ -629,7 +629,8 @@ local function net_listen(host: string, port: integer,
   local task = running_task()
   accepting_work(task.runtime, "listen on TCP")
   local addresses = resolve_addresses(host, port)
-  local last_status = libuv.UV_EADDRNOTAVAIL
+  local last_status: ffi.titan_ffi_int =
+      libuv.UV_EADDRNOTAVAIL as ffi.titan_ffi_int
 
   local address_index = 1
   while address_index <= #addresses do

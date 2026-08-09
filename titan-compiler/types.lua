@@ -743,6 +743,93 @@ function types.c_ffi_scope_key(typ)
     return table.concat(scopes, "|")
 end
 
+-- C declaration nodes retain the normalized umbrella header that produced
+-- their spelling. The metadata is compiler-only: binary interfaces reject C
+-- FFI types and serialization ignores underscore fields.
+function types.mark_c_ffi_include(typ, include, seen)
+    if type(typ) ~= "table" then return end
+    seen = seen or {}
+    if seen[typ] then return end
+    seen[typ] = true
+
+    local tag = typ._tag
+    local declaration_node = tag == "Type.CPointer"
+        or tag == "Type.CArray" or tag == "Type.CFunction"
+        or tag == "Type.CStruct" or tag == "Type.CUnion"
+        or tag == "Type.CField" or tag == "Type.CTypedef"
+        or tag == "Type.COwned" or tag == "Type.Pointer"
+        or tag == "Type.Function"
+        or (tag == "Type.CInteger" and typ._c_enum_identity)
+    if declaration_node and not typ._c_origin_header then
+        typ._c_origin_header = include
+    end
+
+    if tag == "Type.CPointer" then
+        types.mark_c_ffi_include(typ.pointee, include, seen)
+    elseif tag == "Type.CArray" then
+        types.mark_c_ffi_include(typ.elem, include, seen)
+    elseif tag == "Type.CFunction" then
+        for _, param in ipairs(typ.params or {}) do
+            types.mark_c_ffi_include(param, include, seen)
+        end
+        types.mark_c_ffi_include(typ.ret, include, seen)
+    elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+        for _, field in ipairs(typ.fields or {}) do
+            types.mark_c_ffi_include(field, include, seen)
+        end
+    elseif tag == "Type.CField" then
+        types.mark_c_ffi_include(typ.type, include, seen)
+    elseif tag == "Type.CTypedef" then
+        types.mark_c_ffi_include(typ.target, include, seen)
+    elseif tag == "Type.COwned" then
+        types.mark_c_ffi_include(typ.pointee, include, seen)
+    elseif tag == "Type.Pointer" then
+        types.mark_c_ffi_include(typ.type, include, seen)
+    elseif tag == "Type.Function" and typ._c_function then
+        types.mark_c_ffi_include(typ._c_function, include, seen)
+    end
+end
+
+-- Return every origin reached through the exact C declaration graph being
+-- rendered. Do not walk Titan namespaces or nominal member maps.
+function types.c_ffi_includes(typ)
+    local includes, seen_includes, seen = {}, {}, {}
+    local function add(include)
+        if not include then return end
+        local key = assert(include.rendered,
+            "C origin header has no normalized spelling")
+        if seen_includes[key] then return end
+        seen_includes[key] = true
+        includes[#includes + 1] = include
+    end
+    local function visit(value)
+        if type(value) ~= "table" or seen[value] then return end
+        seen[value] = true
+        local tag = value._tag
+        -- These Titan values render as Udata */TValue and do not spell their
+        -- semantic C payload. A later payload cast records the pointee itself.
+        if tag == "Type.COwned" or tag == "Type.Function" then return end
+
+        add(value._c_origin_header)
+        if tag == "Type.CPointer" then
+            visit(value.pointee)
+        elseif tag == "Type.CArray" then
+            visit(value.elem)
+        elseif tag == "Type.CFunction" then
+            for _, param in ipairs(value.params or {}) do visit(param) end
+            visit(value.ret)
+        elseif tag == "Type.CField" then
+            visit(value.type)
+        elseif tag == "Type.Pointer" then
+            visit(value.type)
+        end
+        -- A retained C typedef, struct, union, or enum emits only its own
+        -- spelling. Do not walk the hidden target or aggregate fields.
+    end
+    visit(typ)
+    return includes
+end
+
 --- Check if two pointer types are different and can be coerced.
 local function can_coerce_pointer(source, target)
     if types.equals(source, target) then
@@ -771,6 +858,15 @@ end
 local function is_c_integer(t)
     t = resolved_c(t)
     return t and t._tag == "Type.CInteger"
+end
+
+function types.is_c_enum_integer_conversion(source, target)
+    source, target = resolved_c(source), resolved_c(target)
+    return source and target
+        and source._tag == "Type.CInteger"
+        and target._tag == "Type.CInteger"
+        and source._c_enum_owner ~= nil
+        and source._c_enum_owner == (target._c_enum_owner or target)
 end
 
 local function is_c_float(t)
@@ -1301,6 +1397,10 @@ c_declaration_type_equals = function(
     if tag == "Type.CVoid" then
         return true
     elseif tag == "Type.CInteger" then
+        if ltype._c_enum_identity or rtype._c_enum_identity then
+            return ltype._c_enum_identity ~= nil
+               and ltype._c_enum_identity == rtype._c_enum_identity
+        end
         return ltype.spelling == rtype.spelling
            and ltype.signed == rtype.signed
            and ltype.rank == rtype.rank
@@ -1474,6 +1574,10 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.Typedef" then
         return t1.name == t2.name
     elseif tag1 == "Type.CInteger" then
+        if t1._c_enum_identity or t2._c_enum_identity then
+            return t1._c_enum_identity ~= nil
+               and t1._c_enum_identity == t2._c_enum_identity
+        end
         return t1.spelling == t2.spelling and
                t1.signed == t2.signed and
                t1.rank == t2.rank and
@@ -2390,6 +2494,8 @@ local function coercion_impl(source, target, policy, seen)
         result = coercion_plan("c_integer_to_integer", source, target)
     elseif source._tag == "Type.Integer" and is_c_integer(target) then
         result = coercion_plan("integer_to_c_integer", source, target)
+    elseif types.is_c_enum_integer_conversion(source, target) then
+        result = coercion_plan("c_enum_integer", source, target)
     elseif is_c_float(source) and target._tag == "Type.Float" then
         result = coercion_plan("c_float_to_float", source, target)
     elseif source._tag == "Type.Float" and is_c_float(target) then

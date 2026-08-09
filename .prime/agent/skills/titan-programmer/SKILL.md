@@ -144,6 +144,36 @@ existing tests before inventing a new pattern.
   not end native ownership: retain callback state until terminal completion
   and close resources explicitly.
 
+## Audit standard-library simplifications across the call graph
+
+When a task spots a wrapper, forwarding function, or overly public declaration,
+do not stop at that file. Inventory the owning module's exported declarations,
+search every high-level source consumer and relevant spec/doc, and audit sibling
+occurrences of the same pattern. For `titan.uv`, this normally means checking
+`async`, `timer`, `net`, `os`, and `fs` together.
+
+Classify a one-field record by semantics, not field count alone:
+
+- replace a source-local record with a type alias when it only renames one bare
+  FFI value and carries no nominal API, callback root, logical length, role,
+  cancellation state, finalizer, or lifetime/ownership boundary;
+- retain a public nominal facade or an internal owner when its identity hides an
+  implementation type, supplies methods/Interfaces, anchors native state, or
+  records any such semantics;
+- after removing reference semantics, move mutation/commit state to the true
+  owner and trace every suspension point. In particular, preserve the boundary
+  between rejected and accepted async close, and reload scalar handles across
+  repeated submissions so a concurrent close cannot leave a recycled native
+  identifier in use.
+
+Parsing edited `.titan` files is only a syntax check. Before a full installation,
+force every collaborating root through the source loader and use the same
+feature-test macros/include flags as its production build; otherwise a stale
+binary dependency or an incomplete C probe context can hide the change. If the
+compiler's Lua implementation also changed, run the project Lua's `luac -p` on
+every touched chunk first: it catches load-time limits such as Lua's 200-local
+chunk ceiling before an apparently unrelated Titan source check fails.
+
 ## Compile and test a small module
 
 Use an installed, ABI-matched Titan toolchain as described by the

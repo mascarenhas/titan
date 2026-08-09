@@ -116,7 +116,21 @@ Foreign modules contain three categories of members:
   falling back. Titan does not model `const` or other C writeability rules for
   subobjects in v1, so the C compiler may still reject those assignments.
   Top-level enum constants become C integer members; simple numeric enum values
-  are retained in Titan's C type list. See
+  are retained in Titan's C type list. An enum object type is checked only when
+  used: the configured C compiler must select an ordinary integer carrier whose
+  complete range fits `lua_Integer`. An unused wider enum is inert. Each
+  enumerator expression—including a constant from a tagged enum—is checked
+  separately, so an in-range constant from a wider enum remains usable while an
+  out-of-range constant is rejected. Its selected expression carrier is
+  preserved through C operators; only the final Titan boundary checks the value.
+  An enumerator adjusts implicitly only to its own enum, not to an unrelated
+  enum or ordinary C integer. Calling a C function pointer performs the same
+  lazy checks on its enum parameters and results, while merely carrying a
+  pointer to a spellable wide enum does not require a numeric carrier. A
+  transparent Titan type alias does not itself count as a value use; the final
+  aliased declaration, pointer, cast, or call determines which check applies.
+  Anonymous object declarators from one C enum declaration retain that one
+  nominal owner. `__int128` carriers are not supported. See
   [C constants and macro-projected fields](c-ffi-expressions.md#c-constants-and-macro-projected-fields).
 * C typedef names become the source-nameable type namespace. Named file-scope
   tag-only `struct S` / `union U` declarations also publish `c.S` using their

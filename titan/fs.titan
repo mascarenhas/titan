@@ -26,7 +26,7 @@ function File:read(max_bytes: integer?): string?
   if requested <= 0 then
     raise "file read size must be positive"
   end
-  if self.handle.handle < 0 then
+  if (self.handle as integer) < 0 then
     self.excess = ""
     return nil
   end
@@ -42,7 +42,7 @@ end
 
 function File:read_until(delimiter: string,
                          chop: boolean?): string?
-  if self.handle.handle < 0 then
+  if (self.handle as integer) < 0 then
     self.excess = ""
     return nil
   end
@@ -86,7 +86,14 @@ function File:read_until(delimiter: string,
 end
 
 function File:write(data: string): integer
-  return uv.fs_write(self.handle, data)
+  local length = #data
+  if length == 0 then return uv.fs_write(self.handle, data, 0) end
+  local offset = 0
+  while offset < length do
+    local written = uv.fs_write(self.handle, data, offset)
+    offset = offset + written
+  end
+  return offset
 end
 
 function File:flush()
@@ -95,11 +102,20 @@ end
 
 function File:close()
   self.excess = ""
-  uv.fs_close(self.handle)
+  if (self.handle as integer) < 0 then return end
+  local descriptor = self.handle
+  local operation = uv.FsCloseCall.new(descriptor, false)
+  self.handle = -1 as uv.uv_file
+  do
+    uv.fs_close(operation)
+  catch
+    if not operation.accepted then self.handle = descriptor end
+    raise
+  end
 end
 
 function File:is_closed(): boolean
-  return self.handle.handle < 0
+  return (self.handle as integer) < 0
 end
 
 function read_file(path: string): string

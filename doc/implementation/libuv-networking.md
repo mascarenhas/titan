@@ -61,8 +61,8 @@ lazily when its first read is dispatched.
 
 The public `net.listen` facade substitutes backlog 128 when its trailing
 argument is absent, validates the resulting value, and passes an ordinary
-required integer to private `uv._net_listen`. Defaulting therefore adds no
-optional type or policy to `titan.uv`.
+required integer to the source-private `titan.uv` function `net_listen`.
+Defaulting therefore adds no optional type or public policy to `titan.uv`.
 
 ## Multi-shot reads and accepts
 

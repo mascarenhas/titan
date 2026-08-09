@@ -525,9 +525,10 @@ handle is already discoverable through the loop; final cleanup's `uv_walk`
 will close the new type automatically. The Runtime root table only keeps the
 wrapper alive for C callbacks and is never traversed as a resource inventory.
 
-Remember that `uv_file` is an operating-system descriptor, not a handle. A new
-filesystem operation uses a request owner and explicit descriptor ownership;
-it does not join handle shutdown.
+Remember that `uv_file` is an operating-system descriptor, not a handle. The
+high-level File facade stores that raw scalar; each new filesystem operation
+copies it into a request owner for the accepted callback lifetime. It does not
+join handle shutdown.
 
 ### 4. Let operations choose their own shapes
 

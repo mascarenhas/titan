@@ -618,7 +618,8 @@ local function config_merged_output(state: uv_spawn_config):
     close_descriptor(descriptors[0])
     close_descriptor(descriptors[1])
   end
-  status = libuv.uv_pipe(descriptors, libuv.UV_NONBLOCK_PIPE, 0)
+  status = libuv.uv_pipe(
+      descriptors, libuv.UV_NONBLOCK_PIPE as ffi.titan_ffi_int, 0)
   if status < 0 then return status, nil end
   status = libuv.uv_pipe_open(
       stream_native(parent_stream) as *libuv.uv_pipe_t, descriptors[0])

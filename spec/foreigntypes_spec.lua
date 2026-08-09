@@ -69,6 +69,48 @@ describe("foreign C type conversion", function()
         }))
     end)
 
+    it("retains normalized declaration origins without tagging profiles",
+    function()
+        local st = symtab.new()
+        st.c_profile = target_profile(true)
+        local h1 = { rendered = '"/tmp/ffi-origin-one.h"' }
+        local h2 = { rendered = '<ffi-origin-two.h>' }
+        local alias, _, alias_declaration = foreigntypes.convert(st, {
+            type = "typedef",
+            name = "ffi_origin_int",
+            def = { "int" },
+        }, "ffi_origin_int", h1)
+        assert.truthy(alias)
+        st:add_foreign_type("ffi_origin_int", alias)
+        assert.equal(h1, alias._c_origin_header)
+        assert.is_nil(alias.target._c_origin_header)
+        assert.equal(h1, alias_declaration.origin_header)
+
+        local fn, _, declaration = foreigntypes.convert(st, {
+            type = "function",
+            name = "ffi_origin_call",
+            params = {{
+                name = "value",
+                type = { "ffi_origin_int" },
+                _declarator_base = { "ffi_origin_int" },
+                _declarator_ops = {},
+            }},
+            ret = {
+                type = { "int" },
+                _declarator_base = { "int" },
+                _declarator_ops = {},
+            },
+            vararg = false,
+            _paramstyle = "prototype",
+        }, "ffi_origin_call", h2)
+        assert.truthy(fn)
+        assert.equal(h2, fn._c_origin_header)
+        assert.equal(h2, fn._c_function._c_origin_header)
+        assert.equal(h1, fn.params[1]._c_origin_header)
+        assert.is_nil(fn._c_function.ret._c_origin_header)
+        assert.equal(h2, declaration.origin_header)
+    end)
+
     it("canonicalizes an unqualified short int", function()
         local scope = {
             find_foreign_type = function()
