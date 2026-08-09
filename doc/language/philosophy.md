@@ -196,7 +196,8 @@ and coercive Lua entries. It also adds nominal Interface declarations,
 structural record/union satisfaction at statically known conversion sites,
 fresh wrappers, concrete downcasts, and exact-wrapper-only dynamic boundaries.
 These coordinated representation changes accounted for that ABI advance; ABI
-0.21 retains the language model while advancing the matched Lua runtime.
+0.21 retained the language model while advancing the matched Lua runtime to
+5.5.1, and ABI 0.22 retains that model.
 
 ## Principles, distilled
 

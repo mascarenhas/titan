@@ -12,6 +12,7 @@
 -- trace. A `raise` from a Titan function caught by Lua `pcall` therefore
 -- surfaces the raised value as the pcall error and records the Titan frames.
 local h = require 'spec.support.helpers'
+local coder = require 'titan-compiler.coder'
 
 local compile_and_run = h.compile_and_run
 local compile_and_read_c = h.compile_and_read_c
@@ -1195,10 +1196,12 @@ describe("catch", function()
                 native_callback()
             end
         ]])
-        local _, prototype = assert(csrc:find(
-            "native_callback_titan", 1, true))
+        local native_callback =
+            coder._source_private_prefix("test", "native_callback") ..
+            "_titan"
+        local _, prototype = assert(csrc:find(native_callback, 1, true))
         local definition = assert(csrc:find(
-            "native_callback_titan", prototype + 1, true))
+            native_callback, prototype + 1, true))
         -- Later declarations may be exported or indented rather than beginning
         -- with one exact `static ` spelling. Both anchors below are the first
         -- such operations after this definition, so the suffix is the stable

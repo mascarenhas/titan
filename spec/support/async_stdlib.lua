@@ -63,7 +63,7 @@ local function find_standard_layout()
     local prefix = os.getenv("PREFIX")
     if prefix and prefix ~= "" then
         layouts[#layouts + 1] = production_layout(
-            prefix .. "/lib/titan/0.21", prefix .. "/share/lua/5.5")
+            prefix .. "/lib/titan/0.22", prefix .. "/share/lua/5.5")
     end
 
     -- Discover the two owners independently. The supported installation puts
@@ -73,12 +73,12 @@ local function find_standard_layout()
     local installed_shim = package.searchpath(
         "titan.coroutine", package.path)
     local installed_abi_root = installed_container and
-        installed_container:match("^(.*)/lib/titan/0%.21/titan%.so$")
+        installed_container:match("^(.*)/lib/titan/0%.22/titan%.so$")
     local installed_shim_root = installed_shim and
         installed_shim:match("^(.*)/titan/coroutine%.lua$")
     if installed_abi_root and installed_shim_root then
         layouts[#layouts + 1] = production_layout(
-            installed_abi_root .. "/lib/titan/0.21", installed_shim_root)
+            installed_abi_root .. "/lib/titan/0.22", installed_shim_root)
     end
 
     layouts[#layouts + 1] = production_layout(REPO, REPO)
@@ -115,9 +115,13 @@ local function assert_layout(layout)
         "stdlib layout is missing shim_root")
     if layout.kind == "container" then
         assert.equals(layout.abi_root .. "/titan.so", layout.container)
+    elseif layout.container then
+        assert.equals(layout.abi_root .. "/titan.so", layout.container)
+        assert.truthy(exists(layout.container),
+            "exact standard-library variant is missing its grouped provider")
     else
         assert.falsy(exists(layout.abi_root .. "/titan.so"),
-            "exact standard-library variant must not contain shallow titan.so")
+            "exact standard-library variant has an unregistered titan.so")
     end
     return layout
 end
@@ -262,7 +266,7 @@ function M.compile(workspace, modname, options)
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
-        "TITAN_PATH_0_21=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_22=" .. quote(layout.abi_root),
         "TITAN_PATH=",
     }
     if options.cppflags then
@@ -302,10 +306,87 @@ function M.compile(workspace, modname, options)
     assert.truthy(ok, output)
 end
 
--- Build the exact coroutine/uv/async dependency chain. The caller first
--- registers its exact titan.string provider because async owns the
--- string-specialized channel ReaderCloser/WriterCloser adapter.
-function M.prepare_async_core(workspace, layout)
+-- Compile source roots that use uv's source-private bridge in one ordinary
+-- multi-root invocation. This deliberately delegates provider planning,
+-- static-input finalization, validation, and publication to titanc rather than
+-- recreating that policy in the spec helper.
+function M.compile_bundle(workspace, roots, options)
+    options = options or {}
+    local layout = assert_layout(assert(options.layout))
+    assert.equals("exact", layout.kind)
+    assert.falsy(layout.container,
+        "an exact workspace may publish only one grouped provider")
+    assert.truthy(type(roots) == "table" and #roots > 1,
+        "a grouped source build requires multiple roots")
+
+    local environment = {
+        "env -u LUA_PATH -u LUA_CPATH" ..
+            " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
+        "TITAN_PATH_0_22=" .. quote(layout.abi_root),
+        "TITAN_PATH=",
+    }
+    if options.cppflags and #options.cppflags > 0 then
+        environment[#environment + 1] =
+            "TITAN_EXTRA_CPPFLAGS=" .. quote(options.cppflags)
+    end
+    local sanitizer_cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS") or ""
+    local cflags = options.cflags or ""
+    if #sanitizer_cflags > 0 then
+        if #cflags > 0 then cflags = cflags .. " " end
+        cflags = cflags .. sanitizer_cflags
+    end
+    if #cflags > 0 then
+        environment[#environment + 1] =
+            "TITAN_EXTRA_CFLAGS=" .. quote(cflags)
+    end
+    local sanitizer_ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or ""
+    local ldflags = options.ldflags or ""
+    if #sanitizer_ldflags > 0 then
+        if #ldflags > 0 then ldflags = ldflags .. " " end
+        ldflags = ldflags .. sanitizer_ldflags
+    end
+    if #ldflags > 0 then
+        environment[#environment + 1] =
+            "TITAN_EXTRA_LDFLAGS=" .. quote(ldflags)
+    end
+
+    local command = {
+        table.concat(environment, " "),
+        quote(host_lua()),
+        quote(REPO .. "/spec/support/async_stdlib_bundle_compile.lua"),
+        quote(REPO), quote(workspace .. "/src"),
+        quote(workspace .. "/titan-runtime"),
+        "--tree", quote(workspace .. "/src"),
+        "--lua", quote(REPO .. "/lua-5.5.1/src"),
+    }
+    for _, root in ipairs(roots) do command[#command + 1] = quote(root) end
+    local extra_objects = options.extra_objects or {}
+    if #extra_objects > 0 then
+        command[#command + 1] = "-X"
+        for _, object in ipairs(extra_objects) do
+            command[#command + 1] = quote(object)
+        end
+    end
+    local ok, _, output = run(table.concat(command, " "), workspace)
+    assert.truthy(ok, output)
+    layout.container = layout.abi_root .. "/titan.so"
+    assert_layout(layout)
+end
+
+-- Build uv and every direct source consumer needed by a fixture in one
+-- canonical prefix provider. Source-private visibility belongs to those direct
+-- import edges; compiling uv first and the facades later would intentionally
+-- reduce the later imports to the public binary interface.
+function M.prepare_async_core(workspace, layout, facades)
+    facades = facades or {}
+    local allowed = { timer = true, fs = true, net = true, os = true }
+    local roots = { "titan.coroutine", "titan.uv", "titan.async" }
+    local bundled = {
+        ["titan.coroutine"] = true,
+        ["titan.uv"] = true,
+        ["titan.async"] = true,
+    }
+
     M.write_source(workspace, "titan.coroutine",
         M.read("titan/coroutine.titan"))
     for _, name in ipairs({
@@ -317,26 +398,45 @@ function M.prepare_async_core(workspace, layout)
     M.write_source(workspace, "titan.async",
         M.read("titan/async.titan"))
 
-    M.compile(workspace, "titan.coroutine", {
-        layout = layout,
-        cppflags = "",
-    })
-    register_exact_provider(layout, "titan.coroutine")
+    for _, name in ipairs(facades) do
+        assert.truthy(allowed[name],
+            "unsupported direct uv facade in exact bundle: " ..
+                tostring(name))
+        local modname = "titan." .. name
+        assert.falsy(bundled[modname],
+            "duplicate direct uv facade in exact bundle: " .. name)
+        bundled[modname] = true
+        roots[#roots + 1] = modname
+        M.write_source(workspace, modname,
+            M.read("titan/" .. name .. ".titan"))
+    end
 
     local cppflags, ldflags, archive = host_libuv_config()
-    M.compile(workspace, "titan.uv", {
+    local support = workspace .. "/titan-runtime/titanlib.o"
+    assert.truthy(exists(support),
+        "exact grouped stdlib build requires prepared titanlib.o")
+    M.compile_bundle(workspace, roots, {
         layout = layout,
         cppflags = cppflags,
         cflags = "-fno-strict-aliasing",
-        ldflags = archive .. " " .. ldflags,
+        ldflags = ldflags,
+        extra_objects = { support, archive },
     })
-    register_exact_provider(layout, "titan.uv")
 
-    M.compile(workspace, "titan.async", {
-        layout = layout,
-        cppflags = "",
-    })
-    register_exact_provider(layout, "titan.async")
+    for _, modname in ipairs(roots) do
+        local relative = modname:gsub("%.", "/")
+        local shim = layout.shim_root .. "/" .. relative .. ".lua"
+        assert.truthy(exists(shim),
+            "grouped stdlib provider is missing shim " .. shim)
+        local contents = M.read(shim)
+        assert.truthy(contents:find(
+            'package.searchpath("titan", package.cpath)', 1, true),
+            "grouped stdlib shim does not select prefix provider titan")
+        layout.providers[modname] = {
+            provider = layout.container,
+            shim = shim,
+        }
+    end
 end
 
 -- Build the exact GC facade used by standard modules that configure weak
@@ -353,10 +453,12 @@ end
 function M.run_lua_source(workspace, source, options)
     options = options or {}
     local layout = assert_layout(options.layout or find_standard_layout())
-    local support_layout = find_standard_layout()
     local cpath = workspace .. "/?.so;" .. canonical_cpath(layout)
-    if support_layout.abi_root ~= layout.abi_root then
-        cpath = cpath .. ";" .. canonical_cpath(support_layout)
+    if not layout.container then
+        local support_layout = find_standard_layout()
+        if support_layout.abi_root ~= layout.abi_root then
+            cpath = cpath .. ";" .. canonical_cpath(support_layout)
+        end
     end
     cpath = cpath .. ";;"
     local lua_path = workspace .. "/?.lua;" ..
@@ -366,7 +468,7 @@ function M.run_lua_source(workspace, source, options)
     local command = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-        "TITAN_PATH_0_21=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_22=" .. quote(layout.abi_root),
         "TITAN_PATH=",
         "LUA_PATH=" .. quote(lua_path),
         "LUA_PATH_5_5=" .. quote(lua_path),
@@ -394,7 +496,7 @@ local function app_command(workspace, modname)
     end
     return "env -u LUA_PATH -u LUA_CPATH" ..
         " -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
-        " TITAN_PATH_0_21=" .. quote(layout.abi_root) .. " " ..
+        " TITAN_PATH_0_22=" .. quote(layout.abi_root) .. " " ..
         "TITAN_PATH= " .. quote(workspace .. "/" .. program_output)
 end
 

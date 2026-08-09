@@ -544,6 +544,8 @@ local function merge_declaration_composite(previous, current, seen)
         if unknown_array_bound(previous.len)
            and not unknown_array_bound(current.len) then
             previous.len = current.len
+            previous._c_origin_header = current._c_origin_header
+                or previous._c_origin_header
         end
         merge_declaration_composite(
             previous.elem, current.elem, seen)
@@ -556,6 +558,8 @@ local function merge_declaration_composite(previous, current, seen)
             previous.params = current.params
             previous.vararg = current.vararg
             previous._paramstyle = "prototype"
+            previous._c_origin_header = current._c_origin_header
+                or previous._c_origin_header
         end
         for index, param in ipairs(previous.params or {}) do
             merge_declaration_composite(
@@ -575,6 +579,8 @@ local function merge_declaration_composite(previous, current, seen)
             previous.rettypes = current.rettypes
             previous.vararg = current.vararg
             previous._paramstyle = "prototype"
+            previous._c_origin_header = current._c_origin_header
+                or previous._c_origin_header
         end
         for index, param in ipairs(previous.params or {}) do
             merge_declaration_composite(
@@ -824,6 +830,8 @@ local function populate_struct_or_union(st, owner, ftype)
     -- must leave the canonical owner incomplete so a later declaration can
     -- complete it rather than freezing a partial field list.
     owner.fields = fields
+    owner._c_origin_header = st._c_origin_header
+        or owner._c_origin_header
     owner.complete = true
     owner._definition_order = st.current_toplevel_order or 0
     if owner._tag == "Type.CStruct" then
@@ -894,20 +902,56 @@ local function convert_struct_or_union_declarator(st, ftype)
 end
 
 local function convert_enum(st, ftype)
+    st._converted_c_enums = st._converted_c_enums
+        or setmetatable({}, { __mode = "k" })
+    local cached = st._converted_c_enums[ftype]
+    if cached then return cached end
+
     local record, binding_err = bind_tag_record(st, ftype)
     if binding_err then return nil, binding_err end
-    if record and record.canonical then
-        return record.canonical
+    local enum_type = record and record.canonical
+    if not enum_type then
+        local provisional = st.c_profile
+            and st.c_profile.integers
+            and st.c_profile.integers.int
+            and st.c_profile.integers.int.type
+            or types.CInteger("int", true, 3, false)
+        enum_type = types.CInteger(
+            provisional.spelling, provisional.signed,
+            provisional.rank, provisional.bits)
+        enum_type._c_numeric = provisional._c_numeric
+        enum_type._c_numeric_carriers =
+            provisional._c_numeric_carriers
     end
 
-    local enum_type = st.c_profile
-        and st.c_profile.integers
-        and st.c_profile.integers.int
-        and st.c_profile.integers.int.type
-        or types.CInteger("int", true, 3, false)
+    local name = c_name(ftype.name)
+    -- `allow_outer` is only a lookup request. If no outer tag exists,
+    -- bind_c_prototype_tag returns a genuinely prototype-local record.
+    local local_prototype = record and record.scope == "prototype"
+    if name and not local_prototype then
+        local origin = st._c_origin_header
+            and st._c_origin_header.rendered or ""
+        enum_type._c_enum_identity = enum_type._c_enum_identity
+            or "enum-tag:" .. origin .. ":" .. name
+        enum_type._c_declaration_spelling =
+            enum_type._c_declaration_spelling or "enum " .. name
+    else
+        local scope = local_prototype
+            and (":prototype:" .. tostring(ftype._prototype_scope_id)) or ""
+        enum_type._c_enum_identity = enum_type._c_enum_identity
+            or "anonymous-enum:" .. tostring(ftype) .. scope
+        enum_type._c_enum_unspellable = true
+        enum_type._c_declaration_spelling = nil
+    end
+    if ftype.values and st._c_origin_header then
+        -- A later definition is the first header that makes a forward enum
+        -- complete enough for carrier probing.
+        enum_type._c_origin_header = st._c_origin_header
+    end
     if record then
         enum_type = st:set_c_tag_canonical(record, enum_type)
     end
+    st._converted_c_enums[ftype] = enum_type
     return enum_type
 end
 
@@ -1071,6 +1115,17 @@ local function convert_typedef(st, ftype)
     if not target then return nil, err end
     local converted = types.CTypedef(
         ftype.name, target, quals or {})
+    local resolved_target = types.resolve_c_typedef(target)
+    if resolved_target and resolved_target._tag == "Type.CInteger"
+       and resolved_target._c_enum_identity
+       and not resolved_target._c_declaration_spelling then
+        resolved_target._c_declaration_spelling = tostring(ftype.name)
+        local origin = st._c_origin_header
+            and st._c_origin_header.rendered or ""
+        resolved_target._c_enum_identity =
+            "enum-typedef:" .. origin .. ":" .. tostring(ftype.name)
+        resolved_target._c_enum_unspellable = nil
+    end
     converted._declaration_provenance =
         ftype._declaration_provenance
     return converted
@@ -1152,11 +1207,14 @@ local function declaration_array_view(typ, memo)
     end
 
     view = view or typ
+    if cloned then
+        view._c_origin_header = typ._c_origin_header
+    end
     memo[typ] = { type = view, cloned = cloned and true or false }
     return view, cloned and true or false
 end
 
-function foreigntypes.convert(st, ftype)
+local function convert_declaration(st, ftype, member_name)
     if ftype.macro_expression
        and ftype.integer_literals
        and #ftype.integer_literals > 0
@@ -1181,12 +1239,56 @@ function foreigntypes.convert(st, ftype)
             convert_struct_or_union_declarator(st, ftype)
     elseif ftype.type == "enum" then
         converted, err = convert_enum(st, ftype)
+        local is_enumerator = false
+        for _, item in ipairs(ftype.values or {}) do
+            if item.name == member_name then
+                is_enumerator = true
+                break
+            end
+        end
+        if converted and is_enumerator then
+            local view = {}
+            for key, value in pairs(converted) do view[key] = value end
+            local origin = st._c_origin_header
+                and st._c_origin_header.rendered or ""
+            view._c_enum_identity = "enum-enumerator:" .. origin
+                .. ":" .. tostring(member_name)
+            view._c_declaration_spelling =
+                "__typeof__((" .. tostring(member_name) .. "))"
+            view._c_enum_probe_spelling = view._c_declaration_spelling
+            view._c_enum_enumerator = tostring(member_name)
+            view._c_enum_owner = converted
+            view._c_enum_unspellable = nil
+            converted = view
+        end
     elseif ftype.type == "functionptr" then
         converted, err, declaration_qualifiers =
             convert_function_pointer(st, ftype)
     elseif type(ftype.type) == "table" then
         converted, err, declaration_qualifiers =
             convert_type(st, ftype)
+        local resolved = converted and types.resolve_c_typedef(converted)
+        if resolved and resolved._tag == "Type.CInteger"
+           and resolved._c_enum_identity
+           and resolved._c_enum_unspellable and member_name then
+            local view = {}
+            for key, value in pairs(resolved) do view[key] = value end
+            -- The object-specific expression spelling is not a new nominal C
+            -- type. Preserve the one anonymous enum owner shared by every
+            -- declarator from this declaration.
+            view._c_enum_identity = resolved._c_enum_identity
+            view._c_enum_owner = resolved
+            -- A scalar cast through the exact anonymous type removes top-level
+            -- const/volatile from the value type without applying the integer
+            -- promotions that would hide a short-enum carrier. Use that same
+            -- exact unqualified spelling for generated temporaries and probes.
+            view._c_declaration_spelling =
+                "__typeof__(((__typeof__((" .. tostring(member_name)
+                .. ")))0))"
+            view._c_enum_probe_spelling = view._c_declaration_spelling
+            view._c_enum_unspellable = nil
+            converted = view
+        end
     else
         return nil, "FIXME unconverted " .. inspect(ftype)
     end
@@ -1216,8 +1318,24 @@ function foreigntypes.convert(st, ftype)
     local declaration = {
         qualifiers = copy_list(declaration_qualifiers or {}),
         provenance = ftype._declaration_provenance,
+        origin_header = st._c_origin_header,
     }
     return converted, nil, declaration
+end
+
+function foreigntypes.convert(st, ftype, member_name, origin_header)
+    local previous = st._c_origin_header
+    st._c_origin_header = origin_header
+    local results = table.pack(pcall(
+        convert_declaration, st, ftype, member_name))
+    st._c_origin_header = previous
+    if not results[1] then error(results[2], 0) end
+    local converted, err, declaration =
+        table.unpack(results, 2, results.n)
+    if converted and origin_header then
+        types.mark_c_ffi_include(converted, origin_header)
+    end
+    return converted, err, declaration
 end
 
 return foreigntypes

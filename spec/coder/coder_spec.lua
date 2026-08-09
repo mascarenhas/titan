@@ -1832,7 +1832,9 @@ describe("Titan code generator", function()
             local c = assert(io.open(modname .. ".c", "r"))
             local csrc = c:read("*a")
             c:close()
-            assert.match('#include "' .. header .. '"', csrc, 1, true)
+            local rendered = '#include "' .. require("lfs").currentdir()
+                .. "/./" .. header .. '"'
+            assert.match(rendered, csrc, 1, true)
         end)
         os.remove(header)
         if not ok then error(err, 0) end
@@ -3088,8 +3090,11 @@ describe("Titan code generator", function()
         }
         local ok, err = generate_modules(modules, "bar")
         assert.truthy(ok, err)
-        local ok, err = call("foo", [[
-            bar = require 'bar'
+        -- Load the importer first so it installs its directly linked source
+        -- producer as the canonical `foo` state before the duplicate legacy
+        -- helper DSO is mapped by `require`.
+        local ok, err = call("bar", [[
+            foo = require 'foo'
             p1 = bar.point(2,3)
             assert(foo.px(p1) == 2.0)
             p2 = foo.Point.new(2,3)

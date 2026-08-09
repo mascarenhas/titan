@@ -123,8 +123,8 @@ a/b.so
 a/b/c.so
 ```
 
-The binary path comes from `TITAN_PATH_0_21` when set, otherwise `TITAN_PATH`,
-otherwise the default `.;<root>/lib/titan/0.21`. In an override, `;;` inserts
+The binary path comes from `TITAN_PATH_0_22` when set, otherwise `TITAN_PATH`,
+otherwise the default `.;<root>/lib/titan/0.22`. In an override, `;;` inserts
 that default at the same position. Search is **path-root first**: Titan walks
 all candidates in the first path root before moving to the second root. Once
 an earlier root contains a file at a relative candidate such as `a/b.so`, that
@@ -134,7 +134,7 @@ still advance to a deeper candidate such as `a/b/c.so`.
 
 A candidate claims `a.b.c` when it exports either member of the requested
 metadata pair, `a_b_c_abi` and `a_b_c_types`. Once claimed, validation is
-terminal: both entries must exist, the ABI marker must be `0.21`, and the type
+terminal: both entries must exist, the ABI marker must be `0.22`, and the type
 metadata must describe `a.b.c`. Broken, half-present, mismatched, or malformed
 metadata is an error rather than permission to skip to another file. An
 ancestor with neither entry is an unrelated nonclaim; an exact `a/b/c.so`
@@ -221,13 +221,19 @@ The standard library is the canonical provider with this name.
 
 ABI 0.20 introduced two private user values on every Array proxy—backing and
 construction-time Lua writer—and a fixed opaque brand upvalue plus final
-strict generic-entry trailer on every Titan function closure. ABI 0.21 retains
-those representations while advancing the embedded Lua contract from 5.5.0
-to 5.5.1. The current marker, `TITAN_PATH_0_21`, and `lib/titan/0.21`
-namespace advance together. Ordinary DSO/archive metadata validation rejects
-0.20 before either side can exchange a value; there is no compatibility
-adapter, migration, or cleanup path. A separately versioned 0.20 installation
-remains preserved prior-version state.
+strict generic-entry trailer on every Titan function closure. ABI 0.21
+retained those representations while advancing the embedded Lua contract from
+5.5.0 to 5.5.1. ABI 0.22 is the source-local `titan.uv`
+surface/private-provider boundary: its serialized public schema and
+reconstructible module-state prefix change while Lua 5.5.1 and the other
+value/native-call layouts remain unchanged. Every generated module also gains
+a fixed physical-provider identity slot so direct source collaborators reject
+canonical private state installed by another provider. The current marker,
+`TITAN_PATH_0_22`, and
+`lib/titan/0.22` namespace advance together. Ordinary DSO/archive metadata
+validation rejects 0.21 before either side can exchange a value; there is no
+compatibility adapter, migration, or cleanup path. A separately versioned 0.21
+installation remains preserved prior-version state.
 
 ABI 0.19 introduced serialized union/variant schemas and made the module-state
 public prefix reconstruct public record and union static closures after
@@ -248,7 +254,7 @@ break changed what the existing native Array pointer slots mean, along with
 generated container code and Lua boundary checks, so 0.16 and 0.17 providers
 could not be mixed. ABI 0.18 and 0.19 preserved its one-user-value proxy;
 ABI 0.20 retained the canonical identity while adding the writer user value;
-ABI 0.21 retains that representation.
+ABI 0.21 retained that representation, and ABI 0.22 retains it.
 
 Historically, ABI 0.16 introduced prefix-container discovery: a 0.15 consumer
 recorded only an imported module's exact child-DSO pathname and could not
@@ -278,8 +284,8 @@ model. One
 paired provider:
 
 ```text
-$ROCKS_TREE/lib/titan/0.21/titan.so
-$ROCKS_TREE/lib/titan/0.21/titan.a
+$ROCKS_TREE/lib/titan/0.22/titan.so
+$ROCKS_TREE/lib/titan/0.22/titan.a
 ```
 
 contains the native support entry plus the independent logical modules

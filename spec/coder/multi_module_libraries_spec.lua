@@ -106,7 +106,7 @@ local function compiler_argv(workspace, source_root, ...)
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "CCACHE_DISABLE=1",
-        "TITAN_PATH_0_21=" .. workspace,
+        "TITAN_PATH_0_22=" .. workspace,
         "TITAN_PATH=",
     }
     if PREFIX then
@@ -1951,6 +1951,29 @@ function get(): integer return dep.get() + 1 end
         assert.is_nil(lfs.attributes(source_root .. "/clash/a/b.c", "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/clash.so", "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/clash.a", "mode"))
+    end)
+
+    it("keeps source-private symbols injective across module boundaries",
+       function()
+        write_file(source_root .. "/private/root.titan", [[
+local function child_leaf(): integer return 1 end
+function expose(): integer return child_leaf() end
+]])
+        write_file(source_root .. "/private/root/child.titan", [[
+local function leaf(): integer return 2 end
+function expose(): integer return leaf() end
+]])
+
+        local ok, output = compile(workspace, source_root,
+            "private.root", "private.root.child")
+        assert.truthy(ok, output)
+        local ran, result = run_lua(workspace, [[
+local root = require "private.root"
+local child = require "private.root.child"
+io.write(root.expose(), " ", child.expose())
+]])
+        assert.truthy(ran, result)
+        assert.equal("1 2", result)
     end)
 
     it("rejects module/member boundary symbol collisions before code generation",

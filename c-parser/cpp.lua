@@ -434,21 +434,23 @@ local function probe_include_paths(config)
     return paths
 end
 
-local function probe_default_defines(config)
-    local argv = config_argv(config)
-    append_argv(argv, { "-dM", "-E", "-x", "c", "/dev/null" })
-    local output, err = run_command(argv, false)
-    if not output then
-        return nil, "failed probing predefined C macros: " .. err
-    end
-
-    local fd
-    fd, err = io.tmpfile()
+local function parse_macro_dump(output)
+    local fd, err = io.tmpfile()
     if not fd then
         return nil, "failed creating temporary macro probe file: " .. err
     end
-    fd:write(output)
-    fd:seek("set", 0)
+    local wrote, write_err = fd:write(output)
+    if not wrote then
+        fd:close()
+        return nil, "failed writing temporary macro probe file: " ..
+            tostring(write_err)
+    end
+    local offset, seek_err = fd:seek("set", 0)
+    if not offset then
+        fd:close()
+        return nil, "failed rewinding temporary macro probe file: " ..
+            tostring(seek_err)
+    end
     local blank_ctx = {
         incdirs = {},
         defines = {},
@@ -460,9 +462,10 @@ local function probe_default_defines(config)
     }
     typed.set_type(blank_ctx, "Ctx")
     local ctx
+    -- parse_file consumes and closes the supplied stream.
     ctx, err = cpp.parse_file("-", fd, blank_ctx)
     if not ctx then
-        return nil, "failed parsing predefined C macros: " .. err
+        return nil, "failed parsing compiler macro output: " .. err
     end
 
     ctx.defines["__builtin_va_list"] = { "char", "*" }
@@ -473,6 +476,20 @@ local function probe_default_defines(config)
     ctx.defines["__inline__"] = { "inline" }
     ctx.defines["__inline"] = { "inline" }
     return ctx.defines
+end
+
+local function probe_macro_definitions(config, source)
+    local argv = config_argv(config)
+    append_argv(argv, { "-dM", "-E", "-x", "c", source })
+    local output, err = run_command(argv, false)
+    if not output then
+        return nil, "failed probing C macros for '" .. source .. "': " .. err
+    end
+    return parse_macro_dump(output)
+end
+
+local function probe_default_defines(config)
+    return probe_macro_definitions(config, "/dev/null")
 end
 
 function cpp.new_context(options)
@@ -1339,8 +1356,26 @@ macro_expand = typed("Ctx, {string}, LineList, number, boolean -> ()", function(
                     local args, j = consume_parentheses(tokens, i + 1, linelist, cur)
                     debug("args:", #args, args)
                     local named_args = {}
-                    for i = 1, #define.args do
-                        named_args[define.args[i]] = args[i] or {}
+                    local variadic = define.args[#define.args] == "..."
+                    local fixed_count = #define.args - (variadic and 1 or 0)
+                    for argi = 1, fixed_count do
+                        named_args[define.args[argi]] = args[argi] or {}
+                    end
+                    if variadic then
+                        local varargs = {}
+                        set_token_spacing(varargs, {})
+                        for argi = fixed_count + 1, #args do
+                            if argi > fixed_count + 1 then
+                                append_token(varargs, ",", false, ",")
+                            end
+                            append_tokens(varargs, args[argi],
+                                token_has_space_before(args[argi], 1))
+                        end
+                        -- The grammar records C's unnamed variadic parameter
+                        -- as `...`; replacement lists name it `__VA_ARGS__`.
+                        -- A literal `...` in the replacement is an ordinary
+                        -- ellipsis and must remain unchanged.
+                        named_args["__VA_ARGS__"] = varargs
                     end
                     local expansion = array_copy(repl)
                     replace_args(ctx, expansion, named_args, linelist, cur)

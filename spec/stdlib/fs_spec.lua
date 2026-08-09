@@ -68,6 +68,10 @@ function start_io(root: string, boundary: string): async.Task
       return nil
     end, "closed File accepted a write")
     expect_failure(function (): value
+      file:write("")
+      return nil
+    end, "closed File accepted an empty write")
+    expect_failure(function (): value
       file:flush()
       return nil
     end, "closed File accepted a flush")

@@ -10,7 +10,7 @@ if [[ $PREFIX != /* ]]; then PREFIX=$PWD/$PREFIX; fi
 PREFIX=$(CDPATH= cd "$PREFIX" && pwd -P)
 LUA="$PREFIX/bin/lua"
 TITANC="$PREFIX/bin/titanc"
-ABI_ROOT="$PREFIX/lib/titan/0.21"
+ABI_ROOT="$PREFIX/lib/titan/0.22"
 PROVIDER="$ABI_ROOT/titan.so"
 SHIM_DIR="$PREFIX/share/lua/5.5/titan"
 
@@ -43,7 +43,7 @@ trap cleanup EXIT HUP INT TERM
 local prefix = assert(arg[1])
 package.path = prefix .. "/share/lua/5.5/?.lua;" ..
                prefix .. "/share/lua/5.5/?/init.lua"
-package.cpath = prefix .. "/lib/titan/0.21/?.so;" ..
+package.cpath = prefix .. "/lib/titan/0.22/?.so;" ..
                 prefix .. "/lib/lua/5.5/?.so"
 
 local peg = require "titan.peg"
@@ -101,7 +101,7 @@ TITAN
     cd "$SMOKE_TMP"
     env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
         TITAN_ROCKS_ROOT="$PREFIX" \
-        TITAN_PATH_0_21="$ABI_ROOT" TITAN_PATH= \
+        TITAN_PATH_0_22="$ABI_ROOT" TITAN_PATH= \
         TITAN_RUNTIME_PREBUILT=1 \
         TITAN_EXTRA_CPPFLAGS="${TITAN_EXTRA_CPPFLAGS:-} -I$PREFIX/include -D_GNU_SOURCE" \
         TITAN_EXTRA_CFLAGS="${TITAN_EXTRA_CFLAGS:-}" \

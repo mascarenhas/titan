@@ -103,7 +103,10 @@ local function ensure_probe_service(st)
         return nil, st.probe_service_error
     end
     st.probe_service = service
-    st.c_profile = service.profile
+    -- C conversion completes canonical tag graphs in place. Give each checker
+    -- its own target-profile leaves so source provenance never mutates the
+    -- service profile shared by nested or later module checks.
+    st.c_profile = types.clone_graph(service.profile)
     return service
 end
 
@@ -145,6 +148,273 @@ local function ensure_module_probe(st)
     st.module_probe = module_probe
     st.module_probe_includes_version = includes_version
     return module_probe
+end
+
+checker._enum_carrier_names = {
+    "char", "signed char", "unsigned char",
+    "short", "unsigned short",
+    "int", "unsigned int",
+    "long", "unsigned long",
+    "long long", "unsigned long long",
+}
+
+-- Build a use-specific probe preamble from this module's written foreign
+-- imports plus only the origin headers needed to spell the probed C types.
+-- Source-import authority is not propagated here: the types themselves carry
+-- the normalized header origins established by their trusted producer.
+function checker._probe_for_c_types(st, probed_types)
+    local direct_keys = {}
+    for _, include in ipairs(st.foreign_includes or {}) do
+        direct_keys[assert(include.rendered,
+            "direct C include has no normalized spelling")] = true
+    end
+
+    local supplemental = {}
+    for _, typ in ipairs(probed_types or {}) do
+        for _, include in ipairs(types.c_ffi_includes(typ)) do
+            local key = assert(include.rendered,
+                "C origin include has no normalized spelling")
+            if not direct_keys[key] then supplemental[key] = include end
+        end
+    end
+    local keys = {}
+    for key in pairs(supplemental) do keys[#keys + 1] = key end
+    if #keys == 0 then return ensure_module_probe(st) end
+    table.sort(keys)
+
+    local includes_version = st.foreign_includes_version or 0
+    local cache_key = tostring(includes_version) .. "\0" ..
+        table.concat(keys, "\0")
+    st.c_type_probes = st.c_type_probes or {}
+    if st.c_type_probes[cache_key] then
+        return st.c_type_probes[cache_key]
+    end
+
+    local service, err = ensure_probe_service(st)
+    if not service then return nil, err end
+    local includes = {}
+    for _, include in ipairs(st.foreign_includes or {}) do
+        includes[#includes + 1] = include
+    end
+    for _, key in ipairs(keys) do
+        includes[#includes + 1] = supplemental[key]
+    end
+    local probe
+    probe, err = service:module_context({
+        source_dir = st.source_dir or ".",
+        includes = includes,
+    })
+    if not probe then return nil, err end
+    st.c_type_probes[cache_key] = probe
+    return probe
+end
+
+function checker._ensure_c_enum_supported(
+        st, typ, loc, errors, seen, spelling_only)
+    if type(typ) ~= "table" then return true end
+    seen = seen or { full = {}, spelling = {} }
+    local visited = spelling_only and seen.spelling or seen.full
+    if visited[typ] then return true end
+    visited[typ] = true
+
+    local tag = typ._tag
+    -- A retained typedef is itself a complete declarator spelling. Looking
+    -- through it while checking only spellability would incorrectly expose an
+    -- inner tag to a later macro and defeats the typedef's C semantics.
+    if spelling_only and tag == "Type.CTypedef" then return true end
+
+    local resolved = types.resolve_c_typedef(typ)
+    if resolved and resolved._tag == "Type.CInteger"
+       and resolved._c_enum_identity then
+        -- A typedef can provide a stable spelling for an otherwise anonymous
+        -- enum. Without that outer spelling, a prototype/anonymous enum cannot
+        -- be reconstructed in a generated standalone declarator.
+        if resolved._c_enum_unspellable and tag ~= "Type.CTypedef" then
+            checker.typeerror(errors, loc,
+                "C enum type '%s' has no usable declaration spelling",
+                types.tostring(typ))
+            return false
+        end
+        if spelling_only then return true end
+
+        local probe, probe_error = checker._probe_for_c_types(st, { typ })
+        if not probe then
+            checker.typeerror(errors, loc,
+                "cannot validate C enum type '%s' with the configured "
+                .. "compiler: %s", types.tostring(typ), probe_error)
+            return false
+        end
+
+        local profile = assert(st.c_profile,
+            "C enum validation requires the configured target profile")
+        local lua_entry = assert(profile.integers[profile.lua_integer],
+            "target profile lacks lua_Integer")
+        -- Probe the exact surface selected by this use. In particular, retain
+        -- an outer typedef rather than resolving it back to a macro-sensitive
+        -- tag. Direct anonymous objects use an unqualified value-expression
+        -- spelling solely for this compatibility query.
+        local declaration_type = typ
+        if typ == resolved and resolved._c_enum_probe_spelling then
+            declaration_type = {}
+            for key, value in pairs(resolved) do
+                declaration_type[key] = value
+            end
+            declaration_type._c_declaration_spelling =
+                resolved._c_enum_probe_spelling
+        end
+
+        local candidates, entries = {}, {}
+        for _, name in ipairs(checker._enum_carrier_names) do
+            local entry = profile.integers[name]
+            if entry then
+                local fits, range_error = csemantics.integer_range_contains(
+                    lua_entry.type._c_numeric, entry.type._c_numeric)
+                assert(fits ~= nil, range_error)
+                if fits or resolved._c_enum_enumerator then
+                    candidates[#candidates + 1] = {
+                        left_type = declaration_type,
+                        right_type = entry.type,
+                    }
+                    entries[#entries + 1] = entry
+                end
+            end
+        end
+
+        local results = probe:validate_declaration_compatibilities(candidates)
+        local selected
+        for index, result in ipairs(results) do
+            if result.accepted then
+                if selected then
+                    checker.typeerror(errors, loc,
+                        "configured C compiler reported multiple carriers "
+                        .. "for enum type '%s'", types.tostring(typ))
+                    return false
+                end
+                selected = entries[index]
+            elseif result.status == "infrastructure_failure" then
+                checker.typeerror(errors, loc,
+                    "cannot validate C enum type '%s' with the configured "
+                    .. "compiler: %s", types.tostring(typ),
+                    result.message or result.summary or result.status)
+                return false
+            end
+        end
+        if not selected then
+            if resolved._c_enum_enumerator then
+                checker.typeerror(errors, loc,
+                    "C enumerator '%s' has no ordinary compiler-selected "
+                    .. "integer carrier", resolved._c_enum_enumerator)
+            else
+                checker.typeerror(errors, loc,
+                    "C enum type '%s' has no compiler-selected carrier whose "
+                    .. "full range fits in lua_Integer", types.tostring(typ))
+            end
+            return false
+        end
+
+        if resolved._c_enum_enumerator then
+            local carrier_fits, range_error =
+                csemantics.integer_range_contains(
+                    lua_entry.type._c_numeric,
+                    selected.type._c_numeric)
+            assert(carrier_fits ~= nil, range_error)
+            if not carrier_fits then
+                local name = resolved._c_enum_enumerator
+                local lua_numeric = lua_entry.type._c_numeric
+                local maximum = assert(lua_numeric.maximum)
+                local fit_expression
+                if selected.type.signed then
+                    local lua_spelling = lua_entry.type.spelling
+                    fit_expression = string.format(
+                        "(((%s) >= (-((%s)%sULL) - 1)) " ..
+                            "&& ((%s) <= ((%s)%sULL)))",
+                        name, lua_spelling, maximum,
+                        name, lua_spelling, maximum)
+                else
+                    fit_expression = string.format(
+                        "((unsigned long long)(%s) <= %sULL)",
+                        name, maximum)
+                end
+                local fit_type = types.CArray(
+                    lua_entry.type,
+                    "(" .. fit_expression .. ") ? 1 : -1")
+                local fit_result =
+                    probe:validate_declaration_compatibilities({ {
+                        left_type = fit_type,
+                        right_type = fit_type,
+                    } })[1]
+                if fit_result.status == "infrastructure_failure" then
+                    checker.typeerror(errors, loc,
+                        "cannot validate C enumerator '%s' with the " ..
+                        "configured compiler: %s", name,
+                        fit_result.message or fit_result.summary
+                            or fit_result.status)
+                    return false
+                elseif not fit_result.accepted then
+                    checker.typeerror(errors, loc,
+                        "C enumerator '%s' is outside the range of " ..
+                        "lua_Integer", name)
+                    return false
+                end
+            end
+        end
+
+        -- Preserve the selected expression/object carrier through later C
+        -- operators. Titan-boundary coercions perform their own range check;
+        -- normalizing here would change unsigned promotions and wraparound.
+        local carrier = selected.type
+        resolved.spelling = carrier.spelling
+        resolved.signed = carrier.signed
+        resolved.rank = carrier.rank
+        resolved.bits = carrier.bits
+        resolved._c_numeric = carrier._c_numeric
+        resolved._c_numeric_carriers = carrier._c_numeric_carriers
+        return true
+    end
+
+    local children = {}
+    local child_spelling_only = spelling_only
+    if tag == "Type.CStruct" or tag == "Type.CUnion"
+       or tag == "Type.COwned" or tag == "Type.Pointer" then
+        return true
+    elseif tag == "Type.CPointer" then
+        children[1] = typ.pointee
+        child_spelling_only = true
+    elseif tag == "Type.CArray" then
+        children[1] = typ.elem
+        child_spelling_only = true
+    elseif tag == "Type.CTypedef" then
+        children[1] = typ.target
+    elseif tag == "Type.CFunction" then
+        for _, param in ipairs(typ.params or {}) do
+            children[#children + 1] = param
+        end
+        children[#children + 1] = typ.ret
+    elseif tag == "Type.Function" then
+        for _, param in ipairs(typ.params or {}) do
+            children[#children + 1] = param
+        end
+        for _, ret in ipairs(typ.rettypes or {}) do
+            children[#children + 1] = ret
+        end
+        children[#children + 1] = typ.varargtype
+        children[#children + 1] = typ.flexrettype
+    elseif tag == "Type.Array" then
+        children[1] = typ.elem
+    elseif tag == "Type.Map" then
+        children[1] = typ.keys
+        children[2] = typ.values
+    elseif tag == "Type.Option" then
+        children[1] = typ.base
+    end
+    local ok = true
+    for _, child in ipairs(children) do
+        if not checker._ensure_c_enum_supported(
+                st, child, loc, errors, seen, child_spelling_only) then
+            ok = false
+        end
+    end
+    return ok
 end
 
 
@@ -255,7 +525,10 @@ local function resolve_type_alias(node, st, errors)
     end
 
     node._alias_state = "resolving"
-    local target = typefromnode(node.type, st, errors)
+    -- Resolving a transparent type-only alias is not an enum value use. The
+    -- eventual type use revalidates the resolved graph in its own full or
+    -- spelling-only context.
+    local target = typefromnode(node.type, st, errors, true)
     -- A recursive visit marks this declaration resolved/invalid. Preserve that
     -- result instead of wrapping it back in the structural RHS on unwind.
     if node._alias_state == "resolved" then
@@ -410,12 +683,14 @@ local function param_types(params, st, errors)
     return ptypes, varargtype, paramnames
 end
 
-local function flexible_return_type(node, st, errors)
+local function flexible_return_type(
+        node, st, errors, defer_c_enum_carrier)
     if not node.flexrettype then
         return false
     end
     return check_varg_elem(
-        typefromnode(node.flexrettype, st, errors),
+        typefromnode(node.flexrettype, st, errors,
+            defer_c_enum_carrier),
         node.flexrettype.loc or node.loc, errors, "return")
 end
 
@@ -1341,6 +1616,17 @@ local function c_field_decl(typ, name, st)
         typ = c_resolve(typ.pointee)
     end
     if typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion" then
+        -- A source-imported C type keeps its producer-owned descriptor, while
+        -- this translation unit may complete the same file-scope tag in a
+        -- later direct header. C has one file-scope tag namespace, so field
+        -- lookup uses that visible completion without mutating the producer.
+        if typ._c_tag_scope == "file" and typ.tagname then
+            local kind = typ._tag == "Type.CStruct" and "struct" or "union"
+            local record = st:find_c_file_tag(typ.tagname, kind)
+            if record and record.canonical and record.canonical.complete then
+                typ = record.canonical
+            end
+        end
         local err = incomplete_c_object_error(typ, st,
             "C field access '" .. name .. "'")
         if err then
@@ -1536,12 +1822,18 @@ end
 
 local function is_nominal_visible_from(st, fqtn)
     local nominal = types.registry[fqtn]
+    local owner = nominal_module(fqtn)
     return nominal
-        and (not nominal.islocal or nominal_module(fqtn) == st.modname)
+        and (not nominal.islocal
+             or owner == st.modname
+             or st:source_import_visible(owner))
 end
 
 local function is_nominal_member_visible_from(st, member)
-    return not member.islocal or nominal_module(member.fqtn) == st.modname
+    local owner = nominal_module(member.fqtn)
+    return not member.islocal
+        or owner == st.modname
+        or st:source_import_visible(owner)
 end
 
 -- A type alias remains type-only as a value, but an alias whose transparent
@@ -2610,15 +2902,23 @@ typefromnode = util.make_visitor({
         return types.Value()
     end,
 
-    ["Ast.TypeName"] = function(node, st, errors)
+    ["Ast.TypeName"] = function(node, st, errors,
+                                    defer_c_enum_carrier)
         local alias = st:find_type_alias(node.name)
         if alias then
-            return resolve_type_alias(alias, st, errors)
+            local typ = resolve_type_alias(alias, st, errors)
+            if checker._ensure_c_enum_supported(
+                    st, typ, node.loc, errors, nil,
+                    defer_c_enum_carrier and true or false) then
+                return typ
+            end
+            return types.Invalid()
         end
         return types.Nominal(st.modname .. "." .. node.name)
     end,
 
-    ["Ast.TypeQualName"] = function(node, st, errors)
+    ["Ast.TypeQualName"] = function(node, st, errors,
+                                        defer_c_enum_carrier)
         local mod = st:find_symbol(node.module)
         if node._contextual_c_name and mod and mod._type
            and mod._type._tag ~= "Type.CModule" then
@@ -2627,16 +2927,23 @@ typefromnode = util.make_visitor({
                 node.name)
         end
         if mod and mod._type and mod._type._tag == "Type.Module" then
-            local type_member = mod._type.type_members
-                and mod._type.type_members[node.name]
+            local type_member =
+                types.module_type_member(
+                    mod._type, node.name, mod._source_import)
             if type_member then
                 if type_member._tag == "Type.Interface" then
                     return types.Nominal(type_member.name)
                 end
-                return type_member
+                if checker._ensure_c_enum_supported(
+                        st, type_member, node.loc, errors, nil,
+                        defer_c_enum_carrier and true or false) then
+                    return type_member
+                end
+                return types.Invalid()
             end
             local fqtn = mod._type.name .. "." .. node.name
-            local member = mod._type.members[node.name]
+            local member = types.module_member(
+                mod._type, node.name, mod._source_import)
             if not member then
                 return invalid(errors, node.loc,
                     "type '%s' not found inside module '%s'",
@@ -2656,7 +2963,12 @@ typefromnode = util.make_visitor({
         elseif mod and mod._type and mod._type._tag == "Type.CModule" then
             local typ = mod._type.type_members and mod._type.type_members[node.name]
             if typ then
-                return typ
+                if checker._ensure_c_enum_supported(
+                        st, typ, node.loc, errors, nil,
+                        defer_c_enum_carrier and true or false) then
+                    return typ
+                end
+                return types.Invalid()
             end
             return invalid(errors, node.loc,
                 "C type '%s' not found inside foreign module '%s'",
@@ -2676,7 +2988,9 @@ typefromnode = util.make_visitor({
     end,
 
     ["Ast.TypeCPointer"] = function(node, st, errors)
-        local pointee = typefromnode(node.subtype, st, errors)
+        -- Forming a pointer needs only an exact pointee spelling. It does not
+        -- carry an enum value and therefore must not force a wide-enum carrier.
+        local pointee = typefromnode(node.subtype, st, errors, true)
         local resolved = c_resolve(pointee)
         if not types.is_direct_c(pointee)
            or (resolved and resolved._tag == "Type.COwned") then
@@ -2688,7 +3002,8 @@ typefromnode = util.make_visitor({
     end,
 
     ["Ast.TypeCArray"] = function(node, st, errors)
-        local elem = typefromnode(node.base, st, errors)
+        -- Exact C array storage needs element spelling, not a numeric carrier.
+        local elem = typefromnode(node.base, st, errors, true)
         local resolved = c_resolve(elem)
         if not types.is_direct_c(elem)
            or (resolved and resolved._tag == "Type.COwned") then
@@ -2701,7 +3016,9 @@ typefromnode = util.make_visitor({
     end,
 
     ["Ast.TypeCOwned"] = function(node, st, errors)
-        local payload = typefromnode(node.subtype, st, errors)
+        -- Owned storage renders/allocates the exact payload but does not box an
+        -- enum value until a later payload access.
+        local payload = typefromnode(node.subtype, st, errors, true)
         if payload._tag == "Type.Invalid" then
             return payload
         end
@@ -2712,12 +3029,16 @@ typefromnode = util.make_visitor({
         return types.COwned(payload, node.count and true or false)
     end,
 
-    ["Ast.TypeArray"] = function(node, st, errors)
-        return types.Array(deoptionize(typefromnode(node.subtype, st, errors)))
+    ["Ast.TypeArray"] = function(node, st, errors,
+                                     defer_c_enum_carrier)
+        return types.Array(deoptionize(typefromnode(
+            node.subtype, st, errors, defer_c_enum_carrier)))
     end,
 
-    ["Ast.TypeMap"] = function(node, st, errors)
-        local key = typefromnode(node.keystype, st, errors)
+    ["Ast.TypeMap"] = function(node, st, errors,
+                                   defer_c_enum_carrier)
+        local key = typefromnode(
+            node.keystype, st, errors, defer_c_enum_carrier)
         if key._tag == "Type.Nil" then
             checker.typeerror(errors, node.loc, "type of map key cannot be nil", node.module)
             key = types.Invalid()
@@ -2726,34 +3047,42 @@ typefromnode = util.make_visitor({
             key = deoptionize(key)
         end
         return types.Map(key,
-                         deoptionize(typefromnode(node.valuestype, st, errors)))
+            deoptionize(typefromnode(
+                node.valuestype, st, errors, defer_c_enum_carrier)))
     end,
 
-    ["Ast.TypeFunction"] = function(node, st, errors)
+    ["Ast.TypeFunction"] = function(node, st, errors,
+                                        defer_c_enum_carrier)
         -- First-class function type `(P...) -> (R...)`. argtypes and rettypes
         -- are lists of type nodes; a nested arrow (`a -> b -> c`, right
         -- associative) shows up as a TypeFunction inside rettypes and recurses.
         local ptypes = {}
         for _, pt in ipairs(node.argtypes) do
-            table.insert(ptypes, typefromnode(pt, st, errors))
+            table.insert(ptypes, typefromnode(
+                pt, st, errors, defer_c_enum_carrier))
         end
         local rettypes = {}
         for _, rt in ipairs(node.rettypes) do
-            table.insert(rettypes, typefromnode(rt, st, errors))
+            table.insert(rettypes, typefromnode(
+                rt, st, errors, defer_c_enum_carrier))
         end
         -- A first-class variadic function type `(P..., ...: t) -> (R...)` carries
         -- its element type node on `node.varargtype` (false when absent); set
         -- the resulting Type.Function's `varargtype` slot accordingly.
         local varargtype = node.varargtype
-            and check_varg_elem(typefromnode(node.varargtype, st, errors),
+            and check_varg_elem(typefromnode(
+                node.varargtype, st, errors, defer_c_enum_carrier),
                                 node.varargtype.loc, errors, "parameter")
             or false
-        local flexrettype = flexible_return_type(node, st, errors)
+        local flexrettype = flexible_return_type(
+            node, st, errors, defer_c_enum_carrier)
         return types.Function(ptypes, rettypes, false, varargtype, flexrettype)
     end,
 
-    ["Ast.TypeOption"] = function(node, st, errors)
-        local typ = optionize(typefromnode(node.basetype, st, errors))
+    ["Ast.TypeOption"] = function(node, st, errors,
+                                      defer_c_enum_carrier)
+        local typ = optionize(typefromnode(
+            node.basetype, st, errors, defer_c_enum_carrier))
         if typ._tag == "Type.Option"
            and not types.has_tvalue_representation(typ.base) then
             return invalid(errors, node.loc,
@@ -2884,7 +3213,8 @@ function checker._unsafe_c_pointer_conversion(
     local st = active_check_state
     local module_probe, probe_error
     if st then
-        module_probe, probe_error = ensure_module_probe(st)
+        module_probe, probe_error = checker._probe_for_c_types(
+            st, { source_pointer, target })
     else
         probe_error = "no active checker context"
     end
@@ -4900,7 +5230,7 @@ checkvar = util.make_visitor({
         end
     end,
 
-    ["Ast.VarDot"] = function(node, st, errors, _)
+    ["Ast.VarDot"] = function(node, st, errors, context)
         if node.exp._tag == "Ast.ExpVar" then
             checkvar(node.exp.var, st, errors)
             if node.exp.var._decl then node.exp.var._decl._used = true end
@@ -4921,8 +5251,16 @@ checkvar = util.make_visitor({
         end
         if ltype._tag == "Type.Module" or ltype._tag == "Type.CModule" then
             local mod = ltype
-            if mod.members[node.name] then
-                node._decl = mod.members[node.name]
+            local import_decl = node.exp._tag == "Ast.ExpVar"
+                and node.exp.var and node.exp.var._decl
+            local include_source = import_decl
+                and import_decl._tag == "Ast.TopLevelImport"
+                and import_decl._source_import == true
+            local module_member = ltype._tag == "Type.Module"
+                and types.module_member(mod, node.name, include_source)
+                or mod.members[node.name]
+            if module_member then
+                node._decl = module_member
                 node._type = node._decl.type
                 if ltype._tag == "Type.CModule" and mod.type_members
                    and mod.type_members[node.name] then
@@ -4937,9 +5275,11 @@ checkvar = util.make_visitor({
                 }
                 node._type = node._decl.type
                 node._ctype_namespace = true
-            elseif ltype._tag == "Type.Module" and mod.type_members
-                   and mod.type_members[node.name] then
-                local member = mod.type_members[node.name]
+            elseif ltype._tag == "Type.Module"
+                   and types.module_type_member(
+                       mod, node.name, include_source) then
+                local member = types.module_type_member(
+                    mod, node.name, include_source)
                 local namespace = alias_namespace_type(member, st)
                 if namespace then
                     node._alias_namespace = true
@@ -4954,7 +5294,7 @@ checkvar = util.make_visitor({
                         "member '%s' not found inside module '%s'",
                         node.name, mod.name)
                 end
-            elseif not mod.members[node.name] then
+            elseif not module_member then
                 node._type = invalid(errors, node.loc,
                     "member '%s' not found inside module '%s'",
                     node.name, mod.name)
@@ -5094,6 +5434,17 @@ checkvar = util.make_visitor({
                 "trying to access a member of value of type '%s'",
                 types.tostring(ltype))
         end
+        if node._type and node._type._tag ~= "Type.Invalid" then
+            local spelling_only = context
+                and node.exp._type._tag == "Type.CModule"
+                and node._type._tag == "Type.Function"
+                and c_function_pointer_type(context) ~= nil
+            if not checker._ensure_c_enum_supported(
+                    st, node._type, node.loc, errors, nil,
+                    spelling_only and true or false) then
+                node._type = types.Invalid()
+            end
+        end
     end,
 
     ["Ast.VarBracket"] = function(node, st, errors, _, mode)
@@ -5140,6 +5491,11 @@ checkvar = util.make_visitor({
         -- always try to coerce index key to key type
         node.exp2 = coerce_and_check(
             node.exp2, keystype, term, errors, node.exp2.loc)
+        if node._type and node._type._tag ~= "Type.Invalid"
+           and not checker._ensure_c_enum_supported(
+               st, node._type, node.loc, errors) then
+            node._type = types.Invalid()
+        end
     end,
 })
 
@@ -5738,7 +6094,10 @@ local function finish_c_operator(node, st, errors, decide, operands)
         return true
     end
 
-    local module_probe, probe_error = ensure_module_probe(st)
+    local module_probe, probe_error = checker._probe_for_c_types(st, {
+        trait.lhs_source, trait.lhs_target,
+        trait.rhs_source, trait.rhs_target,
+    })
     if not module_probe then
         checker.typeerror(errors, node.loc,
             "cannot validate C operator '%s' because the configured "
@@ -5827,6 +6186,11 @@ local function check_explicit_cast_relation(node, st, errors)
     checkexp(node.exp, st, errors, node.target)
     local source = node.exp._type
     local target = node.target
+    if source._tag == "Type.Invalid" or target._tag == "Type.Invalid" then
+        node._written_cast_failed = true
+        node._written_cast = false
+        return target
+    end
     local cast_plan = types.written_cast(source, target)
     local interface_failure
 
@@ -6139,7 +6503,7 @@ checkexp = util.make_visitor({
                     return
                 end
                 if record.islocal
-                   and nominal_module(context.fqtn) ~= st.modname then
+                   and not is_nominal_visible_from(st, context.fqtn) then
                     node._type = invalid(errors, node.loc,
                         "record type '%s' is local to module '%s'",
                         context.fqtn, nominal_module(context.fqtn))
@@ -6583,6 +6947,12 @@ checkexp = util.make_visitor({
                 if named then
                     node._type = types.Invalid()
                     named_target_error(errors, node.loc)
+                    check_call_argument_expressions(node.args, st, errors)
+                    return
+                end
+                if not checker._ensure_c_enum_supported(
+                        st, cfunc, node.loc, errors) then
+                    node._type = types.Invalid()
                     check_call_argument_expressions(node.args, st, errors)
                     return
                 end
@@ -7514,10 +7884,24 @@ end
 
 -- Typecheck the toplevel node
 local toplevel_visitor = util.make_visitor({
-    ["Ast.TopLevelImport"] = function(node, _, errors, loader)
-        local modtype, errs = checker.checkimport(node.modname, loader)
+    ["Ast.TopLevelImport"] = function(node, st, errors, loader)
+        local modtype, errs, import_info =
+            checker.checkimport(node.modname, loader)
         if modtype then
             node._type = modtype
+            -- Source visibility is trusted loader provenance, never a field a
+            -- binary provider can place in evaluated metadata.
+            node._source_import = import_info
+                and import_info.kind == "source"
+                and modtype._source == true
+            if node._source_import then
+                -- Visibility is direct. C headers are not inherited as a
+                -- context: each source-only C type retains its own origin
+                -- header, and code generation adds that header only when it
+                -- renders a declaration using the type.
+                st.source_imports[node.modname] =
+                    st.source_imports[node.modname] or node
+            end
             for _, err in ipairs(errs) do
                 table.insert(errors, err)
             end
@@ -7547,11 +7931,21 @@ local toplevel_visitor = util.make_visitor({
             end
         end
         if ftypes then
+            local normalized
+            normalized, err = cprobe.normalize_include_descriptor(include, {
+                source_dir = st.source_dir,
+            })
+            if normalized then
+                include = normalized
+            else
+                ftypes = nil
+            end
+        end
+        if ftypes then
             node._include = include
             st.last_foreign_import_node = node
             st.foreign_includes[#st.foreign_includes + 1] = include
-            st.foreign_includes_version =
-                st.foreign_includes_version + 1
+            st.foreign_includes_version = st.foreign_includes_version + 1
             st.module_probe = nil
             st.module_probe_error = nil
             st.module_probe_includes_version = nil
@@ -7566,8 +7960,10 @@ local toplevel_visitor = util.make_visitor({
                 local fname = item.name
                 local ftype = item.type
                 local decl, conversion_error, declaration =
-                    foreigntypes.convert(st, ftype)
+                    foreigntypes.convert(st, ftype, fname, include)
                 if decl then
+                    types.mark_c_ffi_scope(decl, st.modname)
+                    types.mark_c_ffi_include(decl, include)
                     local ordinary
                     if is_foreign_ordinary_identifier(fname, ftype) then
                         ordinary = {
@@ -7592,6 +7988,8 @@ local toplevel_visitor = util.make_visitor({
                             or false
                         local member = types.ModuleMember(
                             name, fname, decl, paramnames)
+                        member._c_origin_header = declaration
+                            and declaration.origin_header or include
                         members[fname] = member
                         if ordinary and ftype.type == "function" then
                             ordinary.paramnames_state =
@@ -7779,6 +8177,7 @@ local toplevel_visitor = util.make_visitor({
         end
 
         node._type = types.Interface(fqtn, methods)
+        node._type._source_complete = true
         types.registry[fqtn] = node._type
     end,
 
@@ -7836,6 +8235,7 @@ local toplevel_visitor = util.make_visitor({
         end
         node._type = types.Record(fqtn, fields, {}, {}, #fields)
         node._type.islocal = node.islocal and true or false
+        node._type._source_complete = true
         node._dynamic_receiver_plan =
             assert(types.dynamic_coercion(types.Nominal(fqtn)),
                 "record nominal lacks its dynamic receiver plan")
@@ -7872,6 +8272,7 @@ local toplevel_visitor = util.make_visitor({
         node._type = types.Union(
             fqtn, variants, {}, {}, #node.variants)
         node._type.islocal = node.islocal and true or false
+        node._type._source_complete = true
         node._dynamic_receiver_plan =
             assert(types.dynamic_coercion(types.Nominal(fqtn)),
                 "union nominal lacks its dynamic receiver plan")
@@ -8452,8 +8853,24 @@ local function first_local_nominal_type(typ, seen)
     end
 end
 
+-- A process may encounter the same owner through both a trusted source edge
+-- and a compiled facade. Keep the complete source descriptor canonical in the
+-- process-global nominal registry; visibility checks still require a direct
+-- source import, so retaining the richer descriptor grants no permission by
+-- itself. Unknown `_source_complete` fields are never serialized.
+function checker._register_nominal_descriptor(typ, trusted_source)
+    local current = types.registry[typ.name]
+    if trusted_source then typ._source_complete = true end
+    if not current or trusted_source or not current._source_complete then
+        -- A metadata expression cannot self-assert this compiler-only marker.
+        if not trusted_source then typ._source_complete = nil end
+        types.registry[typ.name] = typ
+    end
+end
+
 function checker.register_module_interface(
-        modname, type_or_error, loader, exposer, interface_seen)
+        modname, type_or_error, loader, exposer, interface_seen,
+        trusted_source)
     exposer = exposer or modname
     interface_seen = interface_seen or {}
     local exposer_key
@@ -8484,67 +8901,128 @@ function checker.register_module_interface(
 
     -- Interfaces are type-only module entries. Register every direct
     -- descriptor before traversing any signature so mutually referring
-    -- Interfaces have their complete nominal environment available.
-    for _, t in pairs(type_or_error.type_members or {}) do
-        if t and t._tag == "Type.Interface" then
-            types.registry[t.name] = t
+    -- Interfaces have their complete nominal environment available. A source
+    -- interface has an additional non-serialized local view; a binary one has
+    -- only the ordinary public collections.
+    local type_views = { type_or_error.type_members or {} }
+    if trusted_source then
+        type_views[#type_views + 1] =
+            type_or_error.source_type_members or {}
+    end
+    for _, view in ipairs(type_views) do
+        for _, t in pairs(view) do
+            if t and t._tag == "Type.Interface" then
+                checker._register_nominal_descriptor(t, trusted_source)
+            end
         end
     end
-    for _, member in ipairs(type_or_error.members) do
-        -- Exported nominals arrive wrapped in a Type.ModuleMember; unwrap so
-        -- the nominal type is registered for `.so`-only imports too
-        -- (the source-import path registers it as a side effect of checking).
-        local t = member.type or member
-        if t and (t._tag == "Type.Record"
-                  or t._tag == "Type.Union") then
-            types.registry[t.name] = t
+
+    local member_views = { type_or_error.members or {} }
+    if trusted_source then
+        member_views[#member_views + 1] =
+            type_or_error.source_members or {}
+    end
+    for _, view in ipairs(member_views) do
+        for _, member in ipairs(view) do
+            -- Nominals arrive wrapped in a Type.ModuleMember. The source view
+            -- additionally registers local owners for direct source importers.
+            local t = member.type or member
+            if t and (t._tag == "Type.Record"
+                      or t._tag == "Type.Union") then
+                checker._register_nominal_descriptor(t, trusted_source)
+            end
         end
     end
+
     local seen = {}
-    for _, member in ipairs(type_or_error.members) do
-        register_referenced_nominals(
-            member.type or member, loader, seen, exposer, interface_seen)
+    for _, view in ipairs(member_views) do
+        for _, member in ipairs(view) do
+            register_referenced_nominals(
+                member.type or member, loader, seen, exposer, interface_seen)
+        end
     end
-    for _, member in pairs(type_or_error.type_members or {}) do
-        register_referenced_nominals(
-            member, loader, seen, exposer, interface_seen)
+    for _, view in ipairs(type_views) do
+        for _, member in pairs(view) do
+            register_referenced_nominals(
+                member, loader, seen, exposer, interface_seen)
+        end
     end
 end
 
 function checker.checkimport(modname, loader, request)
-    local ok, type_or_error, errors = loader(modname, request)
+    local ok, type_or_error, errors, import_info = loader(modname, request)
     if not ok then return nil, type_or_error end
     checker.register_module_interface(
         modname, type_or_error, loader, request and request.exposer,
-        request and request.interface_seen)
-    return type_or_error, errors
+        request and request.interface_seen,
+        import_info and import_info.kind == "source"
+            and type_or_error._source == true)
+    return type_or_error, errors, import_info
 end
 
 -- Builds a type for the module from the types of its public members
 --   modast: AST for the module
 --   returns "Type.Module" type
-local function makemoduletype(modname, modast)
+local function makemoduletype(modname, modast, st)
     local members = {}
     local type_members = {}
+    local source_members = {}
+    local source_type_members = {}
+
+    local function add_source_member(member)
+        member.islocal = true
+        source_members[#source_members + 1] = member
+        source_members[member.name] = member
+    end
+
     for _, tlnode in ipairs(modast) do
-        if tlnode._tag ~= "Ast.TopLevelImport" and not tlnode.islocal and not tlnode._ignore then
+        if not tlnode._ignore then
             local tag = tlnode._tag
-            if tag == "Ast.TopLevelVar" then
-                table.insert(members, types.ModuleVariable(modname, tlnode.decl.name, tlnode._type))
+            if tag == "Ast.TopLevelImport"
+               or tag == "Ast.TopLevelForeignImport" then
+                -- Imports are compile-time declarations, not module members.
+            elseif tag == "Ast.TopLevelVar" then
+                local member = types.ModuleVariable(
+                    modname, tlnode.decl.name, tlnode._type)
+                if tlnode.islocal then
+                    add_source_member(member)
+                else
+                    members[#members + 1] = member
+                end
             elseif tag == "Ast.TopLevelFunc" then
-                table.insert(members, types.ModuleMember(modname, tlnode.name,
-                    tlnode._type, tlnode._paramnames))
+                local member = types.ModuleMember(modname, tlnode.name,
+                    tlnode._type, tlnode._paramnames)
+                if tlnode.islocal then
+                    add_source_member(member)
+                else
+                    members[#members + 1] = member
+                end
             elseif tag == "Ast.TopLevelRecord"
-               or tag == "Ast.TopLevelUnion" then
-                table.insert(members, types.ModuleMember(modname, tlnode.name,
-                    tlnode._type, false))
-            elseif tag == "Ast.TopLevelTypeAlias"
-                   or tag == "Ast.TopLevelInterface" then
+                   or tag == "Ast.TopLevelUnion" then
+                local member = types.ModuleMember(
+                    modname, tlnode.name, tlnode._type, false)
+                if tlnode.islocal then
+                    add_source_member(member)
+                else
+                    members[#members + 1] = member
+                end
+            elseif tag == "Ast.TopLevelTypeAlias" then
+                if tlnode.islocal then
+                    source_type_members[tlnode.name] = tlnode._type
+                else
+                    type_members[tlnode.name] = tlnode._type
+                end
+            elseif tag == "Ast.TopLevelInterface" then
                 type_members[tlnode.name] = tlnode._type
             end
         end
     end
-    return types.Module(modname, members, type_members)
+
+    local modtype = types.Module(modname, members, type_members)
+    modtype._source = true
+    modtype.source_members = source_members
+    modtype.source_type_members = source_type_members
+    return modtype
 end
 
 local function reject_exported_c_ffi_type(modname, errors, loc, typ)
@@ -8699,7 +9177,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
         end
         reject_exported_c_ffi_types(modname, ast, errors)
         reject_exported_local_nominal_types(modname, ast, errors)
-        ast._type = makemoduletype(modname, ast)
+        ast._type = makemoduletype(modname, ast, st)
         return ast._type, errors
     end
 

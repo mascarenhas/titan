@@ -102,27 +102,27 @@ union AllFiveError
 end
 
 function run(func: () -> value): Task
-  return uv._run(func)
+  return uv.run_internal(func)
 end
 
 function loop()
-  uv._loop()
+  uv.loop()
 end
 
 function yield()
-  uv._yield()
+  uv.yield()
 end
 
 function running(): Task
-  return uv._running()
+  return uv.running_task()
 end
 
 function suspend()
-  uv._suspend()
+  uv.suspend()
 end
 
 function version(): string
-  return uv._version()
+  return uv.version()
 end
 
 function channel(size: integer?):

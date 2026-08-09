@@ -78,6 +78,10 @@ local function compile_fixture(workspace)
 
     local link = assert(cdriver.split_shell_words(driver.CC))
     link[#link + 1] = "-shared"
+    -- This fixture exercises BuildId matching, so request that prerequisite
+    -- explicitly instead of relying on the configured compiler's linker
+    -- default (which differs between GCC and Clang distributions).
+    link[#link + 1] = "-Wl,--build-id=sha1"
     link[#link + 1] = object
     link[#link + 1] = "-o"
     link[#link + 1] = provider

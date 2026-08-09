@@ -1,5 +1,6 @@
 local assert = require 'luassert'
 local lfs = require 'lfs'
+local coder = require 'titan-compiler.coder'
 
 local ROOT_ARTIFACTS = {
     "titan-runtime/libtitan.a",
@@ -173,6 +174,10 @@ local function matching_c_brace(source, opening)
         end
     end
     error("unmatched generated-C brace at byte " .. opening, 0)
+end
+
+local function coroutine_native_name(name)
+    return coder._source_private_prefix("titan.coroutine", name) .. "_titan"
 end
 
 local function generated_function_body(generated, signature)
@@ -766,8 +771,8 @@ describe("coroutine standard module", function()
 
     it("roots transfers through checked public Lua uservalue APIs", function()
         local generated = read_file(COROUTINE_VARIANT_C)
-        local signature = "static void " ..
-            "titan_coroutine_root_transfer_titan("
+        local signature = "TITAN_SOURCE_LOCAL void " ..
+            coroutine_native_name("root_transfer") .. "("
         local body = generated_function_body(generated, signature)
 
         local recover = assert(body:find("mco_get_user_data", 1, true))
@@ -932,8 +937,8 @@ describe("coroutine standard module", function()
 
     it("anchors a popped payload before clearing its transfer root", function()
         local generated = read_file(COROUTINE_VARIANT_C)
-        local signature = "static TValue " ..
-            "titan_coroutine_pop_transfer_or_raise_titan("
+        local signature = "TITAN_SOURCE_LOCAL TValue " ..
+            coroutine_native_name("pop_transfer_or_raise") .. "("
         local body = generated_function_body(generated, signature)
         local payload_pop = assert(body:find("mco_pop(_param_co", 1, true))
         payload_pop = assert(body:find("mco_pop(_param_co", payload_pop + 1,
@@ -941,7 +946,7 @@ describe("coroutine standard module", function()
         local anchor_refresh = assert(body:find("setobj2t", payload_pop,
             true))
         local root_clear = assert(body:find(
-            "titan_coroutine_clear_transfer_titan",
+            coroutine_native_name("clear_transfer"),
             payload_pop, true))
         assert.is_true(payload_pop < anchor_refresh)
         assert.is_true(anchor_refresh < root_clear)

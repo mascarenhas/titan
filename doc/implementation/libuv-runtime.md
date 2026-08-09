@@ -494,10 +494,21 @@ as an ownership list.
 
 A `uv_file` is an operating-system descriptor rather than a `uv_handle_t`.
 There is deliberately no Runtime File registry and no automatic File-close
-shutdown phase. The wrapper and each in-flight filesystem request retain the
-descriptor as needed; explicit `File:close()` owns its terminal callback, while
-operating-system process teardown handles descriptors left open by the
-application.
+shutdown phase. The high-level `fs.File` facade stores the raw descriptor, and each in-flight
+filesystem request retains its submitted copy as needed. A full high-level
+write reloads the facade's descriptor before every short-write submission, so
+a close between chunks is observed instead of reusing a stale process integer.
+
+`File:close()` constructs its source-private close attempt before installing the
+closed `-1` sentinel, then suspends. Dispatch marks the attempt accepted only
+after native submission succeeds. A caught failure restores the descriptor
+only while that bit is false and uses a bare re-raise to preserve the original
+traceback. Once submission is accepted, success, callback failure, and pending
+cancellation all leave the facade terminal: retrying that integer could close
+an unrelated descriptor after operating-system reuse. Close itself is not a
+cancellation-affected operation, so an accepted request reaches its callback.
+Operating-system process teardown handles descriptors deliberately left open
+by the application.
 
 After successful close, the Runtime clears its roots. A later `run`/`loop`
 pair creates a fresh loop. Retained loop resources from the prior session are
