@@ -1356,8 +1356,26 @@ macro_expand = typed("Ctx, {string}, LineList, number, boolean -> ()", function(
                     local args, j = consume_parentheses(tokens, i + 1, linelist, cur)
                     debug("args:", #args, args)
                     local named_args = {}
-                    for i = 1, #define.args do
-                        named_args[define.args[i]] = args[i] or {}
+                    local variadic = define.args[#define.args] == "..."
+                    local fixed_count = #define.args - (variadic and 1 or 0)
+                    for argi = 1, fixed_count do
+                        named_args[define.args[argi]] = args[argi] or {}
+                    end
+                    if variadic then
+                        local varargs = {}
+                        set_token_spacing(varargs, {})
+                        for argi = fixed_count + 1, #args do
+                            if argi > fixed_count + 1 then
+                                append_token(varargs, ",", false, ",")
+                            end
+                            append_tokens(varargs, args[argi],
+                                token_has_space_before(args[argi], 1))
+                        end
+                        -- The grammar records C's unnamed variadic parameter
+                        -- as `...`; replacement lists name it `__VA_ARGS__`.
+                        -- A literal `...` in the replacement is an ordinary
+                        -- ellipsis and must remain unchanged.
+                        named_args["__VA_ARGS__"] = varargs
                     end
                     local expansion = array_copy(repl)
                     replace_args(ctx, expansion, named_args, linelist, cur)
