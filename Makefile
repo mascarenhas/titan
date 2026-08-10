@@ -2189,13 +2189,17 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 # longer builds stdlib before LuaRocks has deployed the compiler.
 rock-build: titan
 
-TITAN_STDLIB_TEST_ROOTS := \
+# --test gives its first root ownership of the aggregate executable path. Keep
+# that role explicit and assign it to titan.test's tests, not an unrelated module.
+TITAN_STDLIB_TEST_PROGRAM_ROOT := test.tests
+TITAN_STDLIB_TEST_PROGRAM_OUTPUT := test/tests
+TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	coroutine.tests iter.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test async.tests \
-	uv.task_tests io.tests fs.tests timer.tests test.tests net.tests ssl.tests \
-	http.tests url.tests os.tests os.process_tests uv.runtime_tests
+	uv.task_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests \
+	url.tests os.tests os.process_tests uv.runtime_tests
 TITAN_TEST_BUILD_DIR ?= .titan-tests
-TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/coroutine/tests__main
+TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
 TITAN_TEST_TIMEOUT ?= 120
 TEST_TITANC ?= titanc
 BUSTED ?= busted
@@ -2291,6 +2295,7 @@ examples: lua ## Compile the example Titan modules (SDL examples need SDL2 heade
 	$(MAKE) -C examples all
 
 clean: ## Remove generated build/test artifacts (keeps the Lua tree)
+	bash spec/support/clean_generated_test_artifacts.sh
 	rm -f $(RUNTIME_O) titan-runtime/*.o $(TITAN_RUNTIME_LIB)
 	rm -f $(LPEGLABEL_OBJECTS) $(LPEGLABEL_ARCHIVE) \
 		$(LPEGLABEL_BUILD_CONFIG) $(LPEGLABEL_ARCHIVE_CONFIG)
@@ -2317,43 +2322,6 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 		examples/sdl_demo
 	rm -f testfiles/*.c testfiles/*.o testfiles/*.so \
 		testfiles/selection_sort.a testfiles/sieve.a
-	bash spec/support/clean_generated_test_artifacts.sh
-	rm -f test_runner_fixture__test_support.c test_runner_fixture__test_support.o test_runner_fixture__test_runner.c \
-		test_runner_fixture__test_runner.o test_runner_fixture__test_entrypoint.c test_runner_fixture__test_entrypoint.o \
-		test_runner_empty__test_support.c test_runner_empty__test_support.o test_runner_empty__test_runner.c \
-		test_runner_empty__test_runner.o test_runner_empty__test_entrypoint.c test_runner_empty__test_entrypoint.o \
-		test_runner_static__test_support.c test_runner_static__test_support.o test_runner_static__test_runner.c \
-		test_runner_static__test_runner.o test_runner_static__test_entrypoint.c test_runner_static__test_entrypoint.o \
-		test_runner_collision__test_support.c test_runner_collision__test_support.o test_runner_collision__test_runner.c \
-		test_runner_collision__test_runner.o test_runner_collision__test_entrypoint.c test_runner_collision__test_entrypoint.o \
-		test_runner_hierarchy__test_support.c test_runner_hierarchy__test_support.o test_runner_hierarchy__test_runner.c \
-		test_runner_hierarchy__test_runner.o test_runner_hierarchy__test_entrypoint.c test_runner_hierarchy__test_entrypoint.o \
-		url__test_support.c url__test_support.o url__test_runner.c \
-		url__test_runner.o url__test_entrypoint.c url__test_entrypoint.o \
-		test_runner_collision.c test_runner_collision.o test_runner_hierarchy.c \
-		test_runner_hierarchy.o test_runner_progname__entrypoint.c test_runner_progname__entrypoint.o \
-		titan/test__test_support.c titan/test__test_support.o titan/test__test_runner.c \
-		titan/test__test_runner.o titan/test__test_entrypoint.c titan/test__test_entrypoint.o
-	rm -f test_runner_fixture test_runner_empty test_runner_static \
-		test_runner_bootstrap titan/test test_runner_progname__main \
-		test_runner_collision test_runner_collision.titan \
-		test_runner_collision__test_support.titan \
-		test_runner_collision__test_runner.titan \
-		test_runner_collision__test_entrypoint.titan \
-		test_runner_hierarchy.titan
-	@if [ ! -d url ]; then rm -f url; fi
-	rm -rf test_runner_fixture.dSYM test_runner_empty.dSYM \
-		test_runner_static.dSYM test_runner_bootstrap.dSYM titan/test.dSYM \
-		test_runner_progname__main.dSYM url.dSYM \
-		nested/tests__main.dSYM
-	rm -f nested/tests__main nested/tests__main__test_support.c \
-		nested/tests__main__test_support.o \
-		nested/tests__main__test_runner.c nested/tests__main__test_runner.o \
-		nested/tests__main__test_entrypoint.c \
-		nested/tests__main__test_entrypoint.o \
-		test_runner_hierarchy/child.titan \
-		test_runner_hierarchy/child.c test_runner_hierarchy/child.o
-	rmdir nested test_runner_hierarchy 2>/dev/null || true
 	rm -f *.c *.o *.so test
 	rm -f luacov.stats.out luacov.report.out
 

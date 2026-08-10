@@ -212,13 +212,12 @@ lifecycle protocol.
 
 The Makefile's `TITAN_STDLIB_TEST_ROOTS` manifest names 22 module-owned roots
 under `spec/stdlib/titan/`. `make titan-stdlib-test-build` makes every one an
-explicit root in a single `titanc --test --no-uv-bootstrap` invocation: source remains
-authoritative, discovery sees the complete checked closure, and no import-only
+explicit root in a single `titanc --test --no-uv-bootstrap` invocation: source
+remains authoritative, discovery sees the complete checked closure, and no import-only
 aggregator can be shadowed by a compiled provider. The command runs from
-`.titan-tests/` with an absolute source tree. Its first current root,
-`coroutine.tests`, therefore owns the one
-`.titan-tests/coroutine/tests__main` executable; synthetic support, runner,
-entrypoint, and Darwin dSYM outputs are owned below the same directory. Ordinary
+`.titan-tests/` with an absolute source tree. The designated first program
+root, `test.tests`, owns the one `.titan-tests/test/tests` executable; synthetic
+support, runner, entrypoint, and Darwin dSYM outputs are owned below the same directory. Ordinary
 module translation units are temporarily generated beside their Titan sources.
 
 `make titan-stdlib-test-run` returns to the repository root before executing,

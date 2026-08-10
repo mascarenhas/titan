@@ -437,9 +437,9 @@ source tree, so every root remains source-authoritative. The generated runner
 is Task-independent; each async case explicitly owns `async.run`/`async.loop`
 through source-only `support.runtime`, and Runtime-bound cleanup runs in LIFO
 order inside that same supervisor Task before the loop returns. Ordinary later
-`Context:cleanup` is only for non-Runtime resources. The first current root, `coroutine.tests`, owns the one
-`.titan-tests/coroutine/tests__main` executable and its synthetic
-support/runner/entrypoint artifacts. Execute it from the repository root with
+`Context:cleanup` is only for non-Runtime resources. The designated program
+root, `test.tests`, owns the one `.titan-tests/test/tests` executable and its
+synthetic support/runner/entrypoint artifacts. Execute it from the repository root with
 `make titan-stdlib-test-run`, because fixtures rely on that CWD; `make
 titan-stdlib-test` performs both steps. `TITAN_FILTER` adds one run-time Lua
 pattern but still compiles all 22 roots. The separate build/run targets let CI
@@ -467,10 +467,13 @@ contract for expected aggregate diagnostics.
 Generated test cleanup is generic but bounded. The owned `.titan-tests/`
 directory may be removed recursively. Below `spec/`, remove generated `.o`
 files and remove a `.c` only when a same-stem `.titan` source exists; this works
-without Git metadata and preserves author-written native C fixtures. Do not
-replace it with an indiscriminate `spec/**/*.c` deletion or broad root-level
-C/object globs. The build target cleans source-adjacent outputs after
-compilation, and `make clean` always removes them plus `.titan-tests`.
+without Git metadata and preserves author-written native C fixtures. Reserved
+`__test_{support,runner,entrypoint}` suffixes identify a test program's synthetic
+files, executable, and dSYM, while the root `test_runner_*` namespace belongs to
+interrupted compiler fixtures. Do not replace these ownership patterns with an
+indiscriminate `spec/**/*.c` deletion or a per-test artifact list. The build
+target cleans source-adjacent outputs after compilation, and `make clean` always
+removes them plus `.titan-tests`.
 
 New or modified specs that generate compiler fixtures in the repository root
 must remove only their exact module artifacts, including the paired `.a` for a

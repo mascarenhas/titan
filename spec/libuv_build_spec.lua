@@ -2209,9 +2209,12 @@ exit 73
                 "rm -rf $(STDLIB_CONTAINER).dSYM",
                 "examples/utils.a examples/artisanal.a examples/sdl_quit.a",
                 "testfiles/selection_sort.a testfiles/sieve.a",
-                "TITAN_STDLIB_TEST_ROOTS :=",
-                "TITAN_TEST_EXECUTABLE := " ..
-                    "$(TITAN_TEST_BUILD_DIR)/coroutine/tests__main",
+                "TITAN_STDLIB_TEST_PROGRAM_ROOT := test.tests",
+                "TITAN_STDLIB_TEST_PROGRAM_OUTPUT := test/tests",
+                "TITAN_STDLIB_TEST_ROOTS := " ..
+                    "$(TITAN_STDLIB_TEST_PROGRAM_ROOT)",
+                "TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/" ..
+                    "$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)",
                 "\nbusted-test:",
                 "\nstdlib-busted-test:",
                 "\ntitan-stdlib-test-build:",
@@ -2529,6 +2532,32 @@ exit 73
                 makefile)
             assert.falsy(makefile:find("STDLIB_BOUNDARY_TESTS", 1, true),
                 makefile)
+            for _, brittle_cleanup in ipairs({
+                "test_runner_fixture__test_support.c",
+                "test_runner_collision__test_runner.c",
+                "nested/tests__main__test_entrypoint.c",
+            }) do
+                assert.falsy(makefile:find(brittle_cleanup, 1, true),
+                    brittle_cleanup)
+            end
+            local clean_start = assert(makefile:find(
+                "\nclean: ## Remove generated build/test artifacts", 1, true))
+            local clean_finish = assert(makefile:find(
+                "\nclean-lua:", clean_start, true))
+            local clean_recipe = makefile:sub(clean_start, clean_finish - 1)
+            assert.is_true(assert(clean_recipe:find(
+                "bash spec/support/clean_generated_test_artifacts.sh",
+                1, true)) < assert(clean_recipe:find(
+                "rm -f titan/*.c titan/*.o", 1, true)))
+            local generated_cleanup = read_file(
+                "spec/support/clean_generated_test_artifacts.sh")
+            for _, cleanup_pattern in ipairs({
+                "*__test_support.*", "*__test_runner.*",
+                "*__test_entrypoint.*", "test_runner_*",
+            }) do
+                assert.truthy(generated_cleanup:find(
+                    cleanup_pattern, 1, true), cleanup_pattern)
+            end
             for _, native_build_contract in ipairs({
                 "spec/fixtures/stdlib/native/uv_stdio_probe.h",
                 "spec/fixtures/stdlib/native/uv_stdio_probe.c",
@@ -2899,5 +2928,72 @@ exit 73
                 "TITAN_NO_LINE_DIRECTIVES", 1, true), sanitizer_job)
             assert.falsy(sanitizer_job:find(
                 "--no-line-directives", 1, true), sanitizer_job)
+        end)
+
+    it("cleans arbitrary test outputs without Git or per-test names",
+        function()
+            local root = make_temp_dir()
+            local success, failure = xpcall(function()
+                for _, directory in ipairs({
+                    "spec", "future", "future/deep",
+                    "future/deep/suite.dSYM",
+                    "test_runner_future_case", ".titan-tests",
+                }) do
+                    assert.truthy(lfs.mkdir(root .. "/" .. directory))
+                end
+                local files = {
+                    ["spec/native_fixture.c"] = "author written\n",
+                    ["spec/generated_fixture.titan"] =
+                        "module generated_fixture\n",
+                    ["spec/generated_fixture.c"] = "generated C\n",
+                    ["spec/generated_fixture.o"] = "generated object\n",
+                    ["future/deep/suite"] = "executable\n",
+                    ["future/deep/suite__test_support.c"] = "generated C\n",
+                    ["future/deep/suite__test_runner.o"] =
+                        "generated object\n",
+                    ["future/deep/suite__test_entrypoint.titan"] =
+                        "collision fixture\n",
+                    ["future/deep/suite.dSYM/marker"] = "dSYM\n",
+                    ["test_runner_future_case/source.titan"] =
+                        "interrupted fixture\n",
+                    [".titan-tests/keep"] = "owned output\n",
+                }
+                for path, contents in pairs(files) do
+                    write_file(root .. "/" .. path, contents)
+                end
+
+                local script = lfs.currentdir() ..
+                    "/spec/support/clean_generated_test_artifacts.sh"
+                local clean_ok, output, why, code = run_argv({
+                    "bash", "-c", 'cd "$1" && exec "$2" --keep-output',
+                    "cleanup-test", root, script,
+                })
+                assert.truthy(clean_ok, output .. "\n(" .. tostring(why) ..
+                    ", " .. tostring(code) .. ")")
+
+                for _, removed in ipairs({
+                    "spec/generated_fixture.c",
+                    "spec/generated_fixture.o",
+                    "future/deep/suite",
+                    "future/deep/suite__test_support.c",
+                    "future/deep/suite__test_runner.o",
+                    "future/deep/suite__test_entrypoint.titan",
+                    "future/deep/suite.dSYM/marker",
+                    "test_runner_future_case/source.titan",
+                }) do
+                    assert.falsy(file_exists(root .. "/" .. removed), removed)
+                end
+                assert.is_nil(lfs.attributes(root .. "/future"))
+                assert.is_nil(lfs.attributes(
+                    root .. "/test_runner_future_case"))
+                assert.equal("author written\n",
+                    read_file(root .. "/spec/native_fixture.c"))
+                assert.equal("module generated_fixture\n",
+                    read_file(root .. "/spec/generated_fixture.titan"))
+                assert.equal("owned output\n",
+                    read_file(root .. "/.titan-tests/keep"))
+            end, debug.traceback)
+            remove_tree(root)
+            assert.truthy(success, failure)
         end)
 end)

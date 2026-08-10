@@ -663,8 +663,9 @@ runner outputs below `.titan-tests/`; it passes `--no-uv-bootstrap` so each
 async test explicitly owns one Runtime and completes Runtime-bound cleanup
 before that session returns. `make titan-stdlib-test-run` executes the binary
 from the repository root, and `make titan-stdlib-test` performs both.
-Temporary source-adjacent generated C/object files are cleaned generically
-without deleting author-written native fixtures.
+Temporary source-adjacent generated C/object files and reserved `__test_*`
+outputs are cleaned by ownership patterns rather than per-test names, without
+deleting author-written native fixtures.
 
 The native executable runs under a Bash process-group deadline. Its combined
 output is streamed through a pipe, preserving the parent-descriptor behavior

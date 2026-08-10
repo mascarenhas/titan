@@ -300,8 +300,8 @@ explicit temporary result file removed with `defer`. The Makefile now owns one e
 `TITAN_STDLIB_TEST_ROOTS` manifest with all 22 module roots. `make
 titan-stdlib-test-build` compiles them in one
 `titanc --test --no-uv-bootstrap` invocation from
-`.titan-tests/`; the first current root owns
-`.titan-tests/coroutine/tests__main`. `make titan-stdlib-test-run` executes
+`.titan-tests/`; the designated `test.tests` program root owns
+`.titan-tests/test/tests`. `make titan-stdlib-test-run` executes
 that binary from the repository root, and `make titan-stdlib-test` composes the
 two. A `TITAN_FILTER` selects cases only at run time, so repeated focused or
 sanitizer invocations reuse the same executable rather than restoring root
@@ -317,10 +317,11 @@ is no native output group supervisor.
 
 Cleanup owns `.titan-tests/` recursively and is generic for source-adjacent
 translation units: remove every `.o` below `spec/`, but remove a `.c` only when
-its same-stem `.titan` source exists. This remains safe without Git metadata and
-preserves tracked C fixtures. Root compiler fixtures retain their exact cleanup
-rules. The native suite owns fresh-state coroutine API behavior, exact
-`io.print` write/current-stdout observation, parent descriptors, process status,
+its same-stem `.titan` source exists. Reserved synthetic `__test_*` suffixes
+derive each test program executable/dSYM, and the root `test_runner_*` namespace
+covers interrupted compiler fixtures without a per-test list. This remains safe
+without Git metadata and preserves tracked C fixtures. The native suite owns
+fresh-state coroutine API behavior, exact `io.print` write/current-stdout observation, parent descriptors, process status,
 and sanitizer composition through observable public behavior. Its linked
 parent-stdio helper prepares descriptors before a standalone child starts; the
 parent waits through C99 `system`, checks the post-Runtime descriptor state, and
