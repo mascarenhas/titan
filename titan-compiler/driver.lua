@@ -93,6 +93,8 @@ function driver.installed_paths(root)
         liblua = root_join(root, "lib/liblua.a"),
         titan_bin = titan_lib,
         lua_cpath = titan_lib .. "/?.so",
+        test_source = root_join(root, "share/titan/" .. driver.TITAN_VER ..
+            "/src/titan/test.titan"),
     }
 end
 
@@ -109,21 +111,34 @@ function driver.source_checkout_from_driver_source(source, current_dir)
         lfs.attributes(root .. "/Makefile", "mode") == "file"
 end
 
-local function is_source_checkout()
+local function source_checkout_root()
     if type(debug) ~= "table" or type(debug.getinfo) ~= "function" then
-        return false
+        return nil
     end
-    return driver.source_checkout_from_driver_source(
-        debug.getinfo(1, "S").source)
+    local source = debug.getinfo(1, "S").source
+    if type(source) ~= "string" or source:sub(1, 1) ~= "@" then return nil end
+    source = source:sub(2)
+    if source:sub(1, 1) ~= "/" then
+        source = lfs.currentdir() .. "/" .. source
+    end
+    local root = source:match("^(.*)/titan%-compiler/driver[.]lua$")
+    if root and driver.source_checkout_from_driver_source("@" .. source) then
+        return normalize_root(root)
+    end
+    return nil
 end
 
 local internal_root = os.getenv("TITAN_ROCKS_ROOT")
 if internal_root == "" then internal_root = nil end
 driver.TITAN_ROOT = driver.resolve_installation_root(
     package.cpath, internal_root)
-driver.SOURCE_CHECKOUT = not internal_root and is_source_checkout()
+driver.SOURCE_CHECKOUT_ROOT = not internal_root and source_checkout_root() or nil
+driver.SOURCE_CHECKOUT = driver.SOURCE_CHECKOUT_ROOT ~= nil
 driver.INSTALLED = not driver.SOURCE_CHECKOUT
 driver.INSTALL_PATHS = driver.installed_paths(driver.TITAN_ROOT)
+driver.TEST_SUPPORT_SOURCE_PATH = driver.SOURCE_CHECKOUT and
+    (driver.SOURCE_CHECKOUT_ROOT .. "/titan/test.titan") or
+    (driver.INSTALL_PATHS and driver.INSTALL_PATHS.test_source or nil)
 driver.INSTALLATION_ERROR = driver.INSTALLED and not driver.INSTALL_PATHS and
     ("cannot locate the Titan installation: package.cpath has no entry ending "
         .. "in '" .. LUA_CPATH_SUFFIX .. "'") or nil
@@ -148,6 +163,20 @@ driver.LIBBACKTRACE_PATH = "libbacktrace"
 driver.INCLUDE_PATH = driver.INSTALLED and driver.INSTALL_PATHS and
     driver.INSTALL_PATHS.include or nil
 driver.CFLAGS = "--std=c99 -O2 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g"
+
+function driver.test_support_source_descriptor()
+    local filename = driver.TEST_SUPPORT_SOURCE_PATH
+    if not filename or lfs.attributes(filename, "mode") ~= "file" then
+        return nil, "Titan test support source is missing" ..
+            (filename and (" at '" .. filename .. "'") or "")
+    end
+    return {
+        kind = "flat",
+        main = filename,
+        files = { filename },
+        program_output = "titan/test",
+    }
+end
 driver.CC = os.getenv("CC") or "cc"
 driver.AR = os.getenv("AR") or "ar"
 driver.RANLIB = os.getenv("RANLIB") or "ranlib"
@@ -234,10 +263,12 @@ function driver.new_resolver_context(options)
     options = options or {}
     return {
         prefer_static = options.prefer_static == true,
+        source_first = options.source_first == true,
         provider_cache = {},
         contextual_types = {},
         native_interface_types = {},
         native_constraints = {},
+        source_modules = {},
         probe_verbose = options.verbose == true,
     }
 end
@@ -1392,13 +1423,22 @@ function driver.find_static_interface(paths, modname, context)
                     local provider, provider_err =
                         inspect_static_provider(context, filename, relative)
                     if not provider then return nil, provider_err end
-                    local entry = provider.entries[modname]
-                    if entry then
-                        return entry.type, filename, relative, provider
-                    elseif index == #candidates then
-                        return nil, "exact static provider '" .. filename ..
-                            "' contains no metadata for module '" .. modname ..
-                            "'"
+                    local overlaps_source = false
+                    for carried_name in pairs(provider.entries) do
+                        if context.source_modules[carried_name] then
+                            overlaps_source = true
+                            break
+                        end
+                    end
+                    if not overlaps_source then
+                        local entry = provider.entries[modname]
+                        if entry then
+                            return entry.type, filename, relative, provider
+                        elseif index == #candidates then
+                            return nil, "exact static provider '" .. filename ..
+                                "' contains no metadata for module '" ..
+                                modname .. "'"
+                        end
                     end
                 end
             end
@@ -1452,7 +1492,88 @@ function driver.defaultloader(static_deps, options)
     local owns_context = options.context == nil
     local context = options.context or driver.new_resolver_context(options)
     local source_roots = options.source_roots or {}
+    local source_overrides = options.source_overrides or {}
     local dependency_stack = {}
+    for name in pairs(source_roots) do
+        context.source_modules[name] = true
+    end
+    for name in pairs(source_overrides) do
+        context.source_modules[name] = true
+    end
+
+    -- A source-first traversal may select one key from a static container
+    -- before reaching a source key carried by that same container. Once the
+    -- source identity is known, move every already-selected key from that
+    -- container to an interface-identical DSO before checking continues. The
+    -- source import remains authoritative and the finalizer never has to
+    -- weaken its physical-provider identity check.
+    local function rebind_overlapping_static_providers(source_name)
+        local providers = {}
+        for _, mod in pairs(driver.imported) do
+            if mod ~= CIRCULAR_MARK and mod.kind == "static" and
+               mod.static_provider and
+               mod.static_provider.entries[source_name] then
+                providers[mod.static_provider.archive] = mod.static_provider
+            end
+        end
+
+        local provider_paths = {}
+        for path in pairs(providers) do
+            provider_paths[#provider_paths + 1] = path
+        end
+        table.sort(provider_paths, util.bytewise_less)
+
+        for _, path in ipairs(provider_paths) do
+            local provider = providers[path]
+            local selected_names = {}
+            for name, mod in pairs(driver.imported) do
+                if mod ~= CIRCULAR_MARK and mod.kind == "static" and
+                   mod.static_provider == provider then
+                    selected_names[#selected_names + 1] = name
+                end
+            end
+            table.sort(selected_names, util.bytewise_less)
+
+            local replacements = {}
+            for _, name in ipairs(selected_names) do
+                local dynamic_type, filename, relative =
+                    driver.find_dynamic_interface(driver.TITAN_BIN_PATH, name)
+                if not dynamic_type then
+                    return nil, "static provider '" .. path ..
+                        "' carries source-selected module '" .. source_name ..
+                        "', and its selected module '" .. name ..
+                        "' has no compatible dynamic-provider fallback" ..
+                        (filename and (": " .. tostring(filename)) or "")
+                end
+                local old_type = driver.imported[name].type
+                if types.serialize(old_type) ~= types.serialize(dynamic_type) then
+                    return nil, "dynamic-provider fallback '" .. filename ..
+                        "' for module '" .. name ..
+                        "' does not match static provider '" .. path .. "'"
+                end
+                replacements[#replacements + 1] = {
+                    name = name,
+                    type = old_type,
+                    file = dynamic_type.file,
+                    filename = filename,
+                    relative = relative,
+                }
+            end
+
+            for _, replacement in ipairs(replacements) do
+                replacement.type.file = replacement.file
+                driver.imported[replacement.name] = {
+                    kind = "dynamic",
+                    type = replacement.type,
+                    filename = replacement.filename,
+                    relative = replacement.relative,
+                    compiled = true,
+                }
+                static_deps[replacement.name] = nil
+            end
+        end
+        return true
+    end
 
     local function remember_dependency_closure(modname, seen)
         seen = seen or {}
@@ -1485,8 +1606,17 @@ function driver.defaultloader(static_deps, options)
         local main_initializer
 
         for index, filename in ipairs(source.files) do
-            local input, err = util.get_file_contents(filename)
-            if not input then return false, err end
+            local input, err
+            if source.contents then
+                input = source.contents[filename]
+                if input == nil then
+                    return false, "generated source has no contents for '" ..
+                        filename .. "'"
+                end
+            else
+                input, err = util.get_file_contents(filename)
+                if not input then return false, err end
+            end
             local nodes, perr = parser.parse(filename, input)
             if not nodes then
                 return false, parser.error_to_string(perr, filename)
@@ -1527,6 +1657,7 @@ function driver.defaultloader(static_deps, options)
             ast = ast,
             type = modt,
             filename = source.main,
+            native_output = source.native_output or source.main,
             source_files = source.files,
             program_output = source.program_output,
             deps = direct_deps,
@@ -1631,12 +1762,48 @@ function driver.defaultloader(static_deps, options)
         if driver.imported[modname] == CIRCULAR_MARK then
             return false, "circular reference to module"
         end
-        if source_roots[modname] and driver.imported[modname] and
+
+        local source_required = source_roots[modname] == true
+        local source_preferred = source_required or context.source_first or
+            source_overrides[modname] ~= nil
+        local source, source_err
+        local source_checked = false
+        local function find_source()
+            if source_checked then return source, source_err end
+            source_checked = true
+            source = source_overrides[modname]
+            if source then return source end
+            source, source_err = resolve_source(
+                driver.TITAN_SOURCE_PATH, modname)
+            return source, source_err
+        end
+        local function load_source(candidate)
+            if candidate.kind == "blocked" then
+                return false, blocked_source_error(modname, candidate)
+            end
+            context.source_modules[modname] = true
+            local rebound, rebound_err =
+                rebind_overlapping_static_providers(modname)
+            if not rebound then return false, rebound_err end
+            local ok, modt, errors, info =
+                parse_source(modname, candidate, loader)
+            if ok then remember_direct_dependency(modname) end
+            return ok, modt, errors, info
+        end
+
+        -- Source-required roots and invocation-wide source-first builds may
+        -- replace a binary left in this process-global cache by an earlier
+        -- compilation. A source error is terminal; a clean source miss lets a
+        -- source-first dependency retain/fall back to its compiled identity.
+        if source_preferred and driver.imported[modname] and
            not driver.imported[modname].ast then
-            -- An explicit root is a source build request even if this
-            -- long-lived compiler process saw its binary as an earlier
-            -- dependency. Dependencies remain unconditionally binary-first.
-            driver.imported[modname] = nil
+            local candidate, candidate_err = find_source()
+            if candidate_err then return false, candidate_err end
+            if candidate then
+                driver.imported[modname] = nil
+            elseif source_required then
+                return false, "source module '" .. modname .. "' not found"
+            end
         end
         if driver.imported[modname] then
             local mod = driver.imported[modname]
@@ -1645,21 +1812,13 @@ function driver.defaultloader(static_deps, options)
             return true, mod.type, {}, { kind = mod.kind }
         end
 
-        local source, source_err
-        if source_roots[modname] then
-            source, source_err = resolve_source(
-                driver.TITAN_SOURCE_PATH, modname)
-            if source_err then return false, source_err end
-            if not source then
+        if source_preferred then
+            local candidate, candidate_err = find_source()
+            if candidate_err then return false, candidate_err end
+            if candidate then return load_source(candidate) end
+            if source_required then
                 return false, "source module '" .. modname .. "' not found"
             end
-            if source.kind == "blocked" then
-                return false, blocked_source_error(modname, source)
-            end
-            local ok, modt, errors, info =
-                parse_source(modname, source, loader)
-            if ok then remember_direct_dependency(modname) end
-            return ok, modt, errors, info
         end
 
         local resolved, compiled_err = driver.find_dependency_interface(
@@ -1675,16 +1834,13 @@ function driver.defaultloader(static_deps, options)
         elseif compiled_err then
             return false, compiled_err
         end
-        source, source_err = resolve_source(driver.TITAN_SOURCE_PATH, modname)
-        if source_err then return false, source_err end
-        if not source then return false, "module '" .. modname .. "' not found" end
-        if source.kind == "blocked" then
-            return false, blocked_source_error(modname, source)
+
+        if not source_checked then
+            local candidate, candidate_err = find_source()
+            if candidate_err then return false, candidate_err end
         end
-        local ok, modt, errors, info =
-            parse_source(modname, source, loader)
-        if ok then remember_direct_dependency(modname) end
-        return ok, modt, errors, info
+        if not source then return false, "module '" .. modname .. "' not found" end
+        return load_source(source)
     end
     context.loader = loader
     loader_contexts[loader] = {
@@ -2032,10 +2188,11 @@ local function static_flag()
     return "-c"
 end
 
-function driver.compile_module(modname, mod, static_deps, verbose)
+function driver.compile_module(modname, mod, static_deps, verbose, options)
     if mod.compiled then return true, nil, nil end
     local ok, err, libname, native_references = driver.compile(
-        modname, mod.ast, mod.filename, static_deps, verbose)
+        modname, mod.ast, mod.native_output or mod.filename,
+        static_deps, verbose, options)
     if not ok then return nil, err end
     mod.compiled = libname
     mod.native_references = native_references or {}
@@ -2260,7 +2417,9 @@ local function append_force_loaded_archives(args, archives)
     append_argv(args, driver.force_load_arguments(archives))
 end
 
-function driver.compile(modname, ast, sourcef, static_deps, verbose)
+local ensure_output_parent
+
+function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
     if not staticmetadata.valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
             string.format("%q", modname)
@@ -2275,12 +2434,15 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose)
     code = pretty.reindent_c(code)
     local filename = sourcef:gsub("[.]titan$", "") .. ".c"
     local libname = sourcef:gsub("[.]titan$", "") .. ".o"
+    local output_ok, output_err = ensure_output_parent(filename)
+    if not output_ok then return nil, output_err end
     os.remove(filename)
     os.remove(libname)
     local ok, err = util.set_file_contents(filename, code)
     if not ok then return nil, err end
     local args, flags_err = driver.generated_compile_prefix()
     if not args then return nil, flags_err end
+    append_argv(args, options and options.extra_compile_flags)
     append_argv(args, { static_flag(), filename })
     append_argv(args, { "-o", libname })
     local ok, err = run_argv(args, verbose)
@@ -2453,7 +2615,7 @@ static int pmain(lua_State *L) {
     }
 
     lua_getfield(L, LUA_REGISTRYINDEX, TITAN_MAIN_BOOTSTRAP_KEY);
-    if (lua_isnil(L, -1)) {
+    if ($SKIP_MAIN_BOOTSTRAP || lua_isnil(L, -1)) {
         lua_pop(L, 1);                 /* direct path: main, arguments */
         lua_call(L, 1, 1);
     } else {
@@ -2498,10 +2660,9 @@ int main(int argc, char** argv) {
         if (lua_getfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY) == LUA_TSTRING) {
             const char *trace = lua_tostring(L, -1);
             report_titan_error(errmsg_tostring(L, -2), trace);
-        } else {
-            lua_pop(L, 1);                 /* nil/non-string slot */
-            report = errmsg_tostring(L, -1);
         }
+        lua_pop(L, 1);                     /* nil/non-string trace slot */
+        report = errmsg_tostring(L, -1);
         fatal(report);
     }
     ret = lua_tointeger(L, -1);
@@ -2511,14 +2672,18 @@ int main(int argc, char** argv) {
 
 ]]
 
-local function write_entrypoint(modname)
-    local entrypoint_c = modname:gsub("[.]", "/") .. "__entrypoint.c"
+local function write_entrypoint(modname, entrypoint_c, program_name,
+                                options)
+    options = options or {}
+    entrypoint_c = entrypoint_c or
+        (modname:gsub("[.]", "/") .. "__entrypoint.c")
     local fd, err = io.open(entrypoint_c, "w")
     if not fd then return nil, err end
     local _, err = fd:write(util.render(entrypoint_template, {
-        PROGNAME = modname:gsub(".*[.]", ""),
+        PROGNAME = program_name or modname:gsub(".*[.]", ""),
         LUAOPEN_FN = "luaopen_" .. modname:gsub("[.]", "_"),
         MODNAME = modname,
+        SKIP_MAIN_BOOTSTRAP = options.no_uv_bootstrap and "1" or "0",
     }))
     if err then return nil, err end
     fd:close()
@@ -2541,7 +2706,7 @@ local function ensure_directory(path)
     return nil, err
 end
 
-local function ensure_output_parent(filename)
+ensure_output_parent = function(filename)
     local parent = filename:match("^(.*)/[^/]+$")
     if not parent or parent == "" then return true end
     return ensure_directory(parent)
@@ -3623,12 +3788,21 @@ local function safe_module_output_path(modname, extension)
 end
 
 local function validate_output_ancestors(filename)
-    local current = ""
-    for component in filename:gmatch("([^/]+)/") do
-        current = current == "" and component or (current .. "/" .. component)
+    local normalized = normalized_absolute_filename(filename)
+    local parent = normalized:match("^(.*)/[^/]+$")
+    local parents = {}
+    while parent and parent ~= "" and parent ~= "/" do
+        table.insert(parents, 1, parent)
+        parent = parent:match("^(.*)/[^/]+$")
+    end
+    for _, current in ipairs(parents) do
         local attr = lfs.symlinkattributes(current)
         if attr and attr.mode ~= "directory" then
-            return nil, "output parent '" .. current .. "' is not a directory"
+            local followed = attr.mode == "link" and lfs.attributes(current)
+            if not followed or followed.mode ~= "directory" then
+                return nil, "output parent '" .. current ..
+                    "' is not a directory"
+            end
         end
     end
     return true
@@ -3812,6 +3986,117 @@ local function same_file_tree(left, right)
            not same_file_tree(
                join_path(left, name), join_path(right, name)) then
             return false
+        end
+    end
+    return true
+end
+
+function driver.validate_program_output_paths(
+        source_outputs, executable, entrypoint_c, native_inputs)
+    if type(executable) ~= "string" or executable == "" then
+        return nil, "standalone executable path must be a nonempty string"
+    end
+    if type(entrypoint_c) ~= "string" or
+       not entrypoint_c:match("[.]c$") then
+        return nil, "standalone entrypoint path must end in .c"
+    end
+    local outputs = {}
+
+    local function below(path, parent)
+        return #path > #parent and
+            path:sub(1, #parent + 1) == parent .. "/"
+    end
+
+    local function add_output(path, owner, mode)
+        local ancestors_ok, ancestors_err =
+            validate_output_ancestors(path)
+        if not ancestors_ok then return nil, ancestors_err end
+        local attr = lfs.symlinkattributes(path)
+        if attr and attr.mode ~= mode then
+            local expected = mode == "directory" and
+                "a nonlink directory" or "a regular nonlink file"
+            return nil, "program output '" ..
+                normalized_absolute_filename(path) .. "' for " .. owner ..
+                " is not " .. expected
+        end
+
+        local output = {
+            path = path,
+            owner = owner,
+            mode = mode,
+            raw = absolute_filename(path),
+            normalized = normalized_absolute_filename(path),
+            physical = physical_absolute_filename(path),
+        }
+        for _, previous in ipairs(outputs) do
+            if output.normalized == previous.normalized or
+               output.physical == previous.physical or
+               same_existing_file(output.raw, previous.raw) then
+                return nil, "program output '" .. output.normalized ..
+                    "' for " .. owner .. " aliases output for " ..
+                    previous.owner
+            end
+            if below(output.normalized, previous.normalized) or
+               below(previous.normalized, output.normalized) or
+               below(output.physical, previous.physical) or
+               below(previous.physical, output.physical) then
+                return nil, "program output '" .. output.normalized ..
+                    "' for " .. owner ..
+                    " has a path hierarchy conflict with output '" ..
+                    previous.normalized .. "' for " .. previous.owner
+            end
+        end
+        outputs[#outputs + 1] = output
+        return true
+    end
+
+    for _, source in ipairs(source_outputs or {}) do
+        local stem = assert(source.output):gsub("[.]titan$", "")
+        local ok, err = add_output(stem .. ".c",
+            "logical module '" .. source.modname .. "'", "file")
+        if not ok then return nil, err end
+        ok, err = add_output(stem .. ".o",
+            "logical module '" .. source.modname .. "'", "file")
+        if not ok then return nil, err end
+    end
+    local ok, err = add_output(
+        entrypoint_c, "standalone entrypoint", "file")
+    if not ok then return nil, err end
+    ok, err = add_output(entrypoint_c:gsub("[.]c$", ".o"),
+        "standalone entrypoint", "file")
+    if not ok then return nil, err end
+    ok, err = add_output(executable, "standalone executable", "file")
+    if not ok then return nil, err end
+    if driver.IS_DARWIN then
+        ok, err = add_output(
+            executable .. ".dSYM", "standalone dSYM", "directory")
+        if not ok then return nil, err end
+    end
+
+    for _, input in ipairs(native_inputs or {}) do
+        local path = archive_input_path(input)
+        if type(path) == "string" then
+            local raw_input = absolute_filename(path)
+            local normalized_input = normalized_absolute_filename(path)
+            local physical_input = physical_absolute_filename(path)
+            for _, output in ipairs(outputs) do
+                if normalized_input == output.normalized or
+                   physical_input == output.physical or
+                   same_existing_file(raw_input, output.raw) then
+                    return nil, "program output '" .. output.normalized ..
+                        "' for " .. output.owner .. " aliases input '" ..
+                        normalized_input .. "'"
+                end
+                if below(normalized_input, output.normalized) or
+                   below(output.normalized, normalized_input) or
+                   below(physical_input, output.physical) or
+                   below(output.physical, physical_input) then
+                    return nil, "program output '" .. output.normalized ..
+                        "' for " .. output.owner ..
+                        " has a path hierarchy conflict with input '" ..
+                        normalized_input .. "'"
+                end
+            end
         end
     end
     return true
@@ -4329,18 +4614,22 @@ function driver.run_standalone_archive_probe(
 end
 
 function driver.compile_program(modname, libnames, link, verbose, extra_objects,
-                                program_output, static_archives)
+                                program_output, static_archives,
+                                entrypoint_output, program_name, options)
+    options = options or {}
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     local execname = program_output or modname:gsub("[.]", "/")
     local output_ok, output_err = ensure_output_parent(execname)
     if not output_ok then return nil, output_err end
-    local entrypoint_name = modname:gsub("[.]", "/") .. "__entrypoint.c"
+    local entrypoint_name = entrypoint_output or
+        (modname:gsub("[.]", "/") .. "__entrypoint.c")
     output_ok, output_err = ensure_output_parent(entrypoint_name)
     if not output_ok then return nil, output_err end
     os.remove(execname)
 
-    local entrypoint_c, err = write_entrypoint(modname)
+    local entrypoint_c, err = write_entrypoint(
+        modname, entrypoint_name, program_name, options)
     if err then return nil, err end
     local entrypoint_o = entrypoint_c:gsub("[.]c$", ".o")
     os.remove(entrypoint_o)

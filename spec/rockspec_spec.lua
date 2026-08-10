@@ -5,6 +5,7 @@ local lfs = require "lfs"
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "os", "peg", "string", "math", "lua", "iter", "gc",
+    "test",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
 
@@ -102,6 +103,8 @@ local TITANC = PREFIX .. "/bin/titanc"
 local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.22"
 local STDLIB_PROVIDER = TITAN_LIBDIR .. "/titan.so"
 local STDLIB_STATIC_ARCHIVE = TITAN_LIBDIR .. "/titan.a"
+local TEST_SUPPORT_SOURCE =
+    PREFIX .. "/share/titan/0.22/src/titan/test.titan"
 local LUA_LIBDIR = PREFIX .. "/lib/lua/5.5"
 local LUA_SHAREDIR = PREFIX .. "/share/lua/5.5"
 local STDLIB_SHIMDIR = LUA_SHAREDIR .. "/titan"
@@ -235,11 +238,14 @@ describe("standalone-prefix source installation", function()
             version_output)
         assert_unique_regular_file(STDLIB_PROVIDER)
         assert_unique_regular_file(STDLIB_STATIC_ARCHIVE)
+        assert_unique_regular_file(TEST_SUPPORT_SOURCE)
+        assert.equal(read_file("titan/test.titan"),
+            read_file(TEST_SUPPORT_SOURCE))
         assert_file(PREFIX ..
             "/share/lua/5.5/titan-compiler/staticmetadata.lua")
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
-            "csemantics.lua",
+            "csemantics.lua", "test_runner.lua",
         }) do
             assert_file(PREFIX ..
                 "/share/lua/5.5/titan-compiler/" .. module)
@@ -377,7 +383,7 @@ describe("standalone-prefix source installation", function()
             '["staticmetadata.lua"]', 1, true), manifest)
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
-            "csemantics.lua",
+            "csemantics.lua", "test_runner.lua",
         }) do
             assert.truthy(manifest:find(
                 '["' .. module .. '"]', 1, true), manifest)
@@ -522,10 +528,107 @@ describe("standalone-prefix source installation", function()
             "titan/http/server.titan",
             "titan/http/native/titan_httpshim.h",
             "titan/http/native/titan_httpshim.c",
-            "spec/stdlib/ssl_spec.lua",
-            "spec/stdlib/url_spec.lua",
-            "spec/stdlib/http_spec.lua",
-            "spec/stdlib/ssl_http_sanitizer_spec.lua",
+            "spec/stdlib/titan/async/test_support.titan",
+            "spec/stdlib/titan/async/tests/all_join_test.titan",
+            "spec/stdlib/titan/async/tests/any_race_test.titan",
+            "spec/stdlib/titan/async/tests/channel_test.titan",
+            "spec/stdlib/titan/async/tests/task_test.titan",
+            "spec/stdlib/titan/async/tests/tests.titan",
+            "spec/stdlib/titan/coroutine/test_support.titan",
+            "spec/stdlib/titan/coroutine/tests/basic_test.titan",
+            "spec/stdlib/titan/coroutine/tests/gc_test.titan",
+            "spec/stdlib/titan/coroutine/tests/lifecycle_test.titan",
+            "spec/stdlib/titan/coroutine/tests/lua_boundary_test.titan",
+            "spec/stdlib/titan/coroutine/tests/nested_test.titan",
+            "spec/stdlib/titan/coroutine/tests/tests.titan",
+            "spec/stdlib/titan/fs/fixture_support.h",
+            "spec/stdlib/titan/fs/test_support.titan",
+            "spec/stdlib/titan/fs/tests.titan",
+            "spec/stdlib/titan/gc/tests.titan",
+            "spec/stdlib/titan/http/test_support.titan",
+            "spec/stdlib/titan/http/tests/client_behavior.titan",
+            "spec/stdlib/titan/http/tests/eof_behavior.titan",
+            "spec/stdlib/titan/http/tests/server_behavior.titan",
+            "spec/stdlib/titan/http/tests/sanitizer_process_test.titan",
+            "spec/stdlib/titan/http/tests/test_cases.titan",
+            "spec/stdlib/titan/http/tests/tests.titan",
+            "spec/stdlib/titan/http/tests/timeout_tls_behavior.titan",
+            "spec/stdlib/titan/io/print_capture.h",
+            "spec/stdlib/titan/io/test_support.titan",
+            "spec/stdlib/titan/io/tests/core_test.titan",
+            "spec/stdlib/titan/io/tests/process_test.titan",
+            "spec/stdlib/titan/io/tests/tests.titan",
+            "spec/stdlib/titan/iter/tests.titan",
+            "spec/stdlib/titan/lua/test_support.titan",
+            "spec/stdlib/titan/lua/tests/core_test.titan",
+            "spec/stdlib/titan/lua/tests/dofile_test.titan",
+            "spec/stdlib/titan/lua/tests/require_test.titan",
+            "spec/stdlib/titan/lua/tests/source_require_test.titan",
+            "spec/stdlib/titan/lua/tests/tests.titan",
+            "spec/stdlib/titan/math/tests.titan",
+            "spec/stdlib/titan/net/test_support.titan",
+            "spec/stdlib/titan/net/tests.titan",
+            "spec/stdlib/titan/os/process_test_support.titan",
+            "spec/stdlib/titan/os/process_tests/exit_test.titan",
+            "spec/stdlib/titan/os/process_tests/host_process_test.titan",
+            "spec/stdlib/titan/os/process_tests/parent_stdio_test.titan",
+            "spec/stdlib/titan/os/process_tests/process_tests.titan",
+            "spec/stdlib/titan/os/process_tests/signal_test.titan",
+            "spec/stdlib/titan/os/process_tests/stream_test.titan",
+            "spec/stdlib/titan/os/test_support.titan",
+            "spec/stdlib/titan/os/tests/helpers_test.titan",
+            "spec/stdlib/titan/os/tests/tests.titan",
+            "spec/stdlib/titan/os/tests/time_test.titan",
+            "spec/stdlib/titan/peg/test_support.titan",
+            "spec/stdlib/titan/peg/tests/core_test.titan",
+            "spec/stdlib/titan/peg/tests/gc_test.titan",
+            "spec/stdlib/titan/peg/tests/relabel_test.titan",
+            "spec/stdlib/titan/peg/tests/tests.titan",
+            "spec/stdlib/titan/ssl/test_support.titan",
+            "spec/stdlib/titan/ssl/tests.titan",
+            "spec/stdlib/titan/string/core_test.titan",
+            "spec/stdlib/titan/string/format_pack_test.titan",
+            "spec/stdlib/titan/string/regex_test.titan",
+            "spec/stdlib/titan/string/test_support.titan",
+            "spec/stdlib/titan/support/async.titan",
+            "spec/stdlib/titan/support/command.titan",
+            "spec/stdlib/titan/support/common.titan",
+            "spec/stdlib/titan/support/runtime.titan",
+            "spec/stdlib/titan/timer/tests.titan",
+            "spec/stdlib/titan/url/tests.titan",
+            "spec/stdlib/titan/uv/runtime_tests.titan",
+            "spec/stdlib/titan/uv/task_test_support.titan",
+            "spec/stdlib/titan/uv/task_tests/cancellation_test.titan",
+            "spec/stdlib/titan/uv/task_tests/continuations_test.titan",
+            "spec/stdlib/titan/uv/task_tests/task_tests.titan",
+            "spec/test_runner_spec.lua",
+            "spec/coder/test_runner_spec.lua",
+            "spec/stdlib/titan/test/tests.titan",
+            "spec/fixtures/test_runner/nested/tests/tests.titan",
+            "spec/fixtures/test_runner/test_runner_dependency.titan",
+            "spec/fixtures/test_runner/test_runner_edge.titan",
+            "spec/fixtures/test_runner/test_runner_empty.titan",
+            "spec/fixtures/test_runner/test_runner_fixture.titan",
+            "spec/fixtures/test_runner/test_runner_folder/contributor.titan",
+            "spec/fixtures/test_runner/test_runner_folder/test_runner_folder.titan",
+            "spec/fixtures/test_runner/test_runner_mutation.titan",
+            "spec/fixtures/test_runner/test_runner_static.titan",
+            "spec/fixtures/test_runner/titan/test/runner/user.titan",
+            "spec/fixtures/test_runner/titan/test/user.titan",
+            "spec/support/run_rock_tests.sh",
+            "spec/support/run_with_timeout.sh",
+            "spec/support/clean_generated_test_artifacts.sh",
+            "spec/fixtures/stdlib/native/os_process_child.c",
+            "spec/fixtures/stdlib/native/os_process_host_child.c",
+            "spec/fixtures/stdlib/native/uv_stdio_probe.c",
+            "spec/fixtures/stdlib/native/uv_stdio_probe.h",
+            "spec/fixtures/stdlib/titan/os_exit_app.titan",
+            "spec/fixtures/stdlib/titan/os_parent_stdin_app.titan",
+            "spec/fixtures/stdlib/titan/ssl_http_sanitizer_app.titan",
+            "spec/fixtures/stdlib/titan/uv_stdio_app.titan",
+            "spec/fixtures/stdlib/titan/uv_bootstrap/uv_bootstrap_app.titan",
+            "spec/fixtures/stdlib/titan/uv_bootstrap/uv_sync_app.titan",
+            "spec/fixtures/test_runner/test_runner_bootstrap.titan",
             "spec/fixtures/ssl/ca.pem",
             "spec/fixtures/ssl/server.pem",
             "spec/fixtures/ssl/server-key.pem",
@@ -547,6 +650,8 @@ describe("standalone-prefix source installation", function()
             "titan/lua.titan",
             "titan/iter.titan",
             "titan/gc.titan",
+            "titan/test.titan",
+            "titan-compiler/test_runner.lua",
             "LICENSES/lpeglabel-LICENSE",
             "LICENSES/lpeg-LICENSE",
             "LICENSES/lpeg-patterns-LICENSE",
@@ -644,6 +749,8 @@ describe("standalone-prefix source installation", function()
                         module .. ".lua"))
                 assert_no_obsolete_module_layout(workspace, module)
             end
+            assert.equal(read_file(stage .. "/titan/test.titan"), read_file(
+                workspace .. "/share/titan/0.22/src/titan/test.titan"))
             assert_absent(workspace .. "/lib/lua/5.5/titan.so")
             assert_absent(workspace .. "/lib/lua/5.5/titan.so.dSYM")
             assert.equal("preserved 0.21 image\n", read_file(preserved))
@@ -662,6 +769,10 @@ describe("standalone-prefix source installation", function()
         assert_absent(canonical_archive)
         copy_tree(STDLIB_PROVIDER, stage .. "/titan.so")
         copy_tree(STDLIB_STATIC_ARCHIVE, stage .. "/titan.a")
+        copy_tree("titan/test.titan", stage .. "/titan/test.titan")
+        write_file(stage .. "/titan/test.titan",
+            read_file(stage .. "/titan/test.titan") ..
+            "\n-- exact staged publication source\n")
         for _, module in ipairs(STDLIB_MODULES) do
             copy_tree(STDLIB_SHIMDIR .. "/" .. module .. ".lua",
                 stage .. "/titan/" .. module .. ".lua")
@@ -784,6 +895,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             local titan_lua = require "titan.lua"
             local iter = require "titan.iter"
             local gc = require "titan.gc"
+            local testing = require "titan.test"
             local builtin_string = require "string"
             -- Requiring only the public facade must initialize uv globally.
             -- The returned uv-owned Task resolves its methods transitively;
@@ -829,6 +941,9 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             assert(type(titan_lua) == "userdata")
             assert(type(iter) == "userdata")
             assert(type(gc) == "userdata")
+            assert(type(testing) == "userdata")
+            assert(not testing.testing())
+            assert(not testing.verbose())
             assert(peg.literal("installed"):match("installed") == 10)
             assert(titan_string.len("installed\0string") == 16)
             assert(titan_math.sqrt(81.0) == 9.0)
@@ -856,6 +971,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 lua = titan_lua,
                 iter = iter,
                 gc = gc,
+                test = testing,
             }) do
                 local symbol = "luaopen_titan_" .. name
                 assert(package.searchpath("titan." .. name, package.path) ==

@@ -1,0 +1,20 @@
+-- Shared Task ownership protocol for native standard-library tests.
+local async = import "async"
+local runtime_test = import "support.runtime"
+
+local function active(task: async.Task): boolean
+  return not task:status():has_finished()
+end
+
+local function cancel_and_join_task(task: async.Task, reason: string)
+  if active(task) then
+    task:cancel(async.CancellationReason.simple(reason))
+  end
+  async.join(task)
+end
+
+local function cleanup_task(task: async.Task, reason: string)
+  runtime_test.cleanup(function ()
+    cancel_and_join_task(task, reason)
+  end)
+end

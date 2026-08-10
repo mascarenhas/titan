@@ -1,0 +1,91 @@
+local type ExitFixtureCase = (string) -> ()
+
+local function compile_exit_fixture(workspace: string)
+  local source = fs.read_file("spec/fixtures/stdlib/titan/os_exit_app.titan")
+  fs.write_file(workspace .. "/os_exit_app.titan", source)
+  local ok: boolean?, why: string, code: integer = command.execute({
+    "sh", "-c", "cd \"$1\" && titanc os_exit_app",
+    "titan-os-exit-compile", workspace,
+  })
+  test.assert(ok ~= nil and why == "exit" and code == 0,
+              "could not compile os.exit fixture (" .. why .. ", " ..
+              code .. ")")
+end
+
+local function run_exit_fixture(workspace: string, mode: string):
+    (string, integer, string)
+  local marker = workspace .. "/" .. mode .. ".marker"
+  local output, why, code = command.capture({
+    workspace .. "/os_exit_app", mode, marker,
+  })
+  test.assert(why == "exit", "os.exit fixture did not exit normally: " .. output)
+  return marker, code, output
+end
+
+local function with_exit_fixture(body: ExitFixtureCase)
+  runtime_test.run(function ()
+    local workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    runtime_test.cleanup(function ()
+      local ok: boolean?, _why: string, code: integer =
+        command.execute({"rm", "-rf", workspace})
+      test.assert(ok ~= nil and code == 0,
+                  "could not remove os.exit fixture workspace")
+    end)
+    compile_exit_fixture(workspace)
+    body(workspace)
+  end)
+end
+
+function test_exit_default_and_explicit_codes_follow_language_cleanup(
+    _context: test.Context)
+  with_exit_fixture(function (workspace: string)
+    local marker, code, output = run_exit_fixture(workspace, "default")
+    test.assert(code == 0, "default os.exit failed: " .. output)
+    test.assert(fs.read_file(marker) == "finally;defer;",
+                "default os.exit changed cleanup order")
+
+    marker, code, output = run_exit_fixture(workspace, "explicit")
+    test.assert(code == 23, "explicit os.exit failed: " .. output)
+    test.assert(fs.read_file(marker) == "defer;",
+                "explicit os.exit changed cleanup order")
+  end)
+end
+
+function test_exit_child_task_replaces_completed_main_result(
+    _context: test.Context)
+  with_exit_fixture(function (workspace: string)
+    local marker, code, output = run_exit_fixture(workspace, "child")
+    test.assert(code == 29, "child os.exit failed: " .. output)
+    local contents = fs.read_file(marker)
+    test.assert(common.contains(contents, "main-defer;") and
+                common.contains(contents, "child-defer;") and
+                not common.contains(contents, "child-after;"),
+                "child os.exit changed Task cleanup")
+  end)
+end
+
+function test_exit_cancellation_is_reinjected_after_catch(
+    _context: test.Context)
+  with_exit_fixture(function (workspace: string)
+    local marker, code, output = run_exit_fixture(workspace, "caught")
+    test.assert(code == 31, "caught os.exit failed: " .. output)
+    test.assert(fs.read_file(marker) == "caught;after-catch;defer;",
+                "caught os.exit was not reinjected before the next await")
+  end)
+end
+
+function test_exit_first_code_wins_competing_request(
+    _context: test.Context)
+  with_exit_fixture(function (workspace: string)
+    local marker, code, output = run_exit_fixture(workspace, "competing")
+    test.assert(code == 41, "competing os.exit failed: " .. output)
+    local contents = fs.read_file(marker)
+    test.assert(common.contains(contents, "main-defer;") and
+                common.contains(contents, "child-caught;") and
+                common.contains(contents, "child-defer;") and
+                not common.contains(contents, "child-after;"),
+                "competing os.exit did not preserve the first code")
+  end)
+end

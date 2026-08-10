@@ -121,6 +121,11 @@ needs no wrapper around `main`. Module initialization installs a private
 bootstrap hook; the generated entrypoint schedules `main` as a Task and drives
 the loop. The Runtime remains alive until every Task has finished, even if
 `main` finishes first.
+A standalone or test executable may instead pass `--no-uv-bootstrap`. Its
+entrypoint calls `main(args)` directly while leaving module initialization and
+the private hook intact. Such a `main` must explicitly use `async.run` and
+`async.loop` for each Runtime session, and must close Runtime-bound resources
+before that session returns.
 
 `async.yield()` cedes one event-loop turn without waiting for an external
 resource. `timer.yield()` is a facade over the same operation. Calling either

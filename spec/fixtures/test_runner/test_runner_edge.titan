@@ -1,0 +1,142 @@
+local test = import "test"
+
+local failure_cleanup_ran = false
+local skip_cleanup_ran = false
+local late_cleanup_ran = false
+local child_failure_sibling_ran = false
+
+function test_cleanup_after_failure(context: test.Context)
+  failure_cleanup_ran = false
+  context:cleanup(function()
+    failure_cleanup_ran = true
+  end)
+  test.assert(false, "body failure with cleanup")
+end
+
+function test_cleanup_after_failure_followup(context: test.Context)
+  test.assert(failure_cleanup_ran, "cleanup did not run after failure")
+end
+
+function test_cleanup_after_skip(context: test.Context)
+  skip_cleanup_ran = false
+  context:cleanup(function()
+    skip_cleanup_ran = true
+  end)
+  test.skip("skip with cleanup")
+end
+
+function test_cleanup_after_skip_followup(context: test.Context)
+  test.assert(skip_cleanup_ran, "cleanup did not run after skip")
+end
+
+function test_cleanup_skip_fails(context: test.Context)
+  context:cleanup(function()
+    test.skip("cleanup skip reason")
+  end)
+end
+
+function test_duplicate_subtests(context: test.Context)
+  context:run("same", function(child: test.Context)
+    test.assert(child:name() ==
+      "test_runner_edge.test_duplicate_subtests.same")
+  end)
+  context:run("same", function(child: test.Context)
+    test.assert(child:name() ==
+      "test_runner_edge.test_duplicate_subtests.same")
+  end)
+end
+
+function test_nested_subtests(context: test.Context)
+  context:run("child", function(child: test.Context)
+    child:run("grandchild", function(grandchild: test.Context)
+      test.assert(grandchild:name() ==
+        "test_runner_edge.test_nested_subtests.child.grandchild")
+    end)
+  end)
+end
+
+function test_child_registers_parent_cleanup(context: test.Context)
+  local child_cleanup_ran = false
+  context:cleanup(function()
+    test.assert(child_cleanup_ran,
+      "child-registered parent cleanup did not run first")
+  end)
+  context:run("child", function(child: test.Context)
+    context:cleanup(function()
+      child_cleanup_ran = true
+    end)
+  end)
+end
+
+
+function test_executed_child_failure_isolated(context: test.Context)
+  child_failure_sibling_ran = false
+  context:cleanup(function()
+    test.assert(child_failure_sibling_ran,
+                "later child did not run after sibling failure")
+    local registration_rejected = false
+    do
+      context:cleanup(function() end)
+    catch
+      registration_rejected = true
+    end
+    test.assert(registration_rejected,
+                "cleanup registration remained open while draining")
+  end)
+  context:run("fails", function(child: test.Context)
+    test.assert(false, "executed child failure")
+  end)
+  context:run("later", function(child: test.Context)
+    child_failure_sibling_ran = true
+  end)
+end
+
+function test_swallowed_markers(context: test.Context)
+  do
+    test.skip("caught skip")
+  catch
+  end
+  do
+    test.assert(false, "caught assertion")
+  catch
+  end
+end
+
+function test_captured_parent(context: test.Context)
+  context:run("misuse", function(child: test.Context)
+    context:run("too_late", function(unused: test.Context)
+    end)
+  end)
+end
+
+function test_integer_error(context: test.Context)
+  raise 17
+end
+
+function test_primary_failure_survives_cleanup(context: test.Context)
+  context:cleanup(function()
+    test.assert(false, "secondary cleanup failure")
+  end)
+  test.assert(false, "primary body failure")
+end
+
+function test_skip_cleanup_failure(context: test.Context)
+  context:cleanup(function()
+    test.assert(false, "cleanup overrides skip")
+  end)
+  test.skip("body skipped first")
+end
+
+function test_all_cleanups_attempted(context: test.Context)
+  late_cleanup_ran = false
+  context:cleanup(function()
+    late_cleanup_ran = true
+  end)
+  context:cleanup(function()
+    test.assert(false, "first cleanup fails")
+  end)
+end
+
+function test_all_cleanups_attempted_followup(context: test.Context)
+  test.assert(late_cleanup_ran, "cleanup draining stopped at first error")
+end

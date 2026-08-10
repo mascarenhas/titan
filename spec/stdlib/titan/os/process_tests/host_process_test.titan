@@ -1,0 +1,173 @@
+local type ProcessChildCase = (string) -> ()
+
+local function with_process_child(body: ProcessChildCase)
+  runtime_test.run(function ()
+    body(system.cwd() .. "/.titan-tests/os_process_host_child")
+  end)
+end
+
+local function restore_process_environment(name: string, original: string?)
+  if original then
+    system.setenv(name, original as string)
+  else
+    system.unsetenv(name)
+  end
+end
+
+function test_process_validates_inputs_and_preserves_argv_env_cwd(
+    _context: test.Context)
+  with_process_child(function (child: string)
+    process_support.expect_failure(function ()
+      system.spawn("", {})
+    end, "spawn accepted an empty executable")
+    process_support.expect_failure(function ()
+      system.spawn(child .. "\0suffix", {})
+    end, "spawn accepted an embedded NUL executable")
+    process_support.expect_failure(function ()
+      system.spawn(child, {"echo\0suffix"})
+    end, "spawn accepted an embedded NUL argument")
+
+    local envname = "TITAN_PROCESS_DIRECT_ENV"
+    local original: string? = system.getenv(envname)
+    local environment = "direct-continuation-process"
+    do
+      defer restore_process_environment(envname, original)
+      system.setenv(envname, environment)
+      local cwd = system.cwd()
+      local process = system.spawn(child, {
+        "argv-env-cwd", envname, "alpha", "", "beta",
+      })
+      defer cleanup_process(process)
+      process_support.required_output(process.stdin, "metadata stdin"):close()
+      local output = process_support.read_all(
+        process_support.required_input(process.stdout, "metadata stdout"))
+      local diagnostics = process_support.read_all(
+        process_support.required_input(process.stderr, "metadata stderr"))
+      process_support.assert_normal(process:wait(), "metadata child")
+      local expected =
+        "cwd:" .. #cwd .. ":" .. cwd .. "\n" ..
+        "env:" .. #environment .. ":" .. environment .. "\n" ..
+        "argv0:" .. #child .. ":" .. child .. "\n" ..
+        "arg:5:alpha\narg:0:\narg:4:beta\n"
+      test.assert(output == expected,
+                  "spawn changed argv, environment, or cwd")
+      test.assert(diagnostics == "", "metadata child wrote stderr")
+    end
+  end)
+end
+
+function test_process_preserves_binary_streams_status_and_signals(
+    _context: test.Context)
+  with_process_child(function (child: string)
+    local payload = "head\0middle\ntrail"
+    local echoed = system.spawn(child, {"echo"})
+    defer cleanup_process(echoed)
+    local echo_input = process_support.required_output(
+      echoed.stdin, "echo stdin")
+    local echo_output = process_support.required_input(
+      echoed.stdout, "echo stdout")
+    local echo_error = process_support.required_input(
+      echoed.stderr, "echo stderr")
+    echo_input:write(payload)
+    echo_input:close()
+    echo_input:close()
+    test.assert(process_support.read_all(echo_output) == payload,
+                "captured process stream changed binary input")
+    test.assert(process_support.read_all(echo_error) == "",
+                "echo child wrote stderr")
+    process_support.assert_normal(echoed:wait(), "echo child")
+    test.assert(not echoed:is_running(), "reaped child remained running")
+
+    local split = system.spawn(child, {"dual", "64"})
+    defer cleanup_process(split)
+    process_support.required_output(split.stdin, "dual stdin"):close()
+    local split_stdout = process_support.read_all(
+      process_support.required_input(split.stdout, "dual stdout"))
+    local split_stderr = process_support.read_all(
+      process_support.required_input(split.stderr, "dual stderr"))
+    process_support.assert_normal(split:wait(), "dual-output child")
+    test.assert(#split_stdout == 64 and #split_stderr == 64 and
+                split_stdout ~= split_stderr,
+                "separate process captures changed")
+
+    local exited = system.spawn(child, {"exit", "37"})
+    defer cleanup_process(exited)
+    process_support.required_output(exited.stdin, "exit stdin"):close()
+    local first = exited:wait()
+    local second = exited:wait()
+    test.assert(first.code == 37 and not first.signal and
+                first.signal_number == 0,
+                "normal process exit status changed")
+    test.assert(second.code == first.code and second.signal == first.signal and
+                second.signal_number == first.signal_number,
+                "repeated wait did not retain process status")
+    process_support.expect_failure(function ()
+      exited:kill("term")
+    end, "kill targeted an exited Process")
+
+    local killed = system.spawn(child, {"ready-wait"})
+    defer cleanup_process(killed)
+    process_support.required_output(killed.stdin, "kill stdin"):close()
+    local killed_stdout = process_support.required_input(
+      killed.stdout, "kill stdout")
+    test.assert(killed_stdout:read_until("\n", true) == "READY",
+                "kill child did not become ready")
+    test.assert(killed:is_running(), "live child was not running")
+    process_support.expect_failure(function ()
+      killed:kill("not-a-signal")
+    end, "Process accepted an unknown signal name")
+    process_support.expect_failure(function ()
+      killed:kill("term\0kill")
+    end, "Process accepted an embedded-NUL signal name")
+    test.assert(killed:is_running(),
+                "invalid signal validation changed Process state")
+    killed:kill("kill")
+    local killed_status = killed:wait()
+    test.assert(killed_status.signal == "kill" and
+                killed_status.signal_number > 0,
+                "signal termination was not preserved")
+    test.assert(not killed:is_running(), "killed child remained running")
+  end)
+end
+
+function test_process_cancellation_waits_for_accepted_callbacks(
+    _context: test.Context)
+  with_process_child(function (child: string)
+    local process = system.spawn(child, {"ready-wait"})
+    defer cleanup_process(process)
+    process_support.required_output(process.stdin, "detached stdin"):close()
+    local output = process_support.required_input(
+      process.stdout, "detached stdout")
+    test.assert(output:read_until("\n", true) == "READY",
+                "detached-wait child did not become ready")
+
+    local waiter = async.run(function (): value
+      process:wait()
+      return nil
+    end)
+    task_support.cleanup_task(waiter, "detached process waiter cleanup")
+    local reader = async.run(function (): value
+      output:read()
+      return nil
+    end)
+    task_support.cleanup_task(reader, "detached process reader cleanup")
+    process_support.wait_until_waiting(waiter, "process waiter")
+    process_support.wait_until_waiting(reader, "process reader")
+    waiter:cancel(async.CancellationReason.simple("detach process waiter"))
+    reader:cancel(async.CancellationReason.simple("detach process reader"))
+    test.assert(waiter:status():as_string() == "waiting" and
+                reader:status():as_string() == "waiting",
+                "process waiters left accepted operations before callbacks")
+    process_support.wait_until_finished(waiter)
+    process_support.wait_until_finished(reader)
+    test.assert(waiter:status():as_string() == "cancelled" and
+                reader:status():as_string() == "cancelled",
+                "detached waiters did not receive later callbacks")
+    test.assert(process:is_running(),
+                "detaching waiters unexpectedly terminated the child")
+    process:kill("kill")
+    local status = process:wait()
+    test.assert(status.signal == "kill" and status.signal_number > 0,
+                "replacement wait lost process termination")
+  end)
+end

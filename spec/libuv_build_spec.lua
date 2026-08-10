@@ -12,19 +12,20 @@ local STDLIB_TYPES_FIXTURE =
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "os", "peg", "string", "math", "lua", "iter", "gc",
+    "test",
 }
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
     "titan.http", "titan.os", "titan.peg", "titan.string", "titan.math",
-    "titan.lua", "titan.iter", "titan.gc",
+    "titan.lua", "titan.iter", "titan.gc", "titan.test",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
     "titan/timer.lua", "titan/io.lua", "titan/fs.lua", "titan/net.lua",
     "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/os.lua",
     "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
-    "titan/iter.lua", "titan/gc.lua",
+    "titan/iter.lua", "titan/gc.lua", "titan/test.lua",
 }
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
@@ -885,7 +886,7 @@ describe("libuv Makefile configuration", function()
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
                 "titan/math.titan", "titan/lua.titan",
-                "titan/iter.titan", "titan/gc.titan",
+                "titan/iter.titan", "titan/gc.titan", "titan/test.titan",
             }, expanded)
         end)
 
@@ -908,7 +909,7 @@ describe("libuv Makefile configuration", function()
     function()
         local short = {
             "coroutine", "uv", "async", "timer", "io", "fs", "net",
-            "ssl", "url", "http", "os", "peg", "string",
+            "ssl", "url", "http", "os", "peg", "string", "test",
         }
         for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
             if source ~= "$(UV_TITAN_SOURCES)" and
@@ -1159,10 +1160,10 @@ describe("libuv Makefile configuration", function()
             }, public_declarations(path))
         end)
 
-    it("pins current metadata for all seventeen standard modules",
+    it("pins current metadata for all eighteen standard modules",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
-            assert.equal(17, #STDLIB_ROOTS)
+            assert.equal(18, #STDLIB_ROOTS)
 
             for _, record_name in ipairs({
                 "ChannelReader", "ChannelWriter",
@@ -1198,11 +1199,11 @@ describe("libuv Makefile configuration", function()
             end
         end)
 
-    it("exports eighteen DSO openers for seventeen standard modules",
+    it("exports nineteen DSO openers for eighteen standard modules",
         function()
-            assert.equal(17, #STDLIB_MODULES)
-            assert.equal(17, #STDLIB_ROOTS)
-            assert.equal(17, #STDLIB_SHIMS)
+            assert.equal(18, #STDLIB_MODULES)
+            assert.equal(18, #STDLIB_ROOTS)
+            assert.equal(18, #STDLIB_SHIMS)
 
             local container = installed_stdlib_container()
             local ok, output, why, code = run_argv(tool_argv(
@@ -1226,7 +1227,7 @@ describe("libuv Makefile configuration", function()
                     found[symbol] = true
                 end
             end
-            assert.equal(18, (function()
+            assert.equal(19, (function()
                 local count = 0
                 for _ in pairs(found) do count = count + 1 end
                 return count
@@ -1831,7 +1832,7 @@ esac
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
                 "titan/math.titan", "titan/lua.titan",
-                "titan/iter.titan", "titan/gc.titan",
+                "titan/iter.titan", "titan/gc.titan", "titan/test.titan",
             }
             for _, source in ipairs(makefile_words("UV_TITAN_SOURCES")) do
                 sources[#sources + 1] = source
@@ -2073,6 +2074,96 @@ fi
             if not tested then error(test_error, 0) end
         end)
 
+    it("forwards LuaRocks command arguments to Busted byte-for-byte",
+        function()
+            local root = make_temp_dir()
+            local tested, test_error = xpcall(function()
+                local bin = root .. "/bin"
+                local log = root .. "/argv"
+                assert(lfs.mkdir(bin))
+                local fake_busted = bin .. "/busted"
+                write_file(fake_busted, [==[#!/usr/bin/env bash
+set -eu
+: "${TITAN_BUSTED_ARGV_LOG:?}"
+printf '%s\0' "$@" > "$TITAN_BUSTED_ARGV_LOG"
+exit 73
+]==])
+                local chmod_ok, chmod_output = run_argv({
+                    "chmod", "+x", fake_busted,
+                })
+                assert.truthy(chmod_ok, chmod_output)
+
+                local ordinary = {
+                    "--name=cost$bill",
+                    "line one\nline two",
+                    "tab\tvalue",
+                    "",
+                }
+                local argv = {
+                    "env",
+                    "-u", "MAKEFLAGS",
+                    "-u", "MFLAGS",
+                    "-u", "MAKEOVERRIDES",
+                    "-u", "EXTRA_TEST_FLAGS",
+                    "-u", "TITAN_ROCK_TEST_INTERNAL",
+                    "-u", "TITAN_ROCK_TEST_FORWARDED",
+                    "-u", "TITAN_ROCK_TEST_ARGC",
+                    "PATH=" .. bin .. ":" .. assert(os.getenv("PATH")),
+                    "BUSTED=busted",
+                    "TITAN_BUSTED_ARGV_LOG=" .. log,
+                    "bash",
+                    "spec/support/run_rock_tests.sh",
+                }
+                for _, argument in ipairs(ordinary) do
+                    argv[#argv + 1] = argument
+                end
+                argv[#argv + 1] = "--busted-filter=focus$tail"
+                argv[#argv + 1] = "--titan-filter=native$tail"
+                local ok = run_argv(argv)
+                assert.falsy(ok)
+
+                local encoded = read_file(log)
+                local actual = {}
+                local offset = 1
+                while offset <= #encoded do
+                    local finish = assert(encoded:find("\0", offset, true))
+                    actual[#actual + 1] = encoded:sub(offset, finish - 1)
+                    offset = finish + 1
+                end
+                ordinary[#ordinary + 1] = "--filter=focus$tail"
+                assert.same(ordinary, actual)
+            end, debug.traceback)
+            remove_tree(root)
+            if not tested then error(test_error, 0) end
+        end)
+
+    it("bounds TERM-ignoring descendants for every command exit path",
+        function()
+            local function run_case(command, expected_ok, expected_code)
+                local started = os.time()
+                local ok, output, why, code = run_argv({
+                    "bash",
+                    "spec/support/run_with_timeout.sh",
+                    "1",
+                    "bash",
+                    "-c",
+                    command,
+                })
+                local elapsed = os.time() - started
+                assert.equal(expected_ok, ok, output)
+                if expected_code then
+                    assert.equal("exit", why)
+                    assert.equal(expected_code, code)
+                end
+                assert.is_true(elapsed < 10,
+                    "timeout supervisor leaked its output pipe for " ..
+                    tostring(elapsed) .. " seconds")
+            end
+
+            run_case('(trap "" TERM; sleep 12) & wait', false, 124)
+            run_case('(trap "" TERM; sleep 12) & exit 0', true)
+        end)
+
     it("owns the provider pair through one stamp and exact cleanup",
         function()
             local makefile = read_file("Makefile")
@@ -2118,6 +2209,19 @@ fi
                 "rm -rf $(STDLIB_CONTAINER).dSYM",
                 "examples/utils.a examples/artisanal.a examples/sdl_quit.a",
                 "testfiles/selection_sort.a testfiles/sieve.a",
+                "TITAN_STDLIB_TEST_PROGRAM_ROOT := test.tests",
+                "TITAN_STDLIB_TEST_PROGRAM_OUTPUT := test/tests",
+                "TITAN_STDLIB_TEST_ROOTS := " ..
+                    "$(TITAN_STDLIB_TEST_PROGRAM_ROOT)",
+                "TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/" ..
+                    "$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)",
+                "\nbusted-test:",
+                "\nstdlib-busted-test:",
+                "\ntitan-stdlib-test-build:",
+                "\ntitan-stdlib-test-run:",
+                "\ntitan-stdlib-test: titan-stdlib-test-build",
+                "\nstdlib-test: stdlib-busted-test",
+                "\nrock-test: busted-test",
             }) do
                 assert.truthy(makefile:find(contract, 1, true), contract)
             end
@@ -2169,6 +2273,17 @@ fi
             assert.falsy(makefile:find("rm -f titan/*.lua", 1, true), makefile)
             assert.falsy(makefile:find("rm -f titan/uv/*.lua", 1, true),
                 makefile)
+            assert.falsy(makefile:find(
+                "run_titan_stdlib_test_groups.sh", 1, true), makefile)
+            assert.falsy(makefile:find(
+                "run_titan_stdlib_tests.sh", 1, true), makefile)
+            local native_run_start = assert(makefile:find(
+                "\ntitan-stdlib-test-run:", 1, true))
+            local native_run_end = assert(makefile:find(
+                "\ntitan-stdlib-test:", native_run_start, true))
+            local native_run = makefile:sub(native_run_start, native_run_end - 1)
+            assert.truthy(native_run:find("2>&1 | cat", 1, true), native_run)
+            assert.falsy(native_run:find("output=$$(", 1, true), native_run)
 
             local examples_makefile = read_file("examples/Makefile")
             assert.truthy(examples_makefile:find(
@@ -2188,7 +2303,10 @@ fi
                 'cmp -s "$manifest" "$restored_manifest"',
                 '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
                 '"$shim_dir/math.lua" "$shim_dir/lua.lua"',
-                '"$shim_dir/iter.lua" "$shim_dir/gc.lua"',
+                '"$shim_dir/iter.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"',
+                'test_source=$prefix_rel/share/titan/0.22/src/titan/test.titan',
+                '"$test_source"',
+                'rm -f "$test_source"',
                 '"$shim_dir/io.lua"',
                 '"$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/ssl.lua"',
                 '"$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/os.lua"',
@@ -2218,6 +2336,8 @@ fi
                 'local lua = import "titan.lua"',
                 'local iter = import "titan.iter"',
                 'local gc = import "titan.gc"',
+                'local testing = import "test"',
+                'not testing.testing() and not testing.verbose()',
                 "local peer = async.run(",
                 "timer.sleep(0)",
                 "fs.write_file(marker,",
@@ -2295,6 +2415,8 @@ fi
                 'local lua = require "titan.lua"',
                 'local iter = require "titan.iter"',
                 'local gc = require "titan.gc"',
+                'local testing = require "titan.test"',
+                'assert(not testing.testing())',
                 'local found = strings.match("regex42", "([0-9]+)")',
                 'strings.find("a\\0b", "\\0b")',
                 'assert(require "io" == builtin_io)',
@@ -2304,18 +2426,272 @@ fi
             end
 
             local workflow = read_file(".github/workflows/ci.yml")
-            assert.truthy(workflow:find(
-                'static_archive="${provider%.so}.a"', 1, true), workflow)
-            assert.truthy(workflow:find(
-                "PEG/string/math/Lua/iter/GC groups", 1, true), workflow)
-            assert.truthy(workflow:find(
-                "Run serial, net/SSL/URL/HTTP/OS, and " ..
-                    "PEG/string/math/Lua/iter/GC " ..
-                    "library tests without coverage", 1, true), workflow)
-            assert.truthy(workflow:find(
-                "ci_libuv_mode_smoke.sh system", 1, true), workflow)
-            assert.truthy(workflow:find(
-                "ci_test_groups.sh library-peg-string", 1, true), workflow)
+            local function count_literal(text, needle)
+                local count = 0
+                local offset = 1
+                while true do
+                    local first = text:find(needle, offset, true)
+                    if not first then return count end
+                    count = count + 1
+                    offset = first + #needle
+                end
+            end
+            local function named_step(job, name)
+                local marker = "\n      - name: " .. name
+                local first = assert(job:find(marker, 1, true), name)
+                local finish = job:find(
+                    "\n      - name:", first + #marker, true)
+                    or (#job + 1)
+                return job:sub(first, finish - 1)
+            end
+            local function assert_codecov_job(job, upload_name)
+                assert.equal(1, count_literal(job, "contents: read"), job)
+                assert.equal(1, count_literal(job, "id-token: write"), job)
+                assert.equal(1,
+                    count_literal(job, "codecov/codecov-action@v7"), job)
+                assert.equal(1,
+                    count_literal(job, "fail_ci_if_error: true"), job)
+                assert.equal(1,
+                    count_literal(job, "files: ./luacov.report.out"), job)
+                assert.equal(1, count_literal(job,
+                    "\n          name: " .. upload_name .. "\n"), job)
+                assert.equal(1, count_literal(job, "use_oidc: true"), job)
+                assert.falsy(job:find("\n%s+token:", 1), job)
+            end
+
+            local stdlib_job = assert(workflow:match(
+                "\n  test%-linux%-stdlib:(.-)" ..
+                "\n  test%-linux%-compiler:"))
+            local compiler_job = assert(workflow:match(
+                "\n  test%-linux%-compiler:(.-)\n  # macOS"))
+            local macos_job = assert(workflow:match(
+                "\n  test%-macos:(.-)\n  sanitizer:"))
+            local sanitizer_job = assert(workflow:match(
+                "\n  sanitizer:(.*)"))
+
+            assert.equal(3, count_literal(workflow,
+                "if: github.event_name == 'push'"), workflow)
+            assert.equal(1, count_literal(workflow,
+                "if: github.event_name == 'workflow_dispatch'"), workflow)
+            assert.equal(4, count_literal(workflow, "\n    runs-on:"),
+                workflow)
+            for _, job_name in ipairs({
+                "test-linux-stdlib", "test-linux-compiler", "test-macos",
+                "sanitizer",
+            }) do
+                assert.equal(1, count_literal(workflow,
+                    "\n  " .. job_name .. ":"), job_name)
+            end
+            for _, removed in ipairs({
+                "prepare-linux", "test-linux-library", "ubuntu-slim",
+                "compiler-core", "compiler-heavy", "library-serial",
+                "library-uv-fs", "library-net-os", "library-peg-string",
+                "ci_test_groups.sh libraries",
+                "run_titan_stdlib_test_groups.sh",
+                "run_titan_stdlib_tests.sh",
+            }) do
+                assert.falsy(workflow:find(removed, 1, true), removed)
+            end
+            assert.falsy(workflow:find("awk", 1, true), workflow)
+            assert.equal(1, count_literal(workflow,
+                "codecov/codecov-action@v7"), workflow)
+            assert.equal(1, count_literal(workflow,
+                "id-token: write"), workflow)
+            assert.equal(1, count_literal(workflow,
+                'luacov "titan%-compiler/"'), workflow)
+            assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
+
+            assert.equal(1, count_literal(stdlib_job,
+                "name: stdlib (ubuntu-24.04, build+all-no-coverage)"),
+                stdlib_job)
+            assert.equal(1, count_literal(stdlib_job,
+                "runs-on: ubuntu-24.04"), stdlib_job)
+            assert.equal(1, count_literal(stdlib_job,
+                "timeout-minutes: 30"), stdlib_job)
+            assert.equal(1, count_literal(stdlib_job,
+                "contents: read"), stdlib_job)
+            assert.falsy(stdlib_job:find("id-token: write", 1, true),
+                stdlib_job)
+            assert.falsy(stdlib_job:find("codecov/codecov-action", 1, true),
+                stdlib_job)
+            assert.falsy(stdlib_job:find('luacov "', 1, true),
+                stdlib_job)
+            assert.falsy(stdlib_job:find(" -c -o gtest", 1, true),
+                stdlib_job)
+            assert.equal(1, count_literal(stdlib_job,
+                "make stdlib-test"), stdlib_job)
+            assert.equal(1, count_literal(stdlib_job,
+                "make titan-stdlib-test-run"), stdlib_job)
+            assert.equal(1, count_literal(stdlib_job,
+                "TITAN_TEST_TIMEOUT=15"), stdlib_job)
+            assert.equal(1, count_literal(stdlib_job,
+                "test_runtime_shutdown_closes_native_handles_but_not_files$"),
+                stdlib_job)
+            assert.falsy(makefile:find(
+                "$(sort $(wildcard spec/stdlib/*_spec.lua))", 1, true),
+                makefile)
+            assert.falsy(makefile:find("STDLIB_BOUNDARY_TESTS", 1, true),
+                makefile)
+            for _, brittle_cleanup in ipairs({
+                "test_runner_fixture__test_support.c",
+                "test_runner_collision__test_runner.c",
+                "nested/tests__main__test_entrypoint.c",
+            }) do
+                assert.falsy(makefile:find(brittle_cleanup, 1, true),
+                    brittle_cleanup)
+            end
+            local clean_start = assert(makefile:find(
+                "\nclean: ## Remove generated build/test artifacts", 1, true))
+            local clean_finish = assert(makefile:find(
+                "\nclean-lua:", clean_start, true))
+            local clean_recipe = makefile:sub(clean_start, clean_finish - 1)
+            assert.is_true(assert(clean_recipe:find(
+                "bash spec/support/clean_generated_test_artifacts.sh",
+                1, true)) < assert(clean_recipe:find(
+                "rm -f titan/*.c titan/*.o", 1, true)))
+            local generated_cleanup = read_file(
+                "spec/support/clean_generated_test_artifacts.sh")
+            for _, cleanup_pattern in ipairs({
+                "*__test_support.*", "*__test_runner.*",
+                "*__test_entrypoint.*", "test_runner_*",
+            }) do
+                assert.truthy(generated_cleanup:find(
+                    cleanup_pattern, 1, true), cleanup_pattern)
+            end
+            for _, native_build_contract in ipairs({
+                "spec/fixtures/stdlib/native/uv_stdio_probe.h",
+                "spec/fixtures/stdlib/native/uv_stdio_probe.c",
+                "spec/fixtures/stdlib/native/os_process_host_child.c",
+                "-X uv_stdio_probe.o",
+            }) do
+                assert.truthy(makefile:find(
+                    native_build_contract, 1, true), native_build_contract)
+            end
+            assert.falsy(read_file(
+                "spec/stdlib/titan/uv/runtime_tests.titan"):find(
+                    "${CC:-cc}", 1, true))
+            assert.falsy(read_file(
+                "spec/stdlib/titan/os/process_tests/" ..
+                "host_process_test.titan"):find("${CC:-cc}", 1, true))
+            for entry in lfs.dir("spec") do
+                assert.falsy(entry:match("_boundary_spec[.]lua$"), entry)
+            end
+            local function assert_no_stdlib_lua(directory)
+                for entry in lfs.dir(directory) do
+                    if entry ~= "." and entry ~= ".." then
+                        local path = directory .. "/" .. entry
+                        local mode = assert(lfs.attributes(path, "mode"))
+                        if mode == "directory" then
+                            assert_no_stdlib_lua(path)
+                        else
+                            assert.falsy(entry:match("[.]lua$"), path)
+                        end
+                    end
+                end
+            end
+            assert_no_stdlib_lua("spec/stdlib")
+            for _, retained in ipairs({
+                "spec/asan_generated_c_context_spec.lua",
+                "spec/dense_array_runtime_spec.lua",
+                "spec/libuv_build_spec.lua",
+                "spec/lpeglabel_build_spec.lua",
+                "spec/minicoro_spec.lua",
+                "spec/readline_build_spec.lua",
+                "spec/rockspec_spec.lua",
+                "spec/stdlib_installer_spec.lua",
+            }) do
+                assert.truthy(makefile:find(retained, 1, true), retained)
+            end
+            assert.equal(1, count_literal(stdlib_job,
+                'TITAN_EXTRA_CFLAGS: "-O0"'), stdlib_job)
+            assert.equal(1, count_literal(stdlib_job,
+                'TITAN_TEST_EXTRA_CFLAGS: "-O0"'), stdlib_job)
+            assert.truthy(stdlib_job:find(
+                'static_archive="${provider%.so}.a"', 1, true), stdlib_job)
+            assert.truthy(stdlib_job:find(
+                "ci_libuv_mode_smoke.sh bundled", 1, true), stdlib_job)
+            assert.truthy(stdlib_job:find(
+                "ci_libuv_mode_smoke.sh system", 1, true), stdlib_job)
+            assert.truthy(stdlib_job:find(
+                "LIBUV_MODE=system OPENSSL_MODE=system", 1, true), stdlib_job)
+            assert.truthy(stdlib_job:find(
+                "archive: false", 1, true), stdlib_job)
+            assert.truthy(stdlib_job:find(
+                "--exclude='./.git'", 1, true), stdlib_job)
+            assert.truthy(stdlib_job:find(
+                "--exclude='./libbacktrace/.git'", 1, true), stdlib_job)
+
+            local pack_index = assert(stdlib_job:find(
+                "- name: Pack prepared Linux tree", 1, true))
+            local tests_index = assert(stdlib_job:find(
+                "- name: Run all stdlib/runtime tests without coverage",
+                pack_index, true))
+            local bundled_index = assert(stdlib_job:find(
+                "- name: Smoke-test bundled libuv source image",
+                tests_index, true))
+            local system_index = assert(stdlib_job:find(
+                "- name: Canary source-rock installation with system " ..
+                    "libuv and OpenSSL", bundled_index, true))
+            local upload_index = assert(stdlib_job:find(
+                "- name: Upload prepared Linux tree", system_index, true))
+            assert.is_true(pack_index < tests_index, stdlib_job)
+            assert.is_true(tests_index < bundled_index, stdlib_job)
+            assert.is_true(bundled_index < system_index, stdlib_job)
+            assert.is_true(system_index < upload_index, stdlib_job)
+
+            assert.equal(1, count_literal(compiler_job,
+                "name: compiler/language (ubuntu-24.04, LuaCov)"),
+                compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                "needs: test-linux-stdlib"), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                "runs-on: ubuntu-24.04"), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                "timeout-minutes: 30"), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                "actions/download-artifact@v8"), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                "name: titan-linux-prepared.tar.gz"), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                "ci_test_groups.sh compiler"), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                'TITAN_EXTRA_CFLAGS: "-O0"'), compiler_job)
+            assert.falsy(compiler_job:find(
+                "ci_stdlib_snapshot.sh", 1, true), compiler_job)
+            assert_codecov_job(compiler_job, "compiler")
+
+            assert.equal(1, count_literal(macos_job,
+                "if: github.event_name == 'workflow_dispatch'"), macos_job)
+            assert.falsy(macos_job:find(
+                "if: github.event_name == 'push'", 1, true), macos_job)
+            assert.equal(1, count_literal(macos_job,
+                "make stdlib-test"), macos_job)
+            assert.equal(1, count_literal(macos_job,
+                "make titan-stdlib-test-run"), macos_job)
+            assert.equal(1, count_literal(macos_job,
+                "TITAN_TEST_TIMEOUT=15"), macos_job)
+            assert.equal(1, count_literal(macos_job,
+                "ci_test_groups.sh compiler-uncovered"), macos_job)
+            assert.equal(1, count_literal(macos_job,
+                "ci_stdlib_snapshot.sh save"), macos_job)
+            assert.equal(1, count_literal(macos_job,
+                "ci_stdlib_snapshot.sh restore"), macos_job)
+            assert.equal(1, count_literal(macos_job,
+                "ci_libuv_mode_smoke.sh"), macos_job)
+            assert.falsy(macos_job:find('luacov "', 1, true), macos_job)
+            assert.falsy(macos_job:find("id-token: write", 1, true),
+                macos_job)
+            assert.equal(2, count_literal(macos_job,
+                "ci_retry_luarocks_dependencies.sh"), macos_job)
+            assert.equal(2, count_literal(workflow,
+                "ci_retry_luarocks_dependencies.sh"), workflow)
+            assert.equal(1, count_literal(macos_job,
+                "luarocks make --only-deps"), macos_job)
+            assert.equal(1, count_literal(macos_job,
+                "luarocks make --force"), macos_job)
+            assert.equal(1, count_literal(macos_job,
+                "luarocks test --prepare"), macos_job)
+
             for _, contract in ipairs({
                 'LLHTTP_VERSION: "9.4.3"',
                 'OPENSSL_VERSION: "3.5.7"',
@@ -2330,45 +2706,11 @@ fi
                 "LIBUV_MODE=system OPENSSL_MODE=system",
                 "OPENSSL_MODE=system",
                 "brew install cmake libuv openssl@3 pkgconf",
-                "spec/stdlib/ssl_http_sanitizer_spec.lua",
-                "streams a fragmented HTTPS request through TLS and llhttp",
+                "test_ssl_http_fresh_process_sanitizer_composition$",
                 "libssl-dev", "perl",
             }) do
                 assert.truthy(workflow:find(contract, 1, true), contract)
             end
-            assert.truthy(workflow:find(
-                "for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc",
-                1, true), workflow)
-            assert.truthy(workflow:find(
-                "--name='titan.peg GC roots patterns and callbacks across " ..
-                "repeated collections'", 1, true), workflow)
-            assert.truthy(workflow:find(
-                "--name='titan.string regex keeps compiled backreferences, " ..
-                "iterators, and replacement callbacks rooted across repeated " ..
-                "full and generational GC'", 1, true), workflow)
-            assert.truthy(workflow:find(
-                "bash spec/support/ci_peg_string_sanitizer_smoke.sh",
-                1, true), workflow)
-
-            local groups = read_file("spec/support/ci_test_groups.sh")
-            for _, pattern in ipairs({
-                "spec/stdlib/ssl*_spec.lua",
-                "spec/stdlib/url*_spec.lua",
-                "spec/stdlib/http*_spec.lua",
-            }) do
-                assert.truthy(groups:find(pattern, 1, true), pattern)
-            end
-            assert.truthy(groups:find(
-                "net/SSL/URL/HTTP/OS spec files", 1, true), groups)
-            assert.truthy(groups:find("library-peg-string)", 1, true), groups)
-            assert.truthy(groups:find(
-                "PEG/string/math/Lua/iter/GC spec files without LuaCov",
-                1, true), groups)
-            assert.truthy(groups:find(
-                "Library PEG/string/math/Lua/iter/GC worker",
-                1, true), groups)
-            assert.falsy(groups:find(
-                "PEG/string spec files without LuaCov", 1, true), groups)
             assert.equal(2, select(2, workflow:gsub(
                 'TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE=' ..
                 '"%$GITHUB_WORKSPACE/libuv%-build/libuv[.]a"', "")))
@@ -2380,100 +2722,68 @@ fi
                 "--name='standalone-prefix source installation loads direct " ..
                 "libuv calls lazily for Titan and explicitly for Lua'",
                 1, true), workflow)
-            local prepare_job = assert(workflow:match(
-                "\n  prepare%-linux:(.-)\n  test%-linux%-library:"))
-            local library_job = assert(workflow:match(
-                "\n  test%-linux%-library:(.-)\n  test%-linux:"))
-            local heavy_job = assert(workflow:match(
-                "\n  test%-linux:(.-)\n  test%-macos:"))
-            local macos_job = assert(workflow:match(
-                "\n  test%-macos:(.-)\n  sanitizer:"))
-            local sanitizer_job = assert(workflow:match(
-                "\n  sanitizer:(.*)"))
-            local function count_literal(text, needle)
-                local count = 0
-                local offset = 1
-                while true do
-                    local start = text:find(needle, offset, true)
-                    if not start then return count end
-                    count = count + 1
-                    offset = start + #needle
-                end
+            assert.truthy(workflow:find(
+                "for module in coroutine uv async timer io fs net ssl url " ..
+                "http os peg string math lua iter gc test; do",
+                1, true), workflow)
+            assert.truthy(workflow:find(
+                "share/titan/0.22/src/titan/test.titan", 1, true), workflow)
+
+            local groups = read_file("spec/support/ci_test_groups.sh")
+            for _, retained in ipairs({
+                "compiler_tests=()",
+                "compiler_unit_tests=()",
+                "compiler_isolated_coverage_tests=()",
+                "spec/asan_generated_c_context_spec.lua",
+                "spec/dense_array_runtime_spec.lua",
+                "spec/libuv_build_spec.lua",
+                "spec/lpeglabel_build_spec.lua",
+                "spec/minicoro_spec.lua",
+                "spec/readline_build_spec.lua",
+                "spec/rockspec_spec.lua",
+                "spec/stdlib_installer_spec.lua",
+                "run_isolated_compiler_coverage",
+                '"$BUSTED" -c -o gtest -v "$test_file"',
+                "compiler)",
+                "compiler-uncovered)",
+                "usage: $0 {compiler|compiler-uncovered}",
+            }) do
+                assert.truthy(groups:find(retained, 1, true), retained)
             end
-            local function named_step(job, name)
-                local marker = "\n      - name: " .. name
-                local start = assert(job:find(marker, 1, true), name)
-                local finish = job:find(
-                    "\n      - name:", start + #marker, true)
-                    or (#job + 1)
-                return job:sub(start, finish - 1)
+            for _, removed in ipairs({
+                "compiler_core_tests", "compiler_heavy_tests",
+                "library_serial_tests", "library_uv_fs_tests",
+                "library_net_os_tests", "library_peg_string_tests",
+                "run_library_group", "run_titan_stdlib_test_groups.sh",
+                "compiler-core", "compiler-heavy", "library-serial",
+                "library-uv-fs", "library-net-os", "library-peg-string",
+                "libraries)", "Library ", "worker", "awk",
+                "spec/*_boundary_spec.lua",
+            }) do
+                assert.falsy(groups:find(removed, 1, true), removed)
             end
-            local function assert_codecov_job(job, upload_name)
-                assert.equal(1, count_literal(job, "contents: read"), job)
-                assert.equal(1, count_literal(job, "id-token: write"), job)
-                assert.equal(1,
-                    count_literal(job, "codecov/codecov-action@v7"), job)
-                assert.equal(1,
-                    count_literal(job, "fail_ci_if_error: true"), job)
-                assert.equal(1,
-                    count_literal(job, "files: ./luacov.report.out"), job)
-                assert.equal(1,
-                    count_literal(job, "name: " .. upload_name), job)
-                assert.equal(1, count_literal(job, "use_oidc: true"), job)
-                assert.falsy(job:find("\n%s+token:", 1), job)
-            end
-            assert_codecov_job(prepare_job, "compiler-core")
-            assert_codecov_job(heavy_job, "compiler-heavy")
-            assert.equal(1, count_literal(prepare_job,
-                "runs-on: ubuntu-24.04"), prepare_job)
-            assert.equal(1, count_literal(prepare_job,
-                "timeout-minutes: 30"), prepare_job)
-            assert.equal(1, count_literal(library_job,
-                "needs: prepare-linux"), library_job)
-            assert.equal(1, count_literal(heavy_job,
-                "needs: prepare-linux"), heavy_job)
-            assert.equal(1, count_literal(library_job,
-                "runs-on: ubuntu-24.04"), library_job)
-            assert.equal(1, count_literal(library_job,
-                "timeout-minutes: 30"), library_job)
-            assert.equal(1, count_literal(library_job,
-                "name: test (ubuntu-24.04, library-uv-fs)"), library_job)
-            assert.equal(0, count_literal(library_job, "ubuntu-slim"),
-                library_job)
-            assert.equal(1, count_literal(heavy_job,
-                "runs-on: ubuntu-slim"), heavy_job)
-            assert.equal(1, count_literal(library_job,
-                "contents: read"), library_job)
-            assert.equal(1, count_literal(library_job,
-                "ci_test_groups.sh library-uv-fs"), library_job)
-            assert.equal(1, count_literal(library_job,
-                "actions/download-artifact@v8"), library_job)
-            assert.equal(1, count_literal(heavy_job,
-                "actions/download-artifact@v8"), heavy_job)
-            assert.falsy(library_job:find("id-token: write", 1, true),
-                library_job)
-            assert.falsy(library_job:find(
-                "codecov/codecov-action", 1, true), library_job)
-            assert.falsy(library_job:find(
-                "ci_test_groups.sh compiler-heavy", 1, true), library_job)
-            assert.falsy(heavy_job:find(
-                "ci_test_groups.sh library-uv-fs", 1, true), heavy_job)
-            assert.equal(1, count_literal(prepare_job,
-                'TITAN_EXTRA_CFLAGS: "-O1"'), prepare_job)
-            assert.equal(1, count_literal(heavy_job,
-                'TITAN_EXTRA_CFLAGS: "-O0"'), heavy_job)
-            assert.equal(2, count_literal(macos_job,
-                "ci_retry_luarocks_dependencies.sh"), macos_job)
-            assert.equal(2, count_literal(workflow,
-                "ci_retry_luarocks_dependencies.sh"), workflow)
-            assert.equal(1, count_literal(macos_job,
-                "luarocks make --only-deps"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "luarocks make --force"), macos_job)
-            assert.equal(1, count_literal(macos_job,
-                "luarocks test --prepare"), macos_job)
+            local uncovered_group = assert(groups:match(
+                "\n    compiler%-uncovered%)(.-)\n    %*%)"))
+            assert.falsy(uncovered_group:find(" -c ", 1, true),
+                uncovered_group)
+
             assert.equal(1, count_literal(sanitizer_job,
-                    'SANITIZER_FLAGS: "-O0 -g -fsanitize=address,undefined'),
+                "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),
+                sanitizer_job)
+            assert.equal(1, count_literal(sanitizer_job,
+                "runs-on: ubuntu-24.04"), sanitizer_job)
+            assert.equal(1, count_literal(sanitizer_job,
+                "timeout-minutes: 30"), sanitizer_job)
+            assert.falsy(sanitizer_job:find("id-token: write", 1, true),
+                sanitizer_job)
+            assert.falsy(sanitizer_job:find(
+                "codecov/codecov-action", 1, true), sanitizer_job)
+            assert.falsy(sanitizer_job:find(
+                "actions/download-artifact", 1, true), sanitizer_job)
+            assert.falsy(sanitizer_job:find("\n    needs:", 1, true),
+                sanitizer_job)
+            assert.equal(1, count_literal(sanitizer_job,
+                'SANITIZER_FLAGS: "-O0 -g -fsanitize=address,undefined'),
                 sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 'TITAN_EXTRA_CFLAGS: "-O0 -g ' ..
@@ -2482,9 +2792,37 @@ fi
                 'LUA_MYCFLAGS: "-fPIC -O1 -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                "runs-on: ubuntu-24.04"), sanitizer_job)
-            assert.equal(1, count_literal(sanitizer_job,
-                "timeout-minutes: 30"), sanitizer_job)
+                "make titan-stdlib-test-build"), sanitizer_job)
+            assert.equal(8, count_literal(sanitizer_job,
+                "make titan-stdlib-test-run"), sanitizer_job)
+            for _, filter in ipairs({
+                "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
+                    "payloads_and_tags_across_gc$'",
+                "TITAN_FILTER='test_timer_'",
+                "TITAN_FILTER='test_fs_'",
+                "TITAN_FILTER='^uv%.task_tests%.'",
+                "TITAN_FILTER='^uv%.runtime_tests%.'",
+                "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",
+                "TITAN_FILTER='test_peg_roots_and_releases_" ..
+                    "titan_callback_patterns$'",
+                "TITAN_FILTER='test_regex_gc_rooting$'",
+            }) do
+                assert.equal(1, count_literal(sanitizer_job, filter), filter)
+            end
+            for _, removed in ipairs({
+                "spec/stdlib/uv_native_handles_spec.lua",
+                "spec/stdlib/uv_tasks_spec.lua",
+                "spec/stdlib/uv_bootstrap_spec.lua",
+                "spec/coroutine_runtime_boundary_spec.lua",
+                "spec/ssl_http_sanitizer_boundary_spec.lua",
+            }) do
+                assert.falsy(sanitizer_job:find(removed, 1, true),
+                    sanitizer_job)
+            end
+            assert.truthy(sanitizer_job:find(
+                "bash spec/support/ci_peg_string_sanitizer_smoke.sh",
+                1, true), sanitizer_job)
+
             local asan_options = assert(sanitizer_job:match(
                 '\n%s+ASAN_OPTIONS:%s+"([^"\n]+)"'))
             assert.truthy(asan_options:find(
@@ -2496,9 +2834,6 @@ fi
             assert.truthy(sanitizer_job:find(
                 "TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT=$RUNNER_TEMP/", 1, true),
                 sanitizer_job)
-            assert.truthy(sanitizer_job:find(
-                "bash spec/support/ci_sanitizer_capture.sh", 1, true),
-                sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 'cmp "$snapshot_provider" "$provider"'), sanitizer_job)
             local capture_script =
@@ -2507,11 +2842,8 @@ fi
                 {
                     "Build sanitizer-enabled native dependencies",
                     {
-                        "make lua",
-                        "make libbacktrace",
-                        "make libuv",
-                        "make llhttp",
-                        "make -j2 openssl",
+                        "make lua", "make libbacktrace", "make libuv",
+                        "make llhttp", "make -j2 openssl",
                     },
                 },
                 {
@@ -2527,29 +2859,33 @@ fi
                     { "luarocks make --force" },
                 },
                 {
+                    "Build unified native stdlib sanitizer executable",
+                    { "make titan-stdlib-test-build" },
+                },
+                {
                     "Run dense Array runtime sanitizer gate",
                     { ".lua/bin/busted" },
                 },
                 {
+                    "Run native coroutine sanitizer gate",
+                    { "make titan-stdlib-test-run" },
+                },
+                {
                     "Run native async sanitizer gate (timer-fs)",
-                    { ".lua/bin/busted" },
+                    { "make titan-stdlib-test-run" },
                 },
                 {
                     "Run native async sanitizer gate (core-uv)",
-                    { ".lua/bin/busted" },
+                    { ".lua/bin/busted", "make titan-stdlib-test-run" },
                 },
                 {
-                    "Run coroutine transfer sanitizer gate",
-                    { ".lua/bin/busted" },
-                },
-                {
-                    "Run TLS/HTTP sanitizer boundary",
-                    { ".lua/bin/busted" },
+                    "Run native TLS/HTTP sanitizer gate",
+                    { "make titan-stdlib-test-run" },
                 },
                 {
                     "Run PEG/regex native sanitizer gate",
                     {
-                        ".lua/bin/busted",
+                        "make titan-stdlib-test-run",
                         "bash spec/support/ci_peg_string_" ..
                             "sanitizer_smoke.sh",
                     },
@@ -2592,6 +2928,72 @@ fi
                 "TITAN_NO_LINE_DIRECTIVES", 1, true), sanitizer_job)
             assert.falsy(sanitizer_job:find(
                 "--no-line-directives", 1, true), sanitizer_job)
-            assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
+        end)
+
+    it("cleans arbitrary test outputs without Git or per-test names",
+        function()
+            local root = make_temp_dir()
+            local success, failure = xpcall(function()
+                for _, directory in ipairs({
+                    "spec", "future", "future/deep",
+                    "future/deep/suite.dSYM",
+                    "test_runner_future_case", ".titan-tests",
+                }) do
+                    assert.truthy(lfs.mkdir(root .. "/" .. directory))
+                end
+                local files = {
+                    ["spec/native_fixture.c"] = "author written\n",
+                    ["spec/generated_fixture.titan"] =
+                        "module generated_fixture\n",
+                    ["spec/generated_fixture.c"] = "generated C\n",
+                    ["spec/generated_fixture.o"] = "generated object\n",
+                    ["future/deep/suite"] = "executable\n",
+                    ["future/deep/suite__test_support.c"] = "generated C\n",
+                    ["future/deep/suite__test_runner.o"] =
+                        "generated object\n",
+                    ["future/deep/suite__test_entrypoint.titan"] =
+                        "collision fixture\n",
+                    ["future/deep/suite.dSYM/marker"] = "dSYM\n",
+                    ["test_runner_future_case/source.titan"] =
+                        "interrupted fixture\n",
+                    [".titan-tests/keep"] = "owned output\n",
+                }
+                for path, contents in pairs(files) do
+                    write_file(root .. "/" .. path, contents)
+                end
+
+                local script = lfs.currentdir() ..
+                    "/spec/support/clean_generated_test_artifacts.sh"
+                local clean_ok, output, why, code = run_argv({
+                    "bash", "-c", 'cd "$1" && exec "$2" --keep-output',
+                    "cleanup-test", root, script,
+                })
+                assert.truthy(clean_ok, output .. "\n(" .. tostring(why) ..
+                    ", " .. tostring(code) .. ")")
+
+                for _, removed in ipairs({
+                    "spec/generated_fixture.c",
+                    "spec/generated_fixture.o",
+                    "future/deep/suite",
+                    "future/deep/suite__test_support.c",
+                    "future/deep/suite__test_runner.o",
+                    "future/deep/suite__test_entrypoint.titan",
+                    "future/deep/suite.dSYM/marker",
+                    "test_runner_future_case/source.titan",
+                }) do
+                    assert.falsy(file_exists(root .. "/" .. removed), removed)
+                end
+                assert.is_nil(lfs.attributes(root .. "/future"))
+                assert.is_nil(lfs.attributes(
+                    root .. "/test_runner_future_case"))
+                assert.equal("author written\n",
+                    read_file(root .. "/spec/native_fixture.c"))
+                assert.equal("module generated_fixture\n",
+                    read_file(root .. "/spec/generated_fixture.titan"))
+                assert.equal("owned output\n",
+                    read_file(root .. "/.titan-tests/keep"))
+            end, debug.traceback)
+            remove_tree(root)
+            assert.truthy(success, failure)
         end)
 end)

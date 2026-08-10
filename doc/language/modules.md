@@ -388,7 +388,8 @@ The compiler driver is invoked with dot-separated *module names*, not
 file paths:
 
 ```sh
-titanc [--print-ast] [-v] [--static] [--no-line-directives] [--lua <luasrc>] \
+titanc [--print-ast] [-v] [--static] [--test] [--no-uv-bootstrap] \
+  [--no-line-directives] [--lua <luasrc>] \
   [--tree <srcroot>] [-l lib1,lib2] [-X object...] <module>...
 ```
 
@@ -405,6 +406,16 @@ titanc [--print-ast] [-v] [--static] [--no-line-directives] [--lua <luasrc>] \
 * `--static` prefers self-describing Titan `.a` providers over `.so`
   providers for ordinary dependencies. It still permits DSO/source fallback
   and does not request a fully static system executable.
+* `--test` source-prefers the requested roots' complete dependency graph,
+  discovers public `test_*` functions, and links a standalone native test
+  executable even without an application `main`. See
+  [Testing Titan code](standard-library-test.md).
+* `--no-uv-bootstrap` is valid only when the result is a normal standalone
+  executable or a `--test` executable. The generated entrypoint still
+  initializes every imported module and preserves the installed bootstrap
+  registry value, but calls `main(args)` directly instead of invoking that
+  value. This is an explicit lifecycle-ownership option, not a way to disable
+  `titan.uv` initialization.
 * `--no-line-directives` omits Titan source `#line` directives from generated
   C, so native compiler and sanitizer diagnostics use physical generated-C
   coordinates. By default diagnostics are attributed to Titan source.
@@ -434,6 +445,12 @@ uses that root as its physical provider:
 
 The Lua-loader and provider columns apply in library mode; the
 entrypoint and executable columns apply in `main` program mode.
+
+In `--test` mode the first requested root's executable column applies even when
+no root declares `main`; the generated runner is the sole main. Its support,
+runner, and entrypoint C/object files use `__test_support`, `__test_runner`, and
+`__test_entrypoint` suffixes beside that executable stem. See the
+[test chapter](standard-library-test.md#discovery-and-compilation).
 
 With several no-`main` roots, Titan publishes one paired provider at their longest common
 dotted-component prefix. For example, `titanc foo.left foo.right` produces
@@ -506,11 +523,12 @@ driver can discover the Titan root from Lua's `package.cpath`; the names do not
 have inherently identical ownership.
 
 The standard-library names `coroutine`, `uv`, `async`, `timer`, `io`, `fs`,
-`net`, `ssl`, `url`, `http`, `os`, `peg`, and `string` are parser sugar for the
-qualified module names
+`net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, and `test` are parser sugar
+for the qualified module names
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
 `titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.os`,
-`titan.peg`, and `titan.string`. The qualified names then follow the ordinary
+`titan.peg`, `titan.string`, and `titan.test`. The qualified names then follow
+ordinary
 module lookup rules. Thus
 `local os = import "os"` means
 Titan's `titan.os` module without colliding with Lua's own `os` library, which

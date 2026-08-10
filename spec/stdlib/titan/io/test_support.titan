@@ -1,0 +1,110 @@
+-- Exact stdout and Lua conversion probes for io.tests.
+local test = import "test"
+local ffi = foreign import "titan/ffi.h"
+local cstdio = foreign import "stdio.h"
+local lua = foreign import "lua.h"
+local lual = foreign import "lauxlib.h"
+local native = foreign import "print_capture.h"
+
+local type PrintableFactory = (string, string, boolean) -> value
+local type ConversionLog = () -> string
+
+local function begin_stdout_capture(): (integer, integer)
+  local read_descriptor = -1
+  local write_descriptor = -1
+  local saved_stdout = -1
+  local redirected = false
+  local transferred = false
+  defer do
+    if not transferred then
+      if redirected and saved_stdout >= 0 then native.dup2(saved_stdout, 1) end
+      if saved_stdout >= 0 then native.close(saved_stdout) end
+      if write_descriptor >= 0 then native.close(write_descriptor) end
+      if read_descriptor >= 0 then native.close(read_descriptor) end
+    end
+  end
+
+  local descriptors = ffi.titan_ffi_int.new_array(2)
+  local status: integer = native.titan_spec_capture_pipe(
+      descriptors as *ffi.titan_ffi_int)
+  test.assert(status == 0, "could not create stdout capture pipe")
+  read_descriptor = descriptors[0]
+  write_descriptor = descriptors[1]
+  saved_stdout = native.dup(1)
+  test.assert(saved_stdout >= 0, "could not duplicate stdout")
+  test.assert(cstdio.fflush(nil) == 0, "could not flush stdout")
+  status = native.dup2(write_descriptor, 1)
+  test.assert(status == 1, "could not redirect stdout")
+  redirected = true
+  local closing = write_descriptor
+  write_descriptor = -1
+  test.assert(native.close(closing) == 0,
+              "could not release redirected pipe descriptor")
+  transferred = true
+  return read_descriptor, saved_stdout
+end
+
+local function end_stdout_capture(read_descriptor: integer,
+                                   saved_stdout: integer)
+  local flushed = cstdio.fflush(nil) == 0
+  local restored = native.dup2(saved_stdout, 1) == 1
+  local saved_closed = native.close(saved_stdout) == 0
+  local read_closed = native.close(read_descriptor) == 0
+  test.assert(flushed, "could not flush redirected stdout")
+  test.assert(restored, "could not restore stdout")
+  test.assert(saved_closed, "could not release saved stdout descriptor")
+  test.assert(read_closed, "could not release capture read descriptor")
+end
+
+local function captured_bytes(read_descriptor: integer,
+                              capacity: integer): string
+  local storage = ffi.titan_ffi_char.new_array(capacity)
+  local count: integer = native.titan_spec_capture_read(
+      read_descriptor, storage as *ffi.titan_ffi_char,
+      capacity as native.titan_spec_size)
+  test.assert(count >= 0, "stdout capture had no completed write")
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  test.assert(lua.lua_checkstack(L, 1) ~= 0,
+              "cannot reserve Lua stack for captured stdout")
+  lua.lua_pushlstring(L, storage as *ffi.titan_ffi_char,
+                      count as native.titan_spec_size)
+  local result: value = ffi.lua_totvalue(L, -1)
+  return result as string
+end
+
+local function load_print_helpers(): (PrintableFactory, ConversionLog)
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  test.assert(lua.lua_checkstack(L, 3) ~= 0,
+              "cannot reserve Lua stack for print fixtures")
+  local source = [[
+local conversions = {}
+return
+  function(label, rendered, should_fail)
+    return setmetatable({}, {
+      __tostring = function()
+        conversions[#conversions + 1] = label
+        if should_fail then error("conversion failure", 0) end
+        return rendered
+      end,
+    })
+  end,
+  function()
+    return table.concat(conversions, "|")
+  end
+]]
+  local status = lual.luaL_loadstring(L, source)
+  if status ~= lua.LUA_OK then
+    local failure: value = ffi.lua_totvalue(L, -1)
+    raise failure
+  end
+  status = lua.lua_pcallk(L, 0, 2, 0, 0, nil)
+  if status ~= lua.LUA_OK then
+    local failure: value = ffi.lua_totvalue(L, -1)
+    raise failure
+  end
+  local factory_value: value = ffi.lua_totvalue(L, -2)
+  local log_value: value = ffi.lua_totvalue(L, -1)
+  return factory_value as PrintableFactory, log_value as ConversionLog
+end

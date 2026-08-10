@@ -296,6 +296,7 @@ export TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_CFLAGS TITAN_EXTRA_LDFLAGS \
 # Quote one complete environment value for the recipe shell.  This preserves
 # embedded quotes in user flag strings so Titan's own argv parser sees them.
 make_shell_quote = '$(subst ','"'"',$(1))'
+make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 RUNTIME_O := titan-runtime/titan.o
 CORO_O    := titan-runtime/titan_coro.o
 UV_O      := titan-runtime/titan_uv.o
@@ -344,13 +345,13 @@ STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 	titan/http/server.titan
 UV_CONFIG_STAMP := titan-runtime/.titan-uv-build-config
 STDLIB_MODULES := coroutine uv async timer io fs net ssl url http os peg string \
-	math lua iter gc
+	math lua iter gc test
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.os \
 	titan.peg titan.string \
-	titan.math titan.lua titan.iter titan.gc
+	titan.math titan.lua titan.iter titan.gc titan.test
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
 	titan/net.titan titan/ssl.titan titan/url.titan \
@@ -362,12 +363,13 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/string/format.titan titan/string/pack.titan \
 	titan/string/regex_api.titan titan/string/regex_compile.titan \
 	titan/string/regex_parser.titan \
-	titan/math.titan titan/lua.titan titan/iter.titan titan/gc.titan
+	titan/math.titan titan/lua.titan titan/iter.titan titan/gc.titan \
+	titan/test.titan
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
 	titan/url.lua titan/http.lua titan/os.lua \
 	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
-	titan/iter.lua titan/gc.lua
+	titan/iter.lua titan/gc.lua titan/test.lua
 STDLIB_CONTAINER := titan.so
 STDLIB_STATIC_ARCHIVE := titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
@@ -451,7 +453,7 @@ STDLIB_COMPLETION_STAMP := titan-runtime/.titan-stdlib-complete
 	check-libuv-tools check-system-libuv invalid-libuv-mode runtime titan \
 	stage-titan-bootstrap install-titan-sdk stdlib install-stdlib \
 	publish-stdlib \
-	rock-post-install test rock-build \
+	rock-post-install rock-test test rock-build \
 	examples clean clean-lua clean-readline clean-luarocks clean-libbacktrace clean-libuv \
 	clean-llhttp clean-openssl \
 	distclean FORCE
@@ -2028,7 +2030,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 
 # FORCE runs the inexpensive completeness check on every invocation. The
 # compiler itself runs only when an input is newer, configuration changed, or
-# one public output is absent. All seventeen roots are explicit source roots in one
+# one public output is absent. All eighteen roots are explicit source roots in one
 # process, so their internal imports are linked into the paired titan.so/titan.a
 # provider. The warm check rescans the archive without rewriting either output.
 $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
@@ -2126,11 +2128,11 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 STDLIB_STAGED_EXTRA_OBJECTS = $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(abspath $(object)))
 
 # LuaRocks invokes this only after deploying titanc and its Lua compiler
-# modules. Build all seventeen source roots once in a private directory on the
-# destination filesystem. The Lua publisher validates the complete protocol,
-# commits seventeen shims, the archive, and the one macOS dSYM before renaming
-# titan.so last; any caught failure restores the prior pair, the legacy
-# DSO-only installation, or the first-install bootstrap.
+# modules. Build all eighteen source roots once in a private directory on the
+# destination filesystem. The Lua publisher validates the complete protocol
+# and exact staged titan.test compiler source, commits eighteen shims, that
+# source, the archive, and the one macOS dSYM before renaming titan.so last;
+# any caught failure restores the prior pair or first-install bootstrap.
 rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	@test -n "$(strip $(ROCKS_TREE))" || { \
 	  echo "ERROR: rock-post-install requires ROCKS_TREE" >&2; exit 1; \
@@ -2155,6 +2157,8 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	echo "==> Building paired Titan stdlib providers with $(ROCK_TITANC)"; \
 	( cd "$$stage"; \
 	  unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	  mkdir -p titan; \
+	  install -m 0644 "$(CURDIR)/titan/test.titan" titan/test.titan; \
 	  export TITAN_ROCKS_ROOT="$$rocks_tree"; \
 	  export TITAN_PATH_0_22="$$abi_dir"; \
 	  export TITAN_PATH=; \
@@ -2185,24 +2189,113 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 # longer builds stdlib before LuaRocks has deployed the compiler.
 rock-build: titan
 
+# --test gives its first root ownership of the aggregate executable path. Keep
+# that role explicit and assign it to titan.test's tests, not an unrelated module.
+TITAN_STDLIB_TEST_PROGRAM_ROOT := test.tests
+TITAN_STDLIB_TEST_PROGRAM_OUTPUT := test/tests
+TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
+	coroutine.tests iter.tests gc.tests lua.tests math.tests peg.tests \
+	string.core_test string.format_pack_test string.regex_test async.tests \
+	uv.task_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests \
+	url.tests os.tests os.process_tests uv.runtime_tests
+TITAN_TEST_BUILD_DIR ?= .titan-tests
+TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
+TITAN_TEST_TIMEOUT ?= 120
+TEST_TITANC ?= titanc
+BUSTED ?= busted
+BUSTED_FILTER ?=
+TITAN_FILTER ?=
+TITAN_TEST_CPPFLAGS = $(if $(strip $(TITAN_EXTRA_CPPFLAGS)),$(TITAN_EXTRA_CPPFLAGS),$(TITAN_TEST_EXTRA_CPPFLAGS))
+TITAN_TEST_CFLAGS = $(if $(strip $(TITAN_EXTRA_CFLAGS)),$(TITAN_EXTRA_CFLAGS),$(TITAN_TEST_EXTRA_CFLAGS))
+TITAN_TEST_LDFLAGS = $(if $(strip $(TITAN_EXTRA_LDFLAGS)),$(TITAN_EXTRA_LDFLAGS),$(TITAN_TEST_EXTRA_LDFLAGS))
+STDLIB_BUSTED_TESTS := \
+	spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua \
+	spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua \
+	spec/minicoro_spec.lua spec/readline_build_spec.lua \
+	spec/rockspec_spec.lua spec/stdlib_installer_spec.lua
+
+.PHONY: busted-test stdlib-busted-test stdlib-test \
+	titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test
+
+busted-test: ## Run retained Busted specs, optionally with BUSTED_FILTER
+	BUSTED=$(call make_shell_quote_value,BUSTED) \
+		BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
+		TITAN_ROCK_TEST_INTERNAL=1 \
+		bash spec/support/run_rock_tests.sh $(EXTRA_TEST_FLAGS)
+
+stdlib-busted-test: ## Run retained stdlib/runtime Busted specs without coverage
+	BUSTED=$(call make_shell_quote_value,BUSTED) \
+		BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
+		TITAN_ROCK_TEST_INTERNAL=1 \
+		bash spec/support/run_rock_tests.sh \
+		$(STDLIB_BUSTED_TESTS) $(EXTRA_TEST_FLAGS)
+
+titan-stdlib-test-build: ## Build every native Titan stdlib test into one executable
+	@bash spec/support/clean_generated_test_artifacts.sh
+	@mkdir -p $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR))
+	@set +e; \
+	( cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
+	  cp $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/uv_stdio_probe.h)) \
+	    uv_stdio_probe.h && \
+	  $(CC) -std=c99 -Wall -Wextra -Werror -fPIC \
+	    $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
+	    -I$(call make_shell_quote,$(abspath spec/fixtures/stdlib/native)) \
+	    -c $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/uv_stdio_probe.c)) \
+	    -o uv_stdio_probe.o && \
+	  $(CC) -std=c99 -Wall -Wextra -Werror \
+	    $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
+	    $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/os_process_host_child.c)) \
+	    $(TITAN_TEST_LDFLAGS) -o os_process_host_child && \
+	  TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) -I.)) \
+	  TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CFLAGS))) \
+	  TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS))) \
+	    $(TEST_TITANC) --test --no-uv-bootstrap --tree \
+	      $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
+	      $(TITAN_STDLIB_TEST_ROOTS) -X uv_stdio_probe.o ); \
+	status=$$?; \
+	bash spec/support/clean_generated_test_artifacts.sh --keep-output; \
+	if test $$status -ne 0; then rm -rf -- $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); fi; \
+	exit $$status
+
+titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILTER
+	@test -x $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE)) || { \
+	  echo "ERROR: run 'make titan-stdlib-test-build' first" >&2; exit 1; \
+	}
+	@TITAN_FILTER=$(call make_shell_quote_value,TITAN_FILTER) \
+	bash -o pipefail -c ' \
+	  if [[ -n $${TITAN_FILTER:-} ]]; then \
+	    set -- "$$@" "--filter=$$TITAN_FILTER"; \
+	  fi; \
+	  bash spec/support/run_with_timeout.sh "$$@" 2>&1 | cat' -- \
+	  $(call make_shell_quote,$(TITAN_TEST_TIMEOUT)) \
+	  $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE))
+
+titan-stdlib-test: titan-stdlib-test-build ## Build and run all native Titan stdlib tests
+	$(MAKE) titan-stdlib-test-run
+
+stdlib-test: stdlib-busted-test ## Run all stdlib/runtime tests without coverage
+	$(MAKE) titan-stdlib-test
+
+rock-test: busted-test ## Run retained Busted specs, then native Titan stdlib tests
+	$(MAKE) titan-stdlib-test
+
 test: lua luarocks ## Build/install the rock and run the suite via `luarocks test`
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	  PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
 	  "$(PREFIX)/bin/luarocks" make --force
-ifneq ($(strip $(EXTRA_TEST_FLAGS)),)
-	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-		echo $(EXTRA_TEST_FLAGS) | PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
-		xargs "$(PREFIX)/bin/luarocks" test --
-else
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 		PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
+		EXTRA_TEST_FLAGS=$(call make_shell_quote,$(strip $(EXTRA_TEST_FLAGS))) \
+		BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
+		TITAN_FILTER=$(call make_shell_quote_value,TITAN_FILTER) \
+		TITAN_TEST_TIMEOUT=$(call make_shell_quote,$(TITAN_TEST_TIMEOUT)) \
 		"$(PREFIX)/bin/luarocks" test
-endif
 
 examples: lua ## Compile the example Titan modules (SDL examples need SDL2 headers)
 	$(MAKE) -C examples all
 
 clean: ## Remove generated build/test artifacts (keeps the Lua tree)
+	bash spec/support/clean_generated_test_artifacts.sh
 	rm -f $(RUNTIME_O) titan-runtime/*.o $(TITAN_RUNTIME_LIB)
 	rm -f $(LPEGLABEL_OBJECTS) $(LPEGLABEL_ARCHIVE) \
 		$(LPEGLABEL_BUILD_CONFIG) $(LPEGLABEL_ARCHIVE_CONFIG)

@@ -86,6 +86,7 @@ use the chapters below for the normative language reference.
 | [Lua loading standard library](standard-library-lua.md) | Binary-safe chunk compilation, Reader and file loading, asynchronous Lua-source `require`, cache semantics, C/Titan loaders, and the custom-searcher policy. |
 | [Iteration standard library](standard-library-iter.md) | Lua-compatible Map traversal, corrected generic-for iterator tuples, and Array iteration that preserves inner nil elements. |
 | [Garbage-collection standard library](standard-library-gc.md) | Weak Maps and ephemerons, collector actions and mode switches, byte counts, and Lua 5.5 tuning parameters. |
+| [Testing Titan code](standard-library-test.md) | The `titan.test` API, native `titanc --test` discovery, subtests and cleanup, filtering, failure output, and process statuses. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, limitations. |
 | [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, host-validated pointer conversions, zero-initialized automatic aggregates and fixed arrays, typed object-macro values, macro-projected fields, and target-correct C operators. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
@@ -188,9 +189,10 @@ Lua and `value` never discover an implementation from a bare record or union.
   asynchronous `fs` and `net`; reusable `url` parsing; high-level `ssl` and
   `http` short imports;
   portable `os` helpers and direct child processes;
-  typed PEG construction; byte-oriented string/regex operations; and the
+  typed PEG construction; byte-oriented string/regex operations; the
   qualified `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc` modules,
-  including explicit weak-map policy and table/userdata finalizer ownership.
+  including explicit weak-map policy and table/userdata finalizer ownership;
+  and native test infrastructure through `titan.test`.
   Lua loads every standard module through its qualified `titan.*` name,
   leaving Lua's own standard modules unchanged.
 

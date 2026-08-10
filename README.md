@@ -104,14 +104,15 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h`, `titan_longjmp.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/{ffi,coro,uv}.h` | Namespaced portable FFI, coroutine, and libuv shim headers |
-| `$ROCKS_TREE/lib/titan/0.22/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus seventeen independent logical modules from `titan.coroutine` through `titan.gc` |
-| `$ROCKS_TREE/lib/titan/0.22/titan.a` | The self-describing static form of the same seventeen logical standard modules, plus native support, private LPegLabel/llhttp payload, and bundled libuv/OpenSSL payload when those modes are selected |
-| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
+| `$ROCKS_TREE/lib/titan/0.22/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus eighteen independent logical modules from `titan.coroutine` through `titan.test` |
+| `$ROCKS_TREE/lib/titan/0.22/titan.a` | The self-describing static form of the same eighteen logical standard modules, plus native support, private LPegLabel/llhttp payload, and bundled libuv/OpenSSL payload when those modes are selected |
+| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc,test}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
+| `$ROCKS_TREE/share/titan/0.22/src/titan/test.titan` | Canonical compiler-data source used for the source-private native test-runner protocol |
 
-The seventeen-module pair and shims are the coordinated ABI-0.22 standard
-image. `titan.io` owns the shared Interface vocabulary and I/O helpers; bare
-native support adds the eighteenth DSO opener without adding a logical metadata
-key.
+The eighteen-module pair, shims, and test support source are the coordinated
+ABI-0.22 standard image. `titan.io` owns the shared Interface vocabulary and
+I/O helpers; bare native support adds the nineteenth DSO opener without adding
+a logical metadata key.
 
 Bundled-libuv installs also contain `$ROCKS_TREE/include/uv.h` and
 `$ROCKS_TREE/include/uv/`. The bundled `libuv.a` is a private build artifact:
@@ -281,7 +282,7 @@ The Titan-owned Lua's configured default `package.cpath` contains
 `$PREFIX/lib/titan/0.22/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
 template lets the generated `titan.*` loaders find the canonical provider; the
 second remains the root-discovery anchor. The default `package.path` finds all
-seventeen loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
+eighteen loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
 layout
 `ROCKS_TREE == PREFIX`, so `titanc` can use the first entry ending in
 `/lib/lua/5.5/?.so` to recover its Titan SDK/rocks root.
@@ -332,14 +333,15 @@ absent, the build atomically stages that bootstrap at
 `$ROCKS_TREE/lib/titan/0.22/titan.so` so the just-installed compiler can load
 its native support table; a repeated install preserves an already valid full
 image. After LuaRocks deploys the compiler, the source-only `post_install` hook
-invokes that `titanc` once for all seventeen current standard roots, with private
+invokes that `titanc` once for all eighteen current standard roots, with private
 LPegLabel, selected libuv, HTTP/llhttp, and TLS/OpenSSL payload after
-`titanlib.o`. It stages the paired providers and generated loaders privately,
-validates them, and publishes them with rollback, committing
+`titanlib.o`. It stages the paired providers, generated loaders, and exact `titan.test`
+compiler source privately, validates them, and publishes them with rollback, committing
 `titan.a` before `titan.so` and using the DSO rename as the final commit point.
-Publication recognizes only bootstrap and recoverable predecessor states in
-the active ABI-0.22 namespace. It neither treats ABI 0.21 as an upgrade
-predecessor nor removes it; seventeen modules are the current installed
+Publication recognizes the bootstrap, immediately preceding canonical
+seventeen-key pair, and current complete pair as recoverable predecessor states
+in the active ABI-0.22 namespace. It neither treats ABI 0.21 as an upgrade
+predecessor nor removes it; eighteen modules are the current installed
 contract.
 There is no separate Make install pass or pre-install hook. The provider,
 generated loaders, and SDK files remain
@@ -360,7 +362,8 @@ runtime, ABI, and interoperation machinery.
 # Usage
 
 ```sh
-$ titanc [--print-ast] [--static] [--no-line-directives] \
+$ titanc [--print-ast] [--static] [--test] [--no-uv-bootstrap] \
+    [--no-line-directives] \
     [--lua <path>] [--tree <path>] <module> [<module>]
 ```
 
@@ -384,6 +387,33 @@ Modules named explicitly on the command line remain source roots. See
 metadata and precedence and [Multi-module
 libraries](doc/language/multi-module-libraries.md) for provider and
 generated-loader rules.
+
+Pass `--test` to source-prefer the requested closure, discover public
+`test_*` functions taking one `test.Context`, and link a native executable
+without writing an application `main`:
+
+```titan
+-- calc_test.titan
+local test = import "test"
+local calc = import "app.calc"
+
+function test_twice(context: test.Context)
+  test.assert(calc.twice(21) == 42)
+end
+```
+
+```sh
+titanc --test --tree . calc_test
+./calc_test --filter=test_twice$
+```
+
+See [Testing Titan code](doc/language/standard-library-test.md) for source
+visibility, subtests, cleanup, filtering, output, and statuses.
+`--no-uv-bootstrap` is valid only for a normal standalone executable or a
+`--test` executable. It makes the generated entrypoint call `main(args)`
+directly even when an imported module installed the ordinary async bootstrap
+hook. The hook and module initialization remain unchanged; code using this
+option must explicitly own any `async.run`/`async.loop` sessions it needs.
 
 A logical module may be one flat source or a folder of immediate
 contributors. For module `M`, let `P` be its dotted name with slashes and `B`
@@ -409,7 +439,8 @@ precedence, interface/member and module-slot ordering, module-variable
 initialization, and code generation.
 
 The standard-library short names (`coroutine`, `uv`, `async`, `timer`, `io`,
-`fs`, `net`, `ssl`, `url`, `http`, `os`, `peg`, and `string`) are parser sugar
+`fs`, `net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, and `test`) are parser
+sugar
 for the corresponding `titan.*` module
 names. Module resolution checks binary dependencies before source, so an
 ordinary `./titan/uv/uv.titan` folder cannot displace the installed compiled
@@ -417,7 +448,7 @@ provider;
 someone who explicitly changes `TITAN_PATH` to hide that provider is choosing
 a different module installation. Modules explicitly named on the `titanc`
 command line must come from source and use the folder-before-flat rule. Titan
-code uses those thirteen short imports; the four qualified-only modules are
+code uses those fourteen short imports; the four qualified-only modules are
 imported as `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc`. Lua uses the
 qualified
 names `require "titan.coroutine"`, `require "titan.async"`,
@@ -426,7 +457,8 @@ names `require "titan.coroutine"`, `require "titan.async"`,
 `require "titan.http"`, and
 `require "titan.os"`, plus `require "titan.peg"`,
 `require "titan.string"`, `require "titan.math"`, `require "titan.lua"`,
-`require "titan.iter"`, and `require "titan.gc"`. The private `titan.uv` logical module remains available
+`require "titan.iter"`, `require "titan.gc"`, and `require "titan.test"`.
+The private `titan.uv` logical module remains available
 for runtime plumbing and direct-libuv extensions. Lua's own `coroutine` and
 `os` modules remain unchanged.
 
@@ -440,14 +472,15 @@ Interface vocabulary and I/O helpers. The high-level `titan.ssl` and
 changing `titan.uv`; `titan.url` supplies HTTP and applications with reusable
 PEG-based URL parsing. Math, dynamic Lua loading, generic
 iteration, and GC control live in `titan.math`, `titan.lua`, `titan.iter`, and
-`titan.gc`; GC-backed owners can attach table/full-userdata finalizers
+`titan.gc`; `titan.test` supplies native test contexts and assertions. GC-backed
+owners can attach table/full-userdata finalizers
 without discarding an existing metatable. Clean validation builds pass all
-seventeen roots to one `titanc` invocation, so their source imports are
+eighteen roots to one `titanc` invocation, so their source imports are
 statically resolved
 inside the paired `titan.so` and `titan.a` providers. Bundled mode carries
 libuv's objects into both forms; system mode keeps the pkg-config-selected
 library as a repeated final-link input. The private LPegLabel objects enter
-both forms in either libuv mode. Seventeen generated Lua loaders expose the
+both forms in either libuv mode. Eighteen generated Lua loaders expose the
 qualified logical entries.
 Its source is the reviewed folder ensemble rooted at `titan/uv/uv.titan`, with
 `file.titan`, `os.titan`, `process.titan`, `runtime.titan`, `task.titan`, and
@@ -617,8 +650,31 @@ modules](doc/language/static-compiled-modules.md).
 
 # Running the test suite
 
-The test suite is written using [Busted](https://lunarmodules.github.io/busted/).
-The simplest way to run it in an isolated installation is:
+The repository uses [Busted](https://lunarmodules.github.io/busted/) for
+compiler, packaging, and native dependency/build gates. There are no Lua files
+under `spec/stdlib/` and no root-level standard-library boundary specs.
+Module-owned standard-library behavior, including fresh-process and host-stdio
+cases, lives under `spec/stdlib/titan/`: compiled Titan parents launch focused
+standalone fixtures through C99 `system`, consume explicit temporary result
+files, and clean them with `defer`. The Makefile names
+all 22 roots explicitly and compiles them together with one `titanc --test`
+invocation. `make titan-stdlib-test-build` places the executable and synthetic
+runner outputs below `.titan-tests/`; it passes `--no-uv-bootstrap` so each
+async test explicitly owns one Runtime and completes Runtime-bound cleanup
+before that session returns. `make titan-stdlib-test-run` executes the binary
+from the repository root, and `make titan-stdlib-test` performs both.
+Temporary source-adjacent generated C/object files and reserved `__test_*`
+outputs are cleaned by ownership patterns rather than per-test names, without
+deleting author-written native fixtures.
+
+The native executable runs under a Bash process-group deadline. Its combined
+output is streamed through a pipe, preserving the parent-descriptor behavior
+exercised by OS/stdio tests. Tests that intentionally provoke uncaught async
+Task errors use flushed `Context:log` lines to bracket those expected
+diagnostics clearly in the aggregate output.
+
+The simplest way to run the complete mixed suite in an isolated installation
+is:
 
 ```sh
 $ export PREFIX="/tmp/titan-$USER-test"
@@ -627,47 +683,67 @@ $ make test
 ```
 
 `make test` runs `luarocks make --force` followed by `luarocks test`. The forced
-build installs the current checkout — including the combined `titan.so` and
-`titan.a` support/standard-library providers — and `luarocks test` installs the test dependencies
-(Busted and cluacov, declared in the rockspec) and runs the suite from the
-repository root. It clears ambient `LUA_PATH`/`LUA_CPATH` overrides for both
-commands, so a shell left over from an old `luarocks init` project cannot make
-the prefix tools load a different compiler snapshot. The supported workflow
-does not use `luarocks init`; avoid exporting those project-tree paths while
-working in a standalone Titan prefix. For canonical validation, also unset
-ambient `ROCKS_TREE`, `TITAN_ROCKS_ROOT`, `TITAN_EXTRA_CPPFLAGS`, and
-`TITAN_NO_LINE_DIRECTIVES`: they are explicit build-policy inputs, so
-`make test` does not erase them, and they change provider/root selection,
-fixture preprocessing, or source-line attribution. To run the iterative
-development steps yourself:
+build installs the current checkout, including the combined `titan.so` and
+`titan.a` support/standard-library providers. The rockspec's command backend
+enters `spec/support/run_rock_tests.sh`, which invokes `make rock-test`: the
+Busted tree runs first, followed by the same aggregate native executable.
+`BUSTED_FILTER` and `TITAN_FILTER` are independent Lua-pattern selectors;
+filtering one domain does not skip the other, so use a leaf target when only one
+is wanted. A Titan filter changes execution only—the build still compiles all
+22 source-authoritative roots.
 
 ```sh
-$ "$PREFIX/bin/luarocks" make --force        # rebuild/reinstall the current checkout
-$ "$PREFIX/bin/luarocks" test                # install test deps + run the suite
-$ bash spec/support/ci_test_groups.sh compiler # compiler/language tests with LuaCov
+$ make stdlib-test
+$ make busted-test BUSTED_FILTER='parser'
+$ make titan-stdlib-test TITAN_FILTER='^http[.]tests[.]test_client'
+$ make titan-stdlib-test-build
+$ make titan-stdlib-test-run TITAN_FILTER='^os[.]tests[.]'
+$ make rock-test BUSTED_FILTER='checker' TITAN_FILTER='^uv[.]task_tests[.]'
+$ BUSTED_FILTER='loader' TITAN_FILTER='^net[.]tests[.]' luarocks test
 ```
 
-The grouped `compiler` command is the complete local coverage entry point. CI
-partitions that same set into `compiler-core` and `compiler-heavy` across its
-two warmed Linux jobs. Library API and runtime suites run without LuaCov
-because the hook measures the Lua compiler, not the generated Titan or native
-library implementation; use
-`bash spec/support/ci_test_groups.sh libraries` for that complete group.
+The backend still passes ordinary `luarocks test -- ...` arguments to Busted;
+its explicit `--busted-filter` and `--titan-filter` forms map to the same two
+independent variables. LuaRocks installs the declared Busted and cluacov test
+dependencies. `make test` clears ambient `LUA_PATH`/`LUA_CPATH` overrides for
+both subprocesses, so a shell left over from an old
+`luarocks init` project cannot make the prefix tools load another compiler
+snapshot. The supported workflow does not use `luarocks init`. For canonical
+validation, also unset ambient `ROCKS_TREE`, `TITAN_ROCKS_ROOT`,
+`TITAN_EXTRA_CPPFLAGS`, and `TITAN_NO_LINE_DIRECTIVES`; those explicit policy
+inputs change provider/root selection, fixture preprocessing, or source-line
+attribution and `make test` deliberately does not erase them.
 
-Note that `luarocks test` does **not** build the rock-under-test, only its
-dependencies, so always `luarocks make` first (that is what `make test` does).
-If you drive Busted directly, use the `busted` installed in `$PREFIX/bin`; the
-prefix-configured Lua paths then find the native support entry installed in
-the canonical provider by `luarocks make`. Once the Titan rock is installed, Busted loads compiler
-modules from that *installed* rock, not from your checkout. Re-run
-`$PREFIX/bin/luarocks make` after editing compiler sources so tests see the
-changes.
+Useful iterative and CI-equivalent commands are:
+
+```sh
+$ "$PREFIX/bin/luarocks" make --force          # install the current checkout
+$ "$PREFIX/bin/luarocks" test                  # run Busted + aggregate native suite
+$ make stdlib-test                            # complete stdlib/runtime work, no LuaCov
+$ bash spec/support/ci_test_groups.sh compiler  # complete compiler/language set with LuaCov
+```
+
+Linux CI has one uncovered stdlib producer, which also prepares and validates
+the bundled/system production images, and one standard-runner consumer for the
+complete covered compiler/language set. That consumer emits the sole Codecov
+report. The ASan+UBSan job builds its own instrumented tree and reuses one
+aggregate native build for focused filters; it does not consume the regular
+artifact.
+The complete macOS suite remains a manually dispatched pre-merge gate.
+
+`luarocks test` does **not** build the rock-under-test, only its test
+dependencies, so always run `luarocks make` first (as `make test` does). If you
+drive Busted directly, use the `busted` installed in `$PREFIX/bin`; the
+prefix-configured Lua paths find the canonical support provider. Once the Titan
+rock is installed, Busted loads compiler modules from that installed snapshot,
+not from the checkout. Re-run `$PREFIX/bin/luarocks make` after editing compiler
+sources.
 
 With a working Titan installation's `bin` directory already on `PATH`, the
 equivalent `luarocks make --force` and `luarocks test` commands work from the
-repository root without setting `PREFIX` or `ROCKS_TREE`. The tests discover
-the active installation from Lua's configured module paths and use the `lua`
-on `PATH` for child interpreters.
+repository root without setting `PREFIX` or `ROCKS_TREE`. Tests discover the
+active installation from Lua's configured paths and use the `lua` on `PATH`
+for child interpreters.
 
 # Building the examples
 
@@ -689,7 +765,7 @@ need the SDL2 development headers installed.
 C, compiled modules, coverage data), including nested `titan/uv/uv.c` and
 `titan/uv/uv.o`, the `titan/http`, `titan/peg`, and `titan/string` folder-main
 outputs, and
-the seventeen known generated standard-library loaders, while
+the eighteen known generated standard-library loaders, while
 keeping source files and downloaded dependency trees.
 `make distclean` additionally removes the downloaded or cloned Lua, GNU
 Readline, LuaRocks, libbacktrace, libuv, OpenSSL, and llhttp source/build trees
@@ -701,6 +777,8 @@ when it is no longer needed.
 
 ```
         --print-ast                       Print the AST.
+        --test                            Build a native Titan test executable.
+        --no-uv-bootstrap                 Call standalone main directly even if titan.uv installs its bootstrap hook.
         -v, --verbose                     Print safely quoted effective compiler commands.
         --static                          Prefer static Titan archive providers.
         --no-line-directives              Omit Titan source #line directives from generated C.
@@ -728,7 +806,7 @@ C-FFI checking and generated compilation;
 `TITAN_EXTRA_CFLAGS` is compile-only; and ordered `TITAN_EXTRA_LDFLAGS` is
 final-link-only. Shell quoting in these environment strings is parsed once, so
 paths containing spaces stay one argument and malformed quoting is rejected.
-        
+
 # Tentative roadmap
 
 This is a *very* preliminary roadmap towards Titan 1.0, where everything is

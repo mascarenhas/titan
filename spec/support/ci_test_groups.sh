@@ -17,17 +17,22 @@ if [[ -z ${BUSTED:-} ]]; then
 fi
 group=${1:-}
 compiler_tests=()
-compiler_core_tests=()
-compiler_heavy_tests=()
 compiler_unit_tests=()
 compiler_isolated_coverage_tests=()
-library_serial_tests=()
-library_uv_fs_tests=()
-library_net_os_tests=()
-library_peg_string_tests=()
 
 while IFS= read -r test_file; do
     case "$test_file" in
+        spec/asan_generated_c_context_spec.lua | \
+        spec/dense_array_runtime_spec.lua | \
+        spec/libuv_build_spec.lua | \
+        spec/lpeglabel_build_spec.lua | \
+        spec/minicoro_spec.lua | \
+        spec/readline_build_spec.lua | \
+        spec/rockspec_spec.lua | \
+        spec/stdlib_installer_spec.lua)
+            # The prepared-tree producer and complete macOS lane run these
+            # runtime, packaging, and standard-library specs without LuaCov.
+            ;;
         spec/driver_spec.lua | \
         spec/foreigntypes_spec.lua | \
         spec/types_spec.lua)
@@ -36,70 +41,6 @@ while IFS= read -r test_file; do
             # insulation and compiler modules loaded by earlier specs.
             compiler_unit_tests+=("$test_file")
             ;;
-        spec/asan_generated_c_context_spec.lua | \
-        spec/dense_array_runtime_spec.lua | \
-        spec/stdlib/coroutine_spec.lua | \
-        spec/stdlib/loadlibglobal_spec.lua | \
-        spec/stdlib_installer_spec.lua | \
-        spec/lpeglabel_build_spec.lua | \
-        spec/readline_build_spec.lua | \
-        spec/libuv_build_spec.lua | \
-        spec/minicoro_spec.lua | \
-        spec/rockspec_spec.lua)
-            # Keep serial native/runtime proofs and suites that mutate or
-            # inspect shared root artifacts out of the parallel workers below.
-            library_serial_tests+=("$test_file")
-            ;;
-        spec/stdlib/async*_spec.lua | \
-        spec/stdlib/uv*_spec.lua | \
-        spec/stdlib/timer*_spec.lua | \
-        spec/stdlib/fs*_spec.lua)
-            library_uv_fs_tests+=("$test_file")
-            ;;
-        spec/stdlib/io*_spec.lua | \
-        spec/stdlib/net*_spec.lua | \
-        spec/stdlib/ssl*_spec.lua | \
-        spec/stdlib/url*_spec.lua | \
-        spec/stdlib/http*_spec.lua | \
-        spec/stdlib/os*_spec.lua)
-            library_net_os_tests+=("$test_file")
-            ;;
-        spec/stdlib/gc*_spec.lua | \
-        spec/stdlib/iter*_spec.lua | \
-        spec/stdlib/lua*_spec.lua | \
-        spec/stdlib/math*_spec.lua | \
-        spec/stdlib/peg*_spec.lua | \
-        spec/stdlib/string*_spec.lua)
-            library_peg_string_tests+=("$test_file")
-            ;;
-        spec/coder/coder_spec.lua | \
-        spec/coder/flexible_returns_spec.lua)
-            # These broad end-to-end files remain on the heavy worker with the
-            # measured C-FFI cohort and isolated static-provider coverage.
-            compiler_tests+=("$test_file")
-            compiler_heavy_tests+=("$test_file")
-            ;;
-        spec/cdriver_spec.lua | \
-        spec/checker/c_ffi_declaration_compatibility_spec.lua | \
-        spec/checker/c_ffi_operators_spec.lua | \
-        spec/checker/c_ffi_owned_types_spec.lua | \
-        spec/checker/c_ffi_pointer_conversions_spec.lua | \
-        spec/checker/c_ffi_spec.lua | \
-        spec/checker/c_ffi_stack_objects_spec.lua | \
-        spec/checker/c_ffi_tag_names_spec.lua | \
-        spec/checker/c_ffi_target_profile_spec.lua | \
-        spec/coder/c_ffi_operators_spec.lua | \
-        spec/coder/c_ffi_owned_types_spec.lua | \
-        spec/coder/c_ffi_pointer_conversions_spec.lua | \
-        spec/coder/c_ffi_spec.lua | \
-        spec/coder/c_ffi_stack_objects_spec.lua | \
-        spec/coder/c_ffi_tag_names_spec.lua)
-            # These compile-probe and generated-C cases are the measured
-            # growth in the covered compiler suite. Keep the cohort explicit
-            # instead of moving unrelated cheap parser/semantic unit files.
-            compiler_tests+=("$test_file")
-            compiler_heavy_tests+=("$test_file")
-            ;;
         spec/union_interface_spec.lua | \
         spec/checker/static_compiled_modules_spec.lua | \
         spec/coder/multi_module_libraries_spec.lua | \
@@ -107,17 +48,13 @@ while IFS= read -r test_file; do
         spec/coder/static_dynamic_facade_spec.lua | \
         spec/coder/static_protocol_mismatch_spec.lua | \
         spec/staticmetadata_spec.lua)
-            # The hostile-interface validator and static-provider specs need
-            # coverage from their own directly exercised compiler prototypes.
-            # Busted's file insulation reloads compiler modules between specs,
-            # while LuaCov keeps only the last loaded prototype's line table
-            # inside one process. Run these files one process at a time on the
-            # heavy worker after its shard.
+            # LuaCov keeps only the last loaded compiler prototype's line table
+            # inside one process. Exercise these direct prototypes in isolated
+            # Busted processes after the complete main compiler set.
             compiler_isolated_coverage_tests+=("$test_file")
             ;;
         *)
             compiler_tests+=("$test_file")
-            compiler_core_tests+=("$test_file")
             ;;
     esac
 done < <(find spec -type f -name '*_spec.lua' -print | LC_ALL=C sort)
@@ -152,44 +89,6 @@ case "$group" in
             exit 1
         fi
         ;;
-    compiler-core)
-        compiler_count=$((${#compiler_core_tests[@]} +
-            ${#compiler_unit_tests[@]}))
-        echo "Running $compiler_count core compiler/language spec files" \
-            "with LuaCov"
-        compiler_status=0
-        # Keep Busted's per-file environments but reuse one compiler module
-        # graph and its immutable foreign-header probe caches. The complete
-        # local and macOS groups retain ordinary auto-insulation as an
-        # independent state-leak check.
-        "$BUSTED" --no-auto-insulate -c -o gtest -v \
-            "${compiler_core_tests[@]}" ||
-            compiler_status=$?
-        unit_status=0
-        "$BUSTED" -c -o gtest -v "${compiler_unit_tests[@]}" ||
-            unit_status=$?
-        if (( compiler_status != 0 || unit_status != 0 )); then
-            echo "compiler core test status: main=$compiler_status " \
-                "unit=$unit_status" >&2
-            exit 1
-        fi
-        ;;
-    compiler-heavy)
-        compiler_count=$((${#compiler_heavy_tests[@]} +
-            ${#compiler_isolated_coverage_tests[@]}))
-        echo "Running $compiler_count heavy compiler/language spec files" \
-            "with LuaCov"
-        compiler_status=0
-        "$BUSTED" -c -o gtest -v "${compiler_heavy_tests[@]}" ||
-            compiler_status=$?
-        isolated_status=0
-        run_isolated_compiler_coverage || isolated_status=$?
-        if (( compiler_status != 0 || isolated_status != 0 )); then
-            echo "compiler heavy test status: main=$compiler_status " \
-                "isolated=$isolated_status" >&2
-            exit 1
-        fi
-        ;;
     compiler-uncovered)
         compiler_count=$((${#compiler_tests[@]} +
             ${#compiler_unit_tests[@]} +
@@ -200,93 +99,8 @@ case "$group" in
             "${compiler_tests[@]}" "${compiler_unit_tests[@]}" \
             "${compiler_isolated_coverage_tests[@]}"
         ;;
-    library-serial)
-        echo "Running ${#library_serial_tests[@]} serial native/runtime and" \
-            "library spec files without LuaCov"
-        "$BUSTED" -o gtest -v "${library_serial_tests[@]}"
-        ;;
-    library-uv-fs)
-        echo "Running ${#library_uv_fs_tests[@]} async/uv/timer/fs spec files" \
-            "without LuaCov"
-        "$BUSTED" -o gtest -v "${library_uv_fs_tests[@]}"
-        ;;
-    library-net-os)
-        echo "Running ${#library_net_os_tests[@]} net/SSL/URL/HTTP/OS spec files" \
-            "without LuaCov"
-        "$BUSTED" -o gtest -v "${library_net_os_tests[@]}"
-        ;;
-    library-peg-string)
-        echo "Running ${#library_peg_string_tests[@]} " \
-            "PEG/string/math/Lua/iter/GC spec files without LuaCov"
-        "$BUSTED" -o gtest -v "${library_peg_string_tests[@]}"
-        ;;
-    libraries)
-        library_count=$((${#library_serial_tests[@]} +
-            ${#library_uv_fs_tests[@]} + ${#library_net_os_tests[@]} +
-            ${#library_peg_string_tests[@]}))
-        echo "Running $library_count native/runtime and library spec files" \
-            "without LuaCov"
-
-        serial_status=0
-        "$BUSTED" -o gtest -v "${library_serial_tests[@]}" ||
-            serial_status=$?
-
-        log_dir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
-        uv_fs_log="$log_dir/titan-library-uv-fs.$$.log"
-        net_os_log="$log_dir/titan-library-net-os.$$.log"
-        peg_string_log="$log_dir/titan-library-peg-string.$$.log"
-
-        "$BUSTED" -o gtest -v "${library_uv_fs_tests[@]}" \
-            >"$uv_fs_log" 2>&1 &
-        uv_fs_pid=$!
-        "$BUSTED" -o gtest -v "${library_net_os_tests[@]}" \
-            >"$net_os_log" 2>&1 &
-        net_os_pid=$!
-        "$BUSTED" -o gtest -v "${library_peg_string_tests[@]}" \
-            >"$peg_string_log" 2>&1 &
-        peg_string_pid=$!
-
-        uv_fs_status=0
-        wait "$uv_fs_pid" || uv_fs_status=$?
-        net_os_status=0
-        wait "$net_os_pid" || net_os_status=$?
-        peg_string_status=0
-        wait "$peg_string_pid" || peg_string_status=$?
-
-        if [[ ${GITHUB_ACTIONS:-} == true ]]; then
-            echo "::group::Library async/uv/timer/fs worker"
-        else
-            echo "Library async/uv/timer/fs worker"
-        fi
-        cat "$uv_fs_log"
-        if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::endgroup::"; fi
-        if [[ ${GITHUB_ACTIONS:-} == true ]]; then
-            echo "::group::Library net/SSL/URL/HTTP/OS worker"
-        else
-            echo "Library net/SSL/URL/HTTP/OS worker"
-        fi
-        cat "$net_os_log"
-        if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::endgroup::"; fi
-        if [[ ${GITHUB_ACTIONS:-} == true ]]; then
-            echo "::group::Library PEG/string/math/Lua/iter/GC worker"
-        else
-            echo "Library PEG/string/math/Lua/iter/GC worker"
-        fi
-        cat "$peg_string_log"
-        if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::endgroup::"; fi
-
-        if (( serial_status != 0 || uv_fs_status != 0 ||
-                net_os_status != 0 || peg_string_status != 0 )); then
-            echo "library test status: serial=$serial_status " \
-                "uv_fs=$uv_fs_status net_os=$net_os_status " \
-                "peg_string=$peg_string_status" >&2
-            exit 1
-        fi
-        ;;
     *)
-        echo "usage: $0 {compiler|compiler-core|compiler-heavy|" \
-            "compiler-uncovered|libraries|library-serial|library-uv-fs|" \
-            "library-net-os|library-peg-string}" >&2
+        echo "usage: $0 {compiler|compiler-uncovered}" >&2
         exit 2
         ;;
 esac

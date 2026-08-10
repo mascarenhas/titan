@@ -1,0 +1,481 @@
+local test = import "test"
+local gclib = import "titan.gc"
+local support = import "support.common"
+local lua_api = foreign import "lua.h"
+
+local record FinalizableProbe
+  marker: integer
+end
+
+local type Finalizer = (value) -> ()
+local type ParameterAccessor = (integer?) -> integer
+local type ModeSelector = () -> boolean
+
+local function finalizable_stack_delta(candidate: value,
+                                       callback: Finalizer): integer
+  local top = lua_api.lua_gettop(L)
+  gclib.finalizable(candidate, callback)
+  return lua_api.lua_gettop(L) - top
+end
+
+local function rejected_stack_delta(candidate: value,
+                                    callback: Finalizer): integer
+  local top = lua_api.lua_gettop(L)
+  do
+    gclib.finalizable(candidate, callback)
+  catch
+    return lua_api.lua_gettop(L) - top
+  end
+  return 1000000
+end
+
+function test_gc_weak_maps_preserve_metatables(_context: test.Context)
+  local first: {value: value} = {}
+  local second: {value: value} = {}
+  local setup = support.lua_helper([[
+return function(first, second)
+  local marker = {}
+  local metatable = { marker = marker }
+  setmetatable(metatable, {
+    __newindex = function() error("metatable assignment was not raw") end,
+  })
+  setmetatable(first, metatable)
+  setmetatable(second, metatable)
+  return metatable, marker
+end
+]]) as (value, value) -> (value, value)
+  local metatable, marker = setup(first, second)
+  local get_metatable = support.lua_helper([[
+return function(candidate) return getmetatable(candidate) end
+]]) as (value) -> value
+  local raw_get = support.lua_helper([[
+return function(candidate, key) return rawget(candidate, key) end
+]]) as (value, string) -> value
+
+  gclib.weak(first)
+  test.assert(get_metatable(first) == metatable)
+  test.assert(raw_get(metatable, "marker") == marker)
+  test.assert(raw_get(metatable, "__mode") == "v")
+  test.assert(get_metatable(second) == metatable)
+
+  local install_ephemeral = support.lua_helper([[
+return function(map) map.object = {} end
+]]) as (value) -> ()
+  install_ephemeral(first)
+  gclib.collect()
+  gclib.collect()
+  test.assert(first["object"] == nil)
+end
+
+function test_gc_ephemeron_collects_cycles(_context: test.Context)
+  local map: {value: value} = {}
+  gclib.ephemeron(map)
+  local mode = support.lua_helper([[
+return function(candidate) return getmetatable(candidate).__mode end
+]]) as (value) -> string
+  test.assert(mode(map) == "k")
+
+  local install_cycle = support.lua_helper([[
+return function(candidate)
+  local key = {}
+  candidate[key] = { owner = key }
+end
+]]) as (value) -> ()
+  install_cycle(map)
+  gclib.collect()
+  gclib.collect()
+  local empty = support.lua_helper([[
+return function(candidate) return next(candidate) == nil end
+]]) as (value) -> boolean
+  test.assert(empty(map))
+end
+
+local function prepare_shared_table_finalizers(
+    first_callback: Finalizer, current_callback: Finalizer):
+    (value, value, value)
+  local first: {string: value} = { ["kind"] = "explicit" }
+  local preexisting: {string: value} = { ["kind"] = "preexisting" }
+  local setup = support.lua_helper([[
+return function(first, preexisting)
+  local marker = {}
+  local protection = {}
+  local metatable = { marker = marker, __metatable = protection }
+  setmetatable(metatable, {
+    __newindex = function() error("metatable assignment was not raw") end,
+  })
+  setmetatable(first, metatable)
+  setmetatable(preexisting, metatable)
+  return metatable, marker, protection
+end
+]]) as (value, value) -> (value, value, value)
+  local metatable, marker, protection = setup(first, preexisting)
+  local set_metatable = support.lua_helper([[
+return function(candidate, metatable) setmetatable(candidate, metatable) end
+]]) as (value, value) -> ()
+  local get_metatable = support.lua_helper([[
+return function(candidate) return getmetatable(candidate) end
+]]) as (value) -> value
+  local debug_metatable = support.lua_helper([[
+return function(candidate) return debug.getmetatable(candidate) end
+]]) as (value) -> value
+  local raw_get = support.lua_helper([[
+return function(candidate, key) return rawget(candidate, key) end
+]]) as (value, string) -> value
+
+  gclib.finalizable(first, first_callback)
+  local future: {string: value} = { ["kind"] = "future" }
+  set_metatable(future, metatable)
+  gclib.finalizable(first, current_callback)
+
+  test.assert(get_metatable(first) == protection)
+  test.assert(debug_metatable(first) == metatable)
+  test.assert(raw_get(metatable, "marker") == marker)
+  test.assert(raw_get(metatable, "__gc") == current_callback)
+  -- first and future become unreachable when this helper frame returns.
+  -- preexisting received the metatable before __gc existed and is unmarked.
+  return metatable, marker, protection
+end
+
+local function prepare_plain_table_finalizer(callback: Finalizer): value
+  local candidate: {string: value} = {}
+  local debug_metatable = support.lua_helper([[
+return function(value) return debug.getmetatable(value) end
+]]) as (value) -> value
+  local raw_get = support.lua_helper([[
+return function(value, key) return rawget(value, key) end
+]]) as (value, string) -> value
+  test.assert(debug_metatable(candidate) == nil)
+  gclib.finalizable(candidate, callback)
+  local metatable = debug_metatable(candidate)
+  test.assert(metatable is {value: value})
+  test.assert(raw_get(metatable, "__gc") == callback)
+  return metatable
+end
+
+function test_gc_finalizes_tables_and_preserves_metatables(
+    _context: test.Context)
+  local first_callback_calls = 0
+  local first_callback: Finalizer = function(_candidate: value)
+    first_callback_calls = first_callback_calls + 1
+  end
+  local finalized: {value} = {}
+  local current_callback: Finalizer = function(candidate: value)
+    finalized[#finalized + 1] = candidate
+  end
+  local metatable, _marker, protection =
+    prepare_shared_table_finalizers(first_callback, current_callback)
+  local get_metatable = support.lua_helper([[
+return function(candidate) return getmetatable(candidate) end
+]]) as (value) -> value
+  local debug_metatable = support.lua_helper([[
+return function(candidate) return debug.getmetatable(candidate) end
+]]) as (value) -> value
+
+  gclib.collect()
+  gclib.collect()
+  test.assert(first_callback_calls == 0)
+  test.assert(#finalized == 2, "finalized count " .. support.error_text(#finalized))
+  local explicit_seen = false
+  local future_seen = false
+  local index = 1
+  while index <= #finalized do
+    local candidate = finalized[index] as {string: value}
+    if candidate["kind"] == "explicit" then explicit_seen = true end
+    if candidate["kind"] == "future" then future_seen = true end
+    test.assert(get_metatable(candidate) == protection)
+    test.assert(debug_metatable(candidate) == metatable)
+    index = index + 1
+  end
+  test.assert(explicit_seen and future_seen)
+  finalized = {}
+
+  local created_calls = 0
+  local created_callback: Finalizer = function(_candidate: value)
+    created_calls = created_calls + 1
+  end
+  local _created_metatable = prepare_plain_table_finalizer(created_callback)
+  gclib.collect()
+  gclib.collect()
+  test.assert(created_calls == 1)
+end
+
+local record UserdataFinalizerState
+  finalized: value
+  capture_seen: value
+  first_calls: integer
+  current_calls: integer
+end
+
+local function prepare_typed_userdata_finalizer(callback: Finalizer): value
+  local candidate = FinalizableProbe.new(17)
+  local debug_metatable = support.lua_helper([[
+return function(value) return debug.getmetatable(value) end
+]]) as (value) -> value
+  local nominal_metatable = debug_metatable(candidate)
+  test.assert(finalizable_stack_delta(candidate, callback) == 0)
+  test.assert(debug_metatable(candidate) == nominal_metatable)
+  return nominal_metatable
+end
+
+local function prepare_custom_userdata_finalizer(
+    state: UserdataFinalizerState):
+    (value, value, value, {value: value})
+  local debug_metatable = support.lua_helper([[
+return function(candidate) return debug.getmetatable(candidate) end
+]]) as (value) -> value
+  local get_metatable = support.lua_helper([[
+return function(candidate) return getmetatable(candidate) end
+]]) as (value) -> value
+  local raw_get = support.lua_helper([[
+return function(candidate, key) return rawget(candidate, key) end
+]]) as (value, string) -> value
+  local debug_set_metatable = support.lua_helper([[
+return function(candidate, metatable)
+  debug.setmetatable(candidate, metatable)
+end
+]]) as (value, value) -> ()
+  local new_table = support.lua_helper([[
+return function() return {} end
+]]) as () -> value
+
+  local candidate: value = FinalizableProbe.new(23)
+  local marker = new_table()
+  local protection = new_table()
+  local metatable_maker = support.lua_helper([[
+return function(marker, protection)
+  local metatable = { marker = marker, __metatable = protection }
+  setmetatable(metatable, {
+    __newindex = function() error("metatable assignment was not raw") end,
+  })
+  return metatable
+end
+]]) as (value, value) -> value
+  local metatable = metatable_maker(marker, protection)
+  debug_set_metatable(candidate, metatable)
+
+  local first_callback: Finalizer = function(_value: value)
+    state.first_calls = state.first_calls + 1
+  end
+  test.assert(finalizable_stack_delta(candidate, first_callback) == 0)
+
+  local weak_capture: {value: value} = {}
+  gclib.weak(weak_capture)
+  local current_callback: Finalizer = function(_value: value) end
+  do
+    local captured = new_table()
+    weak_capture[1] = captured
+    current_callback = function(finalized_value: value)
+      state.current_calls = state.current_calls + 1
+      state.capture_seen = captured
+      state.finalized = finalized_value
+    end
+  end
+  test.assert(finalizable_stack_delta(candidate, current_callback) == 0)
+  test.assert(get_metatable(candidate) == protection)
+  test.assert(debug_metatable(candidate) == metatable)
+  test.assert(raw_get(metatable, "marker") == marker)
+  test.assert(raw_get(metatable, "__gc") == current_callback)
+  return metatable, marker, protection, weak_capture
+end
+
+local function prepare_unmetad_userdata_finalizer(callback: Finalizer): value
+  local debug_metatable = support.lua_helper([[
+return function(candidate) return debug.getmetatable(candidate) end
+]]) as (value) -> value
+  local debug_set_metatable = support.lua_helper([[
+return function(candidate, metatable)
+  debug.setmetatable(candidate, metatable)
+end
+]]) as (value, value) -> ()
+  local raw_get = support.lua_helper([[
+return function(candidate, key) return rawget(candidate, key) end
+]]) as (value, string) -> value
+
+  local candidate: value = FinalizableProbe.new(31)
+  debug_set_metatable(candidate, nil)
+  test.assert(debug_metatable(candidate) == nil)
+  test.assert(finalizable_stack_delta(candidate, callback) == 0)
+  local created = debug_metatable(candidate)
+  test.assert(created is {value: value})
+  test.assert(raw_get(created, "__gc") == callback)
+  return created
+end
+
+function test_gc_finalizes_userdata_and_preserves_metatables(
+    _context: test.Context)
+  local finalized_marker = 0
+  local finalize_typed: Finalizer = function(candidate: value)
+    local exact = candidate as FinalizableProbe
+    finalized_marker = exact.marker
+  end
+  local _nominal_metatable = prepare_typed_userdata_finalizer(finalize_typed)
+  gclib.collect()
+  gclib.collect()
+  test.assert(finalized_marker == 17,
+              "marker " .. support.error_text(finalized_marker))
+
+  local state = UserdataFinalizerState.new(nil, nil, 0, 0)
+  local metatable, _marker, protection, weak_capture =
+    prepare_custom_userdata_finalizer(state)
+  local get_metatable = support.lua_helper([[
+return function(candidate) return getmetatable(candidate) end
+]]) as (value) -> value
+  local debug_metatable = support.lua_helper([[
+return function(candidate) return debug.getmetatable(candidate) end
+]]) as (value) -> value
+  local is_userdata = support.lua_helper([[
+return function(candidate) return type(candidate) == "userdata" end
+]]) as (value) -> boolean
+
+  gclib.collect()
+  gclib.collect()
+  test.assert(state.first_calls == 0)
+  test.assert(state.current_calls == 1)
+  test.assert(is_userdata(state.finalized))
+  test.assert(get_metatable(state.finalized) == protection)
+  test.assert(debug_metatable(state.finalized) == metatable)
+  test.assert(state.capture_seen == weak_capture[1])
+  state.finalized = nil
+
+  local created_calls = 0
+  local created_callback: Finalizer = function(_candidate: value)
+    created_calls = created_calls + 1
+  end
+  local _created_metatable =
+    prepare_unmetad_userdata_finalizer(created_callback)
+  gclib.collect()
+  gclib.collect()
+  test.assert(created_calls == 1)
+end
+
+local function assert_finalizable_rejected(candidate: value,
+                                           callback: Finalizer)
+  support.assert_raises_contains(function()
+    gclib.finalizable(candidate, callback)
+  end, "expects a table or full userdata")
+end
+
+function test_gc_rejects_noncollectable_finalizer_values(
+    _context: test.Context)
+  local callback: Finalizer = function(_candidate: value) end
+  test.assert(rejected_stack_delta(17, callback) == 0)
+  assert_finalizable_rejected(nil, callback)
+
+  local rejected: {value} = {
+    false,
+    17,
+    3.5,
+    "text",
+    function() end,
+  }
+  local make_special = support.lua_helper([[
+return function()
+  local captured = true
+  local function with_upvalue() return captured end
+  return coroutine.create(function() end), debug.upvalueid(with_upvalue, 1)
+end
+]]) as () -> (value, value)
+  local thread, light_userdata = make_special()
+  rejected[#rejected + 1] = thread
+  rejected[#rejected + 1] = light_userdata
+
+  local index = 1
+  while index <= #rejected do
+    assert_finalizable_rejected(rejected[index], callback)
+    index = index + 1
+  end
+end
+
+function test_gc_controls_state_modes_steps_and_counts(
+    _context: test.Context)
+  local originally_paused = gclib.paused()
+  local originally_incremental = gclib.incremental()
+  if not originally_incremental then gclib.generational() end
+  defer do
+    if originally_incremental then
+      gclib.incremental()
+    else
+      gclib.generational()
+    end
+    if originally_paused then gclib.pause() else gclib.resume() end
+  end
+
+  gclib.resume()
+  test.assert(not gclib.paused())
+  test.assert(not gclib.paused())
+  gclib.pause()
+  test.assert(gclib.paused())
+  test.assert(gclib.paused())
+  gclib.resume()
+  test.assert(not gclib.paused())
+
+  gclib.step()
+  gclib.step(0)
+  test.assert(gclib.count() > 0)
+
+  gclib.incremental()
+  test.assert(gclib.incremental())
+  test.assert(not gclib.generational())
+  test.assert(gclib.generational())
+end
+
+local function round_trip_parameters(select_mode: ModeSelector,
+                                     accessors: {ParameterAccessor},
+                                     originals: {integer})
+  select_mode()
+  local index = 1
+  while index <= #accessors do
+    local accessor = accessors[index]
+    local original = originals[index]
+    local replacement = 100
+    if original == 100 then replacement = 200 end
+    test.assert(accessor(replacement) == original)
+    test.assert(accessor() == replacement)
+    test.assert(accessor(original) == replacement)
+    test.assert(accessor() == original)
+    index = index + 1
+  end
+end
+
+function test_gc_parameters_round_trip_and_validate(_context: test.Context)
+  local accessors: {ParameterAccessor} = {
+    gclib.minormul,
+    gclib.majorminor,
+    gclib.minormajor,
+    gclib.pause_percent,
+    gclib.stepmul,
+    gclib.stepsize,
+  }
+  local originally_incremental = gclib.incremental()
+  local originals: {integer} = {}
+  local index = 1
+  while index <= #accessors do
+    originals[index] = accessors[index]()
+    index = index + 1
+  end
+  defer do
+    local restore_index = 1
+    while restore_index <= #accessors do
+      accessors[restore_index](originals[restore_index])
+      restore_index = restore_index + 1
+    end
+    if originally_incremental then
+      gclib.incremental()
+    else
+      gclib.generational()
+    end
+  end
+
+  round_trip_parameters(gclib.incremental, accessors, originals)
+  round_trip_parameters(gclib.generational, accessors, originals)
+
+  support.assert_raises_contains(function()
+    gclib.minormul(-1)
+  end, "between 0 and 100000")
+  support.assert_raises_contains(function()
+    gclib.stepsize(100001)
+  end, "between 0 and 100000")
+  support.assert_raises_contains(function()
+    gclib.step(-1)
+  end, "must be non-negative")
+end

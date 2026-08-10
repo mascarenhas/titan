@@ -55,11 +55,15 @@ local standard_imports = {
     os = "titan.os",
     peg = "titan.peg",
     string = "titan.string",
+    test = "titan.test",
 }
 
+function parser.normalize_import(modname)
+    return standard_imports[modname] or modname
+end
+
 function defs.importdecl(loc, localname, modname)
-    return ast.TopLevelImport(
-        loc, localname, standard_imports[modname] or modname)
+    return ast.TopLevelImport(loc, localname, parser.normalize_import(modname))
 end
 
 function defs.get_loc(s, pos)

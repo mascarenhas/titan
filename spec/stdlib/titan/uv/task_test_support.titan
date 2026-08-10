@@ -1,0 +1,57 @@
+-- Shared fixture ownership for uv Task tests.
+local test = import "test"
+local runtime_test = import "support.runtime"
+local async = import "async"
+local coroutine = import "coroutine"
+local fs = import "fs"
+local net = import "net"
+local timer = import "timer"
+
+local function wait_finished(task: async.Task)
+  while not task:status():has_finished() do timer.yield() end
+end
+
+local function simple_cancellation_reason(task: async.Task): string
+  local cancelled, reason? = task:status():has_cancelled()
+  if not cancelled or reason == nil then
+    raise "cancelled Task has no cancellation reason"
+  end
+  case reason as async.CancellationReason
+  when simple: message then return message
+  else raise "cancelled Task has a complex cancellation reason"
+  end
+end
+
+-- Public net does not expose an ephemeral listener's selected port. Retry
+-- only address-use collisions from other concurrent test processes.
+local function listen_available(first_port: integer): (net.Server, integer)
+  local port = first_port
+  for _ = 1, 100 do
+    do
+      local server = net.listen("127.0.0.1", port)
+      return server, port
+    catch
+      if error is async.OperationError then
+        local failure = error as async.OperationError
+        if failure.name == "EADDRINUSE" then
+          port = port + 1
+          if port > 60999 then port = 20000 end
+        else
+          raise "unexpected listen failure: " .. failure.operation ..
+                ":" .. failure.name .. ": " .. failure.message
+        end
+      else
+        raise error
+      end
+    end
+  end
+  raise "could not find an available loopback port"
+end
+
+local function temporary_file(context: test.Context): string
+  local path = fs.tmpname()
+  runtime_test.cleanup(function ()
+    fs.unlink(path)
+  end)
+  return path
+end

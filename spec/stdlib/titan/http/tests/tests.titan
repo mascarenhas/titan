@@ -1,0 +1,15 @@
+-- Native titan.http behavior tests.
+local test = import "test"
+local runtime_test = import "support.runtime"
+local async = import "async"
+local fs = import "fs"
+local http = import "http"
+local net = import "net"
+local ssl = import "ssl"
+local str = import "string"
+local timer = import "timer"
+local command = import "support.command"
+local url = import "url"
+
+local support = import "http.test_support"
+local task_support = import "support.async"

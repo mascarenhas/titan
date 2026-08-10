@@ -274,9 +274,9 @@ system-llhttp mode, and neither the private archive nor headers are installed
 as runtime-SDK files.
 
 The HTTP root adds one logical protocol, archive key, generated shim, and
-`luaopen_titan_http`. Together URL, SSL, and HTTP advance the coordinated
-current standard image to seventeen logical modules and shims and eighteen DSO
-openers including bare `luaopen_titan` support. ABI 0.22 publishes that
+`luaopen_titan_http`. The later addition of the independent `titan.test` module
+makes the coordinated current image eighteen logical modules and shims with
+nineteen DSO openers including bare `luaopen_titan` support. ABI 0.22 publishes that
 complete image in its own namespace; it neither recognizes ABI 0.21 as a
 publication predecessor nor removes the preserved prior-version provider.
 

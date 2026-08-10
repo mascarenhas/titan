@@ -285,7 +285,7 @@ Lua process and requires exactly one support table exposing `_loadlib` and
 proof.
 
 The production standard library is the canonical example. One compiler
-invocation names all seventeen logical roots and publishes root `titan.so` and
+invocation names all eighteen logical roots and publishes root `titan.so` and
 `titan.a`. Internal standard imports are direct. `titanlib.o` is shared `-X`
 payload and supplies bare `luaopen_titan` without adding a logical metadata
 key. The private namespaced five-member LPegLabel archive follows it as
@@ -293,9 +293,9 @@ metadata-free payload. The selected libuv payload follows it, then the private
 HTTP adapter and llhttp archive, and finally the selected OpenSSL payload used
 directly by `titan.ssl`. Bundled archives are force-carried into the DSO and flattened
 into the archive; system-mode libuv/OpenSSL settings remain final-link inputs
-and are never copied into `titan.a`. The DSO exports eighteen Lua entries
-(`luaopen_titan` plus the seventeen logical entries); both forms define the
-seventeen logical protocols, and the archive advertises exactly seventeen
+and are never copied into `titan.a`. The DSO exports nineteen Lua entries
+(`luaopen_titan` plus the eighteen logical entries); both forms define the
+eighteen logical protocols, and the archive advertises exactly eighteen
 metadata keys.
 The private LPegLabel archive and its headers remain source-build inputs; they
 are not installed in the compiler/runtime SDK.
@@ -312,12 +312,14 @@ a private directory on the destination filesystem under the same effective
 `CC`, `AR`, `RANLIB`, Titan extra flags, runtime root, and libuv policy used by
 the installer, together with the matching OpenSSL policy and private HTTP
 native inputs. TLS uses the selected OpenSSL library directly and has no
-adapter object. The hook then executes the source-only
+adapter object. The exact `titan/test.titan` used by this generation is copied
+into the same private stage. The hook then executes the source-only
 `scripts/stdlib_installer.lua` directly with the installed Lua; the publisher
 is not an installed compiler module. The script rescans `titan.a`, requires
-the exact seventeen-key set, compares embedded metadata with the staged DSO and a
+the exact eighteen-key set, compares embedded metadata with the staged DSO and a
 fresh-process archive-backed validation image, validates bare
-`luaopen_titan`, the seventeen exact shims, and the macOS dSYM, then publishes the
+`luaopen_titan`, the eighteen exact shims, the exact test-support source, and
+the macOS dSYM, then publishes the
 paired bundle with the DSO last. It recognizes bootstrap-only and current
 complete-pair predecessors in that same namespace. Injected failures restore
 the exact supported predecessor. After the DSO commit, backup cleanup is best
@@ -326,13 +328,14 @@ Separately versioned 0.17, 0.18, 0.19, 0.20, and 0.21 artifacts are not purged,
 migrated, or cleaned up.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
-dSYM) and seventeen Lua shims:
+dSYM), eighteen Lua shims, and the canonical test-support source:
 
 ```text
 <root>/lib/titan/0.22/titan.so
 <root>/lib/titan/0.22/titan.a
 <root>/lib/titan/0.22/titan.so.dSYM          # macOS only
-<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc}.lua
+<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc,test}.lua
+<root>/share/titan/0.22/src/titan/test.titan
 ```
 
 These remain direct Titan artifacts outside the source-rock manifest. The
@@ -340,15 +343,15 @@ manifest owns the compiler Lua/script files; `luarocks remove` does not claim
 to remove Titan library-package artifacts.
 
 The checkout Make graph has one provider-pair completion/configuration stamp.
-All seventeen flat/folder source sets, native inputs, effective
+All eighteen flat/folder source sets, native inputs, effective
 `CC`/`AR`/`RANLIB`, embedded-format inputs, libuv/OpenSSL modes, dependency
 identities, and extra flags are prerequisites. The
 DSO, archive, conditional dSYM, and every shim must exist; every warm
-invocation rescans `titan.a` for the exact seventeen-key set without changing pair
+invocation rescans `titan.a` for the exact eighteen-key set without changing pair
 mtimes. `make clean` removes only exact known generated outputs. Production
 library tests treat the combined set as read-only. CI snapshots and restores
-the checkout runtime archive plus the installed DSO/archive/dSYM/shims around
-compiler groups; its system-libuv/system-OpenSSL smoke replaces the whole
+the checkout runtime archive plus the installed DSO/archive/dSYM/shims and
+canonical compiler source around compiler groups; its system-libuv/system-OpenSSL smoke replaces the whole
 paired generation rather than one logical child, while the prepared artifact retains the
 bundled generation.
 
@@ -404,10 +407,8 @@ or native linking. The 0.22 publisher does not migrate, clean up, or otherwise
 consume the preserved 0.21 tree, and there is no retained historical cutover
 canary.
 
-Production, installed, and async standard-library behavior tests use the
-combined image; the uv redesign has no delayed-callback source variant or
-alternate exact-provider graph. The serial coroutine suite is the narrow
-exception: it isolates its exact test image or preserves and restores the
-complete production `titan.so`/`titan.a` pair, dSYM, and generated coroutine
-shim. That coroutine test layout is not an alternate production packaging
-model.
+Production, installed, and native standard-library behavior tests use the
+combined image; the uv redesign has no delayed-callback source variant,
+alternate exact-provider graph, or serial source-rewritten coroutine image.
+Implementation mechanics remain owned by compiler/native harness coverage
+rather than an alternate production packaging model.

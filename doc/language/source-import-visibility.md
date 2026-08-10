@@ -10,6 +10,12 @@ only its ordinary public interface. This lets a group of source modules share
 implementation details without publishing those details to separately compiled
 consumers or to Lua.
 
+Ordinary dependencies select compiled providers before source. A
+[`titanc --test`](standard-library-test.md) invocation is the deliberate
+exception: it prefers source across the complete requested closure so test
+modules can collaborate directly with local implementation declarations, then
+falls back to compiled providers on a clean source miss.
+
 ## Direct source visibility
 
 Given a direct source edge

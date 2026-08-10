@@ -1,0 +1,325 @@
+local function any_two_tag(result: async.AnyTwoResult): string
+  case result
+  when first: payload then return "1:" .. (payload as string)
+  when second: payload then return "2:" .. (payload as string)
+  when none then return "none"
+  else raise "invalid AnyTwoResult"
+  end
+end
+
+local function any_three_tag(result: async.AnyThreeResult): string
+  case result
+  when first: payload then return "1:" .. (payload as string)
+  when second: payload then return "2:" .. (payload as string)
+  when third: payload then return "3:" .. (payload as string)
+  when none then return "none"
+  else raise "invalid AnyThreeResult"
+  end
+end
+
+local function any_four_tag(result: async.AnyFourResult): string
+  case result
+  when first: payload then return "1:" .. (payload as string)
+  when second: payload then return "2:" .. (payload as string)
+  when third: payload then return "3:" .. (payload as string)
+  when fourth: payload then return "4:" .. (payload as string)
+  when none then return "none"
+  else raise "invalid AnyFourResult"
+  end
+end
+
+local function any_five_tag(result: async.AnyFiveResult): string
+  case result
+  when first: payload then return "1:" .. (payload as string)
+  when second: payload then return "2:" .. (payload as string)
+  when third: payload then return "3:" .. (payload as string)
+  when fourth: payload then return "4:" .. (payload as string)
+  when fifth: payload then return "5:" .. (payload as string)
+  when none then return "none"
+  else raise "invalid AnyFiveResult"
+  end
+end
+
+local function race_two_tag(result: async.RaceTwoResult): string
+  case result
+  when first: status then return "1:" .. status:as_string()
+  when second: status then return "2:" .. status:as_string()
+  else raise "invalid RaceTwoResult"
+  end
+end
+
+local function race_three_tag(result: async.RaceThreeResult): string
+  case result
+  when first: status then return "1:" .. status:as_string()
+  when second: status then return "2:" .. status:as_string()
+  when third: status then return "3:" .. status:as_string()
+  else raise "invalid RaceThreeResult"
+  end
+end
+
+local function race_four_tag(result: async.RaceFourResult): string
+  case result
+  when first: status then return "1:" .. status:as_string()
+  when second: status then return "2:" .. status:as_string()
+  when third: status then return "3:" .. status:as_string()
+  when fourth: status then return "4:" .. status:as_string()
+  else raise "invalid RaceFourResult"
+  end
+end
+
+local function race_five_tag(result: async.RaceFiveResult): string
+  case result
+  when first: status then return "1:" .. status:as_string()
+  when second: status then return "2:" .. status:as_string()
+  when third: status then return "3:" .. status:as_string()
+  when fourth: status then return "4:" .. status:as_string()
+  when fifth: status then return "5:" .. status:as_string()
+  else raise "invalid RaceFiveResult"
+  end
+end
+
+function test_any_combinators_all_arities_and_positions(context: test.Context)
+  runtime_test.run(function ()
+    context:log("BEGIN expected uncaught async Task diagnostics")
+    local succeeded = support.successful("ok")
+    task_support.cleanup_task(succeeded, "any succeeded cleanup")
+    local nil_succeeded = support.successful(nil)
+    task_support.cleanup_task(nil_succeeded, "any nil cleanup")
+    local first_cancelled = support.cancelled("first-cancel")
+    task_support.cleanup_task(first_cancelled, "any first cancellation cleanup")
+    local second_cancelled = support.cancelled("second-cancel")
+    task_support.cleanup_task(second_cancelled, "any second cancellation cleanup")
+    local logged_failure = support.failing("combinator-logged-failure")
+    task_support.cleanup_task(logged_failure, "any failure cleanup")
+    async.join_five(succeeded, nil_succeeded, first_cancelled,
+                    second_cancelled, logged_failure)
+
+    test.assert(any_two_tag(async.any_two(succeeded, first_cancelled)) == "1:ok",
+          "any_two first variant")
+    test.assert(any_two_tag(async.any_two(first_cancelled, succeeded)) == "2:ok",
+          "any_two second variant")
+    test.assert(any_two_tag(async.any_two(first_cancelled,
+                                    second_cancelled)) == "none",
+          "any_two none variant")
+
+    test.assert(any_three_tag(async.any_three(
+              succeeded, first_cancelled, second_cancelled)) == "1:ok",
+          "any_three first variant")
+    test.assert(any_three_tag(async.any_three(
+              first_cancelled, succeeded, second_cancelled)) == "2:ok",
+          "any_three second variant")
+    test.assert(any_three_tag(async.any_three(
+              first_cancelled, second_cancelled, succeeded)) == "3:ok",
+          "any_three third variant")
+    test.assert(any_three_tag(async.any_three(
+              first_cancelled, second_cancelled,
+              first_cancelled)) == "none",
+          "any_three none variant")
+
+    test.assert(any_four_tag(async.any_four(
+              succeeded, first_cancelled, second_cancelled,
+              first_cancelled)) == "1:ok", "any_four first variant")
+    test.assert(any_four_tag(async.any_four(
+              first_cancelled, succeeded, second_cancelled,
+              first_cancelled)) == "2:ok", "any_four second variant")
+    test.assert(any_four_tag(async.any_four(
+              first_cancelled, second_cancelled, succeeded,
+              first_cancelled)) == "3:ok", "any_four third variant")
+    test.assert(any_four_tag(async.any_four(
+              first_cancelled, second_cancelled, first_cancelled,
+              succeeded)) == "4:ok", "any_four fourth variant")
+    test.assert(any_four_tag(async.any_four(
+              first_cancelled, second_cancelled, first_cancelled,
+              second_cancelled)) == "none", "any_four none variant")
+
+    test.assert(any_five_tag(async.any_five(
+              succeeded, first_cancelled, second_cancelled,
+              first_cancelled, second_cancelled)) == "1:ok",
+          "any_five first variant")
+    test.assert(any_five_tag(async.any_five(
+              first_cancelled, succeeded, second_cancelled,
+              first_cancelled, second_cancelled)) == "2:ok",
+          "any_five second variant")
+    test.assert(any_five_tag(async.any_five(
+              first_cancelled, second_cancelled, succeeded,
+              first_cancelled, second_cancelled)) == "3:ok",
+          "any_five third variant")
+    test.assert(any_five_tag(async.any_five(
+              first_cancelled, second_cancelled, first_cancelled,
+              succeeded, second_cancelled)) == "4:ok",
+          "any_five fourth variant")
+    test.assert(any_five_tag(async.any_five(
+              first_cancelled, second_cancelled, first_cancelled,
+              second_cancelled, succeeded)) == "5:ok",
+          "any_five fifth variant")
+    test.assert(any_five_tag(async.any_five(
+              first_cancelled, second_cancelled, first_cancelled,
+              second_cancelled, first_cancelled)) == "none",
+          "any_five none variant")
+
+    case async.any_two(nil_succeeded, first_cancelled)
+    when first: payload then
+      test.assert(payload == nil, "any lost a nil success payload")
+    else
+      raise "nil success did not select any_two first"
+    end
+    case async.any_two(logged_failure, first_cancelled)
+    when none then
+    else
+      raise "failed/cancelled any did not return none"
+    end
+
+    -- A duplicated terminal Task is an exact tie. Argument position, not Task
+    -- identity, controls the result.
+    test.assert(any_two_tag(async.any_two(succeeded, succeeded)) == "1:ok",
+          "any duplicate tie was not left-to-right")
+
+    local live_duplicate = support.sleeping(2, "live-duplicate")
+    task_support.cleanup_task(live_duplicate, "any duplicate cleanup")
+    test.assert(any_two_tag(async.any_two(live_duplicate,
+                                    live_duplicate)) == "1:live-duplicate",
+          "live any duplicate tie was not left-to-right")
+    local live_three = support.sleeping(2, "live-three")
+    task_support.cleanup_task(live_three, "any three cleanup")
+    test.assert(any_three_tag(async.any_three(live_three, live_three,
+                                       live_three)) == "1:live-three",
+          "live any_three duplicate tie was not left-to-right")
+    local live_four = support.sleeping(2, "live-four")
+    task_support.cleanup_task(live_four, "any four cleanup")
+    test.assert(any_four_tag(async.any_four(live_four, live_four, live_four,
+                                     live_four)) == "1:live-four",
+          "live any_four duplicate tie was not left-to-right")
+    local live_five = support.sleeping(2, "live-five")
+    task_support.cleanup_task(live_five, "any five cleanup")
+    test.assert(any_five_tag(async.any_five(live_five, live_five, live_five,
+                                     live_five, live_five)) == "1:live-five",
+          "live any_five duplicate tie was not left-to-right")
+
+    -- Keep every operand live through the initial scan so the copied
+    -- failed/cancelled listener arms, rather than only the scan arms, decide
+    -- that no Task succeeded.
+    local live_none_failure = support.failing("any-live-logged-failure")
+    task_support.cleanup_task(live_none_failure, "any live failure cleanup")
+    local live_none_second = support.cancelled("any-live-second")
+    task_support.cleanup_task(live_none_second, "any live second cleanup")
+    local live_none_third = support.cancelled("any-live-third")
+    task_support.cleanup_task(live_none_third, "any live third cleanup")
+    local live_none_fourth = support.cancelled("any-live-fourth")
+    task_support.cleanup_task(live_none_fourth, "any live fourth cleanup")
+    local live_none_fifth = support.cancelled("any-live-fifth")
+    task_support.cleanup_task(live_none_fifth, "any live fifth cleanup")
+    test.assert(any_five_tag(async.any_five(
+              live_none_failure, live_none_second, live_none_third,
+              live_none_fourth, live_none_fifth)) == "none",
+          "live any_five terminal listeners did not select none")
+    context:log("END expected uncaught async Task diagnostics")
+  end)
+end
+
+function test_race_combinators_all_arities_ties_and_statuses(context: test.Context)
+  runtime_test.run(function ()
+    context:log("BEGIN expected uncaught async Task diagnostics")
+    local succeeded = support.successful("winner")
+    task_support.cleanup_task(succeeded, "race winner cleanup")
+    local pending = support.sleeping(60000, "late")
+    task_support.cleanup_task(pending, "race cleanup")
+    async.join(succeeded)
+
+    test.assert(race_two_tag(async.race_two(succeeded, pending)) == "1:succeeded",
+          "race_two first variant")
+    local race_two_second =
+      race_two_tag(async.race_two(pending, succeeded))
+    test.assert(race_two_second == "2:succeeded",
+          "race_two second variant: " .. race_two_second)
+
+    test.assert(race_three_tag(async.race_three(
+              succeeded, pending, pending)) == "1:succeeded",
+          "race_three first variant")
+    test.assert(race_three_tag(async.race_three(
+              pending, succeeded, pending)) == "2:succeeded",
+          "race_three second variant")
+    test.assert(race_three_tag(async.race_three(
+              pending, pending, succeeded)) == "3:succeeded",
+          "race_three third variant")
+
+    test.assert(race_four_tag(async.race_four(
+              succeeded, pending, pending, pending)) == "1:succeeded",
+          "race_four first variant")
+    test.assert(race_four_tag(async.race_four(
+              pending, succeeded, pending, pending)) == "2:succeeded",
+          "race_four second variant")
+    test.assert(race_four_tag(async.race_four(
+              pending, pending, succeeded, pending)) == "3:succeeded",
+          "race_four third variant")
+    test.assert(race_four_tag(async.race_four(
+              pending, pending, pending, succeeded)) == "4:succeeded",
+          "race_four fourth variant")
+
+    test.assert(race_five_tag(async.race_five(
+              succeeded, pending, pending, pending,
+              pending)) == "1:succeeded", "race_five first variant")
+    test.assert(race_five_tag(async.race_five(
+              pending, succeeded, pending, pending,
+              pending)) == "2:succeeded", "race_five second variant")
+    test.assert(race_five_tag(async.race_five(
+              pending, pending, succeeded, pending,
+              pending)) == "3:succeeded", "race_five third variant")
+    test.assert(race_five_tag(async.race_five(
+              pending, pending, pending, succeeded,
+              pending)) == "4:succeeded", "race_five fourth variant")
+    test.assert(race_five_tag(async.race_five(
+              pending, pending, pending, pending,
+              succeeded)) == "5:succeeded", "race_five fifth variant")
+
+    test.assert(race_two_tag(async.race_two(succeeded,
+                                      succeeded)) == "1:succeeded",
+          "race duplicate tie was not left-to-right")
+
+    local live_duplicate = support.sleeping(2, "race-live-duplicate")
+    task_support.cleanup_task(live_duplicate, "race duplicate cleanup")
+    test.assert(race_two_tag(async.race_two(live_duplicate,
+                                      live_duplicate)) == "1:succeeded",
+          "live race duplicate tie was not left-to-right")
+    local live_three = support.sleeping(2, "race-live-three")
+    task_support.cleanup_task(live_three, "race three cleanup")
+    test.assert(race_three_tag(async.race_three(live_three, live_three,
+                                         live_three)) == "1:succeeded",
+          "live race_three duplicate tie was not left-to-right")
+    local live_four = support.sleeping(2, "race-live-four")
+    task_support.cleanup_task(live_four, "race four cleanup")
+    test.assert(race_four_tag(async.race_four(live_four, live_four, live_four,
+                                       live_four)) == "1:succeeded",
+          "live race_four duplicate tie was not left-to-right")
+    local live_five = support.sleeping(2, "race-live-five")
+    task_support.cleanup_task(live_five, "race five cleanup")
+    test.assert(race_five_tag(async.race_five(live_five, live_five, live_five,
+                                       live_five,
+                                       live_five)) == "1:succeeded",
+          "live race_five duplicate tie was not left-to-right")
+
+    local live_race_cancelled = support.cancelled("race-live-cancelled")
+    task_support.cleanup_task(live_race_cancelled, "race live cancellation cleanup")
+    test.assert(race_five_tag(async.race_five(
+              pending, pending, pending, pending,
+              live_race_cancelled)) == "5:cancelled",
+          "live race_five cancellation listener lost its position")
+    test.assert(not pending:status():has_finished(),
+          "race cancelled an unfinished loser")
+
+    local cancelled_task = support.cancelled("race-cancelled")
+    task_support.cleanup_task(cancelled_task, "race cancellation cleanup")
+    local failed_task = support.failing("race-logged-failure")
+    task_support.cleanup_task(failed_task, "race failure cleanup")
+    async.join_two(cancelled_task, failed_task)
+    test.assert(race_two_tag(async.race_two(cancelled_task,
+                                      pending)) == "1:cancelled",
+          "race did not return cancellation")
+    test.assert(race_two_tag(async.race_two(failed_task,
+                                      pending)) == "1:failed",
+          "race did not return failure")
+
+    pending:cancel(async.CancellationReason.simple("race cleanup"))
+    async.join(pending)
+    context:log("END expected uncaught async Task diagnostics")
+  end)
+end

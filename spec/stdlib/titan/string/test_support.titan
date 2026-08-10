@@ -1,0 +1,360 @@
+local test = import "test"
+local lua = foreign import "lua.h"
+local lual = foreign import "lauxlib.h"
+local ffi = foreign import "titan/ffi.h"
+
+local type Contains = (string, string) -> boolean
+local type UnaryString = (string) -> string
+local type LuaLength = (string) -> integer
+local type LuaSub = (string, integer, integer?) -> string
+local type LuaByte = (string, integer?, integer?) -> (...: integer)
+local type LuaFind =
+  (string, string, integer?) -> (integer?, integer?)
+local type LuaRepeat = (string, integer, string?) -> string
+local type LuaChar = (...: integer) -> string
+local type LuaToString = (value) -> string
+local type LuaFormat = (string, ...: value) -> string
+local type LuaPack = (string, ...: value) -> string
+local type LuaPacksize = (string) -> integer
+local type LuaUnpack =
+  (string, string, integer?) -> (value, ...: value)
+local type MakeValue = (string) -> value
+local type ReplaceToString = () -> value
+local type RestoreToString = (value) -> ()
+local type SetLocale = () -> string?
+local type RestoreLocale = (string) -> ()
+local type SetGcMode = (string) -> string
+local type CollectGc = () -> ()
+
+local contains_function: Contains? = nil
+local lua_len_function: LuaLength? = nil
+local lua_sub_function: LuaSub? = nil
+local lua_reverse_function: UnaryString? = nil
+local lua_lower_function: UnaryString? = nil
+local lua_upper_function: UnaryString? = nil
+local lua_byte_function: LuaByte? = nil
+local lua_find_function: LuaFind? = nil
+local lua_rep_function: LuaRepeat? = nil
+local lua_char_function: LuaChar? = nil
+local lua_tostring_function: LuaToString? = nil
+local lua_format_function: LuaFormat? = nil
+local lua_pack_function: LuaPack? = nil
+local lua_packsize_function: LuaPacksize? = nil
+local lua_unpack_function: LuaUnpack? = nil
+local make_custom_tostring_function: MakeValue? = nil
+local make_failing_tostring_function: MakeValue? = nil
+local replace_tostring_function: ReplaceToString? = nil
+local restore_tostring_function: RestoreToString? = nil
+local set_locale_function: SetLocale? = nil
+local restore_locale_function: RestoreLocale? = nil
+local set_gc_mode_function: SetGcMode? = nil
+local collect_gc_function: CollectGc? = nil
+
+local function load_lua_function(source: string): value
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if lua.lua_checkstack(L, 2) == 0 then
+    raise "cannot reserve Lua stack for string/url test helper"
+  end
+  local status = lual.luaL_loadstring(L, source)
+  if status ~= lua.LUA_OK then
+    local failure: value = ffi.lua_totvalue(L, -1)
+    raise failure
+  end
+  status = lua.lua_pcallk(L, 0, 1, 0, 0, nil)
+  if status ~= lua.LUA_OK then
+    local failure: value = ffi.lua_totvalue(L, -1)
+    raise failure
+  end
+  return ffi.lua_totvalue(L, -1)
+end
+
+local function render_error(failure: value): string
+  local result = "<error while rendering failure>"
+  do
+    local top = lua.lua_gettop(L)
+    defer lua.lua_settop(L, top)
+    if lua.lua_checkstack(L, 2) ~= 0 then
+      ffi.lua_pushtvalue(L, failure)
+      lual.luaL_tolstring(L, -1, nil)
+      local rendered: value = ffi.lua_totvalue(L, -1)
+      if rendered is string then result = rendered as string end
+    end
+  catch
+    -- Retain the conservative fallback when __tostring itself raises.
+  end
+  return result
+end
+
+local function contains(subject: string, needle: string): boolean
+  local exact = contains_function
+  return exact(subject, needle)
+end
+
+local function expect_error(callback: () -> (), fragment: string?): string
+  local raised = false
+  local message = ""
+  do
+    callback()
+  catch
+    raised = true
+    message = render_error(error)
+  end
+  test.assert(raised, "expected callback to raise")
+  if fragment then
+    test.assert(contains(message, fragment as string),
+                "error did not contain expected fragment: " .. message)
+  end
+  return message
+end
+
+local function succeeds(callback: () -> ()): boolean
+  local succeeded = true
+  do
+    callback()
+  catch
+    succeeded = false
+  end
+  return succeeded
+end
+
+local function attempt_string(callback: () -> string): (boolean, string)
+  local succeeded = true
+  local result = ""
+  do
+    result = callback()
+  catch
+    succeeded = false
+    result = render_error(error)
+  end
+  return succeeded, result
+end
+
+local function lua_len(subject: string): integer
+  local exact = lua_len_function
+  return exact(subject)
+end
+
+local function lua_sub(subject: string, first: integer,
+                 last: integer?): string
+  local exact = lua_sub_function
+  return exact(subject, first, last)
+end
+
+local function lua_reverse(subject: string): string
+  local exact = lua_reverse_function
+  return exact(subject)
+end
+
+local function lua_lower(subject: string): string
+  local exact = lua_lower_function
+  return exact(subject)
+end
+
+local function lua_upper(subject: string): string
+  local exact = lua_upper_function
+  return exact(subject)
+end
+
+local function lua_byte(subject: string, first: integer?,
+                  last: integer?): (...: integer)
+  local exact = lua_byte_function
+  return exact(subject, first, last)
+end
+
+local function lua_find(subject: string, needle: string,
+                  initial: integer?): (integer?, integer?)
+  local exact = lua_find_function
+  return exact(subject, needle, initial)
+end
+
+local function lua_rep(subject: string, count: integer,
+                 separator: string?): string
+  local exact = lua_rep_function
+  return exact(subject, count, separator)
+end
+
+local function lua_char(...: integer): string
+  local exact = lua_char_function
+  return exact(...)
+end
+
+local function lua_tostring(candidate: value): string
+  local exact = lua_tostring_function
+  return exact(candidate)
+end
+
+local function lua_format(format_string: string, ...: value): string
+  local exact = lua_format_function
+  return exact(format_string, ...)
+end
+
+local function lua_pack(format_string: string, ...: value): string
+  local exact = lua_pack_function
+  return exact(format_string, ...)
+end
+
+local function lua_packsize(format_string: string): integer
+  local exact = lua_packsize_function
+  return exact(format_string)
+end
+
+local function lua_unpack(format_string: string, data: string,
+                    initial: integer?): (value, ...: value)
+  local exact = lua_unpack_function
+  return exact(format_string, data, initial)
+end
+
+local function custom_tostring_value(text: string): value
+  local exact = make_custom_tostring_function
+  return exact(text)
+end
+
+local function failing_tostring_value(message: string): value
+  local exact = make_failing_tostring_function
+  return exact(message)
+end
+
+local function replace_global_tostring(): value
+  local exact = replace_tostring_function
+  return exact()
+end
+
+local function restore_global_tostring(original: value)
+  local exact = restore_tostring_function
+  exact(original)
+end
+
+local function set_c_locale(): string?
+  local exact = set_locale_function
+  return exact()
+end
+
+local function restore_locale(previous: string)
+  local exact = restore_locale_function
+  exact(previous)
+end
+
+local function set_gc_mode(mode: string): string
+  local exact = set_gc_mode_function
+  return exact(mode)
+end
+
+local function collect_gc()
+  local exact = collect_gc_function
+  exact()
+end
+
+local function values_equal(left: value, right: value): boolean
+  if left == right then return true end
+  if left is float and right is float then
+    local left_number = left as float
+    local right_number = right as float
+    return left_number ~= left_number and right_number ~= right_number
+  end
+  return false
+end
+
+local function assert_value_arrays_equal(actual: {value}, expected: {value},
+                                   message: string?)
+  test.assert(#actual == #expected,
+              message or "different flexible-result lengths")
+  local index = 1
+  while index <= #actual do
+    test.assert(values_equal(actual[index], expected[index]),
+                message or "different flexible-result values")
+    index = index + 1
+  end
+end
+
+do
+  contains_function = load_lua_function([[
+return function(subject, needle)
+  return string.find(subject, needle, 1, true) ~= nil
+end
+]]) as Contains
+  lua_len_function =
+    load_lua_function("return function(s) return string.len(s) end")
+      as LuaLength
+  lua_sub_function = load_lua_function([[
+return function(s, first, last) return string.sub(s, first, last) end
+]]) as LuaSub
+  lua_reverse_function =
+    load_lua_function("return function(s) return string.reverse(s) end")
+      as UnaryString
+  lua_lower_function =
+    load_lua_function("return function(s) return string.lower(s) end")
+      as UnaryString
+  lua_upper_function =
+    load_lua_function("return function(s) return string.upper(s) end")
+      as UnaryString
+  lua_byte_function = load_lua_function([[
+return function(s, first, last) return string.byte(s, first, last) end
+]]) as LuaByte
+  lua_find_function = load_lua_function([[
+return function(s, needle, initial)
+  return string.find(s, needle, initial, true)
+end
+]]) as LuaFind
+  lua_rep_function = load_lua_function([[
+return function(s, count, separator)
+  return string.rep(s, count, separator)
+end
+]]) as LuaRepeat
+  lua_char_function =
+    load_lua_function("return function(...) return string.char(...) end")
+      as LuaChar
+  lua_tostring_function =
+    load_lua_function("return function(v) return tostring(v) end")
+      as LuaToString
+  lua_format_function =
+    load_lua_function("return function(...) return string.format(...) end")
+      as LuaFormat
+  lua_pack_function =
+    load_lua_function("return function(...) return string.pack(...) end")
+      as LuaPack
+  lua_packsize_function = load_lua_function([[
+return function(format) return string.packsize(format) end
+]]) as LuaPacksize
+  lua_unpack_function =
+    load_lua_function("return function(...) return string.unpack(...) end")
+      as LuaUnpack
+  make_custom_tostring_function = load_lua_function([[
+return function(text)
+  return setmetatable({}, { __tostring = function() return text end })
+end
+]]) as MakeValue
+  make_failing_tostring_function = load_lua_function([[
+return function(message)
+  return setmetatable({}, {
+    __tostring = function() error(message) end,
+  })
+end
+]]) as MakeValue
+  replace_tostring_function = load_lua_function([[
+return function()
+  local original = _G.tostring
+  _G.tostring = function() return "replaced" end
+  return original
+end
+]]) as ReplaceToString
+  restore_tostring_function = load_lua_function([[
+return function(original) _G.tostring = original end
+]]) as RestoreToString
+  set_locale_function = load_lua_function([[
+return function()
+  local previous = os.setlocale(nil, "all")
+  if previous == nil or os.setlocale("C", "all") == nil then return nil end
+  return previous
+end
+]]) as SetLocale
+  restore_locale_function = load_lua_function([[
+return function(previous) assert(os.setlocale(previous, "all")) end
+]]) as RestoreLocale
+  set_gc_mode_function = load_lua_function([[
+return function(mode) return collectgarbage(mode) end
+]]) as SetGcMode
+  collect_gc_function = load_lua_function([[
+return function() collectgarbage("collect") end
+]]) as CollectGc
+end

@@ -332,7 +332,8 @@ local strings = import "string"
 
 Use an alias such as `strings` when the short name is also a type keyword.
 The short-name set is `coroutine`, `uv`, `async`, `timer`, `io`, `fs`, `net`,
-`ssl`, `url`, `http`, `os`, `peg`, and `string`. This rule applies inside
+`ssl`, `url`, `http`, `os`, `peg`, `string`, and `test`. This rule applies
+inside
 standard-library sources too: spelling one of those imports as `"titan.fs"`,
 `"titan.ssl"`, or a
 similar qualified name is a style violation, not extra precision.
@@ -358,6 +359,38 @@ module.
 
 Application modules keep their own dotted identities in both languages:
 Titan imports `app.model`, and Lua requires `app.model`.
+
+## Write native tests as ordinary modules
+
+Use a public top-level `test_*` function with one `test.Context` parameter for
+a discoverable case. Keep reusable assertions and setup in ordinary local
+functions; use `context:run` only when a child schedule and qualified child name
+are meaningful. Give subtests short local names because the runner prefixes the
+complete parent name.
+
+```titan
+local test = import "test"
+local subject = import "app.subject"
+
+function test_empty(context: test.Context)
+  local resource = subject.open()
+  context:cleanup(function() resource:close() end)
+  test.assert(resource:size() == 0)
+end
+```
+
+Use language `defer` for resources that must close as the current body returns.
+Use `Context:cleanup` when teardown must happen after registered descendants.
+Register cleanup immediately after acquisition, just as with ordinary `defer`.
+Do not catch `test.skip` or failed assertions unless the test is explicitly
+checking error handling.
+
+Tests of the standard library may import `test` and the module under test, but
+fixture construction should not acquire an unrelated Titan standard-library
+dependency. Use a narrow reviewed C/Lua FFI helper when the test itself must
+create host state. Keep build, loader-promotion, process-supervision, sanitizer,
+and source-interposition proofs in their Lua/native harnesses: the native test
+runner is not a build system or an external supervisor.
 
 ## Keep Lua and C machinery behind narrow audited boundaries
 
