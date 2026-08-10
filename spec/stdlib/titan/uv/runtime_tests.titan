@@ -1,0 +1,297 @@
+local test = import "test"
+local runtime_test = import "support.runtime"
+local common = import "support.common"
+local command = import "support.command"
+local fs = import "fs"
+local system = import "os"
+local timer = import "timer"
+local stdio_probe = foreign import "uv_stdio_probe.h"
+
+local retained_shutdown_file: fs.File? = nil
+local retained_shutdown_ticker: timer.Ticker? = nil
+
+function test_runtime_shutdown_closes_native_handles_but_not_files(
+    _context: test.Context)
+  local path = ""
+  runtime_test.run(function ()
+    path = fs.tmpname()
+    retained_shutdown_file = fs.open(path, "w")
+    local file = retained_shutdown_file as fs.File
+    file:write("left-open-for-runtime-shutdown")
+
+    -- A File owns a process descriptor rather than a loop handle. A Ticker is
+    -- a loop handle and is deliberately left to the Runtime's uv_walk pass.
+    retained_shutdown_ticker = timer.ticker(60000)
+  end)
+
+  local file = retained_shutdown_file as fs.File
+  test.assert(not file:is_closed(),
+              "Runtime shutdown closed a retained File descriptor")
+
+  local close_trace = ""
+  do
+    file:close()
+  catch
+    close_trace = traceback
+  end
+  test.assert(common.contains(close_trace, "in titan.uv.fs_close"),
+              "File close outside a Runtime lost its uv frame")
+  test.assert(not file:is_closed(),
+              "rejected close changed the retained File state")
+
+  runtime_test.run(function ()
+    local ticker = retained_shutdown_ticker as timer.Ticker
+    test.assert(not ticker:tick(),
+                "prior Runtime left its retained Ticker active")
+    file:write("-second-runtime")
+    file:close()
+    test.assert(file:is_closed(),
+                "later Runtime did not close the retained File")
+    test.assert(fs.read_file(path) ==
+                "left-open-for-runtime-shutdown-second-runtime",
+                "cross-Runtime File bytes changed")
+    fs.unlink(path)
+  end)
+end
+
+local type BootstrapFixtureCase = (string) -> ()
+
+local function compile_bootstrap_fixture(workspace: string, name: string)
+  local source = fs.read_file(
+    "spec/fixtures/stdlib/titan/uv_bootstrap/" .. name .. ".titan")
+  fs.write_file(workspace .. "/" .. name .. ".titan", source)
+  local ok: boolean?, why: string, code: integer = command.execute({
+    "sh", "-c", "cd \"$1\" && titanc \"$2\"",
+    "titan-uv-bootstrap-compile", workspace, name,
+  })
+  test.assert(ok ~= nil and why == "exit" and code == 0,
+              "could not compile " .. name .. " (" .. why .. ", " ..
+              code .. ")")
+end
+
+local function run_bootstrap_fixture(workspace: string,
+                                     arguments: {string}):
+    (string, string, integer)
+  local command_line: {string} = { workspace .. "/" .. arguments[1] }
+  for index = 2, #arguments do
+    command_line[#command_line + 1] = arguments[index]
+  end
+  return command.capture(command_line)
+end
+
+local function with_bootstrap_fixture(include_sync: boolean,
+                                      body: BootstrapFixtureCase)
+  runtime_test.run(function ()
+    local workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    runtime_test.cleanup(function ()
+      local ok: boolean?, _why: string, code: integer =
+        command.execute({"rm", "-rf", workspace})
+      test.assert(ok ~= nil and code == 0,
+                  "could not remove uv bootstrap fixture workspace")
+    end)
+    compile_bootstrap_fixture(workspace, "uv_bootstrap_app")
+    if include_sync then
+      compile_bootstrap_fixture(workspace, "uv_sync_app")
+    end
+    body(workspace)
+  end)
+end
+
+function test_default_bootstrap_drives_async_main_and_preserves_sync_path(
+    _context: test.Context)
+  with_bootstrap_fixture(true, function (workspace: string)
+    local output, why, code = run_bootstrap_fixture(
+      workspace, {"uv_bootstrap_app", "status"})
+    test.assert(why == "exit" and code == 17,
+                "async bootstrap returned the wrong status: " .. output)
+
+    output, why, code = run_bootstrap_fixture(workspace, {"uv_sync_app"})
+    test.assert(why == "exit" and code == 19,
+                "synchronous standalone path changed: " .. output)
+  end)
+end
+
+function test_default_bootstrap_passes_only_positive_program_arguments(
+    _context: test.Context)
+  with_bootstrap_fixture(false, function (workspace: string)
+    local output, why, code = run_bootstrap_fixture(
+      workspace, {"uv_bootstrap_app"})
+    test.assert(why == "exit" and code == 0,
+                "bootstrap changed the empty argument Array: " .. output)
+
+    output, why, code = run_bootstrap_fixture(
+      workspace, {"uv_bootstrap_app", "args", "one", "two"})
+    test.assert(why == "exit" and code == 0,
+                "bootstrap changed positive program arguments: " .. output)
+  end)
+end
+
+function test_default_bootstrap_isolates_failed_child(
+    context: test.Context)
+  with_bootstrap_fixture(false, function (workspace: string)
+    local marker = workspace .. "/isolated.marker"
+    local output, why, code = run_bootstrap_fixture(
+      workspace, {"uv_bootstrap_app", "isolated", marker})
+    context:log("BEGIN expected child-bootstrap Task diagnostics")
+    context:log(output)
+    context:log("END expected child-bootstrap Task diagnostics")
+    test.assert(why == "exit" and code == 0 and
+                common.contains(output, "uncaught error in async Task:") and
+                common.contains(output, "isolated-child-boom") and
+                common.contains(output, "stack traceback:") and
+                common.contains(output, "uv_bootstrap_app.unhandled_origin"),
+                "isolated bootstrap failure changed: " .. output)
+    test.assert(fs.read_file(marker) == "healthy-sibling-finished",
+                "failed child stopped its healthy sibling")
+  end)
+end
+
+function test_default_bootstrap_finishes_child_after_failed_main(
+    context: test.Context)
+  with_bootstrap_fixture(false, function (workspace: string)
+    local marker = workspace .. "/main-failure.marker"
+    local output, why, code = run_bootstrap_fixture(
+      workspace, {"uv_bootstrap_app", "main-failure", marker})
+    context:log("BEGIN expected failed-main bootstrap diagnostics")
+    context:log(output)
+    context:log("END expected failed-main bootstrap diagnostics")
+    test.assert(why == "exit" and code == 1 and
+                common.contains(output, "main-task-boom") and
+                common.contains(output, "stack traceback:") and
+                common.contains(output, "uv_bootstrap_app.main_origin"),
+                "failed main bootstrap changed: " .. output)
+    test.assert(fs.read_file(marker) ==
+                "healthy-child-after-main-failure",
+                "failed main stopped its healthy child")
+  end)
+end
+
+local type StdioFixtureCase = (string) -> ()
+
+local function compile_stdio_fixture(workspace: string)
+  fs.write_file(workspace .. "/uv_stdio_probe.h",
+    fs.read_file("spec/fixtures/stdlib/native/uv_stdio_probe.h"))
+  fs.write_file(workspace .. "/uv_stdio_app.titan",
+    fs.read_file("spec/fixtures/stdlib/titan/uv_stdio_app.titan"))
+  local probe_object = system.cwd() .. "/.titan-tests/uv_stdio_probe.o"
+  local status = command.system({
+    "sh", "-c", [==[
+      set -eu
+      cd "$1"
+      titanc uv_stdio_app -X "$2"
+    ]==],
+    "titan-uv-stdio-compile", workspace, probe_object,
+  })
+  test.assert(status == 0, "could not compile uv stdio fixture")
+end
+
+local function with_stdio_fixture(body: StdioFixtureCase)
+  runtime_test.run(function ()
+    local workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    runtime_test.cleanup(function ()
+      local ok: boolean?, _why: string, code: integer =
+        command.execute({"rm", "-rf", workspace})
+      test.assert(ok ~= nil and code == 0,
+                  "could not remove uv stdio fixture workspace")
+    end)
+    compile_stdio_fixture(workspace)
+    body(workspace)
+  end)
+end
+
+local stdio_probe_active = false
+
+local function restore_stdio_probe()
+  if stdio_probe_active then
+    stdio_probe.titan_uv_test_stdio_finish(0)
+    stdio_probe_active = false
+  end
+end
+
+local function assert_stdio_fixture(workspace: string, mode: string,
+                                    expected: string, parent_mode: integer,
+                                    nonblocking_mask: integer,
+                                    expected_stdout: string,
+                                    expected_stderr: string)
+  local result_path = workspace .. "/" .. mode .. ".result"
+  if stdio_probe.titan_uv_test_stdio_setup(parent_mode) ~= 0 then
+    raise stdio_probe.titan_uv_test_stdio_failure() as string
+  end
+  stdio_probe_active = true
+  local status = 0
+  local finish_status = 0
+  local captured_stdout = ""
+  local captured_stderr = ""
+  do
+    defer restore_stdio_probe()
+    status = command.system({
+      workspace .. "/uv_stdio_app", mode, result_path,
+    })
+    finish_status =
+      stdio_probe.titan_uv_test_stdio_finish(nonblocking_mask)
+    stdio_probe_active = false
+    captured_stdout = stdio_probe.titan_uv_test_stdio_output(1) as string
+    captured_stderr = stdio_probe.titan_uv_test_stdio_output(2) as string
+  end
+  local report = fs.read_file(result_path)
+  defer fs.unlink(result_path)
+  local probe_failure = stdio_probe.titan_uv_test_stdio_failure() as string
+  test.assert(status == 0 and finish_status == 0 and
+              report == "OK:" .. expected and
+              captured_stdout == expected_stdout and
+              captured_stderr == expected_stderr,
+              "uv stdio " .. mode .. " fixture failed: " .. report ..
+              "; probe: " .. probe_failure ..
+              "; stdout: " .. captured_stdout ..
+              "; stderr: " .. captured_stderr)
+end
+
+function test_parent_pipe_stdio_classification_and_transfer(
+    _context: test.Context)
+  with_stdio_fixture(function (workspace: string)
+    assert_stdio_fixture(
+      workspace, "pipes", "parent-pipes-ok",
+      stdio_probe.TITAN_UV_TEST_STDIO_PIPE_ALL, 7,
+      "pipe-stdout", "pipe-stderr")
+  end)
+end
+
+function test_parent_stream_inheritance_uses_prepared_handles(
+    _context: test.Context)
+  with_stdio_fixture(function (workspace: string)
+    assert_stdio_fixture(
+      workspace, "inherit", "parent-inheritance-ok",
+      stdio_probe.TITAN_UV_TEST_STDIO_PIPE_ALL, 0, "", "")
+  end)
+end
+
+function test_parent_pty_stdio_classification_and_transfer(
+    _context: test.Context)
+  with_stdio_fixture(function (workspace: string)
+    assert_stdio_fixture(
+      workspace, "tty", "parent-tty-ok",
+      stdio_probe.TITAN_UV_TEST_STDIO_TTY_SLAVE, 0, "tty-output", "")
+  end)
+end
+
+function test_parent_regular_file_stdio_rejection_does_not_leak(
+    _context: test.Context)
+  with_stdio_fixture(function (workspace: string)
+    assert_stdio_fixture(
+      workspace, "file", "parent-file-rejected",
+      stdio_probe.TITAN_UV_TEST_STDIO_FILE_STDOUT, 0, "", "")
+  end)
+end
+
+function test_parent_socket_stdio_rejection_does_not_leak(
+    _context: test.Context)
+  with_stdio_fixture(function (workspace: string)
+    assert_stdio_fixture(
+      workspace, "socket", "parent-socket-rejected",
+      stdio_probe.TITAN_UV_TEST_STDIO_SOCKET_STDOUT, 0, "", "")
+  end)
+end

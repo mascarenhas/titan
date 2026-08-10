@@ -2876,7 +2876,8 @@ describe("Titan typecheck of records", function()
         }
         local ok, err = run_checker_modules(modules, "bar")
         assert.falsy(ok)
-        assert.match("method 'secret' not found in record 'foo%.Box'", err)
+        assert.match(
+            "method 'foo%.Box:secret' is local to module 'foo'", err)
     end)
 
     it("allows record functions to construct records with local fields", function()

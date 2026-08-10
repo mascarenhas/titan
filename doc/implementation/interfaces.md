@@ -421,11 +421,11 @@ covers:
 - the exported bound native/Lua/strict trampoline set.
 
 ABI 0.20 also introduced the two-user-value Array proxy and strict generic
-function entry. ABI 0.21 retains those layouts while advancing the matched Lua
-runtime. A 0.20 provider is rejected before its metadata is decoded or any
-native value crosses the boundary; there is no compatibility adapter,
-migration, or cleanup path, and separately versioned 0.20 artifacts remain
-preserved.
+function entry. ABI 0.21 retained those layouts while advancing the matched
+Lua runtime to 5.5.1, and ABI 0.22 retains them. A 0.21 provider is rejected
+before its metadata is decoded or any native value crosses the boundary; there
+is no compatibility adapter, migration, or cleanup path, and separately
+versioned 0.20 and 0.21 artifacts remain preserved.
 
 The wrapper, concrete module, and concrete value use stock Lua reachability.
 The two user values are strong traced edges with ordinary backward barriers;

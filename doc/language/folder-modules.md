@@ -226,22 +226,28 @@ Titan dogfoods this layout in its private libuv plumbing module:
 
 ```
 titan/uv/
-  uv.titan          # shared imports/constants/state, bootstrap, initializer
-  file.titan        # filesystem request/descriptor records and exported API
-  os.titan          # OS/signal records and exported API
-  process.titan     # process/pipe records and exported API
-  runtime.titan     # runtime/byte records, Error, and version exports
-  task.titan        # Task/timer records, methods, and exported API
-  tcp.titan         # TCP/network records and exported API
+  uv.titan          # shared prelude/state, bootstrap, Error/OperationError
+  file.titan        # source-private filesystem request/descriptor machinery
+  os.titan          # source-private OS/signal machinery
+  process.titan     # source-private process/pipe machinery
+  runtime.titan     # source-private Runtime and loop machinery
+  task.titan        # public Task/status types plus private task/timer machinery
+  tcp.titan         # source-private TCP/network machinery
 ```
 
-The main source keeps the shared prelude, module state, bootstrap, and sole
-initializer. Both exported and private record declarations live with their
-semantic contributor implementations; contributor exports are ordinary
-`titan.uv` members. These files are one logical module and therefore produce
-one object and one `titan/uv.lua` loader, never one artifact per contributor.
-The production standard-library invocation links that object with the other
-eight `titan.*` roots into the canonical `titan.so`/`titan.a` provider pair.
+The main source keeps the shared prelude, module state, bootstrap, sole
+initializer, and the public `Error` and `OperationError` records. `task.titan`
+owns the other three public nominal types: `CancellationReason`, `TaskStatus`,
+and `Task`. The filesystem, OS, process, Runtime, timer, and TCP bridges and
+their native owner records are local declarations. The five high-level source
+modules `titan.async`, `titan.timer`, `titan.net`, `titan.os`, and `titan.fs`
+select those locals only through their direct source-import edges; they are not
+members of the compiled `titan.uv` interface.
+
+These files are one logical module and therefore produce one object and one
+`titan/uv.lua` loader, never one artifact per contributor. The production
+standard-library invocation links that object with the other sixteen logical
+roots into the canonical `titan.so`/`titan.a` provider pair.
 Titan imports select the preferred compiled form, while Lua
 `require "titan.uv"` selects the independent `titan.uv` logical module inside
 the DSO; no contributor is a separately loadable module.

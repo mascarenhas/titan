@@ -24,10 +24,11 @@ if [[ $PREFIX != /* ]]; then PREFIX=$PWD/$PREFIX; fi
 PREFIX=$(CDPATH= cd "$PREFIX" && pwd -P)
 LUA="$PREFIX/bin/lua"
 TITANC="$PREFIX/bin/titanc"
-ABI_ROOT="$PREFIX/lib/titan/0.21"
+ABI_ROOT="$PREFIX/lib/titan/0.22"
 SHIM_ROOT="$PREFIX/share/lua/5.5"
 PROVIDER="$ABI_ROOT/titan.so"
 STATIC_ARCHIVE="$ABI_ROOT/titan.a"
+TEST_SUPPORT_SOURCE="$PREFIX/share/titan/0.22/src/titan/test.titan"
 PROCESS_CHILD_SUPPLIED=${TITAN_PROCESS_SMOKE_CHILD:+1}
 LIBUV_PKG_CONFIG=${LIBUV_PKG_CONFIG:-pkg-config}
 OPENSSL_PKG_CONFIG=${OPENSSL_PKG_CONFIG:-pkg-config}
@@ -101,13 +102,16 @@ check_canonical_container() {
     test -f "$STATIC_ARCHIVE"
     test ! -L "$STATIC_ARCHIVE"
     test ! -e "$PREFIX/lib/libuv.a"
+    test -s "$TEST_SUPPORT_SOURCE"
+    test ! -L "$TEST_SUPPORT_SOURCE"
+    grep -Fq 'function testing(): boolean' "$TEST_SUPPORT_SOURCE"
     test ! -e "$PROVIDER.dSYM" || [[ $platform == macos ]]
     if [[ $platform == macos ]]; then
         test -d "$PROVIDER.dSYM"
         test -f "$PROVIDER.dSYM/Contents/Resources/DWARF/titan.so"
     fi
 
-    for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc; do
+    for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc test; do
         local shim="$SHIM_ROOT/titan/$module.lua"
         test -f "$shim"
         test ! -L "$shim"
@@ -152,6 +156,7 @@ local expected = {
     ["titan.lua"] = true,
     ["titan.iter"] = true,
     ["titan.gc"] = true,
+    ["titan.test"] = true,
 }
 local scanned, scan_error = metadata.scan_archive(archive, {
     expected_abi = driver.TITAN_VER,
@@ -464,18 +469,18 @@ run_mode_smoke() {
     local lua_cpath="$ABI_ROOT/?.so"
 
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_21="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_22="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/stdlib_provider_smoke.lua "$mode"
 
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_21="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_22="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/net_production_smoke.lua "$mode"
     # The os facade intentionally supports only pipe and TTY parent streams;
     # CI and noninteractive shells may otherwise supply a regular-file stdin.
     printf '' | env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_21="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_22="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/os_production_smoke.lua "$mode" \
         "$TITAN_PROCESS_SMOKE_CHILD"
@@ -504,6 +509,7 @@ local math = import "titan.math"
 local lua = import "titan.lua"
 local iter = import "titan.iter"
 local gc = import "titan.gc"
+local testing = import "test"
 
 local function check(condition: boolean, message: string)
   if not condition then raise message end
@@ -539,6 +545,8 @@ end
 function main(args: {string}): integer
   local marker = args[1]
   local process_child = args[2]
+  check(not testing.testing() and not testing.verbose(),
+        "titan.test reported an active runner in a production executable")
   local envname = "TITAN_STATIC_LIBUV_MODE_SMOKE"
   local original: string? = system.getenv(envname)
   defer
@@ -715,7 +723,7 @@ TITAN
         cd "$mode_dir"
         env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
             TITAN_ROCKS_ROOT="$PREFIX" \
-            TITAN_PATH_0_21="$ABI_ROOT" TITAN_PATH= \
+            TITAN_PATH_0_22="$ABI_ROOT" TITAN_PATH= \
             TITAN_RUNTIME_PREBUILT=1 \
             TITAN_EXTRA_CPPFLAGS="$cppflags" \
             TITAN_EXTRA_CFLAGS="-fno-strict-aliasing" \

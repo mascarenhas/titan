@@ -146,11 +146,13 @@ locals across filesystem yields and Lua calls. There are no borrowed raw
 pointers and no stack index is retained across an operation that can reallocate
 the stack.
 
-The focused behavior suite lives in `spec/stdlib/lua_spec.lua` outside
-LuaCov. It builds exact private coroutine/uv/async, PEG/string, I/O/filesystem,
-and Lua providers, then exercises text and binary chunks, embedded zero
-handling, Reader ownership, File error cleanup, cache states, asynchronous
-source loads, the duplicate-load guard, preload/C/Titan/custom loaders, and
-diagnostics. Its cancellation case reads an unbounded source candidate, cancels
-the waiting Task, checks the terminal cancelled status, and then retries
-the same module name from a finite source to prove deferred guard cleanup.
+The focused behavior suite is the native `lua.tests` owner under
+`spec/stdlib/titan/lua/`, outside LuaCov. It exercises text and binary chunks,
+embedded zero handling, Reader ownership, repeated File-error descriptor
+accounting, cache states, asynchronous source loads, duplicate-load rejection,
+preload/C/Titan/custom loaders, and diagnostics. Its cancellation case reads an
+unbounded source candidate, cancels the waiting Task, checks the terminal
+cancelled status, and then retries the same module name from a finite source to
+prove deferred guard cleanup. Narrow Lua-host access (for example `/dev/fd`
+enumeration) is obtained through a test-only Lua C-API helper without moving
+ordinary behavior back into a Busted suite.

@@ -1,0 +1,158 @@
+local async = import "async"
+local fs = import "fs"
+local http = import "http"
+local ssl = import "ssl"
+local str = import "string"
+local system = import "os"
+local timer = import "timer"
+
+local function active(task: async.Task): boolean
+  return not task:status():has_finished()
+end
+
+local function contains(subject: string, needle: string): boolean
+  local first: integer? = str.find(subject, needle)
+  return first ~= nil
+end
+
+local function exercise(certificate: string, private_key: string)
+  local server_value: http.Server? = nil
+  local handler: http.Handler = function (request: http.Request,
+                                          response: http.Response)
+    if request.target == "/idle-before-fragmented" then
+      response:set_header("Content-Length", "0")
+    else
+      response:set_header("Content-Length", "7")
+      response:write("safe\0ok")
+      do (server_value as http.Server):close() end
+    end
+  end
+  local port = 20000 + system.pid() % 30000
+  local server: http.Server? = nil
+  for _ = 1, 100 do
+    do
+      server = http.listen_tls("127.0.0.1", certificate, handler,
+                               private_key, port, nil, 500)
+      break
+    catch
+      if error is async.OperationError then
+        local failure = error as async.OperationError
+        if failure.name == "EADDRINUSE" then
+          port = port + 1
+        else
+          raise "http.listen_tls failed with " .. failure.name .. ": " ..
+            failure.message
+        end
+      else
+        raise error
+      end
+    end
+  end
+  if server == nil then raise "could not find an HTTPS loopback port" end
+  local exact_server = server as http.Server
+  server_value = exact_server
+  defer exact_server:close()
+  local serving = async.run(function (): value
+    exact_server:serve()
+    return nil
+  end)
+
+  local idle = ssl.connect("127.0.0.1", port, nil)
+  idle:write(
+    "GET /idle-before-fragmented HTTP/1.1\r\n" ..
+    "Host: localhost\r\n\r\n")
+  local idle_response? = idle:read_until("\r\n\r\n", false)
+  if not idle_response or
+     not contains(idle_response as string, "HTTP/1.1 200 OK\r\n") then
+    raise "HTTPS idle-timeout prelude received the wrong response"
+  end
+
+  local observed = "not-read"
+  local idle_reader = async.run(function (): value
+    do
+      local chunk? = idle:read()
+      if chunk then
+        observed = "unexpected TLS data"
+      else
+        observed = "authenticated TLS EOF"
+      end
+    catch
+      if error is ssl.Error then
+        observed = (error as ssl.Error).name
+      else
+        raise error
+      end
+    end
+    return nil
+  end)
+  local watchdog_fired = false
+  local watchdog = async.run(function (): value
+    timer.sleep(5000)
+    watchdog_fired = true
+    idle_reader:cancel(async.CancellationReason.simple(
+      "sanitizer HTTPS idle timeout stalled"))
+    return nil
+  end)
+  local idle_status = async.join(idle_reader)
+  watchdog:cancel(async.CancellationReason.simple(
+    "sanitizer HTTPS idle timeout completed"))
+  async.join(watchdog)
+  if watchdog_fired then
+    raise "HTTPS idle timeout needed the sanitizer watchdog"
+  end
+  if not idle_status:has_succeeded() then
+    raise "HTTPS idle-timeout peer reader did not succeed"
+  end
+  if observed ~= "TLS_TRUNCATED_EOF" then
+    raise "HTTPS idle timeout reported " .. observed
+  end
+  idle:close()
+
+  if exact_server:idle_timeout(0) ~= 500 then
+    raise "HTTPS idle timeout did not retain its configured value"
+  end
+
+  local connection = ssl.connect("127.0.0.1", port, nil)
+  defer connection:close()
+  local request =
+    "GET /fragmented HTTP/1.1\r\n" ..
+    "Host: localhost\r\nConnection: close\r\n\r\n"
+  local index = 1
+  while index <= #request do
+    connection:write(str.sub(request, index, index))
+    index = index + 1
+  end
+  local response = str.writer()
+  for chunk in connection:read do response:write(chunk) end
+  local rendered = response:drain()
+  if not contains(rendered, "HTTP/1.1 200 OK\r\n") or
+     not contains(rendered, "\r\n\r\nsafe\0ok") then
+    raise "fragmented HTTPS response was wrong"
+  end
+  connection:close()
+  while active(serving) do timer.yield() end
+  if serving:status():as_string() ~= "succeeded" then
+    raise "HTTPS serve Task failed"
+  end
+end
+
+function main(arguments: {string}): integer
+  local result_path? = arguments[1]
+  local certificate? = arguments[2]
+  local private_key? = arguments[3]
+  if not result_path or not certificate or not private_key then return 2 end
+
+  local succeeded = true
+  local result = "ssl-http-sanitizer-ok"
+  do
+    exercise(certificate as string, private_key as string)
+  catch
+    succeeded = false
+    result = str.tostring(error) .. "\n" .. traceback
+  end
+  local report = "ERROR:" .. result
+  if succeeded then report = "OK:" .. result end
+  fs.write_file(result_path as string, report)
+  if succeeded then return 0 end
+  return 1
+end

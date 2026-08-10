@@ -191,19 +191,25 @@ local function resolve_include(filename, options, incdirs)
     }
 end
 
-local function new_cpp_context(options)
+local function preprocessor_options(options)
     local own_dirs, dirs_error =
         cdriver.resolve_compiler_include_dirs(
             options.compiler_include_dirs)
     if not own_dirs then return nil, dirs_error end
-    return cpp.new_context({
+    return {
         compiler = options.compiler,
         language_mode = options.language_mode,
         language_flag = options.language_flag,
         compile_flags = options.compile_flags,
         cppflags = options.cppflags,
         fixed_include_dirs = own_dirs,
-    })
+    }
+end
+
+local function new_cpp_context(options)
+    local config, err = preprocessor_options(options)
+    if not config then return nil, err end
+    return cpp.new_context(config)
 end
 
 function cdriver.process_file(filename, options)

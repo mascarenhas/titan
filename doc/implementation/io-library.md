@@ -101,8 +101,11 @@ waiting raises. The completed bit is set only after process cleanup succeeds,
 so a later call can retry whatever did not reach that point. A later `wait`
 uses either the facade cache or the Process's retained exit status.
 
-The focused non-LuaCov suite in `spec/stdlib/io_spec.lua` compiles an exact
-private `titan.io` provider. Instrumented string and output providers prove
+The focused non-LuaCov native `io.tests` folder module is rooted at
+`spec/stdlib/titan/io/tests/tests.titan`; both `core_test.titan` and
+`process_test.titan` are constituents of that one logical test owner. Its core
+constituent runs against the canonical `titan.io` provider. Instrumented string
+and output values prove
 left-to-right conversion, conversion-before-output, builder result bytes,
 the zero-argument newline, one write, and late lookup of reassigned stdout.
 Its structural ReaderCloser records prove the literal delimiter/chop call,
@@ -111,10 +114,11 @@ errors, a retryable raising closer, and repeated manual close-function calls.
 Normal exits reach one terminal physical close; successful EOF gets a harmless
 idempotent repeat, while a close error gets one finalizer retry.
 
-`spec/stdlib/io_process_spec.lua` compiles small consumers against the
-canonical coroutine/uv/async, string, os, and io modules. It covers structural
-Interface conversion, interactive merged output, binary delimiter reads,
-retained exit status, idempotent close, and explicit running-child
-termination/reaping. The sibling `os_stream_facade_spec.lua` owns direct spawn
-configuration, optional endpoints, merged-facade identity, parent stdin,
-TTY-query, Interface conversion, and close-time wakeup of a pending reader.
+The process constituent runs against the canonical coroutine/uv/async, string,
+os, and io modules. It covers structural Interface
+conversion, interactive merged output, binary delimiter reads, retained exit
+status, idempotent close, and explicit running-child termination/reaping.
+Exact parent-stdin process plumbing also runs natively: a compiled Titan parent
+launches a focused standalone child through C99 `system`, reads its temporary
+result file, and removes that file with `defer`. Closed-facade behavior in a
+later Runtime runs under two explicit `support.runtime` sessions.

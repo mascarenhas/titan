@@ -419,17 +419,17 @@ libtitan-llhttp.a
 [bundled OpenSSL libssl.a + libcrypto.a]
 ```
 
-The source build invokes one compiler process for the seventeen logical roots:
+The source build invokes one compiler process for the eighteen logical roots:
 
 ```text
 titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs
 titan.net titan.ssl titan.url titan.http titan.os titan.peg titan.string
-titan.math titan.lua titan.iter titan.gc
+titan.math titan.lua titan.iter titan.gc titan.test
 ```
 
-The paired `titan.so`/`titan.a` has seventeen logical ABI/types protocols,
-seventeen archive metadata keys, and seventeen generated Lua shims. Bare native
-support adds an eighteenth DSO opener. LPegLabel contributes no logical key:
+The paired `titan.so`/`titan.a` has eighteen logical ABI/types protocols,
+eighteen archive metadata keys, and eighteen generated Lua shims. Bare native
+support adds a nineteenth DSO opener. LPegLabel contributes no logical key:
 its five members are
 force-carried into both provider forms solely as private native payload.
 
@@ -446,16 +446,16 @@ That compiler-owned dependency is independent of the vendored standard
 module: a deployed `titan.peg` pattern never dynamically links to or requires
 the external module.
 
-The generated providers are validated for exact symbols, seventeen metadata
-keys, all eighteen Lua openers, and absence of an LPegLabel dynamic
+The generated providers are validated for exact symbols, eighteen metadata
+keys, all nineteen Lua openers, and absence of an LPegLabel dynamic
 dependency. Isolation
 tests load private and external engines in both orders, use both pattern
 families, vary their max-stack settings independently, and reject cross-engine
 patterns.
 
 Publication otherwise retains the canonical standard-library transaction:
-new or changed shims and dSYM are committed first, then `titan.a`, with
-`titan.so` renamed last. Current seventeen-module reinstall and caught-failure
+new or changed shims and the exact staged `titan.test` compiler source are
+committed first, followed by dSYM and `titan.a`, with `titan.so` renamed last. Current eighteen-module reinstall and caught-failure
 rollback are supported. Titan remains a prototype; stale conflicting layouts
 and future ABI bumps are handled by cleaning the old installation and building
 a fresh versioned tree, not by adding cross-layout migration classifiers.

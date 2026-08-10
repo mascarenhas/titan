@@ -499,7 +499,8 @@ render_declarator = function(typ, name, quals, expand_typedef)
     elseif tag == "Type.CVoid" then
         return finish_base("void", name, quals)
     elseif tag == "Type.CInteger" or tag == "Type.CFloat" then
-        return finish_base(typ.spelling, name, quals)
+        return finish_base(
+            typ._c_declaration_spelling or typ.spelling, name, quals)
     elseif tag == "Type.CStruct" then
         return finish_base(aggregate_base("struct", typ), name, quals)
     elseif tag == "Type.CUnion" then

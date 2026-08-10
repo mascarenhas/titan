@@ -265,25 +265,29 @@ int titan_uv_test_stdio_setup(int mode) {
   case TITAN_UV_TEST_STDIO_PIPE_ALL:
     if (setup_input_pipe() != 0 || setup_output_pipe(1) != 0 ||
         setup_output_pipe(2) != 0)
-      return -1;
+      goto fail;
     break;
   case TITAN_UV_TEST_STDIO_FILE_STDOUT:
     if (setup_file_stdout() != 0)
-      return -1;
+      goto fail;
     break;
   case TITAN_UV_TEST_STDIO_TTY_SLAVE:
     if (setup_tty() != 0)
-      return -1;
+      goto fail;
     break;
   case TITAN_UV_TEST_STDIO_SOCKET_STDOUT:
     if (setup_socket_stdout() != 0)
-      return -1;
+      goto fail;
     break;
   default:
     record_failure("unknown stdio fixture mode %d", mode);
-    return -1;
+    goto fail;
   }
   return 0;
+
+fail:
+  titan_uv_test_stdio_finish(0);
+  return -1;
 }
 
 int titan_uv_test_stdio_finish(int expected_nonblocking_mask) {

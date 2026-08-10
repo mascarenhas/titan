@@ -136,15 +136,7 @@ function M.prepare(workspace, include_io)
         cppflags = "",
     })
     async_stdlib.register_exact_provider(layout, "titan.string")
-    async_stdlib.prepare_async_core(workspace, layout)
-
-    async_stdlib.write_source(
-        workspace, "titan.os", async_stdlib.read("titan/os.titan"))
-    async_stdlib.compile(workspace, "titan.os", {
-        layout = layout,
-        cppflags = "",
-    })
-    async_stdlib.register_exact_provider(layout, "titan.os")
+    async_stdlib.prepare_async_core(workspace, layout, { "os" })
 
     if include_io then
         async_stdlib.write_source(
@@ -169,7 +161,7 @@ function M.run_lua_source(workspace, layout, source, options)
     local command = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-        "TITAN_PATH_0_21=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_22=" .. quote(layout.abi_root),
         "TITAN_PATH=",
         "LUA_PATH=" .. quote(lua_path),
         "LUA_PATH_5_5=" .. quote(lua_path),

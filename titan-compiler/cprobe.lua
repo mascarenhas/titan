@@ -390,10 +390,28 @@ local function render_declaration_compatibility_batch_source(
             entry.left_type, entry.right_type,
             entry.left_declaration, entry.right_declaration,
             probe_identifier("d", module_context.header_key))
+        lines[#lines + 1] = "#if defined(__clang__)"
+        lines[#lines + 1] = "# pragma clang diagnostic push"
+        lines[#lines + 1] =
+            "# pragma clang diagnostic ignored \"-Wunused-variable\""
+        lines[#lines + 1] = "#elif defined(__GNUC__)"
+        lines[#lines + 1] = "# pragma GCC diagnostic push"
+        lines[#lines + 1] =
+            "# pragma GCC diagnostic ignored \"-Wunused-variable\""
+        lines[#lines + 1] = "# if __GNUC__ >= 13"
+        lines[#lines + 1] =
+            "#  pragma GCC diagnostic ignored \"-Wenum-int-mismatch\""
+        lines[#lines + 1] = "# endif"
+        lines[#lines + 1] = "#endif"
         lines[#lines + 1] =
             "extern " .. rendered.left_declaration .. ";"
         lines[#lines + 1] =
             "extern " .. rendered.right_declaration .. ";"
+        lines[#lines + 1] = "#if defined(__clang__)"
+        lines[#lines + 1] = "# pragma clang diagnostic pop"
+        lines[#lines + 1] = "#elif defined(__GNUC__)"
+        lines[#lines + 1] = "# pragma GCC diagnostic pop"
+        lines[#lines + 1] = "#endif"
         lines[#lines + 1] = ""
         return table.concat(lines, "\n")
     end
@@ -414,10 +432,18 @@ local function render_declaration_compatibility_batch_source(
     lines[#lines + 1] = "# pragma clang diagnostic push"
     lines[#lines + 1] =
         "# pragma clang diagnostic ignored \"-Wnested-externs\""
+    lines[#lines + 1] =
+        "# pragma clang diagnostic ignored \"-Wunused-variable\""
     lines[#lines + 1] = "#elif defined(__GNUC__)"
     lines[#lines + 1] = "# pragma GCC diagnostic push"
     lines[#lines + 1] =
         "# pragma GCC diagnostic ignored \"-Wnested-externs\""
+    lines[#lines + 1] =
+        "# pragma GCC diagnostic ignored \"-Wunused-variable\""
+    lines[#lines + 1] = "# if __GNUC__ >= 13"
+    lines[#lines + 1] =
+        "#  pragma GCC diagnostic ignored \"-Wenum-int-mismatch\""
+    lines[#lines + 1] = "# endif"
     lines[#lines + 1] = "#endif"
 
     for index, entry in ipairs(entries) do
@@ -2067,6 +2093,17 @@ function cprobe.new_service(options)
         workspace = nil,
         closed = false,
     }, Service)
+end
+
+function cprobe.normalize_include_descriptor(descriptor, options)
+    options = options or {}
+    local process_cwd, cwd_error = lfs.currentdir()
+    if not process_cwd then
+        return nil, "cannot determine include cwd: " .. tostring(cwd_error)
+    end
+    local cwd = absolute_path(options.cwd or process_cwd, process_cwd)
+    local source_dir = absolute_path(options.source_dir or cwd, cwd)
+    return normalize_include_descriptor(descriptor, source_dir, cwd)
 end
 
 cprobe.new = cprobe.new_service

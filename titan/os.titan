@@ -191,10 +191,10 @@ local function locale_category(name: string): ffi.titan_ffi_int
 end
 
 local function parent_stdio(descriptor: integer): uv.uv_stdio_t
-  if descriptor == 0 then return uv._os_parent_stdin() end
-  if descriptor == 1 then return uv._os_parent_stdout() end
-  if descriptor == 2 then return uv._os_parent_stderr() end
-  raise "internal parent stdio descriptor is invalid"
+  if descriptor < 0 or descriptor > 2 then
+    raise "internal parent stdio descriptor is invalid"
+  end
+  return uv.os_parent_stdio(descriptor)
 end
 
 local function input_handle(stream: InputStream): uv.uv_stdio_t
@@ -235,7 +235,7 @@ local function read_stream(stream: InputStream): string?
     stream.excess = ""
     return result
   end
-  return uv._os_stdio_read(handle)
+  return uv.os_stdio_read(handle)
 end
 
 local function read_input_until(stream: InputStream, delimiter: string,
@@ -285,7 +285,7 @@ local function read_input_until(stream: InputStream, delimiter: string,
 end
 
 function clock(): float
-  return uv._os_clock()
+  return uv.os_clock()
 end
 
 function difftime(later: integer, earlier: integer): float
@@ -305,7 +305,7 @@ function date(format: string?, timestamp: integer?): value
     actual_format = str.sub(actual_format, 2)
   end
 
-  local instant = uv._os_time() as ctime.time_t
+  local instant = uv.os_time() as ctime.time_t
   if timestamp then
     instant = (timestamp as integer) as ctime.time_t
   end
@@ -366,7 +366,7 @@ function time(year: integer?, month: integer?, day: integer?,
     if isdst == true or isdst == false then
       raise "time requires year, month, and day together"
     end
-    return uv._os_time()
+    return uv.os_time()
   end
   if not year or not month or not day then
     raise "time requires year, month, and day together"
@@ -401,81 +401,81 @@ function time(year: integer?, month: integer?, day: integer?,
 end
 
 function getenv(name: string): string?
-  return uv._os_getenv(name)
+  return uv.os_getenv(name)
 end
 
 function setenv(name: string, contents: string)
-  uv._os_setenv(name, contents)
+  uv.os_setenv(name, contents)
 end
 
 function unsetenv(name: string)
-  uv._os_unsetenv(name)
+  uv.os_unsetenv(name)
 end
 
 function cwd(): string
-  return uv._os_cwd()
+  return uv.current_directory("os.cwd")
 end
 
 function chdir(path: string)
-  uv._os_chdir(path)
+  uv.change_directory(path, "os.chdir")
 end
 
 function homedir(): string
-  return uv._os_homedir()
+  return uv.os_homedir()
 end
 
 function tmpdir(): string
-  return uv._os_tmpdir()
+  return uv.os_tmpdir()
 end
 
 function hostname(): string
-  return uv._os_hostname()
+  return uv.os_hostname()
 end
 
 function exepath(): string
-  return uv._os_exepath()
+  return uv.os_exepath()
 end
 
 function pid(): integer
-  return uv._os_pid()
+  return uv.os_pid()
 end
 
 function ppid(): integer
-  return uv._os_ppid()
+  return uv.os_ppid()
 end
 
 function with_stdin(config: SpawnConfig): integer
-  return uv._os_spawn_config_with_stdin(config.handle)
+  return uv.configure_capture(config.handle, 0)
 end
 
 function with_stdout(config: SpawnConfig): integer
-  return uv._os_spawn_config_with_stdout(config.handle)
+  return uv.configure_capture(config.handle, 1)
 end
 
 function with_stderr(config: SpawnConfig): integer
-  return uv._os_spawn_config_with_stderr(config.handle)
+  return uv.configure_capture(config.handle, 2)
 end
 
 function with_parent_stdin(config: SpawnConfig): integer
-  return uv._os_spawn_config_with_parent_stdin(config.handle)
+  return uv.configure_parent(config.handle, 0)
 end
 
 function with_parent_stdout(config: SpawnConfig): integer
-  return uv._os_spawn_config_with_parent_stdout(config.handle)
+  return uv.configure_parent(config.handle, 1)
 end
 
 function with_parent_stderr(config: SpawnConfig): integer
-  return uv._os_spawn_config_with_parent_stderr(config.handle)
+  return uv.configure_parent(config.handle, 2)
 end
 
 function with_merged_output(config: SpawnConfig): integer
-  return uv._os_spawn_config_with_merged_output(config.handle)
+  return uv.os_spawn_config_with_merged_output(config.handle)
 end
 
 function spawn(file: string, args: {string},
                ...: SpawnOption): Process
-  local config = SpawnConfig.new(uv._os_spawn_config_new())
-  defer uv._os_spawn_config_close(config.handle)
+  local config = SpawnConfig.new(uv.os_spawn_config_new())
+  defer uv.os_spawn_config_close(config.handle)
   local status = with_stdin(config)
   if status >= 0 then status = with_stdout(config) end
   if status >= 0 then status = with_stderr(config) end
@@ -486,10 +486,10 @@ function spawn(file: string, args: {string},
     index = index + 1
   end
   if status < 0 then
-    uv._os_spawn_config_error(config.handle, status)
+    uv.os_spawn_config_error(config.handle, status)
   end
   local process_handle, raw_stdin?, raw_stdout?, raw_stderr? =
-    uv._os_process_spawn_with_config(file, args, config.handle)
+    uv.os_process_spawn_with_config(file, args, config.handle)
 
   local input: OutputStream? = nil
   if raw_stdin then
@@ -517,21 +517,21 @@ function spawn(file: string, args: {string},
 end
 
 function Process:wait(): ExitStatus
-  local code, signal_number = uv._os_process_wait(self.handle)
-  return ExitStatus.new(code, uv._os_signal_name(signal_number),
+  local code, signal_number = uv.os_process_wait(self.handle)
+  return ExitStatus.new(code, uv.signal_name(signal_number),
                         signal_number)
 end
 
 function Process:kill(signal: string)
-  uv._os_process_kill(self.handle, signal)
+  uv.os_process_kill(self.handle, signal)
 end
 
 function Process:is_running(): boolean
-  return uv._os_process_is_running(self.handle)
+  return uv.os_process_is_running(self.handle)
 end
 
 function OutputStream:write(data: string)
-  uv._os_stdio_write(output_handle(self), data)
+  uv.os_stdio_write(output_handle(self), data)
 end
 
 function OutputStream:close()
@@ -539,11 +539,11 @@ function OutputStream:close()
   local captured? = self.handle
   if not captured then return end
   self.handle = nil
-  uv._os_stdio_close(captured as uv.uv_stdio_t)
+  uv.os_stdio_close(captured as uv.uv_stdio_t)
 end
 
 function OutputStream:is_tty(): boolean
-  return uv._os_stdio_is_tty(output_handle(self))
+  return uv.os_stdio_is_tty(output_handle(self))
 end
 
 function InputStream:read(): string?
@@ -562,19 +562,19 @@ function InputStream:close()
   if not captured then return end
   self.handle = nil
   self.excess = ""
-  uv._os_stdio_close(captured as uv.uv_stdio_t)
+  uv.os_stdio_close(captured as uv.uv_stdio_t)
 end
 
 function InputStream:is_tty(): boolean
-  return uv._os_stdio_is_tty(input_handle(self))
+  return uv.os_stdio_is_tty(input_handle(self))
 end
 
 function exit(code: integer?)
   local actual_code = 0
   if code then actual_code = code as integer end
-  uv._os_exit(actual_code)
+  uv.os_exit(actual_code)
 end
 
 function wait_signal(name: string): string
-  return uv._os_wait_signal(name)
+  return uv.os_wait_signal(name)
 end

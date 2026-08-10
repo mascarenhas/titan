@@ -1,0 +1,24 @@
+-- Native channel, combinator, and Task behavior tests for titan.async.
+local test = import "test"
+local runtime_test = import "support.runtime"
+local async = import "async"
+local timer = import "timer"
+local support = import "async.test_support"
+local task_support = import "support.async"
+
+-- These narrow Lua/C boundaries build reachability probes and inspect raw
+-- traceback text without adding unrelated Titan standard-library imports.
+local lua = foreign import "lua.h"
+local ffi = foreign import "titan/ffi.h"
+local cstring = foreign import "string.h"
+
+interface ReaderCloserShape
+  function read(): string?
+  function read_until(delimiter: string, chop: boolean?): string?
+  function close()
+end
+
+interface WriterCloserShape
+  function write(data: string)
+  function close()
+end

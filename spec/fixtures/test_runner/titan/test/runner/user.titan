@@ -1,0 +1,9 @@
+local test = import "test"
+
+function test_runner_prefixed_location(context: test.Context)
+  local file, function_name, line = test.location()
+  test.assert(file == "user.titan")
+  test.assert(function_name ==
+              "titan.test.runner.user.test_runner_prefixed_location")
+  test.assert(line > 0)
+end

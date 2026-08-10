@@ -166,6 +166,39 @@ syntactically present extents are preserved rather than thrown away; the checker
 treats only numeric extents as known and rejects operations that require a known
 bound.
 
+### Enum carriers
+
+C enum descriptors retain their exact tag, typedef, or enumerator-expression
+spelling plus the normalized origin header. They are not lowered through the
+parser's provisional `int`. On first value use, the checker asks the configured
+compiler which ordinary plain/signed/unsigned character, short, int, long, or
+long long declaration is compatible. The compatibility query renders the exact
+surface at the use—retaining an outer typedef—and uses the consumer's ordered
+direct headers plus that surface's rendered origins. Thus a tag spelling that a
+later macro invalidates cannot be certified by an earlier producer or alias.
+Enum object types are accepted only when that carrier's full range fits
+`lua_Integer`; `__int128` is deliberately not a candidate. Unused enum
+declarations require no probe. Invocation of a C function pointer triggers the
+same check for its by-value parameter and result graph; merely storing a pointer
+or carrying a spellable wide enum behind one checks declarator spelling, not a
+numeric carrier. Transparent Titan aliases resolve without forcing a carrier;
+each eventual use rechecks their resolved graph in full or spelling-only mode.
+
+Every enumerator, including one owned by a tagged enum, gets its own exact
+`__typeof__((NAME))` view and is validated independently. Its
+compiler-selected ordinary expression type establishes that no wider carrier
+is involved, and a compile-time array-bound predicate checks the exact value
+against the `lua_Integer` range. That selected carrier remains intact through C
+promotions and operators; the eventual Titan/Lua coercion performs the range
+check. The sole automatic C-enum adjustment is from an enumerator view to its
+canonical owning enum. Every directly named object from one anonymous enum
+declaration keeps that same canonical owner; its object-specific declarator is
+only an exact spelling, never a new nominal type. Generated temporaries and
+carrier probes cast through `__typeof__((object))` to obtain the exact
+unqualified value type, removing top-level `const`/`volatile` without integer
+promotion. An enum surface without any standalone exact spelling, such as a
+prototype-local tag, fails closed even when reached below a pointer.
+
 `c99.lua` distinguishes a true `(void)` prototype from `()`: both have no
 effective parameter types, but only the former establishes a known empty name
 list. `ctypes.get_params` publishes `paramnames = { ... }` only when every

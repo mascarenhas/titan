@@ -156,10 +156,13 @@ describe("Titan driver generic build flags", function()
             APPLICATION .. "/" .. MODULE .. ".c", "rb"))
         local csource = generated:read("*a")
         generated:close()
+        local include_root = lfs.currentdir() .. "/" .. INCLUDE .. "/"
         assert.truthy(csource:find(
-            '#include "driver_flags_config.h"', 1, true), csource)
-        assert.truthy(csource:find('#include "titan/ffi.h"', 1, true),
-            csource)
+            '#include "' .. include_root .. 'driver_flags_config.h"',
+            1, true), csource)
+        assert.truthy(csource:find(
+            '#include "' .. include_root .. 'titan/ffi.h"',
+            1, true), csource)
     end)
 
     it("keeps extra C flags in compile phases and ordered LD flags in the link phase",

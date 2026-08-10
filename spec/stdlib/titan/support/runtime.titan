@@ -1,0 +1,98 @@
+-- Per-case async Runtime ownership for the unified native stdlib test image.
+-- The executable bypasses the automatic standalone bootstrap, so a test that
+-- needs async operations starts one Task and pumps one Runtime explicitly.
+local async = import "async"
+local test = import "test"
+local lua = foreign import "lua.h"
+local ffi = foreign import "titan/ffi.h"
+
+local type Body = () -> ()
+local type Cleanup = () -> ()
+
+local record Session
+  cleanups: {Cleanup}
+  cleanups_open: boolean
+  failed: boolean
+  failure_is_skip: boolean
+  failure: value
+  failure_traceback: string
+end
+
+local active_session: Session? = nil
+
+local function reinstall_trace(trace: string)
+  ffi.lua_pushtvalue(L, trace)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
+  lua.lua_pushboolean(L, 1)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
+end
+
+local function remember_failure(session: Session, failure: value,
+                                failure_traceback: string,
+                                from_cleanup: boolean)
+  local skipped, reason? = test.runner_skip_reason(failure)
+  local effective = failure
+  if from_cleanup and skipped then
+    local message = "test.skip cannot be called from async test cleanup"
+    if reason then message = message .. ": " .. (reason as string) end
+    effective = message
+    skipped = false
+  end
+  if session.failed and not (from_cleanup and session.failure_is_skip) then
+    return
+  end
+  session.failed = true
+  session.failure_is_skip = skipped
+  session.failure = effective
+  session.failure_traceback = failure_traceback
+end
+
+local function cleanup(callback: Cleanup)
+  local session? = active_session
+  if not session or not (session as Session).cleanups_open then
+    raise "cannot register async cleanup outside an active async test case"
+  end
+  local current = session as Session
+  current.cleanups[#current.cleanups + 1] = callback
+end
+
+local function run_cleanups(session: Session)
+  session.cleanups_open = false
+  local index = #session.cleanups
+  while index >= 1 do
+    local callback = session.cleanups[index]
+    session.cleanups[index] = nil
+    do
+      callback()
+    catch
+      remember_failure(session, error, traceback, true)
+    end
+    index = index - 1
+  end
+end
+
+local function run(body: Body)
+  if active_session then raise "async test Runtime is not reentrant" end
+  local session = Session.new({}, true, false, false, nil, "")
+  active_session = session
+  defer active_session = nil
+
+  local task = async.run(function (): value
+    do
+      body()
+    catch
+      remember_failure(session, error, traceback, false)
+    end
+    run_cleanups(session)
+    return nil
+  end)
+  async.loop()
+
+  local status = task:status()
+  test.assert(status:has_succeeded(),
+              "async test supervisor ended " .. status:as_string())
+  if session.failed then
+    reinstall_trace(session.failure_traceback)
+    raise session.failure
+  end
+end

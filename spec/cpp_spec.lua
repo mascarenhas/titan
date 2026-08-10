@@ -149,6 +149,28 @@ describe("c preprocessor (cpp)", function()
         it("expands with multiple arguments", function()
             assert.equal("1 + 2", expand("#define ADD(a,b) a + b\nADD(1, 2)\n"))
         end)
+        it("substitutes every standard variadic macro argument", function()
+            assert.equal("call ( a , b + c , d )", expand([[
+#define CALL(...) call(__VA_ARGS__)
+CALL(a, b + c, d)
+]]))
+            assert.equal("head : tail1 , tail2", expand([[
+#define PREFIX(head, ...) head : __VA_ARGS__
+PREFIX(head, tail1, tail2)
+]]))
+            assert.equal('"a, b + c"', expand([[
+#define STRINGIZE(...) #__VA_ARGS__
+STRINGIZE(a, b + c)
+]]))
+            assert.equal("call ( )", expand([[
+#define CALL(...) call(__VA_ARGS__)
+CALL()
+]]))
+            assert.equal("void f ( int , ... ) ;", expand([[
+#define DECL(name, ...) void name(int, ...);
+DECL(f, ignored, extras)
+]]))
+        end)
         it("expands repeated uses independently", function()
             assert.equal("( 1 ) ( 2 ) ( 3 )",
                 expand("#define F(x) (x)\nF(1) F(2) F(3)\n"))

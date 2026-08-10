@@ -144,7 +144,7 @@ local record TimerOwner
 end
 
 -- A repeating timer retains only its latest tick and at most one waiter.
-record uv_timer_t
+local record uv_timer_t
   local handle: owned *libuv.uv_timer_t
   local callback: (uv_timer_t) -> ()
   local runtime: Runtime
@@ -673,27 +673,19 @@ local function run_internal(func: () -> value): Task
   return task
 end
 
-function _run(func: () -> value): Task
-  return run_internal(func)
-end
-
-function _yield()
+local function yield()
   await(Call.turn(TurnCall.new()))
 end
 
-function _running(): Task
-  return running_task()
-end
-
-function _suspend()
+local function suspend()
   await(Call.suspend(SuspendCall.new()))
 end
 
-function _sleep(milliseconds: integer)
+local function sleep(milliseconds: integer)
   await(Call.sleep(SleepCall.new(milliseconds)))
 end
 
-function _ticker(milliseconds: integer): uv_timer_t
+local function ticker(milliseconds: integer): uv_timer_t
   if milliseconds <= 0 then
     raise "ticker interval must be positive"
   end
@@ -702,15 +694,15 @@ function _ticker(milliseconds: integer): uv_timer_t
   return start_ticker(task, milliseconds)
 end
 
-function _ticker_tick(ticker: uv_timer_t): boolean
+local function ticker_tick(ticker: uv_timer_t): boolean
   return await(Call.ticker_tick(TickerTickCall.new(ticker))) as boolean
 end
 
-function _ticker_close(ticker: uv_timer_t)
+local function ticker_close(ticker: uv_timer_t)
   await(Call.ticker_close(TickerCloseCall.new(ticker)))
 end
 
-function _os_exit(code: integer)
+local function os_exit(code: integer)
   local task = running_task()
   local runtime = task.runtime
   if runtime.exit_code == nil then

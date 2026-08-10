@@ -6,7 +6,7 @@ buffers, fields, arrays, and explicit C varargs, but exposing stack-oriented Lua
 C API calls to arbitrary Titan programs still needs a separate design pass.
 
 The standard `titan.peg`, `titan.string`, `titan.lua`, `titan.iter`,
-and `titan.gc` implementations are a narrow trusted exception. Their
+`titan.gc`, and `titan.test` implementations are a narrow trusted exception. Their
 module-private code uses an audited allowlist of raw Lua C API operations
 against the generated function's built-in `lua_State *L`. That exception is
 an implementation technique, not a user-facing FFI feature and not permission
@@ -68,7 +68,8 @@ raw Lua C API:
   yield attempt is a normal Lua error at this native/Titan boundary, not a
   suspended continuation;
 * let ordinary errors from typed Lua callables use Titan's generated generic
-  call boundary. The current trusted code has no manual `lua_pcallk` adapter.
+  call boundary. The one manual `lua_pcallk` use in `titan.test` is a fixed,
+  module-initialization helper factory with an exact two-result ledger.
 
 The current allowlist has the following accounting rules. “Pushes one” means
 the pushed slot is also a temporary GC root until the saved top is restored.
@@ -85,8 +86,10 @@ the pushed slot is also a temporary GC root until the saved top is restored.
 | `lua_rawset` | Pop key and value while retaining the table. `titan.gc` uses it on a confirmed existing metatable so changing `__mode` cannot invoke a metatable-of-metatable `__newindex`; the public API's write barrier remains responsible for the new edge. |
 | `lua_next` | Pop the current key and, on success, push the next key and item; exhaustion pushes nothing. It can longjmp for an invalid key. `titan.iter` copies both successful results into traced `value` locals before restoring the entry top. |
 | `luaL_loadbufferx` | Push exactly one compiled function on success or one error object on failure, using the explicit input length rather than a terminating zero. `titan.lua` checks the status, traces the surviving object, and restores the saved top. Compilation can allocate or longjmp. |
+| `luaL_loadstring` | Push one compiled function or one error object. `titan.test` uses only a fixed internal helper-factory chunk, traces an error before raising, and restores the saved top. The `luaL_dostring` convenience is a function-like macro and is not FFI-callable. |
+| `lua_pcallk` | Pop the fixed helper-factory function and zero arguments, then push exactly two closures on success or one error object on failure. `titan.test` uses a nil continuation in non-yieldable module initialization and traces both successful closures before restoring the top. |
 | `lua_setupvalue` | Install and pop the stack-top value as the selected closure upvalue, applying Lua's barrier. If that upvalue does not exist it returns null and pops nothing, so `titan.lua` removes the unused environment explicitly. |
-| `luaL_tolstring` | Push one string result. It may invoke `__tostring`, allocate, or raise, so the result is copied to a traced Titan value before restoration. |
+| `luaL_tolstring` | Push one string result. It may invoke `__tostring`, allocate, or raise, so the result is copied to a traced Titan value before restoration. `titan.test` catches a throwing renderer and preserves a fixed failure-text fallback. |
 | `lua_type`, `lua_topointer` | Net zero. `lua_type` validates private opener/registry results. A pointer from `lua_topointer` is identity-only and must not be dereferenced. |
 | `ffi.lua_totvalue` | Net zero; copies the selected slot into Titan's traced `value` representation before cleanup. |
 | `titan_lpeglabel_open` | Push the private engine table and report one result. PEG validates both facts, copies the table to a traced Map, and restores the entry top. |

@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+
+# Remove compiler-generated test artifacts without consulting Git. Translation
+# units below spec/ are generated only when a same-stem Titan source exists;
+# author-written native C fixtures therefore survive. Synthetic --test outputs
+# use reserved __test_* suffixes, and root test-runner fixtures use the reserved
+# test_runner_* namespace.
+
+set -euo pipefail
+
+keep_output=false
+if [[ ${1-} == --keep-output ]]; then
+    keep_output=true
+    shift
+fi
+if [[ $# -ne 0 ]]; then
+    echo "usage: $0 [--keep-output]" >&2
+    exit 2
+fi
+
+while IFS= read -r -d '' source; do
+    if [[ -f ${source%.c}.titan ]]; then rm -f -- "$source"; fi
+done < <(find spec -type f -name '*.c' -print0)
+
+find spec -type f -name '*.o' -delete
+
+# A test program's executable and dSYM share the prefix of its reserved
+# synthetic support/runner/entrypoint files. Record those prefixes before
+# deleting the synthetic files so nested outputs are cleaned without naming
+# individual tests here.
+test_programs=()
+while IFS= read -r -d '' artifact; do
+    case $artifact in
+        *__test_support.*) program=${artifact%__test_support.*} ;;
+        *__test_runner.*) program=${artifact%__test_runner.*} ;;
+        *__test_entrypoint.*) program=${artifact%__test_entrypoint.*} ;;
+        *) continue ;;
+    esac
+    test_programs+=("$program")
+    rm -f -- "$artifact"
+done < <(find . \
+    -path './.git' -prune -o \
+    -path './.lua' -prune -o \
+    -path './.titan-tests' -prune -o \
+    -type f \( \
+        -name '*__test_support.titan' -o \
+        -name '*__test_support.c' -o -name '*__test_support.o' -o \
+        -name '*__test_runner.titan' -o \
+        -name '*__test_runner.c' -o -name '*__test_runner.o' -o \
+        -name '*__test_entrypoint.titan' -o \
+        -name '*__test_entrypoint.c' -o -name '*__test_entrypoint.o' \
+    \) -print0)
+
+for program in "${test_programs[@]}"; do
+    rm -f -- "$program"
+    rm -rf -- "$program.dSYM"
+    parent=${program%/*}
+    while [[ $parent != "$program" && $parent != . && $parent != / ]]; do
+        rmdir -- "$parent" 2>/dev/null || break
+        program=$parent
+        parent=${program%/*}
+    done
+done
+
+# Root-level files and directories with this prefix are owned exclusively by
+# the test-runner compiler specs, including interrupted collision fixtures.
+for fixture in ./test_runner_*; do
+    if [[ -e $fixture || -L $fixture ]]; then rm -rf -- "$fixture"; fi
+done
+
+if ! $keep_output; then rm -rf -- .titan-tests; fi

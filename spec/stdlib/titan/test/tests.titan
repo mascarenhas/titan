@@ -1,0 +1,155 @@
+local test = import "test"
+local command = import "support.command"
+local runtime_test = import "support.runtime"
+local common = import "support.common"
+
+local function assert_outside_runner_probe(source: string, label: string)
+  local output, why, code = command.capture({"lua", "-E", "-e", source})
+  test.assert(why == "exit" and code == 0,
+              label .. " failed: " .. output)
+end
+
+function test_outside_runner_publishes_documented_surface(
+    _context: test.Context)
+  assert_outside_runner_probe([==[
+    local test = require "titan.test"
+    assert(type(test) == "userdata")
+    assert(type(test.testing) == "function")
+    assert(type(test.verbose) == "function")
+    assert(type(test.location) == "function")
+    assert(type(test.skip) == "function")
+    assert(type(test.assert) == "function")
+    assert(type(test.Context) == "table")
+
+    local private_names = {
+      "Cleanup", "RegisteredTest", "runner_begin", "runner_end",
+      "runner_new_context", "runner_take_subtests", "runner_take_cleanup",
+      "runner_skip_reason", "runner_error_text", "runner_matches",
+      "runner_trace_location",
+    }
+    for _, name in ipairs(private_names) do
+      local ok, failure = pcall(function() return test[name] end)
+      assert(not ok, name)
+      assert(tostring(failure):find(
+        "member '" .. name .. "' does not exist", 1, true),
+        tostring(failure))
+    end
+  ]==], "outside-runner public-surface probe")
+end
+
+function test_outside_runner_reports_inactive_state(_context: test.Context)
+  assert_outside_runner_probe([==[
+    local test = require "titan.test"
+    assert(test.testing() == false)
+    assert(test.verbose() == false)
+  ]==], "outside-runner inactive-state probe")
+end
+
+function test_outside_runner_raises_readable_errors(_context: test.Context)
+  assert_outside_runner_probe([==[
+    local test = require "titan.test"
+    local ok, failure = pcall(test.assert, false)
+    assert(not ok and tostring(failure):find("assertion failed", 1, true),
+           tostring(failure))
+    ok, failure = pcall(test.assert, false, "outside assertion")
+    assert(not ok and tostring(failure):find("outside assertion", 1, true),
+           tostring(failure))
+    ok, failure = pcall(test.skip, "outside skip")
+    assert(not ok and tostring(failure):find(
+      "test skipped: outside skip", 1, true), tostring(failure))
+  ]==], "outside-runner error probe")
+end
+
+function test_outside_runner_defers_lua_helper_capture(
+    _context: test.Context)
+  assert_outside_runner_probe([==[
+    local original_gmatch = string.gmatch
+    string.gmatch = false
+    local test = require "titan.test"
+    string.gmatch = original_gmatch
+    local filename, function_name, line = test.location()
+    assert(filename == "<none>" and function_name == "<none>" and line == 0)
+  ]==], "outside-runner deferred-helper probe")
+end
+
+function test_outside_runner_uses_location_sentinel(_context: test.Context)
+  assert_outside_runner_probe([==[
+    local test = require "titan.test"
+    local filename, function_name, line = test.location()
+    assert(filename == "<none>" and function_name == "<none>" and line == 0)
+  ]==], "outside-runner location probe")
+end
+
+local type RuntimeBody = () -> ()
+
+local function caught_runtime(body: RuntimeBody): (value, string)
+  local failure: value = nil
+  local failure_traceback = ""
+  do
+    runtime_test.run(body)
+  catch
+    failure = error
+    failure_traceback = traceback
+  end
+  return failure, failure_traceback
+end
+
+local function cleanup_trace_origin()
+  raise "cleanup-trace"
+end
+
+function test_runtime_cleanup_failure_replaces_pass(_context: test.Context)
+  local failure, failure_traceback = caught_runtime(function ()
+    runtime_test.cleanup(cleanup_trace_origin)
+  end)
+  test.assert(failure == "cleanup-trace" and
+              common.contains(failure_traceback, "cleanup_trace_origin"),
+              "cleanup failure did not replace a passing body with its trace")
+end
+
+function test_runtime_cleanup_failure_replaces_skip(_context: test.Context)
+  local failure, failure_traceback = caught_runtime(function ()
+    runtime_test.cleanup(cleanup_trace_origin)
+    test.skip("body skip")
+  end)
+  test.assert(failure == "cleanup-trace" and
+              common.contains(failure_traceback, "cleanup_trace_origin"),
+              "cleanup failure did not replace a skipped body")
+end
+
+function test_runtime_body_failure_precedes_cleanup_failure(
+    _context: test.Context)
+  local failure, _failure_traceback = caught_runtime(function ()
+    runtime_test.cleanup(function ()
+      raise "cleanup-loses"
+    end)
+    raise "body-wins"
+  end)
+  test.assert(failure == "body-wins",
+              "cleanup failure replaced the body failure")
+end
+
+function test_runtime_cleanup_rejects_skip(_context: test.Context)
+  local failure, _failure_traceback = caught_runtime(function ()
+    runtime_test.cleanup(function ()
+      test.skip("cleanup reason")
+    end)
+  end)
+  test.assert(failure ==
+              "test.skip cannot be called from async test cleanup: cleanup reason",
+              "cleanup skip was not converted to a failure")
+end
+
+function test_runtime_cleanup_is_lifo_and_attempts_all(_context: test.Context)
+  local order = ""
+  local failure, _failure_traceback = caught_runtime(function ()
+    runtime_test.cleanup(function () order = order .. "first;" end)
+    runtime_test.cleanup(function ()
+      order = order .. "second;"
+      raise "middle-cleanup"
+    end)
+    runtime_test.cleanup(function () order = order .. "third;" end)
+  end)
+  test.assert(order == "third;second;first;" and failure == "middle-cleanup",
+              "Runtime cleanup did not remain LIFO and all-attempted")
+end

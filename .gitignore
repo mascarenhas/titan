@@ -70,8 +70,14 @@
 /titan/lua.lua
 /titan/iter.lua
 /titan/gc.lua
+/titan/test.lua
 
 # Native runtime command-line configuration stamps
 /titan-runtime/.titan-*-build-config
 /titan-runtime/.titan-stdlib-complete
 /titan-runtime/bootstrap/
+
+# Unified native standard-library test build
+/.titan-tests/
+/luacov.stats.out
+/luacov.report.out

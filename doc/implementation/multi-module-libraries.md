@@ -61,7 +61,7 @@ a/b/c.so
 ```
 
 The exact historical location is therefore the final candidate. The compiler
-first expands the selected `TITAN_PATH_0_21`/`TITAN_PATH` with the runtime's
+first expands the selected `TITAN_PATH_0_22`/`TITAN_PATH` with the runtime's
 `;;` default-insertion semantics. It then searches **root-major**: all
 shallow-to-exact candidates in the first path root, then all candidates in the
 second root, and so on.
@@ -97,7 +97,7 @@ The states are deliberately strict:
 * an exact candidate with neither symbol retains the markerless-binary error
   instead of falling through to source.
 
-The ABI marker must return exactly one string equal to `0.21`. The types entry
+The ABI marker must return exactly one string equal to `0.22`. The types entry
 must return exactly one serialized `Type.Module` for the requested logical
 name, with a canonical public schema. The loader does not scan later images
 after a claim; visible duplicate providers are resolved by ordinary first
@@ -285,7 +285,7 @@ Lua process and requires exactly one support table exposing `_loadlib` and
 proof.
 
 The production standard library is the canonical example. One compiler
-invocation names all seventeen logical roots and publishes root `titan.so` and
+invocation names all eighteen logical roots and publishes root `titan.so` and
 `titan.a`. Internal standard imports are direct. `titanlib.o` is shared `-X`
 payload and supplies bare `luaopen_titan` without adding a logical metadata
 key. The private namespaced five-member LPegLabel archive follows it as
@@ -293,16 +293,16 @@ metadata-free payload. The selected libuv payload follows it, then the private
 HTTP adapter and llhttp archive, and finally the selected OpenSSL payload used
 directly by `titan.ssl`. Bundled archives are force-carried into the DSO and flattened
 into the archive; system-mode libuv/OpenSSL settings remain final-link inputs
-and are never copied into `titan.a`. The DSO exports eighteen Lua entries
-(`luaopen_titan` plus the seventeen logical entries); both forms define the
-seventeen logical protocols, and the archive advertises exactly seventeen
+and are never copied into `titan.a`. The DSO exports nineteen Lua entries
+(`luaopen_titan` plus the eighteen logical entries); both forms define the
+eighteen logical protocols, and the archive advertises exactly eighteen
 metadata keys.
 The private LPegLabel archive and its headers remain source-build inputs; they
 are not installed in the compiler/runtime SDK.
 
 `make titan` builds a distinct private bootstrap at
 `titan-runtime/bootstrap/titan.so`, linked only from `titanlib.o`. During a
-source-rock install it is staged at `<root>/lib/titan/0.21/titan.so` only when
+source-rock install it is staged at `<root>/lib/titan/0.22/titan.so` only when
 that pathname is absent. A usable existing bootstrap or full image is
 preserved, so a repeated build never replaces a full library with the smaller
 bootstrap. An incompatible existing image is an error and is not overwritten.
@@ -312,27 +312,30 @@ a private directory on the destination filesystem under the same effective
 `CC`, `AR`, `RANLIB`, Titan extra flags, runtime root, and libuv policy used by
 the installer, together with the matching OpenSSL policy and private HTTP
 native inputs. TLS uses the selected OpenSSL library directly and has no
-adapter object. The hook then executes the source-only
+adapter object. The exact `titan/test.titan` used by this generation is copied
+into the same private stage. The hook then executes the source-only
 `scripts/stdlib_installer.lua` directly with the installed Lua; the publisher
 is not an installed compiler module. The script rescans `titan.a`, requires
-the exact seventeen-key set, compares embedded metadata with the staged DSO and a
+the exact eighteen-key set, compares embedded metadata with the staged DSO and a
 fresh-process archive-backed validation image, validates bare
-`luaopen_titan`, the seventeen exact shims, and the macOS dSYM, then publishes the
+`luaopen_titan`, the eighteen exact shims, the exact test-support source, and
+the macOS dSYM, then publishes the
 paired bundle with the DSO last. It recognizes bootstrap-only and current
 complete-pair predecessors in that same namespace. Injected failures restore
 the exact supported predecessor. After the DSO commit, backup cleanup is best
 effort and cannot turn the coherent install into a reported hook failure.
-Separately versioned 0.17, 0.18, 0.19, and 0.20 artifacts are not purged,
+Separately versioned 0.17, 0.18, 0.19, 0.20, and 0.21 artifacts are not purged,
 migrated, or cleaned up.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
-dSYM) and seventeen Lua shims:
+dSYM), eighteen Lua shims, and the canonical test-support source:
 
 ```text
-<root>/lib/titan/0.21/titan.so
-<root>/lib/titan/0.21/titan.a
-<root>/lib/titan/0.21/titan.so.dSYM          # macOS only
-<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc}.lua
+<root>/lib/titan/0.22/titan.so
+<root>/lib/titan/0.22/titan.a
+<root>/lib/titan/0.22/titan.so.dSYM          # macOS only
+<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc,test}.lua
+<root>/share/titan/0.22/src/titan/test.titan
 ```
 
 These remain direct Titan artifacts outside the source-rock manifest. The
@@ -340,19 +343,19 @@ manifest owns the compiler Lua/script files; `luarocks remove` does not claim
 to remove Titan library-package artifacts.
 
 The checkout Make graph has one provider-pair completion/configuration stamp.
-All seventeen flat/folder source sets, native inputs, effective
+All eighteen flat/folder source sets, native inputs, effective
 `CC`/`AR`/`RANLIB`, embedded-format inputs, libuv/OpenSSL modes, dependency
 identities, and extra flags are prerequisites. The
 DSO, archive, conditional dSYM, and every shim must exist; every warm
-invocation rescans `titan.a` for the exact seventeen-key set without changing pair
+invocation rescans `titan.a` for the exact eighteen-key set without changing pair
 mtimes. `make clean` removes only exact known generated outputs. Production
 library tests treat the combined set as read-only. CI snapshots and restores
-the checkout runtime archive plus the installed DSO/archive/dSYM/shims around
-compiler groups; its system-libuv/system-OpenSSL smoke replaces the whole
+the checkout runtime archive plus the installed DSO/archive/dSYM/shims and
+canonical compiler source around compiler groups; its system-libuv/system-OpenSSL smoke replaces the whole
 paired generation rather than one logical child, while the prepared artifact retains the
 bundled generation.
 
-## ABI 0.16 through 0.21 and test-only exact providers
+## ABI 0.16 through 0.22 and test-only exact providers
 
 ABI 0.16 changed neither per-module serialized type shapes nor Titan's native
 calling convention. It is nevertheless a mandatory compatibility boundary:
@@ -371,9 +374,10 @@ those pointers now denote private backing Tables paired one-to-one with
 canonical Lua proxy Udata. Every generated module also caches the per-state
 Array metatable. Since 0.16 code could expose or mutate a backing as an
 ordinary table, 0.16 and 0.17 providers must never be mixed. Current lookup
-uses `TITAN_PATH_0_21` and `lib/titan/0.21`; installed 0.17/0.18/0.19/0.20
-trees are preserved only as separately versioned predecessors. See
-[Dense Arrays](dense-arrays.md#abi-017-020-and-021-boundaries).
+uses `TITAN_PATH_0_22` and `lib/titan/0.22`; installed
+0.17/0.18/0.19/0.20/0.21 trees are preserved only as separately versioned
+predecessors. See
+[Dense Arrays](dense-arrays.md#abi-017-020-021-and-022-boundaries).
 
 ABI 0.18 preserved the provider model and Array protocol, but the generated
 standard-library archive objects now reference callback trampolines promoted
@@ -391,16 +395,20 @@ ABI 0.20 retained both provider formats and the metadata container, but changed
 two runtime layouts: every Array proxy carries a second traced user value for
 its genuine-Lua writer, and every Titan function closure carries a fixed
 opaque brand upvalue plus a final strict-entry light C function. Its marker must
-reject 0.19 before any native value crosses that boundary. ABI 0.21 retains
-those layouts while advancing the embedded Lua contract from 5.5.0 to 5.5.1.
-Its marker rejects 0.20 before schema decoding or native linking. The 0.21
-publisher does not migrate, clean up, or otherwise consume the preserved 0.20
-tree, and there is no retained historical cutover canary.
+reject 0.19 before any native value crosses that boundary. ABI 0.21 retained
+those layouts while advancing the embedded Lua contract from 5.5.0 to 5.5.1;
+its marker rejects 0.20 before schema decoding or native linking. ABI 0.22 is
+the source-local `titan.uv` surface/private-provider boundary: its public schema
+and reconstructible module-userdata prefix change while Lua 5.5.1 and the other
+value/native-call layouts remain unchanged. Every generated module additionally
+reserves the fixed physical-provider identity slot that authenticates direct
+source-private state. Its marker rejects 0.21 before schema decoding
+or native linking. The 0.22 publisher does not migrate, clean up, or otherwise
+consume the preserved 0.21 tree, and there is no retained historical cutover
+canary.
 
-Production, installed, and async standard-library behavior tests use the
-combined image; the uv redesign has no delayed-callback source variant or
-alternate exact-provider graph. The serial coroutine suite is the narrow
-exception: it isolates its exact test image or preserves and restores the
-complete production `titan.so`/`titan.a` pair, dSYM, and generated coroutine
-shim. That coroutine test layout is not an alternate production packaging
-model.
+Production, installed, and native standard-library behavior tests use the
+combined image; the uv redesign has no delayed-callback source variant,
+alternate exact-provider graph, or serial source-rewritten coroutine image.
+Implementation mechanics remain owned by compiler/native harness coverage
+rather than an alternate production packaging model.

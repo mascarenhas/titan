@@ -468,24 +468,23 @@ No HTTP C or `uv` reach-through is needed.
 
 ## Tests, migrations, and documentation
 
-Add `spec/stdlib/async_combinators_spec.lua` and route `async*_spec.lua` into
-the uncovered `library_uv_fs` group. Cover every arity and variant, nil success
-values, all-failed/cancelled `any`, success/failure/cancellation races,
-left-to-right ties and duplicates, all success/error unions, joins, already
-terminal Tasks, real timer/I/O sleeping, self-dependency rejection, and the
-rule that failures remain logged, plus `OperationError` as an exact
-`Error.error` payload.
+The implemented coverage lives in the native `async.tests` folder module under
+`spec/stdlib/titan/async/tests/`, run directly outside LuaCov. Its combinator
+constituents cover every arity and variant, nil success values,
+all-failed/cancelled `any`, success/failure/cancellation races, left-to-right
+ties and duplicates, all success/error unions, joins, already terminal Tasks,
+real timer/I/O sleeping, self-dependency rejection, and the rule that failures
+remain logged, plus `OperationError` as an exact `Error.error` payload.
 
-Add `spec/stdlib/async_channel_spec.lua` to the uncovered async group. Cover
-default and explicit capacity validation, FIFO order through circular
-wraparound, `nil` payloads, blocking send and receive, rejection of a second
-blocked operation in either direction, unconditional same-direction no-barging
-between a wake request and delivery, opposite-operation wakeup,
-repeated/coalesced resumes with condition rechecks, cancellation clearing each
-installed waiter through `defer`, and close idempotence, buffered-reference
-discard, wakes of blocked senders and receivers, and the exact
-`"channel is closed"` error from every later or woken send/receive when no
-authoritative Task cancellation races with close.
+The channel constituent covers default and explicit capacity validation, FIFO
+order through circular wraparound, `nil` payloads, blocking send and receive,
+rejection of a second blocked operation in either direction, unconditional
+same-direction no-barging between a wake request and delivery,
+opposite-operation wakeup, repeated/coalesced resumes with condition rechecks,
+cancellation clearing each installed waiter through `defer`, close idempotence,
+buffered-reference discard, wakes of blocked senders and receivers, and the
+exact `"channel is closed"` error from every later or woken send/receive when
+no authoritative Task cancellation races with close.
 
 In the same async channel suite, cover the opaque ChannelReader/ChannelWriter
 factory, string message order, delimiters split across messages, chopped and

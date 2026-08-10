@@ -107,7 +107,7 @@ local function fs_tmpname_template(): string
       "/titan-fs-XXXXXX"
 end
 
-function _os_getenv(name: string): string?
+local function os_getenv(name: string): string?
   checked_text(name, "os.getenv")
   local operation = function (bytes: *ffi.titan_ffi_char,
                               sizes: *libuv.size_t): ffi.titan_ffi_int
@@ -118,53 +118,37 @@ function _os_getenv(name: string): string?
       "os.getenv")
 end
 
-function _os_setenv(name: string, contents: string)
+local function os_setenv(name: string, contents: string)
   checked_text(name, "os.setenv")
   checked_text(contents, "os.setenv")
   check_status(libuv.uv_os_setenv(name, contents),
                "os.setenv")
 end
 
-function _os_unsetenv(name: string)
+local function os_unsetenv(name: string)
   checked_text(name, "os.unsetenv")
   check_status(libuv.uv_os_unsetenv(name), "os.unsetenv")
 end
 
-function _os_cwd(): string
-  return current_directory("os.cwd")
-end
-
-function _os_chdir(path: string)
-  change_directory(path, "os.chdir")
-end
-
-function _fs_pwd(): string
-  return current_directory("fs.pwd")
-end
-
-function _fs_chdir(path: string)
-  change_directory(path, "fs.chdir")
-end
-
-function _os_homedir(): string
+local function os_homedir(): string
   return os_sized_buffer(os_homedir_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
       "os.homedir") as string
 end
 
-function _os_tmpdir(): string
+local function os_tmpdir(): string
   return os_sized_buffer(os_tmpdir_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
       "os.tmpdir") as string
 end
 
-function _os_hostname(): string
+local function os_hostname(): string
   return os_sized_buffer(os_hostname_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
       "os.hostname") as string
 end
 
-function _os_exepath(): string
+local function os_exepath(): string
   if not program_args_ready then
     raise "os.exepath is only available in a compiled Titan program"
   end
@@ -173,15 +157,15 @@ function _os_exepath(): string
       "os.exepath") as string
 end
 
-function _os_pid(): integer
+local function os_pid(): integer
   return libuv.uv_os_getpid()
 end
 
-function _os_ppid(): integer
+local function os_ppid(): integer
   return libuv.uv_os_getppid()
 end
 
-function _os_clock(): float
+local function os_clock(): float
   local usage: libuv.uv_rusage_t
   local status = libuv.uv_getrusage(usage)
   check_status(status, "os.clock")
@@ -191,7 +175,7 @@ function _os_clock(): float
          ((usage.ru_stime.tv_usec as integer) as float) / 1000000.0
 end
 
-function _os_time(): integer
+local function os_time(): integer
   local current: libuv.uv_timeval64_t
   local status = libuv.uv_gettimeofday(current)
   check_status(status, "os.current_time")
@@ -243,16 +227,11 @@ local function SignalWaitCall:dispatch(task: Task): Immediate?
   return nil
 end
 
-function _os_wait_signal(name: string): string
+local function os_wait_signal(name: string): string
   local signum = signal_number(name)
   if signum <= 0 or name == "kill" then
     raise "unsupported waitable signal name '" .. name .. "'"
   end
   return await(Call.signal_wait(
       SignalWaitCall.new(signum as integer))) as string
-end
-
-function _os_signal_name(signal_number: integer): string?
-  if signal_number <= 0 then return nil end
-  return signal_name(signal_number)
 end

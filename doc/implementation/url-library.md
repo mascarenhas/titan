@@ -87,11 +87,11 @@ target. HTTP operations raise the returned `url.Error` when they cannot
 proceed; both standalone URL entry points remain nonthrowing.
 
 The URL root adds one logical protocol, archive metadata key, generated shim,
-and `luaopen_titan_url` entry to the coordinated provider. Together with the
-new SSL and HTTP modules, the current image has seventeen logical modules and
-shims and eighteen DSO openers including bare `luaopen_titan`. ABI 0.21
+and `luaopen_titan_url` entry to the coordinated provider. The later addition
+of the independent `titan.test` module makes the current image eighteen logical
+modules and shims with nineteen DSO openers including bare `luaopen_titan`. ABI 0.22
 publishes that complete image in its own namespace; it does not migrate or
-clean up the preserved ABI-0.20 provider.
+clean up the preserved ABI-0.21 provider.
 
 The non-LuaCov URL suite carries the accepted and rejected URI matrix,
 normalization cases, tuple exclusivity, exact `Error` fields, and the separate
