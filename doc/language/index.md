@@ -58,6 +58,7 @@ use the chapters below for the normative language reference.
 | [Functions](functions.md) | Declarations, argument adjustment, multiple return values, visibility, functions as values, and the `main` convention for standalone programs. |
 | [Named arguments](named-arguments.md) | Declaration-based `f { name = value }` and method-call syntax, omissions, evaluation order, record construction, direct C prototype names, and Lua's positional-only boundary. |
 | [Anonymous functions and closures](closures.md) | Lambda expressions, parameter/return type inference, lexical capture of enclosing locals, fresh-value-per-evaluation semantics, and bound method references `obj:method`. |
+| [Closure adjustment wrappers](closure-adjustment-wrappers.md) | Directional callable actions, missing nil results, conditional target-wrapper realization and fresh identity, source Lua behavior, strict/generic fallback, `as`/`is`, and limits. |
 | [Variadic parameters](variadic-parameters.md) | The trailing `...: t` parameter, `#...`, the raising `...[e]` index, spreading `...` into calls, returns, and positional Array/integer-Map constructors, slot-driven adjust-up, variadic functions as values, and the limits and bans. |
 | [Flexible returns](flexible-returns.md) | Runtime-sized homogeneous result tails, finite option projection, open sinks, contextual calls through `value`, surplus adjustment, and directional callable adjustment. |
 | [Records](records.md) | Nominal record types, constructors, fields, methods, record functions, and records as seen from Lua. |
@@ -112,11 +113,14 @@ Lua and `value` never discover an implementation from a bare record or union.
   static like `Rec.new` — used as a value yields a stable function value,
   and function types like `(integer) -> integer` are accepted in every
   type position. Function values can be stored in locals, parameters,
-  record fields, arrays and maps, passed, returned, and called; exact
-  Titan-to-Titan calls take a zero-overhead native path, non-exact branded
-  Titan closures take a strict generic path, and non-Titan Lua callables take
-  the ordinary Lua path with dynamic result conversion
+  record fields, arrays and maps, passed, returned, and called. Exact
+  Titan-to-Titan calls take a zero-overhead native path. A statically known
+  non-exact callable edge conditionally realizes a fresh target-tagged wrapper;
+  when realization is ineligible, branded Titan closures retain the strict
+  generic path and non-Titan Lua callables retain ordinary Lua dispatch with
+  dynamic result conversion
   ([functions](functions.md#functions-as-values),
+  [closure adjustment wrappers](closure-adjustment-wrappers.md),
   [type system](types.md#function-types)). This also means Titan can
   **call a Lua function directly** — passing a Lua closure to a
   function-typed parameter and calling it

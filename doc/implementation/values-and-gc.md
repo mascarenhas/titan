@@ -144,15 +144,26 @@ them, installs the two user values through Lua's API, and applies the backing
 Table's back barrier after the key-0 reverse link. No user-value edge is
 untraced.
 
-A first-class Titan function remains a `CClosure`. Its header is `_mod`,
+A canonical Titan **source** function is a `CClosure`. Its header is `_mod`,
 canonical function-type tag, native-entry pointer, and opaque closure brand;
-captures begin at upvalue 4; the final upvalue is the strict light C function.
-The last slot does not move capture indices. Exact dispatch first compares the
-canonical static tag and then trusts this private layout without a registry
-lookup. After an exact-tag mismatch, generic dispatch compares the fixed
-64-bit brand sentinel in upvalue 3. Both require at least five upvalues and
-otherwise read raw pointer bits without `ttis*` checks. With five structural
-upvalues, at most 250 captures fit under Lua's 255-upvalue limit.
+captures begin at upvalue 4; the final upvalue is the declaration's strict
+light C function. The last slot does not move capture indices. Exact dispatch
+first compares the canonical static tag and then trusts this private layout
+without a registry lookup. After an exact-tag mismatch, generic dispatch
+compares the fixed 64-bit brand sentinel in upvalue 3. Both require the private
+minimum shape and otherwise read trusted raw pointer bits without `ttis*`
+checks. With five structural source upvalues, at most 250 captures fit under
+Lua's 255-upvalue limit.
+
+A realized callable-adjustment wrapper is also a CClosure, but adds one traced
+link. For a source with `n` upvalues it copies header/captures through `n-2`,
+replaces tag/native with target B's tag/adapter, stores the immediate source
+closure at `n-1`, and stores B's consumer-local strict relay at `n`.
+`CClosure.f` remains the source coercive entry. Wrapper chains copy older
+private links and append the new immediate source, so every adapter receives
+the correct `_fn`. If `n == MAXUPVAL`, construction preserves the operand for
+generic fallback. See
+[Closure adjustment wrappers](closure-adjustment-wrappers.md#wrapper-layout).
 
 ## Records: a single tagged Udata
 
@@ -489,7 +500,15 @@ array slots from those temps. The constructor records its highest non-nil
 position in `lenhint`; resizes save and restore that authoritative length.
 Map constructors root their ordinary Table plus key and value temps, boxing an
 Array used as a raw-visible key or value. See
-[Dense Arrays](dense-arrays.md#runtime-construction). String results —
+[Dense Arrays](dense-arrays.md#runtime-construction).
+
+Callable adjustment materializes and anchors its operand before any scratch
+push. Guarded realization pushes copied header/capture values, the anchored
+immediate source, and the target relay, then lets `lua_pushcclosure` construct a
+new white object with traced upvalues. The result is anchored immediately and
+`_base` is restored from `_base_off`; nested callable adjustments are separate
+relocation points. The source link never lives in untraced C storage.
+String results —
 literals (`luaS_new`), concatenation,
 number→string casts — are likewise stored to their temp's slot
 immediately after creation.
@@ -553,10 +572,15 @@ pointer — not its barriers.)
 owners that are still `CClosure`s — every store of a captured value into
 a function value's upvalue array ([closures and captured
 variables](codegen-overview.md#closures-and-captured-variables)).
-The strict-entry trailer is installed at closure construction like the header
-and captures. A capture *box* is a `Udata`: GC-bearing boxes have one traced
-user value and use the back barrier, while non-GC values use an untraced raw
-payload and need no barrier.
+The strict-entry trailer is installed at source-closure construction like the
+header and captures. A callable wrapper is likewise assembled entirely through
+`lua_pushcclosure`: the new white closure receives copied captures plus the
+traced immediate-source link and target relay before publication, so no manual
+forward/back barrier is emitted for those construction-time edges. A later
+store into an existing closure would still require the forward barrier. A
+capture *box* is a `Udata`: GC-bearing boxes have one traced user value and use
+the back barrier, while non-GC values use an untraced raw payload and need no
+barrier.
 
 The division of labor with Lua's table internals is spelled out in a
 comment in `coder.lua`: raw stores go through `luaH_set`/`luaH_setint`
@@ -606,13 +630,19 @@ setsvalue(L, _tmp_1_slot, _tmp_1);
   and its `args` array never count as roots on their own. A generic
   `luaD_callnoyield(..., LUA_MULTRET)` obtains the same run from live Lua stack
   values, converts it while those values are rooted, then hands it to the same
-  consumers. Branded non-exact Titan closures use strict guards in this stack
-  path; non-Titan callables use dynamic boundary conversion.
+  consumers. Branded exact-tag mismatches use strict guards in this stack path;
+  non-Titan callables use dynamic boundary conversion. A realized adjustment
+  wrapper instead enters its target-native adapter: the adapter reserves a
+  nil-initialized traced frame, anchors incoming B values, immediately anchors
+  A results after the immediate-source native call, and publishes B results
+  into caller-owned fixed/open roots. Its descriptors and raw backing remain
+  untraced.
 
 The string out-parameter is live in `_tmp_1` the moment the callee
 returns and is in a stack slot before any subsequent allocation can run.
-When a Lua program or the strict Titan adapter is the caller, the generated
-Lua-stack entry plays this role: it reserves stack space for the fixed prefix
+When a Lua program or a strict Titan declaration/relay is the caller, the
+generated Lua-stack entry plays this role: it reserves stack space for the
+fixed prefix
 and requested flexible capacity
 before invoking the native function, then writes each actual result back with
 `setboxed` — for a record that is just the record's own userdata, while an

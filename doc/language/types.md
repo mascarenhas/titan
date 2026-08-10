@@ -262,10 +262,13 @@ operations:
   when an `A?` is viewed as a consistent `B?`, nil passes and a present payload
   is guarded immediately as `B`.
 * **callable adjustment** is Titan's directional function-shape operation:
-  it records fixed-position alignment, ignored values, nil-filled positions,
-  input/output tails, and flexible projection. Aligned components may use
-  consistency and nested callable adjustment, but never ordinary numeric,
-  Option, C, or Interface-wrapper coercions.
+  it records fixed-position alignment, ignored values, nil-filled argument and
+  eligible missing-result positions, input/output tails, and flexible
+  projection. Aligned components may use consistency and nested callable
+  adjustment, but never ordinary numeric, Option, C, or Interface-wrapper
+  coercions. A finite non-exact edge conditionally realizes a fresh
+  target-tagged closure; its checker-recorded actions still govern the generic
+  fallback when the run-time value is ineligible.
 * **dynamic coercion** is the target-directed conversion used at an explicitly
   dynamic boundary: a written `value as/is T`, a genuine Lua-to-Titan sink,
   or a result entering Titan from a non-Titan Lua callable.
@@ -291,16 +294,17 @@ back to this matrix rather than defining competing conversion rules.
 
 | Context or operation | Rule | What happens at run time |
 | --- | --- | --- |
-| Ordinary typed Titan declaration, assignment, argument, return, or constructor slot | Exact identity, one direct outer coercion, a gradual view, or a directional callable adjustment must exist. Ordinary coercions never lift through an Array, Map, Function, or nominal member. | The checker-selected direct conversion is performed; a same-representation gradual view preserves the object. |
-| Implicit `value -> T` in a typed Titan context | Strict gradual projection; `T` must be guardable. This is not the broad dynamic coercion used by written casts or Lua. | The exact tag, shape, or nominal identity required for `T` is checked. No integral-float narrowing, integer-to-float conversion, truthiness, Option introduction/force, or pointer assertion is added by the guard. |
+| Ordinary typed Titan declaration, assignment, argument, return, or constructor slot | Exact identity, one direct outer coercion, a gradual view, or a directional callable adjustment must exist. Ordinary coercions never lift through an Array, Map, Function, or nominal member. | The checker-selected direct conversion is performed; a same-representation Array/Map gradual view preserves the object. An exact Function edge preserves its source closure; a non-exact one follows the conditional wrapper row below. |
+| Statically known non-exact Function `A -> B` adjustment (implicit or written `as`) | One checker-frozen directional `CallablePlan`, including only its named argument/result/tail actions and strict component operations. | Evaluate the operand once. An exact branded Titan `A` closure with upvalue room becomes a fresh target-`B` wrapper; other values stay unchanged for generic dispatch. No cache or equality unwrapping is used. |
+| Implicit `value -> T` in a typed Titan context | Strict gradual projection; `T` must be guardable. This is not the broad dynamic coercion used by written casts or Lua. | The exact tag, shape, or nominal identity required for `T` is checked. No integral-float narrowing, integer-to-float conversion, truthiness, Option introduction/force, or pointer assertion is added by the guard. A Function target preserves the boxed value and creates no static adjustment wrapper. |
 | Typed Titan Array element or Map value read | Strict target guard, regardless of which static view was used to write the slot or whether a Map value came from Lua. The checker rejects a read whose optional result type is not guardable. | An accepted read either produces the requested value or raises before Titan uses it. Array reads never invoke the Array's Lua writer. Map reads do not track write provenance. |
-| Written `v as T` / `v is T` with `v: value` | Shared dynamic coercion, except for the explicitly unsafe raw-C-pointer rule below. | `as` converts or raises; `is` tests acceptance without returning the converted value or raising for a mismatch. Both evaluate `v` once. |
+| Written `v as T` / `v is T` with `v: value` | Shared dynamic coercion, except for the explicitly unsafe raw-C-pointer rule below. | `as` converts or raises; `is` tests acceptance without returning the converted value or raising for a mismatch. Both evaluate `v` once. A Function target remains unwrapped and defers callability. |
 | Genuine Lua function argument, exported module-variable write, public record-field write, non-nil Array-element write, or result from a non-Titan Lua callable entering Titan | The same dynamic coercion as the preceding row. | Equal target types accept, reject, and convert the same values at all of these boundaries. |
 | Lua writes `nil` to an Array proxy | Deletion is recognized before element conversion. | The position is removed; the writer is not called, and an out-of-capacity deletion does not allocate. |
 | Array passes through `value`, Lua, an import, a return, a nested box, or another consistent static view | Preserve the canonical proxy, backing, and construction-time writer. | No target-view writer is synthesized, compared, or installed. The writer describes future genuine-Lua writes, not the current contents. |
-| Exact native Titan function call | Exact function tag and static type. | Call the native entry directly; no Lua-stack boundary conversion occurs. |
-| Non-exact call of a branded Titan function through a static view (from callable adjustment or a dynamic Function boundary) | Strict Titan-generic entry selected through the function's brand and trailer. | Arguments and observed results use strict gradual guards and the statically recorded shape demand. Ordinary coercions are not smuggled through the call. |
-| Genuine Lua call of a Titan function | Coercive Lua entry. | Lua arguments use dynamic coercion; the Titan function's ordinary result conversion returns values to Lua. |
+| Exact native Titan function call | Exact function tag and static type. | Call the native entry directly; for a realized wrapper this is its target adapter. No Lua-stack boundary conversion occurs. |
+| Branded Titan call after an exact-tag mismatch (dynamic Function view or wrapper-ineligible/later non-exact view) | Strict Titan-generic entry selected through the function's brand and trailer. | Ordinary closures use their declaration strict entry; wrappers use their consumer-local target relay and adapter. Arguments and observed results use strict gradual actions and the static demand. |
+| Genuine Lua call of a Titan function or realized wrapper | The closure's coercive Lua entry. | An ordinary closure uses its source contract. A wrapper copies `source->f`, preserving whatever Lua surface its immediate source value already carries—ultimately the original declaration's—rather than synthesizing target `B`'s entry. |
 | Titan call of a non-Titan Lua callable | Ordinary Lua call, followed by the dynamic boundary for results entering Titan. | Callability follows Lua, including `__call`; requested result types use dynamic coercion. |
 | `value as/is` a raw C pointer | Written, explicitly unsafe pointer assertion only. Implicit gradual projection, typed container reads, callable adjustment, and non-Titan Lua-result conversion to a raw pointer are rejected. | The written operation may accept the lightuserdata/nil representation, but cannot prove the pointee type. See [the FFI policy](ffi.md#casts-and-coercions). |
 | Interface target | A statically known satisfying record/union-to-Interface edge constructs a fresh wrapper. Dynamic conversion accepts only an existing wrapper of that exact nominal Interface type (or nil for an option); it never discovers an implementation from a bare record or union. | Wrapper construction is one direct outer coercion and does not lift through containers or callable components. Calls through the wrapper use the Interface's method contract. See [Interfaces](interfaces.md). |
@@ -440,10 +444,15 @@ or a callable adjustment:
 8. The finite scalar slots of a **generic `for`**: yielded-variable bindings
    and the iterator's typed state, initial-control, and close setup.
 
-Expression-list consumers apply these rules per demanded scalar. A positional
-Array/integer-Map constructor or flexible return may also consume an open run
-under an explicitly recorded element plan; that does not create a structural
-conversion between the producer and consumer's container or Function types.
+Expression-list consumers apply these rules per demanded scalar. A finite
+non-exact Function edge is an expression effect: its operand is evaluated once
+and it may allocate a fresh
+[closure adjustment wrapper](closure-adjustment-wrappers.md). Exact Function
+edges allocate nothing. A positional Array/integer-Map constructor or flexible
+return may also consume an open run under an explicitly recorded element plan;
+that does not create a structural conversion between the producer and
+consumer's container or Function types, though a callable element uses the same
+conditional wrapper rule.
 
 Conditions of `if`, `while` and `repeat` are not on this list because
 they need no coercion: *any* type is accepted as a condition, and its
@@ -607,10 +616,12 @@ the length (`#` requires an array, an exact integer-keyed map, or a string);
 and indexing *into* it
 (`expression in indexing is not an array or map but value`). Contextual calls
 are the deliberate callable exception: the surrounding demand supplies a
-complete temporary contract. An exact Titan closure may use its native entry,
-a non-exact branded Titan closure uses its strict entry, and an ordinary Lua
-callable may honor `__call` before dynamically converting results. Arithmetic
-and container operations still require an explicit cast because implicit
+complete temporary contract. An exactly tagged Titan closure may use its
+native entry. Because a contextual `value` call has no statically known source
+Function type, it does not realize an adjustment wrapper: a differently tagged
+branded Titan closure uses its strict entry, and an ordinary Lua callable may
+honor `__call` before dynamically converting results. Arithmetic and container
+operations still require an explicit cast because implicit
 unboxing inside them would silently give raw semantics to code that looks
 statically typed.
 
@@ -638,7 +649,12 @@ still be requested simply by placing an expression in a typed context.
 Interface casts additionally provide explicit wrapper construction from a
 statically satisfying record or union and exact-concrete downcasts from an
 Interface wrapper; dynamic casts to an Interface accept only an existing exact
-wrapper. See [Interfaces](interfaces.md#concrete-tests-and-downcasts).
+wrapper. A written non-exact Function-to-Function `as` uses the same
+conditional fresh wrapper as an implicit callable adjustment. Its corresponding
+`is` test checks admission but remains allocation-free. A written or implicit
+`value -> Function` edge remains a dynamic boxed projection and creates no
+wrapper. See [Interfaces](interfaces.md#concrete-tests-and-downcasts) and
+[Closure adjustment wrappers](closure-adjustment-wrappers.md#implicit-adjustment-as-and-is).
 
 For C FFI types, regular `as <type>` is also the explicit cast mechanism:
 C integers can be cast to `integer`, C floats can be cast to `float`, Titan

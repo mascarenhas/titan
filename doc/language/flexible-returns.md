@@ -256,12 +256,14 @@ Lua-boundary type errors.
 
 If a `value` contains a Titan function whose exact type matches the type
 derived for the call, Titan preserves the same native call path used by a
-statically typed function value. A non-exact Titan-branded function uses its
-strict generic trailer and the checker-recorded callable adjustment. A Lua
-function, Lua C function, or value with `__call` uses the ordinary Lua path,
-and each requested result entering Titan uses the shared dynamic coercion.
-This distinction does not change the result-list rules above: the derived
-static type still determines which results are visible. See the
+statically typed function value. A contextual `value` call has no statically
+known source Function type, so it does not realize an adjustment wrapper: a
+differently tagged Titan-branded function uses its strict generic trailer and
+the checker-recorded demand. A Lua function, Lua C function, or value with
+`__call` uses the ordinary Lua path, and each requested result entering Titan
+uses the shared dynamic coercion. This distinction does not change the
+result-list rules above: the derived static type still determines which results
+are visible. See the
 [normative boundary matrix](types.md#normative-boundary-matrix).
 
 Lua 5.5 can encode at most 250 results in a finite VM call request. Titan
@@ -393,10 +395,15 @@ For results:
   beyond its own prefix, followed by the actual flexible tail when present.
   A fixed-only actual function may simply end; a flexible tail is always
   allowed to contain zero values.
+* If an expected fixed position has no actual fixed or flexible source, the
+  named `nil_fill_result` shape action may supply nil only when that expected
+  type accepts a missing nil: `nil`, `value`, an Option, or a nullable Titan/C
+  pointer. Required booleans, numbers, strings, records, unions, and Interfaces
+  remain incompatible. A source flexible projection takes precedence.
 * Shared result positions are checked in the result direction. Equal or
   gradually consistent components can be guarded; ordinary coercions are
-  rejected. Option projection from an actual flexible tail is a named
-  shape action and does not make a fixed `T` result adjustable to fixed `T?`.
+  rejected. Neither flexible projection nor `nil_fill_result` is a component
+  coercion, so neither makes a fixed `T` result adjustable to fixed `T?`.
 
 ```lua
 function pair(): (integer, integer)
@@ -411,6 +418,11 @@ local one: () -> integer = pair                    -- second result is hidden
 local run: () -> (...: integer) = pair             -- finite pair, then the run ends
 local maybe_one: () -> integer? = numbers          -- safe finite projection
 local required_one: () -> integer = numbers        -- raises if the run is empty
+
+function done(): ()
+end
+local absent: () -> integer? = done                -- fixed nil_fill_result
+local bad: () -> integer = done                    -- rejected
 ```
 
 The familiar contravariant/covariant vocabulary approximates the alignment,
@@ -427,11 +439,17 @@ local bad_float: () -> float = n       -- rejected: no result coercion lifting
 local bad_option: () -> integer? = n   -- rejected: fixed T -> fixed T? does not lift
 ```
 
-Callable adjustment is not exact identity. An adjusted assignment uses the
-strict Titan-generic path when its runtime value is a Titan closure. It also
-cannot expose results outside the expected static type: storing `numbers` in
-`() -> integer` makes calls through that slot finite one-result calls,
-including inside an open sink. See [The type system](types.md#function-types) and
+Callable adjustment is not exact identity. A finite non-exact assignment
+conditionally realizes a fresh target-tagged closure when its run-time operand
+is an exact eligible Titan source value. Calls through that wrapper use its
+checker-frozen native adapter. Lua/noncallable/differently tagged/max-upvalue
+operands stay unchanged and retain the strict branded or ordinary Lua generic
+path. Either form prevents results outside the expected static type from
+escaping: storing `numbers` in `() -> integer` makes calls through that slot
+finite one-result calls, including inside an open sink. Re-evaluating a realized
+adjustment creates another identity; there is no cache. See
+[Closure adjustment wrappers](closure-adjustment-wrappers.md),
+[The type system](types.md#function-types), and
 [Functions as values](functions.md#functions-as-values).
 
 ## The 200-value bound
@@ -452,13 +470,15 @@ A statically open generic flexible forwarding call uses Lua-stack open-result
 mode, even when a later outer consumer will retain only a finite prefix. Titan
 measures the raw results and that outer consumer copies only its requested
 prefix, so discarded surplus Lua results do not by themselves trigger the
-200-value bound. If the run-time target is a non-exact Titan-branded closure,
-however, that closure first enters through its strict generic stack entry with
-an open request. The entry materializes and caps its own open flexible tail
-before the later finite outer consumer can trim the run. No inherited finite
-flexible-result budget is passed through that statically open stack-call
-boundary; ordinary statically finite generic calls still request their
-concrete result count.
+200-value bound. If the run-time target reaches the branded fallback after an
+exact-tag mismatch, however, its strict generic stack entry first receives the
+open request and materializes/caps its own open flexible tail before the later
+finite outer consumer can trim the run. No inherited finite flexible-result
+budget is passed through that statically open stack-call boundary; ordinary
+statically finite generic calls still request their concrete result count. A
+realized adjustment wrapper whose target tag matches uses its native adapter
+instead, and that adapter applies the same target demand and 200-element ABI
+bound without turning the call into a genuine-Lua boundary.
 
 Flexible returns cross the [Lua boundary](lua-interop.md) as ordinary Lua
 multiple results. Lua's requested result count determines whether it receives

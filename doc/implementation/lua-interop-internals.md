@@ -1,8 +1,9 @@
 # Lua interop internals
 
 This chapter describes the machinery at the Lua↔Titan boundary: the
-coercive entry used by genuine Lua calls, the strict Lua-stack entry used by
-non-exact branded Titan calls, the shared per-type lowering plans, the
+coercive source entry used by genuine Lua calls, the strict Lua-stack entries
+used after branded exact-tag mismatches, the target adapter/consumer relay used
+by realized callable wrappers, the shared per-type lowering plans, the
 metatables that serve records and module variables to Lua, the Array writer
 carried in each proxy, the registry entries holding it all together,
 the dynamic loader, the error handler, the standalone-executable
@@ -52,9 +53,11 @@ define a second conversion relation.
 ## The two Lua-stack entries (`genluaentry`)
 
 Every first-class Titan function has [three entry roles](codegen-overview.md):
-the native-convention entry used by exact Titan→Titan calls, a coercive
+the native-convention entry used by exact-tag Titan→Titan calls, a coercive
 `lua_CFunction` used by genuine Lua calls, and a strict Lua-stack entry used
-by branded non-exact Titan calls. `genluaentry` in `coder.lua` emits the two
+after a branded exact-tag mismatch. A realized callable wrapper fills those
+same roles with its target adapter, copied source `CClosure.f`, and
+consumer-local target relay. `genluaentry` in `coder.lua` emits the two
 stack-convention entries for every non-`local` top-level function
 (`<mod>_<name>_titanentry_lua` and `…_strict`, modulo C identifier
 mangling) and every static (`…_titanentry_luastatic` and `…_strictstatic`).
@@ -156,12 +159,14 @@ Walking through it:
   error value"), but **nothing in the current tree reads or writes it
   after reservation**: all Titan run-time errors go through `codethrow`
   → `luaL_error`. It is leftover groundwork from that experiment.
-* **Module recovery.** The canonical first-class closure is built with the
-  module `Udata` in upvalue 0, followed by its type tag, native entry pointer,
-  fixed closure brand, any captures, and the strict-entry trailer. The ordinary
-  Lua entry therefore
-  recovers `_mod` from `_fn->upvalue[0]` with `uvalue`; it does not rely on the
-  obsolete one-upvalue wrapper shape.
+* **Module recovery.** The canonical source closure is built with the module
+  `Udata` in upvalue 0, followed by its type tag, native entry pointer, fixed
+  closure brand, any captures, and the declaration strict-entry trailer. A
+  realized adjustment wrapper copies that module/captures and source Lua entry,
+  replaces the tag/native pointer, and appends the immediate source plus target
+  relay. The ordinary Lua entry therefore recovers `_mod` from
+  `_fn->upvalue[0]` with `uvalue`; it does not rely on the obsolete one-upvalue
+  wrapper shape.
 * **Arguments.** Each parameter is a C local of its native
   [`ctype`](values-and-gc.md), filled by the checker-attached
   `DynamicCoercionPlan` from `s2v(func + i)`. The location baked into boundary error messages is
@@ -184,30 +189,38 @@ Walking through it:
   a finite Lua caller pays only for the requested tail capacity.
 
 The strict entry shares all of that arity, error-frame, tail, result-request,
-and stack-relocation machinery, but has one hidden first argument: the
-original canonical Titan closure. The adapter verifies that the hidden value
-is a C closure and that its coercive entry, private header, final strict-entry
-trailer, and function tag match this declaration exactly. The dispatch site
-has already established the fixed brand for a non-exact closure, so the strict
-adapter does not repeat that comparison. It roots and passes that original
-closure as `_fn`, excluding the hidden argument from every
-user-visible arity calculation. The declaration-specific adapter consumes
-strict `GuardPlan`s for formals and variadic elements, then boxes the native
-result under the callee's declared result types. After it returns,
-`codevaluecall` consumes the caller-attached strict result guards. Numeric
-conversion and Lua truthiness are therefore unavailable on either half of
-this path.
+and stack-relocation machinery, but has one hidden first argument: the Titan
+closure selected by dispatch. An ordinary declaration entry verifies that the
+hidden value is a C closure and that its coercive entry, private header, final
+strict-entry trailer, and source function tag match the declaration exactly.
+The dispatch site has already established the fixed brand, so the entry does
+not repeat that comparison. It roots and passes the source closure as `_fn`,
+excluding the hidden argument from every user-visible arity calculation,
+consumes strict `GuardPlan`s for formals/tail, and boxes results under the
+source type before caller-attached strict result actions run.
 
-The canonical closure's `f` remains the coercive entry. Its final upvalue is
-the strict light C function. `codevaluecall` first performs the likely exact
-static-tag comparison; an exact match uses the native pointer without any Lua
-registry access. Only after a mismatch does it compare fixed `upvalue[3]`
-against the opaque 64-bit `TITAN_FUNCTION_CLOSURE_BRAND` sentinel. Both
-predicates require the five-upvalue minimum and otherwise compare raw pointer
-bits without `ttis*` shape checks. A branded non-exact call pushes the strict
-entry plus the original closure; non-Titan callable values use Lua's ordinary
-call machinery, receive the already adjusted and boxed static arguments, and
-dynamically coerce their results as those values enter Titan.
+A realized wrapper cannot copy this declaration entry: its target tag would
+fail the baked source-tag check, while its `CClosure.f` must remain the source
+entry. Its consumer-local relay uses the same shell but validates the target
+tag, target native adapter/header shapes, and its own final trailer. It then
+calls the target adapter with the wrapper as `_fn`; the adapter follows the
+penultimate immediate-source link and executes the frozen B→A/A→B actions.
+Numeric conversion and Lua truthiness are unavailable on either strict path.
+
+The canonical source closure's `f` remains the coercive entry, and every
+adjustment wrapper copies its immediate source's `f`. Source closures store a
+declaration strict light C function last; wrappers store their target relay.
+`codevaluecall` first performs the likely exact static-tag comparison; an exact
+match uses the native pointer (ordinary body or wrapper adapter) without a Lua
+registry lookup. Only after a mismatch does it compare fixed `upvalue[3]`
+against `TITAN_FUNCTION_CLOSURE_BRAND`. Both predicates require the minimum
+private shape and otherwise compare trusted raw pointer bits. A branded
+mismatch pushes the closure's trailer plus the closure; non-Titan callable
+values use Lua's ordinary call machinery, receive the already adjusted and
+boxed static arguments, and dynamically coerce results as they enter Titan.
+
+The guarded construction/layout/rooting details are in
+[Closure adjustment wrappers](closure-adjustment-wrappers.md).
 
 ## Dynamic boundary conversion
 
@@ -313,9 +326,10 @@ same dynamic matrix as the native-local renderer:
   a field, module slot, or Array backing table is mutated.
 
 Strict Titan observations use the separate `GuardPlan` renderer: implicit
-`value` projections, Array reads, Map reads, and branded non-exact function
-arguments/results accept the runtime representation required by the static
-target and otherwise raise. They never invoke this dynamic conversion path.
+`value` projections, Array reads, Map reads, realized callable-adapter
+components, and branded exact-tag-mismatch arguments/results accept the
+runtime representation required by the static target and otherwise raise. They
+never invoke this dynamic conversion path.
 
 ## Records from Lua
 
@@ -866,18 +880,22 @@ observation**. Genuine-Lua function arguments, record and module writes,
 non-nil Array writes, written `value as/is T`, and results returned to Titan
 by a non-Titan callable consume one canonical `DynamicCoercionPlan`. Results
 returned from Titan to Lua are only boxed. Implicit `value`
-projections, Array/Map reads, and branded non-exact Titan calls consume strict
-`GuardPlan`s. Direct numeric/Option coercions inserted by the checker do not
-become structural callable consistency.
+projections and Array/Map reads consume strict `GuardPlan`s. Callable strict
+operations run either in a realized wrapper's frozen native adapter or through
+the branded exact-tag-mismatch stack path. Direct numeric/Option coercions
+inserted by the checker do not become structural callable consistency.
 
 On the way **out**, every value has one canonical Lua representation:
 numbers, strings, booleans and nil as-is; Maps as their ordinary Tables;
 Arrays as their proxy Udata; records/unions as their stable `Udata`; and
 Interfaces as their nominal wrapper Udata. Identity is preserved and no
-container is copied. An exactly branded Titan closure uses
-the native convention. A branded non-exact Titan closure uses its strict
-adapter; a Lua closure/C function or `__call` object uses Lua's internal call
-machinery and the dynamic boundary plan. Finite calls use a concrete result request;
+container is copied. An exactly tagged Titan source closure uses its native body; an exactly tagged
+adjustment wrapper uses its target-native adapter. A branded mismatch uses the
+closure's declaration entry or target relay; a Lua closure/C function or
+`__call` object uses Lua's internal call machinery and the dynamic boundary
+plan. Wrapper identity is deliberately fresh when construction is realized,
+but its boxed Lua representation remains that same CClosure object and its
+`CClosure.f` remains the source coercive entry. Finite calls use a concrete result request;
 every statically open generic producer uses
 `luaD_callnoyield(..., LUA_MULTRET)` and keeps the complete run rooted on the
 Lua stack. On normal return, the outer Titan caller measures, trims, validates,
@@ -909,10 +927,13 @@ The remaining trust boundary is explicit:
 2. **`value` is pass-through by design.** A later implicit observation is
    strict; a written cast is intentionally dynamic and records programmer
    intent.
-3. **The debug API and native extensions are privileged.** They can mutate
-   private Array/Interface user values, function upvalues, or nominal
-   metatables and thereby violate Titan invariants. Ordinary untrusted Lua
-   cannot do so; the debug library remains forbidden there.
+3. **The debug API and native extensions are privileged.** Exact dispatch and
+   wrapper construction trust Titan's private closure slots only after the
+   existing tag/brand/header predicate; arbitrary Lua callables stay on generic
+   dispatch. Debug/C code can nevertheless mutate private Array/Interface user
+   values, function upvalues, or nominal metatables and thereby violate Titan
+   invariants. Ordinary untrusted Lua cannot do so; the debug library remains
+   forbidden there.
 4. **Raw C pointers are outside gradual safety.** No strict or dynamic
    `value` guard fabricates one. Only the deliberately unsafe written cast can
    extract raw pointer bits.

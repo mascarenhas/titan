@@ -453,16 +453,20 @@ variadic/flexible element buffer: Table **
 descriptor: TitanVargArrayOrMap
 ```
 
-Lua entries, contextual calls through `value`, non-exact function-value calls,
-raw Map storage, and exported accessors are boxed boundaries. Outgoing Arrays
-become proxies; incoming Array positions require and unwrap canonical proxies.
-Options apply the selected strict or dynamic policy recursively.
+Lua entries, contextual calls through `value`, branded exact-tag-mismatch
+function calls, raw Map storage, and exported accessors are boxed boundaries.
+Outgoing Arrays become proxies; incoming Array positions require and unwrap
+canonical proxies. Options apply the selected strict or dynamic policy
+recursively.
 
-Function values now distinguish three routes: an exact branded Titan closure
-uses its native entry; a branded non-exact Titan closure uses the strict
-trailing stack entry; and a non-Titan callable uses Lua's ordinary call path.
-Only genuine Lua inputs and non-Titan Lua results use dynamic coercion. None of
-these routes replaces an Array's carried writer.
+Function values still dispatch through exact native, branded mismatch, and
+non-Titan routes. A statically known non-exact callable edge may first create a
+fresh target-tagged wrapper: its exact native adapter applies strict Array
+component boxing/unboxing without replacing the carried writer. An ineligible
+branded value uses the strict trailing stack entry; a non-Titan callable uses
+Lua's ordinary path and dynamic result conversion. A wrapper's genuine-Lua
+`CClosure.f` remains the source entry. None of these routes compares or replaces
+an Array's carried writer.
 
 Dispatch is based on semantic Titan type, not descriptor family:
 `TitanVargArrayOrMap` cannot reveal whether a `Table **` element is an Array

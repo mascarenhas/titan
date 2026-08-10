@@ -366,9 +366,11 @@ then brought the documentation in line.
   and called. Function-type annotations are accepted everywhere. A value is a
   boxed `TValue`; a Titan function value is a `CClosure` with upvalue[0]=`_mod`,
   upvalue[1]=a function-type tag (light userdata), upvalue[2]=native entry
-  pointer. Each referenced function has one canonical closure in a dedicated
-  module upvalue slot (stable identity); exported functions always get one, so
-  importers reference them by upvalue index (no hash lookup). Function-type
+  pointer. Each referenced function has one canonical **source** closure in a
+  dedicated module upvalue slot (stable exact identity); exported functions
+  always get one, so importers reference them by upvalue index (no hash lookup).
+  The later closure-adjustment feature preserves this source statement while
+  permitting a fresh conditional target wrapper at a non-exact edge. Function-type
   tags are shared across modules via the Lua registry (publish-or-recover),
   keyed by the canonical type string. Calls take an exact-type fast path
   (direct native call) or a generic path (`luaD_callnoyield` through the Lua
@@ -495,9 +497,13 @@ multiple results remain available without weakening an already typed callable.
 * **Native and Lua call paths.** Flexible native entries receive caller-owned
   typed output backing plus a finite/open budget. Exact module, static, method,
   bound-method, lambda, and exactly tagged first-class calls retain the native
-  path. Non-exact Titan values and Lua callables use the generic stack path;
-  statically open producers uniformly request `LUA_MULTRET`, preserve their raw
-  count on the Lua stack, and are trimmed or checked by the Titan sink.
+  path. At this ABI-0.14 milestone, non-exact Titan values and Lua callables
+  used the generic stack path; statically open producers uniformly requested
+  `LUA_MULTRET`, preserved their raw count on the Lua stack, and were trimmed or
+  checked by the Titan sink. The later
+  [closure-adjustment-wrapper feature](language/closure-adjustment-wrappers.md)
+  conditionally gives a statically known non-exact Titan edge a target-native
+  adapter while retaining this generic behavior as its required fallback.
 * **Lifetime and interface work.** Flexible result backing is paired with
   traced roots for GC-bearing elements, including pending returns that cross
   allocating or nested `finally` blocks. Callable serialization, compiled

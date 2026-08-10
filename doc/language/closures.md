@@ -234,6 +234,14 @@ Equality on function values is object identity (raw closure-pointer
 comparison), the same rule that applies to any function value
 ([functions](functions.md#functions-as-values)).
 
+This fresh lambda is the **source closure**. An exact target-typed use preserves
+it. Evaluating an admitted non-exact Function-to-Function edge may, when the
+run-time value is an eligible exact Titan closure, create another fresh
+[target-tagged adjustment wrapper](closure-adjustment-wrappers.md). That wrapper
+is unequal to the lambda and to a wrapper from another evaluation; an
+ineligible generic fallback preserves the lambda's identity. Wrapper allocation
+does not re-evaluate the lambda expression or its capture expressions.
+
 ## Recursion: a lambda cannot name itself
 
 A lambda bound to a `local` cannot refer to itself by that name, because
@@ -292,10 +300,13 @@ function use(): integer
 end
 ```
 
-The receiver expression is evaluated **once**, when the bound value is
-created. The result is an ordinary function value — store it, pass it,
-return it, call it through either path, hand it to Lua — with no special
-handling at the use site. Because the captured receiver is a reference,
+The receiver expression is evaluated **once**, when the bound source value is
+created. The result is an ordinary function value — store it, pass it, return
+it, call it through Titan or Lua — with no special handling at the use site. An
+exact static view preserves that bound closure; a non-exact callable edge has
+the same conditional fresh-wrapper/fallback behavior as any other
+[closure adjustment](closure-adjustment-wrappers.md). Because the captured
+receiver is a reference,
 calling a bound method that mutates record state is visible through the
 record:
 

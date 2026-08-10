@@ -199,7 +199,11 @@ The checker-facing summary is:
 - `types.coercion(source, target)` returns one direct automatic
   `CoercionPlan`, including named Option operations;
 - `types.callable_adjustment(source_actual, target_expected)` returns a
-  directional shape/component plan;
+  directional shape/component plan, including the narrow `nil_fill_result`
+  action when a wholly missing expected result accepts nil;
+- the generalized callable freezer turns that raw authority into a closed,
+  relation-free adapter graph with component operations, roots, rebases,
+  demand math, location, and trace name;
 - `types.assignment_adjustment(source, target)` selects identity, direct
   coercion, gradual view, callable adjustment, or rejection;
 - `types.dynamic_coercion(target)` describes the broader conversion authorized
@@ -231,11 +235,12 @@ mismatch; a checked C conversion that already emitted a qualifier/category/probe
 diagnostic carries an explicit marker that suppresses only the duplicate
 generic mismatch.
 
-Identity, gradual structural views, and directional callable plans may reach
-`checkmatch` without changing the producer's representation. The checker
-retains the complete plan on the expression/sink so later code can select a
-strict observation without reconstructing the relation from two types. The
-`term` string still names the diagnostic context (`assignment`, `return`,
+Identity and gradual Array/Map structural views may reach `checkmatch` without
+changing the producer's representation. A finite non-exact directional callable
+plan must already have produced `Ast.ExpCast`; `checkmatch` consumes its same
+raw plan object and does not retain a same-representation callable exception.
+Open runs retain the shared plan on their sink. The `term` string still names
+the diagnostic context (`assignment`, `return`,
 `array indexing`, call argument, and so on). Numeric `for` bounds are not
 assignment sinks: after Option forcing they use a dedicated exact-type check,
 so neither numeric conversion nor a gradual `value` view can reach the C
@@ -245,10 +250,10 @@ control representation.
 
 This is the load-bearing design. **Invariant:** after `checker.check`
 succeeds, every accepted nonidentity semantic edge has a plan. A
-representation-changing fixed conversion is an annotated `Ast.ExpCast`;
-same-representation gradual/callable views retain
-`_assignment_adjustment`; every finite consumed call result beyond the first
-is an explicit `Ast.ExpExtra`; and each shared list consumer carries its
+representation-changing fixed conversion and every finite non-exact callable
+edge is an annotated `Ast.ExpCast`; only same-representation Array/Map gradual
+views retain `_assignment_adjustment`; every finite consumed call result beyond
+the first is an explicit `Ast.ExpExtra`; and each shared list consumer carries its
 finite/open element adjustment. Numeric `for` loops have explicit steps and
 generic `for` loops have hidden iterator tuple/call declarations. The coder
 consumes these decisions and does not call a semantic relation.
@@ -259,8 +264,11 @@ consumes these decisions and does not call a semantic relation.
 `assignment_adjustment(source._type, target)` once:
 
 - identity returns the original expression;
-- a callable or same-representation structural gradual view leaves the source
+- a same-representation Array/Map structural gradual view leaves the source
   carrier intact and stores `_assignment_adjustment`;
+- a non-exact callable decision becomes `Ast.ExpCast` with the child at source
+  type A, the cast at target type B, `_implicit_coercion = true`, and the exact
+  raw `_adjustment`; the checker also freezes its callable-adapter lowering;
 - a `value` injection/projection becomes `Ast.ExpCast` with `_adjustment =
   gradual_view`;
 - a direct conversion becomes `Ast.ExpCast` with `_adjustment =
@@ -288,8 +296,9 @@ The coder also consumes a same-representation Option view at its sink.
 Unlike an Array or Map, an Option has no mutable backing whose element
 observations can remain deferred: nil passes, while a present payload is
 strictly guarded as the target base before the source base view is forgotten.
-Array, Map, and callable structural views keep their ordinary deferred
-component behavior.
+Array and Map structural views keep their ordinary deferred component
+behavior. Callable components are instead executed by a realized wrapper's
+frozen adapter or, on conditional fallback, by the strict generic path.
 
 `tryforce(node)` wraps any Option-typed node in a cast to its base — the
 implicit "must not be nil here" check. It is applied at: `for` bounds;
@@ -307,7 +316,9 @@ record fields, top-level variable initializers, generic-`for` tuple slots
 and visible variables, plus the operator-specific promotions (catalogued in
 the [type system chapter](../language/types.md)). A contributor adding a
 context must preserve the selected plan through `checkmatch` and code
-generation.
+generation. The raw/frozen callable contract and conditional allocation are
+specified in
+[Closure adjustment wrappers](closure-adjustment-wrappers.md#checker-elaboration).
 
 ### `ExpExtra` — materializing finite call results
 
@@ -332,7 +343,10 @@ call instead receives
 `_open_results = {source_type, target_type, start, adjustment}`.
 Computed Map/record fields and named arguments are scalar finite consumers.
 The `?`
-inference marker still applies per finite declaration slot.
+inference marker still applies per finite declaration slot. When an open-run
+element adjustment is callable, there is no per-element `Ast.ExpCast`; the
+checker freezes and attaches the shared adapter at the owning source location,
+and the coder later validates, registers, and emits that already frozen graph.
 
 ### Shared finite/open expression-list demand
 
@@ -561,8 +575,10 @@ Every Array/Map `Ast.VarBracket` read also carries `_read_guard` for its
 optionized result type. Function declarations, methods, bound-method
 trampolines, and lambdas carry parallel strict GuardPlan arrays for fixed and
 variadic parameters; generic call nodes carry strict fixed/open result guards.
-These annotations are distinct from the dynamic plans used by genuine Lua
-entries and non-Titan callable results.
+Frozen callable adapters reuse those component guards plus explicit root/rebase
+and action records, while their consumer-local target relays reuse the strict
+stack shell. These annotations are distinct from the dynamic plans used by
+genuine Lua entries and non-Titan callable results.
 
 `or` implements option defaulting: when the left side is `t?` and the right
 side's type equals `t`, the whole expression has type `t` (`of or 1.0` with
@@ -632,7 +648,10 @@ Lua caps a C closure at 255 upvalues. Titan reserves four header slots and the
 final strict Titan-generic entry trailer, so the checker accepts at most
 250 source-level captures. The first larger closure receives
 `function captures too many variables (251, max 250)` during checking rather
-than reaching `lua_pushcclosure`.
+than reaching `lua_pushcclosure`. Callable wrapper realization needs one
+additional traced source-closure upvalue, but this does not lower the source
+capture limit: a 255-upvalue source (or full wrapper chain) remains admissible
+and takes the generic fallback at the next non-exact edge.
 
 ### Lambda type inference: checking vs synthesis mode
 

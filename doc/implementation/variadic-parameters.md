@@ -153,9 +153,12 @@ Consumers test `varargtype`; the two never mix. Four type operations change:
   missing-nil action; an expected input tail must also be safely observed in
   every such position. The expected output shape then observes
   the actual fixed/flexible results covariantly. No numeric, Option, or other
-  automatic coercion is lifted through the callable shape. See
-  [flexible returns](flexible-returns.md#identity-and-callable-adjustment)
-  for the complete matrix.
+  automatic coercion is lifted through the callable shape. A missing expected
+  fixed result may use the separate `nil_fill_result` action only under the
+  shared nil-acceptance policy. See
+  [flexible returns](flexible-returns.md#identity-and-callable-adjustment) and
+  [closure adjustment wrappers](closure-adjustment-wrappers.md) for the
+  complete raw/frozen matrix.
 * **`equals`** remains exact structural identity: fixed positions, input-tail
   presence/type, and output-tail presence/type must all match. Thus
   `...: integer` and `...: value` are not equal, which gives them different
@@ -314,10 +317,11 @@ name a trailing flexible-result call as its open source.
 After checking, every static element destined for a `TitanVarg*` struct has
 an attached `assignment_adjustment` to the element type, so its store consumes
 the ordinary plan lowering. Runtime run-to-run conversion uses the same
-per-element plan. A strict `value → t` guard can therefore appear in the
-strict generic entry, a fresh forwarding copy, or a flexible result-run
-consumer; it is never replaced by a representation cast. The genuine-Lua
-entry instead consumes the corresponding `DynamicCoercionPlan`.
+per-element plan. A strict `value → t` guard can therefore appear in a realized callable
+wrapper's native adapter, the branded generic fallback, a fresh forwarding
+copy, or a flexible result-run consumer; it is never replaced by a
+representation cast. The genuine-Lua entry instead consumes the corresponding
+`DynamicCoercionPlan`.
 
 An adjusted Interface method uses this same descriptor ABI for an input tail.
 Its checker-frozen adapter records the run actions, element guard/injection,
@@ -531,25 +535,31 @@ keys so a C typedef whose spelling resembles a Titan type cannot alias it. The
 tag **folds in the vararg element** because the full callable shape
 distinguishes `...: integer` from `...: value`. So:
 
+Before dispatch, a statically known non-exact callable cast may conditionally
+construct a fresh target-tagged wrapper. It evaluates/anchors the source once,
+requires an exact branded source tag and one free upvalue, and otherwise leaves
+the carrier unchanged.
+
 * **Tag matches the static type** → the **native fast path**: build the struct
   (the same `emit_vararg_struct` cases 1–3, including a forwarded `...`) and
   call the native pointer through the fast-path typedef (`function_sig`, which
-  includes the trailing `_varargs` + `_start`), with `_fn = _vc_callee`. The
-  struct build is spliced into the *fast branch only* (`$VARGSTATS`), so a
-  gradual mismatch never allocates it (and a case-3 `checkandget` cannot raise
-  spuriously before the generic path runs).
-* **Tag differs but is branded** (for example a
-  `(integer, ...: value)`-typed view holding a
-  `(integer, ...: integer)` Titan function) → the **strict generic
-  Lua-stack path**: push the closure's strict light C function, the original
-  closure as a hidden carrier, every fixed and surplus static argument, and
-  any forwarded `...` elements. The strict entry rebuilds the descriptor with
-  `GuardPlan`s and invokes the native body with the original closure as `_fn`.
+  includes the trailing `_varargs` + `_start`), with `_fn = _vc_callee`. For a
+  source closure the pointer names its body; for a realized wrapper it names
+  the target adapter, which builds A's fixed/tail view and delegates to the
+  immediate source. The target typed tail is therefore enforced on the exact
+  path. `$VARGSTATS` remains inside the selected native branch.
+* **Tag differs but is branded** (a dynamic Function view or wrapper-ineligible
+  carrier) → the **strict generic Lua-stack path**: push the closure's final
+  strict light C function, the closure as a hidden carrier, every fixed and
+  surplus static argument, and any forwarded `...` elements. An ordinary
+  source uses its declaration entry; a wrapper uses its consumer target relay.
+  The strict shell rebuilds descriptors with `GuardPlan`s before the source or
+  target-adapter native call.
 * **The value is not a branded Titan closure** → the ordinary Lua generic path
-  calls the Lua closure, C function, or `__call` value. It receives arguments
-  already adjusted to the static callable shape and boxed for Lua; results
-  entering Titan use the canonical `DynamicCoercionPlan`, including numeric
-  conversions and truthiness.
+  calls the Lua closure, C function, or `__call` value. A static adjustment
+  never wraps it. It receives arguments already adjusted to the static callable
+  shape and boxed for Lua; results entering Titan use the canonical
+  `DynamicCoercionPlan`, including numeric conversions and truthiness.
 
 `luaD_callnoyield` can relocate the stack, so `codevaluecall` sets
 `ctx.uses_base_off` and recomputes `_base` afterward on every stack path.
@@ -588,8 +598,11 @@ elements remain internal backing Tables, while generic/Lua-visible runs box
 them as proxies. ABI 0.18 and 0.19 preserved that descriptor contract; ABI
 0.20 kept it while adding the Array writer user value and callable
 strict-entry trailer; 0.21 retained those descriptors while advancing the
-embedded Lua contract to 5.5.1, and 0.22 retains them. See
-[Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
+embedded Lua contract to 5.5.1, and 0.22 retains them. Closure adjustment
+wrappers reuse the same descriptor/native signature and add only private
+consumer adapter/relay artifacts, so this optimization does not advance the
+ABI. See [Dense Arrays](dense-arrays.md#internal-and-boxed-representations) and
+[Closure adjustment wrappers](closure-adjustment-wrappers.md#abi-and-ownership-rationale).
 
 Compiled-interface import paths round-trip `varargtype` through the same
 serialization, whether recovered from DSO callables or an archive metadata

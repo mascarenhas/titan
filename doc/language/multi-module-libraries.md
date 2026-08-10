@@ -230,10 +230,14 @@ value/native-call layouts remain unchanged. Every generated module also gains
 a fixed physical-provider identity slot so direct source collaborators reject
 canonical private state installed by another provider. The current marker,
 `TITAN_PATH_0_22`, and
-`lib/titan/0.22` namespace advance together. Ordinary DSO/archive metadata
-validation rejects 0.21 before either side can exchange a value; there is no
-compatibility adapter, migration, or cleanup path. A separately versioned 0.21
-installation remains preserved prior-version state.
+`lib/titan/0.22` namespace advance together. Conditional
+[closure adjustment wrappers](closure-adjustment-wrappers.md) reuse this fixed
+0.22 header and native signature: target adapters and strict relays are private
+to the consuming translation unit, so they add no provider symbol/schema/slot
+and require no ABI bump. Ordinary DSO/archive metadata validation rejects 0.21
+before either side can exchange a value; there is no compatibility adapter,
+migration, or cleanup path. A separately versioned 0.21 installation remains
+preserved prior-version state.
 
 ABI 0.19 introduced serialized union/variant schemas and made the module-state
 public prefix reconstruct public record and union static closures after

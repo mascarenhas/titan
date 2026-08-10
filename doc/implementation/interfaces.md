@@ -99,9 +99,12 @@ requires:
 `types.method_function_type` projects both methods to ordinary
 `Type.Function` shapes and leaves declaration-only parameter names out of
 identity and adjustment. Aligned components may be exact, gradually
-consistent, or nested callable adjustments. `component_adjustment` does not
-consult ordinary coercion, so numeric, Option, C, and concrete-to-Interface
-coercions do not lift through a method signature.
+consistent, or nested callable adjustments. A wholly missing concrete result
+may use `nil_fill_result` only when the Interface result passes
+`accepts_missing_nil`; the action has no source component and source-flex
+projection takes precedence. `component_adjustment` does not consult ordinary
+coercion, so numeric, Option, C, and concrete-to-Interface coercions do not lift
+through a method signature.
 
 The result retains one ordered mapping per Interface slot:
 
@@ -134,9 +137,12 @@ descriptors, their nominal value types, the ordered mappings, pair exactness,
 and any outer Option operation. It is the coder's authority to allocate; the
 coder does not rerun structural matching.
 
-An exact mapping needs no adapter. A non-exact mapping is normalized into a
-closed, relation-free `interface_method_adapter` graph. Its operations are
-limited to:
+An exact mapping needs no adapter. For a non-exact mapping, the generalized
+freezer supplies the same closed, relation-free callable action subgraph used
+by first-class closure adjustments. `make_interface_adapter` then wraps that
+subgraph in a distinct `interface_method_adapter` with Interface-specific hidden
+operands, roots, rebases, lifetime labels, and method invocation backend. The
+shared callable operations are limited to:
 
 - identity;
 - gradual injection;
@@ -144,14 +150,19 @@ limited to:
   (including the corresponding Option case) or a representation-preserving
   delayed Array/Map observation;
 - a nested frozen callable adjustment; and
-- the ordinary argument/result run actions for fixed slots, nil fill,
-  ignored slots, typed tails, flexible tails, and hidden surplus results.
+- the ordinary argument/result run actions for fixed slots, missing-argument
+  nil fill, `nil_fill_result`, ignored slots, typed tails, flexible tails, and
+  hidden surplus results.
 
 The checker explicitly rejects a nested concrete-to-Interface conversion in
-this graph. It also records every fixed and open-range root and every required
-stack rebase. The coder validates the graph as closed records and dense lists,
-rechecks its types and action sequence against the two method descriptors, and
-never calls a type relation while emitting the adapter.
+this graph. The Interface wrapper records its own fixed and open-range roots and
+required stack rebases around the shared action subgraph. The coder validates
+both closed records and their dense lists, rechecks types and action sequence
+against the two method descriptors, and never calls a type relation while
+emitting the adapter. The shared conversion-action emitter is parameterized by
+invocation: this Interface path calls a known method with concrete self, while a
+closure wrapper recovers and calls its penultimate immediate source closure. See
+[Closure adjustment wrappers](closure-adjustment-wrappers.md#one-frozen-callableadapterplan).
 
 For a finite flexible-result request, the adapter first consumes any surplus
 fixed concrete results before asking the concrete flexible tail for more.
@@ -240,8 +251,11 @@ The adapter receives the same hidden operands, but its invariant is fixed:
 
 The adapter converts Interface arguments into the concrete callable's shape,
 calls the concrete method with those hidden operands unchanged, and converts
-the concrete results into the Interface shape. The translation unit that
-emits the adapter is irrelevant to `_mod` provenance.
+the concrete results into the Interface shape. A `nil_fill_result` initializes
+the first C return or the appropriate later out-parameter without reading a
+concrete result. The translation unit that emits the adapter is irrelevant to
+`_mod` provenance. These steps share the closure adapter's action/root/rebase
+engine; only this known-method invocation differs.
 
 Open input and result runs use the existing typed descriptor ABI and the
 `TITAN_VARARG_MAX` bound. GC-bearing fixed values and open ranges are anchored
@@ -291,15 +305,17 @@ Interface metatable check first.
 
 ### Strict Titan generic calls
 
-A bound Interface method is an ordinary branded Titan function closure. A
-non-exact Titan call reaches its final strict light-C-function entry, which
-applies gradual guards to the function type and invokes the bound native
-trampoline. Generic stack representation alone does not select the coercive
+A bound Interface method starts as an ordinary branded Titan source closure. A
+statically known non-exact Function edge may conditionally wrap it with a
+target tag/native adapter and consumer-local relay. If realization is
+ineligible—or a later dynamic view has another tag—the final strict
+light-C-function entry applies the frozen gradual actions and reaches the bound
+native route. Generic stack representation alone does not select the coercive
 Lua rules.
 
 ### Bound method values
 
-An Interface bound-method closure has six zero-based upvalues:
+An Interface bound-method **source** closure has six zero-based upvalues:
 
 ```text
 0  Interface-owner module Udata
@@ -310,10 +326,13 @@ An Interface bound-method closure has six zero-based upvalues:
 5  strict Lua-stack entry
 ```
 
-Its `CClosure.f` is the coercive Lua trampoline. Exact Titan calls use upvalue
-2; non-exact branded calls use upvalue 5; genuine Lua calls use
-`CClosure.f`. The native trampoline loads the copied method slot and hidden
-concrete values from the captured wrapper. The Lua trampoline inserts that
+Its `CClosure.f` is the coercive Lua trampoline. Exact source calls use
+upvalue 2; branded source-tag mismatches use upvalue 5; genuine Lua calls use
+`CClosure.f`. A realized adjustment copies the captured Interface wrapper,
+appends the bound source closure as its immediate-source link, replaces
+upvalue 1/2 with target tag/adapter, and stores the target relay last. The
+native trampoline loads the copied method slot and hidden concrete values from
+the captured wrapper. The Lua trampoline inserts that
 same wrapper as receiver and delegates to the Interface method's Lua entry.
 
 The Interface owner exports the native bound trampoline, Lua trampoline, and
@@ -422,10 +441,14 @@ covers:
 
 ABI 0.20 also introduced the two-user-value Array proxy and strict generic
 function entry. ABI 0.21 retained those layouts while advancing the matched
-Lua runtime to 5.5.1, and ABI 0.22 retains them. A 0.21 provider is rejected
-before its metadata is decoded or any native value crosses the boundary; there
-is no compatibility adapter, migration, or cleanup path, and separately
-versioned 0.20 and 0.21 artifacts remain preserved.
+Lua runtime to 5.5.1, and ABI 0.22 retains them. The generalized callable
+action graph, `nil_fill_result`, and first-class closure wrappers add no
+Interface schema/payload slot or provider symbol. Target wrapper adapters and
+strict relays are consumer-private and use existing signatures, so there is no
+new ABI bump. A 0.21 provider is rejected before its metadata is decoded or any
+native value crosses the boundary; there is no compatibility adapter, migration,
+or cleanup path, and separately versioned 0.20 and 0.21 artifacts remain
+preserved.
 
 The wrapper, concrete module, and concrete value use stock Lua reachability.
 The two user values are strong traced edges with ordinary backward barriers;

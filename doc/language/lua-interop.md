@@ -141,7 +141,7 @@ declared type:
 | record type | a userdata created by that same record type (from any module instance) | a userdata carrying the record's metatable |
 | union type | a userdata created by that exact union type | the same opaque union userdata |
 | Interface type | an existing wrapper of that exact nominal Interface type; never a bare record or union | the same Interface wrapper userdata |
-| function type | any boxed value; callability/signature is deferred to invocation | the same boxed value; a Titan-defined function is its canonical closure |
+| function type | any boxed value; callability/signature is deferred to invocation | the same boxed value; an unadjusted Titan declaration is its canonical source closure, while a realized callable adjustment is its fresh wrapper |
 | `T?` (option) | `nil`, or a value accepted by the same dynamic rule as `T` | `nil`, or whatever `T` produces |
 | `value` | anything | the value, unchanged |
 
@@ -231,8 +231,12 @@ The shared dynamic conversion runs at exactly these places:
    operation even though the syntax appears in Titan.
 
 Separate **strict** guards run for an implicit `value -> T` projection, every
-typed Array element read, every typed Map value read, and every argument/result
-observed through a non-exact branded Titan function view.
+typed Array element read, every typed Map value read, and every callable
+component observed by a target adapter or after a branded exact-tag mismatch.
+A statically known non-exact callable edge may first realize a
+[target-tagged wrapper](closure-adjustment-wrappers.md); that native adapter
+executes the same checker-frozen strict actions without becoming a Lua
+boundary.
 
 And, just as importantly, where they do *not* happen:
 
@@ -246,13 +250,15 @@ And, just as importantly, where they do *not* happen:
   instead intercepts every ordinary Lua write and dynamically converts a
   non-nil element before committing it; a later read still performs its
   independent strict guard for the current static view.
-* **Not on exact native Titan calls.** A direct Titan-to-Titan call, including
-  across modules, needs no boundary checks because the compiler has already
-  proven the types match. The same is true for a function value whose exact
-  run-time type tag matches its static type. A non-exact but branded Titan
-  closure uses the strict generic entry in its trailer. Only a genuine Lua
-  call of Titan uses the closure's coercive entry; a non-Titan Lua callable
-  uses an ordinary Lua call followed by dynamic result conversion.
+* **Not as genuine-Lua conversion on native Titan calls.** A direct
+  Titan-to-Titan call, including across modules, needs no boundary checks when
+  the types are exact. A realized adjustment wrapper also has the target tag
+  and uses a native adapter, but that adapter executes only the strict
+  checker-frozen `B -> A` argument and `A -> B` result actions. After an
+  exact-tag mismatch an unchanged branded closure uses its strict generic
+  trailer. Only a genuine Lua call uses `CClosure.f`; for a wrapper that field
+  is deliberately the source's coercive entry. A non-Titan Lua callable uses
+  an ordinary Lua call followed by dynamic result conversion.
 
 When an argument check fails, the error message is prefixed with a source
 location of the shape `file:line:col:` — note that this is the location of
@@ -583,16 +589,26 @@ The value passed for `f` may be any boxed Lua value; acceptance into a
 Function slot deliberately defers callability. Plain Lua functions, C
 functions, tables with a `__call` metamethod, and Titan functions are
 callable. Calling a value that turns out **not** to be callable raises an
-ordinary Lua error at the point of the call. A Titan function value of the
-exact expected type skips the Lua stack and calls its native entry directly.
-A non-exact Titan-branded closure instead uses its strict trailer: aligned
-arguments and observed results must pass gradual guards, with no ordinary
-scalar, Option, or Interface-wrapper coercion lifted through the function type.
-A non-Titan callable uses an ordinary Lua call, and each result entering Titan
+ordinary Lua error at the point of the call. A Titan function value whose tag matches the expected type skips the Lua stack
+and calls its native entry directly. For a realized non-exact adjustment this
+native entry is a target adapter: aligned arguments and observed results execute
+only the checker-frozen strict actions, with no ordinary scalar, Option, or
+Interface-wrapper coercion lifted through the function type. An unchanged
+Titan-branded value whose tag differs instead uses its strict trailer. A
+non-Titan callable uses an ordinary Lua call, and each result entering Titan
 uses the broad dynamic conversion for its requested target type. A Lua function
 may still also travel through Titan opaquely as a `value` inside a shared table
-and be
-handed back intact.
+and be handed back intact. Because Lua closures/C functions/`__call` objects are
+not eligible Titan source closures, a static callable adjustment preserves that
+same boxed value and identity rather than wrapping it.
+
+When Lua receives and calls a realized adjustment wrapper, it enters the
+`CClosure.f` copied from the immediate source value. Lua therefore preserves
+whatever genuine-Lua surface that value already carries—ultimately the
+original source declaration's argument adjustment, dynamic conversions, and
+result behavior—not a synthesized target Lua entry. Titan exact calls of the
+same object use its target-native adapter. See
+[Closure adjustment wrappers](closure-adjustment-wrappers.md#titan-and-lua-observe-different-contracts).
 
 For a positional call whose static callee type is `value`, Titan derives a
 temporary function type from the written arguments and from the surrounding

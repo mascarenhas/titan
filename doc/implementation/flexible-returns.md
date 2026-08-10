@@ -288,15 +288,16 @@ types never share a native-entry cast by accident.
 operation used
 when a callable value is stored or called through another callable type. It
 returns a `CallablePlan`, not a boolean. The plan records fixed/tail
-argument alignment, nil fill, ignored surplus, finite/open result demand, and
-one component `AdjustmentPlan` for every aligned slot. An exact component has
-an identity adjustment and no guard; a gradual view contains its strict
-`GuardPlan`; a nested function component contains another `CallablePlan`.
-The checker separately annotates concrete entry/result observations with
-`_strict_guard_plans` and `_strict_result_guard_plans`. Crucially, callable
-adjustment uses gradual consistency recursively; it does not lift ordinary
-numeric, Option, nominal-to-Interface, or other automatic coercions through
-the function type.
+argument alignment, missing-argument nil fill, ignored surplus, finite/open
+result demand, the `nil_fill_result` action, and one component
+`AdjustmentPlan` for every aligned slot. An exact component has an identity
+adjustment and no guard; a gradual view contains its strict `GuardPlan`; a
+nested function component contains another `CallablePlan`. The checker
+separately annotates concrete entry/result observations and freezes a
+relation-free `CallableAdapterPlan` with roots, rebases, demand math, location,
+and trace identity. Crucially, callable adjustment uses gradual consistency
+recursively; it does not lift ordinary numeric, Option,
+nominal-to-Interface, or other automatic coercions through the function type.
 
 ### Inputs
 
@@ -328,20 +329,28 @@ the function type.
   actual flexible element, when present, against its element type.
 * An actual fixed-only result list may end under an expected flexible tail;
   zero trailing values is a valid run.
+* When an expected fixed result has neither a fixed nor flexible actual source,
+  `nil_fill_result` supplies nil only if `accepts_missing_nil` admits the target
+  (Nil, Value, Option, Titan Pointer, or CPointer). It has no source adjustment,
+  is non-exact, and follows source-flex projection in precedence.
 
 This is the function-specific directional adjustment layered on Titan's
 symmetric gradual-consistency relation. The local two-way `value` rule does
-not make whole function types symmetric or transitive. The resulting
-`CallablePlan` controls storage and generic calls; equality alone licenses the
-exact native function-pointer path. See
+not make whole function types symmetric or transitive. The resulting raw
+`CallablePlan` remains semantic authority. For a finite non-exact edge the
+checker inserts `Ast.ExpCast` and freezes the native adapter; guarded run-time
+realization can then give target B an exact-tag native path. Ineligible or
+dynamic carriers retain generic dispatch. Exact equality alone preserves the
+source closure with no allocation. See
 [Type relations and boundary plans](type-relations-and-boundaries.md).
 
 Interface method satisfaction reuses this directional callable machinery.
-When a concrete method needs adjustment, the checker freezes the fixed/tail
-result run, hidden-surplus policy, roots, and stack rebases into the Interface
-adapter plan. The coder emits that plan under the Interface method's native
-signature; it never treats the direct concrete-to-Interface coercion as a
-structural result-component relation. See
+The generalized freezer produces the same ordered action/root/rebase graph for
+an adjusted Interface slot and a first-class closure wrapper; only the
+invocation backend differs. The coder emits an Interface plan under the method
+signature and a closure plan under target `function_sig(B)`. Neither treats the
+direct concrete-to-Interface coercion as a structural result-component
+relation. See
 [Interfaces](interfaces.md#frozen-conversion-and-adapter-plans).
 
 ## Generated result runs and the native ABI
@@ -478,23 +487,32 @@ consumer iterates only the actual `n_args` range, beginning at the
 `_open_results.start` recorded after any finite projections.
 
 `codevaluecall` retains the existing exact-tag branch. A Titan `CClosure` with
-the exact canonical function tag loads `_mod` and the native entry pointer
-from its standard upvalues, casts the pointer to the full flexible signature,
-and calls it directly. The flexible tail is part of the tag, so a consistent
-but differently shaped closure cannot enter that branch.
+the exact canonical function tag loads `_mod` and the native entry pointer from
+its standard upvalues, casts the pointer to the full flexible signature, and
+calls it directly. The pointer is an ordinary source body for an exact source
+value and a synthetic target adapter for a realized callable wrapper. The
+flexible tail is part of the tag, so a differently shaped closure cannot enter
+unless a prior static non-exact edge actually realized that target tag.
 
-The generic Lua-stack path then splits by brand. A non-exact Titan closure has
-the opaque ABI sentinel in fixed `upvalue[3]`: `codevaluecall` pushes the
-closure's final strict light C function, passes the original closure as a
-hidden argument, and uses the checker-attached strict argument guards in that
-entry. The count-plus-raw-brand predicate needs no registry lookup. After the
-entry returns, `codevaluecall` applies the checker-attached strict result
-guards. A Lua closure, Lua C function, or `__call` value is unbranded; its
-arguments are the already adjusted and boxed values from the static call,
-while its results entering Titan use the canonical dynamic boundary
-conversions. A contextual `value` call reaches the same three-way split after
-synthesis; exact recovery is therefore possible without a separate
-dynamic-call implementation.
+Finite/open callable casts are lowered before dispatch by the shared guarded
+constructor. It evaluates/anchors once, creates a fresh B wrapper only for an
+exact branded A closure with upvalue room, and otherwise preserves the carrier.
+The wrapper adapter receives B's `_flexwant`, calls the immediate source under
+A's demand formula, roots results, and publishes B's fixed/tail shape subject to
+the 200 bound.
+
+The generic Lua-stack path then splits by brand. An exact-tag mismatch has the
+opaque ABI sentinel in fixed `upvalue[3]`: `codevaluecall` pushes the closure's
+final strict light C function and the closure as hidden carrier. An ordinary
+source uses its declaration strict entry; a wrapper uses its consumer-local
+target relay and then its adapter. After the entry returns, `codevaluecall`
+applies the caller-attached strict result actions. A Lua closure, Lua C
+function, or `__call` value is unbranded; its arguments are the already adjusted
+and boxed values from the static call, while results entering Titan use the
+canonical dynamic boundary conversions. A contextual `value` call reaches the
+same three-way split after synthesis but never has a statically known A→B edge
+to wrap; exact recovery is still possible without a separate dynamic-call
+implementation.
 
 ### Choosing the Lua VM result request
 
@@ -527,10 +545,12 @@ remaining finite budget, and applies the 200-value overflow error only when the
 enclosing sink is effectively open.
 
 No finite `_flexwant` is smuggled through `CallInfo` at a generic boundary. A
-branded non-exact Titan closure therefore enters its strict stack adapter with
-`LUA_MULTRET`; the adapter treats its own native call as open and enforces its
-own 200-value descriptor bound before returning. A non-Titan callable receives
-the same Lua result request but its returned values are dynamically coerced.
+branded exact-tag mismatch therefore enters its declaration strict entry or
+wrapper target relay with `LUA_MULTRET`; that stack path treats its native call
+as open and enforces its own 200-value descriptor bound before returning. An
+exactly tagged realized wrapper instead receives `_flexwant` through its native
+target signature. A non-Titan callable receives the Lua result request but its
+returned values are dynamically coerced.
 
 Lua 5.5's finite result count is encoded in `CallInfo.callstatus` and is
 bounded by `MAXRESULTS` (250). That creates a second, independent bound only
@@ -548,12 +568,17 @@ diagnostics.
 
 ## Lua-stack entries
 
-`genluaentry` emits the coercive genuine-Lua and strict Titan-generic entries
-from one arity/tail/result shell. Both pad missing fixed parameters with nil.
+`genluaentry` emits the coercive genuine-Lua and declaration strict
+Titan-generic entries from one arity/tail/result shell. A wrapper copies the
+source coercive entry and uses the same shell for a consumer-local target strict
+relay. All pad missing fixed parameters with nil under their own source/target
+contract.
 A fixed Titan function ignores surplus user arguments; an input-variadic
-function collects them in its input descriptor. The strict entry additionally
-validates and excludes its hidden original-closure argument and consumes
-strict guards where the coercive entry consumes dynamic plans.
+function collects them in its input descriptor. A declaration strict entry
+validates/excludes its hidden source closure and consumes strict guards where
+the coercive entry consumes dynamic plans. A wrapper relay validates/excludes
+the target wrapper without requiring the source `CClosure.f`, then invokes the
+target adapter.
 
 For flexible results, the entry reads Lua 5.5's requested-result count from
 the current `CallInfo` with `get_nresults(L->ci->callstatus)`:
@@ -592,7 +617,11 @@ The ownership/rooting rules are:
 * no allocating operation occurs between releasing the callee's temporary
   roots and anchoring the corresponding caller-owned output values;
 * generic Lua results remain rooted in their VM result slots until conversion
-  and destination anchoring finish.
+  and destination anchoring finish;
+* a callable target adapter anchors every incoming GC-bearing B value before
+  nested conversion, immediately anchors all A fixed/flexible results after the
+  source native call, and keeps the immediate source/wrapper rooted across each
+  allocating or rebasing operation.
 
 All stack locations that survive a possible allocation or call are stored as
 offsets and recovered with `restorestack`; raw `StkId` pointers do not cross a

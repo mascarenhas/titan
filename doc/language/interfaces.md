@@ -226,11 +226,38 @@ end
 Calls through `I` evaluate `x` and `y`, but the adjusted concrete method
 ignores them. Its one `float` result becomes the first `value` in the flexible
 tail. This pair needs an adjustment entry; it is not an exact method pair.
+Interface payload slots retain their existing exact-entry/adjustment-entry
+representation. The adjustment entry and first-class
+[closure wrappers](closure-adjustment-wrappers.md) share the same directional
+action graph, but an Interface conversion still constructs its nominal
+Interface userdata wrapper rather than retagging the method closure.
+
+A no-result concrete method may also implement an Interface method whose
+otherwise missing result accepts nil:
+
+```titan
+record Notifier
+end
+
+function Notifier:notify(): ()
+end
+
+interface ObservableNotifier
+    function notify(): value
+end
+```
+
+A call through `ObservableNotifier` receives one nil `value`. Changing the
+Interface result to `integer` makes `Notifier` fail satisfaction rather than
+inventing a scalar conversion.
 
 Aligned parameter and result components may use gradual consistency and nested
 callable adjustment. They may not use an ordinary numeric, Option, C, or
-Interface wrapper coercion. In particular, a concrete result coercion does not
-lift through the method's function type:
+Interface wrapper coercion. A concrete method with no corresponding fixed or
+flexible result may satisfy an Interface result only through the ordinary named
+nil-fill action, and only for a nil-accepting result such as `value` or `T?`;
+a required scalar/nominal result remains incompatible. In particular, a
+concrete result coercion does not lift through the method's function type:
 
 ```titan
 interface Cloneable
@@ -313,9 +340,12 @@ end
 
 A gradual view such as `{integer}` as `{value}` preserves the same container
 and checks elements when observed. It does not perform scalar conversions over
-the contents. Likewise, a non-exact branded function view uses delayed strict
-guards when called; it does not smuggle an Interface, numeric, or Option
-coercion through an aligned component.
+the contents. Likewise, a non-exact callable edge executes only its strict
+component actions: an eligible exact Titan source may become a fresh
+[target-tagged closure wrapper](closure-adjustment-wrappers.md), while an
+ineligible branded value retains delayed strict generic guards. Neither path
+smuggles an Interface, numeric, or Option coercion through an aligned
+component.
 
 An Interface may be a Map key. A satisfying concrete key is wrapped at each
 target-typed indexing operation. Since each conversion allocates a fresh
@@ -373,10 +403,12 @@ end
 ```
 
 The function value captures the Interface wrapper and has the method's type
-with `self` removed. Exact Titan calls use its native Interface trampoline;
-non-exact branded views use the strict generic path; Lua calls its coercive Lua
-entry. Like every function value, a bound method has no named-call metadata,
-so call it positionally after binding.
+with `self` removed. Exact Titan calls use its native Interface trampoline. A
+later non-exact callable edge conditionally creates a fresh target wrapper; if
+that is ineligible, a branded mismatch uses the strict generic path. Lua calls
+the source bound closure's coercive Lua entry, which a realized wrapper copies.
+Like every function value, a bound method has no named-call metadata, so call
+it positionally after binding.
 
 ## Options
 
