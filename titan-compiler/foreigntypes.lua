@@ -1290,7 +1290,7 @@ local function convert_declaration(st, ftype, member_name)
             converted = view
         end
     else
-        return nil, "FIXME unconverted " .. inspect(ftype)
+        return nil, "unsupported C declaration: " .. inspect(ftype)
     end
     if not converted then return nil, err end
     if ftype.type == "function"
