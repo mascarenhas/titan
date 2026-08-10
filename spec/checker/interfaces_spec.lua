@@ -1354,7 +1354,9 @@ describe("interfaces (typechecker)", function()
 
         assert.same({
             "after_action",
+            "after_action",
             "after_native_call",
+            "after_action",
             "after_action",
         }, (function()
             local kinds = {}
@@ -1365,8 +1367,16 @@ describe("interfaces (typechecker)", function()
         end)())
         assert.equal("argument:2",
             adapter.rebase_points[1].action)
+        assert.equal("argument:5",
+            adapter.rebase_points[2].action)
+        assert.equal("callable_wrapper_construction",
+            adapter.rebase_points[2].reason)
         assert.equal("result:2",
-            adapter.rebase_points[3].action)
+            adapter.rebase_points[4].action)
+        assert.equal("result:5",
+            adapter.rebase_points[5].action)
+        assert.equal("callable_wrapper_construction",
+            adapter.rebase_points[5].reason)
         assert.is_false(
             adapter.rooting.ranges.argument_source.present)
         assert.is_true(

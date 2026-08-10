@@ -554,12 +554,12 @@ local function checkmatch(term, expected, exp, errors, loc, adjustment,
     local found = exp._type
 
     -- Identity and every representation-changing adjustment must already have
-    -- left the expression at the target type. Callable and structural gradual
-    -- views deliberately retain the producer type and carry their plan on the
-    -- same expression.
+    -- left the expression at the target type. Structural gradual views retain
+    -- the producer type and carry their plan on the same expression. A
+    -- non-exact callable adjustment is an explicit target-typed ExpCast, even
+    -- though both endpoint values use TValue representation.
     local same_representation = adjustment
         and (adjustment.kind == "identity"
-            or adjustment.kind == "callable"
             or (adjustment.kind == "gradual_view"
                 and adjustment.op == "structural"))
     if adjustment == false then
@@ -1998,7 +1998,8 @@ local function freeze_interface_guard(plan, target, seen)
     return frozen
 end
 
-local freeze_interface_callable
+local freeze_callable_actions
+local freeze_callable_adapter_plan
 
 local function interface_adapter_is_gc(typ)
     local normalized = types.normalize(typ)
@@ -2018,8 +2019,8 @@ end
 -- Normalize a callable component edge into the only operations an Interface
 -- adapter may execute. Ordinary coercions and representation-changing nested
 -- Interface construction are intentionally absent.
-local function freeze_interface_component(
-        adjustment, source, target, seen)
+local function freeze_callable_component(
+        adjustment, source, target, context)
     local normalized_source = types.normalize(source)
     local normalized_target = types.normalize(target)
     interface_adapter_assert(
@@ -2100,12 +2101,12 @@ local function freeze_interface_component(
             target = normalized_target,
             declared_source = source,
             declared_target = target,
-            timing = "delayed_call",
-            may_raise = false,
-            may_relocate = false,
-            callable = freeze_interface_callable(
+            timing = "immediate",
+            may_raise = true,
+            may_relocate = true,
+            adapter = freeze_callable_adapter_plan(
                 adjustment, normalized_source,
-                normalized_target, seen),
+                normalized_target, context.location, context),
         }
     end
 
@@ -2117,6 +2118,16 @@ local function freeze_interface_component(
             .. tostring(adjustment.kind))
 end
 
+-- Fill the compatibility alias only after constructing the complete nested
+-- plan. Existing Interface consumers read `callable`; closure consumers use
+-- the full `adapter` including roots, rebases, location, and strict plans.
+local function finish_callable_component(operation)
+    if operation.kind == "callable_view" then
+        operation.callable = operation.adapter.callable
+    end
+    return operation
+end
+
 local function adapter_action(kind, order, fields)
     fields = fields or {}
     fields.kind = kind
@@ -2126,7 +2137,7 @@ local function adapter_action(kind, order, fields)
 end
 
 local function component_action(
-        raw, kind, order, phase, source, target, seen, fields)
+        raw, kind, order, phase, source, target, context, fields)
     fields = fields or {}
     fields.phase = phase
     fields.source_type = source
@@ -2134,16 +2145,37 @@ local function component_action(
     fields.source_gc = interface_adapter_is_gc(source)
     fields.destination_gc =
         interface_adapter_is_gc(target)
-    fields.operation = freeze_interface_component(
-        raw.adjustment, source, target, seen)
+    fields.operation = finish_callable_component(
+        freeze_callable_component(
+            raw.adjustment, source, target, context))
     fields.rebase_after = fields.operation.may_relocate
     return adapter_action(kind, order, fields)
+end
+
+local function callable_dense_count(list, name)
+    interface_adapter_assert(type(list) == "table", name .. " is not a table")
+    local maximum, count = 0, 0
+    for key in pairs(list) do
+        interface_adapter_assert(
+            type(key) == "number" and key >= 1
+                and key == math.floor(key),
+            name .. " has a non-array key")
+        if key > maximum then maximum = key end
+        count = count + 1
+    end
+    interface_adapter_assert(count == maximum,
+        name .. " is not dense")
+    for index = 1, maximum do
+        interface_adapter_assert(list[index] ~= nil,
+            name .. " has a hole at " .. tostring(index))
+    end
+    return maximum
 end
 
 -- Freeze one directional callable plan while preserving every action index and
 -- offset. This is structural elaboration only: it never asks any relation to
 -- prove a new edge.
-freeze_interface_callable = function(raw, source, target, seen)
+freeze_callable_actions = function(raw, source, target, context)
     interface_adapter_assert(
         type(raw) == "table" and raw.kind == "callable",
         "method adjustment is not callable")
@@ -2164,15 +2196,14 @@ freeze_interface_callable = function(raw, source, target, seen)
         type(raw.arguments) == "table"
             and type(raw.results) == "table",
         "callable plan lacks ordered action lists")
+    local raw_argument_count = callable_dense_count(
+        raw.arguments, "callable argument actions")
+    local raw_result_count = callable_dense_count(
+        raw.results, "callable result actions")
 
-    seen = seen or {}
-    local prior = seen[raw]
-    if prior then
-        interface_adapter_assert(
-            not prior.active,
-            "recursive callable-plan cycle")
-        return prior.frozen
-    end
+    interface_adapter_assert(
+        type(context) == "table",
+        "callable freezer lacks its context")
 
     local frozen = {
         kind = "interface_callable_actions",
@@ -2182,8 +2213,6 @@ freeze_interface_callable = function(raw, source, target, seen)
         arguments = {},
         results = {},
     }
-    seen[raw] = { active = true, frozen = frozen }
-
     local argument_index = 0
     local function argument(kind)
         argument_index = argument_index + 1
@@ -2204,7 +2233,7 @@ freeze_interface_callable = function(raw, source, target, seen)
             "shared argument indexes are not canonical")
         frozen.arguments[order] = component_action(
             action, "argument", order, "argument",
-            target.params[index], source.params[index], seen, {
+            target.params[index], source.params[index], context, {
                 expected_index = index,
                 actual_index = index,
                 source_kind = "interface_fixed",
@@ -2223,7 +2252,7 @@ freeze_interface_callable = function(raw, source, target, seen)
                 "tail-to-fixed argument indexes are not canonical")
             frozen.arguments[order] = component_action(
                 action, "tail_or_nil_to_argument", order, "argument",
-                target.varargtype, source.params[index], seen, {
+                target.varargtype, source.params[index], context, {
                     actual_index = index,
                     expected_tail_offset =
                         index - #target.params,
@@ -2274,7 +2303,7 @@ freeze_interface_callable = function(raw, source, target, seen)
                 "fixed-to-tail argument index is not canonical")
             frozen.arguments[order] = component_action(
                 action, "argument_to_tail", order, "argument",
-                target.params[index], source.varargtype, seen, {
+                target.params[index], source.varargtype, context, {
                     expected_index = index,
                     source_kind = "interface_fixed",
                     destination_kind = "concrete_tail",
@@ -2313,7 +2342,7 @@ freeze_interface_callable = function(raw, source, target, seen)
             "input tail offset is not canonical")
         frozen.arguments[order] = component_action(
             action, "tail_to_tail", order, "argument",
-            target.varargtype, source.varargtype, seen, {
+            target.varargtype, source.varargtype, context, {
                 expected_tail_consumed = consumed,
                 source_kind = "interface_tail",
                 source_open = true,
@@ -2366,7 +2395,7 @@ freeze_interface_callable = function(raw, source, target, seen)
             })
     end
     interface_adapter_assert(
-        argument_index == #raw.arguments,
+        argument_index == raw_argument_count,
         "callable plan has extra argument actions")
 
     local result_index = 0
@@ -2390,16 +2419,13 @@ freeze_interface_callable = function(raw, source, target, seen)
                 "fixed result indexes are not canonical")
             frozen.results[order] = component_action(
                 action, "result", order, "result",
-                actual, expected, seen, {
+                actual, expected, context, {
                     actual_index = index,
                     expected_index = index,
                     source_kind = "concrete_fixed",
                     destination_kind = "interface_fixed",
                 })
-        else
-            interface_adapter_assert(
-                source.flexrettype,
-                "required result has no concrete source")
+        elseif source.flexrettype then
             local optional = expected._tag == "Type.Option"
             local kind = optional
                 and "flex_to_optional_result"
@@ -2422,7 +2448,7 @@ freeze_interface_callable = function(raw, source, target, seen)
                 wraps and expected.base or expected
             local frozen_action = component_action(
                 action, kind, order, "result",
-                source.flexrettype, operation_target, seen, {
+                source.flexrettype, operation_target, context, {
                     expected_index = index,
                     actual_flex_offset = offset,
                     source_kind = "concrete_flex",
@@ -2445,12 +2471,41 @@ freeze_interface_callable = function(raw, source, target, seen)
                     wrap_present = wraps,
                 })
             -- The operation may target the Option base, but the adapter slot
-            -- and its destination root always carry the complete Interface
+            -- and its destination root always carry the complete expected
             -- result type.
             frozen_action.target_type = expected
             frozen_action.destination_gc =
                 interface_adapter_is_gc(expected)
             frozen.results[order] = frozen_action
+        else
+            local action, order = result("nil_fill_result")
+            interface_adapter_assert(
+                action.expected_index == index
+                    and action.expected_type
+                    and types.equals(action.expected_type, expected)
+                    and action.adjustment == nil,
+                "missing-result nil fill is malformed")
+            frozen.results[order] = adapter_action(
+                "nil_fill_result", order, {
+                    phase = "result",
+                    expected_index = index,
+                    expected_type = expected,
+                    source_kind = "constant_nil",
+                    destination_kind = "interface_fixed",
+                    source_type = types.Nil(),
+                    target_type = expected,
+                    source_gc = false,
+                    destination_gc =
+                        interface_adapter_is_gc(expected),
+                    admissible = true,
+                    effect = "synthesize_nil",
+                    missing_arm = {
+                        kind = "nil_fill",
+                        admissible = true,
+                        target_type = expected,
+                    },
+                    rebase_after = false,
+                })
         end
     end
 
@@ -2464,7 +2519,7 @@ freeze_interface_callable = function(raw, source, target, seen)
                 "fixed-to-flex result indexes are not canonical")
             frozen.results[order] = component_action(
                 action, "result_to_flex", order, "result",
-                source.rettypes[index], target.flexrettype, seen, {
+                source.rettypes[index], target.flexrettype, context, {
                     actual_index = index,
                     expected_flex_offset = offset,
                     source_kind = "concrete_fixed",
@@ -2504,7 +2559,7 @@ freeze_interface_callable = function(raw, source, target, seen)
             "output flex offset is not canonical")
         frozen.results[order] = component_action(
             action, "flex_to_flex", order, "result",
-            source.flexrettype, target.flexrettype, seen, {
+            source.flexrettype, target.flexrettype, context, {
                 actual_flex_consumed = consumed,
                 source_kind = "concrete_flex",
                 source_open = true,
@@ -2557,10 +2612,9 @@ freeze_interface_callable = function(raw, source, target, seen)
             })
     end
     interface_adapter_assert(
-        result_index == #raw.results,
+        result_index == raw_result_count,
         "callable plan has extra result actions")
 
-    seen[raw].active = false
     return frozen
 end
 
@@ -2620,6 +2674,301 @@ local function adapter_fixed_roots(actions, side)
     return roots
 end
 
+local CALLABLE_ADAPTER_VARARG_CAP = 200
+
+local function callable_adapter_location(loc)
+    interface_adapter_assert(
+        type(loc) == "table"
+            and type(loc.filename) == "string"
+            and type(loc.line) == "number"
+            and loc.line >= 1 and loc.line == math.floor(loc.line)
+            and type(loc.col) == "number"
+            and loc.col >= 1 and loc.col == math.floor(loc.col),
+        "callable adapter lacks a real source location")
+    return {
+        filename = loc.filename,
+        line = loc.line,
+        col = loc.col,
+    }
+end
+
+local function same_adapter_location(left, right)
+    return left and right
+        and left.filename == right.filename
+        and left.line == right.line
+        and left.col == right.col
+end
+
+local function freeze_strict_guard_slot(typ, index)
+    local normalized = types.normalize(typ)
+    interface_adapter_assert(normalized,
+        "strict relay has an unnormalizable boundary type")
+    local guard = types.gradual_guard(normalized)
+    return {
+        index = index,
+        type = normalized,
+        guard = guard
+            and freeze_interface_guard(guard, normalized, {})
+            or false,
+    }
+end
+
+local function freeze_strict_relay(target)
+    local relay = {
+        kind = "callable_strict_relay",
+        parameters = {},
+        vararg = false,
+        results = {},
+        flexible_result = false,
+    }
+    for index, typ in ipairs(target.params) do
+        relay.parameters[index] = freeze_strict_guard_slot(typ, index)
+    end
+    if target.varargtype then
+        relay.vararg = freeze_strict_guard_slot(
+            target.varargtype, "vararg")
+    end
+    for index, typ in ipairs(target.rettypes) do
+        relay.results[index] = freeze_strict_guard_slot(typ, index)
+    end
+    if target.flexrettype then
+        relay.flexible_result = freeze_strict_guard_slot(
+            target.flexrettype, "flexible_result")
+    end
+    return relay
+end
+
+local function callable_adapter_fixed_roots(actions, side)
+    local roots = {}
+    local gc_field = side == "source"
+        and "source_gc" or "destination_gc"
+    local open_field = side == "source"
+        and "source_open" or "destination_open"
+    local type_field = side == "source"
+        and "source_type" or "target_type"
+    for _, action in ipairs(actions) do
+        if action[gc_field] and not action[open_field] then
+            local lifetime
+            if action.phase == "argument" then
+                lifetime = side == "source"
+                    and "all_arguments_converted"
+                    or "source_native_call_returns"
+            else
+                lifetime = side == "source"
+                    and "all_results_converted"
+                    or "target_caller_handoff"
+            end
+            roots[#roots + 1] = {
+                action = action.id,
+                type = action[type_field],
+                storage = "lua_stack_slot",
+                retain_until = lifetime,
+            }
+        end
+    end
+    return roots
+end
+
+local function callable_adapter_rooting(source, target, actions)
+    return {
+        raw_descriptors_are_roots = false,
+        raw_buffers_are_roots = false,
+        construction = {
+            source = {
+                type = source,
+                gc_bearing = true,
+                traced = true,
+                storage = "lua_stack_slot",
+                retain_until = "wrapper_constructed",
+            },
+            result = {
+                type = target,
+                gc_bearing = true,
+                traced = true,
+                storage = "lua_stack_slot",
+                retain_until = "target_caller_handoff",
+            },
+        },
+        fixed = {
+            argument_source =
+                callable_adapter_fixed_roots(
+                    actions.arguments, "source"),
+            argument_destination =
+                callable_adapter_fixed_roots(
+                    actions.arguments, "destination"),
+            result_source =
+                callable_adapter_fixed_roots(
+                    actions.results, "source"),
+            result_destination =
+                callable_adapter_fixed_roots(
+                    actions.results, "destination"),
+        },
+        ranges = {
+            argument_source = adapter_root_range(
+                "argument_source", "argument", "source",
+                target.varargtype, "all_arguments_converted"),
+            argument_destination = adapter_root_range(
+                "argument_destination", "argument", "destination",
+                source.varargtype, "source_native_call_returns"),
+            result_source = adapter_root_range(
+                "result_source", "result", "source",
+                source.flexrettype, "all_results_converted"),
+            result_destination = adapter_root_range(
+                "result_destination", "result", "destination",
+                target.flexrettype, "target_caller_handoff"),
+        },
+    }
+end
+
+local function callable_action_rebase_reason(action)
+    if action.operation
+       and action.operation.kind == "callable_view" then
+        return "callable_wrapper_construction"
+    end
+    return "immediate_gradual_guard"
+end
+
+local function callable_adapter_rebases(actions)
+    local points = {
+        {
+            kind = "after_wrapper_construction",
+            reason = "wrapper_construction_may_relocate_stack",
+        },
+    }
+    for _, action in ipairs(actions.arguments) do
+        if action.rebase_after then
+            points[#points + 1] = {
+                kind = "after_action",
+                action = action.id,
+                reason = callable_action_rebase_reason(action),
+            }
+        end
+    end
+    points[#points + 1] = {
+        kind = "after_native_call",
+        backend = "immediate_source_closure",
+        reason = "source_call_may_relocate_stack",
+    }
+    for _, action in ipairs(actions.results) do
+        if action.rebase_after then
+            points[#points + 1] = {
+                kind = "after_action",
+                action = action.id,
+                reason = callable_action_rebase_reason(action),
+            }
+        end
+    end
+    return points
+end
+
+local function freeze_flexible_result_demand(source, target)
+    local consumed = math.max(
+        0, #target.rettypes - #source.rettypes)
+    local fixed_surplus = math.max(
+        0, #source.rettypes - #target.rettypes)
+    local source_has_flex = source.flexrettype ~= nil
+        and source.flexrettype ~= false
+    local target_has_flex = target.flexrettype ~= nil
+        and target.flexrettype ~= false
+    return {
+        kind = "callable_flexible_result_demand",
+        abi_cap = CALLABLE_ADAPTER_VARARG_CAP,
+        source_has_flex = source_has_flex,
+        target_has_flex = target_has_flex,
+        fixed_source_flex_consumed = consumed,
+        fixed_source_surplus = fixed_surplus,
+        remaining_source_capacity =
+            CALLABLE_ADAPTER_VARARG_CAP - consumed,
+        within_abi_cap = consumed <= CALLABLE_ADAPTER_VARARG_CAP,
+        mode = not source_has_flex and "none"
+            or (target_has_flex and "forward_target_demand"
+                or "fixed_prefix"),
+        target_demand_parameter = target_has_flex
+            and "_flexwant" or false,
+        unlimited_demand = target_has_flex
+            and "LUA_MULTRET" or false,
+    }
+end
+
+freeze_callable_adapter_plan = function(raw, source, target, loc, context)
+    source = types.normalize(source)
+    target = types.normalize(target)
+    interface_adapter_assert(
+        source and target
+            and source._tag == "Type.Function"
+            and target._tag == "Type.Function",
+        "callable adapter endpoints are not functions")
+    local frozen_location = callable_adapter_location(loc)
+
+    context = context or {}
+    context.adapters = context.adapters or {}
+    context.location = context.location or frozen_location
+    local prior = context.adapters[raw]
+    if prior then
+        interface_adapter_assert(not prior.active,
+            "recursive callable-plan cycle")
+        return prior.frozen
+    end
+
+    local attached = raw._callable_adapter
+    if attached then
+        interface_adapter_assert(
+            attached.source and attached.target
+                and types.equals(attached.source, source)
+                and types.equals(attached.target, target)
+                and same_adapter_location(
+                    attached.location, frozen_location),
+            "callable plan already has a different frozen adapter")
+        return attached
+    end
+
+    local frozen = {
+        kind = "callable_adapter_plan",
+        source = source,
+        target = target,
+        exact = raw.exact,
+        location = frozen_location,
+        trace_name = string.format(
+            "[callable adapter %s -> %s at %s:%d:%d]",
+            types.tostring(source), types.tostring(target),
+            frozen_location.filename, frozen_location.line,
+            frozen_location.col),
+        callable = false,
+        arguments = false,
+        results = false,
+        dense = false,
+        strict_relay = false,
+        rooting = false,
+        rebase_points = false,
+        flexible_result_demand = false,
+        relation_free = true,
+        no_nested_interface_conversions = true,
+        uses_base_off = true,
+    }
+    context.adapters[raw] = { active = true, frozen = frozen }
+
+    local previous_location = context.location
+    context.location = frozen_location
+    local actions = freeze_callable_actions(raw, source, target, context)
+    context.location = previous_location
+    frozen.callable = actions
+    frozen.arguments = actions.arguments
+    frozen.results = actions.results
+    frozen.dense = {
+        argument_count = #actions.arguments,
+        result_count = #actions.results,
+    }
+    frozen.strict_relay = freeze_strict_relay(target)
+    frozen.rooting = callable_adapter_rooting(source, target, actions)
+    frozen.rebase_points = callable_adapter_rebases(actions)
+    frozen.flexible_result_demand =
+        freeze_flexible_result_demand(source, target)
+
+    context.adapters[raw].active = false
+    raw._callable_adapter = frozen
+    return frozen
+end
+
 local function make_interface_adapter(
         concrete, interface, mapping)
     interface_adapter_assert(
@@ -2648,8 +2997,14 @@ local function make_interface_adapter(
         return nil
     end
 
-    local actions = freeze_interface_callable(
-        mapping.adjustment, mapping.source, mapping.target, {})
+    local trace_name = string.format(
+        "%s:%s [adapter for %s:%s]",
+        interface.name, mapping.name,
+        concrete.name, mapping.name)
+    local shared = freeze_callable_adapter_plan(
+        mapping.adjustment, mapping.source, mapping.target,
+        location.new(trace_name .. ".titan", 1, 1), nil)
+    local actions = shared.callable
     local owner_module = nominal_module(concrete.name)
     local adapter = {
         kind = "interface_method_adapter",
@@ -2660,10 +3015,7 @@ local function make_interface_adapter(
             "%s->%s#%d:%s",
             concrete.name, interface.name,
             mapping.index, mapping.name),
-        trace_name = string.format(
-            "%s:%s [adapter for %s:%s]",
-            interface.name, mapping.name,
-            concrete.name, mapping.name),
+        trace_name = trace_name,
         concrete_owner = concrete,
         concrete_owner_module = owner_module,
         concrete_method = mapping.concrete,
@@ -2698,6 +3050,7 @@ local function make_interface_adapter(
         arguments = actions.arguments,
         results = actions.results,
         callable = actions,
+        callable_adapter = shared,
         relation_free = true,
         no_nested_interface_conversions = true,
         uses_base_off = true,
@@ -2742,7 +3095,7 @@ local function make_interface_adapter(
             argument_rebases[#argument_rebases + 1] = {
                 kind = "after_action",
                 action = action.id,
-                reason = "immediate_gradual_guard",
+                reason = callable_action_rebase_reason(action),
             }
         end
     end
@@ -2751,7 +3104,7 @@ local function make_interface_adapter(
             result_rebases[#result_rebases + 1] = {
                 kind = "after_action",
                 action = action.id,
-                reason = "immediate_gradual_guard",
+                reason = callable_action_rebase_reason(action),
             }
         end
     end
@@ -2775,9 +3128,18 @@ end
 
 return {
     make = make_interface_adapter,
+    freeze = freeze_callable_adapter_plan,
 }
 
 end)()
+
+-- Freeze a checker-authorized Function-to-Function edge into the closed action,
+-- rooting, rebase, strict-boundary, and demand graph consumed by codegen. This
+-- is elaboration only: it never asks an assignment/callable relation again.
+function checker.freeze_callable_adapter(
+        raw, source, target, loc)
+    return interface_adapters.freeze(raw, source, target, loc, nil)
+end
 
 local function make_interface_conversion(source, target, adjustment)
     local wrapper = find_interface_wrapper(adjustment)
@@ -3314,12 +3676,23 @@ local function trycoerce(source, target, errors, use,
         end
     elseif adjustment.kind == "identity" then
         return source, adjustment
-    elseif adjustment.kind == "callable"
-        or (adjustment.kind == "gradual_view"
-            and adjustment.op == "structural") then
-        -- These are same-representation views. Preserve the producer's actual
-        -- type for lowering, but retain the complete checker decision on the
-        -- expression delivered to the sink.
+    elseif adjustment.kind == "callable" then
+        -- A non-exact callable edge is an allocating semantic operation even
+        -- though both endpoints use TValue representation. Reify the one
+        -- already-classified plan as the existing cast node; the child keeps
+        -- its actual type and no metadata copy is left to trigger a second
+        -- lowering pass.
+        local n = ast.ExpCast(source.loc, source, target)
+        n._implicit_coercion = true
+        n._adjustment = adjustment
+        n._callable_adapter = checker.freeze_callable_adapter(
+            adjustment, source._type, target, source.loc)
+        n._type = target
+        return n, adjustment
+    elseif adjustment.kind == "gradual_view"
+        and adjustment.op == "structural" then
+        -- Structural Array/Map views retain their producer type and carry the
+        -- complete checker decision on the expression delivered to the sink.
         source._assignment_adjustment = adjustment
         return source, adjustment
     elseif adjustment.kind == "gradual_view" then
@@ -3772,13 +4145,22 @@ local function adjust_explist(exps, demand, st, errors)
             })
     end
     adjusted.open_adjustment = open_adjustment or false
+    adjusted.open_callable_adapter = open_adjustment
+        and open_adjustment.kind == "callable"
+        and checker.freeze_callable_adapter(
+            open_adjustment, adjusted.open_type,
+            adjusted.open_target, adjusted.open_source.loc)
+        or false
     adjusted.open_interface_conversion =
         open_interface_conversion or false
     if adjusted.open_source and not demand.defer_open_check then
         local open = adjusted.open_source._tag == "Ast.ExpDots"
             and adjusted.open_source._open_dots
             or adjusted.open_source._open_results
-        if open then open.adjustment = adjusted.open_adjustment end
+        if open then
+            open.adjustment = adjusted.open_adjustment
+            open.callable_adapter = adjusted.open_callable_adapter
+        end
     end
     if adjusted.open_source and not demand.defer_open_check
        and adjusted.open_type._tag ~= "Type.Invalid"
@@ -4008,6 +4390,12 @@ local function check_positional_constructor(node, st, errors, container_tag,
         end
         adjusted.open_target = etype
         adjusted.open_adjustment = open_adjustment or false
+        adjusted.open_callable_adapter = open_adjustment
+            and open_adjustment.kind == "callable"
+            and checker.freeze_callable_adapter(
+                open_adjustment, source, etype,
+                adjusted.open_source.loc)
+            or false
         adjusted.open_interface_conversion =
             open_interface_conversion or false
         if adjusted.open_source._tag == "Ast.ExpCall"
@@ -4015,11 +4403,15 @@ local function check_positional_constructor(node, st, errors, container_tag,
             adjusted.open_source._open_results.target_type = etype
             adjusted.open_source._open_results.adjustment =
                 adjusted.open_adjustment
+            adjusted.open_source._open_results.callable_adapter =
+                adjusted.open_callable_adapter
         elseif adjusted.open_source._tag == "Ast.ExpDots"
                and adjusted.open_source._open_dots then
             adjusted.open_source._open_dots.target_type = etype
             adjusted.open_source._open_dots.adjustment =
                 adjusted.open_adjustment
+            adjusted.open_source._open_dots.callable_adapter =
+                adjusted.open_callable_adapter
         end
     end
 
@@ -6305,6 +6697,11 @@ local function check_explicit_cast_relation(node, st, errors)
         end
     end
     node._written_cast = cast_plan or false
+    if node._tag == "Ast.ExpCast"
+       and cast_plan and cast_plan.op == "callable" then
+        node._callable_adapter = checker.freeze_callable_adapter(
+            cast_plan.callable, source, target, node.loc)
+    end
     if not cast_plan then
         checker.typeerror(errors, node.loc, "cannot cast '%s' to '%s'",
             types.tostring(source), types.tostring(target))

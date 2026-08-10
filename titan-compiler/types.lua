@@ -2079,6 +2079,17 @@ callable_adjustment_impl = function(source, target, context)
                 adjustment = adjustment,
                 wrap_present = optional and wrap_present or nil,
             }
+        elseif accepts_missing_nil(expected) then
+            -- A call through the expected view requests one more fixed result
+            -- than the actual function can produce. This is a named shape
+            -- action, not a component coercion: the adapter materializes the
+            -- absent result directly in the expected nil-bearing
+            -- representation.
+            result.results[#result.results + 1] = {
+                kind = "nil_fill_result",
+                expected_index = index,
+                expected_type = expected,
+            }
         else
             matches[target] = nil
             return false
