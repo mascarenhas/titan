@@ -38,7 +38,7 @@ local function bootstrap(main_callable: ({string}) -> integer,
     result = main_callable(args)
     return nil
   end)
-  _loop()
+  loop()
   local exit_code? = task.runtime.exit_code
   if exit_code then return exit_code as integer end
   local succeeded = task:status():has_succeeded()

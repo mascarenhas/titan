@@ -1,4 +1,23 @@
 local h = require 'spec.support.helpers'
+local driver = require 'titan-compiler.driver'
+
+local function with_extra_cflags(flags, fn)
+    local previous = driver.EXTRA_CFLAGS
+    local configured = {}
+    for _, flag in ipairs(previous or {}) do
+        configured[#configured + 1] = flag
+    end
+    for _, flag in ipairs(flags) do
+        configured[#configured + 1] = flag
+    end
+    driver.EXTRA_CFLAGS = configured
+    driver.configure_foreign_c()
+    local results = table.pack(xpcall(fn, debug.traceback))
+    driver.EXTRA_CFLAGS = previous
+    driver.configure_foreign_c()
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
 
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
@@ -116,6 +135,37 @@ describe("C FFI code generation", function()
         end)
     end)
 
+    it("probes enum carriers under warning-as-error policies", function()
+        with_extra_cflags({ "-Wall", "-Werror" }, function()
+            with_header([[
+                typedef enum { FFI_WARN_NEG = -1,
+                               FFI_WARN_POS = 1 } ffi_warn_enum;
+                enum { FFI_WARN_FIT = 0x7fffffffffffffffULL };
+                static const enum { FFI_WARN_CONST_ZERO = 0,
+                                    FFI_WARN_CONST_ONE = 1 }
+                    ffi_warn_const_object = FFI_WARN_CONST_ONE;
+            ]], function(header)
+                h.run_coder([[
+                    local c = foreign import "]] .. header .. [["
+                    function run(input: integer): integer
+                        local item: c.ffi_warn_enum = input as c.ffi_warn_enum
+                        return item as integer
+                    end
+                    function fit(): integer
+                        return c.FFI_WARN_FIT as integer
+                    end
+                    function qualified(): integer
+                        return c.ffi_warn_const_object as integer
+                    end
+                ]], [[
+                    assert(test.run(-1) == -1)
+                    assert(test.fit() == 9223372036854775807)
+                    assert(test.qualified() == 1)
+                ]])
+            end)
+        end)
+    end)
+
     it("executes comparisons against direct libuv-shaped UV_E enumerators", function()
         with_header([[
             #define UV_ERRNO_MAP(XX) \
@@ -137,6 +187,145 @@ describe("C FFI code generation", function()
                 end
             ]], [[
                 assert(test.errors_match())
+            ]])
+        end)
+    end)
+
+    it("uses the compiler-selected enum carrier without wide lowering",
+    function()
+        with_header([[
+            enum ffi_tagged_enum {
+                FFI_TAGGED_ZERO = 0,
+                FFI_TAGGED_ONE = 1
+            };
+            typedef enum { FFI_HIGH_ZERO = 0,
+                           FFI_HIGH_ONE = 1,
+                           FFI_HIGH_VALUE = 0xffffffffU } ffi_high_enum;
+            static ffi_high_enum ffi_high_take(ffi_high_enum value) {
+                return value;
+            }
+            static const enum { FFI_CONST_ZERO = 0,
+                                FFI_CONST_ONE = 1 }
+                ffi_const_enum_object = FFI_CONST_ONE;
+            static volatile enum { FFI_VOLATILE_ZERO = 0,
+                                   FFI_VOLATILE_ONE = 1 }
+                ffi_volatile_enum_object = FFI_VOLATILE_ONE;
+            static const enum { FFI_SHARED_A = 1, FFI_SHARED_B = 2 }
+                ffi_shared_enum_left = FFI_SHARED_A,
+                ffi_shared_enum_right = FFI_SHARED_B;
+            typedef enum { FFI_WIDE_ZERO = 0,
+                           FFI_WIDE_HIGH = 0x8000000000000000ULL }
+                ffi_wide_enum;
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+                function tagged_not(): integer
+                    return (~c.FFI_TAGGED_ZERO) as integer
+                end
+                function high(): integer
+                    return c.ffi_high_take(c.FFI_HIGH_VALUE) as integer
+                end
+                function high_wrap(): integer
+                    return (c.FFI_HIGH_VALUE + c.FFI_HIGH_ONE) as integer
+                end
+                function qualified_objects(): integer
+                    return (c.ffi_const_enum_object as integer)
+                        + (c.ffi_volatile_enum_object as integer)
+                end
+                function same_anonymous_owner(): integer
+                    local item = c.ffi_shared_enum_left
+                    item = c.FFI_SHARED_B
+                    item = c.ffi_shared_enum_right
+                    return item as integer
+                end
+                function wide_zero(): integer
+                    local item = c.FFI_WIDE_ZERO
+                    item = 7
+                    return item as integer
+                end
+            ]], [[
+                assert(test.tagged_not() == -1)
+                local high = test.high()
+                local high_wrap = test.high_wrap()
+                local qualified = test.qualified_objects()
+                local same_owner = test.same_anonymous_owner()
+                assert(high == 4294967295)
+                assert(high_wrap == 0)
+                assert(qualified == 2)
+                assert(same_owner == 2)
+                assert(test.wide_zero() == 7)
+            ]])
+        end)
+
+        with_extra_cflags({ "-fshort-enums", "-Wall", "-Werror" }, function()
+            with_header([[
+                typedef enum { FFI_SHORT_NEG = -1,
+                               FFI_SHORT_MAX = 127 } ffi_short_enum;
+                static inline ffi_short_enum ffi_short_take(ffi_short_enum value) {
+                    return value;
+                }
+                typedef ffi_short_enum (*ffi_short_callback)(ffi_short_enum);
+                static inline ffi_short_callback ffi_short_pointer(void) {
+                    return ffi_short_take;
+                }
+                typedef enum { FFI_USHORT_ZERO = 0,
+                               FFI_USHORT_MAX = 255 } ffi_ushort_enum;
+                static inline ffi_ushort_enum ffi_ushort_take(
+                    ffi_ushort_enum value) {
+                    return value;
+                }
+            ]], function(header)
+                h.run_coder([[
+                    local c = foreign import "]] .. header .. [["
+                    function short(x: integer): integer
+                        local item: c.ffi_short_enum =
+                            x as c.ffi_short_enum
+                        return c.ffi_short_take(item) as integer
+                    end
+                    function short_pointer(x: integer): integer
+                        local callback = c.ffi_short_pointer()
+                        return callback(x as c.ffi_short_enum) as integer
+                    end
+                    function ushort(x: integer): integer
+                        local item: c.ffi_ushort_enum =
+                            x as c.ffi_ushort_enum
+                        return c.ffi_ushort_take(item) as integer
+                    end
+                ]], [[
+                    assert(test.short(-128) == -128)
+                    assert(test.short(-1) == -1)
+                    assert(test.short(127) == 127)
+                    assert(not pcall(test.short, -129))
+                    assert(not pcall(test.short, 128))
+                    assert(test.short_pointer(-128) == -128)
+                    assert(test.short_pointer(127) == 127)
+                    assert(not pcall(test.short_pointer, -129))
+                    assert(not pcall(test.short_pointer, 128))
+                    assert(test.ushort(0) == 0)
+                    assert(test.ushort(255) == 255)
+                    assert(not pcall(test.ushort, -1))
+                    assert(not pcall(test.ushort, 256))
+                ]])
+            end)
+        end)
+    end)
+
+    it("retains an enum typedef through a later tag-name macro", function()
+        with_header([[
+            enum ffi_typedef_context_tag { FFI_TYPEDEF_CONTEXT_VALUE = 17 };
+            typedef enum ffi_typedef_context_tag ffi_typedef_context;
+            static ffi_typedef_context ffi_typedef_context_get(void) {
+                return FFI_TYPEDEF_CONTEXT_VALUE;
+            }
+            #define ffi_typedef_context_tag ffi_typedef_context_shadow
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+                function run(): integer
+                    return c.ffi_typedef_context_get() as integer
+                end
+            ]], [[
+                assert(test.run() == 17)
             ]])
         end)
     end)

@@ -1,0 +1,77 @@
+local function send_self_signal(name: string)
+  local spelling = ""
+  if name == "usr1" then
+    spelling = "USR1"
+  elseif name == "usr2" then
+    spelling = "USR2"
+  else
+    raise "test requested an unsupported signal"
+  end
+
+  -- The public process API supplies the stimulus as well as the watcher under
+  -- test. The spawned shell is fully owned and reaped here; no parent process
+  -- or native interposer participates in the assertion.
+  local sender = system.spawn(
+    "/bin/sh", {"-c", "kill -" .. spelling .. " $PPID"})
+  defer process_support.close_process_streams(sender)
+  process_support.assert_normal(sender:wait(), "self-signal sender")
+end
+
+function test_signal_watcher_validation_delivery_cancellation_and_replacement(
+    context: test.Context)
+  runtime_test.run(function ()
+    process_support.expect_failure(function ()
+      system.wait_signal("not-a-signal")
+    end, "unknown signal name was accepted")
+    process_support.expect_failure(function ()
+      system.wait_signal("kill")
+    end, "uncatchable signal was accepted")
+    process_support.expect_failure(function ()
+      system.wait_signal("usr1\0ignored")
+    end, "embedded-NUL signal name was accepted")
+
+    local received = ""
+    local waiter = async.run(function (): value
+      received = system.wait_signal("usr1")
+      return nil
+    end)
+    task_support.cleanup_task(waiter, "signal waiter cleanup")
+    process_support.wait_until_waiting(waiter, "signal Task")
+    send_self_signal("usr1")
+    process_support.wait_until_finished(waiter)
+    test.assert(waiter:status():as_string() == "succeeded" and
+                received == "usr1",
+                "one-shot signal continuation returned the wrong result")
+
+    local cancelled_resumed = false
+    local cancelled = async.run(function (): value
+      system.wait_signal("usr2")
+      cancelled_resumed = true
+      return nil
+    end)
+    task_support.cleanup_task(cancelled, "cancelled signal waiter cleanup")
+    process_support.wait_until_waiting(cancelled, "cancelled signal Task")
+    cancelled:cancel(
+      async.CancellationReason.simple("discard signal wait"))
+    test.assert(cancelled:status():as_string() == "waiting" and
+                not cancelled_resumed,
+                "signal cancellation resumed before its close callback")
+    process_support.wait_until_finished(cancelled)
+    test.assert(cancelled:status():as_string() == "cancelled" and
+                not cancelled_resumed,
+                "cancelled signal continuation resumed")
+
+    local replacement_received = ""
+    local replacement = async.run(function (): value
+      replacement_received = system.wait_signal("usr2")
+      return nil
+    end)
+    task_support.cleanup_task(replacement, "replacement signal waiter cleanup")
+    process_support.wait_until_waiting(replacement, "replacement signal Task")
+    send_self_signal("usr2")
+    process_support.wait_until_finished(replacement)
+    test.assert(replacement:status():as_string() == "succeeded" and
+                replacement_received == "usr2",
+                "replacement one-shot signal watcher failed")
+  end)
+end

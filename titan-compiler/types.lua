@@ -605,6 +605,231 @@ function types.public_module_prefix_layout(modtype)
     return layout
 end
 
+-- A source interface carries a second, non-serialized member view. Its
+-- first-class local functions and local nominal statics need canonical closure
+-- slots just like public callables, but those slots must remain outside the
+-- importer-reconstructible ABI prefix. They occupy a deterministic source-only
+-- prefix immediately after the unconditional Array-metatable slot. Binary
+-- interfaces never have `source_members`, so they expose no such layout.
+function types.source_module_prefix_layout(modtype)
+    assert(modtype and modtype._tag == "Type.Module")
+    local layout = {}
+    if not modtype._source then return layout end
+
+    for _, member in ipairs(modtype.source_members or {}) do
+        if member._tag == "Type.ModuleVariable" then
+            layout[#layout + 1] = {
+                kind = "variable",
+                value = member,
+                key = "variable:" .. member.name,
+            }
+        end
+    end
+
+    for _, member in ipairs(modtype.source_members or {}) do
+        if member._tag == "Type.ModuleMember"
+           and member.type._tag == "Type.Function" then
+            layout[#layout + 1] = {
+                kind = "function",
+                value = member,
+                key = "function:" .. member.name,
+            }
+        end
+    end
+
+    local nominal_members = {}
+    for _, member in ipairs(modtype.members or {}) do
+        nominal_members[#nominal_members + 1] = member
+    end
+    for _, member in ipairs(modtype.source_members or {}) do
+        nominal_members[#nominal_members + 1] = member
+    end
+    for _, member in ipairs(nominal_members) do
+        local owner = member._tag == "Type.ModuleMember" and member.type
+        if owner and (owner._tag == "Type.Record"
+                      or owner._tag == "Type.Union") then
+            local names = {}
+            for name, static in pairs(owner.functions or {}) do
+                if static.islocal then names[#names + 1] = name end
+            end
+            table.sort(names, util.bytewise_less)
+            for _, name in ipairs(names) do
+                local static = owner.functions[name]
+                layout[#layout + 1] = {
+                    kind = "static",
+                    value = static,
+                    owner = owner,
+                    key = "static:" .. static.fqtn .. "." .. static.name,
+                }
+            end
+        end
+    end
+    return layout
+end
+
+function types.module_member(modtype, name, include_source)
+    return modtype.members[name]
+        or (include_source and modtype.source_members
+            and modtype.source_members[name])
+end
+
+function types.module_type_member(modtype, name, include_source)
+    return (modtype.type_members and modtype.type_members[name])
+        or (include_source and modtype.source_type_members
+            and modtype.source_type_members[name])
+end
+
+-- Preserve cycles and sharing while isolating mutable checker inputs. Foreign
+-- conversion completes C graphs in place, so each checker clones the probe
+-- service's otherwise shared target profile before attaching provenance.
+function types.clone_graph(value, memo)
+    if type(value) ~= "table" then return value end
+    memo = memo or {}
+    if memo[value] then return memo[value] end
+    local copy = {}
+    memo[value] = copy
+    for key, child in pairs(value) do
+        copy[types.clone_graph(key, memo)] =
+            types.clone_graph(child, memo)
+    end
+    return copy
+end
+
+-- Source-only FFI graphs remain in memory rather than serialized metadata.
+-- Stamp their defining Titan module on each per-checker C descriptor so function
+-- tags and owned-C identities remain canonical through a source import.
+function types.mark_c_ffi_scope(typ, scope, seen)
+    if type(typ) ~= "table" then return end
+    seen = seen or {}
+    if seen[typ] then return end
+    seen[typ] = true
+    if type(typ._tag) == "string"
+       and typ._tag:match("^Type%.C")
+       and typ._tag ~= "Type.CModule" then
+        typ._ffi_scope = typ._ffi_scope or scope
+    end
+    for key, child in pairs(typ) do
+        if key ~= "_ffi_scope" and type(child) == "table" then
+            types.mark_c_ffi_scope(child, scope, seen)
+        end
+    end
+end
+
+function types.c_ffi_scopes(typ)
+    local scopes, seen_scopes, seen = {}, {}, {}
+    local function visit(value)
+        if type(value) ~= "table" or seen[value] then return end
+        seen[value] = true
+        if type(value._tag) == "string"
+           and value._tag:match("^Type%.C")
+           and value._tag ~= "Type.CModule"
+           and value._ffi_scope
+           and not seen_scopes[value._ffi_scope] then
+            seen_scopes[value._ffi_scope] = true
+            scopes[#scopes + 1] = value._ffi_scope
+        end
+        for key, child in pairs(value) do
+            if key ~= "_ffi_scope" then visit(child) end
+        end
+    end
+    visit(typ)
+    table.sort(scopes, util.bytewise_less)
+    return scopes
+end
+
+function types.c_ffi_scope_key(typ)
+    local scopes = types.c_ffi_scopes(typ)
+    if #scopes == 0 then return nil end
+    return table.concat(scopes, "|")
+end
+
+-- C declaration nodes retain the normalized umbrella header that produced
+-- their spelling. The metadata is compiler-only: binary interfaces reject C
+-- FFI types and serialization ignores underscore fields.
+function types.mark_c_ffi_include(typ, include, seen)
+    if type(typ) ~= "table" then return end
+    seen = seen or {}
+    if seen[typ] then return end
+    seen[typ] = true
+
+    local tag = typ._tag
+    local declaration_node = tag == "Type.CPointer"
+        or tag == "Type.CArray" or tag == "Type.CFunction"
+        or tag == "Type.CStruct" or tag == "Type.CUnion"
+        or tag == "Type.CField" or tag == "Type.CTypedef"
+        or tag == "Type.COwned" or tag == "Type.Pointer"
+        or tag == "Type.Function"
+        or (tag == "Type.CInteger" and typ._c_enum_identity)
+    if declaration_node and not typ._c_origin_header then
+        typ._c_origin_header = include
+    end
+
+    if tag == "Type.CPointer" then
+        types.mark_c_ffi_include(typ.pointee, include, seen)
+    elseif tag == "Type.CArray" then
+        types.mark_c_ffi_include(typ.elem, include, seen)
+    elseif tag == "Type.CFunction" then
+        for _, param in ipairs(typ.params or {}) do
+            types.mark_c_ffi_include(param, include, seen)
+        end
+        types.mark_c_ffi_include(typ.ret, include, seen)
+    elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+        for _, field in ipairs(typ.fields or {}) do
+            types.mark_c_ffi_include(field, include, seen)
+        end
+    elseif tag == "Type.CField" then
+        types.mark_c_ffi_include(typ.type, include, seen)
+    elseif tag == "Type.CTypedef" then
+        types.mark_c_ffi_include(typ.target, include, seen)
+    elseif tag == "Type.COwned" then
+        types.mark_c_ffi_include(typ.pointee, include, seen)
+    elseif tag == "Type.Pointer" then
+        types.mark_c_ffi_include(typ.type, include, seen)
+    elseif tag == "Type.Function" and typ._c_function then
+        types.mark_c_ffi_include(typ._c_function, include, seen)
+    end
+end
+
+-- Return every origin reached through the exact C declaration graph being
+-- rendered. Do not walk Titan namespaces or nominal member maps.
+function types.c_ffi_includes(typ)
+    local includes, seen_includes, seen = {}, {}, {}
+    local function add(include)
+        if not include then return end
+        local key = assert(include.rendered,
+            "C origin header has no normalized spelling")
+        if seen_includes[key] then return end
+        seen_includes[key] = true
+        includes[#includes + 1] = include
+    end
+    local function visit(value)
+        if type(value) ~= "table" or seen[value] then return end
+        seen[value] = true
+        local tag = value._tag
+        -- These Titan values render as Udata */TValue and do not spell their
+        -- semantic C payload. A later payload cast records the pointee itself.
+        if tag == "Type.COwned" or tag == "Type.Function" then return end
+
+        add(value._c_origin_header)
+        if tag == "Type.CPointer" then
+            visit(value.pointee)
+        elseif tag == "Type.CArray" then
+            visit(value.elem)
+        elseif tag == "Type.CFunction" then
+            for _, param in ipairs(value.params or {}) do visit(param) end
+            visit(value.ret)
+        elseif tag == "Type.CField" then
+            visit(value.type)
+        elseif tag == "Type.Pointer" then
+            visit(value.type)
+        end
+        -- A retained C typedef, struct, union, or enum emits only its own
+        -- spelling. Do not walk the hidden target or aggregate fields.
+    end
+    visit(typ)
+    return includes
+end
+
 --- Check if two pointer types are different and can be coerced.
 local function can_coerce_pointer(source, target)
     if types.equals(source, target) then
@@ -633,6 +858,15 @@ end
 local function is_c_integer(t)
     t = resolved_c(t)
     return t and t._tag == "Type.CInteger"
+end
+
+function types.is_c_enum_integer_conversion(source, target)
+    source, target = resolved_c(source), resolved_c(target)
+    return source and target
+        and source._tag == "Type.CInteger"
+        and target._tag == "Type.CInteger"
+        and source._c_enum_owner ~= nil
+        and source._c_enum_owner == (target._c_enum_owner or target)
 end
 
 local function is_c_float(t)
@@ -1163,6 +1397,10 @@ c_declaration_type_equals = function(
     if tag == "Type.CVoid" then
         return true
     elseif tag == "Type.CInteger" then
+        if ltype._c_enum_identity or rtype._c_enum_identity then
+            return ltype._c_enum_identity ~= nil
+               and ltype._c_enum_identity == rtype._c_enum_identity
+        end
         return ltype.spelling == rtype.spelling
            and ltype.signed == rtype.signed
            and ltype.rank == rtype.rank
@@ -1200,10 +1438,15 @@ c_declaration_type_equals = function(
     elseif tag == "Type.CFunction" then
         return c_function_type_equals(ltype, rtype, seen)
     elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
-        -- File/prototype-scope tag binding and the conditional-header
-        -- baseline canonicalize compatible aggregate identities before value
-        -- compatibility reaches this relation.
+        -- Source-imported declarations retain their producer descriptor, but
+        -- generated C places inherited and direct headers in one file-scope
+        -- tag namespace. Equal named file-scope tags therefore denote the same
+        -- C type even when independent extraction allocated two objects.
         return ltype == rtype
+            or (ltype._c_tag_scope == "file"
+                and rtype._c_tag_scope == "file"
+                and ltype.tagname ~= nil
+                and ltype.tagname == rtype.tagname)
     end
     return false
 end
@@ -1331,6 +1574,10 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.Typedef" then
         return t1.name == t2.name
     elseif tag1 == "Type.CInteger" then
+        if t1._c_enum_identity or t2._c_enum_identity then
+            return t1._c_enum_identity ~= nil
+               and t1._c_enum_identity == t2._c_enum_identity
+        end
         return t1.spelling == t2.spelling and
                t1.signed == t2.signed and
                t1.rank == t2.rank and
@@ -2247,6 +2494,8 @@ local function coercion_impl(source, target, policy, seen)
         result = coercion_plan("c_integer_to_integer", source, target)
     elseif source._tag == "Type.Integer" and is_c_integer(target) then
         result = coercion_plan("integer_to_c_integer", source, target)
+    elseif types.is_c_enum_integer_conversion(source, target) then
+        result = coercion_plan("c_enum_integer", source, target)
     elseif is_c_float(source) and target._tag == "Type.Float" then
         result = coercion_plan("c_float_to_float", source, target)
     elseif source._tag == "Type.Float" and is_c_float(target) then

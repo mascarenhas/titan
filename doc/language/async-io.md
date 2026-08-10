@@ -121,6 +121,11 @@ needs no wrapper around `main`. Module initialization installs a private
 bootstrap hook; the generated entrypoint schedules `main` as a Task and drives
 the loop. The Runtime remains alive until every Task has finished, even if
 `main` finishes first.
+A standalone or test executable may instead pass `--no-uv-bootstrap`. Its
+entrypoint calls `main(args)` directly while leaving module initialization and
+the private hook intact. Such a `main` must explicitly use `async.run` and
+`async.loop` for each Runtime session, and must close Runtime-bound resources
+before that session returns.
 
 `async.yield()` cedes one event-loop turn without waiting for an external
 resource. `timer.yield()` is a facade over the same operation. Calling either
@@ -470,10 +475,10 @@ child, which may outlive the Runtime. Application code that owns a child's
 lifecycle must explicitly call `Process:kill` and/or `Process:wait` as needed
 before its Tasks finish.
 
-A `uv_file` is an operating-system descriptor, not a libuv loop handle. The
-Runtime neither registers nor closes File wrappers during shutdown: application
-code owns explicit `File:close()`, and process teardown reclaims a descriptor
-that was deliberately left open.
+A File owns an operating-system descriptor, not a libuv loop handle. The
+Runtime neither registers nor closes these descriptors during shutdown:
+application code owns explicit `File:close()`, and process teardown reclaims a
+descriptor that was deliberately left open.
 
 The Runtime keeps a sparse Task inventory and a sparse live-owner set for the
 C-to-Titan callback bridge. The former determines when the last Task has

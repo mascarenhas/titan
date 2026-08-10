@@ -6,6 +6,7 @@ local checker = require 'titan-compiler.checker'
 local coder = require 'titan-compiler.coder'
 local parser = require 'titan-compiler.parser'
 local driver = require 'titan-compiler.driver'
+local test_runner = require 'titan-compiler.test_runner'
 local util = require 'titan-compiler.util'
 
 local p = argparse('titan', 'Titan compiler')
@@ -13,6 +14,9 @@ p:argument('module', 'Names of the modules to compile.'):args("+")
 p:flag('--print-ast', 'Print the AST.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
 p:flag('--static', 'Prefer static Titan archive providers.')
+p:flag('--test', 'Build a native Titan test executable.')
+p:flag('--no-uv-bootstrap',
+    'Call standalone main directly even if titan.uv installs its bootstrap hook.')
 p:flag('--no-line-directives',
     'Omit source #line directives from generated C.')
 p:option('-u --lua', 'Path to Lua source tree (source checkouts only; installed compilers use their matching Lua SDK).')
@@ -72,28 +76,41 @@ local main_module = nil
 
 local requested_roots = {}
 local requested_modules = driver.deduplicate_module_names(args.module)
+local source_overrides = {}
+if args.test then
+    local test_source, test_source_err =
+        driver.test_support_source_descriptor()
+    if not test_source then exit(test_source_err) end
+    source_overrides["titan.test"] = test_source
+end
 resolver_context = driver.new_resolver_context({
     prefer_static = args.static,
+    source_first = args.test,
     verbose = args.verbose,
 })
 for _, modname in ipairs(requested_modules) do
+    if args.test and modname == test_runner.MODULE_NAME then
+        exit("logical module '" .. test_runner.MODULE_NAME ..
+            "' is reserved by --test")
+    end
     requested_roots[modname] = true
 end
 local loader = driver.defaultloader({}, {
     source_roots = requested_roots,
+    source_overrides = source_overrides,
     context = resolver_context,
 })
 
 for _, modname in ipairs(requested_modules) do
     local ok, errs = checker.checkimport(modname, loader)
-    if not ok then 
+    if not ok then
         table.insert(errors, errs)
     else
         if #errs > 0 then table.insert(errors, table.concat(errs, "\n")) end
         local ast = driver.imported[modname].ast
-        if ast and checker.has_main(ast) then
+        if not args.test and ast and checker.has_main(ast) then
             if main_module then
-                table.insert(errors, modname .. ": multiple main functions found (already declared in " .. main_module ..")")
+                table.insert(errors, modname .. ": multiple main functions found (already declared in " .. main_module .. ")")
             else
                 main_module = modname
             end
@@ -105,6 +122,45 @@ for _, modname in ipairs(requested_modules) do
 end
 
 if #errors > 0 then exit(table.concat(errors, "\n")) end
+
+local test_modules = {}
+local test_program_output
+local test_entrypoint_output
+if args.test then
+    if driver.imported[test_runner.MODULE_NAME] then
+        exit("logical module '" .. test_runner.MODULE_NAME ..
+            "' is reserved by --test")
+    end
+    local cases
+    cases, test_modules = test_runner.discover(
+        requested_modules, driver.imported, driver.dependency_closure)
+    test_program_output = assert(
+        driver.imported[requested_modules[1]].program_output)
+    test_entrypoint_output = test_program_output .. "__test_entrypoint.c"
+    source_overrides["titan.test"].native_output =
+        test_program_output .. "__test_support.titan"
+    if driver.imported["titan.test"] then
+        driver.imported["titan.test"].native_output =
+            source_overrides["titan.test"].native_output
+    end
+    local runner_source, runner_source_err = test_runner.render(cases)
+    if not runner_source then exit(runner_source_err) end
+    source_overrides[test_runner.MODULE_NAME] =
+        test_runner.source_descriptor(test_program_output, runner_source)
+    requested_roots[test_runner.MODULE_NAME] = true
+    local ok, errs = checker.checkimport(test_runner.MODULE_NAME, loader)
+    if not ok then
+        table.insert(errors, errs)
+    elseif #errs > 0 then
+        table.insert(errors, table.concat(errs, "\n"))
+    end
+    if #errors > 0 then exit(table.concat(errors, "\n")) end
+    main_module = test_runner.MODULE_NAME
+end
+
+if args.no_uv_bootstrap and not main_module then
+    exit("--no-uv-bootstrap is only valid when compiling a standalone executable")
+end
 
 local finalized, finalize_errors =
     driver.finalize_resolver_context(resolver_context)
@@ -140,6 +196,43 @@ end
 table.sort(linked_names, util.bytewise_less)
 for name in pairs(output_name_set) do table.insert(output_names, name) end
 table.sort(output_names, util.bytewise_less)
+
+if main_module then
+    local source_outputs = {}
+    for _, name in ipairs(linked_names) do
+        local mod = driver.imported[name]
+        source_outputs[#source_outputs + 1] = {
+            modname = name,
+            output = mod.native_output or mod.filename,
+        }
+    end
+    local program_output = test_program_output or
+        driver.imported[main_module].program_output or
+        main_module:gsub("[.]", "/")
+    local entrypoint_output = test_entrypoint_output or
+        (main_module:gsub("[.]", "/") .. "__entrypoint.c")
+    local program_inputs = {}
+    for name in pairs(resolver_context.source_names) do
+        local mod = driver.imported[name]
+        for _, filename in ipairs(mod.source_files or { mod.filename }) do
+            program_inputs[#program_inputs + 1] = filename
+        end
+    end
+    for _, mod in pairs(resolver_context.dynamic_names) do
+        if mod.filename then
+            program_inputs[#program_inputs + 1] = mod.filename
+        end
+    end
+    for _, archive in ipairs(selected_static_archives) do
+        program_inputs[#program_inputs + 1] = archive
+    end
+    for _, input in ipairs(args.extra_object or {}) do
+        program_inputs[#program_inputs + 1] = input
+    end
+    local outputs_ok, outputs_err = driver.validate_program_output_paths(
+        source_outputs, program_output, entrypoint_output, program_inputs)
+    if not outputs_ok then table.insert(errors, outputs_err) end
+end
 
 local mangled_owners = {}
 local symbol_owners = {}
@@ -250,8 +343,12 @@ local used_native_names = {}
 
 for _, name in ipairs(linked_names) do
     local mod = driver.imported[name]
+    local compile_options = test_modules[name] and {
+        extra_compile_flags = test_runner.TEST_COMPILE_FLAGS,
+    } or nil
     local ok, err, libname = driver.compile_module(
-        name, mod, resolver_context.native_static_names, args.verbose)
+        name, mod, resolver_context.native_static_names, args.verbose,
+        compile_options)
     if not ok then
         table.insert(errors, err)
     else
@@ -312,10 +409,14 @@ if main_module then
     if not probe_ok then
         table.insert(errors, probe_err)
     else
+        local program_output = test_program_output or
+            driver.imported[main_module].program_output
         local ok, term, code = driver.compile_program(main_module, ofiles,
             args.link, args.verbose, args.extra_object,
-            driver.imported[main_module].program_output,
-            selected_static_archives)
+            program_output, selected_static_archives,
+            test_entrypoint_output,
+            args.test and requested_modules[1]:gsub(".*[.]", "") or nil,
+            { no_uv_bootstrap = args.no_uv_bootstrap })
         if not ok then
             table.insert(errors, link_failed("program", main_module, term, code))
         end

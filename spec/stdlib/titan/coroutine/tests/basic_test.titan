@@ -1,0 +1,143 @@
+local function create_body(arg: value): value
+  return arg
+end
+
+function test_creates_coroutine_and_returns_callback_result(
+    _context: test.Context)
+  local co = coroutine.create(create_body, "tag")
+  test.assert(co:resume("hello") == "hello")
+end
+
+local function yield_body(arg: value): value
+  test.assert(coroutine.is_yieldable("tag"),
+              "matching coroutine tag was not yieldable")
+  test.assert(not coroutine.is_yieldable("other"),
+              "unmatched coroutine tag was yieldable")
+  local back = coroutine.yield(arg, "tag")
+  return back
+end
+
+local function outside(): boolean
+  return coroutine.is_yieldable("tag")
+end
+
+local function yield_run(): string
+  local co = coroutine.create(yield_body, "tag")
+  local s0 = co:status()
+  local first = co:resume("out")
+  local s1 = co:status()
+  local second = co:resume("in")
+  local s2 = co:status()
+  return s0 .. ":" .. (first as string) .. ":" .. s1 ..
+         ":" .. (second as string) .. ":" .. s2
+end
+
+function test_yields_resumes_reports_status_and_checks_yieldability(
+    _context: test.Context)
+  test.assert(not outside(), "coroutine was yieldable outside a callback")
+  test.assert(yield_run() == "suspended:out:suspended:in:dead")
+end
+
+local function default_resume(): string
+  local co = coroutine.create(function(arg: value): value
+    local got = coroutine.yield(arg, "default")
+    return got
+  end, "default")
+  local first = co:resume("out", nil)
+  local second = co:resume("in", nil)
+  return (first as string) .. ":" .. (second as string)
+end
+
+local function override_resume(): string
+  local co = coroutine.create(function(arg: value): value
+    local got = coroutine.yield(arg, "override")
+    return got
+  end, "default")
+  local first = co:resume("out", "override")
+  local second = co:resume("in", "override")
+  return (first as string) .. ":" .. (second as string)
+end
+
+local function default_error(): string
+  local co = coroutine.create(function(_arg: value): value
+    do
+      coroutine.yield("ready", "default")
+    catch
+      return "caught:" .. support.caught_string(error)
+    end
+    return "missed"
+  end, "default")
+  local first = co:resume(nil, nil)
+  local second = co:error("oops", nil)
+  return (first as string) .. ":" .. (second as string)
+end
+
+local function override_error(): string
+  local co = coroutine.create(function(_arg: value): value
+    do
+      coroutine.yield("ready", "override")
+    catch
+      return "caught:" .. support.caught_string(error)
+    end
+    return "missed"
+  end, "default")
+  local first = co:resume(nil, "override")
+  local second = co:error("oops", "override")
+  return (first as string) .. ":" .. (second as string)
+end
+
+function test_uses_default_override_and_nil_fallback_tags(
+    _context: test.Context)
+  test.assert(default_resume() == "out:in", "default resume tag failed")
+  test.assert(override_resume() == "out:in", "override resume tag failed")
+  test.assert(default_error() == "ready:caught:oops",
+              "default error tag failed")
+  test.assert(override_error() == "ready:caught:oops",
+              "override error tag failed")
+end
+
+function test_reports_running_and_normal_statuses(_context: test.Context)
+  local a: coroutine.Coro? = nil
+  local b: coroutine.Coro? = nil
+  b = coroutine.create(function(_arg: value): value
+    test.assert((a as coroutine.Coro):status() == "normal")
+    test.assert((b as coroutine.Coro):status() == "running")
+    return "ok"
+  end, "b")
+  a = coroutine.create(function(_arg: value): value
+    return (b as coroutine.Coro):resume(nil, "b")
+  end, "a")
+
+  test.assert((a as coroutine.Coro):resume(nil, "a") == "ok")
+  test.assert((a as coroutine.Coro):status() == "dead")
+  test.assert((b as coroutine.Coro):status() == "dead")
+end
+
+function test_raw_tag_mismatch_does_not_call_lua_eq(_context: test.Context)
+  local calls: {string: value} = { ["count"] = 0 }
+  local resume_tag: value = { ["kind"] = "resume" }
+  local yield_tag: value = { ["kind"] = "yield" }
+  local install_eq = common.lua_helper([==[
+    return function(tag, counter)
+      setmetatable(tag, {
+        __eq = function()
+          counter.count = counter.count + 1
+          return true
+        end,
+      })
+    end
+  ]==]) as (value, {string: value}) -> ()
+  install_eq(resume_tag, calls)
+  install_eq(yield_tag, calls)
+
+  local co = coroutine.create(function (_argument: value): value
+    return coroutine.yield("unmatched", yield_tag)
+  end, resume_tag)
+  common.assert_raises(function ()
+    co:resume(nil, resume_tag)
+  end)
+  test.assert(calls["count"] == 0,
+              "coroutine raw-tag comparison invoked Lua __eq")
+  test.assert(co:status() == "dead",
+              "raw-tag mismatch did not terminate the coroutine")
+end

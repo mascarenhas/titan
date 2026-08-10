@@ -1848,7 +1848,7 @@ end
        function()
         local names = {
             "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-            "url", "http", "os", "peg", "string",
+            "url", "http", "os", "peg", "string", "test",
         }
         for _, name in ipairs(names) do
             assert_program_ast(

@@ -1,0 +1,5 @@
+local test = import "test"
+
+function test_nested_output(context: test.Context)
+  test.assert(context:name() == "nested.tests.test_nested_output")
+end

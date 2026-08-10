@@ -232,19 +232,20 @@ order is its written declaration order inside that source file; contributor
 byte order decides only where the whole declaration appears in the combined
 AST. No contributor name enters the Interface identity or wrapper ABI.
 
-The `titan.uv` dogfood intentionally uses that rule rather than hiding public
-declarations in the main source. Its exported records and functions live in
-the semantic contributors, so their member order follows the contributor
+The original `titan.uv` dogfood used that rule rather than hiding public
+declarations in the main source. In ABI 0.15 its exported records and functions
+lived in their semantic contributors, so member order followed the contributor
 sequence `file`, `os`, `process`, `runtime`, `task`, `tcp`. That initial public
 move differed from the old monolithic member order, so the release advanced
-the compiled-module ABI to **0.15** and the exact `titan_uv_types` fixture pins
-the resulting deterministic interface. The subsequent declaration-order pass
-moves the remaining private records to their semantic contributors and moves
+the compiled-module ABI to **0.15** and the exact `titan_uv_types` fixture
+pinned the resulting deterministic interface. The subsequent declaration-order
+pass moved the remaining private records to their semantic contributors and
 the private `FS` constants instance beside `FsConstants` in `file.titan`.
-Private slot and initialization order change, but no serialized public member,
+Private slot and initialization order changed, but no serialized public member,
 importer-visible variable slot, canonical exported-function closure slot, or
-fixture does. It therefore remained ABI 0.15 until the later provider-layout
-transition.
+fixture did. It therefore remained ABI 0.15 until the later provider-layout
+transition. ABI 0.22 changes the public/private boundary as described below;
+it does not change folder assembly.
 
 ABI 0.16 leaves this logical interface unchanged but permits `M`'s symbols to
 reside in a shared prefix container. Runtime imports load the selected
@@ -269,38 +270,49 @@ and absolute variant tags, plus the reconstructible public nominal-static slot
 prefix. Folder order therefore remains authoritative for public owner/member
 order and for variant tags, while keyed static maps use bytewise ordering.
 
-ABI 0.20 left folder composition unchanged, and ABI 0.21 does likewise. Array
-writer inventories, callable strict entries, Interface descriptors, and
+ABI 0.20 and ABI 0.21 left folder composition unchanged. Array writer
+inventories, callable strict entries, Interface descriptors, and
 concrete/Interface pair obligations are collected only after the contributors
 have become one checked AST, then emitted once per logical module. Their
-module-private slots follow the same importer-reconstructible public prefix
-and never give a contributor a runtime identity. The `process.titan`
-contributor now also exports the nominal
-`uv_stdio_t` process-stream wrapper used by `titan.os`; its private native
-representation is a pipe-or-TTY union. This changes the logical `titan.uv`
-schema, not contributor identity or composition.
+module-private slots follow the same importer-reconstructible public prefix and
+never give a contributor a runtime identity. ABI 0.20's logical `titan.uv`
+schema included the nominal `uv_stdio_t` process-stream wrapper used by
+`titan.os`; its private native representation selected a pipe or TTY owner.
+
+ABI 0.22 still leaves folder composition unchanged, but deliberately changes
+the logical module boundary. `uv_stdio_t`, every high-level bridge function,
+and the filesystem, OS, process, Runtime, timer, and TCP owner records are now
+local declarations selected only by direct source consumers. The serialized
+public owner order is `Error`, `OperationError`, `CancellationReason`,
+`TaskStatus`, and `Task`: the first two come from the main and the last three
+from `task.titan`. That schema and its reconstructible module-userdata prefix,
+together with the fixed physical-provider identity slot now carried by every
+module, are why this source-private transition advances the ABI; contributor
+filenames still have no runtime identity of their own.
 
 ## `titan.uv` dogfooding
 
 The production `titan.uv` source is the folder ensemble
 `titan/uv/uv.titan`, `file.titan`, `os.titan`, `process.titan`,
-`runtime.titan`, `task.titan`, and `tcp.titan`. The main file
-owns shared imports, shared constants, module state, bootstrap setup,
-program-argument setup, and the sole initializer. Each contributor owns its
-public API and both public and private records alongside the related
-implementation. The main file
-exports no member and declares no record. The Makefile
-declares this set explicitly as `UV_TITAN_SOURCES`; it does not use a
+`runtime.titan`, `task.titan`, and `tcp.titan`. The main file owns shared
+imports, shared constants, module state, bootstrap setup, program-argument
+setup, the sole initializer, and the public `Error` and `OperationError`
+records. `task.titan` owns the public `CancellationReason`, `TaskStatus`, and
+`Task` declarations alongside their implementations. Every other contributor
+declaration is source-private. Its related high-level module (`async`, `timer`,
+`net`, `os`, or `fs`) may select it only through a direct source import; no
+such owner or bridge is serialized into the compiled `titan.uv` interface.
+The Makefile declares this set explicitly as `UV_TITAN_SOURCES`; it does not use a
 wildcard, so adding a production source changes the reviewed build graph.
 Every listed source is a prerequisite of the one combined standard-library
-completion target. The production compiler invocation names all seventeen logical
+completion target. The production compiler invocation names all eighteen logical
 roots:
 
 ```sh
 titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
   titan.ssl titan.url titan.http titan.os \
   titan.peg titan.string \
-  titan.math titan.lua titan.iter titan.gc \
+  titan.math titan.lua titan.iter titan.gc titan.test \
   -X titan-runtime/titanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a llhttp-build/titan_httpshim.o \
      llhttp-build/libtitan-llhttp.a \
@@ -310,7 +322,7 @@ titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.
 Generated `titan/uv/uv.c` and `titan/uv/uv.o` are build artifacts and are
 removed by `make clean`. No contributor DSO, archive, or contributor shim is
 built or installed. The one logical `titan.uv` object, its one generated
-`titan/uv.lua` shim, and the remaining sixteen logical modules (seventeen in
+`titan/uv.lua` shim, and the remaining seventeen logical modules (eighteen in
 total) reside in the physical `titan.so`/`titan.a` pair. The private
 five-member LPegLabel archive is shared metadata-free payload for the
 `titan.peg`/`titan.string` folder modules. Bundled mode then supplies the
@@ -321,7 +333,7 @@ copy it into `titan.a` (and omits `libuv-build/libuv.a` from the command).
 That setting may itself select a shared or static system library. Higher
 `async`/`timer`/`fs`/`net`/`os` modules still import
 the independent logical `titan.uv` protocol, but their calls are direct
-because all seventeen source roots are linked together. `titan.ssl` reaches
+because all eighteen source roots are linked together. `titan.ssl` reaches
 that runtime only through public `titan.net`, and `titan.http` only through the
 public net/SSL/I/O/async layers; `titan.url` is synchronous composition over
 `titan.peg` and `titan.string`. None adds a direct uv dependency.

@@ -1,0 +1,71 @@
+-- Filesystem fixture ownership for fs.tests.
+local test = import "test"
+local ffi = foreign import "titan/ffi.h"
+local cstdlib = foreign import "stdlib.h"
+local cstring = foreign import "string.h"
+local native = foreign import "fixture_support.h"
+
+local function remove_native(path: string)
+  test.assert(native.titan_spec_remove_if_present(path) == 0,
+              "could not remove native fixture path")
+end
+
+local function cleanup_path(context: test.Context, path: string)
+  context:cleanup(function ()
+    remove_native(path)
+  end)
+end
+
+local function new_workspace(context: test.Context): string
+  local pattern = "/tmp/titan-fs-test-XXXXXX"
+  local storage = ffi.titan_ffi_char.new_array(#pattern + 1)
+  cstring.memcpy(storage as *ffi.titan_ffi_char,
+                 pattern as const *ffi.titan_ffi_char,
+                 #pattern as cstring.size_t)
+  storage[#pattern] = 0
+  local created = native.mkdtemp(storage as *ffi.titan_ffi_char)
+  test.assert(created, "could not create native workspace")
+  local root = created as string
+  cleanup_path(context, root)
+  return root
+end
+
+local function make_symlink(context: test.Context,
+                            target: string, link: string)
+  cleanup_path(context, link)
+  local status: integer = native.symlink(target, link)
+  test.assert(status == 0, "could not create native symlink fixture")
+end
+
+local function set_fixture_environment(context: test.Context,
+                                       name: string, contents: string)
+  local old_pointer = cstdlib.getenv(name)
+  local old_value: string? = nil
+  if old_pointer then old_value = old_pointer as string end
+  context:cleanup(function ()
+    local status: integer = 0
+    if old_value then
+      status = native.setenv(name, old_value as string, 1)
+    else
+      status = native.unsetenv(name)
+    end
+    test.assert(status == 0, "could not restore native environment fixture")
+  end)
+  local status: integer = native.setenv(name, contents, 1)
+  test.assert(status == 0, "could not set native environment fixture")
+end
+
+local function make_boundary_payload(): string
+  local prefix_length = 65535
+  local length = prefix_length + 6
+  local storage = ffi.titan_ffi_char.new_array(length)
+  cstring.memset(storage as *ffi.titan_ffi_char, 120,
+                 prefix_length as cstring.size_t)
+  storage[prefix_length] = 0
+  storage[prefix_length + 1] = 89
+  storage[prefix_length + 2] = 116
+  storage[prefix_length + 3] = 97
+  storage[prefix_length + 4] = 105
+  storage[prefix_length + 5] = 108
+  return storage as string
+end

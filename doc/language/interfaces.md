@@ -661,8 +661,9 @@ archives, multi-module prefix providers, and standalone executables.
 Interface method order is ABI-significant and is preserved in compiled module
 metadata. Interfaces entered the compiled-module contract in ABI 0.20 together
 with the two-user-value Array proxy and strict generic function-entry protocol.
-ABI 0.21 retains that model while advancing the matched Lua runtime; prior-ABI
-providers are rejected rather than adapted in place.
+ABI 0.21 retained that model while advancing the matched Lua runtime to
+5.5.1, and ABI 0.22 retains it; prior-ABI providers are rejected rather than
+adapted in place.
 
 ## Version-one boundaries
 

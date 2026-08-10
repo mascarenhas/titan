@@ -14,6 +14,10 @@ function symtab.new(modname)
         foreign_field_macro_cache = {},
         c_file_tags = {},
         c_prototype_tags = {},
+        -- A local declaration in another module is visible only through a
+        -- direct source import of that owning module. This set deliberately
+        -- does not inherit the imported module's own source dependencies.
+        source_imports = {},
         modname = modname
     }
     return setmetatable(self, symtab)
@@ -70,6 +74,15 @@ function symtab:hidden_from_initializer(decl)
         return order > frontier
     end
     return false
+end
+
+function symtab:source_import_visible(owner)
+    local import = self.source_imports[owner]
+    if not import then return false end
+    -- Function signatures and bodies see every import. A module-variable
+    -- initializer retains the existing source-order frontier and must not gain
+    -- an owner's locals from a direct import written later.
+    return not self:hidden_from_initializer(import)
 end
 
 -- Titan type aliases live in a distinct, module-wide type namespace. They are

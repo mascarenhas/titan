@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 
 # Some compiler specs rebuild the checkout runtime. Preserve that Make-owned
-# archive plus the canonical installed standard-library provider pair around those
-# groups so later production smokes see the exact build that the library gates
-# tested. The source-rock hook owns the installed provider and shims; this
+# archive plus the canonical installed standard-library provider pair, shims,
+# and test-support compiler source around those groups so later production
+# smokes see the exact build that the library gates tested. The source-rock hook
+# owns those installed artifacts; this
 # snapshot must not depend on a packaging spec having built checkout-root
 # standard-library outputs as a side effect.
 
@@ -30,9 +31,10 @@ case "$prefix" in
         ;;
 esac
 
-provider=$prefix_rel/lib/titan/0.21/titan.so
+provider=$prefix_rel/lib/titan/0.22/titan.so
 static_archive=${provider%.so}.a
 shim_dir=$prefix_rel/share/lua/5.5/titan
+test_source=$prefix_rel/share/titan/0.22/src/titan/test.titan
 
 artifacts=(
     titan-runtime/libtitan.a
@@ -46,7 +48,8 @@ artifacts=(
     "$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/os.lua"
     "$shim_dir/peg.lua" "$shim_dir/string.lua"
     "$shim_dir/math.lua" "$shim_dir/lua.lua"
-    "$shim_dir/iter.lua" "$shim_dir/gc.lua"
+    "$shim_dir/iter.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"
+    "$test_source"
 )
 
 if [[ $(uname -s) == Darwin ]]; then artifacts+=("$provider.dSYM"); fi
@@ -116,7 +119,8 @@ remove_installed_artifacts() {
         "$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/os.lua" \
         "$shim_dir/peg.lua" "$shim_dir/string.lua" \
         "$shim_dir/math.lua" "$shim_dir/lua.lua" \
-        "$shim_dir/iter.lua" "$shim_dir/gc.lua"
+        "$shim_dir/iter.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"
+    rm -f "$test_source"
 }
 
 case "$mode" in

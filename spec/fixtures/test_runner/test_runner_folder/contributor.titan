@@ -1,0 +1,4 @@
+function test_folder_contributor(context: test.Context)
+  test.assert(context:name() ==
+    "test_runner_folder.test_folder_contributor")
+end

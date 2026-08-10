@@ -1,0 +1,3 @@
+function helper(): integer
+  return 42
+end

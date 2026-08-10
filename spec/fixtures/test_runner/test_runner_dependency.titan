@@ -1,0 +1,6 @@
+local test = import "test"
+
+function test_dependency(context: test.Context)
+  test.assert(test.testing())
+  test.assert(context:name() == "test_runner_dependency.test_dependency")
+end

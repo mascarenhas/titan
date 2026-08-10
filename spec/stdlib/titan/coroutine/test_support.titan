@@ -1,0 +1,11 @@
+local test = import "test"
+local cstring = foreign import "string.h"
+
+local function contains(subject: string, fragment: string): boolean
+  return cstring.strstr(subject, fragment) ~= nil
+end
+
+local function caught_string(failure: value): string
+  test.assert(failure is string, "coroutine error was not a string")
+  return failure as string
+end

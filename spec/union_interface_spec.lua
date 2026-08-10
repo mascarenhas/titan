@@ -63,6 +63,26 @@ local function canonical_interface_module()
 end
 
 describe("union module interfaces", function()
+    it("rejects compiler-only source views in recovered metadata", function()
+        local fields = {
+            "_source", "source_members", "source_type_members",
+            "_source_foreign_includes", "_source_c_context",
+        }
+        for _, field in ipairs(fields) do
+            local module = canonical_module()
+            module[field] = field == "_source" and true or {}
+            local ok, err = driver.validate_module_interface(module, "sample")
+            assert.falsy(ok)
+            assert.match("compiler%-only source interface state", err)
+        end
+
+        local module, union = canonical_module()
+        union._source_complete = true
+        local ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("compiler%-only source state", err)
+    end)
+
     it("accepts public variants with gaps in their absolute tags", function()
         local module = canonical_module()
         local ok, err = driver.validate_module_interface(module, "sample")

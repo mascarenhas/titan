@@ -30,7 +30,7 @@ local function check_listen_port(port: integer)
 end
 
 local function read(connection: Connection): string?
-  if uv._net_is_closed(connection.handle) then
+  if uv.net_is_closed(connection.handle) then
     connection.excess = ""
     return nil
   end
@@ -39,13 +39,13 @@ local function read(connection: Connection): string?
     connection.excess = ""
     return result
   end
-  return uv._net_read(connection.handle)
+  return uv.net_read(connection.handle)
 end
 
 function connect(host: string, port: integer): Connection
   check_host(host)
   check_connect_port(port)
-  return Connection.new(uv._net_connect(host, port), "")
+  return Connection.new(uv.net_connect(host, port), "")
 end
 
 function listen(host: string, port: integer,
@@ -55,7 +55,7 @@ function listen(host: string, port: integer,
   local actual_backlog = 128
   if backlog then actual_backlog = backlog as integer end
   if actual_backlog <= 0 then raise "listen backlog must be positive" end
-  return Server.new(uv._net_listen(host, port, actual_backlog))
+  return Server.new(uv.net_listen(host, port, actual_backlog))
 end
 
 function Connection:read(): string?
@@ -64,7 +64,7 @@ end
 
 function Connection:read_until(delimiter: string,
                                chop: boolean?): string?
-  if uv._net_is_closed(self.handle) then
+  if uv.net_is_closed(self.handle) then
     self.excess = ""
     return nil
   end
@@ -111,22 +111,22 @@ function Connection:read_until(delimiter: string,
 end
 
 function Connection:write(data: string)
-  uv._net_write(self.handle, data)
+  uv.net_write(self.handle, data)
 end
 
 function Connection:shutdown()
-  uv._net_shutdown(self.handle)
+  uv.net_shutdown(self.handle)
 end
 
 function Connection:close()
   self.excess = ""
-  uv._net_close(self.handle)
+  uv.net_close(self.handle)
 end
 
 function Server:accept(): Connection
-  return Connection.new(uv._net_accept(self.handle), "")
+  return Connection.new(uv.net_accept(self.handle), "")
 end
 
 function Server:close()
-  uv._net_close(self.handle)
+  uv.net_close(self.handle)
 end

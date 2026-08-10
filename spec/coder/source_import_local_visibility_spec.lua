@@ -1,0 +1,530 @@
+local lfs = require "lfs"
+local h = require "spec.support.helpers"
+
+local generated_modules = {}
+
+local function remove_tree(path)
+    local mode = lfs.symlinkattributes(path, "mode")
+    if mode == "directory" then
+        for name in lfs.dir(path) do
+            if name ~= "." and name ~= ".." then
+                remove_tree(path .. "/" .. name)
+            end
+        end
+        assert.truthy(lfs.rmdir(path))
+    elseif mode then
+        assert.truthy(os.remove(path))
+    end
+end
+
+local function clean_generated_modules()
+    for name in pairs(generated_modules) do
+        for _, suffix in ipairs({ ".c", ".o", ".so", ".a" }) do
+            remove_tree(name .. suffix)
+        end
+        remove_tree(name .. ".so.dSYM")
+    end
+    generated_modules = {}
+end
+
+local function generate(modules, main)
+    for name in pairs(modules) do generated_modules[name] = true end
+    local ok, err = h.generate_modules(modules, main)
+    assert.truthy(ok, err)
+end
+
+local function call(module, source)
+    local ok, err = h.call(module, source)
+    assert.truthy(ok, err)
+end
+
+local function read_file(path)
+    local file = assert(io.open(path, "rb"))
+    local contents = file:read("*a")
+    file:close()
+    return contents
+end
+
+describe("source-import local visibility (end-to-end)", function()
+    after_each(clean_generated_modules)
+
+    it("calls direct and first-class local functions, statics, and bound " ..
+       "methods", function()
+        generate({
+            source_runtime_members = [[
+                local total: integer = 0
+                local messages: {string} = { "" }
+
+                local function combine(left: integer,
+                                       right: integer): integer
+                    return left + right
+                end
+
+                record Counter
+                    local current: integer
+                end
+
+                local function Counter.from(initial: integer): Counter
+                    return Counter.new(initial)
+                end
+
+                local function Counter:bump(delta: integer): integer
+                    self.current = self.current + delta
+                    return self.current
+                end
+            ]],
+            source_runtime_member_consumer = [[
+                local provider = import "source_runtime_members"
+
+                function direct(): integer
+                    provider.total = 40
+                    return provider.combine(provider.total, 2)
+                end
+
+                function first_class(): integer
+                    local combine: (integer, integer) -> integer =
+                        provider.combine
+                    local make: (integer) -> provider.Counter =
+                        provider.Counter.from
+                    local counter = make(10)
+                    local bump: (integer) -> integer = counter:bump
+                    return combine(bump(5), 27)
+                end
+
+                function stable_identity(): boolean
+                    return provider.combine == provider.combine
+                        and provider.Counter.from == provider.Counter.from
+                end
+
+                function remember(message: string)
+                    provider.messages = { message }
+                end
+
+                function remembered_length(): integer
+                    return #provider.messages[1]
+                end
+            ]],
+        }, "source_runtime_member_consumer")
+
+        call("source_runtime_member_consumer", [[
+            assert(source_runtime_member_consumer.direct() == 42)
+            assert(source_runtime_member_consumer.first_class() == 42)
+            assert(source_runtime_member_consumer.stable_identity())
+
+            collectgarbage("collect")
+            collectgarbage("generational")
+            collectgarbage("collect")
+            local message = string.rep("source-private module value", 1024)
+            local expected = #message
+            source_runtime_member_consumer.remember(message)
+            message = nil
+            for i = 1, 20000 do
+                local garbage = { i, tostring(i), {} }
+            end
+            for _ = 1, 20 do collectgarbage("step", 1000) end
+            assert(source_runtime_member_consumer.remembered_length() == expected)
+            collectgarbage("incremental")
+
+            local provider = require "source_runtime_members"
+            assert(not pcall(function() return provider.total end))
+            assert(not pcall(function() return provider.messages end))
+            assert(not pcall(function() return provider.combine end))
+            assert(provider.Counter ~= nil)
+            assert(provider.Counter.new == nil)
+            assert(provider.Counter.from == nil)
+        ]])
+    end)
+
+    it("rejects canonical state from another physical provider", function()
+        local owner = "source_runtime_identity_owner"
+        local consumer = "source_runtime_identity_consumer"
+        generate({
+            [owner] = [[
+                local pad: integer = 111
+                local secret: integer = 42
+                function visible(): integer return secret end
+            ]],
+        }, owner)
+
+        local old_provider = os.tmpname() .. "-source-identity-owner.so"
+        local file = assert(io.open(old_provider, "wb"))
+        assert(file:write(read_file(owner .. ".so")))
+        assert(file:close())
+
+        generate({
+            [owner] = [[
+                local secret: integer = 42
+                function visible(): integer return secret end
+            ]],
+            [consumer] = string.format([[
+                local owner = import %q
+                function read(): integer return owner.secret end
+            ]], owner),
+        }, consumer)
+
+        local preloader = "source_runtime_identity_preloader"
+        local preloader_file = preloader .. ".lua"
+        file = assert(io.open(preloader_file, "wb"))
+        assert(file:write(string.format([[
+            local open = assert(package.loadlib(%q, %q))
+            assert(type(open()) == "userdata")
+            local ok, err = pcall(require, %q)
+            assert(not ok)
+            assert(tostring(err):find(
+                "different physical provider", 1, true), tostring(err))
+            return true
+        ]], old_provider, "luaopen_" .. owner, consumer)))
+        assert(file:close())
+
+        local ok, err = h.call(preloader, "")
+        os.remove(preloader_file)
+        os.remove(old_provider)
+        assert.truthy(ok, err)
+    end)
+
+
+    it("constructs local records and dispatches local unions across a " ..
+       "source import", function()
+        generate({
+            source_runtime_nominals = [[
+                local record Pair
+                    left: integer
+                    right: integer
+                end
+
+                local union Outcome
+                    ready: Pair
+                    failed: string
+                end
+            ]],
+            source_runtime_nominal_consumer = [[
+                local provider = import "source_runtime_nominals"
+
+                function run(): integer
+                    local first = provider.Pair.new(10, 20)
+                    local second: provider.Pair = { left = 1, right = 2 }
+                    first.left = first.left + second.left
+                    first.right = first.right + second.right
+
+                    local outcome: provider.Outcome =
+                        provider.Outcome.ready(first)
+                    case outcome
+                    when ready: pair then
+                        return pair.left + pair.right + 9
+                    when failed: message then
+                        return #message
+                    end
+                end
+            ]],
+        }, "source_runtime_nominal_consumer")
+
+        call("source_runtime_nominal_consumer", [[
+            assert(source_runtime_nominal_consumer.run() == 42)
+        ]])
+    end)
+
+    it("preserves producer-owned C identity across source calls", function()
+        local header = os.tmpname() .. "-source-owned-runtime.h"
+        local file = assert(io.open(header, "wb"))
+        assert(file:write([[
+#pragma once
+struct SourceOwnedRuntime { int field; };
+]]))
+        assert(file:close())
+
+        generate({
+            source_runtime_owned_owner = string.format([[
+                local c = foreign import %q
+                local type Item = c.SourceOwnedRuntime
+
+                local function make(): owned *Item
+                    return c.SourceOwnedRuntime.new()
+                end
+
+                local function id(
+                    item: owned *Item
+                ): owned *Item
+                    return item
+                end
+            ]], header),
+            source_runtime_owned_forwarder = [[
+                local owner = import "source_runtime_owned_owner"
+
+                local function make(): owned *owner.Item
+                    return owner.make()
+                end
+
+                local function id(
+                    item: owned *owner.Item
+                ): owned *owner.Item
+                    return owner.id(item)
+                end
+            ]],
+            source_runtime_owned_consumer = [[
+                local forwarder = import "source_runtime_owned_forwarder"
+                local owner = import "source_runtime_owned_owner"
+
+                function run(): integer
+                    local item: owned *owner.Item = forwarder.make()
+                    item.field = 42
+                    return forwarder.id(item).field as integer
+                end
+            ]],
+        }, "source_runtime_owned_consumer")
+
+        local forwarder = read_file("source_runtime_owned_forwarder.c")
+        assert.falsy(forwarder:find(header, 1, true), forwarder)
+        local consumer = read_file("source_runtime_owned_consumer.c")
+        assert.truthy(consumer:find(header, 1, true), consumer)
+        os.remove(header)
+
+        call("source_runtime_owned_consumer", [[
+            assert(source_runtime_owned_consumer.run() == 42)
+        ]])
+    end)
+
+
+    it("keeps direct and source-origin quoted-header spelling identical", function()
+        local header = "source_runtime_file_macro.h"
+        local file = assert(io.open(header, "wb"))
+        assert(file:write([[
+#pragma once
+struct SourceRuntimeFileMacro {
+    char pad[sizeof(__FILE__)];
+    int tail;
+};
+static struct SourceRuntimeFileMacro source_runtime_file_macro_object = {
+    { 0 }, 1234
+};
+static struct SourceRuntimeFileMacro *source_runtime_file_macro_make(void) {
+    return &source_runtime_file_macro_object;
+}
+]]))
+        assert(file:close())
+
+        generate({
+            source_runtime_file_macro_owner = string.format([[
+                local c = foreign import %q
+                local type Item = c.SourceRuntimeFileMacro
+
+                local function get(): *Item
+                    return c.source_runtime_file_macro_make()
+                end
+            ]], header),
+            source_runtime_file_macro_consumer = [[
+                local owner = import "source_runtime_file_macro_owner"
+
+                function run(): integer
+                    local item = owner.get()
+                    return item.tail as integer
+                end
+            ]],
+        }, "source_runtime_file_macro_consumer")
+        local owner_include = read_file(
+            "source_runtime_file_macro_owner.c"):match(
+                "#include [^\n]*source_runtime_file_macro%.h[^\n]*")
+        local consumer_include = read_file(
+            "source_runtime_file_macro_consumer.c"):match(
+                "#include [^\n]*source_runtime_file_macro%.h[^\n]*")
+        assert.equal(owner_include, consumer_include)
+        os.remove(header)
+
+        call("source_runtime_file_macro_consumer", [[
+            assert(source_runtime_file_macro_consumer.run() == 1234)
+        ]])
+    end)
+
+
+    it("adds source origins to C operator and pointer probes", function()
+        local count_header = "source_runtime_probe_count.h"
+        local count_file = assert(io.open(count_header, "wb"))
+        assert(count_file:write([[
+            typedef int source_runtime_count;
+            static source_runtime_count source_runtime_count_value(void) {
+                return 21;
+            }
+        ]]))
+        assert(count_file:close())
+        local left_header = "source_runtime_probe_left.h"
+        local left_file = assert(io.open(left_header, "wb"))
+        assert(left_file:write([[
+            struct SourceRuntimeLeft { int value; };
+            static struct SourceRuntimeLeft source_runtime_left_value = { 7 };
+            static struct SourceRuntimeLeft *source_runtime_left(void) {
+                return &source_runtime_left_value;
+            }
+        ]]))
+        assert(left_file:close())
+        local right_header = "source_runtime_probe_right.h"
+        local right_file = assert(io.open(right_header, "wb"))
+        assert(right_file:write([[
+            struct SourceRuntimeRight { int value; };
+        ]]))
+        assert(right_file:close())
+
+        generate({
+            source_runtime_probe_owner = string.format([[
+                local counts = foreign import %q
+                local lefts = foreign import %q
+                local rights = foreign import %q
+                local type Count = counts.source_runtime_count
+                local type Left = lefts.SourceRuntimeLeft
+                local type Right = rights.SourceRuntimeRight
+
+                local function count(): Count
+                    return counts.source_runtime_count_value()
+                end
+
+                local function left(): *Left
+                    return lefts.source_runtime_left()
+                end
+            ]], count_header, left_header, right_header),
+            source_runtime_probe_consumer = [[
+                local owner = import "source_runtime_probe_owner"
+
+                function run(): integer
+                    local count = owner.count()
+                    local doubled = count + count
+                    local right = owner.left() as *owner.Right
+                    if right == nil then return -1 end
+                    return doubled as integer
+                end
+            ]],
+        }, "source_runtime_probe_consumer")
+        os.remove(count_header)
+        os.remove(left_header)
+        os.remove(right_header)
+
+        local generated = read_file("source_runtime_probe_consumer.c")
+        assert.truthy(generated:find(count_header, 1, true), generated)
+        assert.truthy(generated:find(left_header, 1, true), generated)
+        assert.truthy(generated:find(right_header, 1, true), generated)
+        call("source_runtime_probe_consumer", [[
+            assert(source_runtime_probe_consumer.run() == 42)
+        ]])
+    end)
+
+
+    it("stops source-origin traversal at a retained C typedef", function()
+        local base_header = "source_runtime_retained_base.h"
+        local alias_header = "source_runtime_retained_alias.h"
+        local base = assert(io.open(base_header, "wb"))
+        assert(base:write([[
+            #ifndef SOURCE_RUNTIME_RETAINED_BASE_H
+            #define SOURCE_RUNTIME_RETAINED_BASE_H
+            struct SourceRuntimeRetained { int value; };
+            #endif
+        ]]))
+        assert(base:close())
+        local alias = assert(io.open(alias_header, "wb"))
+        assert(alias:write(string.format([[
+            #include %q
+            typedef struct SourceRuntimeRetained SourceRuntimeRetainedAlias;
+            static SourceRuntimeRetainedAlias source_runtime_retained = { 33 };
+            static SourceRuntimeRetainedAlias *source_runtime_retained_get(void) {
+                return &source_runtime_retained;
+            }
+        ]], base_header)))
+        assert(alias:close())
+
+        generate({
+            source_runtime_retained_owner = string.format([[
+                local base = foreign import %q
+                local alias = foreign import %q
+                local type Retained = alias.SourceRuntimeRetainedAlias
+
+                local function get(): *Retained
+                    return alias.source_runtime_retained_get()
+                end
+            ]], base_header, alias_header),
+            source_runtime_retained_consumer = [[
+                local owner = import "source_runtime_retained_owner"
+                function run(): integer
+                    local pointer = owner.get()
+                    if pointer == nil then return -1 end
+                    return pointer.value as integer
+                end
+            ]],
+        }, "source_runtime_retained_consumer")
+        os.remove(base_header)
+        os.remove(alias_header)
+
+        local generated = read_file("source_runtime_retained_consumer.c")
+        assert.truthy(generated:find(alias_header, 1, true), generated)
+        assert.falsy(generated:find(
+            "#include \"" .. base_header, 1, true), generated)
+        call("source_runtime_retained_consumer", [[
+            assert(source_runtime_retained_consumer.run() == 33)
+        ]])
+    end)
+
+    it("adds only origin headers required by generated FFI declarations",
+    function()
+        generate({
+            source_runtime_ffi_leaf = [[
+                local stdio = foreign import "stdio.h"
+                local unused = foreign import "stdatomic.h"
+                local type File = stdio.FILE
+
+                local function open(): *File
+                    return stdio.tmpfile()
+                end
+
+                local function write(file: *File): integer
+                    return stdio.fputs("source visibility", file) as integer
+                end
+
+                local function close(file: *File): integer
+                    return stdio.fclose(file) as integer
+                end
+            ]],
+            source_runtime_ffi_bridge = [[
+                local leaf = import "source_runtime_ffi_leaf"
+
+                local function open(): *leaf.File
+                    return leaf.open()
+                end
+
+                local function write(file: *leaf.File): integer
+                    return leaf.write(file)
+                end
+
+                local function close(file: *leaf.File): integer
+                    return leaf.close(file)
+                end
+            ]],
+            source_runtime_ffi_consumer = [[
+                local bridge = import "source_runtime_ffi_bridge"
+
+                function run(): integer
+                    local open = bridge.open
+                    local write = bridge.write
+                    local close = bridge.close
+                    local file = open()
+                    if file == nil then return -1 end
+                    local written = write(file)
+                    local closed = close(file)
+                    if written < 0 or closed ~= 0 then
+                        return -1
+                    end
+                    return 42
+                end
+            ]],
+        }, "source_runtime_ffi_consumer")
+
+        for _, name in ipairs({
+            "source_runtime_ffi_bridge",
+            "source_runtime_ffi_consumer",
+        }) do
+            local generated = read_file(name .. ".c")
+            assert.truthy(generated:find(
+                "#include <stdio.h>", 1, true), name .. ".c")
+            assert.falsy(generated:find(
+                "#include <stdatomic.h>", 1, true), name .. ".c")
+        end
+
+        call("source_runtime_ffi_consumer", [[
+            assert(source_runtime_ffi_consumer.run() == 42)
+        ]])
+    end)
+end)

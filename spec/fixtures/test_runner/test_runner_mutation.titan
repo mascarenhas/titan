@@ -1,0 +1,32 @@
+local test = import "test"
+local lua = foreign import "lua.h"
+
+local function clear_lua_helper_globals()
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if lua.lua_checkstack(L, 3) == 0 then
+    raise "cannot reserve Lua stack for helper-global mutation"
+  end
+  lua.lua_rawgeti(L, lua.LUA_REGISTRYINDEX,
+                  lua.LUA_RIDX_GLOBALS as lua.lua_Integer)
+  lua.lua_pushnil(L)
+  lua.lua_setfield(L, -2, "string")
+  lua.lua_pushnil(L)
+  lua.lua_setfield(L, -2, "tonumber")
+end
+
+function test_location_after_lua_global_mutation(context: test.Context)
+  local file, function_name, line = test.location()
+  test.assert(file == "test_runner_mutation.titan")
+  test.assert(function_name ==
+              "test_runner_mutation.test_location_after_lua_global_mutation")
+  test.assert(line > 0)
+end
+
+function test_failure_after_lua_global_mutation(context: test.Context)
+  test.assert(false, "failure after Lua global mutation")
+end
+
+do
+  clear_lua_helper_globals()
+end

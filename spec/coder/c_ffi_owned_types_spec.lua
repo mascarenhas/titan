@@ -698,6 +698,8 @@ describe("source-written owned C type code generation", function()
                     int right;
                 } ffi_same;
             ]], function(second_header)
+                -- Model separate compilation deliberately: source views would
+                -- carry the defining C scope across this synthetic module set.
                 local ok, err = h.generate_modules({
                     owned_tag_a = [[
                         local c = foreign import "]] ..
@@ -724,7 +726,7 @@ describe("source-written owned C type code generation", function()
                             return read(c.ffi_same.new())
                         end
                     ]],
-                }, "owned_tag_b")
+                }, "owned_tag_b", nil, { interface = "compiled" })
                 assert.truthy(ok, err)
 
                 local called, message = h.call("owned_tag_b", [[

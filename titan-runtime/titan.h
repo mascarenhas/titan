@@ -107,9 +107,13 @@
    0.20 -> 0.21: the embedded Lua contract advances from 5.5.0 to 5.5.1.
    Generated code follows the revised stack-slot and numeric-operation macros,
    and native-layout consumers follow Lua's revised LUAI_MAXALIGN contract.
-   Providers compiled against the two internal-header sets must not mix. */
-#define TITAN_VER "0.21"
-#define TITAN_VER_SUFFIX "_0_21"
+   Providers compiled against the two internal-header sets must not mix.
+   0.21 -> 0.22: titan.uv localizes its source-local surface, changing its
+   serialized public schema and reconstructible module-userdata prefix. This
+   is a private-provider boundary; Lua 5.5.1 and the other 0.21 layouts remain
+   unchanged. */
+#define TITAN_VER "0.22"
+#define TITAN_VER_SUFFIX "_0_22"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"

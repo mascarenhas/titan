@@ -1,0 +1,32 @@
+local _uv = import "uv"
+local lua = foreign import "lua.h"
+local lual = foreign import "lauxlib.h"
+local ffi = foreign import "titan/ffi.h"
+
+local function bootstrap_hook_is_installed(): boolean
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
+  return lua.lua_type(L, -1) == lua.LUA_TFUNCTION
+end
+
+function main(arguments: {string}): integer
+  if not bootstrap_hook_is_installed() then return 34 end
+  if arguments[1] == "raise" then
+    raise "direct-main-boom"
+  end
+  if #arguments ~= 2 then return 35 end
+  if arguments[1] ~= "one" or arguments[2] ~= "two" then return 36 end
+  return 37
+end
+
+do
+  local status = lual.luaL_loadstring(L, [==[
+    return function(_main, _arguments)
+      error("synthetic bootstrap invoked")
+    end
+  ]==])
+  if status ~= 0 then raise "could not load synthetic bootstrap" end
+  lua.lua_callk(L, 0, 1, 0, nil)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
+end

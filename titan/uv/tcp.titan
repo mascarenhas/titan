@@ -78,7 +78,7 @@ end
 -- Persistent TCP handles own their exact long-lived stream state directly.
 -- The bridge reads alloc, read, and connection callbacks from fields 2, 3,
 -- and 4. Libuv, not Titan, tracks and orders concurrent write requests.
-record uv_tcp_t
+local record uv_tcp_t
   local native: owned *libuv.uv_tcp_t
   local alloc_callback: (uv_tcp_t, libuv.size_t,
                          ffi.titan_ffi_void_ptr) -> ()
@@ -590,7 +590,7 @@ local function validate_port(port: integer)
   end
 end
 
-function _net_connect(host: string, port: integer): uv_tcp_t
+local function net_connect(host: string, port: integer): uv_tcp_t
   validate_port(port)
   local task = running_task()
   accepting_work(task.runtime, "connect TCP")
@@ -619,7 +619,7 @@ function _net_connect(host: string, port: integer): uv_tcp_t
   raise make_error(libuv.UV_EADDRNOTAVAIL, "net.connect")
 end
 
-function _net_listen(host: string, port: integer,
+local function net_listen(host: string, port: integer,
                      backlog: integer): uv_tcp_t
   validate_port(port)
   if backlog <= 0 then raise "TCP listen backlog must be positive" end
@@ -629,7 +629,8 @@ function _net_listen(host: string, port: integer,
   local task = running_task()
   accepting_work(task.runtime, "listen on TCP")
   local addresses = resolve_addresses(host, port)
-  local last_status = libuv.UV_EADDRNOTAVAIL
+  local last_status: ffi.titan_ffi_int =
+      libuv.UV_EADDRNOTAVAIL as ffi.titan_ffi_int
 
   local address_index = 1
   while address_index <= #addresses do
@@ -651,14 +652,14 @@ function _net_listen(host: string, port: integer,
   raise make_error(last_status, "net.listen")
 end
 
-function _net_read(tcp: uv_tcp_t): string?
+local function net_read(tcp: uv_tcp_t): string?
   require_connection(tcp, "read from")
   if libuv.uv_is_closing(tcp_handle(tcp)) ~= 0 then return nil end
   validate_tcp(tcp, "read from")
   return await(Call.tcp_read(TcpReadCall.new(tcp))) as string?
 end
 
-function _net_write(tcp: uv_tcp_t, data: string)
+local function net_write(tcp: uv_tcp_t, data: string)
   require_connection(tcp, "write to")
   validate_tcp(tcp, "write to")
   if libuv.uv_is_writable(tcp_stream(tcp)) == 0 then
@@ -669,26 +670,26 @@ function _net_write(tcp: uv_tcp_t, data: string)
       TcpWriteCall.new(tcp, data)))
 end
 
-function _net_shutdown(tcp: uv_tcp_t)
+local function net_shutdown(tcp: uv_tcp_t)
   require_connection(tcp, "shut down")
   validate_tcp(tcp, "shut down")
   if libuv.uv_is_writable(tcp_stream(tcp)) == 0 then return end
   await(Call.tcp_shutdown(TcpShutdownCall.new(tcp)))
 end
 
-function _net_accept(server: uv_tcp_t): uv_tcp_t
+local function net_accept(server: uv_tcp_t): uv_tcp_t
   local state = require_server(server, "accept on")
   if state.error ~= nil then raise state.error end
   validate_tcp(server, "accept on")
   return await(Call.tcp_accept(TcpAcceptCall.new(server))) as uv_tcp_t
 end
 
-function _net_close(tcp: uv_tcp_t)
+local function net_close(tcp: uv_tcp_t)
   if libuv.uv_is_closing(tcp_handle(tcp)) ~= 0 then return end
   validate_tcp(tcp, "close")
   await(Call.tcp_close(TcpCloseCall.new(tcp)))
 end
 
-function _net_is_closed(tcp: uv_tcp_t): boolean
+local function net_is_closed(tcp: uv_tcp_t): boolean
   return libuv.uv_is_closing(tcp_handle(tcp)) ~= 0
 end

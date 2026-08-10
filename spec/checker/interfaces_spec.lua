@@ -402,9 +402,9 @@ describe("interfaces (typechecker)", function()
             ]],
         }, "consumer")
         assert.falsy(ok)
-        -- Public projection omits local methods, so this source-import path
-        -- reports the same first ordered obligation as a missing method.
-        assert.match("method 'get' is missing", err)
+        -- The compiled facade grants no source capability even when this
+        -- in-memory test has already registered the owner's rich descriptor.
+        assert.match("method 'get' is local to module 'owner'", err)
     end)
 
     it("ignores concrete parameter names and accepts union methods", function()
