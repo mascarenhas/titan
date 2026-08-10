@@ -123,12 +123,18 @@ record Context
 end
 
 function Context:name(): string
+function Context:log(message: string)
 function Context:run(name: string, subtest: (Context) -> ())
 function Context:cleanup(f: () -> ())
 ```
 
 The runner supplies the contexts passed to tests; `Context` has no public
-fields. `name()` returns the full name. `run` registers a child named
+fields. `name()` returns the full name. `log` asks the runner to write and
+flush an informational line decorated with the test's full name. Tests that
+deliberately exercise code which
+logs expected diagnostics should emit clear `BEGIN` and `END` messages around
+that code, so the intervening output cannot be mistaken for an unasserted test
+failure. `run` registers a child named
 `<parent-name>.<name>` and preserves registration order. Children run only
 after the parent body returns, and may recursively register their own
 children. Repeated child names are allowed and run as separate cases.

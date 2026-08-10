@@ -628,16 +628,25 @@ sources. Refresh the corresponding entry in
 `spec/fixtures/stdlib/titan_stdlib_types.lua` only if a high-level facade's
 interface changed as well.
 
-Run the focused build and behavior gates first, then the complete uncovered
-library group:
+Run the focused build and behavior gates first. Build the aggregate native
+suite once, select `net.tests` and `ssl.tests` in separate fresh processes, and
+then run the complete uncovered stdlib surface:
 
 ```sh
 busted spec/libuv_build_spec.lua
 busted spec/stdlib/uv_tasks_spec.lua
 busted spec/stdlib/uv_native_handles_spec.lua
-bash spec/support/run_titan_stdlib_tests.sh net-ssl  # host cohort: net.tests + ssl.tests
-bash spec/support/ci_test_groups.sh libraries
+make titan-stdlib-test-build
+make titan-stdlib-test-run TITAN_FILTER='^net[.]tests[.]'
+make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]'
+make stdlib-busted-test
+make titan-stdlib-test-run
 ```
+
+The final two commands complete the uncovered stdlib gate without rebuilding
+the native executable; `make stdlib-test` performs the complete gate from
+scratch. A `TITAN_FILTER` selects cases at run time; it does not rebuild or
+narrow the 21-root executable.
 
 The real installation path and both link policies remain release boundaries:
 

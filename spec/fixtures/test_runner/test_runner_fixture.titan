@@ -65,6 +65,7 @@ function test_pass(context: ContextAlias)
   test.assert(test.testing(), "runner is not active")
   test.assert(not test.verbose(), "unexpected verbose mode")
   test.assert(context:name() == "test_runner_fixture.test_pass")
+  context:log("fixture log")
 end
 
 function test_result(context: test.Context): integer

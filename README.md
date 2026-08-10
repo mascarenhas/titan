@@ -645,12 +645,21 @@ modules](doc/language/static-compiled-modules.md).
 # Running the test suite
 
 The repository uses [Busted](https://lunarmodules.github.io/busted/) for
-compiler, packaging, and host-dependent Lua specs. Most standard-library
-behavior is module-owned Titan source under `spec/stdlib/titan/`, compiled with
-`titanc --test` by `spec/support/run_titan_stdlib_tests.sh` and run directly by
-`spec/support/run_titan_stdlib_test_groups.sh` rather than through Busted
-wrappers. Python 3 is required by the bounded native-executable supervisor; set
-`PYTHON=/absolute/path/to/python3` to override the default `python3` command.
+compiler, packaging, and host-dependent Lua specs. Module-owned
+standard-library behavior lives under `spec/stdlib/titan/`: the Makefile names
+all 21 roots explicitly and compiles them together with one `titanc --test`
+invocation. `make titan-stdlib-test-build` places the executable and synthetic
+runner outputs below `.titan-tests/`; `make titan-stdlib-test-run` executes that
+binary from the repository root, and `make titan-stdlib-test` performs both.
+Temporary source-adjacent generated C/object files are cleaned generically
+without deleting author-written native fixtures.
+
+The native executable runs under a Bash process-group deadline. Its combined
+output is streamed through a pipe, preserving the parent-descriptor behavior
+exercised by OS/stdio tests. Tests that intentionally provoke uncaught async
+Task errors use flushed `Context:log` lines to bracket those expected
+diagnostics clearly in the aggregate output.
+
 The simplest way to run the complete mixed suite in an isolated installation
 is:
 
@@ -661,56 +670,67 @@ $ make test
 ```
 
 `make test` runs `luarocks make --force` followed by `luarocks test`. The forced
-build installs the current checkout — including the combined `titan.so` and
+build installs the current checkout, including the combined `titan.so` and
 `titan.a` support/standard-library providers. The rockspec's command backend
-enters `spec/support/run_rock_tests.sh`, which carries any standard
-`luarocks test -- ...` arguments through `make rock-test`, applies them to the
-retained Busted specs, and then runs the native Titan suites directly. LuaRocks
-also installs the declared Busted and cluacov test dependencies. It clears
-ambient `LUA_PATH`/`LUA_CPATH`
-overrides for both
-commands, so a shell left over from an old `luarocks init` project cannot make
-the prefix tools load a different compiler snapshot. The supported workflow
-does not use `luarocks init`; avoid exporting those project-tree paths while
-working in a standalone Titan prefix. For canonical validation, also unset
-ambient `ROCKS_TREE`, `TITAN_ROCKS_ROOT`, `TITAN_EXTRA_CPPFLAGS`, and
-`TITAN_NO_LINE_DIRECTIVES`: they are explicit build-policy inputs, so
-`make test` does not erase them, and they change provider/root selection,
-fixture preprocessing, or source-line attribution. To run the iterative
-development steps yourself:
+enters `spec/support/run_rock_tests.sh`, which invokes `make rock-test`: the
+Busted tree runs first, followed by the same aggregate native executable.
+`BUSTED_FILTER` and `TITAN_FILTER` are independent Lua-pattern selectors;
+filtering one domain does not skip the other, so use a leaf target when only one
+is wanted. A Titan filter changes execution only—the build still compiles all
+21 source-authoritative roots.
 
 ```sh
-$ "$PREFIX/bin/luarocks" make --force        # rebuild/reinstall the current checkout
-$ "$PREFIX/bin/luarocks" test                # install test deps + run the suite
-$ bash spec/support/ci_test_groups.sh compiler # compiler/language tests with LuaCov
+$ make stdlib-test
+$ make busted-test BUSTED_FILTER='parser'
+$ make titan-stdlib-test TITAN_FILTER='^http[.]tests[.]test_client'
+$ make titan-stdlib-test-build
+$ make titan-stdlib-test-run TITAN_FILTER='^os[.]tests[.]'
+$ make rock-test BUSTED_FILTER='checker' TITAN_FILTER='^uv[.]task_tests[.]'
+$ BUSTED_FILTER='loader' TITAN_FILTER='^net[.]tests[.]' luarocks test
 ```
 
-The grouped `compiler` command is the complete local coverage entry point. CI
-partitions that same set into `compiler-core` and `compiler-heavy` across its
-two warmed Linux jobs. Library API and runtime suites run without LuaCov
-because the hook measures the Lua compiler, not the generated Titan or native
-library implementation; use
-`bash spec/support/ci_test_groups.sh libraries` for that complete group. A
-single native group can be reproduced directly, for example with
-`bash spec/support/run_titan_stdlib_tests.sh async`; each executable is run
-under the harness's bounded process supervisor. Combined selectors such as
-`net-ssl` and `io-fs-timer` are host cohorts only—their discovered tests retain
-qualified module owners such as `net.tests`, `ssl.tests`, and `fs.tests`.
+The backend still passes ordinary `luarocks test -- ...` arguments to Busted;
+its explicit `--busted-filter` and `--titan-filter` forms map to the same two
+independent variables. LuaRocks installs the declared Busted and cluacov test
+dependencies. `make test` clears ambient `LUA_PATH`/`LUA_CPATH` overrides for
+both subprocesses, so a shell left over from an old
+`luarocks init` project cannot make the prefix tools load another compiler
+snapshot. The supported workflow does not use `luarocks init`. For canonical
+validation, also unset ambient `ROCKS_TREE`, `TITAN_ROCKS_ROOT`,
+`TITAN_EXTRA_CPPFLAGS`, and `TITAN_NO_LINE_DIRECTIVES`; those explicit policy
+inputs change provider/root selection, fixture preprocessing, or source-line
+attribution and `make test` deliberately does not erase them.
 
-Note that `luarocks test` does **not** build the rock-under-test, only its
-dependencies, so always `luarocks make` first (that is what `make test` does).
-If you drive Busted directly, use the `busted` installed in `$PREFIX/bin`; the
-prefix-configured Lua paths then find the native support entry installed in
-the canonical provider by `luarocks make`. Once the Titan rock is installed, Busted loads compiler
-modules from that *installed* rock, not from your checkout. Re-run
-`$PREFIX/bin/luarocks make` after editing compiler sources so tests see the
-changes.
+Useful iterative and CI-equivalent commands are:
+
+```sh
+$ "$PREFIX/bin/luarocks" make --force          # install the current checkout
+$ "$PREFIX/bin/luarocks" test                  # run Busted + aggregate native suite
+$ make stdlib-test                            # complete stdlib/runtime work, no LuaCov
+$ bash spec/support/ci_test_groups.sh compiler  # complete compiler/language set with LuaCov
+```
+
+Linux CI has one uncovered stdlib producer, which also prepares and validates
+the bundled/system production images, and one standard-runner consumer for the
+complete covered compiler/language set. That consumer emits the sole Codecov
+report. The ASan+UBSan job builds its own instrumented tree and reuses one
+aggregate native build for focused filters; it does not consume the regular
+artifact.
+The complete macOS suite remains a manually dispatched pre-merge gate.
+
+`luarocks test` does **not** build the rock-under-test, only its test
+dependencies, so always run `luarocks make` first (as `make test` does). If you
+drive Busted directly, use the `busted` installed in `$PREFIX/bin`; the
+prefix-configured Lua paths find the canonical support provider. Once the Titan
+rock is installed, Busted loads compiler modules from that installed snapshot,
+not from the checkout. Re-run `$PREFIX/bin/luarocks make` after editing compiler
+sources.
 
 With a working Titan installation's `bin` directory already on `PATH`, the
 equivalent `luarocks make --force` and `luarocks test` commands work from the
-repository root without setting `PREFIX` or `ROCKS_TREE`. The tests discover
-the active installation from Lua's configured module paths and use the `lua`
-on `PATH` for child interpreters.
+repository root without setting `PREFIX` or `ROCKS_TREE`. Tests discover the
+active installation from Lua's configured paths and use the `lua` on `PATH`
+for child interpreters.
 
 # Building the examples
 

@@ -296,6 +296,7 @@ export TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_CFLAGS TITAN_EXTRA_LDFLAGS \
 # Quote one complete environment value for the recipe shell.  This preserves
 # embedded quotes in user flag strings so Titan's own argv parser sees them.
 make_shell_quote = '$(subst ','"'"',$(1))'
+make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 RUNTIME_O := titan-runtime/titan.o
 CORO_O    := titan-runtime/titan_coro.o
 UV_O      := titan-runtime/titan_uv.o
@@ -2188,9 +2189,80 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 # longer builds stdlib before LuaRocks has deployed the compiler.
 rock-build: titan
 
-rock-test: ## Run retained Busted specs and native Titan stdlib suites
-	TITAN_ROCK_TEST_INTERNAL=1 \
+TITAN_STDLIB_TEST_ROOTS := \
+	coroutine.tests iter.tests gc.tests lua.tests math.tests peg.tests \
+	string.core_test string.format_pack_test string.regex_test async.tests \
+	uv.task_tests io.tests fs.tests timer.tests net.tests ssl.tests \
+	http.tests url.tests os.tests os.process_tests uv.runtime_tests
+TITAN_TEST_BUILD_DIR ?= .titan-tests
+TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/coroutine/tests__main
+TITAN_TEST_TIMEOUT ?= 120
+TEST_TITANC ?= titanc
+BUSTED ?= busted
+BUSTED_FILTER ?=
+TITAN_FILTER ?=
+TITAN_TEST_CPPFLAGS = $(if $(strip $(TITAN_EXTRA_CPPFLAGS)),$(TITAN_EXTRA_CPPFLAGS),$(TITAN_TEST_EXTRA_CPPFLAGS))
+TITAN_TEST_CFLAGS = $(if $(strip $(TITAN_EXTRA_CFLAGS)),$(TITAN_EXTRA_CFLAGS),$(TITAN_TEST_EXTRA_CFLAGS))
+TITAN_TEST_LDFLAGS = $(if $(strip $(TITAN_EXTRA_LDFLAGS)),$(TITAN_EXTRA_LDFLAGS),$(TITAN_TEST_EXTRA_LDFLAGS))
+STDLIB_BUSTED_TESTS := $(sort $(wildcard spec/stdlib/*_spec.lua)) \
+	spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua \
+	spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua \
+	spec/minicoro_spec.lua spec/readline_build_spec.lua \
+	spec/rockspec_spec.lua spec/stdlib_installer_spec.lua
+
+.PHONY: busted-test stdlib-busted-test stdlib-test \
+	titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test
+
+busted-test: ## Run retained Busted specs, optionally with BUSTED_FILTER
+	BUSTED=$(call make_shell_quote_value,BUSTED) \
+		BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
+		TITAN_ROCK_TEST_INTERNAL=1 \
 		bash spec/support/run_rock_tests.sh $(EXTRA_TEST_FLAGS)
+
+stdlib-busted-test: ## Run retained stdlib/runtime Busted specs without coverage
+	BUSTED=$(call make_shell_quote_value,BUSTED) \
+		BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
+		TITAN_ROCK_TEST_INTERNAL=1 \
+		bash spec/support/run_rock_tests.sh \
+		$(STDLIB_BUSTED_TESTS) $(EXTRA_TEST_FLAGS)
+
+titan-stdlib-test-build: ## Build every native Titan stdlib test into one executable
+	@bash spec/support/clean_generated_test_artifacts.sh
+	@mkdir -p $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR))
+	@set +e; \
+	( cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
+	  TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS))) \
+	  TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CFLAGS))) \
+	  TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS))) \
+	    $(TEST_TITANC) --test --tree \
+	      $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
+	      $(TITAN_STDLIB_TEST_ROOTS) ); \
+	status=$$?; \
+	bash spec/support/clean_generated_test_artifacts.sh --keep-output; \
+	if test $$status -ne 0; then rm -rf -- $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); fi; \
+	exit $$status
+
+titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILTER
+	@test -x $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE)) || { \
+	  echo "ERROR: run 'make titan-stdlib-test-build' first" >&2; exit 1; \
+	}
+	@TITAN_FILTER=$(call make_shell_quote_value,TITAN_FILTER) \
+	bash -o pipefail -c ' \
+	  if [[ -n $${TITAN_FILTER:-} ]]; then \
+	    set -- "$$@" "--filter=$$TITAN_FILTER"; \
+	  fi; \
+	  bash spec/support/run_with_timeout.sh "$$@" 2>&1 | cat' -- \
+	  $(call make_shell_quote,$(TITAN_TEST_TIMEOUT)) \
+	  $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE))
+
+titan-stdlib-test: titan-stdlib-test-build ## Build and run all native Titan stdlib tests
+	$(MAKE) titan-stdlib-test-run
+
+stdlib-test: stdlib-busted-test ## Run all stdlib/runtime tests without coverage
+	$(MAKE) titan-stdlib-test
+
+rock-test: busted-test ## Run retained Busted specs, then native Titan stdlib tests
+	$(MAKE) titan-stdlib-test
 
 test: lua luarocks ## Build/install the rock and run the suite via `luarocks test`
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
@@ -2199,6 +2271,9 @@ test: lua luarocks ## Build/install the rock and run the suite via `luarocks tes
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 		PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
 		EXTRA_TEST_FLAGS=$(call make_shell_quote,$(strip $(EXTRA_TEST_FLAGS))) \
+		BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
+		TITAN_FILTER=$(call make_shell_quote_value,TITAN_FILTER) \
+		TITAN_TEST_TIMEOUT=$(call make_shell_quote,$(TITAN_TEST_TIMEOUT)) \
 		"$(PREFIX)/bin/luarocks" test
 
 examples: lua ## Compile the example Titan modules (SDL examples need SDL2 headers)
@@ -2231,130 +2306,7 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 		examples/sdl_demo
 	rm -f testfiles/*.c testfiles/*.o testfiles/*.so \
 		testfiles/selection_sort.a testfiles/sieve.a
-	rm -f spec/stdlib/titan/iter/tests.c spec/stdlib/titan/iter/tests.o \
-		spec/stdlib/titan/gc/tests.c spec/stdlib/titan/gc/tests.o \
-		spec/stdlib/titan/lua/tests/tests.c spec/stdlib/titan/lua/tests/tests.o \
-		spec/stdlib/titan/lua/test_support.c spec/stdlib/titan/lua/test_support.o \
-		spec/stdlib/titan/math/tests.c spec/stdlib/titan/math/tests.o \
-		spec/stdlib/titan/peg/tests/tests.c spec/stdlib/titan/peg/tests/tests.o \
-		spec/stdlib/titan/peg/test_support.c spec/stdlib/titan/peg/test_support.o \
-		spec/stdlib/titan/string/core_test.c spec/stdlib/titan/string/core_test.o \
-		spec/stdlib/titan/string/format_pack_test.c \
-		spec/stdlib/titan/string/format_pack_test.o \
-		spec/stdlib/titan/string/regex_test.c spec/stdlib/titan/string/regex_test.o \
-		spec/stdlib/titan/string/test_support.c \
-		spec/stdlib/titan/string/test_support.o spec/stdlib/titan/url/tests.c \
-		spec/stdlib/titan/url/tests.o spec/stdlib/titan/coroutine/tests/tests.c \
-		spec/stdlib/titan/coroutine/tests/tests.o \
-		spec/stdlib/titan/coroutine/test_support.c \
-		spec/stdlib/titan/coroutine/test_support.o \
-		spec/stdlib/titan/async/tests/tests.c spec/stdlib/titan/async/tests/tests.o \
-		spec/stdlib/titan/async/test_support.c \
-		spec/stdlib/titan/async/test_support.o spec/stdlib/titan/http/tests/tests.c \
-		spec/stdlib/titan/http/tests/tests.o spec/stdlib/titan/http/test_support.c \
-		spec/stdlib/titan/http/test_support.o spec/stdlib/titan/net/tests.c \
-		spec/stdlib/titan/net/tests.o spec/stdlib/titan/net/test_support.c \
-		spec/stdlib/titan/net/test_support.o spec/stdlib/titan/ssl/tests.c \
-		spec/stdlib/titan/ssl/tests.o spec/stdlib/titan/ssl/test_support.c \
-		spec/stdlib/titan/ssl/test_support.o \
-		spec/stdlib/titan/uv/task_tests/task_tests.c \
-		spec/stdlib/titan/uv/task_tests/task_tests.o \
-		spec/stdlib/titan/uv/task_test_support.c \
-		spec/stdlib/titan/uv/task_test_support.o \
-		spec/stdlib/titan/uv/runtime_tests.c spec/stdlib/titan/uv/runtime_tests.o \
-		spec/stdlib/titan/io/tests/tests.c spec/stdlib/titan/io/tests/tests.o \
-		spec/stdlib/titan/io/test_support.c spec/stdlib/titan/io/test_support.o \
-		spec/stdlib/titan/fs/tests.c spec/stdlib/titan/fs/tests.o \
-		spec/stdlib/titan/fs/test_support.c spec/stdlib/titan/fs/test_support.o \
-		spec/stdlib/titan/timer/tests.c spec/stdlib/titan/timer/tests.o \
-		spec/stdlib/titan/os/tests/tests.c spec/stdlib/titan/os/tests/tests.o \
-		spec/stdlib/titan/os/test_support.c spec/stdlib/titan/os/test_support.o \
-		spec/stdlib/titan/os/process_tests/process_tests.c \
-		spec/stdlib/titan/os/process_tests/process_tests.o \
-		spec/stdlib/titan/os/process_test_support.c \
-		spec/stdlib/titan/os/process_test_support.o \
-		spec/stdlib/titan/support/common.c spec/stdlib/titan/support/common.o \
-		spec/stdlib/titan/support/async.c spec/stdlib/titan/support/async.o
-	rm -f iter/tests iter/tests__test_support.c iter/tests__test_support.o \
-		iter/tests__test_runner.c iter/tests__test_runner.o \
-		iter/tests__test_entrypoint.c iter/tests__test_entrypoint.o gc/tests \
-		gc/tests__test_support.c gc/tests__test_support.o gc/tests__test_runner.c \
-		gc/tests__test_runner.o gc/tests__test_entrypoint.c \
-		gc/tests__test_entrypoint.o lua/tests__main lua/tests__main__test_support.c \
-		lua/tests__main__test_support.o lua/tests__main__test_runner.c \
-		lua/tests__main__test_runner.o lua/tests__main__test_entrypoint.c \
-		lua/tests__main__test_entrypoint.o math/tests math/tests__test_support.c \
-		math/tests__test_support.o math/tests__test_runner.c \
-		math/tests__test_runner.o math/tests__test_entrypoint.c \
-		math/tests__test_entrypoint.o peg/tests__main \
-		peg/tests__main__test_support.c peg/tests__main__test_support.o \
-		peg/tests__main__test_runner.c peg/tests__main__test_runner.o \
-		peg/tests__main__test_entrypoint.c peg/tests__main__test_entrypoint.o \
-		string/core_test string/core_test__test_support.c \
-		string/core_test__test_support.o string/core_test__test_runner.c \
-		string/core_test__test_runner.o string/core_test__test_entrypoint.c \
-		string/core_test__test_entrypoint.o url/tests url/tests__test_support.c \
-		url/tests__test_support.o url/tests__test_runner.c url/tests__test_runner.o \
-		url/tests__test_entrypoint.c url/tests__test_entrypoint.o \
-		coroutine/tests__main coroutine/tests__main__test_support.c \
-		coroutine/tests__main__test_support.o coroutine/tests__main__test_runner.c \
-		coroutine/tests__main__test_runner.o \
-		coroutine/tests__main__test_entrypoint.c \
-		coroutine/tests__main__test_entrypoint.o async/tests__main \
-		async/tests__main__test_support.c async/tests__main__test_support.o \
-		async/tests__main__test_runner.c async/tests__main__test_runner.o \
-		async/tests__main__test_entrypoint.c async/tests__main__test_entrypoint.o \
-		http/tests__main http/tests__main__test_support.c \
-		http/tests__main__test_support.o http/tests__main__test_runner.c \
-		http/tests__main__test_runner.o http/tests__main__test_entrypoint.c \
-		http/tests__main__test_entrypoint.o net/tests net/tests__test_support.c \
-		net/tests__test_support.o net/tests__test_runner.c net/tests__test_runner.o \
-		net/tests__test_entrypoint.c net/tests__test_entrypoint.o \
-		uv/task_tests__main uv/task_tests__main__test_support.c \
-		uv/task_tests__main__test_support.o uv/task_tests__main__test_runner.c \
-		uv/task_tests__main__test_runner.o uv/task_tests__main__test_entrypoint.c \
-		uv/task_tests__main__test_entrypoint.o uv/runtime_tests \
-		uv/runtime_tests__test_support.c uv/runtime_tests__test_support.o \
-		uv/runtime_tests__test_runner.c uv/runtime_tests__test_runner.o \
-		uv/runtime_tests__test_entrypoint.c uv/runtime_tests__test_entrypoint.o \
-		io/tests__main io/tests__main__test_support.c io/tests__main__test_support.o \
-		io/tests__main__test_runner.c io/tests__main__test_runner.o \
-		io/tests__main__test_entrypoint.c io/tests__main__test_entrypoint.o \
-		os/tests__main os/tests__main__test_support.c os/tests__main__test_support.o \
-		os/tests__main__test_runner.c os/tests__main__test_runner.o \
-		os/tests__main__test_entrypoint.c os/tests__main__test_entrypoint.o \
-		os/process_tests__main os/process_tests__main__test_support.c \
-		os/process_tests__main__test_support.o os/process_tests__main__test_runner.c \
-		os/process_tests__main__test_runner.o \
-		os/process_tests__main__test_entrypoint.c \
-		os/process_tests__main__test_entrypoint.o
-	rm -rf iter/tests.dSYM gc/tests.dSYM lua/tests__main.dSYM math/tests.dSYM \
-		peg/tests__main.dSYM string/core_test.dSYM url/tests.dSYM \
-		coroutine/tests__main.dSYM async/tests__main.dSYM http/tests__main.dSYM \
-		net/tests.dSYM uv/task_tests__main.dSYM uv/runtime_tests.dSYM \
-		io/tests__main.dSYM os/tests__main.dSYM os/process_tests__main.dSYM
-	rmdir async coroutine gc http io iter lua math net os peg string \
-		url uv 2>/dev/null || true
-	rm -f spec/fixtures/test_runner/test_runner_fixture.c \
-		spec/fixtures/test_runner/test_runner_fixture.o \
-		spec/fixtures/test_runner/test_runner_dependency.c \
-		spec/fixtures/test_runner/test_runner_dependency.o \
-		spec/fixtures/test_runner/test_runner_edge.c \
-		spec/fixtures/test_runner/test_runner_edge.o \
-		spec/fixtures/test_runner/test_runner_folder/test_runner_folder.c \
-		spec/fixtures/test_runner/test_runner_folder/test_runner_folder.o \
-		spec/fixtures/test_runner/titan/test/user.c \
-		spec/fixtures/test_runner/titan/test/user.o \
-		spec/fixtures/test_runner/titan/test/runner/user.c \
-		spec/fixtures/test_runner/titan/test/runner/user.o \
-		spec/fixtures/test_runner/test_runner_mutation.c \
-		spec/fixtures/test_runner/test_runner_mutation.o \
-		spec/fixtures/test_runner/test_runner_empty.c \
-		spec/fixtures/test_runner/test_runner_empty.o \
-		spec/fixtures/test_runner/test_runner_static.c \
-		spec/fixtures/test_runner/test_runner_static.o \
-		spec/fixtures/test_runner/nested/tests/tests.c \
-		spec/fixtures/test_runner/nested/tests/tests.o
+	bash spec/support/clean_generated_test_artifacts.sh
 	rm -f test_runner_fixture__test_support.c test_runner_fixture__test_support.o test_runner_fixture__test_runner.c \
 		test_runner_fixture__test_runner.o test_runner_fixture__test_entrypoint.c test_runner_fixture__test_entrypoint.o \
 		test_runner_empty__test_support.c test_runner_empty__test_support.o test_runner_empty__test_runner.c \

@@ -129,6 +129,10 @@ local function writeln(output: string)
   if stdio.fflush(nil) ~= 0 then raise "cannot flush test output" end
 end
 
+local function report_log(full_name: string, message: string)
+  writeln("[----------] " .. full_name .. ": " .. message)
+end
+
 local function test_word(count: integer): string
   if count == 1 then return "test" end
   return "tests"
@@ -336,7 +340,7 @@ function main(args: {string}): integer
 
 local MAIN_SUFFIX = [=[
 
-  test.runner_begin(state.verbose)
+  test.runner_begin(state.verbose, report_log)
   defer test.runner_end()
   writeln("[==========] Running Titan tests.")
   for index = 1, #cases do

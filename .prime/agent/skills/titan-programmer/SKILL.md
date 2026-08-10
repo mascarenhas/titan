@@ -27,6 +27,7 @@ tie-breaker. Open only the chapters relevant to the change:
 | Data modeling | [arrays/maps](../../../../doc/language/arrays-maps.md), [records](../../../../doc/language/records.md), [unions](../../../../doc/language/unions.md), [aliases](../../../../doc/language/type-aliases.md) |
 | Modules, visibility, contributors, artifacts | [modules](../../../../doc/language/modules.md), [source collaboration](../../../../doc/language/source-import-visibility.md), [folder modules](../../../../doc/language/folder-modules.md), [multi-module libraries](../../../../doc/language/multi-module-libraries.md), [static providers](../../../../doc/language/static-compiled-modules.md) |
 | Errors and ownership cleanup | [error handling](../../../../doc/language/error-handling.md), [defer](../../../../doc/language/defer.md) |
+| Native tests, `titan.test`, discovery, and filtering | [testing Titan code](../../../../doc/language/standard-library-test.md) |
 | Lua and C boundaries | [Lua interop](../../../../doc/language/lua-interop.md), [FFI](../../../../doc/language/ffi.md), [C expressions](../../../../doc/language/c-ffi-expressions.md) |
 | Tasks and coroutines | [async I/O](../../../../doc/language/async-io.md), [coroutines](../../../../doc/language/coroutines.md), then the affected standard-library chapter |
 | Exact syntax | [grammar](../../../../doc/language/grammar.md) |
@@ -213,11 +214,111 @@ before code generation, and emits an executable because `check` has exact
 and assert through `lua -e 'assert(require("calc").twice(21) == 42)'` from the
 same directory.
 
-For repository changes, follow [AGENTS.md](../../../../AGENTS.md) rather than
-guessing installation flags. Standard-library behavior specs belong under
-`spec/stdlib/` and run without LuaCov. Rebuild/reinstall through the documented
-flow before Busted so `luarocks.loader` does not test a stale installed
-snapshot.
+## Write and run native Titan tests
+
+Read [Testing Titan code](../../../../doc/language/standard-library-test.md) for
+the complete contract. A native test file is an ordinary Titan module, not a
+special source kind:
+
+```titan
+local test = import "test"
+local calc = import "app.calc"
+
+function test_twice(context: test.Context)
+  context:log("checking ordinary inputs")
+  test.assert(calc.twice(21) == 42, "twice returned the wrong value")
+
+  context:run("zero", function(child: test.Context)
+    test.assert(child:name() == "calc_test.test_twice.zero")
+    test.assert(calc.twice(0) == 0)
+  end)
+end
+```
+
+### Discovery and ownership
+
+- `titanc --test` source-prefers the requested roots and their source import
+  closure. It discovers surviving **public** top-level `test_*` functions with
+  exactly one fixed parameter normalizing to `titan.test.Context`; local
+  functions, variadic signatures, and lookalike types are ignored. Results are
+  allowed but discarded. Case names are `<logical-module>.<function>` and are
+  ordered bytewise, not by file traversal.
+- Test suffixes and directories are only conventions. Folder contributors are
+  one logical test module and one namespace. Use a nonreserved owner such as
+  `math.tests` or `url_test`; a bare standard-library shorthand cannot be
+  imported by the generated runner, and bare Lua-library names may collide at
+  the native boundary.
+- Keep repository standard-library behavior under its owning logical module in
+  `spec/stdlib/titan/`; module-specific support stays with that module, and
+  shared support should represent a genuinely cross-module contract. The
+  repository compiles all native stdlib roots into one executable, but case
+  owners remain qualified modules such as `net.tests` and `ssl.tests`.
+  Compiler and language behavior remains in the appropriate Busted layer.
+- Test mode's source-first closure permits an owning test module to directly
+  import and exercise source-local declarations. Do not turn that direct edge
+  into a shared test backdoor or assume private access through a binary import.
+
+### Use the test context deliberately
+
+- `test.assert(check, message?)` raises on false. An uncaught
+  `test.skip(reason?)` skips the current body and its already registered,
+  selected children; calling `skip` from cleanup is a failure.
+- `context:run(name, callback)` registers a child in order. Children run only
+  after the parent body returns, have independent status, and may register
+  descendants. Use `context:name()` when a helper needs the complete case name.
+- Register `context:cleanup(callback)` immediately after acquisition when the
+  fixture must outlive subtests. Every cleanup is attempted after all
+  descendants, in LIFO order, on pass, skip, or failure. A language `defer`
+  instead runs as the body exits, before children. Subtest registration closes
+  with the body; cleanup registration stays open through descendants but closes
+  when cleanup begins.
+- `context:log(message)` asks the runner to emit and flush a line labeled with
+  the full case name. Surround deliberately expected diagnostics with clear `BEGIN` and
+  `END` log messages so raw program output is not mistaken for an unasserted
+  failure.
+
+### Build, filter, and run
+
+From the test source root, pass dotted module names rather than filenames:
+
+```sh
+titanc --test --tree . calc_test
+./calc_test
+./calc_test --filter='calc_test%.test_twice' --verbose
+```
+
+Filters are Lua patterns over complete case names; repeated `-f PATTERN` or
+`--filter=PATTERN` forms combine with OR. Parents and children are selected
+independently. A filtered-out parent is never entered to discover dynamic
+children. Use a
+pattern matching both the parent and descendants when selecting a subtree.
+`--verbose` adds the raw traceback to normal failure attribution.
+
+If an import selects the async standalone bootstrap, the complete runner runs
+as one Task in one Runtime. Bodies, subtests, and cleanup may suspend normally,
+but must not call `async.loop` recursively. A test that must observe Runtime
+startup, post-run shutdown, or a second Runtime needs a supervising host or
+subprocess instead.
+
+For repository standard-library work, use the Make targets. They compile every
+native stdlib root into one executable, apply bounded process supervision and
+generic generated-artifact cleanup, and run without LuaCov. Busted and Titan
+filters are independent:
+
+```sh
+make stdlib-test
+make titan-stdlib-test TITAN_FILTER='async%.tests%.test_channel'
+make busted-test BUSTED_FILTER='test runner'
+make rock-test BUSTED_FILTER='test runner' \
+  TITAN_FILTER='async%.tests%.test_channel'
+```
+
+Follow [AGENTS.md](../../../../AGENTS.md) for the installation flow.
+Rebuild/reinstall after compiler or `titan.test` changes before Busted or native
+suite commands so the installed compiler and canonical support source are
+current. Consult the [runner implementation
+chapter](../../../../doc/implementation/test-runner.md) only when changing the
+compiler or private runner protocol.
 
 ## Before finishing
 

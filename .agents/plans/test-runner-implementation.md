@@ -9,7 +9,7 @@ any eventual divergence from the draft.
 
 - Branch: `feat/test-runner`
 - Draft-only initial commit: `eed38db` (`Add draft Titan test runner specification`)
-- Phase: implementation complete; final full-suite/CI validation pending
+- Phase: implementation and local full-suite validation complete; published CI validation pending
 - ABI decision: retain 0.22; the immediately preceding canonical seventeen-key
   pair is a supported bounded transactional predecessor
 - Architecture decisions: reviewed and closed in
@@ -184,10 +184,14 @@ the designer changes them.
 
 ## `titan.test` design pointers
 
-Proposed public declarations exactly match the draft:
+The final public declarations are:
 
 - `testing`, `verbose`, `location`, `skip`, and `assert`;
-- exported `Context` with public `cleanup`, `name`, and `run` methods.
+- exported `Context` with public `cleanup`, `name`, `log`, and `run` methods.
+
+`log` is the narrow implementation divergence recorded below: it lets a test
+emit a flushed, prefixed informational boundary without importing another
+stdlib module.
 
 The public record has module-local fields for its full name, ordered child
 registrations, LIFO cleanup stack, and registration phase. Its synthesized
@@ -276,11 +280,11 @@ in the covered compiler group; keep public library behavior outside LuaCov.
 
 Move standard-library API/runtime assertions to module-owned roots under
 `spec/stdlib/titan/` (for example `lua.tests`, `peg.tests`, and
-`uv.task_tests`). They therefore exercise the current installed canonical
-provider built by `make test`, while `--test` source-compiles the tests, their
-ordinary imported test-support modules, and the private `titan.test` support
-source. Use C/Lua FFI only in narrow Titan test-support modules for temporary
-files, process fixtures, and Lua-boundary checks.
+`uv.task_tests`). They exercise the installed canonical provider built by
+`make test`, while `--test` source-compiles the tests, their ordinary imported
+support modules, and private `titan.test` support. Use C/Lua FFI only in narrow
+Titan test-support modules for temporary files, process fixtures, and
+Lua-boundary checks.
 
 Retain Lua/native harnesses only where a distinct host or build boundary is the
 subject, including at minimum:
@@ -289,33 +293,44 @@ subject, including at minimum:
 - loader/global-promotion and provider packaging/layout proofs;
 - sanitizer-only native-memory gates;
 - tests whose subject is process termination and must supervise a child;
-- native toolchain/fixture construction that cannot be expressed by the initial
-  runner without turning the test library into a build system.
+- native toolchain/fixture construction that cannot be expressed by the runner
+  without turning the test library into a build system.
 
-For every retained Lua spec, record the boundary reason. Delete migrated Lua
-cases rather than running duplicate suites. Integrate Titan suites into
-`spec/support/ci_test_groups.sh` without LuaCov and preserve existing serial,
-uv/fs, net/OS, and PEG/string grouping/time budgets.
+For every retained Lua spec, record the boundary reason and delete migrated Lua
+cases rather than duplicating them. The Makefile now owns one explicit
+`TITAN_STDLIB_TEST_ROOTS` manifest with all 21 module roots. `make
+titan-stdlib-test-build` compiles them in one `titanc --test` invocation from
+`.titan-tests/`; the first current root owns
+`.titan-tests/coroutine/tests__main`. `make titan-stdlib-test-run` executes
+that binary from the repository root, and `make titan-stdlib-test` composes the
+two. A `TITAN_FILTER` selects cases only at run time, so repeated focused or
+sanitizer invocations reuse the same executable rather than restoring root
+partitions.
 
+The Bash timeout helper places each run in its own process group and preserves
+the child's status, including a distinct deadline status. Make streams merged
+output through a pipe so parent-descriptor tests do not observe a regular file.
+Tests that deliberately produce uncaught Task reports surround them with
+flushed `Context:log` `BEGIN`/`END expected uncaught async Task diagnostics`
+lines. The producing test therefore owns the diagnostic presentation; there
+is no native output group supervisor.
 
-The direct native driver exposes `iter`, `gc`, `lua`, `math`, `peg`,
-`string`, `url`, `coroutine`, `async`, `http`, `net-ssl`, `uv-tasks`,
-`uv-runtime`, `io-fs-timer`, `os`, and `os-process`. Combined names are only
-host process-cohort labels: discovered identities remain owned by their
-qualified stdlib modules. `run_titan_stdlib_test_groups.sh` preserves the
-serial, async/uv/I/O/timer/fs, net/SSL/URL/HTTP/OS, and
-PEG/string/math/Lua/iter/GC CI shards, applies bounded process supervision, and
-checks expected Task diagnostics directly without Busted wrappers. Each run
-removes its exact generated leaves and then applies empty-only `rmdir` to the
-output parent, so test-created empty folders disappear without claiming a
-pre-existing or nonempty directory. The current tree deletes fully migrated
-Lua suites and retains narrow host coverage for
-coroutine rewriting/interposition and Lua calls, loader/global-promotion and
-private engine state, exact `io.print` write/current-stdout observation,
-parent descriptors and process status, purpose-built native helpers,
-sanitizer gates, fresh Lua/Runtime state, and cross-Runtime file lifetime. The
-per-slice `/tmp` migration reports are historical work notes; this mapping and
-the tracked suite roots are the final manifest.
+Cleanup owns `.titan-tests/` recursively and is generic for source-adjacent
+translation units: remove every `.o` below `spec/`, but remove a `.c` only when
+its same-stem `.titan` source exists. This remains safe without Git metadata and
+preserves tracked C fixtures. Root compiler fixtures retain their exact cleanup
+rules. The retained host specs continue to cover coroutine
+rewriting/interposition and Lua calls, loader/global promotion and private
+engine state, exact `io.print` write/current-stdout observation, parent
+descriptors and process status, purpose-built helpers, fresh Lua/Runtime state,
+and cross-Runtime file lifetime.
+
+CI runs this complete stdlib surface in one uncovered Linux producer. One
+standard Linux consumer restores the prepared tree and runs the complete
+compiler/language set with one LuaCov report; the independent sanitizer builds
+its own instrumented aggregate and selects focused cases. The complete macOS
+suite stays a manually dispatched pre-merge gate.
+
 
 ### Completion gates
 
@@ -324,9 +339,9 @@ the tracked suite roots are the final manifest.
 2. Reinstall the working compiler before Busted to avoid the installed-snapshot
    shadow.
 3. Run focused parser/driver/coder/stdlib/packaging specs.
-4. Run the complete compiler and library groups, then canonical `make test`
-   from an isolated absolute prefix with ambient root/CPP/line-policy variables
-   cleared.
+4. Run the complete uncovered stdlib surface and the one covered compiler
+   group, then canonical `make test` from an isolated absolute prefix with
+   ambient root/CPP/line-policy variables cleared.
 5. Review all Titan code against the Titan programmer skill and language/style
    reference; independently review compiler/packaging code and both manuals.
 6. Push, open a PR with `gh`, wait for every Linux push job, fix failures, and
@@ -369,16 +384,23 @@ The final Titan design review established these invariants:
 - The installed private `titan.test` source is snapshotted into and published
   from the exact native generation stage. It remains compiler data outside the
   rock manifest and is committed in the same recoverable transaction.
-- Native stdlib behavior is launched directly by the shell group supervisor;
-  `luarocks test` reaches the same path through `run_rock_tests.sh` and
-  `make rock-test`, with command-backend arguments preserved for Busted.
-  Coroutine remains in the serial shard, while URL and
-  string retain their existing host cohorts. The `io-fs-timer` cohort compiles
-  the distinct `io.tests`, `fs.tests`, and `timer.tests` roots into one
-  executable rather than inventing a combined logical test owner.
-- Every native executable has a portable process-group deadline. The intentional
-  Runtime-shutdown lifetime oracle runs in its own short, filtered process; this
-  is host supervision rather than a new runner lifecycle API.
+- Make owns one explicit 21-root native manifest and one executable under
+  `.titan-tests`; there is no native group orchestrator or per-suite executable.
+  `luarocks test` reaches it through `run_rock_tests.sh` and `make rock-test`.
+  `BUSTED_FILTER` and `TITAN_FILTER` remain independent, and ordinary appended
+  command-backend arguments remain Busted arguments.
+- The public `Context:log` method is an intentional narrow addition to the
+  draft. It sends the context name and message through the private logger
+  callback; the generated runner writes and flushes the prefixed C-stdio line.
+  Tests can bracket their own expected async Task diagnostics without another
+  stdlib import.
+- The aggregate executable has a portable Bash process-group deadline. The
+  build/run target split lets a focused lifetime oracle use a fresh filtered
+  process without recompiling or introducing a runner lifecycle API.
+- The earlier partitioned Linux plan is replaced by one uncovered stdlib
+  producer and one standard-runner complete compiler consumer with a single
+  coverage report. ASan+UBSan remains an independent instrumented build, and the
+  complete macOS gate remains manual and pre-merge.
 - Direct source-private imports let test-support declarations remain local.
   Host-side exact-provider coverage is retained only where native redirection
   cannot observe the number of `io.print` writes/current-output lookup, along

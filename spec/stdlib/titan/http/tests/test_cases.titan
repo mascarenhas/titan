@@ -59,20 +59,26 @@ end
 
 function test_server_buffered_empty_lines_eof_is_malformed(
     context: test.Context)
+  context:log("BEGIN expected uncaught async Task diagnostics")
   run_case(context, start_buffered_empty_lines_eof, 53125,
            "buffered-empty-lines-eof-ok")
+  context:log("END expected uncaught async Task diagnostics")
 end
 
 function test_server_partial_keep_alive_eof_is_malformed(
     context: test.Context)
+  context:log("BEGIN expected uncaught async Task diagnostics")
   run_case(context, start_partial_keep_alive_eof, 53250,
            "partial-keep-alive-eof-ok")
+  context:log("END expected uncaught async Task diagnostics")
 end
 
 function test_server_partial_empty_line_eof_is_malformed(
     context: test.Context)
+  context:log("BEGIN expected uncaught async Task diagnostics")
   run_case(context, start_partial_empty_line_eof, 53375,
            "partial-empty-line-eof-ok")
+  context:log("END expected uncaught async Task diagnostics")
 end
 
 function test_client_handles_all_response_framing_modes(
@@ -88,8 +94,10 @@ end
 
 function test_server_isolates_failures_and_enforces_bodyless_framing(
     context: test.Context)
+  context:log("BEGIN expected uncaught async Task diagnostics")
   run_case(context, start_server_failure_isolation, 54500,
            "server-failures-ok")
+  context:log("END expected uncaught async Task diagnostics")
 end
 
 function test_server_close_completes_despite_task_cancellation(
@@ -115,8 +123,10 @@ end
 
 function test_plain_http_header_idle_timeout_protocol(
     context: test.Context)
+  context:log("BEGIN expected uncaught async Task diagnostics")
   run_case(context, start_idle_timeout_plain, 56500,
            "idle-timeout-plain-ok")
+  context:log("END expected uncaught async Task diagnostics")
 end
 
 function test_https_header_idle_timeout_protocol(

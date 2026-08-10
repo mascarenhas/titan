@@ -91,6 +91,7 @@ local function caught_all_five(first: async.Task, second: async.Task,
 end
 
 function test_all_combinators_values_and_error_positions(context: test.Context)
+  context:log("BEGIN expected uncaught async Task diagnostics")
   local first = support.sleeping(3, "one")
   task_support.cleanup_task(context, first, "all first cleanup")
   local second = support.successful(nil)
@@ -241,9 +242,11 @@ function test_all_combinators_values_and_error_positions(context: test.Context)
       raise "all reported the wrong failed position"
     end
   end
+  context:log("END expected uncaught async Task diagnostics")
 end
 
 function test_join_arities_and_complete_status_payloads(context: test.Context)
+  context:log("BEGIN expected uncaught async Task diagnostics")
   local timer_task = async.run(function (): value
     timer.sleep(2)
     return "joined-timer"
@@ -374,4 +377,5 @@ function test_join_arities_and_complete_status_payloads(context: test.Context)
         support.success_payload(five_fourth) == "join-live-five" and
         support.success_payload(five_fifth) == "join-live-five",
         "live join_five duplicate lost a positional status")
+  context:log("END expected uncaught async Task diagnostics")
 end

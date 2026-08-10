@@ -4,6 +4,7 @@ local ffi = foreign import "titan/ffi.h"
 
 local type Cleanup = () -> ()
 local type TestFunction = (Context) -> ()
+local type TestLogger = (string, string) -> ()
 local type TraceScanner =
   (string, string?) -> (string?, string?, integer?)
 local type PatternMatcher = (string, string) -> boolean
@@ -22,6 +23,7 @@ end
 
 local runner_active = false
 local runner_is_verbose = false
+local runner_logger: TestLogger? = nil
 local trace_scanner: TraceScanner? = nil
 local pattern_matcher: PatternMatcher? = nil
 local location_probe = LocationProbe.new()
@@ -77,6 +79,13 @@ function Context:name(): string
   return self.full_name
 end
 
+function Context:log(message: string)
+  if not runner_active or not runner_logger then
+    raise "cannot log outside a Titan test runner"
+  end
+  (runner_logger as TestLogger)(self.full_name, message)
+end
+
 function Context:run(name: string, subtest: TestFunction)
   if not self.subtests_open then
     raise "cannot register subtest after test body finishes"
@@ -85,8 +94,9 @@ function Context:run(name: string, subtest: TestFunction)
     RegisteredTest.new(self.full_name .. "." .. name, subtest)
 end
 
-local function runner_begin(is_verbose: boolean)
+local function runner_begin(is_verbose: boolean, logger: TestLogger)
   if runner_active then raise "Titan test runner is already active" end
+  runner_logger = logger
   runner_active = true
   runner_is_verbose = is_verbose
 end
@@ -94,6 +104,7 @@ end
 local function runner_end()
   runner_is_verbose = false
   runner_active = false
+  runner_logger = nil
 end
 
 local function runner_new_context(name: string): Context

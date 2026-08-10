@@ -60,136 +60,98 @@ not add epicycles around what may be a misunderstood simpler design.
 - **CI runs Linux on every push and the complete macOS suite only on manual
   dispatch.** Use `workflow_dispatch` as the **pre-merge check** with
   `gh workflow run ci.yml --ref <branch>`. Linux jobs are push-only and are not
-  repeated by that macOS dispatch. The regular Linux flow uses one standard
-  `ubuntu-24.04` producer with an explicit 30-minute timeout plus two
-  consumers. The build-heavy async/uv/I/O/timer/fs consumer also uses standard
-  `ubuntu-24.04` with a 30-minute timeout; the compiler-heavy consumer uses
-  1-core `ubuntu-slim` and is subject to that runner's hard 15-minute limit. The
-  producer runs the core compiler/language shard plus serial, net/OS, and
-  PEG/string/math/Lua/iter/GC tests on its warm tree, and uploads a same-run,
-  full-tree tar artifact for the two parallel consumers. The standard consumer
-  runs the async/uv/I/O/timer/fs library group without coverage. The slim consumer runs
-  the heavy coverage shard:
-  `coder_spec.lua`,
-  `flexible_returns_spec.lua`, `cdriver_spec.lua`, every checker/coder
-  `c_ffi*_spec.lua`, and the static-provider specs that require isolated Busted
-  processes for direct coverage. The complete local `compiler` group remains
-  the union of both coverage shards. All Linux runner labels remain x86_64
-  Ubuntu 24.04, so the prepared native tree crosses only the runner
-  size/container boundary, never an OS, architecture, or object target. Each
-  shard uploads its explicit report
-  through Codecov's GitHub OIDC flow with job-local `id-token: write`; upload
-  errors fail the job so coverage publication cannot be silently skipped. The
-  Linux core invocation keeps Busted's per-file environments but uses
-  `--no-auto-insulate` to reuse one compiler module graph and immutable
-  foreign-header probe caches; the complete local and macOS compiler groups
-  retain ordinary auto-insulation as the independent state-leak check.
-  Disposable Titan fixtures and alternate images in the producer's serial,
-  net/OS, and PEG/string/math/Lua/iter/GC groups compile at `-O0`;
-  purpose-built native harnesses retain their explicit flags. Generated native
-  fixtures in the producer's core compiler group compile at `-O1`, retaining optimized
-  generated-C coverage
-  without spending the full `-O2` compile cost. Fixtures in the heavy compiler
-  consumer compile at `-O0` so optimization of disposable code does not consume
-  its 1-core runner budget. The Linux system-mode source-install canary builds
-  its installed provider at `-O0`, then its focused tests and production smoke
-  use optimized consumers against that provider. The core
-  Linux compiler group, the canonical bundled provider packed before those
-  tests, its bundled production smoke, and the complete macOS run (including
-  both libuv modes) remain optimized. The
-  regular producer now prepares a clean ABI-0.22 prefix directly. Its
-  dependency cache key includes the active Titan ABI; after restore it runs
-  `make lua` and `make luarocks`, removes or replaces only known active-0.22
-  Titan-owned rock/direct-shim state, and proves the interpreter's
-  `package.cpath` contains `lib/titan/0.22/?.so` but not the 0.21 template.
-  Separately versioned ABI-0.21 files remain preserved prior-version state;
-  the 0.22 preparation has no cross-ABI migration or cleanup path.
-  The historical ABI-0.17-to-0.18 cutover smoke is retired rather than carried
-  forward as migration machinery. This does not waive the ordinary manually
-  dispatched complete macOS pre-merge gate. The
-  sanitizer job keeps its build and focused native-memory gate on one warm
-  standard `ubuntu-24.04` runner with an explicit 30-minute timeout:
-  representative timer/fs suites, core owner/callback proofs, and production
-  net/OS smokes. The redesigned timer/fs cohorts are small direct-continuation
-  behavior gates and run in full through topical native-runner filters; there
-  is no delayed-callback source variant or reduced sanitizer-only case set.
-  Keep ordinary Titan `#line` attribution
-  throughout this job:
-  the selected `uv_tasks` traceback gate depends on exact user-function
-  frames, and `uv_bootstrap` additionally requires a standard-provider frame.
-  Use
-  `TITAN_NO_LINE_DIRECTIVES=1` only in an isolated diagnostic reproduction,
-  not for the complete sanitizer suite. The Linux sanitizer build instead
-  gives `rock-post-install` an exact diagnostic snapshot destination. Before
-  the private stage is removed, it preserves that stage's sanitized
-  `titan.so`, every exact generated standard-library `.c`/`.o` pair from the
-  source output paths used for that link, and the
-  NUL-delimited generated-C compile-prefix argv. Each sanitizer gate captures
-  its original combined output, and only a failure-only diagnostic step reads
+  repeated by that macOS dispatch. The regular push graph has exactly three
+  standard `ubuntu-24.04` jobs with explicit 30-minute timeouts:
+
+  1. `test-linux-stdlib` is the prepared-tree producer. It prepares a clean
+     ABI-0.22 prefix, builds and installs the optimized bundled provider, and
+     packs the complete prepared tree before tests or a system-mode reinstall.
+     It then runs, without LuaCov, the retained root build/runtime/packaging
+     specs, every retained `spec/stdlib/*_spec.lua` host boundary, and the one
+     21-root native stdlib executable through `make stdlib-test`.
+     Disposable generated fixtures and test objects use `-O0`; purpose-built
+     native harnesses retain their explicit flags, and the provider packed for
+     consumers remains optimized. After the uncovered tests it builds the
+     child-process fixture, runs the bundled production smoke, reinstalls the
+     source rock with system libuv/OpenSSL at `-O0`, reruns only the two
+     mode-dependent SDK-layout/external-DSO promotion cases from
+     `rockspec_spec.lua`, and runs the full system production smoke with
+     optimized consumers. The bundled smoke and packed canonical provider also
+     remain optimized. It uploads the already packed artifact only after both
+     provider modes pass. Never repack the live system-linked tree.
+  2. `test-linux-compiler` is the sole regular-artifact consumer. It needs the
+     stdlib producer, restores that full tree on the same x86_64 Ubuntu target,
+     and runs the complete `spec/support/ci_test_groups.sh compiler` set with
+     LuaCov and ordinary Busted auto-insulation. Disposable generated fixtures
+     use `TITAN_EXTRA_CFLAGS=-O0`. The job emits one filtered report and makes
+     one failing-on-error OIDC Codecov upload named `compiler`; it is the only
+     job with `id-token: write`. Its restored checkout is disposable and has no
+     later production-image consumer, so it does not snapshot and restore the
+     canonical image around compiler tests.
+  3. `sanitizer` independently builds its own ASan+UBSan-instrumented Lua,
+     libbacktrace, libuv, llhttp, OpenSSL, and Titan tree; it never consumes the
+     regular artifact. It builds the same aggregate native test executable once
+     and uses `TITAN_FILTER` with repeated `make titan-stdlib-test-run`
+     invocations when a fresh process is useful. Filters select focused lifetime
+     cases; they are not group names and never trigger recompilation. Keep the retained
+     owner/callback, coroutine-transfer, TLS/HTTP, dense-Array, PEG/string, and
+     production net/OS gates, but leave the complete stdlib behavior run in the
+     regular producer.
+
+  The producer archive is deliberately a full-tree tar: partial archives lose
+  source/output timestamp ordering, prepared Lua files, executable bits, and
+  standard-library images. Pack it before tests and before system publication,
+  but upload it only after the bundled and system gates pass. The producer and
+  consumer are the same OS, architecture, and object target; a prepared native
+  tree must never cross one of those boundaries. Keep Linux dependency builds
+  in the job that consumes their warm tree, and keep both production-mode
+  smokes in the producer instead of rebuilding them in a consumer.
+
+  The regular producer's cache key includes the active ABI. After restore it
+  reruns `make lua` and `make luarocks`, replaces only known active-0.22
+  Titan-owned rock/direct-shim state, and proves `package.cpath` contains
+  `lib/titan/0.22/?.so` but not the 0.21 template. Separately versioned 0.21
+  state remains preserved; there is no cross-ABI migration or cleanup path.
+  The historical ABI-0.17-to-0.18 cutover smoke remains retired rather than
+  becoming migration machinery. The `rockspec_spec.lua` publication gate copies
+  the already validated installed pair and shims into a private stage, then uses
+  `publish-stdlib` with that exact `STDLIB_INSTALL_STAGE`; it must not invoke
+  build-dependent `install-stdlib` and rebuild all eighteen roots in the same
+  configuration. Keep packaging gates before legacy compiler specs that clean
+  root outputs.
+
+  Sanitizer execution retains ordinary Titan `#line` attribution: selected
+  traceback gates require exact user and standard-provider frames. Use
+  `TITAN_NO_LINE_DIRECTIVES=1` only for an isolated reproduction. Before the
+  private generation stage disappears, `rock-post-install` saves its sanitized
+  `titan.so`, every exact generated stdlib `.c`/`.o` pair used by that link, and
+  the NUL-delimited generated-C compile-prefix argv. Each gate captures its
+  original combined output, and only the failure-only diagnostic step reads
   those logs; the failed program and provider are never rerun. The mapper uses
-  the original ASan frame's relocation-safe canonical-provider module offset
-  and BuildId to find the saved provider function and its byte delta, then
-  builds an on-demand shadow for the unique owning translation unit with its
-  `#line` directives blanked in place and the exact captured prefix replayed. It
-  reports physical generated-C context only after the saved and shadow target
-  function bytes match exactly in `.text`, the provider function is in `.text`
-  with the saved function's size, and the saved/shadow function names,
-  addresses, sizes, and `.text` membership agree. Shadow symbolization is
-  explicitly section-relative to `.text` and must return the exact private
-  shadow pathname; its line-identical saved C supplies the displayed context.
-  Any mismatch leaves the context unavailable instead of guessing.
-  This side channel is why normal `#line` attribution can remain enabled for
-  the test execution and its required logical Titan traceback frames. Its Lua,
-  libbacktrace, and libuv dependencies compile with sanitizer instrumentation
-  at `-O1`, while the much larger generated Titan images and disposable test
-  fixtures use the same instrumentation at `-O0`; optimizing those generated
-  translation units can consume the complete runner limit without improving
-  the memory-safety gate. Keep full library behavior suites in regular Linux
-  unless they exercise a distinct sanitizer-sensitive boundary. Keep each
-  Linux dependency build in the job that consumes its warmed tree, and keep
-  the Linux production mode smokes in the regular producer: rebuilding them
-  in a consumer wastes aggregate billed runner time even when the workflow's
-  wall-clock critical path is unchanged. The cold manual macOS job retries
-  only its runtime and test dependency-acquisition commands inside the same
-  prefix, so successful partial LuaRocks installs survive transient download
-  failures; keep the actual Titan build and complete test suite single-shot.
-  After the system-mode source-rock
-  reinstall, rerun only the mode-dependent SDK-layout and external-DSO
-  promotion cases from `rockspec_spec.lua`; the complete bundled packaging
-  gate has already run, and repeating it would consume the producer's
-  remaining job budget without adding system-policy coverage. The full
-  system production smoke still follows those focused assertions. Pack the
-  regular artifact before the mode smoke replaces the bundled
-  `titan.so`/`titan.a` pair, but upload it only after both modes pass; repacking
-  the system-linked tree changes every
-  logical standard module at once and shifts
-  recompilation into a consumer. The full-tree archive is intentional because
-  partial output archives lose source/output timestamp ordering and trigger
-  Make rebuilds; it also preserves the prepared Lua installation, executable
-  bits, and standard-library images. Run the serial, net/OS, and
-  PEG/string/math/Lua/iter/GC
-  library groups before core compiler coverage in that producer. The
-  `rockspec_spec.lua` layout-publication case copies the already validated
-  installed pair and
-  shims into a private stage before rerunning the real publisher; it must not
-  invoke the build-dependent `install-stdlib` target and recompile all eighteen
-  roots in the same bundled configuration. Use `publish-stdlib` with an exact
-  `STDLIB_INSTALL_STAGE` instead. Legacy compiler specs still clean
-  root-generated module outputs, so keep the packaging gate first. The
-  complete macOS flow likewise runs the library
-  group before its uncovered compiler group. Its compiler gate also exercises
-  x86_64/arm64 universal Mach-O archive lookup and repackaging; keep that real
-  macOS proof in the one pre-merge manual dispatch rather than replacing it
-  with a host-only synthetic check. CI snapshots and restores the prepared
-  runtime artifacts, canonical installed `titan.so` and `titan.a`, conditional
-  dSYM, and all eighteen generated shims around the producer's compiler-only
-  group so root output cleanup cannot stale or remove the production image
-  before the mode smoke. The two consumers use independent restored trees, and
-  the compiler consumer has no later production-image dependency, so it need
-  not snapshot and restore the standard image around its shard. Compiler and
-  language specs must not
-  delete the shared checkout runtime archive merely to force recompilation;
-  Make owns that dependency state. The serial coroutine suite is the isolated
+  the original ASan frame's relocation-safe canonical-provider offset and
+  BuildId, then builds one on-demand shadow for the unique owning translation
+  unit with `#line` directives blanked and the exact saved compile prefix. It
+  reports physical C context only after saved/shadow function bytes, names,
+  sizes, addresses, and `.text` membership agree; symbolization is
+  section-relative to `.text` and must name the exact private shadow path. Any
+  mismatch leaves context unavailable rather than guessing. Lua,
+  libbacktrace, and libuv compile with sanitizer instrumentation at `-O1`; the
+  much larger generated Titan images and disposable fixtures use the same
+  instrumentation at `-O0`.
+
+  The cold `test-macos` job remains dispatch-only and is a required pre-merge
+  gate. It retries only dependency-acquisition commands within the same prefix;
+  the Titan build and complete test run remain single-shot. Run all uncovered
+  stdlib/runtime/packaging work, including the aggregate native executable,
+  before `ci_test_groups.sh compiler-uncovered`. Snapshot the runtime archive,
+  canonical `titan.so`/`titan.a`, conditional dSYM, all eighteen shims, and the
+  canonical test-support source before compiler tests, then restore them before
+  the bundled/system production smokes. Keep the real x86_64/arm64 universal
+  Mach-O archive lookup and repackaging proof here rather than replacing it
+  with a host-only synthetic check. The complete macOS run, including both
+  libuv modes, remains optimized. Compiler and language specs must not delete
+  the shared checkout runtime archive merely to force recompilation; Make owns
+  that dependency state. The coroutine suite is the isolated restoration
   exception described below.
 - **A local Titan prefix prepared by `make lua`.** The checkout keeps the
   gitignored `./lua-5.5.1` build tree, while the installation contains the
@@ -284,16 +246,18 @@ not add epicycles around what may be a misunderstood simpler design.
   `luarocks remove`; binary-rock ownership is deferred until Titan has a
   library/application packaging story. The
   rockspec declares `test_dependencies` (busted, cluacov) plus a `command`
-  test backend that enters `run_rock_tests.sh`. The script preserves standard
-  `luarocks test -- ...` arguments while invoking `make rock-test`, applies
-  those arguments to the retained Busted specs, and then runs the native Titan
-  suites directly. `luarocks test` does **not** build the rock-under-test, so
-  `make test` runs `luarocks make` first.
-- **Python 3 for the mixed test suite.** Native Titan standard-library test
-  executables run under `spec/support/run_with_timeout.py` so a regression
-  cannot hang the test command or CI indefinitely. `run_titan_stdlib_tests.sh` invokes
-  `python3` by default; set `PYTHON` to an absolute Python 3 interpreter when
-  that command has another name.
+  test backend that enters `run_rock_tests.sh`. The adapter passes ordinary
+  appended arguments only to Busted, maps `BUSTED_FILTER` and `TITAN_FILTER`
+  independently, and invokes `make rock-test`; the latter runs the Busted tree
+  and the one aggregate native Titan suite. Filtering one domain does not skip
+  the other, so use its leaf Make target when only that domain is wanted.
+  `luarocks test` does **not** build the rock-under-test, so `make test` runs
+  `luarocks make` first.
+- **Bash for bounded native tests.** `spec/support/run_with_timeout.sh` starts
+  the aggregate executable in its own process group and enforces the deadline
+  with `TERM` followed by `KILL`. The Make runner streams combined output
+  through a pipe, not a regular-file redirection, so the stdio/parent-descriptor
+  cases keep their supported boundary.
 - **C toolchain**: `CC` (default `cc`) for compilation and for the C FFI's
   predefined-macro/include-search probes, plus `AR` (default `ar`) and
   `RANLIB` (default `ranlib`) for every generated static provider. All three
@@ -337,14 +301,18 @@ every generated fixture's C preprocessing, or source-line attribution;
 erase these explicit build-policy inputs.
 
 ```sh
-make test                                           # builds prefix dependencies recursively if missing, installs rock, and runs full busted suite
-luarocks test                                       # test an already current install; with its bin on PATH, PREFIX/ROCKS_TREE are not required
-PREFIX=/tmp/my-tmp-test-dir EXTRA_TEST_FLAGS="-o gtest" make test  # pass extra busted flags
-luarocks make && bash spec/support/ci_test_groups.sh compiler  # CI's covered compiler/language group
-bash spec/support/ci_test_groups.sh libraries       # CI's complete uncovered library group
+make test                                           # prepare/install the rock, then run the complete mixed suite
+luarocks test                                       # test an already current install; PREFIX/ROCKS_TREE are not required when its bin is on PATH
+make rock-test BUSTED_FILTER='parser' TITAN_FILTER='^http[.]tests[.]'  # independent domain filters
+make stdlib-test                                    # complete retained stdlib/runtime category without coverage
+make busted-test BUSTED_FILTER='for loop'           # Busted only
+make titan-stdlib-test TITAN_FILTER='^net[.]tests[.]' # build/run the aggregate native suite
+make titan-stdlib-test-build                        # build all 21 roots once under .titan-tests
+make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]' # reuse that executable
+luarocks make && bash spec/support/ci_test_groups.sh compiler  # complete covered compiler/language group
 make clean                                           # remove generated artifacts; `make distclean` also removes downloaded Lua/Readline/LuaRocks/libbacktrace/libuv/OpenSSL/llhttp trees
 
-busted                                              # full test suite — MUST run from repo root (all driver paths are relative); busted recurses into spec/ subdirs
+busted                                              # full Busted tree — MUST run from repo root (all driver paths are relative)
 busted spec/parser_spec.lua                         # single spec file
 busted spec/coder/coder_spec.lua --filter='for loop' # single test (Lua pattern on test name)
 
@@ -357,15 +325,18 @@ busted spec/coder/coder_spec.lua --filter='for loop' # single test (Lua pattern 
 run library API/runtime tests under LuaCov when their purpose is to test the
 library rather than a compiler or language feature. LuaCov measures the Lua
 compiler, not Titan or C library implementations, and its debug hook can make
-repeated checks of large library sources disproportionately slow. CI uses
-`spec/support/ci_test_groups.sh` to run the compiler/language group with
-coverage and the library group without it. This includes both the async-I/O
-stdlib suites and the earlier coroutine stdlib suite; both must still run in
-full outside coverage. The repository `.luacov` limits debug-hook collection
-to the same compiler, root-spec, and `titanc` paths emitted by CI's explicit
-report command; keep those filters aligned. If a library suite exposes a
-compiler coverage gap, add a small focused compiler/checker test for that code
-path instead of covering the library integration suite.
+repeated checks of large library sources disproportionately slow. Linux CI has
+one uncovered stdlib producer and one consumer that runs the complete
+`spec/support/ci_test_groups.sh compiler` set with coverage and emits the sole
+LuaCov/Codecov report. The producer runs retained host/build boundaries plus
+the aggregate native suite without coverage; the independent sanitizer selects
+only focused native-memory cases and does not publish coverage. This includes
+both async-I/O and coroutine behavior, which must still run in full in the
+regular uncovered job. The repository `.luacov` limits debug-hook collection to
+the same compiler, root-spec, and `titanc` paths emitted by the one report
+command; keep those filters aligned. If a library suite exposes a compiler
+coverage gap, add a small focused compiler/checker test for that code path
+instead of covering the library integration suite.
 
 **Spec layout.** Pure, layer-level specs live at `spec/` root (`abi_spec`,
 `cdriver_spec`, `cpp_spec`, `ctypes_spec`, `driver_spec`,
@@ -445,30 +416,49 @@ Helpers pull in luassert explicitly (`require 'luassert'`) because a
 `helpers.verbose = true` (was a per-file `local verbose`) to print `cc`
 command lines and keep generated `.c` files.
 
-Native standard-library behavior lives in module-owned roots under
-`spec/stdlib/titan/` and is compiled by
-`spec/support/run_titan_stdlib_tests.sh`. The direct group supervisor
-`spec/support/run_titan_stdlib_test_groups.sh` runs those executables in the
-ordinary uncovered library shards and through `make rock-test`; Busted is not
-an intermediary. Host labels such as `net-ssl` and `io-fs-timer` only select a
-process cohort—the discovered test identities remain `net.tests`, `ssl.tests`,
-`io.tests`, `fs.tests`, and `timer.tests`. Each native executable is
-process-supervised with a bounded timeout, and groups run serially because
-some generated source/object paths are shared. Every root and synthetic stem
-has an exact cleanup list in the scripts and `make clean`. After removing those
-leaves, use only failure-tolerant `rmdir` for generated output parents so empty
-folders disappear while pre-existing or nonempty directories survive; never
-replace this with recursive deletion or broad C/object globs.
+Native standard-library behavior lives in 21 module-owned roots under
+`spec/stdlib/titan/`. `TITAN_STDLIB_TEST_ROOTS` names every root explicitly;
+`make titan-stdlib-test-build` invokes the active `titanc --test` once from
+`.titan-tests/`, with an absolute source tree, so every root remains
+source-authoritative. The first current root, `coroutine.tests`, owns the one
+`.titan-tests/coroutine/tests__main` executable and its synthetic
+support/runner/entrypoint artifacts. Execute it from the repository root with
+`make titan-stdlib-test-run`, because fixtures rely on that CWD; `make
+titan-stdlib-test` performs both steps. `TITAN_FILTER` adds one run-time Lua
+pattern but still compiles all 21 roots. The separate build/run targets let CI
+and ASan reuse one executable for several fresh filtered processes without
+reintroducing native groups.
+
+The retained Busted specs own genuine host, process, build, loader, and
+interposition boundaries; `make rock-test` runs them and then the aggregate
+native executable. There are no per-suite native scripts, named host group
+selectors, or Busted wrappers around Titan cases. `run_with_timeout.sh` gives the
+executable its own Bash process group, enforces a bounded deadline with
+`TERM`/`KILL`, and preserves its exit status. The Make recipe streams merged
+stdout/stderr through a pipe rather than a regular file, preserving the parent
+pipe semantics exercised by OS/stdio tests. Cases that intentionally cause
+uncaught async Task diagnostics bracket the expected region with flushed
+`Context:log("BEGIN expected uncaught async Task diagnostics")` and matching
+`END` lines. Those source-owned brackets are the complete presentation
+contract for expected aggregate diagnostics.
+
+Generated test cleanup is generic but bounded. The owned `.titan-tests/`
+directory may be removed recursively. Below `spec/`, remove generated `.o`
+files and remove a `.c` only when a same-stem `.titan` source exists; this works
+without Git metadata and preserves author-written native C fixtures. Do not
+replace it with an indiscriminate `spec/**/*.c` deletion or broad root-level
+C/object globs. The build target cleans source-adjacent outputs after
+compilation, and `make clean` always removes them plus `.titan-tests`.
 
 New or modified specs that generate compiler fixtures in the repository root
 must remove only their exact module artifacts, including the paired `.a` for a
-no-`main` compile, and must treat
-`titan-runtime/libtitan.a` as shared Make-owned state. The grouped CI commands
-also snapshot and restore the prepared runtime, combined standard-library
-DSO/archive/dSYM, generated shims, and canonical test-support source around
-legacy compiler suites that still
-clean root artifacts; later
-production smokes deliberately consume that restored image.
+no-`main` compile, and must treat `titan-runtime/libtitan.a` as shared
+Make-owned state. The Linux compiler job runs on a disposable restored tree and
+has no later production consumer, so it needs no canonical-image snapshot.
+The manual macOS job does have later bundled/system smokes and must snapshot
+and restore the prepared runtime archive, combined standard-library
+DSO/archive/dSYM, all generated shims, and canonical test-support source around
+legacy compiler specs that clean root artifacts.
 
 The serial `spec/stdlib/coroutine_spec.lua` suite temporarily exercises an
 isolated exact-provider path, but must restore the prepared runtime, complete

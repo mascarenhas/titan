@@ -107,11 +107,12 @@ policy.
 ## `titan.test` private protocol
 
 The public module serializes only `testing`, `verbose`, `location`, `skip`,
-`assert`, the nominal `Context`, and its three methods. Its fields,
+`assert`, the nominal `Context`, and its four methods. Its fields,
 `RegisteredTest`, callback aliases, markers, state, and all `runner_*` helpers
 are local. The direct-source runner uses:
 
-* `runner_begin` / `runner_end` for module-local active and verbose booleans;
+* `runner_begin` / `runner_end` for module-local active and verbose state and
+  the generated runner's logger callback;
 * `runner_new_context` to construct the otherwise unconstructible public
   nominal record;
 * `runner_take_subtests` to seal subtest registration and detach the ordered
@@ -125,7 +126,10 @@ A Context has separate `subtests_open` and `cleanups_open` state. The former
 closes at the body-to-descendants transition; the latter closes when cleanup
 starts, so a descendant may deliberately append cleanup to a captured parent.
 Popping before invoking cleanup ensures every registered callback can be
-attempted without retaining a completed closure. Runner activation occurs in synthetic `main`, after CLI
+attempted without retaining a completed closure. `runner_begin` also installs
+the generated runner's logger callback. `Context:log` supplies that callback
+with the context's full name and the message; the runner owns the decorated,
+flushed output line. Runner activation occurs in synthetic `main`, after CLI
 validation and after module initialization; this intentionally leaves
 `testing()` false in initializers and avoids an entrypoint registry protocol.
 
@@ -195,6 +199,54 @@ Runtime cleanup after the runner returns, or establish a second Runtime.
 Repository tests whose oracle crosses one of those lifecycle boundaries keep a
 host/subprocess harness rather than reaching through private bootstrap registry
 state or adding a second runner protocol.
+
+## Repository dogfooding
+
+The Makefile's `TITAN_STDLIB_TEST_ROOTS` manifest names 21 module-owned roots
+under `spec/stdlib/titan/`. `make titan-stdlib-test-build` makes every one an
+explicit root in a single `titanc --test` invocation: source remains
+authoritative, discovery sees the complete checked closure, and no import-only
+aggregator can be shadowed by a compiled provider. The command runs from
+`.titan-tests/` with an absolute source tree. Its first current root,
+`coroutine.tests`, therefore owns the one
+`.titan-tests/coroutine/tests__main` executable; synthetic support, runner,
+entrypoint, and Darwin dSYM outputs are owned below the same directory. Ordinary
+module translation units are temporarily generated beside their Titan sources.
+
+`make titan-stdlib-test-run` returns to the repository root before executing,
+because several fixtures use repository-relative paths. `TITAN_FILTER` supplies
+one Lua pattern to this already built executable; it never changes the 21-root
+compile. `make titan-stdlib-test` composes build and run, while the split leaf
+targets let sanitizer and focused development runs reuse one build in multiple
+fresh processes. `BUSTED_FILTER` is independent and belongs to
+`busted-test`; `rock-test` enters both domains without inventing native group
+names.
+
+`run_with_timeout.sh` uses Bash monitor mode to give the executable its own
+process group and polls it at a coarse interval. At the deadline it sends
+`TERM`, then `KILL` after a short grace period, maps the timeout to status 124,
+and otherwise preserves the child's status. Make streams combined
+stdout/stderr through a pipe rather than redirecting either stream to a regular
+file, preserving the parent-pipe boundary tested by OS/stdio cases. Expected
+uncaught Task diagnostics are owned by their Titan tests: a case emits flushed
+`Context:log` messages containing `BEGIN expected uncaught async Task
+diagnostics` and `END expected uncaught async Task diagnostics` around the
+operation. Those prefixed brackets make a successful aggregate log readable
+and keep the expectation owned by the case that produces it.
+
+Cleanup is generic within a narrow ownership boundary. `.titan-tests/` is a
+Make-owned directory and may be removed recursively. Under `spec/`, the cleanup
+helper removes all generated `.o` files and removes a `.c` only when a
+same-stem `.titan` source exists. It does not consult Git, so it also works in a
+source rock, while author-written C fixtures remain untouched. Root-level
+compiler fixtures retain their existing exact cleanup rules.
+
+The regular Linux stdlib producer runs the retained host boundaries and this
+aggregate executable without LuaCov. The sole regular consumer runs the
+complete compiler/language group with LuaCov and publishes one report. The
+sanitizer builds an independent ASan+UBSan aggregate once and selects focused
+cases with the run target; it never restores the regular artifact. The complete
+macOS gate remains manually dispatched before merge.
 
 ## Packaging and compatibility
 

@@ -356,6 +356,10 @@ describe("native Titan test runner", function()
             "[ RUN      ] test_runner_edge.test_executed_child_failure_isolated.later",
             "[       OK ] test_runner_edge.test_executed_child_failure_isolated.later",
             "[       OK ] test_runner_edge.test_executed_child_failure_isolated")
+        assert_order(output,
+            "[ RUN      ] test_runner_fixture.test_pass",
+            "[----------] test_runner_fixture.test_pass: fixture log",
+            "[       OK ] test_runner_fixture.test_pass")
         assert.truthy(output:find("[==========] 43 tests ran.", 1, true), output)
         assert.truthy(output:find("[  PASSED  ] 26 tests.", 1, true), output)
         assert.truthy(output:find("[  SKIPPED ] 5 tests.", 1, true), output)

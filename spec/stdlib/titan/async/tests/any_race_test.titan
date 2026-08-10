@@ -79,6 +79,7 @@ local function race_five_tag(result: async.RaceFiveResult): string
 end
 
 function test_any_combinators_all_arities_and_positions(context: test.Context)
+  context:log("BEGIN expected uncaught async Task diagnostics")
   local succeeded = support.successful("ok")
   task_support.cleanup_task(context, succeeded, "any succeeded cleanup")
   local nil_succeeded = support.successful(nil)
@@ -210,9 +211,11 @@ function test_any_combinators_all_arities_and_positions(context: test.Context)
             live_none_failure, live_none_second, live_none_third,
             live_none_fourth, live_none_fifth)) == "none",
         "live any_five terminal listeners did not select none")
+  context:log("END expected uncaught async Task diagnostics")
 end
 
 function test_race_combinators_all_arities_ties_and_statuses(context: test.Context)
+  context:log("BEGIN expected uncaught async Task diagnostics")
   local succeeded = support.successful("winner")
   task_support.cleanup_task(context, succeeded, "race winner cleanup")
   local pending = support.sleeping(60000, "late")
@@ -314,4 +317,5 @@ function test_race_combinators_all_arities_ties_and_statuses(context: test.Conte
 
   pending:cancel(async.CancellationReason.simple("race cleanup"))
   async.join(pending)
+  context:log("END expected uncaught async Task diagnostics")
 end
