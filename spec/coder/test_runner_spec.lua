@@ -13,12 +13,20 @@ local PREFIXED = "titan.test.user"
 local RUNNER_PREFIXED = "titan.test.runner.user"
 local MUTATION = "test_runner_mutation"
 local NESTED = "nested.tests"
+local BOOTSTRAP = "test_runner_bootstrap"
 
 local function file_exists(path)
     local file = io.open(path, "rb")
     if not file then return false end
     file:close()
     return true
+end
+
+local function read_file(path)
+    local file = assert(io.open(path, "rb"))
+    local contents = assert(file:read("*a"))
+    assert(file:close())
+    return contents
 end
 
 local prefix_lua = os.getenv("PREFIX") and
@@ -134,6 +142,14 @@ local STATIC_ARTIFACTS = {
     STATIC .. "__test_entrypoint.o",
 }
 
+local BOOTSTRAP_ARTIFACTS = {
+    BOOTSTRAP,
+    FIXTURE .. "/" .. BOOTSTRAP .. ".c",
+    FIXTURE .. "/" .. BOOTSTRAP .. ".o",
+    BOOTSTRAP .. "__entrypoint.c",
+    BOOTSTRAP .. "__entrypoint.o",
+}
+
 local SUPPORT_ROOT_ARTIFACTS = {
     "titan/test",
     "titan/test__test_support.c",
@@ -155,11 +171,13 @@ local function clean()
     for _, path in ipairs(COLLISION_ARTIFACTS) do os.remove(path) end
     for _, path in ipairs(EMPTY_ARTIFACTS) do os.remove(path) end
     for _, path in ipairs(STATIC_ARTIFACTS) do os.remove(path) end
+    for _, path in ipairs(BOOTSTRAP_ARTIFACTS) do os.remove(path) end
     for _, path in ipairs(SUPPORT_ROOT_ARTIFACTS) do os.remove(path) end
     clean_nested()
     remove_tree(ROOT .. ".dSYM")
     remove_tree(EMPTY .. ".dSYM")
     remove_tree(STATIC .. ".dSYM")
+    remove_tree(BOOTSTRAP .. ".dSYM")
     remove_tree("titan/test.dSYM")
     os.remove("test_runner_progname__entrypoint.c")
     os.remove("test_runner_progname__entrypoint.o")
@@ -203,6 +221,7 @@ local function compile_suite()
         [[package.cpath = "./titan-runtime/bootstrap/?.so;" .. package.cpath]],
         "./titanc",
         "--test",
+        "--no-uv-bootstrap",
         "--verbose",
         "--tree", FIXTURE,
         ROOT, EDGE, FOLDER, PREFIXED, RUNNER_PREFIXED, MUTATION,
@@ -290,6 +309,75 @@ describe("native Titan test runner", function()
         end
         assert.falsy(compiler_output:find("multiple main", 1, true),
             compiler_output)
+    end)
+
+    it("calls test-runner main directly when async bootstrap is disabled",
+       function()
+        local entrypoint = read_file(ROOT .. "__test_entrypoint.c")
+        assert.truthy(entrypoint:find(
+            "if (1 || lua_isnil(L, -1))", 1, true), entrypoint)
+        assert.truthy(entrypoint:find(
+            "lua_call(L, 1, 1);", 1, true), entrypoint)
+    end)
+
+    it("ignores an installed bootstrap only when explicitly disabled",
+       function()
+        local direct_argv = working_titanc_arguments()
+        direct_argv[#direct_argv + 1] = "--no-uv-bootstrap"
+        direct_argv[#direct_argv + 1] = "--tree"
+        direct_argv[#direct_argv + 1] = FIXTURE
+        direct_argv[#direct_argv + 1] = BOOTSTRAP
+        local compiled, output = run(direct_argv)
+        assert.truthy(compiled, output)
+
+        local ok, direct_output, why, code = run({
+            "./" .. BOOTSTRAP, "one", "two",
+        })
+        assert.falsy(ok, direct_output)
+        assert.equal("exit", why)
+        assert.equal(37, code)
+        assert.falsy(direct_output:find("synthetic bootstrap invoked", 1, true),
+            direct_output)
+
+        ok, direct_output, why, code = run({
+            "./" .. BOOTSTRAP, "raise",
+        })
+        assert.falsy(ok, direct_output)
+        assert.equal("exit", why)
+        assert.equal(1, code)
+        assert.truthy(direct_output:find("direct-main-boom", 1, true),
+            direct_output)
+        assert.truthy(direct_output:find("stack traceback:", 1, true),
+            direct_output)
+        assert.falsy(direct_output:find("synthetic bootstrap invoked", 1, true),
+            direct_output)
+
+        local default_argv = working_titanc_arguments()
+        default_argv[#default_argv + 1] = "--tree"
+        default_argv[#default_argv + 1] = FIXTURE
+        default_argv[#default_argv + 1] = BOOTSTRAP
+        compiled, output = run(default_argv)
+        assert.truthy(compiled, output)
+
+        ok, output, why, code = run({ "./" .. BOOTSTRAP })
+        assert.falsy(ok, output)
+        assert.equal("exit", why)
+        assert.equal(1, code)
+        assert.truthy(output:find("synthetic bootstrap invoked", 1, true),
+            output)
+    end)
+
+    it("rejects disabled async bootstrap for library output", function()
+        local argv = working_titanc_arguments()
+        argv[#argv + 1] = "--no-uv-bootstrap"
+        argv[#argv + 1] = "--tree"
+        argv[#argv + 1] = FIXTURE
+        argv[#argv + 1] = DEPENDENCY
+        local ok, output = run(argv)
+        assert.falsy(ok, output)
+        assert.truthy(output:find(
+            "--no-uv-bootstrap is only valid when compiling a standalone executable",
+            1, true), output)
     end)
 
     it("applies sibling-call preservation only to discovered test modules",

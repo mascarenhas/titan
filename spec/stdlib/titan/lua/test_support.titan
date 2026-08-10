@@ -1,4 +1,5 @@
 local test = import "test"
+local runtime_test = import "support.runtime"
 local async = import "async"
 local fs = import "fs"
 local lua = foreign import "lua.h"
@@ -54,7 +55,7 @@ local function temporary_file(context: test.Context,
     path = temporary .. suffix
     fs.rename(temporary, path)
   end
-  context:cleanup(function ()
+  runtime_test.cleanup(function ()
     fs.unlink(path)
   end)
   return path
@@ -108,13 +109,13 @@ local function temporary_directory(context: test.Context): string
   local root = fs.tmpname()
   fs.unlink(root)
   fs.mkdir(root)
-  context:cleanup(function () fs.rmdir(root) end)
+  runtime_test.cleanup(function () fs.rmdir(root) end)
   return root
 end
 
 local function owned_file(context: test.Context, path: string,
                           contents: string)
-  context:cleanup(function () fs.unlink(path) end)
+  runtime_test.cleanup(function () fs.unlink(path) end)
   fs.write_file(path, contents)
 end
 

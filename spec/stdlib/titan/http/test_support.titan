@@ -1,4 +1,5 @@
 local test = import "test"
+local runtime_test = import "support.runtime"
 local async = import "async"
 local fs = import "fs"
 local http = import "http"
@@ -18,7 +19,7 @@ end
 
 local function absent_temporary_path(context: test.Context): string
   local path = fs.tmpname()
-  context:cleanup(function ()
+  runtime_test.cleanup(function ()
     do
       fs.unlink(path)
     catch

@@ -515,14 +515,17 @@ flattened into `titan.a`, never linked into a general extension.
 ## Linking a standalone program: `driver.compile_program`
 
 `driver.compile_program(modname, libnames, link, verbose, extra_objects,
-program_output, static_archives, entrypoint_output, program_name)` produces an
+program_output, static_archives, entrypoint_output, program_name, options)`
+produces an
 executable at the optional
 `program_output` path, relative to the working directory. Omitting it
 preserves the original `modname:gsub("[.]", "/")` default for programmatic
 callers and `tableloader`. The trailing `static_archives` list contains
 selected self-describing providers. The optional entrypoint path and display
 name let test mode keep synthetic native artifacts beside the selected program
-without changing its logical main identity. Filesystem source descriptors
+without changing its logical main identity. The optional final table currently
+carries `no_uv_bootstrap`; omitting it preserves the ordinary hook-selection
+behavior for programmatic callers. Filesystem source descriptors
 cache:
 
 | Form for `foo.bar` | `program_output` |
@@ -605,10 +608,12 @@ error alerts):
   `#args == argc - 1`. Requiring the main module first
   initializes all imports; an async standard module may install a
   callable under `registry[TITAN_MAIN_BOOTSTRAP_KEY]` during that work.
-  If the key is nil, `pmain` calls `main(arg)` directly as before. If a
-  hook is present, it calls `hook(main, arg)` instead. Both paths remain
-  inside `main`'s single outer protected call, and retrieving `main`
-  before consulting the hook prevents an importer from replacing the
+  The rendered `$SKIP_MAIN_BOOTSTRAP` constant is true only for
+  `options.no_uv_bootstrap`. If it is true or the key is nil, `pmain` pops the
+  retrieved hook value and calls `main(arg)` directly. Otherwise it calls
+  `hook(main, arg)`. The bypass does not clear or replace the registry key.
+  Both paths remain inside `main`'s single outer protected call, and retrieving
+  `main` before consulting the hook prevents an importer from replacing the
   program's entry function.
 * **Top-level reporting** uses Titan's own `errorhandler` as the
   `lua_pcall` message handler. On error, that handler records the raw
@@ -632,7 +637,7 @@ normal module-init protocol.
 
 ```sh
 ./titanc [--print-ast] [-v|--verbose] [-u|--lua <luasrc>] \
-  [--static] [--test] [--no-line-directives] \
+  [--static] [--test] [--no-uv-bootstrap] [--no-line-directives] \
   [-t|--tree <srcroot>] [-l|--link lib1,lib2] \
   [-X|--extra-object obj.o...] <module>...
 ```
@@ -645,8 +650,14 @@ or more dot-separated module names. `--tree` overrides
 command line, `--print-ast` dumps each module's
 AST after checking, `--static` swaps the compiled-provider passes to prefer
 self-describing archives before DSOs, `--test` selects the native test pipeline
-described in [Native test runner](test-runner.md), `--no-line-directives` tells
-the coder
+described in [Native test runner](test-runner.md), and `--no-uv-bootstrap`
+threads one entrypoint-only option through `driver.compile_program`. The driver
+renders the bootstrap condition with a constant direct-path operand; module
+initialization, `TITAN_MAIN_ARGC_KEY`/`TITAN_MAIN_ARGV_KEY` publication,
+libuv's possible argv replacement, main retrieval, protected error handling,
+and the registry hook itself are unchanged. The CLI rejects the option before
+finalization when no standalone main or generated test main exists.
+`--no-line-directives` tells the coder
 to leave native diagnostics attributed to the generated C file instead of
 Titan source, `-l` passes extra system libraries to the linker, and
 `-X`/`--extra-object` appends one or more already-built native payloads.

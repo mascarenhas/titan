@@ -6,7 +6,7 @@ local type CaseStart = (integer) -> async.Task
 local function run_case(context: test.Context, start: CaseStart,
                         first_port: integer, expected: string)
   local task = start(first_port)
-  context:cleanup(function ()
+  runtime_test.cleanup(function ()
     task_support.cancel_and_join_task(task, "HTTP test cleanup")
   end)
   local status = async.join(task)
@@ -19,123 +19,161 @@ end
 
 function test_client_parses_fragmented_chunked_response(
     context: test.Context)
-  run_case(context, start_client, 50000, "client-ok")
+  runtime_test.run(function ()
+    run_case(context, start_client, 50000, "client-ok")
+  end)
 end
 
 function test_client_validates_supplied_host_authority(
     context: test.Context)
-  run_case(context, start_client_host_validation, 50500,
-           "client-host-validation-ok")
+  runtime_test.run(function ()
+    run_case(context, start_client_host_validation, 50500,
+             "client-host-validation-ok")
+  end)
 end
 
 function test_http_validates_fields_and_reason_phrases(
     context: test.Context)
-  run_case(context, start_header_validation, 51000,
-           "header-validation-ok")
+  runtime_test.run(function ()
+    run_case(context, start_header_validation, 51000,
+             "header-validation-ok")
+  end)
 end
 
 function test_server_starts_handler_at_headers_and_streams_bodies(
     context: test.Context)
-  run_case(context, start_server_streaming, 51500,
-           "server-streaming-ok")
+  runtime_test.run(function ()
+    run_case(context, start_server_streaming, 51500,
+             "server-streaming-ok")
+  end)
 end
 
 function test_server_resolves_expect_continue_before_body(
     context: test.Context)
-  run_case(context, start_expect_continue, 52000, "expect-ok")
+  runtime_test.run(function ()
+    run_case(context, start_expect_continue, 52000, "expect-ok")
+  end)
 end
 
 function test_server_preserves_buffered_serial_requests(
     context: test.Context)
-  run_case(context, start_buffered_next_requests, 52500,
-           "buffered-suffix-ok")
+  runtime_test.run(function ()
+    run_case(context, start_buffered_next_requests, 52500,
+             "buffered-suffix-ok")
+  end)
 end
 
 function test_server_idle_keep_alive_eof_is_clean(
     context: test.Context)
-  run_case(context, start_idle_keep_alive_eof, 53000,
-           "idle-keep-alive-eof-ok")
+  runtime_test.run(function ()
+    run_case(context, start_idle_keep_alive_eof, 53000,
+             "idle-keep-alive-eof-ok")
+  end)
 end
 
 function test_server_buffered_empty_lines_eof_is_malformed(
     context: test.Context)
-  context:log("BEGIN expected uncaught async Task diagnostics")
-  run_case(context, start_buffered_empty_lines_eof, 53125,
-           "buffered-empty-lines-eof-ok")
-  context:log("END expected uncaught async Task diagnostics")
+  runtime_test.run(function ()
+    context:log("BEGIN expected uncaught async Task diagnostics")
+    run_case(context, start_buffered_empty_lines_eof, 53125,
+             "buffered-empty-lines-eof-ok")
+    context:log("END expected uncaught async Task diagnostics")
+  end)
 end
 
 function test_server_partial_keep_alive_eof_is_malformed(
     context: test.Context)
-  context:log("BEGIN expected uncaught async Task diagnostics")
-  run_case(context, start_partial_keep_alive_eof, 53250,
-           "partial-keep-alive-eof-ok")
-  context:log("END expected uncaught async Task diagnostics")
+  runtime_test.run(function ()
+    context:log("BEGIN expected uncaught async Task diagnostics")
+    run_case(context, start_partial_keep_alive_eof, 53250,
+             "partial-keep-alive-eof-ok")
+    context:log("END expected uncaught async Task diagnostics")
+  end)
 end
 
 function test_server_partial_empty_line_eof_is_malformed(
     context: test.Context)
-  context:log("BEGIN expected uncaught async Task diagnostics")
-  run_case(context, start_partial_empty_line_eof, 53375,
-           "partial-empty-line-eof-ok")
-  context:log("END expected uncaught async Task diagnostics")
+  runtime_test.run(function ()
+    context:log("BEGIN expected uncaught async Task diagnostics")
+    run_case(context, start_partial_empty_line_eof, 53375,
+             "partial-empty-line-eof-ok")
+    context:log("END expected uncaught async Task diagnostics")
+  end)
 end
 
 function test_client_handles_all_response_framing_modes(
     context: test.Context)
-  run_case(context, start_client_framing, 53500, "client-framing-ok")
+  runtime_test.run(function ()
+    run_case(context, start_client_framing, 53500, "client-framing-ok")
+  end)
 end
 
 function test_server_drains_unread_requests_for_keep_alive(
     context: test.Context)
-  run_case(context, start_unread_request_drain, 54000,
-           "request-drain-ok")
+  runtime_test.run(function ()
+    run_case(context, start_unread_request_drain, 54000,
+             "request-drain-ok")
+  end)
 end
 
 function test_server_isolates_failures_and_enforces_bodyless_framing(
     context: test.Context)
-  context:log("BEGIN expected uncaught async Task diagnostics")
-  run_case(context, start_server_failure_isolation, 54500,
-           "server-failures-ok")
-  context:log("END expected uncaught async Task diagnostics")
+  runtime_test.run(function ()
+    context:log("BEGIN expected uncaught async Task diagnostics")
+    run_case(context, start_server_failure_isolation, 54500,
+             "server-failures-ok")
+    context:log("END expected uncaught async Task diagnostics")
+  end)
 end
 
 function test_server_close_completes_despite_task_cancellation(
     context: test.Context)
-  run_case(context, start_cancelled_server_close, 55000,
-           "server-close-cancel-ok")
+  runtime_test.run(function ()
+    run_case(context, start_cancelled_server_close, 55000,
+             "server-close-cancel-ok")
+  end)
 end
 
 function test_client_close_completes_despite_task_cancellation(
     context: test.Context)
-  run_case(context, start_cancelled_client_close, 55500,
-           "client-close-cancel-ok")
+  runtime_test.run(function ()
+    run_case(context, start_cancelled_client_close, 55500,
+             "client-close-cancel-ok")
+  end)
 end
 
 function test_server_idle_timeout_api_validation_and_updates(
     context: test.Context)
-  local missing_pem_path = support.absent_temporary_path(context)
-  local start: CaseStart = function (first_port: integer): async.Task
-    return start_idle_timeout_api(first_port, missing_pem_path)
-  end
-  run_case(context, start, 56000, "idle-timeout-api-ok")
+  runtime_test.run(function ()
+    local missing_pem_path = support.absent_temporary_path(context)
+    local start: CaseStart = function (first_port: integer): async.Task
+      return start_idle_timeout_api(first_port, missing_pem_path)
+    end
+    run_case(context, start, 56000, "idle-timeout-api-ok")
+  end)
 end
 
 function test_plain_http_header_idle_timeout_protocol(
     context: test.Context)
-  context:log("BEGIN expected uncaught async Task diagnostics")
-  run_case(context, start_idle_timeout_plain, 56500,
-           "idle-timeout-plain-ok")
-  context:log("END expected uncaught async Task diagnostics")
+  runtime_test.run(function ()
+    context:log("BEGIN expected uncaught async Task diagnostics")
+    run_case(context, start_idle_timeout_plain, 56500,
+             "idle-timeout-plain-ok")
+    context:log("END expected uncaught async Task diagnostics")
+  end)
 end
 
 function test_https_header_idle_timeout_protocol(
     context: test.Context)
-  run_case(context, start_idle_timeout_tls, 57000,
-           "idle-timeout-tls-ok")
+  runtime_test.run(function ()
+    run_case(context, start_idle_timeout_tls, 57000,
+             "idle-timeout-tls-ok")
+  end)
 end
 
 function test_public_verified_https_request_and_server(
     context: test.Context)
-  run_case(context, start_https, 57500, "https-ok")
+  runtime_test.run(function ()
+    run_case(context, start_https, 57500, "https-ok")
+  end)
 end

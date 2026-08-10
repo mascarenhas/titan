@@ -294,16 +294,23 @@ children. Use a
 pattern matching both the parent and descendants when selecting a subtree.
 `--verbose` adds the raw traceback to normal failure attribution.
 
-If an import selects the async standalone bootstrap, the complete runner runs
-as one Task in one Runtime. Bodies, subtests, and cleanup may suspend normally,
-but must not call `async.loop` recursively. A test that must observe Runtime
-startup, post-run shutdown, or a second Runtime needs a supervising host or
-subprocess instead.
+By default, an import may select the async standalone bootstrap and run the
+complete runner as one Task in one Runtime; callbacks then must not call
+`async.loop` recursively. `--no-uv-bootstrap` instead calls runner `main`
+directly without changing module initialization or the installed hook. In that
+mode each async case must explicitly create a Task, drive `async.loop`, and
+finish Runtime-bound Tasks and handles before the session returns. Register
+such cleanup with the source-only Runtime helper, not later `Context:cleanup`.
+Sequential Runtime sessions are valid; test the automatic bootstrap itself in a
+separately compiled child that omits the option.
 
 For repository standard-library work, use the Make targets. They compile every
-native stdlib root into one executable, apply bounded process supervision and
-generic generated-artifact cleanup, and run without LuaCov. Busted and Titan
-filters are independent:
+native stdlib root into one `--no-uv-bootstrap` executable, apply bounded process supervision and
+generic generated-artifact cleanup, and run without LuaCov. Do not add Lua
+files below `spec/stdlib/` or root standard-library boundary specs. A public
+fresh-process boundary belongs to its native module: launch a focused standalone
+fixture through C99 `system`, report through a temporary result file, and remove
+that file with `defer`. Busted and Titan filters are independent:
 
 ```sh
 make stdlib-test

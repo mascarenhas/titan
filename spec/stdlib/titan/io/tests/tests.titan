@@ -1,4 +1,7 @@
 -- Native titan.io stream and process behavior tests.
 local test = import "test"
 local stream = import "io"
+local system = import "os"
+local async = import "async"
+local runtime_test = import "support.runtime"
 local support = import "io.test_support"

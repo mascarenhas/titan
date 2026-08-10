@@ -1,83 +1,90 @@
 local test = import "test"
+local runtime_test = import "support.runtime"
 local async = import "async"
 local stream = import "io"
 local timer = import "timer"
 local task_support = import "support.async"
 
 function test_timer_yield_and_sleep(_context: test.Context)
-  timer.yield()
-  timer.sleep(0)
-  timer.sleep(2)
+  runtime_test.run(function ()
+    timer.yield()
+    timer.sleep(0)
+    timer.sleep(2)
 
-  local rejected = false
-  do
-    timer.sleep(-1)
-  catch
-    local failure = error as async.OperationError
-    test.assert(failure.operation == "timer.sleep",
-                "negative sleep reported the wrong operation")
-    rejected = true
-  end
-  test.assert(rejected, "negative sleep was accepted")
+    local rejected = false
+    do
+      timer.sleep(-1)
+    catch
+      local failure = error as async.OperationError
+      test.assert(failure.operation == "timer.sleep",
+                  "negative sleep reported the wrong operation")
+      rejected = true
+    end
+    test.assert(rejected, "negative sleep was accepted")
+  end)
 end
 
 function test_timer_ticker_waited_and_retained_ticks(
     _context: test.Context)
-  local ticker = timer.ticker(1)
-  defer ticker:close()
+  runtime_test.run(function ()
+    local ticker = timer.ticker(1)
+    defer ticker:close()
 
-  local count = 0
-  for _index = 1, 3 do
-    if ticker:tick() then count = count + 1 end
-  end
-  test.assert(count == 3, "Ticker lost a waited tick")
+    local count = 0
+    for _index = 1, 3 do
+      if ticker:tick() then count = count + 1 end
+    end
+    test.assert(count == 3, "Ticker lost a waited tick")
 
-  -- A recurring timer retains one pending fact, not an accumulated count.
-  timer.sleep(8)
-  test.assert(ticker:tick(),
-              "Ticker did not retain its latest unwaited tick")
+    -- A recurring timer retains one pending fact, not an accumulated count.
+    timer.sleep(8)
+    test.assert(ticker:tick(),
+                "Ticker did not retain its latest unwaited tick")
 
-  local closer: stream.Closer = ticker
-  closer:close()
-  closer:close()
-  test.assert(not ticker:tick(), "closed Ticker produced another tick")
+    local closer: stream.Closer = ticker
+    closer:close()
+    closer:close()
+    test.assert(not ticker:tick(), "closed Ticker produced another tick")
+  end)
 end
 
 function test_timer_ticker_pending_close_and_invalid_period(
     context: test.Context)
-  local ticker = timer.ticker(10000)
-  defer ticker:close()
-  local ticked = true
-  local waiter = async.run(function (): value
-    ticked = ticker:tick()
-    return nil
+  runtime_test.run(function ()
+    local ticker = timer.ticker(10000)
+    defer ticker:close()
+    local ticked = true
+    local waiter = async.run(function (): value
+      ticked = ticker:tick()
+      return nil
+    end)
+    task_support.cleanup_task(waiter, "ticker waiter cleanup")
+
+    while waiter:status():as_string() == "ready" do timer.yield() end
+    test.assert(waiter:status():as_string() == "waiting",
+                "Ticker waiter did not suspend")
+
+    local competing_waiter_rejected = false
+    do
+      ticker:tick()
+    catch
+      competing_waiter_rejected = true
+    end
+    test.assert(competing_waiter_rejected,
+                "Ticker accepted a second waiting Task")
+
+    ticker:close()
+    while task_support.active(waiter) do timer.yield() end
+    test.assert(waiter:status():as_string() == "succeeded",
+                "closing Ticker failed its waiter")
+    test.assert(not ticked, "closing Ticker resumed its waiter with true")
+
+    local invalid = false
+    do
+      timer.ticker(0)
+    catch
+      invalid = true
+    end
+    test.assert(invalid, "Ticker accepted a nonpositive interval")
   end)
-  task_support.cleanup_task(context, waiter, "ticker waiter cleanup")
-
-  while waiter:status():as_string() == "ready" do timer.yield() end
-  test.assert(waiter:status():as_string() == "waiting",
-              "Ticker waiter did not suspend")
-
-  local competing_waiter_rejected = false
-  do
-    ticker:tick()
-  catch
-    competing_waiter_rejected = true
-  end
-  test.assert(competing_waiter_rejected,
-              "Ticker accepted a second waiting Task")
-
-  ticker:close()
-  while task_support.active(waiter) do timer.yield() end
-  test.assert(waiter:status():as_string() == "succeeded",
-              "closing Ticker failed its waiter")
-  test.assert(not ticked, "closing Ticker resumed its waiter with true")
-
-  local invalid = false
-  do
-    timer.ticker(0)
-  catch
-    invalid = true
-  end
-  test.assert(invalid, "Ticker accepted a nonpositive interval")
 end

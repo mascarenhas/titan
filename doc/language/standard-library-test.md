@@ -183,16 +183,26 @@ for normal test builds.
 
 ## Asynchronous tests
 
-A test executable uses the ordinary standalone bootstrap selected by its
-imports. If the suite imports `async` or another module in that runtime
-constellation, the whole generated runner executes as one Task inside one
-Runtime. Test bodies, subtests, and cleanup callbacks may therefore call
-ordinary suspending library operations directly; they must not call
-`async.loop` recursively.
+By default, a test executable uses the ordinary standalone bootstrap selected
+by its imports. If the suite imports `async` or another module in that runtime
+constellation, the complete generated runner executes as one Task inside one
+Runtime. Test bodies, subtests, and cleanup callbacks may then suspend directly
+and must not call `async.loop` recursively.
 
-A single native test executable cannot observe the boundary before or after
-that Runtime or create a second Runtime. Tests of Runtime startup, shutdown,
-or cross-Runtime process state still require a supervising host process.
+Passing `--no-uv-bootstrap` selects explicit ownership instead. The entrypoint
+calls the runner's `main(args)` directly even though `titan.uv` still initializes
+and leaves its bootstrap hook installed. A test that needs asynchronous work
+must start a Task with `async.run`, call `async.loop`, and finish every
+Runtime-bound Task and handle before that loop returns. Runner
+`Context:cleanup` occurs later and is therefore suitable only for resources
+that do not require the ended Runtime. Several explicit sessions may run
+sequentially in one executable.
+
+The repository's aggregate standard-library executable uses this explicit
+mode. Its source-only test helper runs each async case under one supervisor Task
+and performs registered Runtime cleanup in LIFO order inside that Task. Tests
+whose oracle is the automatic bootstrap itself compile and supervise a separate
+standalone child without `--no-uv-bootstrap`.
 
 ## Running and filtering
 

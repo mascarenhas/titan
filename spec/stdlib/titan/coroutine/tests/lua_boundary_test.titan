@@ -1,0 +1,87 @@
+local function assert_coroutine_lua_probe(source: string, label: string)
+  local output, why, code = command.capture({"lua", "-E", "-e", source})
+  test.assert(why == "exit" and code == 0,
+              label .. " failed: " .. output)
+end
+
+function test_lua_host_rejects_poisoned_coroutine_metatable(
+    _context: test.Context)
+  assert_coroutine_lua_probe([==[
+    local registry = debug.getregistry()
+    registry["titan.coroutine"] = "poisoned"
+    local ok, failure = pcall(require, "titan.coroutine")
+    assert(not ok)
+    assert(tostring(failure):find(
+      "invalid Titan coroutine metatable registry entry", 1, true),
+      tostring(failure))
+    assert(registry["titan.coroutine"] == "poisoned")
+  ]==], "poisoned coroutine metatable probe")
+end
+
+function test_lua_host_observes_complete_coroutine_metatable(
+    _context: test.Context)
+  assert_coroutine_lua_probe([==[
+    require "titan.coroutine"
+    local metatable = debug.getregistry()["titan.coroutine"]
+    assert(type(metatable) == "table")
+    assert(metatable.__name == "titan.coroutine")
+    assert(type(metatable.__gc) == "function")
+  ]==], "coroutine metatable publication probe")
+end
+
+function test_lua_host_roots_coroutine_payloads_and_tags_across_gc(
+    _context: test.Context)
+  assert_coroutine_lua_probe([==[
+    local coroutine = require "titan.coroutine"
+    collectgarbage("generational")
+
+    local tag = {}
+    local payload
+    local marker
+    local co = coroutine.create(function(argument)
+      assert(argument == payload)
+      collectgarbage("step")
+      local received = coroutine.yield(marker, tag)
+      assert(received == payload)
+      return marker(received)
+    end, tag)
+
+    collectgarbage("collect")
+    payload = { answer = 41 }
+    marker = function(value) return value.answer + 1 end
+    assert(co:status() == "suspended")
+    assert(co:resume(payload, tag) == marker)
+    payload.extra = {}
+    for _ = 1, 50 do collectgarbage("step") end
+    assert(co:resume(payload, tag) == 42)
+    assert(co:status() == "dead")
+
+    local numeric = coroutine.create(function(argument)
+      local received = coroutine.yield("numeric", 1.0)
+      return received
+    end, 1)
+    assert(numeric:resume(nil, 1) == "numeric")
+    assert(numeric:resume("done", 1.0) == "done")
+    collectgarbage("incremental")
+  ]==], "Lua-host coroutine GC probe")
+end
+
+function test_lua_host_reports_coroutine_api_errors(_context: test.Context)
+  assert_coroutine_lua_probe([==[
+    local coroutine = require "titan.coroutine"
+    local function fails(callback, needle)
+      local ok, failure = pcall(callback)
+      assert(not ok, "expected API call to fail")
+      if needle then
+        assert(tostring(failure):find(needle, 1, true), tostring(failure))
+      end
+    end
+
+    local bad_callback = coroutine.create("not callable", "tag")
+    fails(function() bad_callback:resume(nil) end)
+    fails(function() coroutine.yield("payload") end,
+      "must provide non-nil tag argument to coroutine.yield")
+    fails(function() coroutine.yield("payload", "tag") end,
+      "Invalid coroutine")
+  ]==], "Lua-host coroutine API-error probe")
+end

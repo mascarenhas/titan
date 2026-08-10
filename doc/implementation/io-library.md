@@ -117,7 +117,8 @@ idempotent repeat, while a close error gets one finalizer retry.
 The process constituent runs against the canonical coroutine/uv/async, string,
 os, and io modules. It covers structural Interface
 conversion, interactive merged output, binary delimiter reads, retained exit
-status, idempotent close, and explicit running-child termination/reaping. The
-retained `os_stream_facade_spec.lua` owns only exact parent-stdin process
-plumbing and the fresh-Runtime observation of an already closed captured
-stream.
+status, idempotent close, and explicit running-child termination/reaping.
+Exact parent-stdin process plumbing also runs natively: a compiled Titan parent
+launches a focused standalone child through C99 `system`, reads its temporary
+result file, and removes that file with `defer`. Closed-facade behavior in a
+later Runtime runs under two explicit `support.runtime` sessions.

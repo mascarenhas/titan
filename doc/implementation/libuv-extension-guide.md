@@ -544,13 +544,15 @@ records are cheaper and clearer than rebuilding a common control hierarchy.
 
 ## Testing additions without rewriting the binding
 
-Default to black-box tests against the canonical production modules. Compile
-an ordinary Titan consumer with `spec/support/async_stdlib.lua`, exercise the
-public `async`, `timer`, `fs`, `net`, `io`, or `os` facade, and assert the
-observable result from a fresh Lua process when process-global state matters.
-These standard-library behavior suites stay under `spec/stdlib/` and outside
-LuaCov. A refactor that preserves the public and native ownership contracts
-should not require test edits.
+Default to black-box tests against the canonical production modules. Put
+module-owned Titan behavior under `spec/stdlib/titan/`, run it through the
+unified native executable and `support.runtime`, and exercise the public
+`async`, `timer`, `fs`, `net`, `io`, or `os` facade. When process-start state
+matters, let the compiled Titan parent launch a focused standalone child through
+C99 `system`; have the child report through a temporary result file that the
+parent removes with `defer`. There are no Lua files under `spec/stdlib/` and
+these behavior tests stay outside LuaCov. A refactor that preserves the public
+and native ownership contracts should not require test edits.
 
 Do not make a test depend on the source text of `titan/uv/*.titan`: do not find
 an anchor, splice in an extension or probe, rebuild a patched uv provider, or
@@ -577,14 +579,12 @@ exception: its test must document the otherwise unreachable invariant and why
 less coupled observation is impossible. It must never add hooks to installed
 modules or become a general scheduler/fault-injection interface.
 
-The repository currently has exactly two such exceptions, both in
-`spec/stdlib/coroutine_spec.lua` and neither in `titan.uv`: one forces GC in
-the native resume-to-transfer-root window, and one forces `lua_checkstack` to
-fail after the saved stack top exists. Public behavior cannot enter either
-boundary deterministically. Each test uses unique anchors and an isolated
-coroutine provider, and each exception should disappear if its boundary ever
-becomes observable without rewriting production source. They are not
-templates for testing a new libuv binding.
+The standard-library suite currently has no source-transformer or
+interposition-only exception. Coroutine transfer mechanics and checked Lua API
+use rely on their existing compiler/native-harness ownership, while native
+library tests retain the observable Lua-host GC and API-error behavior. Do not
+recreate the removed implementation-level variants as templates for a new
+libuv binding.
 
 ### Mechanical integration gates
 
@@ -634,9 +634,9 @@ then run the complete uncovered stdlib surface:
 
 ```sh
 busted spec/libuv_build_spec.lua
-busted spec/stdlib/uv_tasks_spec.lua
-busted spec/stdlib/uv_native_handles_spec.lua
 make titan-stdlib-test-build
+make titan-stdlib-test-run TITAN_FILTER='^uv[.]task_tests[.]'
+make titan-stdlib-test-run TITAN_FILTER='^uv[.]runtime_tests[.]'
 make titan-stdlib-test-run TITAN_FILTER='^net[.]tests[.]'
 make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]'
 make stdlib-busted-test
@@ -646,7 +646,7 @@ make titan-stdlib-test-run
 The final two commands complete the uncovered stdlib gate without rebuilding
 the native executable; `make stdlib-test` performs the complete gate from
 scratch. A `TITAN_FILTER` selects cases at run time; it does not rebuild or
-narrow the 21-root executable.
+narrow the 22-root executable.
 
 The real installation path and both link policies remain release boundaries:
 

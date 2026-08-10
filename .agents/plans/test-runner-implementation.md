@@ -9,7 +9,7 @@ any eventual divergence from the draft.
 
 - Branch: `feat/test-runner`
 - Draft-only initial commit: `eed38db` (`Add draft Titan test runner specification`)
-- Phase: implementation and local full-suite validation complete; published CI validation pending
+- Phase: implementation published; explicit-Runtime and zero-Lua-stdlib follow-up in local validation
 - ABI decision: retain 0.22; the immediately preceding canonical seventeen-key
   pair is a supported bounded transactional predecessor
 - Architecture decisions: reviewed and closed in
@@ -286,20 +286,20 @@ support modules, and private `titan.test` support. Use C/Lua FFI only in narrow
 Titan test-support modules for temporary files, process fixtures, and
 Lua-boundary checks.
 
-Retain Lua/native harnesses only where a distinct host or build boundary is the
-subject, including at minimum:
+Retain Busted only for compiler, provider-publication, packaging, and native
+dependency/build gates. Standard-library implementation/codegen inspection,
+source rewriting, provider-cache internals, and redundant FFI/interposition
+cases rely on their existing compiler/native-harness owners instead of a second
+library assertion. Public host and process behavior is Titan-owned, including
+tests that supervise a child.
 
-- the coroutine source-rewrite/interposition exception;
-- loader/global-promotion and provider packaging/layout proofs;
-- sanitizer-only native-memory gates;
-- tests whose subject is process termination and must supervise a child;
-- native toolchain/fixture construction that cannot be expressed by the runner
-  without turning the test library into a build system.
-
-For every retained Lua spec, record the boundary reason and delete migrated Lua
-cases rather than duplicating them. The Makefile now owns one explicit
-`TITAN_STDLIB_TEST_ROOTS` manifest with all 21 module roots. `make
-titan-stdlib-test-build` compiles them in one `titanc --test` invocation from
+There are no Lua files below `spec/stdlib/` and no root-level standard-library
+`*_boundary_spec.lua` survivors. Fresh-process and parent-stdio behavior uses a
+compiled Titan parent, C99 `system` to launch a focused standalone child, and an
+explicit temporary result file removed with `defer`. The Makefile now owns one explicit
+`TITAN_STDLIB_TEST_ROOTS` manifest with all 22 module roots. `make
+titan-stdlib-test-build` compiles them in one
+`titanc --test --no-uv-bootstrap` invocation from
 `.titan-tests/`; the first current root owns
 `.titan-tests/coroutine/tests__main`. `make titan-stdlib-test-run` executes
 that binary from the repository root, and `make titan-stdlib-test` composes the
@@ -319,11 +319,16 @@ Cleanup owns `.titan-tests/` recursively and is generic for source-adjacent
 translation units: remove every `.o` below `spec/`, but remove a `.c` only when
 its same-stem `.titan` source exists. This remains safe without Git metadata and
 preserves tracked C fixtures. Root compiler fixtures retain their exact cleanup
-rules. The retained host specs continue to cover coroutine
-rewriting/interposition and Lua calls, loader/global promotion and private
-engine state, exact `io.print` write/current-stdout observation, parent
-descriptors and process status, purpose-built helpers, fresh Lua/Runtime state,
-and cross-Runtime file lifetime.
+rules. The native suite owns fresh-state coroutine API behavior, exact
+`io.print` write/current-stdout observation, parent descriptors, process status,
+and sanitizer composition through observable public behavior. Its linked
+parent-stdio helper prepares descriptors before a standalone child starts; the
+parent waits through C99 `system`, checks the post-Runtime descriptor state, and
+reads the child's explicit result file. Loader/global-promotion and private
+engine implementation mechanics remain with existing compiler, packaging, and
+native-harness coverage rather than duplicate boundary specs. Process exit,
+automatic bootstrap, and cross-Runtime lifecycle behavior are likewise
+Titan-owned tests supervising children or explicit sessions.
 
 CI runs this complete stdlib surface in one uncovered Linux producer. One
 standard Linux consumer restores the prepared tree and runs the complete
@@ -354,9 +359,9 @@ The final Titan design review established these invariants:
 
 1. **ABI/provider generation:** retain ABI 0.22 because the independent
    `titan.test` key and compiler-data source change no existing serialized,
-   userdata, native-call, or loader contract. The canonical seventeen-key 0.22
-   pair may be replaced transactionally; rollback restores that pair and the
-   prior absence of the new source/shim. This is bounded same-ABI additive
+   userdata, native-call, or loader contract. The canonical eighteen-key 0.22
+   pair may be replaced transactionally; rollback restores the immediately
+   preceding seventeen-key pair and the prior absence of the new source/shim. This is bounded same-ABI additive
    publication, not cross-ABI migration.
 2. **Source-first resolution:** source is authoritative for the complete test
    invocation. A provisionally selected static archive that later overlaps a
@@ -384,7 +389,7 @@ The final Titan design review established these invariants:
 - The installed private `titan.test` source is snapshotted into and published
   from the exact native generation stage. It remains compiler data outside the
   rock manifest and is committed in the same recoverable transaction.
-- Make owns one explicit 21-root native manifest and one executable under
+- Make owns one explicit 22-root native manifest and one executable under
   `.titan-tests`; there is no native group orchestrator or per-suite executable.
   `luarocks test` reaches it through `run_rock_tests.sh` and `make rock-test`.
   `BUSTED_FILTER` and `TITAN_FILTER` remain independent, and ordinary appended
@@ -401,8 +406,12 @@ The final Titan design review established these invariants:
   producer and one standard-runner complete compiler consumer with a single
   coverage report. ASan+UBSan remains an independent instrumented build, and the
   complete macOS gate remains manual and pre-merge.
+- `--no-uv-bootstrap` is an entrypoint-only standalone option. The aggregate
+  uses it so source-only `support.runtime` can own one supervisor Task and LIFO
+  same-Runtime cleanup per async case, including multiple sequential sessions.
+  Automatic-bootstrap tests compile child executables that omit the option.
 - Direct source-private imports let test-support declarations remain local.
   Host-side exact-provider coverage is retained only where native redirection
   cannot observe the number of `io.print` writes/current-output lookup, along
-  with the previously identified loader, process, sanitizer, provider, and
-  cross-Runtime boundaries.
+  with the previously identified loader, process, sanitizer, and provider
+  boundaries.

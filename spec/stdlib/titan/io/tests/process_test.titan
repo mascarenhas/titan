@@ -20,78 +20,84 @@ end
 
 function test_io_process_interactive_merged_output_and_status(
     _context: test.Context)
-  local rejected_nul = false
-  do
-    stream.popen("printf forbidden\0suffix")
-  catch
-    rejected_nul = true
-  end
-  test.assert(rejected_nul, "popen accepted an embedded NUL command")
+  runtime_test.run(function ()
+    local rejected_nul = false
+    do
+      stream.popen("printf forbidden\0suffix")
+    catch
+      rejected_nul = true
+    end
+    test.assert(rejected_nul, "popen accepted an embedded NUL command")
 
-  local pipe = stream.popen(
-      "IFS= read -r line; printf 'OUT:%s' \"$line\"; " ..
-      "printf ':ERR' >&2; exit 7")
-  defer pipe:close()
-  check_stream_interfaces(pipe)
-  pipe:write("hello world\n")
-  test.assert(read_process_output(pipe) == "OUT:hello world:ERR",
-              "interactive popen changed merged output")
+    local pipe = stream.popen(
+        "IFS= read -r line; printf 'OUT:%s' \"$line\"; " ..
+        "printf ':ERR' >&2; exit 7")
+    defer pipe:close()
+    check_stream_interfaces(pipe)
+    pipe:write("hello world\n")
+    test.assert(read_process_output(pipe) == "OUT:hello world:ERR",
+                "interactive popen changed merged output")
 
-  local first = pipe:wait()
-  local second = pipe:wait()
-  test.assert(first.code == 7 and not first.signal and
-              first.signal_number == 0,
-              "popen returned the wrong normal exit status")
-  test.assert(first.code == second.code and first.signal == second.signal and
-              first.signal_number == second.signal_number,
-              "popen did not retain its exit status")
+    local first = pipe:wait()
+    local second = pipe:wait()
+    test.assert(first.code == 7 and not first.signal and
+                first.signal_number == 0,
+                "popen returned the wrong normal exit status")
+    test.assert(first.code == second.code and first.signal == second.signal and
+                first.signal_number == second.signal_number,
+                "popen did not retain its exit status")
 
-  pipe:close()
-  pipe:close()
-  test.assert(not pipe:read() and not pipe:read_until("missing"),
-              "closed popen stream did not keep terminal EOF")
-  local after_close = pipe:wait()
-  test.assert(first.code == after_close.code and
-              first.signal == after_close.signal and
-              first.signal_number == after_close.signal_number,
-              "close changed a retained exit status")
+    pipe:close()
+    pipe:close()
+    test.assert(not pipe:read() and not pipe:read_until("missing"),
+                "closed popen stream did not keep terminal EOF")
+    local after_close = pipe:wait()
+    test.assert(first.code == after_close.code and
+                first.signal == after_close.signal and
+                first.signal_number == after_close.signal_number,
+                "close changed a retained exit status")
+  end)
 end
 
 function test_io_process_binary_delimiters(_context: test.Context)
-  local payload = "head\0middle\ntrail"
-  local pipe = stream.popen(
-      "dd bs=1 count=17 2>/dev/null; printf '|done'")
-  defer pipe:close()
-  pipe:write(payload)
-  test.assert(pipe:read_until("|", true) == payload,
-              "popen binary delimiter read changed bytes")
-  test.assert(pipe:read() == "done",
-              "popen delimiter read lost retained excess")
-  test.assert(not pipe:read() and not pipe:read_until("missing"),
-              "repeated popen reads did not return EOF")
-  local status = pipe:wait()
-  test.assert(status.code == 0 and not status.signal,
-              "binary popen command did not exit normally")
-  pipe:close()
+  runtime_test.run(function ()
+    local payload = "head\0middle\ntrail"
+    local pipe = stream.popen(
+        "dd bs=1 count=17 2>/dev/null; printf '|done'")
+    defer pipe:close()
+    pipe:write(payload)
+    test.assert(pipe:read_until("|", true) == payload,
+                "popen binary delimiter read changed bytes")
+    test.assert(pipe:read() == "done",
+                "popen delimiter read lost retained excess")
+    test.assert(not pipe:read() and not pipe:read_until("missing"),
+                "repeated popen reads did not return EOF")
+    local status = pipe:wait()
+    test.assert(status.code == 0 and not status.signal,
+                "binary popen command did not exit normally")
+    pipe:close()
+  end)
 end
 
 function test_io_process_close_terminates_and_reaps(
     _context: test.Context)
-  local pipe = stream.popen(
-      "printf 'READY\nUNREAD\n'; while :; do :; done")
-  defer pipe:close()
-  test.assert(pipe:read_until("\n", true) == "READY",
-              "running popen command did not become ready")
-  pipe:close()
-  pipe:close()
-  test.assert(not pipe:read() and not pipe:read_until("missing"),
-              "closing popen did not discard unread output")
+  runtime_test.run(function ()
+    local pipe = stream.popen(
+        "printf 'READY\nUNREAD\n'; while :; do :; done")
+    defer pipe:close()
+    test.assert(pipe:read_until("\n", true) == "READY",
+                "running popen command did not become ready")
+    pipe:close()
+    pipe:close()
+    test.assert(not pipe:read() and not pipe:read_until("missing"),
+                "closing popen did not discard unread output")
 
-  local first = pipe:wait()
-  local second = pipe:wait()
-  test.assert(first.signal == "term" and first.signal_number > 0,
-              "popen close did not terminate its running child")
-  test.assert(first.code == second.code and first.signal == second.signal and
-              first.signal_number == second.signal_number,
-              "popen close did not retain the signal exit status")
+    local first = pipe:wait()
+    local second = pipe:wait()
+    test.assert(first.signal == "term" and first.signal_number > 0,
+                "popen close did not terminate its running child")
+    test.assert(first.code == second.code and first.signal == second.signal and
+                first.signal_number == second.signal_number,
+                "popen close did not retain the signal exit status")
+  end)
 end

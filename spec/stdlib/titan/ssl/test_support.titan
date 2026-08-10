@@ -1,5 +1,6 @@
 -- TLS fixture ownership for ssl.tests.
 local test = import "test"
+local runtime_test = import "support.runtime"
 local async = import "async"
 local fs = import "fs"
 local ssl = import "ssl"
@@ -10,7 +11,7 @@ local PRIVATE_KEY = "spec/fixtures/ssl/server-key.pem"
 local TRUST_ROOT = "spec/fixtures/ssl/ca.pem"
 
 local function cleanup_path(context: test.Context, path: string)
-  context:cleanup(function ()
+  runtime_test.cleanup(function ()
     do
       fs.unlink(path)
     catch
@@ -31,12 +32,12 @@ local function temporary_path(context: test.Context): string
 end
 
 local function cleanup_server(context: test.Context, server: ssl.Server)
-  context:cleanup(function () server:close() end)
+  runtime_test.cleanup(function () server:close() end)
 end
 
 local function cleanup_connection(context: test.Context,
                                   connection: ssl.Connection)
-  context:cleanup(function () connection:close() end)
+  runtime_test.cleanup(function () connection:close() end)
 end
 
 local function listen_available(first_port: integer,

@@ -362,7 +362,8 @@ runtime, ABI, and interoperation machinery.
 # Usage
 
 ```sh
-$ titanc [--print-ast] [--static] [--test] [--no-line-directives] \
+$ titanc [--print-ast] [--static] [--test] [--no-uv-bootstrap] \
+    [--no-line-directives] \
     [--lua <path>] [--tree <path>] <module> [<module>]
 ```
 
@@ -408,6 +409,11 @@ titanc --test --tree . calc_test
 
 See [Testing Titan code](doc/language/standard-library-test.md) for source
 visibility, subtests, cleanup, filtering, output, and statuses.
+`--no-uv-bootstrap` is valid only for a normal standalone executable or a
+`--test` executable. It makes the generated entrypoint call `main(args)`
+directly even when an imported module installed the ordinary async bootstrap
+hook. The hook and module initialization remain unchanged; code using this
+option must explicitly own any `async.run`/`async.loop` sessions it needs.
 
 A logical module may be one flat source or a folder of immediate
 contributors. For module `M`, let `P` be its dotted name with slashes and `B`
@@ -645,12 +651,18 @@ modules](doc/language/static-compiled-modules.md).
 # Running the test suite
 
 The repository uses [Busted](https://lunarmodules.github.io/busted/) for
-compiler, packaging, and host-dependent Lua specs. Module-owned
-standard-library behavior lives under `spec/stdlib/titan/`: the Makefile names
-all 21 roots explicitly and compiles them together with one `titanc --test`
+compiler, packaging, and native dependency/build gates. There are no Lua files
+under `spec/stdlib/` and no root-level standard-library boundary specs.
+Module-owned standard-library behavior, including fresh-process and host-stdio
+cases, lives under `spec/stdlib/titan/`: compiled Titan parents launch focused
+standalone fixtures through C99 `system`, consume explicit temporary result
+files, and clean them with `defer`. The Makefile names
+all 22 roots explicitly and compiles them together with one `titanc --test`
 invocation. `make titan-stdlib-test-build` places the executable and synthetic
-runner outputs below `.titan-tests/`; `make titan-stdlib-test-run` executes that
-binary from the repository root, and `make titan-stdlib-test` performs both.
+runner outputs below `.titan-tests/`; it passes `--no-uv-bootstrap` so each
+async test explicitly owns one Runtime and completes Runtime-bound cleanup
+before that session returns. `make titan-stdlib-test-run` executes the binary
+from the repository root, and `make titan-stdlib-test` performs both.
 Temporary source-adjacent generated C/object files are cleaned generically
 without deleting author-written native fixtures.
 
@@ -677,7 +689,7 @@ Busted tree runs first, followed by the same aggregate native executable.
 `BUSTED_FILTER` and `TITAN_FILTER` are independent Lua-pattern selectors;
 filtering one domain does not skip the other, so use a leaf target when only one
 is wanted. A Titan filter changes execution only—the build still compiles all
-21 source-authoritative roots.
+22 source-authoritative roots.
 
 ```sh
 $ make stdlib-test
@@ -765,6 +777,7 @@ when it is no longer needed.
 ```
         --print-ast                       Print the AST.
         --test                            Build a native Titan test executable.
+        --no-uv-bootstrap                 Call standalone main directly even if titan.uv installs its bootstrap hook.
         -v, --verbose                     Print safely quoted effective compiler commands.
         --static                          Prefer static Titan archive providers.
         --no-line-directives              Omit Titan source #line directives from generated C.

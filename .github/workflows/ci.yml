@@ -659,6 +659,12 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh dense-array \
             .lua/bin/busted -o gtest -v spec/dense_array_runtime_spec.lua
 
+      - name: Run native coroutine sanitizer gate
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh coroutine-gc \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_lua_host_roots_coroutine_payloads_and_tags_across_gc$'
+
       - name: Run native async sanitizer gate (timer-fs)
         run: |
           bash spec/support/ci_sanitizer_capture.sh timer-tests \
@@ -674,33 +680,17 @@ jobs:
           MINICORO_TEST_CFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
           bash spec/support/ci_sanitizer_capture.sh core-uv \
-            .lua/bin/busted -o gtest -v \
-            spec/minicoro_spec.lua \
-            spec/stdlib/uv_native_handles_spec.lua \
-            spec/stdlib/uv_tasks_spec.lua \
-            spec/stdlib/uv_bootstrap_spec.lua
+            .lua/bin/busted -o gtest -v spec/minicoro_spec.lua
           bash spec/support/ci_sanitizer_capture.sh uv-task-tests \
             make titan-stdlib-test-run TITAN_FILTER='^uv%.task_tests%.'
+          bash spec/support/ci_sanitizer_capture.sh uv-runtime-tests \
+            make titan-stdlib-test-run TITAN_FILTER='^uv%.runtime_tests%.'
 
-      - name: Run coroutine transfer sanitizer gate
-        env:
-          TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
-          TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
-        run: |
-          bash spec/support/ci_sanitizer_capture.sh coroutine-transfer \
-            .lua/bin/busted -o gtest -v \
-            spec/stdlib/coroutine_spec.lua \
-            --name='coroutine standard module roots fresh terminal result and error transfers through pop-side GC'
-
-      - name: Run TLS/HTTP sanitizer boundary
-        env:
-          TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
-          TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
+      - name: Run native TLS/HTTP sanitizer gate
         run: |
           bash spec/support/ci_sanitizer_capture.sh ssl-http \
-            .lua/bin/busted -o gtest -v \
-            spec/stdlib/ssl_http_sanitizer_spec.lua \
-            --filter='streams a fragmented HTTPS request through TLS and llhttp'
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'
 
       - name: Run PEG/regex native sanitizer gate
         env:

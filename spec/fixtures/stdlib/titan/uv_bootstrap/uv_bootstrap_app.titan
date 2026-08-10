@@ -1,0 +1,50 @@
+local async = import "async"
+local fs = import "fs"
+local timer = import "timer"
+
+local function unhandled_origin(): value
+  timer.sleep(0)
+  raise "isolated-child-boom"
+  return nil
+end
+
+local function main_origin(): integer
+  timer.sleep(0)
+  raise "main-task-boom"
+  return 99
+end
+
+function main(args: {string}): integer
+  local mode? = args[1]
+  if not mode then
+    if #args == 0 and not args[0] and not args[-1] then return 0 end
+    return 30
+  elseif mode == "status" then
+    timer.sleep(0)
+    timer.yield()
+    return 17
+  elseif mode == "args" then
+    if args[0] or args[-1] then return 30 end
+    if #args ~= 3 then return 31 end
+    if args[2] ~= "one" or args[3] ~= "two" then return 32 end
+    return 0
+  elseif mode == "isolated" then
+    local marker = args[2]
+    async.run(unhandled_origin)
+    async.run(function (): value
+      timer.sleep(10)
+      fs.write_file(marker, "healthy-sibling-finished")
+      return nil
+    end)
+    return 0
+  elseif mode == "main-failure" then
+    local marker = args[2]
+    async.run(function (): value
+      timer.sleep(10)
+      fs.write_file(marker, "healthy-child-after-main-failure")
+      return nil
+    end)
+    return main_origin()
+  end
+  return 33
+end

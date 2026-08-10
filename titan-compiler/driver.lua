@@ -2615,7 +2615,7 @@ static int pmain(lua_State *L) {
     }
 
     lua_getfield(L, LUA_REGISTRYINDEX, TITAN_MAIN_BOOTSTRAP_KEY);
-    if (lua_isnil(L, -1)) {
+    if ($SKIP_MAIN_BOOTSTRAP || lua_isnil(L, -1)) {
         lua_pop(L, 1);                 /* direct path: main, arguments */
         lua_call(L, 1, 1);
     } else {
@@ -2672,7 +2672,9 @@ int main(int argc, char** argv) {
 
 ]]
 
-local function write_entrypoint(modname, entrypoint_c, program_name)
+local function write_entrypoint(modname, entrypoint_c, program_name,
+                                options)
+    options = options or {}
     entrypoint_c = entrypoint_c or
         (modname:gsub("[.]", "/") .. "__entrypoint.c")
     local fd, err = io.open(entrypoint_c, "w")
@@ -2681,6 +2683,7 @@ local function write_entrypoint(modname, entrypoint_c, program_name)
         PROGNAME = program_name or modname:gsub(".*[.]", ""),
         LUAOPEN_FN = "luaopen_" .. modname:gsub("[.]", "_"),
         MODNAME = modname,
+        SKIP_MAIN_BOOTSTRAP = options.no_uv_bootstrap and "1" or "0",
     }))
     if err then return nil, err end
     fd:close()
@@ -4612,7 +4615,8 @@ end
 
 function driver.compile_program(modname, libnames, link, verbose, extra_objects,
                                 program_output, static_archives,
-                                entrypoint_output, program_name)
+                                entrypoint_output, program_name, options)
+    options = options or {}
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     local execname = program_output or modname:gsub("[.]", "/")
@@ -4625,7 +4629,7 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
     os.remove(execname)
 
     local entrypoint_c, err = write_entrypoint(
-        modname, entrypoint_name, program_name)
+        modname, entrypoint_name, program_name, options)
     if err then return nil, err end
     local entrypoint_o = entrypoint_c:gsub("[.]c$", ".o")
     os.remove(entrypoint_o)

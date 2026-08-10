@@ -2192,7 +2192,7 @@ rock-build: titan
 TITAN_STDLIB_TEST_ROOTS := \
 	coroutine.tests iter.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test async.tests \
-	uv.task_tests io.tests fs.tests timer.tests net.tests ssl.tests \
+	uv.task_tests io.tests fs.tests timer.tests test.tests net.tests ssl.tests \
 	http.tests url.tests os.tests os.process_tests uv.runtime_tests
 TITAN_TEST_BUILD_DIR ?= .titan-tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/coroutine/tests__main
@@ -2204,7 +2204,7 @@ TITAN_FILTER ?=
 TITAN_TEST_CPPFLAGS = $(if $(strip $(TITAN_EXTRA_CPPFLAGS)),$(TITAN_EXTRA_CPPFLAGS),$(TITAN_TEST_EXTRA_CPPFLAGS))
 TITAN_TEST_CFLAGS = $(if $(strip $(TITAN_EXTRA_CFLAGS)),$(TITAN_EXTRA_CFLAGS),$(TITAN_TEST_EXTRA_CFLAGS))
 TITAN_TEST_LDFLAGS = $(if $(strip $(TITAN_EXTRA_LDFLAGS)),$(TITAN_EXTRA_LDFLAGS),$(TITAN_TEST_EXTRA_LDFLAGS))
-STDLIB_BUSTED_TESTS := $(sort $(wildcard spec/stdlib/*_spec.lua)) \
+STDLIB_BUSTED_TESTS := \
 	spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua \
 	spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua \
 	spec/minicoro_spec.lua spec/readline_build_spec.lua \
@@ -2231,12 +2231,23 @@ titan-stdlib-test-build: ## Build every native Titan stdlib test into one execut
 	@mkdir -p $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR))
 	@set +e; \
 	( cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
-	  TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS))) \
+	  cp $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/uv_stdio_probe.h)) \
+	    uv_stdio_probe.h && \
+	  $(CC) -std=c99 -Wall -Wextra -Werror -fPIC \
+	    $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
+	    -I$(call make_shell_quote,$(abspath spec/fixtures/stdlib/native)) \
+	    -c $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/uv_stdio_probe.c)) \
+	    -o uv_stdio_probe.o && \
+	  $(CC) -std=c99 -Wall -Wextra -Werror \
+	    $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
+	    $(call make_shell_quote,$(abspath spec/fixtures/stdlib/native/os_process_host_child.c)) \
+	    $(TITAN_TEST_LDFLAGS) -o os_process_host_child && \
+	  TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) -I.)) \
 	  TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CFLAGS))) \
 	  TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS))) \
-	    $(TEST_TITANC) --test --tree \
+	    $(TEST_TITANC) --test --no-uv-bootstrap --tree \
 	      $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
-	      $(TITAN_STDLIB_TEST_ROOTS) ); \
+	      $(TITAN_STDLIB_TEST_ROOTS) -X uv_stdio_probe.o ); \
 	status=$$?; \
 	bash spec/support/clean_generated_test_artifacts.sh --keep-output; \
 	if test $$status -ne 0; then rm -rf -- $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); fi; \
@@ -2324,7 +2335,7 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 		titan/test__test_support.c titan/test__test_support.o titan/test__test_runner.c \
 		titan/test__test_runner.o titan/test__test_entrypoint.c titan/test__test_entrypoint.o
 	rm -f test_runner_fixture test_runner_empty test_runner_static \
-		titan/test test_runner_progname__main \
+		test_runner_bootstrap titan/test test_runner_progname__main \
 		test_runner_collision test_runner_collision.titan \
 		test_runner_collision__test_support.titan \
 		test_runner_collision__test_runner.titan \
@@ -2332,7 +2343,7 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 		test_runner_hierarchy.titan
 	@if [ ! -d url ]; then rm -f url; fi
 	rm -rf test_runner_fixture.dSYM test_runner_empty.dSYM \
-		test_runner_static.dSYM titan/test.dSYM \
+		test_runner_static.dSYM test_runner_bootstrap.dSYM titan/test.dSYM \
 		test_runner_progname__main.dSYM url.dSYM \
 		nested/tests__main.dSYM
 	rm -f nested/tests__main nested/tests__main__test_support.c \

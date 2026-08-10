@@ -1,5 +1,6 @@
 -- Shared fixture ownership for uv Task tests.
 local test = import "test"
+local runtime_test = import "support.runtime"
 local async = import "async"
 local coroutine = import "coroutine"
 local fs = import "fs"
@@ -49,7 +50,7 @@ end
 
 local function temporary_file(context: test.Context): string
   local path = fs.tmpname()
-  context:cleanup(function ()
+  runtime_test.cleanup(function ()
     fs.unlink(path)
   end)
   return path

@@ -342,12 +342,11 @@ provide all GC reachability for the coroutines and their values. Titan imports
 and Lua requires enter the same canonical DSO, which is the sole native owner,
 while every Lua state gets its own module instance and runtime object.
 
-The serial coroutine test that must rebuild its native backend uses an
-isolated exact `titan/coroutine.so` layout, or preserves and restores the full
-production `titan.so`, conditional dSYM, and generated coroutine shim. Its
-private Titan path contains no shallow production container, so prefix lookup
-can reach the exact terminal candidate. This is a test-only variant, not an
-installed layout.
+Coroutine behavior tests use the canonical combined provider. Observable
+Lua-host GC and API-error behavior runs from the module-owned native suite;
+generated-C, transfer-rooting, and Lua-API implementation mechanics remain with
+existing compiler/native harness coverage. The suite does not rebuild an exact
+`coroutine.so` variant or source-rewrite the production implementation.
 
 When a coroutine yields to a non-immediate outer tag, the coroutine whose
 `mco_resume` is returning becomes `MCO_SUSPENDED`. The coroutines between

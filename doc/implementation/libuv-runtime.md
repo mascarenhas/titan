@@ -521,7 +521,11 @@ close.
 Module initialization records the main Lua thread, applies `uv_setup_args`
 when a generated entrypoint published argc/argv, and installs the private main
 bootstrap hook. It also changes only a default Unix `SIGPIPE` disposition to
-ignored so libuv can report closed-stream writes.
+ignored so libuv can report closed-stream writes. A generated entrypoint built
+with `--no-uv-bootstrap` still performs this complete initialization and leaves
+the hook installed, but takes its direct `main(args)` branch. This allows an
+application or test runner to own sequential outer-loop sessions explicitly;
+it does not create a second uv initialization mode.
 
 The standalone bootstrap schedules `main` as a Task and drives the same outer
 loop. It waits for all Tasks through Runtime liveness, not a low-level joiner

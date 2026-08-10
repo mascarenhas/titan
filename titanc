@@ -15,6 +15,8 @@ p:flag('--print-ast', 'Print the AST.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
 p:flag('--static', 'Prefer static Titan archive providers.')
 p:flag('--test', 'Build a native Titan test executable.')
+p:flag('--no-uv-bootstrap',
+    'Call standalone main directly even if titan.uv installs its bootstrap hook.')
 p:flag('--no-line-directives',
     'Omit source #line directives from generated C.')
 p:option('-u --lua', 'Path to Lua source tree (source checkouts only; installed compilers use their matching Lua SDK).')
@@ -154,6 +156,10 @@ if args.test then
     end
     if #errors > 0 then exit(table.concat(errors, "\n")) end
     main_module = test_runner.MODULE_NAME
+end
+
+if args.no_uv_bootstrap and not main_module then
+    exit("--no-uv-bootstrap is only valid when compiling a standalone executable")
 end
 
 local finalized, finalize_errors =
@@ -409,7 +415,8 @@ if main_module then
             args.link, args.verbose, args.extra_object,
             program_output, selected_static_archives,
             test_entrypoint_output,
-            args.test and requested_modules[1]:gsub(".*[.]", "") or nil)
+            args.test and requested_modules[1]:gsub(".*[.]", "") or nil,
+            { no_uv_bootstrap = args.no_uv_bootstrap })
         if not ok then
             table.insert(errors, link_failed("program", main_module, term, code))
         end

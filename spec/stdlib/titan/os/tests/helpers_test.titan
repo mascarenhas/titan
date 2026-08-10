@@ -78,3 +78,18 @@ function test_paths_and_process_identity(_context: test.Context)
   test.assert(system.pid() > 0, "pid was not positive")
   test.assert(system.ppid() >= 0, "ppid was negative")
 end
+
+function test_lua_host_rejects_exepath_without_standalone_arguments(
+    _context: test.Context)
+  local output, why, code = command.capture({
+    "lua", "-E", "-e", [==[
+      local system = require "titan.os"
+      local succeeded, failure = pcall(system.exepath)
+      assert(not succeeded)
+      assert(failure ==
+        "os.exepath is only available in a compiled Titan program", failure)
+    ]==],
+  })
+  test.assert(why == "exit" and code == 0,
+              "Lua-host os.exepath probe failed: " .. output)
+end

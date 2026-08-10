@@ -67,8 +67,8 @@ not add epicycles around what may be a misunderstood simpler design.
      ABI-0.22 prefix, builds and installs the optimized bundled provider, and
      packs the complete prepared tree before tests or a system-mode reinstall.
      It then runs, without LuaCov, the retained root build/runtime/packaging
-     specs, every retained `spec/stdlib/*_spec.lua` host boundary, and the one
-     21-root native stdlib executable through `make stdlib-test`.
+     specs and the one 22-root native stdlib executable through `make
+     stdlib-test`; there are no standard-library Lua boundary specs.
      Disposable generated fixtures and test objects use `-O0`; purpose-built
      native harnesses retain their explicit flags, and the provider packed for
      consumers remains optimized. After the uncovered tests it builds the
@@ -94,7 +94,7 @@ not add epicycles around what may be a misunderstood simpler design.
      and uses `TITAN_FILTER` with repeated `make titan-stdlib-test-run`
      invocations when a fresh process is useful. Filters select focused lifetime
      cases; they are not group names and never trigger recompilation. Keep the retained
-     owner/callback, coroutine-transfer, TLS/HTTP, dense-Array, PEG/string, and
+     owner/callback, observable coroutine-GC, TLS/HTTP, dense-Array, PEG/string, and
      production net/OS gates, but leave the complete stdlib behavior run in the
      regular producer.
 
@@ -307,7 +307,7 @@ make rock-test BUSTED_FILTER='parser' TITAN_FILTER='^http[.]tests[.]'  # indepen
 make stdlib-test                                    # complete retained stdlib/runtime category without coverage
 make busted-test BUSTED_FILTER='for loop'           # Busted only
 make titan-stdlib-test TITAN_FILTER='^net[.]tests[.]' # build/run the aggregate native suite
-make titan-stdlib-test-build                        # build all 21 roots once under .titan-tests
+make titan-stdlib-test-build                        # build all 22 roots once under .titan-tests
 make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]' # reuse that executable
 luarocks make && bash spec/support/ci_test_groups.sh compiler  # complete covered compiler/language group
 make clean                                           # remove generated artifacts; `make distclean` also removes downloaded Lua/Readline/LuaRocks/libbacktrace/libuv/OpenSSL/llhttp trees
@@ -316,10 +316,18 @@ busted                                              # full Busted tree — MUST 
 busted spec/parser_spec.lua                         # single spec file
 busted spec/coder/coder_spec.lua --filter='for loop' # single test (Lua pattern on test name)
 
-./titanc [--print-ast] [--test] [-v] [--static] [--no-line-directives] \
+./titanc [--print-ast] [--test] [--no-uv-bootstrap] [-v] [--static] \
+  [--no-line-directives] \
   [--lua <luasrc>] [--tree <srcroot>] \
   [-l lib1,lib2] [-X object...] <module>...
 ```
+
+`--no-uv-bootstrap` is valid only for a standalone program or `--test`. It
+changes only the generated entrypoint's hook choice: imports and `titan.uv`
+initialize normally, argc/argv reconstruction and protected error handling are
+preserved, and the registry hook is neither cleared nor identified. The
+repository aggregate uses it for explicit sequential Runtime ownership;
+children that test automatic bootstrap behavior deliberately omit it.
 
 **Coverage is for compiler and language behavior, not library suites.** Do not
 run library API/runtime tests under LuaCov when their purpose is to test the
@@ -348,9 +356,15 @@ gates also live there (`libuv_build_spec`, `rockspec_spec`,
 language specs are split by layer:
 checker-only specs (run the checker, never generate or execute code) live
 under `spec/checker/`, while compiler end-to-end specs (generate C, compile,
-run) live under `spec/coder/`. Standard-library API and runtime behavior live
-under `spec/stdlib/`, including `coroutine` and the
-async-I/O modules; these suites deliberately run without LuaCov. Do not put a
+run) live under `spec/coder/`. Standard-library API and runtime behavior lives as Titan source under
+`spec/stdlib/titan/`, including `coroutine` and the async-I/O modules, and runs
+in the unified native executable without LuaCov. There are no Lua files under
+`spec/stdlib/` and no root-level standard-library `*_boundary_spec.lua` files.
+Fresh-process public behavior belongs in the owning native Titan module: a
+compiled parent may launch a focused standalone fixture through C99 `system`,
+receive its explicit result through a temporary file, and remove that file with
+`defer`. Do not retain implementation/codegen inspection, provider-cache
+internals, or redundant FFI/interposition checks as library behavior. Do not put a
 library integration suite under `spec/checker/` or `spec/coder/` merely
 because it typechecks or compiles Titan source. If it reveals missing compiler
 coverage, add a small compiler-focused case for that path instead. A sizable
@@ -378,8 +392,9 @@ artifact, external-`--tree`, and mixed-source traceback behavior belongs in
 `spec/coder/folder_modules_spec.lua`. Keep uv runtime behavior in the existing
 non-LuaCov stdlib suites.
 Prefix-container public compilation and generated-shim behavior live in
-`spec/coder/multi_module_libraries_spec.lua`; native support-loader mode and
-promotion behavior live in `spec/stdlib/loadlibglobal_spec.lua`. Keep the
+`spec/coder/multi_module_libraries_spec.lua`; support-loader publication and
+promotion are covered by that compiler suite plus `rockspec_spec.lua` and
+`stdlib_installer_spec.lua`, without a duplicate library boundary spec. Keep the
 root-major provider/metadata-claim matrix in `spec/driver_spec.lua`.
 Static-provider coverage is intentionally split: bounded ELF/Mach-O/archive
 and synthetic universal-container parsing belongs in
@@ -401,38 +416,45 @@ the spec file), so subdir specs still run from repo root. The shared
 compile/run/import scaffolding (`parse`, `compile`, `call`, `run_coder`,
 `generate_modules`, `build_so_chain`, `check_against_so`, `run_checker`,
 `check_errs`, `DEPTH_PROBE`, ...) lives in **`spec/support/helpers.lua`**,
-`require`d as `spec.support.helpers`; async standard-library tests use
-`spec/support/async_stdlib.lua` plus the filesystem and OS/process extensions
-`spec/support/fs_test_support.lua` and `spec/support/os_test_support.lua` to
-compile inline Titan sources and execute inline Lua assertions in unique
-`/tmp` workspaces. Only genuine reusable C/H host and interposer artifacts
-remain under `spec/fixtures/stdlib/native/`. These tests treat Makefile-owned
-combined `titan.so`/`titan.a`, generated standard shims, and the private libuv
-archive as
-read-only. These helpers may not clean
-or rebuild shared root artifacts during Busted.
+`require`d as `spec.support.helpers`. The remaining
+`spec/support/async_stdlib.lua` and OS process support are build/production-smoke
+infrastructure, not a home for standard-library behavior assertions. Reusable
+C/H host fixtures live under `spec/fixtures/stdlib/native/`; compiled Titan
+fresh-process fixtures live under `spec/fixtures/stdlib/titan/`. Tests treat the
+Makefile-owned combined `titan.so`/`titan.a`, generated standard shims, and the
+private libuv archive as read-only. Helpers may not clean or rebuild shared root
+artifacts during Busted.
 Helpers pull in luassert explicitly (`require 'luassert'`) because a
 `require`d module does not inherit busted's `assert` global. Set
 `helpers.verbose = true` (was a per-file `local verbose`) to print `cc`
 command lines and keep generated `.c` files.
 
-Native standard-library behavior lives in 21 module-owned roots under
+Native standard-library behavior lives in 22 module-owned roots under
 `spec/stdlib/titan/`. `TITAN_STDLIB_TEST_ROOTS` names every root explicitly;
-`make titan-stdlib-test-build` invokes the active `titanc --test` once from
-`.titan-tests/`, with an absolute source tree, so every root remains
-source-authoritative. The first current root, `coroutine.tests`, owns the one
+`make titan-stdlib-test-build` invokes the active
+`titanc --test --no-uv-bootstrap` once from `.titan-tests/`, with an absolute
+source tree, so every root remains source-authoritative. The generated runner
+is Task-independent; each async case explicitly owns `async.run`/`async.loop`
+through source-only `support.runtime`, and Runtime-bound cleanup runs in LIFO
+order inside that same supervisor Task before the loop returns. Ordinary later
+`Context:cleanup` is only for non-Runtime resources. The first current root, `coroutine.tests`, owns the one
 `.titan-tests/coroutine/tests__main` executable and its synthetic
 support/runner/entrypoint artifacts. Execute it from the repository root with
 `make titan-stdlib-test-run`, because fixtures rely on that CWD; `make
 titan-stdlib-test` performs both steps. `TITAN_FILTER` adds one run-time Lua
-pattern but still compiles all 21 roots. The separate build/run targets let CI
+pattern but still compiles all 22 roots. The separate build/run targets let CI
 and ASan reuse one executable for several fresh filtered processes without
 reintroducing native groups.
 
-The retained Busted specs own genuine host, process, build, loader, and
-interposition boundaries; `make rock-test` runs them and then the aggregate
+The retained Busted specs own compiler, provider-publication, packaging, and
+native dependency/build gates; public standard-library host and process behavior
+belongs to the aggregate native executable. Its narrow parent-stdio probe is
+linked into the compiled parent, which launches standalone Titan children with
+C99 `system`; each child reports through a temporary result file removed by
+`defer`. `make rock-test` runs the retained Busted gates and then the aggregate
 native executable. There are no per-suite native scripts, named host group
-selectors, or Busted wrappers around Titan cases. `run_with_timeout.sh` gives the
+selectors, root standard-library boundary specs, or Busted wrappers around
+Titan cases. `run_with_timeout.sh` gives the
 executable its own Bash process group, enforces a bounded deadline with
 `TERM`/`KILL`, and preserves its exit status. The Make recipe streams merged
 stdout/stderr through a pipe rather than a regular file, preserving the parent
@@ -460,17 +482,12 @@ and restore the prepared runtime archive, combined standard-library
 DSO/archive/dSYM, all generated shims, and canonical test-support source around
 legacy compiler specs that clean root artifacts.
 
-The serial `spec/stdlib/coroutine_spec.lua` suite temporarily exercises an
-isolated exact-provider path, but must restore the prepared runtime, complete
-production `titan.so`/`titan.a`/dSYM, generated coroutine shim, and mtimes in
-teardown so a later packaging test does not rebuild the whole standard
-library. It is the one surviving standard-library source-rewrite exception:
-one variant deterministically forces GC in the otherwise inaccessible native
-resume-to-transfer-root window, and a second interposes Lua stack operations
-to prove the otherwise inaccessible `lua_checkstack` failure path restores the
-exact stack. Both require unique anchors, build isolated coroutine providers,
-and must disappear if those boundaries become directly injectable. This
-exception does not authorize source rewriting in `titan.uv` tests.
+Standard-library tests do not rewrite production source or inspect generated
+objects to re-prove codegen mechanics. Coroutine transfer rooting, checked Lua
+API use, loader publication, and similar implementation contracts remain owned
+by the existing compiler/native harness coverage; library tests exercise their
+observable public behavior instead. This rule also forbids recreating source
+transformers or interposition-only variants in `titan.uv` tests.
 
 Async standard-library behavioral specs compile against the canonical
 production modules. Keep them centered on public callback-continuation
@@ -1495,9 +1512,8 @@ stdio inheritance always uses wrapped pipe/TTY streams with
   (the shared helper retains compatibility fallbacks for older trees).
   Artifacts (`test.c`, `test.so`, `test.a`, `./test`, and exact `*.o` outputs)
   land in the repo root;
-  `after_each` and the shared application helpers clean them. These cases
-  consume the prepared runtime archive; only the serial coroutine suite may
-  invalidate it inside its explicit preserve/rebuild/restore boundary. Set
+  `after_each` and the shared application helpers clean them. These cases consume the prepared runtime archive; standard-library native
+  tests and fixtures must not invalidate that shared Make-owned image. Set
   `helpers.verbose = true` in `spec/support/helpers.lua` to see `cc` command
   lines and keep generated `.c` files.
 - The **DSO-selected import path** (a dependency reachable only as a compiled

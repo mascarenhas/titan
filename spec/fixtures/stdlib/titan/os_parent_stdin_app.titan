@@ -1,0 +1,40 @@
+local fs = import "fs"
+local stream = import "io"
+local system = import "os"
+local str = import "string"
+
+local function exercise_parent_stdin()
+  local reader: stream.ReaderCloser = system.stdin
+  local writer: stream.Writer = system.stdout
+  local diagnostics: stream.Writer = system.stderr
+  if not reader or not writer or not diagnostics then
+    raise "parent stdio Interface conversion produced nil"
+  end
+  if system.stdin:read_until("|", true) ~= "first" then
+    raise "parent stdin delimiter read changed"
+  end
+  if system.stdin:read() ~= "second" then
+    raise "parent stdin retained bytes changed"
+  end
+  if system.stdin:read() then raise "parent stdin did not reach EOF" end
+  system.stdin:close()
+  if system.stdin:read() then raise "borrowed stdin close changed EOF" end
+end
+
+function main(arguments: {string}): integer
+  local result_path? = arguments[1]
+  if not result_path then return 2 end
+  local succeeded = true
+  local result = "parent-input-ok"
+  do
+    exercise_parent_stdin()
+  catch
+    succeeded = false
+    result = str.tostring(error) .. "\n" .. traceback
+  end
+  local report = "ERROR:" .. result
+  if succeeded then report = "OK:" .. result end
+  fs.write_file(result_path as string, report)
+  if succeeded then return 0 end
+  return 1
+end

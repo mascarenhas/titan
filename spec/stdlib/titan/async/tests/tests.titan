@@ -1,5 +1,6 @@
 -- Native channel, combinator, and Task behavior tests for titan.async.
 local test = import "test"
+local runtime_test = import "support.runtime"
 local async = import "async"
 local timer = import "timer"
 local support = import "async.test_support"

@@ -189,22 +189,30 @@ location contract.
 ## Standalone asynchronous bootstrap
 
 The generated runner has an ordinary Titan `main`. It does not own a scheduler
-or special-case asynchronous tests. When an imported standard module installs
-the existing standalone async bootstrap, that bootstrap invokes the complete
-runner inside one Task and one Runtime. Test bodies and cleanup callbacks can
-suspend through the usual library protocol.
+or special-case asynchronous tests. Without another option, an imported
+standard module may install the existing standalone async bootstrap, which
+invokes the complete runner inside one Task and one Runtime.
 
-Consequently, a test callback cannot recursively call `async.loop`, observe
-Runtime cleanup after the runner returns, or establish a second Runtime.
-Repository tests whose oracle crosses one of those lifecycle boundaries keep a
-host/subprocess harness rather than reaching through private bootstrap registry
-state or adding a second runner protocol.
+`--no-uv-bootstrap` changes only the generated entrypoint's choice after module
+initialization: it takes the ordinary direct call to runner `main` even when the
+registry hook is non-nil. It does not clear or identify the hook and does not
+change `titan.uv`. The repository aggregate uses this option so its source-only
+`support.runtime` helper can establish sequential sessions. `run(body)` creates
+one supervisor Task, runs `async.loop`, and re-raises the body's original value
+with its pinned traceback after all registered LIFO Runtime cleanup completes.
+A Runtime-bound Task or handle must be registered there; later
+`Context:cleanup` cannot suspend in a Runtime that already ended.
+
+The runner remains Task-independent in both modes. Automatic-bootstrap behavior
+is tested by separately compiled child programs that deliberately omit the
+option, rather than by exposing private registry state or adding a runner
+lifecycle protocol.
 
 ## Repository dogfooding
 
-The Makefile's `TITAN_STDLIB_TEST_ROOTS` manifest names 21 module-owned roots
+The Makefile's `TITAN_STDLIB_TEST_ROOTS` manifest names 22 module-owned roots
 under `spec/stdlib/titan/`. `make titan-stdlib-test-build` makes every one an
-explicit root in a single `titanc --test` invocation: source remains
+explicit root in a single `titanc --test --no-uv-bootstrap` invocation: source remains
 authoritative, discovery sees the complete checked closure, and no import-only
 aggregator can be shadowed by a compiled provider. The command runs from
 `.titan-tests/` with an absolute source tree. Its first current root,
@@ -215,7 +223,7 @@ module translation units are temporarily generated beside their Titan sources.
 
 `make titan-stdlib-test-run` returns to the repository root before executing,
 because several fixtures use repository-relative paths. `TITAN_FILTER` supplies
-one Lua pattern to this already built executable; it never changes the 21-root
+one Lua pattern to this already built executable; it never changes the 22-root
 compile. `make titan-stdlib-test` composes build and run, while the split leaf
 targets let sanitizer and focused development runs reuse one build in multiple
 fresh processes. `BUSTED_FILTER` is independent and belongs to

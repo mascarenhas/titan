@@ -2524,9 +2524,43 @@ exit 73
             assert.equal(1, count_literal(stdlib_job,
                 "test_runtime_shutdown_closes_native_handles_but_not_files$"),
                 stdlib_job)
-            assert.truthy(makefile:find(
+            assert.falsy(makefile:find(
                 "$(sort $(wildcard spec/stdlib/*_spec.lua))", 1, true),
                 makefile)
+            assert.falsy(makefile:find("STDLIB_BOUNDARY_TESTS", 1, true),
+                makefile)
+            for _, native_build_contract in ipairs({
+                "spec/fixtures/stdlib/native/uv_stdio_probe.h",
+                "spec/fixtures/stdlib/native/uv_stdio_probe.c",
+                "spec/fixtures/stdlib/native/os_process_host_child.c",
+                "-X uv_stdio_probe.o",
+            }) do
+                assert.truthy(makefile:find(
+                    native_build_contract, 1, true), native_build_contract)
+            end
+            assert.falsy(read_file(
+                "spec/stdlib/titan/uv/runtime_tests.titan"):find(
+                    "${CC:-cc}", 1, true))
+            assert.falsy(read_file(
+                "spec/stdlib/titan/os/process_tests/" ..
+                "host_process_test.titan"):find("${CC:-cc}", 1, true))
+            for entry in lfs.dir("spec") do
+                assert.falsy(entry:match("_boundary_spec[.]lua$"), entry)
+            end
+            local function assert_no_stdlib_lua(directory)
+                for entry in lfs.dir(directory) do
+                    if entry ~= "." and entry ~= ".." then
+                        local path = directory .. "/" .. entry
+                        local mode = assert(lfs.attributes(path, "mode"))
+                        if mode == "directory" then
+                            assert_no_stdlib_lua(path)
+                        else
+                            assert.falsy(entry:match("[.]lua$"), path)
+                        end
+                    end
+                end
+            end
+            assert_no_stdlib_lua("spec/stdlib")
             for _, retained in ipairs({
                 "spec/asan_generated_c_context_spec.lua",
                 "spec/dense_array_runtime_spec.lua",
@@ -2643,8 +2677,7 @@ exit 73
                 "LIBUV_MODE=system OPENSSL_MODE=system",
                 "OPENSSL_MODE=system",
                 "brew install cmake libuv openssl@3 pkgconf",
-                "spec/stdlib/ssl_http_sanitizer_spec.lua",
-                "streams a fragmented HTTPS request through TLS and llhttp",
+                "test_ssl_http_fresh_process_sanitizer_composition$",
                 "libssl-dev", "perl",
             }) do
                 assert.truthy(workflow:find(contract, 1, true), contract)
@@ -2672,7 +2705,6 @@ exit 73
                 "compiler_tests=()",
                 "compiler_unit_tests=()",
                 "compiler_isolated_coverage_tests=()",
-                "spec/stdlib/*_spec.lua",
                 "spec/asan_generated_c_context_spec.lua",
                 "spec/dense_array_runtime_spec.lua",
                 "spec/libuv_build_spec.lua",
@@ -2697,6 +2729,7 @@ exit 73
                 "compiler-core", "compiler-heavy", "library-serial",
                 "library-uv-fs", "library-net-os", "library-peg-string",
                 "libraries)", "Library ", "worker", "awk",
+                "spec/*_boundary_spec.lua",
             }) do
                 assert.falsy(groups:find(removed, 1, true), removed)
             end
@@ -2731,30 +2764,32 @@ exit 73
                 '-fsanitize=address,undefined'), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(5, count_literal(sanitizer_job,
+            assert.equal(8, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
+                "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
+                    "payloads_and_tags_across_gc$'",
                 "TITAN_FILTER='test_timer_'",
                 "TITAN_FILTER='test_fs_'",
                 "TITAN_FILTER='^uv%.task_tests%.'",
+                "TITAN_FILTER='^uv%.runtime_tests%.'",
+                "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",
                 "TITAN_FILTER='test_peg_roots_and_releases_" ..
                     "titan_callback_patterns$'",
                 "TITAN_FILTER='test_regex_gc_rooting$'",
             }) do
                 assert.equal(1, count_literal(sanitizer_job, filter), filter)
             end
-            assert.truthy(sanitizer_job:find(
-                "spec/stdlib/uv_native_handles_spec.lua", 1, true),
-                sanitizer_job)
-            assert.truthy(sanitizer_job:find(
-                "spec/stdlib/uv_tasks_spec.lua", 1, true), sanitizer_job)
-            assert.truthy(sanitizer_job:find(
-                "spec/stdlib/uv_bootstrap_spec.lua", 1, true), sanitizer_job)
-            assert.truthy(sanitizer_job:find(
-                "spec/stdlib/coroutine_spec.lua", 1, true), sanitizer_job)
-            assert.truthy(sanitizer_job:find(
-                "spec/stdlib/ssl_http_sanitizer_spec.lua", 1, true),
-                sanitizer_job)
+            for _, removed in ipairs({
+                "spec/stdlib/uv_native_handles_spec.lua",
+                "spec/stdlib/uv_tasks_spec.lua",
+                "spec/stdlib/uv_bootstrap_spec.lua",
+                "spec/coroutine_runtime_boundary_spec.lua",
+                "spec/ssl_http_sanitizer_boundary_spec.lua",
+            }) do
+                assert.falsy(sanitizer_job:find(removed, 1, true),
+                    sanitizer_job)
+            end
             assert.truthy(sanitizer_job:find(
                 "bash spec/support/ci_peg_string_sanitizer_smoke.sh",
                 1, true), sanitizer_job)
@@ -2803,6 +2838,10 @@ exit 73
                     { ".lua/bin/busted" },
                 },
                 {
+                    "Run native coroutine sanitizer gate",
+                    { "make titan-stdlib-test-run" },
+                },
+                {
                     "Run native async sanitizer gate (timer-fs)",
                     { "make titan-stdlib-test-run" },
                 },
@@ -2811,12 +2850,8 @@ exit 73
                     { ".lua/bin/busted", "make titan-stdlib-test-run" },
                 },
                 {
-                    "Run coroutine transfer sanitizer gate",
-                    { ".lua/bin/busted" },
-                },
-                {
-                    "Run TLS/HTTP sanitizer boundary",
-                    { ".lua/bin/busted" },
+                    "Run native TLS/HTTP sanitizer gate",
+                    { "make titan-stdlib-test-run" },
                 },
                 {
                     "Run PEG/regex native sanitizer gate",

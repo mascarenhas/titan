@@ -1,0 +1,75 @@
+-- Native-test access to the host shell through Lua's standard os/io library.
+local common = import "support.common"
+local cstdlib = foreign import "stdlib.h"
+
+local type Renderer = ({string}) -> string
+local type Executor = ({string}) -> (boolean?, string, integer)
+local type Capturer = ({string}) -> (string, string, integer)
+
+local renderer: Renderer? = nil
+local executor: Executor? = nil
+local capturer: Capturer? = nil
+
+local function renderer_function(): Renderer
+  if not renderer then
+    renderer = common.lua_helper([==[
+      local function quote(argument)
+        return "'" .. argument:gsub("'", "'\\''") .. "'"
+      end
+      return function(argv)
+        local command = {}
+        for index = 1, #argv do command[index] = quote(argv[index]) end
+        return table.concat(command, " ")
+      end
+    ]==]) as Renderer
+  end
+  return renderer as Renderer
+end
+
+local function executor_function(): Executor
+  if not executor then
+    executor = common.lua_helper([==[
+      local function quote(argument)
+        return "'" .. argument:gsub("'", "'\\''") .. "'"
+      end
+      return function(argv)
+        local command = {}
+        for index = 1, #argv do command[index] = quote(argv[index]) end
+        return os.execute(table.concat(command, " "))
+      end
+    ]==]) as Executor
+  end
+  return executor as Executor
+end
+
+local function capturer_function(): Capturer
+  if not capturer then
+    capturer = common.lua_helper([==[
+      local function quote(argument)
+        return "'" .. argument:gsub("'", "'\\''") .. "'"
+      end
+      return function(argv)
+        local command = {}
+        for index = 1, #argv do command[index] = quote(argv[index]) end
+        local pipe, message = io.popen(table.concat(command, " ") .. " 2>&1", "r")
+        if not pipe then return tostring(message), "open", 1 end
+        local output = pipe:read("*a")
+        local ok, why, code = pipe:close()
+        return output, why or "exit", ok and 0 or code
+      end
+    ]==]) as Capturer
+  end
+  return capturer as Capturer
+end
+
+local function execute(argv: {string}): (boolean?, string, integer)
+  return executor_function()(argv)
+end
+
+local function capture(argv: {string}): (string, string, integer)
+  return capturer_function()(argv)
+end
+
+local function system(argv: {string}): integer
+  return cstdlib.system(renderer_function()(argv))
+end

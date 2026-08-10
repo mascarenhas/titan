@@ -1,5 +1,6 @@
 -- Native titan.lua behavior tests.
 local test = import "test"
+local runtime_test = import "support.runtime"
 local async = import "async"
 local fs = import "fs"
 local timer = import "timer"

@@ -388,7 +388,8 @@ The compiler driver is invoked with dot-separated *module names*, not
 file paths:
 
 ```sh
-titanc [--print-ast] [-v] [--static] [--test] [--no-line-directives] [--lua <luasrc>] \
+titanc [--print-ast] [-v] [--static] [--test] [--no-uv-bootstrap] \
+  [--no-line-directives] [--lua <luasrc>] \
   [--tree <srcroot>] [-l lib1,lib2] [-X object...] <module>...
 ```
 
@@ -409,6 +410,12 @@ titanc [--print-ast] [-v] [--static] [--test] [--no-line-directives] [--lua <lua
   discovers public `test_*` functions, and links a standalone native test
   executable even without an application `main`. See
   [Testing Titan code](standard-library-test.md).
+* `--no-uv-bootstrap` is valid only when the result is a normal standalone
+  executable or a `--test` executable. The generated entrypoint still
+  initializes every imported module and preserves the installed bootstrap
+  registry value, but calls `main(args)` directly instead of invoking that
+  value. This is an explicit lifecycle-ownership option, not a way to disable
+  `titan.uv` initialization.
 * `--no-line-directives` omits Titan source `#line` directives from generated
   C, so native compiler and sanitizer diagnostics use physical generated-C
   coordinates. By default diagnostics are attributed to Titan source.

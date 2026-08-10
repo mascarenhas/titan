@@ -407,10 +407,8 @@ or native linking. The 0.22 publisher does not migrate, clean up, or otherwise
 consume the preserved 0.21 tree, and there is no retained historical cutover
 canary.
 
-Production, installed, and async standard-library behavior tests use the
-combined image; the uv redesign has no delayed-callback source variant or
-alternate exact-provider graph. The serial coroutine suite is the narrow
-exception: it isolates its exact test image or preserves and restores the
-complete production `titan.so`/`titan.a` pair, dSYM, and generated coroutine
-shim. That coroutine test layout is not an alternate production packaging
-model.
+Production, installed, and native standard-library behavior tests use the
+combined image; the uv redesign has no delayed-callback source variant,
+alternate exact-provider graph, or serial source-rewritten coroutine image.
+Implementation mechanics remain owned by compiler/native harness coverage
+rather than an alternate production packaging model.
