@@ -1,0 +1,80 @@
+function test_environment_helpers_preserve_real_values(
+    _context: test.Context)
+  local name = "TITAN_OS_TEST_ENVIRONMENT_VALUE"
+  local original: string? = system.getenv(name)
+  defer support.restore_environment(name, original)
+
+  system.unsetenv(name)
+  test.assert(system.getenv(name) == nil,
+              "missing environment variable did not return nil")
+
+  system.setenv(name, "")
+  local empty: string? = system.getenv(name)
+  test.assert(empty ~= nil and (empty as string) == "",
+              "empty environment value was confused with absence")
+
+  local long_value = support.long_repeated("0123456789abcdef", 8192)
+  system.setenv(name, long_value)
+  local copied: string? = system.getenv(name)
+  test.assert(copied ~= nil and (copied as string) == long_value,
+              "long environment value was truncated during resize")
+
+  support.restore_environment(name, original)
+  local restored: string? = system.getenv(name)
+  if original then
+    test.assert(restored ~= nil and
+                (restored as string) == (original as string),
+                "existing environment value was not restored")
+  else
+    test.assert(restored == nil,
+                "previously missing environment variable leaked")
+  end
+end
+
+function test_text_helpers_reject_embedded_nul(
+    _context: test.Context)
+  local name = "TITAN_OS_TEST_NUL_VALUE"
+  local original: string? = system.getenv(name)
+  defer support.restore_environment(name, original)
+
+  support.assert_operation_error(function()
+    system.getenv(name .. "\0get")
+  end, "os.getenv")
+  support.assert_operation_error(function()
+    system.setenv(name .. "\0set", "value")
+  end, "os.setenv")
+  support.assert_operation_error(function()
+    system.setenv(name, "value\0suffix")
+  end, "os.setenv")
+  support.assert_operation_error(function()
+    system.unsetenv(name .. "\0unset")
+  end, "os.unsetenv")
+  support.assert_operation_error(function()
+    system.chdir(system.cwd() .. "\0suffix")
+  end, "os.chdir")
+end
+
+function test_paths_and_process_identity(_context: test.Context)
+  local original = system.cwd()
+  local target = system.tmpdir()
+  if target == original then target = system.homedir() end
+  if target == original then target = "/" end
+  test.assert(target ~= original,
+              "host exposes no distinct standard directory for chdir")
+
+  do
+    defer system.chdir(original)
+    system.chdir(target)
+    test.assert(system.cwd() ~= original, "chdir did not update cwd")
+  end
+  test.assert(system.cwd() == original,
+              "cwd was not restored after chdir")
+
+  test.assert(#system.homedir() > 0, "homedir returned an empty path")
+  test.assert(#system.tmpdir() > 0, "tmpdir returned an empty path")
+  test.assert(#system.hostname() > 0, "hostname returned an empty name")
+  test.assert(#system.exepath() > 0,
+              "compiled Titan exepath returned an empty path")
+  test.assert(system.pid() > 0, "pid was not positive")
+  test.assert(system.ppid() >= 0, "ppid was negative")
+end

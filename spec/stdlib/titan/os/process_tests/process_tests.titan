@@ -1,0 +1,7 @@
+-- Native process, signal, and stream behavior tests for titan.os.
+local test = import "test"
+local async = import "async"
+local stream = import "io"
+local system = import "os"
+local process_support = import "os.process_test_support"
+local task_support = import "support.async"

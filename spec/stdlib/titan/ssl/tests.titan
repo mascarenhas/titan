@@ -1,0 +1,323 @@
+local test = import "test"
+local async = import "async"
+local fs = import "fs"
+local stream = import "io"
+local net = import "net"
+local ssl = import "ssl"
+local str = import "string"
+local timer = import "timer"
+local support = import "ssl.test_support"
+local net_support = import "net.test_support"
+local task_support = import "support.async"
+
+function test_ssl_combined_pem_and_binary_record_exchange(
+    context: test.Context)
+  local certificate_bundle = support.temporary_path(context)
+  fs.write_file(certificate_bundle,
+                fs.read_file(support.CERTIFICATE) .. "\n" ..
+                fs.read_file(support.TRUST_ROOT) .. "\n" ..
+                fs.read_file(support.PRIVATE_KEY))
+  local server, port =
+    support.listen_available(36000, certificate_bundle, nil)
+  support.cleanup_server(context, server)
+  local peer = async.run(function (): value
+    local connection = server:accept()
+    defer connection:close()
+    local channel: stream.ReaderWriterCloser = connection
+    local prefix = channel:read_until("\0END", true)
+    test.assert(prefix == str.rep("x", 40000),
+                "TLS binary delimiter read returned the wrong prefix")
+    test.assert(channel:read() == "tail",
+                "TLS delimiter read did not retain excess")
+    channel:write("reply\0\nrest")
+    connection:shutdown()
+    connection:shutdown()
+    test.assert(not connection:read(),
+                "TLS peer did not remain readable through half-close")
+    channel:close()
+    channel:close()
+    return nil
+  end)
+  task_support.cleanup_task(context, peer, "TLS exchange cleanup")
+
+  local connection = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
+  support.cleanup_connection(context, connection)
+  local channel: stream.ReaderWriterCloser = connection
+  channel:write(str.rep("x", 40000) .. "\0ENDtail")
+  test.assert(channel:read_until("\n", true) == "reply\0",
+              "TLS response delimiter changed binary bytes")
+  test.assert(channel:read() == "rest",
+              "TLS response delimiter lost excess")
+  test.assert(not channel:read(), "TLS peer close_notify was not clean EOF")
+  channel:close()
+  channel:close()
+  test.assert(not channel:read() and not channel:read_until("missing"),
+              "closed TLS connection did not stay at EOF")
+
+  while task_support.active(peer) do timer.yield() end
+  test.assert(peer:status():as_string() == "succeeded",
+              "TLS peer Task failed")
+  server:close()
+  server:close()
+end
+
+function test_ssl_split_pem_accepts_are_lazy(context: test.Context)
+  local server, port =
+    support.listen_available(37000, support.CERTIFICATE, support.PRIVATE_KEY)
+  support.cleanup_server(context, server)
+  local stalled = net.connect("127.0.0.1", port)
+  net_support.cleanup_connection(context, stalled)
+  local first = server:accept()
+  support.cleanup_connection(context, first)
+
+  local second_peer = async.run(function (): value
+    local connection = server:accept()
+    defer connection:close()
+    connection:write("second")
+    connection:close()
+    return nil
+  end)
+  task_support.cleanup_task(context, second_peer, "lazy TLS accept cleanup")
+  local second = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
+  support.cleanup_connection(context, second)
+  test.assert(second:read() == "second",
+              "a stalled ClientHello blocked the next accept")
+  test.assert(not second:read(),
+              "second TLS connection did not close cleanly")
+  second:close()
+  first:close()
+  stalled:close()
+  while task_support.active(second_peer) do timer.yield() end
+  test.assert(second_peer:status():as_string() == "succeeded",
+              "second accepted TLS connection failed")
+  server:close()
+end
+
+function test_ssl_rejects_wrong_dns_identity(context: test.Context)
+  local server, port =
+    support.listen_available(38000, support.WRONG_CERTIFICATE, support.PRIVATE_KEY)
+  support.cleanup_server(context, server)
+  local peer_failed = false
+  local peer = async.run(function (): value
+    local connection = server:accept()
+    defer connection:close()
+    do
+      connection:read()
+    catch
+      peer_failed = true
+    end
+    connection:close()
+    return nil
+  end)
+  task_support.cleanup_task(context, peer, "TLS verification peer cleanup")
+  local failed = false
+  do
+    ssl.connect("localhost", port, support.TRUST_ROOT)
+  catch
+    test.assert(error is ssl.Error,
+                "verification raised a non-TLS error")
+    local failure = error as ssl.Error
+    test.assert(failure.name == "CERTIFICATE_VERIFY_FAILED",
+                "verification reported " .. failure.name)
+    failed = true
+  end
+  test.assert(failed, "wrong DNS identity was accepted")
+  while task_support.active(peer) do timer.yield() end
+  test.assert(peer:status():as_string() == "succeeded" and peer_failed,
+              "server did not retire the rejected TLS handshake")
+  server:close()
+end
+
+function test_ssl_distinguishes_truncated_transport_from_clean_eof(
+    context: test.Context)
+  local server, port =
+    support.listen_available(39000, support.CERTIFICATE, support.PRIVATE_KEY)
+  support.cleanup_server(context, server)
+  local accepted: ssl.Connection? = nil
+  context:cleanup(function ()
+    if accepted ~= nil then
+      (accepted as ssl.Connection):close()
+    end
+  end)
+  local handshake_done = false
+  local peer = async.run(function (): value
+    local connection = server:accept()
+    accepted = connection
+    connection:handshake()
+    handshake_done = true
+    -- Cancellation terminalizes this TLS connection and closes its TCP
+    -- transport without fabricating a peer or rewriting ssl source.
+    connection:read()
+    return nil
+  end)
+  task_support.cleanup_task(context, peer, "truncated TLS peer cleanup")
+  local client = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
+  support.cleanup_connection(context, client)
+  while not handshake_done do timer.yield() end
+  peer:cancel(async.CancellationReason.simple(
+    "intentional abrupt TLS peer"))
+  -- Keep one application record in flight while the cancelled peer closes.
+  -- Kernels may present FIN or RST; the TLS layer must normalize both to the
+  -- same unauthenticated truncation boundary.
+  client:write("wake-cancelled-peer")
+  while task_support.active(peer) do timer.yield() end
+  test.assert(peer:status():as_string() == "cancelled",
+              "abrupt TLS peer did not finish through cancellation")
+  test.assert(accepted ~= nil, "TLS server never accepted the client")
+  local server_connection = accepted as ssl.Connection
+  server_connection:close()
+
+  local truncated = false
+  do
+    client:read()
+  catch
+    local detail = str.tostring(error)
+    if error is async.OperationError then
+      local transport_failure = error as async.OperationError
+      detail = transport_failure.name .. " from " ..
+               transport_failure.operation
+    end
+    test.assert(error is ssl.Error,
+                "truncated TLS transport raised a non-TLS error: " .. detail)
+    local failure = error as ssl.Error
+    test.assert(failure.name == "TLS_TRUNCATED_EOF" and
+                failure.message ==
+                  "TLS transport closed without close_notify" and
+                failure.operation == "ssl.read",
+                "truncated TLS transport reported " .. failure.name ..
+                  " from " .. failure.operation)
+    truncated = true
+  end
+  test.assert(truncated,
+              "unauthenticated TCP termination was accepted as clean TLS EOF")
+  client:close()
+  server:close()
+end
+
+function test_ssl_rejects_missing_empty_and_malformed_pem(
+    context: test.Context)
+  local missing = support.temporary_path(context)
+  fs.unlink(missing)
+
+  local missing_ca = false
+  do
+    ssl.connect("127.0.0.1", 40000, missing)
+  catch
+    test.assert(error is async.OperationError,
+                "missing CA path raised a non-filesystem error")
+    local failure = error as async.OperationError
+    test.assert(failure.name == "ENOENT" and
+                failure.operation == "fs.open",
+                "missing CA path did not fail through fs.open")
+    missing_ca = true
+  end
+  test.assert(missing_ca, "missing CA path was accepted")
+
+  local missing_certificate = false
+  do
+    ssl.listen("127.0.0.1", 40000, missing, support.PRIVATE_KEY)
+  catch
+    test.assert(error is async.OperationError,
+                "missing certificate path raised a non-filesystem error")
+    local failure = error as async.OperationError
+    test.assert(failure.name == "ENOENT" and
+                failure.operation == "fs.open",
+                "missing certificate path did not fail through fs.open")
+    missing_certificate = true
+  end
+  test.assert(missing_certificate, "missing certificate path was accepted")
+
+  local missing_key = false
+  do
+    ssl.listen("127.0.0.1", 40000, support.CERTIFICATE, missing)
+  catch
+    test.assert(error is async.OperationError,
+                "missing private-key path raised a non-filesystem error")
+    local failure = error as async.OperationError
+    test.assert(failure.name == "ENOENT" and
+                failure.operation == "fs.open",
+                "missing private-key path did not fail through fs.open")
+    missing_key = true
+  end
+  test.assert(missing_key, "missing private-key path was accepted")
+
+  local empty = support.temporary_path(context)
+  local empty_ca = false
+  do
+    ssl.connect("127.0.0.1", 40000, empty)
+  catch
+    test.assert(error is ssl.Error,
+                "empty CA PEM raised a non-TLS error")
+    local failure = error as ssl.Error
+    test.assert(failure.operation == "ssl.client.trust",
+                "empty CA PEM reported " .. failure.operation)
+    empty_ca = true
+  end
+  test.assert(empty_ca, "empty CA PEM was accepted")
+
+  local empty_certificate = false
+  do
+    ssl.listen("127.0.0.1", 40000, empty, support.PRIVATE_KEY)
+  catch
+    test.assert(error is ssl.Error,
+                "empty certificate PEM raised a non-TLS error")
+    local failure = error as ssl.Error
+    test.assert(failure.operation == "ssl.server.certificate",
+                "empty certificate PEM reported " .. failure.operation)
+    empty_certificate = true
+  end
+  test.assert(empty_certificate, "empty certificate PEM was accepted")
+
+  local empty_key = false
+  do
+    ssl.listen("127.0.0.1", 40000, support.CERTIFICATE, empty)
+  catch
+    test.assert(error is ssl.Error,
+                "empty private-key PEM raised a non-TLS error")
+    local failure = error as ssl.Error
+    test.assert(failure.operation == "ssl.server.private-key",
+                "empty private-key PEM reported " .. failure.operation)
+    empty_key = true
+  end
+  test.assert(empty_key, "empty private-key PEM was accepted")
+
+  local malformed = support.temporary_path(context)
+  fs.write_file(malformed,
+                fs.read_file(support.TRUST_ROOT) .. "\n" ..
+                "-----BEGIN support.CERTIFICATE-----\n" ..
+                "not-base64\n" ..
+                "-----END support.CERTIFICATE-----\n")
+  local malformed_ca = false
+  do
+    ssl.connect("127.0.0.1", 40000, malformed)
+  catch
+    test.assert(error is ssl.Error,
+                "malformed trailing CA PEM raised a non-TLS error")
+    local failure = error as ssl.Error
+    test.assert(failure.operation == "ssl.client.trust",
+                "malformed trailing CA PEM reported " .. failure.operation)
+    malformed_ca = true
+  end
+  test.assert(malformed_ca, "malformed trailing CA PEM was accepted")
+
+  local malformed_key = support.temporary_path(context)
+  fs.write_file(malformed_key,
+                fs.read_file(support.PRIVATE_KEY) .. "\n" ..
+                "-----BEGIN PRIVATE KEY-----\n" ..
+                "not-base64\n" ..
+                "-----END PRIVATE KEY-----\n")
+  local malformed_private_key = false
+  do
+    ssl.listen("127.0.0.1", 40000, support.CERTIFICATE, malformed_key)
+  catch
+    test.assert(error is ssl.Error,
+                "malformed trailing private-key PEM raised a non-TLS error")
+    local failure = error as ssl.Error
+    test.assert(failure.operation == "ssl.server.private-key",
+                "malformed trailing private-key PEM reported " ..
+                  failure.operation)
+    malformed_private_key = true
+  end
+  test.assert(malformed_private_key,
+              "malformed trailing private-key PEM was accepted")
+end

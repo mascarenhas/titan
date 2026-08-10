@@ -1,0 +1,4 @@
+-- Native titan.coroutine behavior tests.
+local test = import "test"
+local coroutine = import "coroutine"
+local support = import "coroutine.test_support"

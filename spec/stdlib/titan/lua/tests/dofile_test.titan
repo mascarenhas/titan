@@ -1,0 +1,45 @@
+function test_lua_dofile_preserves_flexible_values_and_recovers_after_errors(
+    context: test.Context)
+  local success = lua_support.temporary_file(context, "-dofile-success.lua")
+  local runtime_error = lua_support.temporary_file(context, "-dofile-runtime-error.lua")
+  local syntax_error = lua_support.temporary_file(context, "-dofile-syntax-error.lua")
+  fs.write_file(success, "return ...")
+  fs.write_file(runtime_error, "error('runtime marker')")
+  fs.write_file(syntax_error, "this is not Lua")
+
+  local values: {value} = { tlua.dofile(success, 4, nil, 6) }
+  test.assert(#values == 3, "dofile changed the flexible result count")
+  test.assert(values[1] == 4 and values[2] == nil and values[3] == 6,
+              "dofile changed flexible arguments or results")
+
+  local runtime_message? = lua_support.caught_string(function ()
+    tlua.dofile(runtime_error)
+  end)
+  test.assert(runtime_message ~= nil,
+              "dofile runtime failure was not a string error")
+  local runtime_text: string = runtime_message
+  test.assert(lua_support.find_literal(runtime_text, "runtime marker") ~= nil,
+              runtime_text)
+
+  local syntax_message? = lua_support.caught_string(function ()
+    tlua.dofile(syntax_error)
+  end)
+  test.assert(syntax_message ~= nil,
+              "dofile syntax failure was not a string error")
+  local syntax_text: string = syntax_message
+  -- Lua abbreviates long source paths, notably macOS /var/folders names, but
+  -- preserves the diagnostic filename suffix.
+  test.assert(lua_support.find_literal(syntax_text, "dofile-syntax-error.lua") ~= nil,
+              syntax_text)
+
+  -- Both exceptional paths leave dofile usable. The native suite can observe
+  -- this recovery and owns the paths through Context cleanup; the retained
+  -- host fragment remains responsible for exact /dev/fd accounting.
+  fs.write_file(runtime_error, "return 'runtime-recovered'")
+  fs.write_file(syntax_error, "return 'syntax-recovered'")
+  local runtime_recovered: value = tlua.dofile(runtime_error)
+  local syntax_recovered: value = tlua.dofile(syntax_error)
+  test.assert(runtime_recovered == "runtime-recovered" and
+              syntax_recovered == "syntax-recovered",
+              "dofile did not recover after a caught file error")
+end

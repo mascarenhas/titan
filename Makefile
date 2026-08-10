@@ -452,7 +452,7 @@ STDLIB_COMPLETION_STAMP := titan-runtime/.titan-stdlib-complete
 	check-libuv-tools check-system-libuv invalid-libuv-mode runtime titan \
 	stage-titan-bootstrap install-titan-sdk stdlib install-stdlib \
 	publish-stdlib \
-	rock-post-install test rock-build \
+	rock-post-install rock-test test rock-build \
 	examples clean clean-lua clean-readline clean-luarocks clean-libbacktrace clean-libuv \
 	clean-llhttp clean-openssl \
 	distclean FORCE
@@ -2188,19 +2188,18 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 # longer builds stdlib before LuaRocks has deployed the compiler.
 rock-build: titan
 
+rock-test: ## Run retained Busted specs and native Titan stdlib suites
+	TITAN_ROCK_TEST_INTERNAL=1 \
+		bash spec/support/run_rock_tests.sh $(EXTRA_TEST_FLAGS)
+
 test: lua luarocks ## Build/install the rock and run the suite via `luarocks test`
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	  PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
 	  "$(PREFIX)/bin/luarocks" make --force
-ifneq ($(strip $(EXTRA_TEST_FLAGS)),)
-	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-		echo $(EXTRA_TEST_FLAGS) | PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
-		xargs "$(PREFIX)/bin/luarocks" test --
-else
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 		PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
+		EXTRA_TEST_FLAGS=$(call make_shell_quote,$(strip $(EXTRA_TEST_FLAGS))) \
 		"$(PREFIX)/bin/luarocks" test
-endif
 
 examples: lua ## Compile the example Titan modules (SDL examples need SDL2 headers)
 	$(MAKE) -C examples all
@@ -2232,119 +2231,110 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 		examples/sdl_demo
 	rm -f testfiles/*.c testfiles/*.o testfiles/*.so \
 		testfiles/selection_sort.a testfiles/sieve.a
-	rm -f spec/stdlib/titan/pure/pure.c spec/stdlib/titan/pure/pure.o \
-		spec/stdlib/titan/math_native/math_native.c \
-		spec/stdlib/titan/math_native/math_native.o \
-		spec/stdlib/titan/peg/tests/tests.c \
-		spec/stdlib/titan/peg/tests/tests.o \
-		spec/stdlib/titan/string_url/string_core_test.c \
-		spec/stdlib/titan/string_url/string_core_test.o \
-		spec/stdlib/titan/string_url/string_format_pack_test.c \
-		spec/stdlib/titan/string_url/string_format_pack_test.o \
-		spec/stdlib/titan/string_url/string_regex_test.c \
-		spec/stdlib/titan/string_url/string_regex_test.o \
-		spec/stdlib/titan/string_url/url_test.c \
-		spec/stdlib/titan/string_url/url_test.o \
-		spec/stdlib/titan/string_url/string_url_support.c \
-		spec/stdlib/titan/string_url/string_url_support.o \
-		spec/stdlib/titan/io_fs_timer/io_fs_timer.c \
-		spec/stdlib/titan/io_fs_timer/io_fs_timer.o \
-		spec/stdlib/titan/uv_tasks_native/uv_tasks_native.c \
-		spec/stdlib/titan/uv_tasks_native/uv_tasks_native.o \
-		spec/stdlib/titan/os_native/os_native.c \
-		spec/stdlib/titan/os_native/os_native.o \
-		spec/stdlib/titan/async_tests/async_tests.c \
-		spec/stdlib/titan/async_tests/async_tests.o \
-		spec/stdlib/titan/net_ssl_native/net_ssl_native.c \
-		spec/stdlib/titan/net_ssl_native/net_ssl_native.o \
-		spec/stdlib/titan/coroutine_native/coroutine_native.c \
-		spec/stdlib/titan/coroutine_native/coroutine_native.o \
-		spec/stdlib/titan/http_native/http_native.c \
-		spec/stdlib/titan/http_native/http_native.o \
-		spec/stdlib/titan/lua_peg_native/lua_peg_native.c \
-		spec/stdlib/titan/lua_peg_native/lua_peg_native.o \
-		spec/stdlib/titan/os_uv_native/os_uv_native.c \
-		spec/stdlib/titan/os_uv_native/os_uv_native.o
-	rm -f pure__main pure__main__test_support.c pure__main__test_support.o \
-		pure__main__test_runner.c pure__main__test_runner.o \
-		pure__main__test_entrypoint.c pure__main__test_entrypoint.o \
-		math_native__main math_native__main__test_support.c \
-		math_native__main__test_support.o math_native__main__test_runner.c \
-		math_native__main__test_runner.o \
-		math_native__main__test_entrypoint.c \
-		math_native__main__test_entrypoint.o \
-		peg/tests__main peg/tests__main__test_support.c \
-		peg/tests__main__test_support.o peg/tests__main__test_runner.c \
-		peg/tests__main__test_runner.o peg/tests__main__test_entrypoint.c \
-		peg/tests__main__test_entrypoint.o \
-		string_core_test string_core_test__test_support.c \
-		string_core_test__test_support.o string_core_test__test_runner.c \
-		string_core_test__test_runner.o string_core_test__test_entrypoint.c \
-		string_core_test__test_entrypoint.o \
-		url_test url_test__test_support.c url_test__test_support.o \
-		url_test__test_runner.c url_test__test_runner.o \
-		url_test__test_entrypoint.c url_test__test_entrypoint.o \
-		lua_peg_native__main lua_peg_native__main__test_support.c \
-		lua_peg_native__main__test_support.o \
-		lua_peg_native__main__test_runner.c \
-		lua_peg_native__main__test_runner.o \
-		lua_peg_native__main__test_entrypoint.c \
-		lua_peg_native__main__test_entrypoint.o \
-		os_uv_native__main os_uv_native__main__test_support.c \
-		os_uv_native__main__test_support.o \
-		os_uv_native__main__test_runner.c \
-		os_uv_native__main__test_runner.o \
-		os_uv_native__main__test_entrypoint.c \
-		os_uv_native__main__test_entrypoint.o \
-		http_native__main http_native__main__test_support.c \
-		http_native__main__test_support.o \
-		http_native__main__test_runner.c \
-		http_native__main__test_runner.o \
-		http_native__main__test_entrypoint.c \
-		http_native__main__test_entrypoint.o \
-		coroutine_native__main coroutine_native__main__test_support.c \
-		coroutine_native__main__test_support.o \
-		coroutine_native__main__test_runner.c \
-		coroutine_native__main__test_runner.o \
-		coroutine_native__main__test_entrypoint.c \
-		coroutine_native__main__test_entrypoint.o \
-		net_ssl_native__main net_ssl_native__main__test_support.c \
-		net_ssl_native__main__test_support.o \
-		net_ssl_native__main__test_runner.c \
-		net_ssl_native__main__test_runner.o \
-		net_ssl_native__main__test_entrypoint.c \
-		net_ssl_native__main__test_entrypoint.o \
-		async_tests__main async_tests__main__test_support.c \
-		async_tests__main__test_support.o async_tests__main__test_runner.c \
-		async_tests__main__test_runner.o \
-		async_tests__main__test_entrypoint.c \
-		async_tests__main__test_entrypoint.o \
-		os_native__main os_native__main__test_support.c \
-		os_native__main__test_support.o os_native__main__test_runner.c \
-		os_native__main__test_runner.o os_native__main__test_entrypoint.c \
-		os_native__main__test_entrypoint.o \
-		uv_tasks_native__main uv_tasks_native__main__test_support.c \
-		uv_tasks_native__main__test_support.o \
-		uv_tasks_native__main__test_runner.c \
-		uv_tasks_native__main__test_runner.o \
-		uv_tasks_native__main__test_entrypoint.c \
-		uv_tasks_native__main__test_entrypoint.o \
-		io_fs_timer__main io_fs_timer__main__test_support.c \
-		io_fs_timer__main__test_support.o \
-		io_fs_timer__main__test_runner.c \
-		io_fs_timer__main__test_runner.o \
-		io_fs_timer__main__test_entrypoint.c \
-		io_fs_timer__main__test_entrypoint.o
-	rm -rf pure__main.dSYM math_native__main.dSYM peg/tests__main.dSYM \
-		string_core_test.dSYM url_test.dSYM lua_peg_native__main.dSYM \
-		os_uv_native__main.dSYM http_native__main.dSYM \
-		coroutine_native__main.dSYM \
-		net_ssl_native__main.dSYM \
-		async_tests__main.dSYM \
-		os_native__main.dSYM \
-		uv_tasks_native__main.dSYM \
-		io_fs_timer__main.dSYM
-	rmdir peg 2>/dev/null || true
+	rm -f spec/stdlib/titan/iter/tests.c spec/stdlib/titan/iter/tests.o \
+		spec/stdlib/titan/gc/tests.c spec/stdlib/titan/gc/tests.o \
+		spec/stdlib/titan/lua/tests/tests.c spec/stdlib/titan/lua/tests/tests.o \
+		spec/stdlib/titan/lua/test_support.c spec/stdlib/titan/lua/test_support.o \
+		spec/stdlib/titan/math/tests.c spec/stdlib/titan/math/tests.o \
+		spec/stdlib/titan/peg/tests/tests.c spec/stdlib/titan/peg/tests/tests.o \
+		spec/stdlib/titan/peg/test_support.c spec/stdlib/titan/peg/test_support.o \
+		spec/stdlib/titan/string/core_test.c spec/stdlib/titan/string/core_test.o \
+		spec/stdlib/titan/string/format_pack_test.c \
+		spec/stdlib/titan/string/format_pack_test.o \
+		spec/stdlib/titan/string/regex_test.c spec/stdlib/titan/string/regex_test.o \
+		spec/stdlib/titan/string/test_support.c \
+		spec/stdlib/titan/string/test_support.o spec/stdlib/titan/url/tests.c \
+		spec/stdlib/titan/url/tests.o spec/stdlib/titan/coroutine/tests/tests.c \
+		spec/stdlib/titan/coroutine/tests/tests.o \
+		spec/stdlib/titan/coroutine/test_support.c \
+		spec/stdlib/titan/coroutine/test_support.o \
+		spec/stdlib/titan/async/tests/tests.c spec/stdlib/titan/async/tests/tests.o \
+		spec/stdlib/titan/async/test_support.c \
+		spec/stdlib/titan/async/test_support.o spec/stdlib/titan/http/tests/tests.c \
+		spec/stdlib/titan/http/tests/tests.o spec/stdlib/titan/http/test_support.c \
+		spec/stdlib/titan/http/test_support.o spec/stdlib/titan/net/tests.c \
+		spec/stdlib/titan/net/tests.o spec/stdlib/titan/net/test_support.c \
+		spec/stdlib/titan/net/test_support.o spec/stdlib/titan/ssl/tests.c \
+		spec/stdlib/titan/ssl/tests.o spec/stdlib/titan/ssl/test_support.c \
+		spec/stdlib/titan/ssl/test_support.o \
+		spec/stdlib/titan/uv/task_tests/task_tests.c \
+		spec/stdlib/titan/uv/task_tests/task_tests.o \
+		spec/stdlib/titan/uv/task_test_support.c \
+		spec/stdlib/titan/uv/task_test_support.o \
+		spec/stdlib/titan/uv/runtime_tests.c spec/stdlib/titan/uv/runtime_tests.o \
+		spec/stdlib/titan/io/tests/tests.c spec/stdlib/titan/io/tests/tests.o \
+		spec/stdlib/titan/io/test_support.c spec/stdlib/titan/io/test_support.o \
+		spec/stdlib/titan/fs/tests.c spec/stdlib/titan/fs/tests.o \
+		spec/stdlib/titan/fs/test_support.c spec/stdlib/titan/fs/test_support.o \
+		spec/stdlib/titan/timer/tests.c spec/stdlib/titan/timer/tests.o \
+		spec/stdlib/titan/os/tests/tests.c spec/stdlib/titan/os/tests/tests.o \
+		spec/stdlib/titan/os/test_support.c spec/stdlib/titan/os/test_support.o \
+		spec/stdlib/titan/os/process_tests/process_tests.c \
+		spec/stdlib/titan/os/process_tests/process_tests.o \
+		spec/stdlib/titan/os/process_test_support.c \
+		spec/stdlib/titan/os/process_test_support.o \
+		spec/stdlib/titan/support/common.c spec/stdlib/titan/support/common.o \
+		spec/stdlib/titan/support/async.c spec/stdlib/titan/support/async.o
+	rm -f iter/tests iter/tests__test_support.c iter/tests__test_support.o \
+		iter/tests__test_runner.c iter/tests__test_runner.o \
+		iter/tests__test_entrypoint.c iter/tests__test_entrypoint.o gc/tests \
+		gc/tests__test_support.c gc/tests__test_support.o gc/tests__test_runner.c \
+		gc/tests__test_runner.o gc/tests__test_entrypoint.c \
+		gc/tests__test_entrypoint.o lua/tests__main lua/tests__main__test_support.c \
+		lua/tests__main__test_support.o lua/tests__main__test_runner.c \
+		lua/tests__main__test_runner.o lua/tests__main__test_entrypoint.c \
+		lua/tests__main__test_entrypoint.o math/tests math/tests__test_support.c \
+		math/tests__test_support.o math/tests__test_runner.c \
+		math/tests__test_runner.o math/tests__test_entrypoint.c \
+		math/tests__test_entrypoint.o peg/tests__main \
+		peg/tests__main__test_support.c peg/tests__main__test_support.o \
+		peg/tests__main__test_runner.c peg/tests__main__test_runner.o \
+		peg/tests__main__test_entrypoint.c peg/tests__main__test_entrypoint.o \
+		string/core_test string/core_test__test_support.c \
+		string/core_test__test_support.o string/core_test__test_runner.c \
+		string/core_test__test_runner.o string/core_test__test_entrypoint.c \
+		string/core_test__test_entrypoint.o url/tests url/tests__test_support.c \
+		url/tests__test_support.o url/tests__test_runner.c url/tests__test_runner.o \
+		url/tests__test_entrypoint.c url/tests__test_entrypoint.o \
+		coroutine/tests__main coroutine/tests__main__test_support.c \
+		coroutine/tests__main__test_support.o coroutine/tests__main__test_runner.c \
+		coroutine/tests__main__test_runner.o \
+		coroutine/tests__main__test_entrypoint.c \
+		coroutine/tests__main__test_entrypoint.o async/tests__main \
+		async/tests__main__test_support.c async/tests__main__test_support.o \
+		async/tests__main__test_runner.c async/tests__main__test_runner.o \
+		async/tests__main__test_entrypoint.c async/tests__main__test_entrypoint.o \
+		http/tests__main http/tests__main__test_support.c \
+		http/tests__main__test_support.o http/tests__main__test_runner.c \
+		http/tests__main__test_runner.o http/tests__main__test_entrypoint.c \
+		http/tests__main__test_entrypoint.o net/tests net/tests__test_support.c \
+		net/tests__test_support.o net/tests__test_runner.c net/tests__test_runner.o \
+		net/tests__test_entrypoint.c net/tests__test_entrypoint.o \
+		uv/task_tests__main uv/task_tests__main__test_support.c \
+		uv/task_tests__main__test_support.o uv/task_tests__main__test_runner.c \
+		uv/task_tests__main__test_runner.o uv/task_tests__main__test_entrypoint.c \
+		uv/task_tests__main__test_entrypoint.o uv/runtime_tests \
+		uv/runtime_tests__test_support.c uv/runtime_tests__test_support.o \
+		uv/runtime_tests__test_runner.c uv/runtime_tests__test_runner.o \
+		uv/runtime_tests__test_entrypoint.c uv/runtime_tests__test_entrypoint.o \
+		io/tests__main io/tests__main__test_support.c io/tests__main__test_support.o \
+		io/tests__main__test_runner.c io/tests__main__test_runner.o \
+		io/tests__main__test_entrypoint.c io/tests__main__test_entrypoint.o \
+		os/tests__main os/tests__main__test_support.c os/tests__main__test_support.o \
+		os/tests__main__test_runner.c os/tests__main__test_runner.o \
+		os/tests__main__test_entrypoint.c os/tests__main__test_entrypoint.o \
+		os/process_tests__main os/process_tests__main__test_support.c \
+		os/process_tests__main__test_support.o os/process_tests__main__test_runner.c \
+		os/process_tests__main__test_runner.o \
+		os/process_tests__main__test_entrypoint.c \
+		os/process_tests__main__test_entrypoint.o
+	rm -rf iter/tests.dSYM gc/tests.dSYM lua/tests__main.dSYM math/tests.dSYM \
+		peg/tests__main.dSYM string/core_test.dSYM url/tests.dSYM \
+		coroutine/tests__main.dSYM async/tests__main.dSYM http/tests__main.dSYM \
+		net/tests.dSYM uv/task_tests__main.dSYM uv/runtime_tests.dSYM \
+		io/tests__main.dSYM os/tests__main.dSYM os/process_tests__main.dSYM
+	rmdir async coroutine gc http io iter lua math net os peg string \
+		url uv 2>/dev/null || true
 	rm -f spec/fixtures/test_runner/test_runner_fixture.c \
 		spec/fixtures/test_runner/test_runner_fixture.o \
 		spec/fixtures/test_runner/test_runner_dependency.c \
@@ -2387,7 +2377,8 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 		test_runner_collision__test_support.titan \
 		test_runner_collision__test_runner.titan \
 		test_runner_collision__test_entrypoint.titan \
-		test_runner_hierarchy.titan url
+		test_runner_hierarchy.titan
+	@if [ ! -d url ]; then rm -f url; fi
 	rm -rf test_runner_fixture.dSYM test_runner_empty.dSYM \
 		test_runner_static.dSYM titan/test.dSYM \
 		test_runner_progname__main.dSYM url.dSYM \

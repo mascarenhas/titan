@@ -1,0 +1,289 @@
+local test = import "test"
+local async = import "async"
+local fs = import "fs"
+local stream = import "io"
+local timer = import "timer"
+local support = import "fs.test_support"
+local task_support = import "support.async"
+
+local function contains_entry(entries: {string}, wanted: string): boolean
+  for index = 1, #entries do
+    if entries[index] as string == wanted then return true end
+  end
+  return false
+end
+
+local function expect_failure(action: () -> (), message: string)
+  local failed = false
+  do
+    action()
+  catch
+    failed = true
+  end
+  test.assert(failed, message)
+end
+
+function test_fs_binary_delimiters_and_close(context: test.Context)
+  local root = support.new_workspace(context)
+  local binary_path = root .. "/binary.dat"
+  support.cleanup_path(context, binary_path)
+  local boundary = support.make_boundary_payload()
+
+  fs.write_file(binary_path, boundary)
+  test.assert(fs.read_file(binary_path) == boundary,
+              "whole-file helpers changed binary data")
+
+  local file = fs.open(binary_path, "rb")
+  defer file:close()
+  expect_failure(function ()
+    file:read_until("")
+  end, "File accepted an empty delimiter")
+  local selected: string? = file:read_until("\0Y", true)
+  test.assert(selected ~= nil and #(selected as string) == 65535,
+              "delimiter spanning native reads returned the wrong prefix")
+  test.assert(file:read() == "tail",
+              "delimiter read lost retained excess")
+  test.assert(not file:read(1) and not file:read_until("missing"),
+              "repeated File reads did not return EOF")
+
+  file:close()
+  file:close()
+  test.assert(file:is_closed(), "File close was not idempotent")
+  test.assert(not file:read() and not file:read_until("missing"),
+              "closed File did not behave as Reader EOF")
+  expect_failure(function ()
+    file:write("late")
+  end, "closed File accepted a write")
+  expect_failure(function ()
+    file:write("")
+  end, "closed File accepted an empty write")
+  expect_failure(function ()
+    file:flush()
+  end, "closed File accepted a flush")
+
+  fs.unlink(binary_path)
+end
+
+function test_fs_modes_interfaces_and_validation(context: test.Context)
+  local root = support.new_workspace(context)
+  local modes_path = root .. "/modes.dat"
+  support.cleanup_path(context, modes_path)
+
+  do
+    local file = fs.open(modes_path, "w")
+    defer file:close()
+    test.assert(file:write("abc") == 3,
+                "write returned the wrong length")
+    file:flush()
+  end
+  do
+    local file = fs.open(modes_path, "a")
+    defer file:close()
+    test.assert(file:write("d") == 1,
+                "append returned the wrong length")
+  end
+  test.assert(fs.read_file(modes_path) == "abcd",
+              "append changed file data")
+
+  do
+    local file = fs.open(modes_path, "r+")
+    defer file:close()
+    test.assert(file:read(2) == "ab",
+                "read/update mode returned wrong bytes")
+    test.assert(file:write("XY") == 2,
+                "read/update write failed")
+    file:flush()
+  end
+  test.assert(fs.read_file(modes_path) == "abXY",
+              "read/update mode used the wrong file position")
+
+  local valid_modes = {
+    "r", "rb", "r+", "r+b", "rb+", "a", "ab", "a+", "a+b", "ab+"
+  }
+  for index = 1, #valid_modes do
+    local opened = fs.open(modes_path, valid_modes[index] as string)
+    opened:close()
+  end
+  local truncating_modes = {"w", "wb", "w+", "w+b", "wb+"}
+  for index = 1, #truncating_modes do
+    local opened = fs.open(modes_path, truncating_modes[index] as string)
+    opened:close()
+  end
+
+  local invalid_modes = {"", "x", "rr", "br", "r++"}
+  for index = 1, #invalid_modes do
+    local mode = invalid_modes[index] as string
+    expect_failure(function ()
+      fs.open(modes_path, mode)
+    end, "invalid mode was accepted: " .. mode)
+  end
+  expect_failure(function ()
+    fs.open(root .. "/bad\0path", "r")
+  end, "embedded-NUL path was accepted")
+
+  do
+    local file = fs.open(modes_path, "r")
+    defer file:close()
+    expect_failure(function ()
+      file:read(0)
+    end, "zero-sized read was accepted")
+  end
+
+  local interface_path = root .. "/interface.dat"
+  support.cleanup_path(context, interface_path)
+  fs.write_file(interface_path, "line\nrest")
+  do
+    local file = fs.open(interface_path, "r+")
+    defer file:close()
+    local concrete: stream.ReaderWriterCloser = file
+    test.assert(concrete:read_until("\n", true) == "line",
+                "ReaderWriterCloser delimiter dispatch failed")
+    concrete:write("X")
+    test.assert(concrete:read() == "rest",
+                "ReaderWriterCloser retained read failed")
+    concrete:close()
+  end
+  test.assert(fs.read_file(interface_path) == "line\nrestX",
+              "ReaderWriterCloser write changed position")
+
+  fs.unlink(modes_path)
+  fs.unlink(interface_path)
+end
+
+function test_fs_paths_metadata_locations_and_errors(context: test.Context)
+  local actual_root = support.new_workspace(context)
+  local root = actual_root .. "-alias"
+  support.make_symlink(context, actual_root, root)
+  support.set_fixture_environment(context, "HOME", root)
+  support.set_fixture_environment(context, "TMPDIR", root)
+
+  local target = root .. "/target.dat"
+  local link = root .. "/target-link"
+  support.cleanup_path(context, target)
+  fs.write_file(target, "target")
+  support.make_symlink(context, target, link)
+
+  local tree = root .. "/tree"
+  local sub = tree .. "/sub"
+  local first = tree .. "/first.dat"
+  local renamed = tree .. "/renamed.dat"
+  local cwd = root .. "/cwd"
+  local marker = cwd .. "/marker"
+  support.cleanup_path(context, tree)
+  support.cleanup_path(context, sub)
+  support.cleanup_path(context, first)
+  support.cleanup_path(context, renamed)
+  support.cleanup_path(context, cwd)
+  support.cleanup_path(context, marker)
+
+  fs.mkdir(tree)
+  fs.mkdir(sub)
+  fs.mkdir(cwd)
+  fs.write_file(marker, "cwd")
+  fs.write_file(first, "abc\0def")
+
+  local info = fs.stat(first)
+  test.assert(info.kind == "file" and info.size == 7,
+              "stat returned wrong regular-file metadata")
+  test.assert(info.mode >= 0 and info.modified_nanoseconds >= 0 and
+              info.modified_nanoseconds < 1000000000,
+              "stat returned invalid portable metadata")
+  test.assert(fs.stat(sub).kind == "directory",
+              "stat did not classify a directory")
+  test.assert(fs.stat(link).kind == "file",
+              "stat did not follow a symbolic link")
+  test.assert(fs.lstat(link).kind == "symlink",
+              "lstat did not classify the symbolic link")
+
+  local entries = fs.list(tree)
+  test.assert(#entries == 2 and contains_entry(entries, "first.dat") and
+              contains_entry(entries, "sub"),
+              "list returned wrong entries")
+  test.assert(not contains_entry(entries, ".") and
+              not contains_entry(entries, ".."),
+              "list exposed dot entries")
+
+  fs.rename(first, renamed)
+  test.assert(fs.read_file(renamed) == "abc\0def",
+              "rename lost file data")
+  expect_failure(function ()
+    fs.rmdir(tree)
+  end, "rmdir removed a nonempty directory")
+  expect_failure(function ()
+    fs.unlink(sub)
+  end, "unlink removed a directory")
+
+  local missing_error = false
+  do
+    fs.stat(root .. "/missing")
+  catch
+    local failure = error as async.OperationError
+    test.assert(failure.operation == "fs.stat",
+                "missing stat reported the wrong operation")
+    missing_error = true
+  end
+  test.assert(missing_error, "stat accepted a missing path")
+  expect_failure(function ()
+    fs.list(root .. "/missing")
+  end, "list accepted a missing path")
+
+  test.assert(fs.tmpdir() == root and fs.homedir() == root,
+              "portable directory helpers returned wrong paths")
+  local temporary = fs.tmpname()
+  support.cleanup_path(context, temporary)
+  test.assert(fs.lstat(temporary).kind == "file",
+              "tmpname did not leave a closed regular file")
+  fs.unlink(temporary)
+
+  local original = fs.pwd()
+  do
+    defer fs.chdir(original)
+    fs.chdir(cwd)
+    local changed = fs.pwd()
+    test.assert(changed ~= original and fs.read_file("marker") == "cwd",
+                "chdir did not select the requested directory")
+    test.assert(fs.read_file(changed .. "/marker") == "cwd",
+                "pwd did not identify the current directory")
+  end
+  test.assert(fs.pwd() == original, "chdir did not restore pwd")
+
+  fs.unlink(link)
+  fs.unlink(target)
+  fs.unlink(renamed)
+  fs.unlink(marker)
+  fs.rmdir(sub)
+  fs.rmdir(tree)
+  fs.rmdir(cwd)
+end
+
+function test_fs_independent_continuations(context: test.Context)
+  local root = support.new_workspace(context)
+  local first_path = root .. "/parallel-first.dat"
+  local second_path = root .. "/parallel-second.dat"
+  support.cleanup_path(context, first_path)
+  support.cleanup_path(context, second_path)
+
+  local first = async.run(function (): value
+    fs.write_file(first_path, "first")
+    return nil
+  end)
+  task_support.cleanup_task(context, first, "first filesystem Task cleanup")
+  local second = async.run(function (): value
+    fs.write_file(second_path, "second")
+    return nil
+  end)
+  task_support.cleanup_task(context, second, "second filesystem Task cleanup")
+
+  while not first:status():has_finished() or
+        not second:status():has_finished() do
+    timer.yield()
+  end
+  test.assert(first:status():as_string() == "succeeded" and
+              second:status():as_string() == "succeeded",
+              "independent filesystem Tasks did not succeed")
+  test.assert(fs.read_file(first_path) == "first" and
+              fs.read_file(second_path) == "second",
+              "independent filesystem results changed")
+  fs.unlink(first_path)
+  fs.unlink(second_path)
+end

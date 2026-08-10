@@ -31,7 +31,8 @@ test_dependencies = {
    "cluacov >= 0.1"
 }
 test = {
-   type = "busted"
+   type = "command",
+   command = "bash spec/support/run_rock_tests.sh"
 }
 hooks = {
    post_install = [[set -e

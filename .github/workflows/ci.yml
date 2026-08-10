@@ -745,7 +745,7 @@ jobs:
             spec/stdlib/uv_native_handles_spec.lua \
             spec/stdlib/uv_tasks_spec.lua \
             spec/stdlib/uv_bootstrap_spec.lua
-          bash spec/support/ci_sanitizer_capture.sh uv-tasks-native \
+          bash spec/support/ci_sanitizer_capture.sh uv-task-tests \
             bash spec/support/run_titan_stdlib_tests.sh uv-tasks
 
       - name: Run coroutine transfer sanitizer gate
@@ -774,9 +774,8 @@ jobs:
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
           bash spec/support/ci_sanitizer_capture.sh peg-gc \
-            .lua/bin/busted -o gtest -v \
-            spec/stdlib/peg_spec.lua \
-            --name='titan.peg GC roots patterns and callbacks across repeated collections'
+            bash spec/support/run_titan_stdlib_tests.sh peg \
+            --filter='test_peg_roots_and_releases_titan_callback_patterns$'
           bash spec/support/ci_sanitizer_capture.sh string-regex-gc \
             bash spec/support/run_titan_stdlib_tests.sh string \
             --filter='test_regex_gc_rooting$'

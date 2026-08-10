@@ -25,93 +25,8 @@ local LUA = prefix and exists(prefix .. "/bin/lua")
 local PROBE_SOURCE = [[
 local peg = import "peg"
 
-local function runtime_callback(
-    subject: string, position: integer,
-    whole: string): (integer, string, string, string)
-  return position + 1, "titan-runtime", whole, subject
-end
-
-local function delayed_callback(
-    first: value, ...: value): (string, value, ...: value)
-  return "titan-function", first, ...
-end
-
-local function fold_callback(
-    accumulator: value, ...: value): value
-  local total = accumulator as integer
-  local index = 1
-  while index <= #... do
-    total = total + (...[index] as integer)
-    index = index + 1
-  end
-  return total
-end
-
-local function no_results(): ()
-end
-
-local function first_only(first: value): value
-  return first
-end
-
-function recursive(): peg.Pattern
-  local rules: {peg.Rule} = {
-    peg.rule("S", peg.sequence(
-      peg.literal("a"),
-      peg.optional(peg.variable("S")))),
-  }
-  return peg.grammar("S", rules)
-end
-
 function rule_array(...: peg.Rule): {peg.Rule}
   return {...}
-end
-
-function grammar_with_rule_count(count: integer): peg.Pattern
-  local rules: {peg.Rule} = {}
-  local index = 1
-  while index <= count do
-    rules[index] = peg.rule(
-      "rule" .. index,
-      index == 1 and peg.succeed() or peg.fail())
-    index = index + 1
-  end
-  return peg.grammar("rule1", rules)
-end
-
-function runtime_pattern(): peg.Pattern
-  return peg.runtime(runtime_callback)
-end
-
-function function_pattern(): peg.Pattern
-  return peg.function_capture(
-    peg.capture(peg.literal("x")), delayed_callback)
-end
-
-function fold_pattern(): peg.Pattern
-  return peg.fold_capture(
-    peg.sequence(
-      peg.constant(10),
-      peg.constant(20, 3),
-      peg.constant(7)),
-    fold_callback)
-end
-
-function zero_runtime_pattern(): peg.Pattern
-  return peg.runtime(no_results)
-end
-
-function zero_match_time_pattern(): peg.Pattern
-  return peg.match_time(peg.succeed(), no_results)
-end
-
-function zero_function_pattern(): peg.Pattern
-  return peg.function_capture(peg.succeed(), no_results)
-end
-
-function fixed_function_pattern(): peg.Pattern
-  return peg.function_capture(
-    peg.constant("first", "ignored"), first_only)
 end
 ]]
 
@@ -171,52 +86,6 @@ describe("titan.peg", function()
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
     end
-
-    it("GC roots patterns and callbacks across repeated collections",
-    function()
-        run([[
-            local peg = require "titan.peg"
-            collectgarbage("collect")
-            collectgarbage("generational")
-
-            local weak = setmetatable({}, { __mode = "v" })
-            local function build()
-                local callback = function(value)
-                    return value .. "!"
-                end
-                local lookup = setmetatable({}, {
-                    __index = function(_, key) return key .. "?" end,
-                })
-                weak.callback = callback
-                weak.lookup = lookup
-                local delayed = peg.function_capture(
-                    peg.capture(peg.literal("a")), callback)
-                local queried = peg.query_capture(
-                    peg.capture(peg.literal("b")), lookup)
-                return peg.choice(delayed, queried)
-            end
-
-            local pattern = build()
-            for index = 1, 100 do
-                if index % 2 == 0 then
-                    collectgarbage("collect")
-                else
-                    collectgarbage("step", 0)
-                end
-                assert(pattern:match("a") == "a!")
-                assert(pattern:match("b") == "b?")
-            end
-            assert(weak.callback and weak.lookup)
-
-            local record_weak = setmetatable(
-                { pattern = pattern }, { __mode = "v" })
-            pattern = nil
-            collectgarbage("collect")
-            collectgarbage("collect")
-            assert(record_weak.pattern == nil)
-            assert(weak.callback == nil and weak.lookup == nil)
-        ]])
-    end)
 
     it("keeps private and external LPegLabel engines isolated", function()
         local function exercise(load_private_first)

@@ -635,7 +635,7 @@ library group:
 busted spec/libuv_build_spec.lua
 busted spec/stdlib/uv_tasks_spec.lua
 busted spec/stdlib/uv_native_handles_spec.lua
-bash spec/support/run_titan_stdlib_tests.sh net-ssl  # or the native facade suite being extended
+bash spec/support/run_titan_stdlib_tests.sh net-ssl  # host cohort: net.tests + ssl.tests
 bash spec/support/ci_test_groups.sh libraries
 ```
 

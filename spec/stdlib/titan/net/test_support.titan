@@ -1,0 +1,51 @@
+-- Network fixture ownership for net.tests.
+local test = import "test"
+local async = import "async"
+local net = import "net"
+
+local type CheckedAction = () -> ()
+
+local function expect_failure(action: CheckedAction, message: string)
+  local failed = false
+  do
+    action()
+  catch
+    failed = true
+  end
+  test.assert(failed, message)
+end
+
+local function cleanup_server(context: test.Context, server: net.Server)
+  context:cleanup(function () server:close() end)
+end
+
+local function cleanup_connection(context: test.Context,
+                                  connection: net.Connection)
+  context:cleanup(function () connection:close() end)
+end
+
+-- Public Servers do not expose an ephemeral listener's selected port. Retry
+-- only address-use collisions from concurrent workers.
+local function listen_available(first_port: integer): (net.Server, integer)
+  local port = first_port
+  for _index = 1, 100 do
+    do
+      local server = net.listen("127.0.0.1", port)
+      return server, port
+    catch
+      if error is async.OperationError then
+        local failure = error as async.OperationError
+        if failure.name == "EADDRINUSE" then
+          port = port + 1
+          if port > 60999 then port = 20000 end
+        else
+          raise "unexpected listen failure: " .. failure.operation ..
+                ":" .. failure.name .. ": " .. failure.message
+        end
+      else
+        raise error
+      end
+    end
+  end
+  raise "could not find an available loopback port"
+end

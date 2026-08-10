@@ -1,0 +1,122 @@
+local test = import "test"
+local async = import "async"
+local fs = import "fs"
+local http = import "http"
+local net = import "net"
+local str = import "string"
+
+local CERTIFICATE = "spec/fixtures/ssl/server.pem"
+local PRIVATE_KEY = "spec/fixtures/ssl/server-key.pem"
+local TRUST_ROOT = "spec/fixtures/ssl/ca.pem"
+local outcome = "not-run"
+
+local function contains(subject: string, needle: string): boolean
+  local first: integer? = str.find(subject, needle)
+  if first then return true end
+  return false
+end
+
+local function absent_temporary_path(context: test.Context): string
+  local path = fs.tmpname()
+  context:cleanup(function ()
+    do
+      fs.unlink(path)
+    catch
+      if error is async.OperationError then
+        local failure = error as async.OperationError
+        if failure.name ~= "ENOENT" then raise error end
+      else
+        raise error
+      end
+    end
+  end)
+  fs.unlink(path)
+  return path
+end
+
+local function read_exact(connection: net.Connection,
+                          length: integer): string
+  local builder = str.writer()
+  local received = 0
+  while received < length do
+    local chunk? = connection:read()
+    if not chunk then raise "HTTP peer saw truncated request body" end
+    local bytes = chunk as string
+    received = received + #bytes
+    if received > length then
+      raise "HTTP peer received bytes beyond the request body"
+    end
+    builder:write(bytes)
+  end
+  return builder:drain()
+end
+
+local function read_response(response: http.ClientResponse): string
+  local builder = str.writer()
+  for chunk in response:read do builder:write(chunk) end
+  return builder:drain()
+end
+
+local function raw_listen(first_port: integer): (net.Server, integer)
+  local port = first_port
+  for _ = 1, 100 do
+    do
+      return net.listen("127.0.0.1", port, 8), port
+    catch
+      if error is async.OperationError and
+         (error as async.OperationError).name == "EADDRINUSE" then
+        port = port + 1
+      else
+        raise error
+      end
+    end
+  end
+  raise "could not find an available loopback port"
+end
+
+local function http_listen(first_port: integer,
+                           handler: http.Handler,
+                           idle_timeout: integer?): (http.Server, integer)
+  local port = first_port
+  for _ = 1, 100 do
+    do
+      if idle_timeout == nil then
+        return http.listen("127.0.0.1", handler, port), port
+      end
+      return http.listen("127.0.0.1", handler, port, nil,
+                         idle_timeout), port
+    catch
+      if error is async.OperationError and
+         (error as async.OperationError).name == "EADDRINUSE" then
+        port = port + 1
+      else
+        raise error
+      end
+    end
+  end
+  raise "could not find an available HTTP loopback port"
+end
+
+local function https_listen(first_port: integer, handler: http.Handler,
+                            idle_timeout: integer):
+    (http.Server, integer)
+  local port = first_port
+  for _ = 1, 100 do
+    do
+      return http.listen_tls("127.0.0.1", CERTIFICATE, handler,
+                             PRIVATE_KEY, port, nil, idle_timeout), port
+    catch
+      if error is async.OperationError and
+         (error as async.OperationError).name == "EADDRINUSE" then
+        port = port + 1
+      else
+        raise error
+      end
+    end
+  end
+  raise "could not find an available HTTPS loopback port"
+end
+
+local function result(): string
+  return outcome
+end

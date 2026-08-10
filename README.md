@@ -644,14 +644,15 @@ modules](doc/language/static-compiled-modules.md).
 
 # Running the test suite
 
-The repository uses [Busted](https://lunarmodules.github.io/busted/) as its
-outer harness. Compiler, packaging, and host-dependent runtime checks are Lua
-specs; most standard-library behavior is native Titan source under
-`spec/stdlib/titan/`, compiled with `titanc --test` by five small Busted
-wrappers and `spec/support/run_titan_stdlib_tests.sh`. Python 3 is required by
-the bounded native-executable supervisor; set `PYTHON=/absolute/path/to/python3`
-to override the default `python3` command. The simplest way to run the complete
-mixed suite in an isolated installation is:
+The repository uses [Busted](https://lunarmodules.github.io/busted/) for
+compiler, packaging, and host-dependent Lua specs. Most standard-library
+behavior is module-owned Titan source under `spec/stdlib/titan/`, compiled with
+`titanc --test` by `spec/support/run_titan_stdlib_tests.sh` and run directly by
+`spec/support/run_titan_stdlib_test_groups.sh` rather than through Busted
+wrappers. Python 3 is required by the bounded native-executable supervisor; set
+`PYTHON=/absolute/path/to/python3` to override the default `python3` command.
+The simplest way to run the complete mixed suite in an isolated installation
+is:
 
 ```sh
 $ export PREFIX="/tmp/titan-$USER-test"
@@ -661,9 +662,13 @@ $ make test
 
 `make test` runs `luarocks make --force` followed by `luarocks test`. The forced
 build installs the current checkout — including the combined `titan.so` and
-`titan.a` support/standard-library providers — and `luarocks test` installs the test dependencies
-(Busted and cluacov, declared in the rockspec) and runs the suite from the
-repository root. It clears ambient `LUA_PATH`/`LUA_CPATH` overrides for both
+`titan.a` support/standard-library providers. The rockspec's command backend
+enters `spec/support/run_rock_tests.sh`, which carries any standard
+`luarocks test -- ...` arguments through `make rock-test`, applies them to the
+retained Busted specs, and then runs the native Titan suites directly. LuaRocks
+also installs the declared Busted and cluacov test dependencies. It clears
+ambient `LUA_PATH`/`LUA_CPATH`
+overrides for both
 commands, so a shell left over from an old `luarocks init` project cannot make
 the prefix tools load a different compiler snapshot. The supported workflow
 does not use `luarocks init`; avoid exporting those project-tree paths while
@@ -688,7 +693,9 @@ library implementation; use
 `bash spec/support/ci_test_groups.sh libraries` for that complete group. A
 single native group can be reproduced directly, for example with
 `bash spec/support/run_titan_stdlib_tests.sh async`; each executable is run
-under the harness's bounded process supervisor.
+under the harness's bounded process supervisor. Combined selectors such as
+`net-ssl` and `io-fs-timer` are host cohorts only—their discovered tests retain
+qualified module owners such as `net.tests`, `ssl.tests`, and `fs.tests`.
 
 Note that `luarocks test` does **not** build the rock-under-test, only its
 dependencies, so always `luarocks make` first (that is what `make test` does).

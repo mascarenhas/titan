@@ -1,0 +1,157 @@
+local record TrackingReader
+  local input: {string}
+  local position: integer
+  local reads: integer
+  local closes: integer
+  local fail_read_at: integer
+  local fail_close: boolean
+  local closed: boolean
+end
+
+local function TrackingReader:read(): string?
+  raise "io.lines called Reader:read"
+end
+
+local function TrackingReader:read_until(delimiter: string,
+                                         chop: boolean?): string?
+  if delimiter ~= "\n" or not chop then
+    raise "io.lines changed its delimiter contract"
+  end
+  if self.closed then return nil end
+  self.reads = self.reads + 1
+  if self.reads == self.fail_read_at then raise "read failure" end
+  self.position = self.position + 1
+  if self.position > #self.input then return nil end
+  return self.input[self.position]
+end
+
+local function TrackingReader:close()
+  if self.closed then return end
+  self.closes = self.closes + 1
+  if self.fail_close then raise "close failure" end
+  self.closed = true
+end
+
+local function tracking(input: {string}, fail_read_at: integer,
+                        fail_close: boolean): TrackingReader
+  return TrackingReader.new(
+      input, 0, 0, 0, fail_read_at, fail_close, false)
+end
+
+local function return_from_lines(reader: TrackingReader): string
+  for line: string in stream.lines(reader) do
+    return line
+  end
+  return ""
+end
+
+function test_io_lines_closes_on_every_loop_exit(_context: test.Context)
+  local reader = tracking({"alpha", "", "omega"}, -1, false)
+  local output: {string} = {}
+  for line: string in stream.lines(reader) do
+    output[#output + 1] = line
+  end
+  test.assert(output[1] as string == "alpha" and
+              output[2] as string == "" and
+              output[3] as string == "omega",
+              "io.lines changed the line sequence")
+  test.assert(reader.reads == 4 and reader.closes == 1,
+              "io.lines did not close exactly once at exhaustion")
+
+  reader = tracking({"first", "second"}, -1, false)
+  for _line: string in stream.lines(reader) do
+    break
+  end
+  test.assert(reader.reads == 1 and reader.closes == 1,
+              "io.lines did not close after break")
+
+  reader = tracking({"line"}, -1, false)
+  do
+    for _line: string in stream.lines(reader) do
+      raise "body failure"
+    end
+  catch
+    if error ~= "body failure" then raise end
+  end
+  test.assert(reader.closes == 1,
+              "io.lines did not close after a body error")
+
+  reader = tracking({"first", "second"}, 2, false)
+  do
+    for _line: string in stream.lines(reader) do
+    end
+  catch
+    if error ~= "read failure" then raise end
+  end
+  test.assert(reader.closes == 1,
+              "io.lines did not close after a read error")
+
+  reader = tracking({"returned"}, -1, false)
+  test.assert(return_from_lines(reader) == "returned" and
+              reader.closes == 1,
+              "io.lines did not close after return")
+end
+
+function test_io_lines_tuple_and_close_retry(_context: test.Context)
+  local reader = tracking({}, -1, true)
+  local matched = false
+  do
+    for _line: string in stream.lines(reader) do
+    end
+  catch
+    matched = error == "close failure"
+  end
+  test.assert(matched and reader.closes == 2,
+              "io.lines did not retry a pre-commit close failure")
+
+  reader = tracking({"manual", "must-not-be-read"}, -1, false)
+  local next_line, state, initial, close = stream.lines(reader)
+  local line: string? = next_line(state)
+  close(state)
+  close(state)
+  local after_close: string? = next_line(state)
+  test.assert(initial == nil and line == "manual" and not after_close,
+              "io.lines returned the wrong iterator tuple behavior")
+  test.assert(reader.closes == 1,
+              "io.lines manual closer was not idempotent")
+end
+
+function test_io_print_formats_left_to_right_and_is_atomic(
+    _context: test.Context)
+  local make_printable, conversions = support.load_print_helpers()
+  local read_descriptor, saved_stdout = support.begin_stdout_capture()
+  defer support.end_stdout_capture(read_descriptor, saved_stdout)
+
+  stream.print(make_printable("first", "<first>", false),
+               make_printable("second", "<second>", false),
+               make_printable("third", "<third>", false))
+  test.assert(conversions() == "first|second|third",
+              "io.print did not convert values from left to right")
+  test.assert(support.captured_bytes(read_descriptor, 128) ==
+              "<first>\t<second>\t<third>\n",
+              "io.print changed separators or the final newline")
+
+  stream.print()
+  test.assert(support.captured_bytes(read_descriptor, 128) == "\n",
+              "zero-argument io.print did not emit one newline")
+
+  local failed = false
+  do
+    stream.print(make_printable("before", "<before>", false),
+                 make_printable("failure", "<failure>", true),
+                 make_printable("after", "<after>", false))
+  catch
+    failed = error == "conversion failure"
+  end
+  test.assert(failed,
+              "io.print did not propagate a conversion failure")
+  test.assert(conversions() ==
+              "first|second|third|before|failure",
+              "io.print converted past a failed value")
+
+  -- A following successful write proves that the failed call left no prefix
+  -- in the capture pipe: both would be returned by this bounded pipe read.
+  stream.print(make_printable("survivor", "<survivor>", false))
+  test.assert(support.captured_bytes(read_descriptor, 128) == "<survivor>\n",
+              "io.print emitted a prefix before conversion completed")
+end

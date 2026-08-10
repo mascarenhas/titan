@@ -2350,8 +2350,9 @@ fi
             assert.truthy(workflow:find(
                 'share/titan/0.22/src/titan/test.titan', 1, true), workflow)
             assert.truthy(workflow:find(
-                "--name='titan.peg GC roots patterns and callbacks across " ..
-                "repeated collections'", 1, true), workflow)
+                "run_titan_stdlib_tests.sh peg", 1, true), workflow)
+            assert.truthy(workflow:find(
+                "--filter='test_peg_roots_and_releases_titan_callback_patterns$'", 1, true), workflow)
             assert.truthy(workflow:find(
                 "run_titan_stdlib_tests.sh string", 1, true), workflow)
             assert.truthy(workflow:find(

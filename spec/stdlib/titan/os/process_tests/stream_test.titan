@@ -1,0 +1,159 @@
+local option_tail_called = false
+
+local function reject_option(_config: system.SpawnConfig): integer
+  return -1
+end
+
+local function forbidden_tail(_config: system.SpawnConfig): integer
+  option_tail_called = true
+  return 0
+end
+
+local function inherit_then_capture(config: system.SpawnConfig): integer
+  local status = system.with_parent_stdout(config)
+  if status < 0 then return status end
+  return system.with_stdout(config)
+end
+
+local function check_interfaces(input: system.OutputStream,
+                                output: system.InputStream)
+  local reader: stream.Reader = output
+  local reader_closer: stream.ReaderCloser = output
+  local writer: stream.Writer = input
+  local closer: stream.Closer = input
+  local writer_closer: stream.WriterCloser = input
+  if not reader or not reader_closer or not writer or not closer or
+      not writer_closer then
+    raise "process stream Interface conversion produced nil"
+  end
+end
+
+local function cleanup_process(process: system.Process)
+  do process_support.close_process_streams(process) catch end
+  do
+    if process:is_running() then process:kill("term") end
+  catch
+  end
+  do process:wait() catch end
+end
+
+function test_stream_facades_capture_merge_inheritance_options_and_interfaces(
+    _context: test.Context)
+  option_tail_called = false
+  process_support.expect_failure(function ()
+    local unexpected = system.spawn(
+      "/bin/sh", {"-c", ":"}, reject_option, forbidden_tail)
+    defer cleanup_process(unexpected)
+  end, "spawn accepted a rejected option")
+  test.assert(not option_tail_called,
+              "spawn continued after a failed option")
+
+  do
+    local separate = system.spawn(
+      "/bin/sh", {"-c", "printf separate; printf diagnostic >&2"})
+    defer cleanup_process(separate)
+    local input = process_support.required_output(separate.stdin, "default stdin")
+    local output = process_support.required_input(separate.stdout, "default stdout")
+    local diagnostics = process_support.required_input(separate.stderr, "default stderr")
+    check_interfaces(input, output)
+    test.assert(not input:is_tty() and not output:is_tty() and
+                not diagnostics:is_tty(),
+                "captured pipe was classified as a TTY")
+    input:close()
+    input:close()
+    test.assert(process_support.read_all(output) == "separate",
+                "default stdout capture changed")
+    test.assert(process_support.read_all(diagnostics) == "diagnostic",
+                "default stderr capture changed")
+    process_support.assert_normal(separate:wait(), "default capture")
+  end
+
+  do
+    local merged = system.spawn(
+      "/bin/sh", {"-c", "printf A; printf B >&2"},
+      system.with_merged_output)
+    defer cleanup_process(merged)
+    process_support.required_output(merged.stdin, "merged stdin"):close()
+    local merged_output = process_support.required_input(merged.stdout, "merged stdout")
+    local merged_error = process_support.required_input(merged.stderr, "merged stderr")
+    test.assert(merged_output == merged_error,
+                "merged output did not expose one stream facade")
+    test.assert(process_support.read_all(merged_output) == "AB",
+                "merged stdout/stderr bytes changed")
+    test.assert(not merged_error:read(),
+                "merged stream did not share terminal EOF")
+    process_support.assert_normal(merged:wait(), "merged capture")
+  end
+
+  do
+    local recaptured = system.spawn(
+      "/bin/sh", {"-c", "printf E; printf F >&2"},
+      system.with_merged_output, inherit_then_capture,
+      system.with_stderr, system.with_stderr)
+    defer cleanup_process(recaptured)
+    process_support.required_output(recaptured.stdin, "recaptured stdin"):close()
+    local recaptured_output = process_support.required_input(
+      recaptured.stdout, "recaptured stdout")
+    local recaptured_error = process_support.required_input(
+      recaptured.stderr, "recaptured stderr")
+    test.assert(recaptured_output ~= recaptured_error,
+                "final spawn choices retained stale merged identity")
+    test.assert(process_support.read_all(recaptured_output) == "E" and
+                process_support.read_all(recaptured_error) == "F",
+                "final spawn choices returned the wrong streams")
+    process_support.assert_normal(recaptured:wait(), "recaptured streams")
+  end
+
+  do
+    local inherited = system.spawn(
+      "/bin/sh", {"-c", ":"},
+      system.with_parent_stdout, system.with_parent_stderr)
+    defer cleanup_process(inherited)
+    process_support.required_output(inherited.stdin, "inherited stdin"):close()
+    test.assert(not inherited.stdout and not inherited.stderr,
+                "inherited descriptors exposed captured endpoints")
+    process_support.assert_normal(inherited:wait(), "inherited stdio")
+  end
+end
+
+function test_stream_facade_close_wakes_pending_reader(
+    context: test.Context)
+  local process = system.spawn(
+    "/bin/sh", {"-c", "while :; do :; done"})
+  defer cleanup_process(process)
+
+  local input = process_support.required_output(process.stdin, "pending stdin")
+  local output = process_support.required_input(process.stdout, "pending stdout")
+  local diagnostics = process_support.required_input(process.stderr, "pending stderr")
+  local read_result = "not-resumed"
+  local reader = async.run(function (): value
+    local chunk? = output:read()
+    if chunk then
+      read_result = chunk as string
+    else
+      read_result = "eof"
+    end
+    return nil
+  end)
+  task_support.cleanup_task(context, reader, "captured stream reader cleanup")
+  process_support.wait_until_waiting(reader, "captured read")
+
+  process_support.expect_failure(function ()
+    output:read()
+  end, "captured input accepted a second waiting reader")
+  output:close()
+  output:close()
+  process_support.wait_until_finished(reader)
+  test.assert(reader:status():as_string() == "succeeded" and
+              read_result == "eof",
+              "closing captured input did not wake its reader with EOF")
+  test.assert(not output:read() and not output:read_until("missing"),
+              "closed captured input did not keep terminal EOF")
+
+  diagnostics:close()
+  input:close()
+  process:kill("term")
+  local status = process:wait()
+  test.assert(status.signal == "term" and status.signal_number > 0,
+              "pending-read child was not reaped")
+end

@@ -274,12 +274,13 @@ in the covered compiler group; keep public library behavior outside LuaCov.
 
 ### Dogfooding
 
-Move standard-library API/runtime assertions to `*_test.titan` modules under a
-source root that contains tests/support only. They therefore exercise the
-current installed canonical provider built by `make test`, while `--test`
-source-compiles the tests and the private `titan.test` support source. Use C/Lua
-FFI in a narrow shared Titan test-support module for temporary files, process
-fixtures, and Lua-boundary checks.
+Move standard-library API/runtime assertions to module-owned roots under
+`spec/stdlib/titan/` (for example `lua.tests`, `peg.tests`, and
+`uv.task_tests`). They therefore exercise the current installed canonical
+provider built by `make test`, while `--test` source-compiles the tests, their
+ordinary imported test-support modules, and the private `titan.test` support
+source. Use C/Lua FFI only in narrow Titan test-support modules for temporary
+files, process fixtures, and Lua-boundary checks.
 
 Retain Lua/native harnesses only where a distinct host or build boundary is the
 subject, including at minimum:
@@ -297,18 +298,24 @@ cases rather than running duplicate suites. Integrate Titan suites into
 uv/fs, net/OS, and PEG/string grouping/time budgets.
 
 
-Final native groups are `pure`, `math`, `peg`, `string`, `lua-peg`,
-`coroutine`, `async`, `uv-tasks`, `io-fs-timer`, `net-ssl`, `http`, `url`,
-`os`, and `os-uv`. The five Busted supervisors preserve the serial,
-async/uv/I/O/timer/fs, net/SSL/URL/HTTP/OS, and PEG/string/math/Lua/iter/GC
-shards and supervise expected Task diagnostics. The current tree deletes the
-fully migrated Lua suites and retains narrow host coverage for coroutine
-rewriting/interposition and Lua calls, loader/global-promotion and private
-engine state, exact `io.print` write/current-stdout observation, parent
-stdio/exit and process status, purpose-built native helpers, sanitizer gates,
-fresh Lua/Runtime state, and cross-Runtime file lifetime. The per-slice `/tmp`
-migration reports are historical work notes; this mapping and the tracked
-suite roots are the final manifest.
+The direct native driver exposes `iter`, `gc`, `lua`, `math`, `peg`,
+`string`, `url`, `coroutine`, `async`, `http`, `net-ssl`, `uv-tasks`,
+`uv-runtime`, `io-fs-timer`, `os`, and `os-process`. Combined names are only
+host process-cohort labels: discovered identities remain owned by their
+qualified stdlib modules. `run_titan_stdlib_test_groups.sh` preserves the
+serial, async/uv/I/O/timer/fs, net/SSL/URL/HTTP/OS, and
+PEG/string/math/Lua/iter/GC CI shards, applies bounded process supervision, and
+checks expected Task diagnostics directly without Busted wrappers. Each run
+removes its exact generated leaves and then applies empty-only `rmdir` to the
+output parent, so test-created empty folders disappear without claiming a
+pre-existing or nonempty directory. The current tree deletes fully migrated
+Lua suites and retains narrow host coverage for
+coroutine rewriting/interposition and Lua calls, loader/global-promotion and
+private engine state, exact `io.print` write/current-stdout observation,
+parent descriptors and process status, purpose-built native helpers,
+sanitizer gates, fresh Lua/Runtime state, and cross-Runtime file lifetime. The
+per-slice `/tmp` migration reports are historical work notes; this mapping and
+the tracked suite roots are the final manifest.
 
 ### Completion gates
 
@@ -362,11 +369,13 @@ The final Titan design review established these invariants:
 - The installed private `titan.test` source is snapshotted into and published
   from the exact native generation stage. It remains compiler data outside the
   rock manifest and is committed in the same recoverable transaction.
-- Native stdlib behavior is launched by five narrow Busted supervisors. The
-  coroutine suite remains in the serial shard; URL remains in net/OS; string
-  remains in PEG/string. The combined `io_fs_timer` source root runs as one
-  executable in the async/uv/I/O/timer/fs shard rather than duplicating its
-  shared generated paths across parallel workers.
+- Native stdlib behavior is launched directly by the shell group supervisor;
+  `luarocks test` reaches the same path through `run_rock_tests.sh` and
+  `make rock-test`, with command-backend arguments preserved for Busted.
+  Coroutine remains in the serial shard, while URL and
+  string retain their existing host cohorts. The `io-fs-timer` cohort compiles
+  the distinct `io.tests`, `fs.tests`, and `timer.tests` roots into one
+  executable rather than inventing a combined logical test owner.
 - Every native executable has a portable process-group deadline. The intentional
   Runtime-shutdown lifetime oracle runs in its own short, filtered process; this
   is host supervision rather than a new runner lifecycle API.

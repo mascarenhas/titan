@@ -283,13 +283,15 @@ not add epicycles around what may be a misunderstood simpler design.
   SDK/stdlib files remain outside the rock manifest and are not removed by
   `luarocks remove`; binary-rock ownership is deferred until Titan has a
   library/application packaging story. The
-  rockspec declares `test_dependencies` (busted, cluacov) plus a
-  `test = { type = "busted" }` block, so `luarocks test` installs those and
-  runs the suite. `luarocks test` does **not** build the rock-under-test, so
+  rockspec declares `test_dependencies` (busted, cluacov) plus a `command`
+  test backend that enters `run_rock_tests.sh`. The script preserves standard
+  `luarocks test -- ...` arguments while invoking `make rock-test`, applies
+  those arguments to the retained Busted specs, and then runs the native Titan
+  suites directly. `luarocks test` does **not** build the rock-under-test, so
   `make test` runs `luarocks make` first.
 - **Python 3 for the mixed test suite.** Native Titan standard-library test
   executables run under `spec/support/run_with_timeout.py` so a regression
-  cannot hang Busted or CI indefinitely. `run_titan_stdlib_tests.sh` invokes
+  cannot hang the test command or CI indefinitely. `run_titan_stdlib_tests.sh` invokes
   `python3` by default; set `PYTHON` to an absolute Python 3 interpreter when
   that command has another name.
 - **C toolchain**: `CC` (default `cc`) for compilation and for the C FFI's
@@ -397,8 +399,8 @@ in `spec/union_interface_spec.lua`. Source/DSO/archive/prefix-container union
 coverage extends the existing compiled-module specs rather than duplicating
 their provider scaffolding. The regex-AST dogfood remains standard-library
 behavior under
-`spec/stdlib/titan/string_url/string_regex_test.titan`, run by the native test
-runner outside LuaCov.
+`spec/stdlib/titan/string/regex_test.titan`, run by the native test runner
+outside LuaCov.
 Folder-source resolution, blocking, composition, and cross-file diagnostics
 belong in filesystem cases in `spec/driver_spec.lua`; public compilation,
 artifact, external-`--tree`, and mixed-source traceback behavior belongs in
@@ -443,14 +445,20 @@ Helpers pull in luassert explicitly (`require 'luassert'`) because a
 `helpers.verbose = true` (was a per-file `local verbose`) to print `cc`
 command lines and keep generated `.c` files.
 
-Native standard-library behavior lives under `spec/stdlib/titan/` and is
-compiled by `spec/support/run_titan_stdlib_tests.sh`; the five
-`spec/native_stdlib_*_test_spec.lua` files are small Busted supervisors that
-place those suites in the ordinary uncovered library shards. Each native
-executable is process-supervised with a bounded timeout and all groups run
-serially within a wrapper because their generated source/object paths are
-shared. Every root and synthetic stem has an exact cleanup list in the script
-and `make clean`; do not replace it with a broad recursive C/object glob.
+Native standard-library behavior lives in module-owned roots under
+`spec/stdlib/titan/` and is compiled by
+`spec/support/run_titan_stdlib_tests.sh`. The direct group supervisor
+`spec/support/run_titan_stdlib_test_groups.sh` runs those executables in the
+ordinary uncovered library shards and through `make rock-test`; Busted is not
+an intermediary. Host labels such as `net-ssl` and `io-fs-timer` only select a
+process cohort—the discovered test identities remain `net.tests`, `ssl.tests`,
+`io.tests`, `fs.tests`, and `timer.tests`. Each native executable is
+process-supervised with a bounded timeout, and groups run serially because
+some generated source/object paths are shared. Every root and synthetic stem
+has an exact cleanup list in the scripts and `make clean`. After removing those
+leaves, use only failure-tolerant `rmdir` for generated output parents so empty
+folders disappear while pre-existing or nonempty directories survive; never
+replace this with recursive deletion or broad C/object globs.
 
 New or modified specs that generate compiler fixtures in the repository root
 must remove only their exact module artifacts, including the paired `.a` for a

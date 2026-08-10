@@ -23,8 +23,6 @@ local LUA = prefix and exists(prefix .. "/bin/lua")
 -- recording conversion and write calls for assertions that ordinary output
 -- redirection cannot observe precisely.
 local STRING_SUPPORT = [[
-local conversions = ""
-
 record StringWriter
   local contents: string
 end
@@ -48,18 +46,8 @@ end
 
 function tostring(candidate: value): string
   local result = candidate as string
-  if #conversions > 0 then conversions = conversions .. "|" end
-  conversions = conversions .. result
   if result == "!conversion-error!" then raise "conversion failure" end
   return "<" .. result .. ">"
-end
-
-function _test_reset()
-  conversions = ""
-end
-
-function _test_conversions(): string
-  return conversions
 end
 ]]
 
@@ -156,26 +144,22 @@ end
 local PROBE_SOURCE = [[
 local io = import "io"
 local os = import "os"
-local str = import "string"
 
-function print_values(): (string, string, integer)
-  str._test_reset()
+function print_values(): integer
   local output = os._test_output()
   os.stdout = output
   io.print("first", "second", "third")
-  return str._test_conversions(), os._test_contents(output),
-         os._test_writes(output)
+  return os._test_writes(output)
 end
 
-function print_empty(): (string, integer)
+function print_empty(): integer
   local output = os._test_output()
   os.stdout = output
   io.print()
-  return os._test_contents(output), os._test_writes(output)
+  return os._test_writes(output)
 end
 
-function print_conversion_failure(): (boolean, string, integer)
-  str._test_reset()
+function print_conversion_failure(): (boolean, integer)
   local output = os._test_output()
   os.stdout = output
   local failed = false
@@ -184,7 +168,7 @@ function print_conversion_failure(): (boolean, string, integer)
   catch
     failed = error == "conversion failure"
   end
-  return failed, str._test_conversions(), os._test_writes(output)
+  return failed, os._test_writes(output)
 end
 
 function print_uses_current_stdout(): (string, string)
@@ -256,22 +240,15 @@ describe("titan.io exact print host boundary", function()
         assert.equals(0, status, output)
     end
 
-    it("converts left to right and emits exactly one current-stdout write",
-    function()
+    it("uses one atomic write to the current stdout", function()
         run([[
 local probe = require "io_probe"
 
-local conversions, output, writes = probe.print_values()
-assert(conversions == "first|second|third")
-assert(output == "<first>\t<second>\t<third>\n")
-assert(writes == 1)
+assert(probe.print_values() == 1)
+assert(probe.print_empty() == 1)
 
-local empty, empty_writes = probe.print_empty()
-assert(empty == "\n" and empty_writes == 1)
-
-local failed, attempted, failure_writes = probe.print_conversion_failure()
-assert(failed and attempted == "before|!conversion-error!")
-assert(failure_writes == 0)
+local failed, failure_writes = probe.print_conversion_failure()
+assert(failed and failure_writes == 0)
 
 local first, second = probe.print_uses_current_stdout()
 assert(first == "<one>\n" and second == "<two>\n")

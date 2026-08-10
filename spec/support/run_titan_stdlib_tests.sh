@@ -31,101 +31,162 @@ tree=
 output=
 roots=()
 sources=()
-synthetic_parent=
 
+# Combined selectors below are host process cohorts only. Their roots remain
+# independent qualified test modules and therefore retain module-owned names.
 case "$suite" in
-    pure)
+    iter)
         tree=spec/stdlib/titan
-        output=pure__main
-        roots=(pure)
-        sources=(spec/stdlib/titan/pure/pure)
+        output=iter/tests
+        roots=(iter.tests)
+        sources=(
+            spec/stdlib/titan/iter/tests
+            spec/stdlib/titan/support/common
+        )
+        ;;
+    gc)
+        tree=spec/stdlib/titan
+        output=gc/tests
+        roots=(gc.tests)
+        sources=(
+            spec/stdlib/titan/gc/tests
+            spec/stdlib/titan/support/common
+        )
+        ;;
+    lua)
+        tree=spec/stdlib/titan
+        output=lua/tests__main
+        roots=(lua.tests)
+        sources=(
+            spec/stdlib/titan/lua/tests/tests
+            spec/stdlib/titan/lua/test_support
+            spec/stdlib/titan/support/async
+            spec/stdlib/titan/support/common
+        )
         ;;
     math)
         tree=spec/stdlib/titan
-        output=math_native__main
-        roots=(math_native)
-        sources=(spec/stdlib/titan/math_native/math_native)
+        output=math/tests
+        roots=(math.tests)
+        sources=(spec/stdlib/titan/math/tests)
         ;;
     peg)
         tree=spec/stdlib/titan
         output=peg/tests__main
         roots=(peg.tests)
-        sources=(spec/stdlib/titan/peg/tests/tests)
-        synthetic_parent=peg
+        sources=(
+            spec/stdlib/titan/peg/tests/tests
+            spec/stdlib/titan/peg/test_support
+        )
         ;;
     string)
-        tree=spec/stdlib/titan/string_url
-        output=string_core_test
-        roots=(string_core_test string_format_pack_test string_regex_test)
+        tree=spec/stdlib/titan
+        output=string/core_test
+        roots=(string.core_test string.format_pack_test string.regex_test)
         sources=(
-            spec/stdlib/titan/string_url/string_core_test
-            spec/stdlib/titan/string_url/string_format_pack_test
-            spec/stdlib/titan/string_url/string_regex_test
-            spec/stdlib/titan/string_url/string_url_support
+            spec/stdlib/titan/string/core_test
+            spec/stdlib/titan/string/format_pack_test
+            spec/stdlib/titan/string/regex_test
+            spec/stdlib/titan/string/test_support
         )
         ;;
     url)
-        tree=spec/stdlib/titan/string_url
-        output=url_test
-        roots=(url_test)
-        sources=(spec/stdlib/titan/string_url/url_test)
+        tree=spec/stdlib/titan
+        output=url/tests
+        roots=(url.tests)
+        sources=(spec/stdlib/titan/url/tests)
         ;;
     coroutine)
         tree=spec/stdlib/titan
-        output=coroutine_native__main
-        roots=(coroutine_native)
-        sources=(spec/stdlib/titan/coroutine_native/coroutine_native)
+        output=coroutine/tests__main
+        roots=(coroutine.tests)
+        sources=(
+            spec/stdlib/titan/coroutine/tests/tests
+            spec/stdlib/titan/coroutine/test_support
+        )
         ;;
     async)
         tree=spec/stdlib/titan
-        output=async_tests__main
-        roots=(async_tests)
-        sources=(spec/stdlib/titan/async_tests/async_tests)
+        output=async/tests__main
+        roots=(async.tests)
+        sources=(
+            spec/stdlib/titan/async/tests/tests
+            spec/stdlib/titan/async/test_support
+            spec/stdlib/titan/support/async
+        )
         ;;
     http)
         tree=spec/stdlib/titan
-        output=http_native__main
-        roots=(http_native)
-        sources=(spec/stdlib/titan/http_native/http_native)
+        output=http/tests__main
+        roots=(http.tests)
+        sources=(
+            spec/stdlib/titan/http/tests/tests
+            spec/stdlib/titan/http/test_support
+            spec/stdlib/titan/support/async
+        )
         ;;
     net-ssl)
         tree=spec/stdlib/titan
-        output=net_ssl_native__main
-        roots=(net_ssl_native)
-        sources=(spec/stdlib/titan/net_ssl_native/net_ssl_native)
-        ;;
-    lua-peg)
-        tree=spec/stdlib/titan
-        output=lua_peg_native__main
-        roots=(lua_peg_native)
-        sources=(spec/stdlib/titan/lua_peg_native/lua_peg_native)
-        ;;
-    os-uv)
-        tree=spec/stdlib/titan
-        output=os_uv_native__main
-        roots=(os_uv_native)
-        sources=(spec/stdlib/titan/os_uv_native/os_uv_native)
-        ;;
-    os)
-        tree=spec/stdlib/titan
-        output=os_native__main
-        roots=(os_native)
-        sources=(spec/stdlib/titan/os_native/os_native)
+        output=net/tests
+        roots=(net.tests ssl.tests)
+        sources=(
+            spec/stdlib/titan/net/tests
+            spec/stdlib/titan/net/test_support
+            spec/stdlib/titan/ssl/tests
+            spec/stdlib/titan/ssl/test_support
+            spec/stdlib/titan/support/async
+        )
         ;;
     uv-tasks)
         tree=spec/stdlib/titan
-        output=uv_tasks_native__main
-        roots=(uv_tasks_native)
-        sources=(spec/stdlib/titan/uv_tasks_native/uv_tasks_native)
+        output=uv/task_tests__main
+        roots=(uv.task_tests)
+        sources=(
+            spec/stdlib/titan/uv/task_tests/task_tests
+            spec/stdlib/titan/uv/task_test_support
+            spec/stdlib/titan/support/async
+        )
+        ;;
+    uv-runtime)
+        tree=spec/stdlib/titan
+        output=uv/runtime_tests
+        roots=(uv.runtime_tests)
+        sources=(spec/stdlib/titan/uv/runtime_tests)
         ;;
     io-fs-timer)
         tree=spec/stdlib/titan
-        output=io_fs_timer__main
-        roots=(io_fs_timer)
-        sources=(spec/stdlib/titan/io_fs_timer/io_fs_timer)
+        output=io/tests__main
+        roots=(io.tests fs.tests timer.tests)
+        sources=(
+            spec/stdlib/titan/io/tests/tests
+            spec/stdlib/titan/io/test_support
+            spec/stdlib/titan/fs/tests
+            spec/stdlib/titan/fs/test_support
+            spec/stdlib/titan/timer/tests
+            spec/stdlib/titan/support/async
+        )
+        ;;
+    os)
+        tree=spec/stdlib/titan
+        output=os/tests__main
+        roots=(os.tests)
+        sources=(
+            spec/stdlib/titan/os/tests/tests
+            spec/stdlib/titan/os/test_support
+        )
+        ;;
+    os-process)
+        tree=spec/stdlib/titan
+        output=os/process_tests__main
+        roots=(os.process_tests)
+        sources=(
+            spec/stdlib/titan/os/process_tests/process_tests
+            spec/stdlib/titan/os/process_test_support
+            spec/stdlib/titan/support/async
+        )
         ;;
     *)
-        echo "usage: $0 {pure|math|peg|string|url|lua-peg|coroutine|async|http|net-ssl|os|os-uv|uv-tasks|io-fs-timer} [runner-options...]" >&2
+        echo "usage: $0 {iter|gc|lua|math|peg|string|url|coroutine|async|http|net-ssl|uv-tasks|uv-runtime|io-fs-timer|os|os-process} [runner-options...]" >&2
         exit 2
         ;;
 esac
@@ -140,8 +201,12 @@ cleanup() {
     for source in "${sources[@]}"; do
         rm -f -- "${source}.c" "${source}.o"
     done
-    if [[ -n $synthetic_parent ]]; then
-        rmdir -- "$synthetic_parent" 2>/dev/null || true
+    # The compiler creates a parent for nested outputs. Remove that immediate
+    # parent only when every exact owned leaf is gone; pre-existing nonempty
+    # directories are preserved by rmdir. A root-level output has no generated
+    # parent to remove.
+    if [[ "$output" == */* ]]; then
+        rmdir -- "${output%/*}" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT

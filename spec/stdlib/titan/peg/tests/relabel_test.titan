@@ -172,13 +172,13 @@ function test_relabel_definition_arrays_and_dynamic_values(
     pattern.define("binary\0name", already),
   }
   test.assert(pattern.compile("'x'", inert):match("x") == 2)
-  assert_raises("truthy", function()
+  support.assert_raises("truthy", function()
     pattern.define_value("x", nil)
   end)
-  assert_raises("truthy", function()
+  support.assert_raises("truthy", function()
     pattern.define_value("x", false)
   end)
-  assert_raises("duplicate PEG definition name 'x'", function()
+  support.assert_raises("duplicate PEG definition name 'x'", function()
     pattern.compile("%x", {
       pattern.define("x", already),
       pattern.define("x", already),
@@ -265,13 +265,13 @@ function test_relabel_deferred_dynamic_callability(
   test.assert(bad_match_time:match("a") == nil)
   test.assert(bad_fold:match("a") == nil)
 
-  assert_raises("call", function()
+  support.assert_raises("call", function()
     bad_replacement:match("xa")
   end)
-  assert_raises("call", function()
+  support.assert_raises("call", function()
     bad_match_time:match("x")
   end)
-  assert_raises("call", function()
+  support.assert_raises("call", function()
     bad_fold:match("ab")
   end)
 
@@ -284,41 +284,41 @@ end
 
 function test_relabel_search_spans_captures_and_gsub(
     context: test.Context)
-  local found = require_match(pattern.match(
+  local found = support.require_match(pattern.match(
     "hi alalo", "{:x:..:} =x"))
   test.assert(found.first == 4 and found.last == 7)
-  test.assert(result_count(found:values()) == 0)
-  found = require_match(pattern.match(
+  test.assert(support.result_count(found:values()) == 0)
+  found = support.require_match(pattern.match(
     "hi alalo", "{:x:..:} =x", 4))
   test.assert(found.first == 4)
   test.assert(pattern.match(
     "hi alalo", "{:x:..:} =x", 5) == nil)
 
-  found = require_match(pattern.match("hi alalo", "{'al'}", 5))
+  found = support.require_match(pattern.match("hi alalo", "{'al'}", 5))
   test.assert(found.first == 6 and found.last == 7)
   test.assert(found:values() == "al")
 
-  found = require_match(pattern.match("", "!."))
+  found = support.require_match(pattern.match("", "!."))
   test.assert(found.first == 1 and found.last == 0)
-  found = require_match(pattern.match("alo", "!."))
+  found = support.require_match(pattern.match("alo", "!."))
   test.assert(found.first == 4 and found.last == 3)
 
-  found = require_match(pattern.match("alo", "{.}{'o'}"))
+  found = support.require_match(pattern.match("alo", "{.}{'o'}"))
   test.assert(found.first == 2 and found.last == 3)
   local first_value, second_value, surplus = found:values()
   test.assert(first_value == "l" and second_value == "o" and
               surplus == nil)
-  test.assert(result_count(found:values()) == 2)
+  test.assert(support.result_count(found:values()) == 2)
   test.assert(pattern.match("alo", "'z'") == nil)
 
-  found = require_match(pattern.match("", "''"))
+  found = support.require_match(pattern.match("", "''"))
   test.assert(found.first == 1 and found.last == 0)
-  test.assert(result_count(found:values()) == 0)
+  test.assert(support.result_count(found:values()) == 0)
 
   test.assert(pattern.match("abc", "'c'", 0) == nil)
-  found = require_match(pattern.match("abc", "'c'", -1))
+  found = support.require_match(pattern.match("abc", "'c'", -1))
   test.assert(found.first == 3)
-  found = require_match(pattern.match("abc", "'c'", -99))
+  found = support.require_match(pattern.match("abc", "'c'", -99))
   test.assert(found.first == 3)
   test.assert(pattern.match("abc", "'c'", 99) == nil)
 
@@ -328,19 +328,19 @@ function test_relabel_search_spans_captures_and_gsub(
     end
   local nil_pattern = pattern.function_capture(
     pattern.capture(pattern.literal("a")), nil_callback)
-  found = require_match(pattern.match("za", nil_pattern))
+  found = support.require_match(pattern.match("za", nil_pattern))
   test.assert(found.first == 2 and found.last == 2)
   local leading, middle, trailing = found:values()
   test.assert(leading == nil and middle == "middle" and trailing == nil)
-  test.assert(result_count(found:values()) == 3)
+  test.assert(support.result_count(found:values()) == 3)
 
-  found = require_match(pattern.match(
-    "", repeat_text("{}", 200)))
-  test.assert(result_count(found:values()) == 200)
+  found = support.require_match(pattern.match(
+    "", support.repeat_text("{}", 200)))
+  test.assert(support.result_count(found:values()) == 200)
 
-  test.assert(require_match(pattern.match("ab", "'b'")).first == 2)
+  test.assert(support.require_match(pattern.match("ab", "'b'")).first == 2)
   test.assert(pattern.match("ab", "%{stop} / 'b'") == nil)
-  test.assert(require_match(
+  test.assert(support.require_match(
     pattern.match("ab", "%{fail} / 'b'")).first == 2)
 
   local attempts = 0
@@ -352,7 +352,7 @@ function test_relabel_search_spans_captures_and_gsub(
     end
   local inspected = pattern.match_time(
     pattern.capture(pattern.any()), inspect_byte)
-  found = require_match(pattern.match("ab", inspected))
+  found = support.require_match(pattern.match("ab", inspected))
   test.assert(found.first == 2 and found.last == 2 and attempts == 2)
 
   local replace_x: (string) -> string =
@@ -378,9 +378,9 @@ function test_relabel_search_spans_captures_and_gsub(
   test.assert(pattern.gsub(
     "ab", "{.}{.}", bracket_whole) == "[ab]")
   test.assert(seen == "ab")
-  found = require_match(pattern.match("abc", pattern.literal("a")))
+  found = support.require_match(pattern.match("abc", pattern.literal("a")))
   test.assert(found.first == 1 and found.last == 1)
-  found = require_match(pattern.match("abc", pattern.literal("b")))
+  found = support.require_match(pattern.match("abc", pattern.literal("b")))
   test.assert(found.first == 2 and found.last == 2)
 
   local first_compile = pattern.compile("'cached'")
@@ -390,17 +390,17 @@ end
 
 function test_relabel_diagnostics_and_line_positions(
     context: test.Context)
-  assert_exact_error("'p' /",
+  support.assert_exact_error("'p' /",
     "PEG syntax error [ExpPatt1] at L1:C6 (byte 6): " ..
     "expected a pattern after '/'\n'p' /\n     ^")
-  assert_exact_error("&",
+  support.assert_exact_error("&",
     "PEG syntax error [ExpPatt2] at L1:C2 (byte 2): " ..
     "expected a pattern after '&'\n&\n ^")
-  assert_exact_error("'That is the question...",
+  support.assert_exact_error("'That is the question...",
     "PEG syntax error [MisTerm1] at L1:C25 (byte 25): " ..
     "missing terminating single quote\n" ..
     "'That is the question...\n                        ^")
-  assert_exact_error("A <- 'a'\r\nB <-",
+  support.assert_exact_error("A <- 'a'\r\nB <-",
     "PEG syntax error [ExpPatt8] at L2:C5 (byte 15): " ..
     "expected a pattern after '<-'\nB <-\n    ^")
 
@@ -420,14 +420,14 @@ function test_relabel_diagnostics_and_line_positions(
   }
   local index = 1
   while index <= #sources do
-    assert_compile_error_contains(sources[index], "[" .. labels[index] .. "]")
+    support.assert_compile_error_contains(sources[index], "[" .. labels[index] .. "]")
     index = index + 1
   end
-  local syntax_first? = compile_error(" A <- %nosuch ('error'")
+  local syntax_first? = support.compile_error(" A <- %nosuch ('error'")
   test.assert(syntax_first ~= nil)
   local actual: string = syntax_first
-  test.assert(bytes_contain(actual, "[MisClose1]"))
-  test.assert(not bytes_contain(actual, "undefined"))
+  test.assert(support.bytes_contain(actual, "[MisClose1]"))
+  test.assert(not support.bytes_contain(actual, "undefined"))
 
   local line, column = pattern.line_column("a\r\nb", 1)
   test.assert(line == 1 and column == 1)
@@ -435,19 +435,19 @@ function test_relabel_diagnostics_and_line_positions(
   test.assert(line == 2 and column == 1)
   line, column = pattern.line_column("a\r\nb", 5)
   test.assert(line == 2 and column == 2)
-  assert_raises("out of range", function()
+  support.assert_raises("out of range", function()
     pattern.line_column("abc", 0)
   end)
-  assert_raises("out of range", function()
+  support.assert_raises("out of range", function()
     pattern.line_column("abc", 5)
   end)
 end
 
 function test_relabel_locale_refresh_and_semantic_errors(
     context: test.Context)
-  local previous_locale = use_c_ctype_locale()
+  local previous_locale = support.use_c_ctype_locale()
   defer do
-    restore_c_ctype_locale(previous_locale)
+    support.restore_c_ctype_locale(previous_locale)
     pattern.update_locale()
   end
 
@@ -463,12 +463,12 @@ function test_relabel_locale_refresh_and_semantic_errors(
   test.assert(before ~= after)
   test.assert(after:match("abc") == 4)
 
-  assert_compile_error_contains(
+  support.assert_compile_error_contains(
     "aaaa", "rule 'aaaa' used outside a grammar")
-  assert_compile_error_contains(
+  support.assert_compile_error_contains(
     "b <- a", "undefined in given grammar")
-  assert_compile_error_contains(
+  support.assert_compile_error_contains(
     "x <- 'a'  x <- 'b'", "'x' already defined as a rule")
-  assert_compile_error_contains(
+  support.assert_compile_error_contains(
     "%nosuch", "name 'nosuch' undefined")
 end

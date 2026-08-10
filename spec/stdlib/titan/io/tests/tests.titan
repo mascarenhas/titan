@@ -1,0 +1,4 @@
+-- Native titan.io stream and process behavior tests.
+local test = import "test"
+local stream = import "io"
+local support = import "io.test_support"

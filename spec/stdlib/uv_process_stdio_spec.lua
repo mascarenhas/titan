@@ -93,79 +93,6 @@ function captured_stdout(): string
   return probe.titan_uv_test_stdio_output(1) as string
 end
 
-function start_processes(child: string): async.Task
-  outcome = "running"
-  return async.run(function (): value
-    local process = system.spawn(child, {"echo"})
-    local stdin = required_output(process.stdin, "stdin")
-    local stdout = required_input(process.stdout, "stdout")
-    local stderr = required_input(process.stderr, "stderr")
-    local payload = "low\0level\nstream"
-    stdin:write(payload)
-    stdin:close()
-    check(read_all(stdout) == payload,
-          "low-level process stream changed binary bytes")
-    check(read_all(stderr) == "", "low-level echo child wrote stderr")
-    normal(process, "low-level echo")
-    stdout:close()
-    stderr:close()
-
-    local merged = system.spawn(
-        child, {"dual", "32"}, system.with_merged_output)
-    required_output(merged.stdin, "merged stdin"):close()
-    local merged_stdout = required_input(merged.stdout, "merged stdout")
-    local merged_stderr = required_input(merged.stderr, "merged stderr")
-    check(merged_stdout == merged_stderr,
-          "merged low-level output used two owners")
-    check(#read_all(merged_stdout) == 64,
-          "merged low-level output returned the wrong byte count")
-    normal(merged, "merged low-level child")
-    merged_stdout:close()
-
-    local half_merged = system.spawn(
-        child, {"early-output-exit"},
-        system.with_merged_output, system.with_stdout)
-    required_output(half_merged.stdin, "half-merged stdin"):close()
-    local half_stdout = required_input(
-        half_merged.stdout, "half-merged stdout")
-    local half_stderr = required_input(
-        half_merged.stderr, "half-merged stderr")
-    check(half_stdout ~= half_stderr,
-          "replacing one merged output kept one shared owner")
-    check(read_all(half_stdout) == "early\0stdout" and
-          read_all(half_stderr) == "early\0stderr",
-          "half-merged output changed or retained the child endpoint")
-    local half_status = half_merged:wait()
-    check(half_status.code == 23 and half_status.signal_number == 0,
-          "half-merged process status changed")
-    half_stdout:close()
-    half_stderr:close()
-
-    local separate = system.spawn(
-        child, {"early-output-exit"},
-        system.with_merged_output, system.with_stdout, system.with_stderr)
-    required_output(separate.stdin, "separate stdin"):close()
-    local separate_stdout = required_input(
-        separate.stdout, "separate stdout")
-    local separate_stderr = required_input(
-        separate.stderr, "separate stderr")
-    check(separate_stdout ~= separate_stderr,
-          "final separate captures retained merged identity")
-    check(read_all(separate_stdout) == "early\0stdout" and
-          read_all(separate_stderr) == "early\0stderr",
-          "final separate captures changed output")
-    local separate_status = separate:wait()
-    check(separate_status.code == 23 and
-          separate_status.signal_number == 0,
-          "low-level process status changed")
-    separate_stdout:close()
-    separate_stderr:close()
-
-    outcome = "processes-ok"
-    return nil
-  end)
-end
-
 function start_parent_inheritance(): async.Task
   outcome = "running"
   setup(probe.TITAN_UV_TEST_STDIO_PIPE_ALL)
@@ -289,11 +216,9 @@ end
 
 describe("uv process and stdio adapter", function()
     local workspace
-    local child
 
     setup(function()
         workspace = os_support.workspace("uv-process-stdio-direct")
-        child = os_support.process_child(workspace)
         local probe = compile_stdio_probe(workspace)
         os_support.write_source(workspace, "uv_process_stdio_cases",
                                 PROCESS_STDIO_CASES)
@@ -313,17 +238,6 @@ describe("uv process and stdio adapter", function()
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
     end
-
-    it("submits process calls and applies final stdio choices", function()
-        run(([==[
-local async = require "titan.async"
-local cases = require "uv_process_stdio_cases"
-local task = assert(cases.start_processes(%q))
-async.loop()
-assert(task:status():as_string() == "succeeded", task:status():as_string())
-assert(cases.result() == "processes-ok", cases.result())
-]==]):format(child))
-    end)
 
     local function run_parent(start_name, finish_name, expected)
         run(([==[
