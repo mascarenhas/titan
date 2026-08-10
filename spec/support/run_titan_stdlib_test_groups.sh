@@ -76,7 +76,7 @@ filter_section() {
     local filter=$2
     printf '%s\n' "$subject" | awk -v marker="===== TITAN FILTER $filter =====" '
         $0 == marker { active = 1; next }
-        active && /^===== TITAN FILTER / { exit }
+        active && /^===== TITAN FILTER / { active = 0 }
         active { print }
     '
 }
