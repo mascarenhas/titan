@@ -43,6 +43,35 @@ describe("Titan utils", function()
          assert.is_false(util.bytewise_less("same", "same"))
      end)
 
+     it("renders string templates correctly", function()
+         local substs = {
+             VAR = "value",
+             NUM = "123",
+         }
+
+         -- Normal placeholder
+         assert.equal("this is a value", util.render("this is a $VAR", substs))
+
+         -- Placeholder with braces
+         assert.equal("this is a value", util.render("this is a ${VAR}", substs))
+
+         -- Multiple replacements
+         assert.equal("value 123", util.render("$VAR $NUM", substs))
+
+         -- Unmatched brace
+         assert.has_error(function()
+             util.render("unmatched ${VAR", substs)
+         end, "unmatched ${ in template")
+
+         -- Missing variable without ignore_missing
+         assert.has_error(function()
+             util.render("missing $MISSING", substs)
+         end, "Internal compiler error: missing template variable MISSING\nmissing $MISSING")
+
+         -- Missing variable with ignore_missing true
+         assert.equal("missing $MISSING", util.render("missing $MISSING", substs, true))
+     end)
+
      it("curries a function", function()
          local function add(a, b)
              return a + b
