@@ -337,7 +337,7 @@ describe("union module interfaces", function()
             {
                 pattern = "function type has an invalid schema",
                 member = types.ModuleMember(
-                    "sample", "c_vararg_function",
+                    "sample", "nonfalse_reserved_function",
                     types.Function({}, {}, true, false, false),
                     false),
             },

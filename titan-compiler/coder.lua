@@ -1752,10 +1752,10 @@ function coder._checked_callable_plan_impl(
     assert(source._tag == "Type.Function"
            and target._tag == "Type.Function",
         use .. " has non-callable operand types")
+    assert(source.vararg == false and target.vararg == false,
+        use .. " has a non-false reserved Function slot")
     assert(callable.exact == types.equals(source, target),
         use .. " has a mismatched exact-callable marker")
-    assert(not (source.vararg or target.vararg) or callable.exact,
-        use .. " adjusts a non-identical untyped C vararg callable")
     assert(type(callable.arguments) == "table"
            and type(callable.results) == "table",
         use .. " lacks its action lists")
@@ -8639,7 +8639,9 @@ end
 local function codeforeigncall(ctx, node)
     local cfuncname = node.exp.var.name
     local ftype = node.exp._type
-    local ret = ftype.ret or ftype.rettypes[1] or types.CVoid()
+    assert(ftype._tag == "Type.CFunction",
+        "direct foreign call lost its C function declaration")
+    local ret = ftype.ret
     local caexps = {}
     local castats = {}
     local poststats = {}
@@ -10233,10 +10235,14 @@ local function codecall(ctx, node)
     else
         callee_ftype = fnode._type
     end
+    if callee_ftype and callee_ftype._tag == "Type.Function" then
+        assert(callee_ftype.vararg == false,
+            "Type.Function reserved vararg field must be false")
+    end
     local callee_vararg = callee_ftype and callee_ftype.varargtype
     if node._named_arg_order then
         assert(callee_ftype)
-        assert(not callee_vararg and not callee_ftype.vararg)
+        assert(not callee_vararg)
     end
     -- Any native Titan call can reallocate the Lua stack (directly or while
     -- servicing a collection). Keep `_base` as an offset and materialize the
@@ -13726,7 +13732,7 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
     elseif tag == "Ast.ExpCall"
            and node.exp.var
            and node.exp.var._decl
-           and node.exp.var._decl._tag == "Type.CPseudoNew" then
+           and node.exp.var._decl._tag == "Checker.CPseudoNew" then
         return codecpseudonew(ctx, node)
     elseif tag == "Ast.ExpCall" and node._c_pointer_call then
         local fstats, fexp = codecfunctionptrcall(ctx, node)

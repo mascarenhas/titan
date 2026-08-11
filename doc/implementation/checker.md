@@ -336,8 +336,11 @@ specified in
 ### `ExpExtra` — materializing finite call results
 
 A checked call keeps its declared fixed ABI shape in `_types`, its optional
-tail in `_flexrettype`, and the complete callable in `_callee_type`. The
-consumer-facing finite projection lives separately in `_visible_types` and
+tail in `_flexrettype`, and the complete callable in `_callee_type`. For a
+Titan/Lua call that authority is `Type.Function`; for a direct or indirect C
+call it is the authoritative `Type.CFunction`, while C `void` projects to an
+empty `_types` list. The consumer-facing finite projection lives separately in
+`_visible_types` and
 `_result_sources`. Wherever finite demand consumes a trailing call beyond its
 first visible result, `finite_result_expressions` synthesizes
 `ast.ExpExtra(loc, exp, index, _type)` nodes, each coerced and matched like any
@@ -404,7 +407,16 @@ of its expression and never receives `ExpExtra` expansion.
 
 ### Call argument adjustment
 
-`checkargs` applies the shared demand to a callable's fixed parameters and
+`call_signature` is a checker-private adapter rather than a type conversion.
+A `Type.Function`/method view exposes fixed params/results plus Titan
+`varargtype` and `flexrettype`; a `Type.CFunction` view exposes C parameters,
+zero or one visible result, and a separate `c_vararg` flag. The adapter never
+enters the type algebra or code generator. The direct-C call branch is selected
+by C-module member provenance, and the C-pointer branch by
+`CPointer(CFunction)`; neither branch can reach callable adjustment, gradual
+callable guards, branding, or generic Lua dispatch.
+
+`checkargs` applies the shared demand to that view's fixed parameters and
 optional input tail. A Titan fixed-parameter deficit is filled with synthesized
 `Ast.ExpNil` nodes, then coerced and matched exactly like written nils. Surplus
 Titan expressions are retained for effects but are not passed to a fixed
@@ -430,8 +442,10 @@ it borrows fixed parameters from a forwarded `...`.
 
 The parser preserves brace calls as `ArgsNamedFunc` or `ArgsNamedMethod` until
 the `Ast.ExpCall` checker has resolved the callee. `named_function_metadata`
-uses that declaration provenance—not merely a `Type.Function`—to accept direct
+uses declaration provenance—not merely a callable shape—to accept direct
 top-level/module functions, record statics, methods, and fixed direct C members.
+A foreign member is recognized only when its `Type.ModuleMember.type` is the
+authoritative `Type.CFunction`; its names remain on the member descriptor.
 Function values, lambdas, bound-method values, C function pointers, C pseudo
 constructors, input-variadic Titan declarations, and C variadic declarations
 are rejected. A flexible result tail does not prevent a declaration from using
@@ -484,9 +498,12 @@ the fourth slot and can supply the close function from the spread.
 The iterator slot may itself be an optionized projection from a flexible
 tuple producer, so it is forced before callable resolution. It must then
 resolve to a callable shape: a non-variadic `Type.Function`, a `value` coerced
-to a synthesized function type, or a C
-function pointer/foreign function viewed through its C signature. The
-synthesized type for a `value` iterator uses the non-`nil` state/init slots
+to a synthesized function type, or a `CPointer(Type.CFunction)`. A direct
+foreign iterator or close name is contextually decayed to the exact pointer in
+the hidden tuple slot before this resolution; a pre-existing C pointer remains
+unchanged. Both C forms use the checker-private signature view and retain the
+`Type.CFunction` in `_c_pointer_call`. The synthesized type for a `value`
+iterator uses the non-`nil` state/init slots
 as zero, one, or two parameter types, and uses the visible declaration list
 as return types, filling unannotated positions with `value`. A statically
 typed iterator may satisfy later visible declarations from optionized flexible
@@ -929,8 +946,11 @@ Two real loaders exist in `driver.lua`:
   deterministically ordered map, so aliases rehydrate without becoming runtime
   members. Exported `ModuleMember`, `Method`, and `StaticMethod` descriptors
   likewise serialize callable tail shape and formal `paramnames`; names remain
-  absent from structural `Type.Function` values. The constructor schema
-  includes `flexrettype`; ABI 0.14 gates that serialized arity so 0.13 modules
+  absent from structural `Type.Function` values. In ABI 0.22 the five-position
+  `Function(params, rettypes, false, varargtype, flexrettype)` constructor keeps
+  its third position as a required reserved-false sentinel; C variadicity never
+  occupies it. The constructor schema includes `flexrettype`; ABI 0.14 gates
+  that serialized arity so 0.13 modules
   are rejected before rehydration. ABI 0.19 additionally serializes
   `Type.Union`/`Type.Variant` schemas, preserving absolute private-skipping
   tags and `nvariants`; variant descriptors remain metadata, not type members.
@@ -940,8 +960,10 @@ Two real loaders exist in `driver.lua`:
 
 `foreign import` is checked separately (`Ast.TopLevelForeignImport`): it runs
 the C parser pipeline and converts each declaration with
-`foreigntypes.convert`. C values become members of a `Type.CModule`; C type
-declarations become `type_members` plus entries in the symbol table's
+`foreigntypes.convert`. C values become members of a `Type.CModule`; a direct
+function member retains `Type.CFunction`, while a function-pointer value retains
+`Type.CPointer(Type.CFunction)` and neither is projected to `Type.Function`. C
+type declarations become `type_members` plus entries in the symbol table's
 `foreign_types` namespace, which is what lets local annotations such as
 `c.size_t` resolve (see [FFI internals](ffi-internals.md)). Before conversion,
 the `TypeList` supplies complete syntactic typedef-name and file-scope tag

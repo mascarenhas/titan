@@ -323,10 +323,14 @@ encodes three field forms:
 | `name = exp` | the name string |
 | `[keyexp] = exp` | the key *expression node* |
 
-At the semantic-type layer every Titan function shape carries a separate
-`flexrettype`; the independent `Type.CFunction` shape has C's single-result
-model instead. `Type.ModuleMember`, `Type.Method`, and `Type.StaticMethod` also
-carry declaration-only `paramnames`. Structural `Type.Function` and
+At the semantic-type layer every Titan/Lua `Type.Function` shape carries a
+separate `flexrettype` and keeps its ABI-0.22 third constructor position as a
+required reserved `false`; Titan input tails live in `varargtype`. A direct
+foreign module member instead retains the independent `Type.CFunction` shape,
+with C's single-result model and `vararg` bit, and a C function pointer is
+`Type.CPointer(Type.CFunction)`. No C signature is projected into
+`Type.Function`. `Type.ModuleMember`, `Type.Method`, and `Type.StaticMethod`
+also carry declaration-only `paramnames`. Structural `Type.Function` and
 `Type.CFunction` deliberately do not carry parameter spellings: names must not
 affect equality, callable adjustment, or native tags.
 
@@ -338,15 +342,17 @@ of these are declared anywhere; this table is the inventory.
 | Field | On | Written by | Read by | Meaning |
 | --- | --- | --- | --- | --- |
 | `_type` | every Exp, Var, Decl, TopLevel node; the AST root | checker (on `ExpExtra` it is a positional constructor field) | checker, coder | the node's checker type (`Type.*`); on the root it is the `Type.Module` interface |
-| `_types`, `_flexrettype`, `_callee_type` | `ExpCall` | checker | checker, coder | declared fixed results, declared flexible element, and complete callable type; these remain the native-ABI authority even when the consumer sees fewer results |
+| `_types`, `_flexrettype`, `_callee_type` | `ExpCall` | checker | checker, coder | declared fixed results, declared flexible element, and complete callable type; `_callee_type` is `Type.Function` for Titan/Lua or the authoritative `Type.CFunction` for a direct/pointer C call |
 | `_visible_types`, `_result_sources` | `ExpCall` | checker | checker, coder | finite results exposed to this consumer and whether each came from a fixed position or a possibly absent flexible projection |
 | `_finite_flex_prefix`, `_flex_result_demand`, `_open_results` | `ExpCall` | checker | coder | finite projected tail count, finite/open demand marker, and the dynamic source/target/start description for an open sink |
 | `_result_adjustment`, `_arg_adjustment`, `_positional_adjustment`, `_tuple_adjustment` | expression-list consumers | checker | coder | shared finite/open elaboration: delivered fixed/tail scalars, retained effect-only expressions, and at most one dynamic final source; `_positional_adjustment` serves both Arrays and exact integer-keyed Maps |
 | `_discard_results`, `_voidok` | expressions/calls | checker | checker, coder | evaluate under zero-result demand; calls may legally expose no result |
 | `_npassed_args`, `_open_args` | `ExpCall` | checker | coder | statically passed argument count and a final dynamic run feeding an input-vararg tail |
 | `_contextual_value_call`, `_contextual_function_type` | `ExpCall` | checker | coder, specs | the callee began as `value` and was checked against a function shape synthesized from argument/result demand |
+| `_foreign_function_pointer` | `ExpVar` | checker | coder | a direct C declaration was contextually decayed to its exactly compatible `CPointer(CFunction)` target; stores the bare C spelling to cast |
+| `_c_pointer_call` | `ExpCall` | checker | coder | authoritative `Type.CFunction` pointee for an indirect C call, including synthesized generic-for iterator/close calls |
 | `_implicit_coercion` | `ExpCast` synthesized by `trycoerce` | checker | coder | distinguishes a demanded sink conversion from a user-written `as`; finite flexible-return lowering may suppress only the sink conversion after its result budget is exhausted |
-| `_decl` | `VarName`, `VarDot` | checker | checker, coder | what the name resolved to: an `Ast.Decl` (local/param/`self`), a top-level AST node, a `Type.ModuleMember`/`Type.ModuleVariable`, a `Type.Field`, or a `Type.StaticMethod` |
+| `_decl` | `VarName`, `VarDot` | checker | checker, coder | what the name resolved to: an `Ast.Decl` (local/param/`self`), a top-level AST node, a `Type.ModuleMember`/`Type.ModuleVariable`, a `Type.Field`/`Type.StaticMethod`, or the syntax-bound `Checker.CPseudoNew` allocation descriptor |
 | `_used` | `Decl`, top-level nodes (via `_decl`) | checker, on every read: `ExpVar`, `VarDot` receivers, call callees | coder | "this variable is read somewhere"; unused locals get no C variable — their initializer is evaluated and cast to `(void)` |
 | `_assigned` | `Decl` (via `_decl`) | checker, in `StatAssign` on `VarName` targets | coder | "this variable is reassigned"; GC-bearing parameters and `self` get a semantic local stack home only when assignment/spill requires it (otherwise they remain C formals and borrow existing allocation/result/semantic/VM provenance—native callers add no argument root; see [values and the GC](values-and-gc.md)) |
 | `_record_constructor` | synthesized `TopLevelStatic` | parser record desugaring | checker | identifies the adjacent synthesized `Rec.new`; explicit record functions, including an explicit `Rec.new`, do not carry it |

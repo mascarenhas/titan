@@ -1,7 +1,6 @@
 -- Phase-A checker coverage for flexible-return schema propagation. Result-list
 -- adjustment and code generation are exercised by later feature phases.
 local checker = require 'titan-compiler.checker'
-local foreigntypes = require 'titan-compiler.foreigntypes'
 local types = require 'titan-compiler.types'
 local h = require 'spec.support.helpers'
 
@@ -199,41 +198,28 @@ describe("flexible return schemas (typechecker)", function()
         assert.match("cannot export local record type 'test.Secret'", errs[1])
     end)
 
-    it("does not lower a flexible-return foreign-shaped function to a C pointer", function()
-        with_header("extern int ffi_next(void);\n", function(header)
-            -- Valid C cannot declare a Titan flexible return tail, while the
-            -- defensive conversion guard deliberately accepts a Type.Function.
-            -- Wrap the real converter for this one import so the source-driven
-            -- generic-for path exercises that private guard without exporting a
-            -- production helper solely for this test.
-            local original_convert = foreigntypes.convert
-            foreigntypes.convert = function(st, ftype)
-                local converted, err = original_convert(st, ftype)
-                if converted and converted._tag == "Type.Function" then
-                    converted = types.Function(converted.params,
-                        converted.rettypes, converted.vararg,
-                        converted.varargtype, types.Integer())
-                end
-                return converted, err
-            end
-
-            local results = { pcall(run_checker, [[
+    it("keeps foreign generic-for callables on their C signatures", function()
+        with_header([[
+            typedef int *ffi_int_ptr;
+            extern ffi_int_ptr ffi_next(void);
+        ]], function(header)
+            local ok, err, tree = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
                 function run(): nil
-                    for n: integer in c.ffi_next, nil, nil do
+                    for n: c.ffi_int_ptr in c.ffi_next, nil, nil do
                     end
                     return nil
                 end
-            ]]) }
-            foreigntypes.convert = original_convert
-            if not results[1] then
-                error(results[2], 0)
-            end
-
-            assert.falsy(results[2])
-            assert.match("a foreign %(C%) function with this signature cannot be used as a generic for callable",
-                results[3])
+            ]])
+            assert.truthy(ok, err)
+            local loop = tree[2].block.stats[1]
+            local pointer = loop.exps[1]._type
+            assert.equal("Type.CPointer", pointer._tag)
+            local cfunc = types.resolve_c_typedef(pointer.pointee)
+            assert.equal("Type.CFunction", cfunc._tag)
+            assert.is_nil(cfunc.flexrettype)
+            assert.equal(cfunc, loop._init_call._callee_type)
         end)
     end)
 

@@ -104,10 +104,12 @@ describe("foreign C type conversion", function()
             _paramstyle = "prototype",
         }, "ffi_origin_call", h2)
         assert.truthy(fn)
+        assert.equal("Type.CFunction", fn._tag)
         assert.equal(h2, fn._c_origin_header)
-        assert.equal(h2, fn._c_function._c_origin_header)
         assert.equal(h1, fn.params[1]._c_origin_header)
-        assert.is_nil(fn._c_function.ret._c_origin_header)
+        assert.is_nil(fn.ret._c_origin_header)
+        assert.equal("prototype", fn._paramstyle)
+        assert.is_false(fn.vararg)
         assert.equal(h2, declaration.origin_header)
     end)
 
@@ -326,8 +328,8 @@ describe("foreign C type conversion", function()
             _paramstyle = "prototype",
         }))
 
+        assert.equal("Type.CFunction", oldstyle._tag)
         assert.equal("oldstyle", oldstyle._paramstyle)
-        assert.equal("oldstyle", oldstyle._c_function._paramstyle)
         assert.equal("prototype", prototype._paramstyle)
         assert.equal("conditional",
             foreigntypes.declaration_compatibility(
@@ -337,8 +339,6 @@ describe("foreign C type conversion", function()
                 oldstyle, prototype)
         assert.equal(oldstyle, canonical)
         assert.equal("prototype", canonical._paramstyle)
-        assert.equal("prototype",
-            canonical._c_function._paramstyle)
         assert.equal(1, #canonical.params)
 
         local reverse_oldstyle =
@@ -383,9 +383,8 @@ describe("foreign C type conversion", function()
             _paramstyle = "prototype",
         }))
 
+        assert.equal("Type.CFunction", converted._tag)
         assert.equal("prototype", converted._paramstyle)
-        assert.equal("prototype",
-            converted._c_function._paramstyle)
         assert.equal("Type.CArray",
             converted.params[1].pointee._tag)
     end)
@@ -488,15 +487,15 @@ describe("foreign C type conversion", function()
         local second_tag = types.CStruct(
             nil, "Local", nil, {}, false, false)
         local int = st.c_profile.integers.int.type
-        local first_prototype = types.Function({
+        local first_prototype = types.CFunction({
             types.CPointer(first_tag, {}),
-        }, {int}, false, false, false)
-        local second_prototype = types.Function({
+        }, int, false, false)
+        local second_prototype = types.CFunction({
             types.CPointer(second_tag, {}),
-        }, {int}, false, false, false)
-        local repeated_prototype = types.Function({
+        }, int, false, false)
+        local repeated_prototype = types.CFunction({
             types.CPointer(first_tag, {}),
-        }, {int}, false, false, false)
+        }, int, false, false)
 
         assert.falsy(foreigntypes.declarations_compatible(
             first_prototype, second_prototype))

@@ -56,12 +56,13 @@ Methods and user-declared record/union statics store the list in their
 descriptor; the implicit
 method receiver and the trailing variadic marker are excluded.
 
-`Type.Function` and `Type.CFunction` have not gained a names field. Their
-equality, callable adjustment, string rendering, serialization, and
-first-class function tags therefore remain structural. This enforces the
-feature boundary: a direct declaration can publish names while a function
-value, anonymous closure, bound-method value, or C function pointer cannot
-acquire named-call eligibility merely from its function type.
+`Type.Function` and `Type.CFunction` have not gained a names field. Boxed
+`Type.Function` equality/adjustment/tags remain structural, while
+`Type.CFunction` keeps separate C signature identity and is never a boxed
+callable. This enforces the feature boundary: a direct foreign
+`Type.ModuleMember` can retain an authoritative `CFunction` plus declaration
+names, while a function value, anonymous closure, bound-method value, or C
+function pointer cannot acquire named-call eligibility merely from its type.
 
 An Interface method is one of those declaration descriptors. Direct
 `wrapper:method { ... }` checking uses the Interface method's `paramnames`,

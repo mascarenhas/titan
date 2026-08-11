@@ -355,8 +355,10 @@ through (see [closures and captured variables](#closures-and-captured-variables)
 It comes **immediately after `_mod` and before the method `self`**, and
 *every* Titan function takes it even when the body never reads it: the
 fast value-call path dispatches purely on the function-type tag, so all
-native entries of a given `Type.Function` must share one ABI. Its value
-at a call site depends on the path:
+native entries of a given `Type.Function` must share one ABI. This type is
+exclusively a boxed Titan/Lua callable; its ABI-0.22 third constructor position
+is reserved `false`, not C variadicity. Its value at a call site depends on the
+path:
 
 * **`NULL`** on a static direct call (`codecall`) — a top-level
   function/method/static reached by name has no closure to pass;
@@ -441,11 +443,16 @@ holders required by the declared ABI, publishes only the consumer-visible
 projection, and, for a flexible producer, allocates a typed caller-owned buffer
 sized to the finite demand or to the bounded open budget.
 
-Direct foreign calls use the parallel branch in `codeforeigncall`. Each named
-expression is converted and assigned to a target-typed C temporary in lexical
-order; the call prints those temporaries in formal order. Mutable GC-bearing
-out-parameter anchors are still refreshed after the C call. Neither branch
-emits a runtime name table, and a named call never reaches `codevaluecall`.
+Direct foreign calls use the parallel branch in `codeforeigncall`, which
+requires the authoritative `Type.CFunction` and emits the bare C declaration;
+there is no projected `Type.Function` fallback. Calls through
+`CPointer(CFunction)` instead use `codecfunctionptrcall`, materializing and
+null-checking the pointer once. Each named direct-call expression is converted
+and assigned to a target-typed C temporary in lexical order; the call prints
+those temporaries in formal order. Mutable GC-bearing out-parameter anchors are
+still refreshed after the C call. Neither C branch emits closure tags, brands,
+strict relays, adjustment wrappers, or a runtime name table, and a named call
+never reaches `codevaluecall`.
 See [named-argument internals](named-arguments.md).
 
 ### Calling function values (`codevaluecall`)

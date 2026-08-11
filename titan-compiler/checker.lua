@@ -997,15 +997,6 @@ function foreign_redeclaration_batch.collect_reads(typ, reads, seen)
             foreign_redeclaration_batch.collect_reads(param, reads, seen)
         end
         foreign_redeclaration_batch.collect_reads(typ.ret, reads, seen)
-    elseif tag == "Type.Function" then
-        foreign_redeclaration_batch.collect_reads(
-            typ._c_function, reads, seen)
-        for _, param in ipairs(typ.params or {}) do
-            foreign_redeclaration_batch.collect_reads(param, reads, seen)
-        end
-        for _, ret in ipairs(typ.rettypes or {}) do
-            foreign_redeclaration_batch.collect_reads(ret, reads, seen)
-        end
     elseif tag == "Type.Pointer" then
         foreign_redeclaration_batch.collect_reads(typ.type, reads, seen)
     end
@@ -1034,18 +1025,6 @@ function foreign_redeclaration_batch.collect_writes(typ, writes, seen)
                 param, writes, seen)
         end
         foreign_redeclaration_batch.collect_writes(typ.ret, writes, seen)
-    elseif tag == "Type.Function" then
-        writes[typ] = true
-        foreign_redeclaration_batch.collect_writes(
-            typ._c_function, writes, seen)
-        for _, param in ipairs(typ.params or {}) do
-            foreign_redeclaration_batch.collect_writes(
-                param, writes, seen)
-        end
-        for _, ret in ipairs(typ.rettypes or {}) do
-            foreign_redeclaration_batch.collect_writes(
-                ret, writes, seen)
-        end
     end
 end
 
@@ -1321,36 +1300,69 @@ local function c_function_pointer_type(typ)
     end
 end
 
-local function c_function_as_function_type(cfunc)
-    local ret = c_resolve(cfunc.ret)
-    local rettypes = ret._tag == "Type.CVoid" and {} or { cfunc.ret }
-    local converted =
-        types.Function(cfunc.params, rettypes, cfunc.vararg, false, false)
-    converted._c_function = cfunc
-    converted._c_return_type = cfunc.ret
-    converted._paramstyle = cfunc._paramstyle
-    converted._return_declaration_qualifiers =
-        cfunc._return_declaration_qualifiers
-    return converted
+-- Calls share one checker-local signature view without converting declaration
+-- types into value types. Type.Function/Method/StaticMethod describe Titan/Lua
+-- callable values and declarations; Type.CFunction remains the authoritative C
+-- signature, with C void projected only into the call's visible zero-result
+-- list. The view never enters the type algebra or code generator.
+local function call_signature(callable)
+    if callable and callable._tag == "Checker.CallSignature" then
+        return callable
+    end
+    if type(callable) ~= "table" then return nil end
+
+    local tag = callable._tag
+    if tag == "Type.CFunction" then
+        local ret = c_resolve(callable.ret)
+        return {
+            _tag = "Checker.CallSignature",
+            kind = "c",
+            callable = callable,
+            params = callable.params,
+            rettypes = ret._tag == "Type.CVoid" and {} or { callable.ret },
+            varargtype = false,
+            flexrettype = false,
+            c_vararg = callable.vararg and true or false,
+        }
+    elseif tag == "Checker.CPseudoNew" then
+        return {
+            _tag = "Checker.CallSignature",
+            kind = "pseudo",
+            callable = callable,
+            params = callable.params,
+            rettypes = callable.rettypes,
+            varargtype = false,
+            flexrettype = false,
+            c_vararg = false,
+            description = callable.name == "new_array"
+                and "C allocation pseudo-function (integer)"
+                or "C allocation pseudo-function ()",
+        }
+    elseif tag == "Type.Function" or tag == "Type.Method"
+           or tag == "Type.StaticMethod" then
+        if tag == "Type.Function" then
+            assert(callable.vararg == false,
+                "Type.Function reserved vararg field must be false")
+        end
+        return {
+            _tag = "Checker.CallSignature",
+            kind = "titan",
+            callable = callable,
+            params = callable.params,
+            rettypes = callable.rettypes,
+            varargtype = callable.varargtype or false,
+            flexrettype = callable.flexrettype or false,
+            c_vararg = false,
+        }
+    end
 end
 
-local function c_function_pointer_accepts_function(target, ftype)
+local function c_function_pointer_accepts_declaration(target, cfunc)
     local expected = c_function_pointer_type(target)
-    if not expected or ftype._tag ~= "Type.Function"
-       or #ftype.rettypes > 1
-       or ftype.varargtype or ftype.flexrettype then
-        return false
-    end
-    local actual = ftype._c_function
-    if not actual then
-        local ret = ftype.rettypes[1] or types.CVoid()
-        actual = types.CFunction(
-            ftype.params, ret, ftype.vararg, false)
-        actual._paramstyle = ftype._paramstyle
-        actual._return_declaration_qualifiers =
-            ftype._return_declaration_qualifiers
-    end
-    return types.c_function_types_equal(expected, actual)
+    return expected ~= nil
+       and cfunc ~= nil
+       and cfunc._tag == "Type.CFunction"
+       and types.c_function_types_equal(expected, cfunc)
 end
 
 local function is_foreign_function_var(var)
@@ -1470,23 +1482,29 @@ local function automatic_c_object_error(typ, st)
     return automatic_c_layout_error(typ, st)
 end
 
+-- C allocation pseudo-members are syntax-bound checker declarations, not
+-- boxed callable values. The singleton context lets VarDot expose their narrow
+-- call signature only while it is the direct callee of an ExpCall; every other
+-- value use is rejected before the descriptor can enter the type algebra.
+local c_pseudo_callee_context = {}
+
 local function c_pseudo_member(typ, name, st)
     if name == "new" then
         return {
-            _tag = "Type.CPseudoNew",
+            _tag = "Checker.CPseudoNew",
             ctype = typ,
             name = name,
-            type = types.Function({}, { c_owned_type(typ, false) }, false,
-                false, false),
+            params = {},
+            rettypes = { c_owned_type(typ, false) },
         }
     elseif name == "new_array" then
         return {
-            _tag = "Type.CPseudoNew",
+            _tag = "Checker.CPseudoNew",
             ctype = typ,
             name = name,
             array = true,
-            type = types.Function({ types.Integer() },
-                { c_owned_type(typ, true) }, false, false, false),
+            params = { types.Integer() },
+            rettypes = { c_owned_type(typ, true) },
         }
     elseif name == "sizeof" or name == "alignof" then
         local err = incomplete_c_object_error(typ, st,
@@ -2190,11 +2208,11 @@ freeze_callable_actions = function(raw, source, target, context)
             and types.equals(raw.target, target),
         "callable plan has mismatched signatures")
     interface_adapter_assert(
+        source.vararg == false and target.vararg == false,
+        "callable plan has a non-false reserved Function slot")
+    interface_adapter_assert(
         raw.exact == types.equals(source, target),
         "callable exactness marker is wrong")
-    interface_adapter_assert(
-        not (source.vararg or target.vararg) or raw.exact,
-        "non-exact untyped C vararg adjustment")
     interface_adapter_assert(
         type(raw.arguments) == "table"
             and type(raw.results) == "table",
@@ -4566,13 +4584,12 @@ end
 local function forin_dots_limit(exps)
     local prefix = #exps - 1
     local limit = 4
-    local ftype = exps[1] and exps[1]._type
-    local cfunc = ftype and c_function_pointer_type(ftype)
-    if cfunc then
-        ftype = c_function_as_function_type(cfunc)
-    end
-    if ftype and ftype._tag == "Type.Function" then
-        limit = math.max(prefix + 1, 1 + math.min(#ftype.params, 2))
+    local callable = exps[1] and exps[1]._type
+    local cfunc = callable and c_function_pointer_type(callable)
+    local signature = call_signature(cfunc or callable)
+    if signature then
+        limit = math.max(prefix + 1,
+            1 + math.min(#signature.params, 2))
         if limit > 4 then limit = 4 end
     end
     return limit
@@ -4597,30 +4614,13 @@ local function check_forin_decl_init(decl, exp, st, errors)
     return exp
 end
 
-local function forin_ftype_from_slot_type(typ)
+local function forin_signature_from_slot_type(typ)
     local cfunc = c_function_pointer_type(typ)
     if cfunc then
-        return c_function_as_function_type(cfunc), cfunc
+        return call_signature(cfunc), cfunc
     elseif typ._tag == "Type.Function" then
-        return typ, nil
+        return call_signature(typ), nil
     end
-end
-
-local function function_type_as_c_pointer(ftype)
-    if #ftype.rettypes > 1 or ftype.varargtype or ftype.flexrettype then
-        return nil
-    end
-    local cfunc = ftype._c_function
-    if not cfunc then
-        local ret = ftype._c_return_type
-            or ftype.rettypes[1] or types.CVoid()
-        cfunc =
-            types.CFunction(ftype.params, ret, ftype.vararg, false)
-        cfunc._paramstyle = ftype._paramstyle
-        cfunc._return_declaration_qualifiers =
-            ftype._return_declaration_qualifiers
-    end
-    return types.CPointer(cfunc, {})
 end
 
 local function check_forin_callable_exp(exp, st, errors, context, demand)
@@ -4628,17 +4628,12 @@ local function check_forin_callable_exp(exp, st, errors, context, demand)
         checkvar(exp.var, st, errors)
         if exp.var._decl then exp.var._decl._used = true end
         local ftype = exp.var._type
+        local cfunc = c_resolve(ftype)
         if exp.var.exp and exp.var.exp._type
            and exp.var.exp._type._tag == "Type.CModule"
-           and ftype._tag == "Type.Function" then
-            local target = function_type_as_c_pointer(ftype)
-            if target then
-                exp._type = target
-                exp._foreign_function_pointer = exp.var.name
-            else
-                exp._type = invalid(errors, exp.loc,
-                    "a foreign (C) function with this signature cannot be used as a generic for callable")
-            end
+           and cfunc and cfunc._tag == "Type.CFunction" then
+            exp._type = types.CPointer(cfunc, {})
+            exp._foreign_function_pointer = exp.var.name
             return
         end
     end
@@ -4791,18 +4786,19 @@ local function checkforin(node, st, errors)
         local old = exps[1]
         exps[1] = trycoerce(exps[1], ftype, errors)
         replace_adjusted_value(tuple_adjustment, old, exps[1])
-        ftype = exps[1]._type
+        ftype = call_signature(exps[1]._type)
     else
-        ftype, iter_cfunc = forin_ftype_from_slot_type(ftype)
+        ftype, iter_cfunc = forin_signature_from_slot_type(ftype)
     end
     if not ftype then
         checker.typeerror(errors, exps[1].loc,
             "generic for iterator must be a function, value, or C function pointer but found %s",
             types.tostring(exps[1]._type))
-        ftype = types.Function({}, { types.Invalid() }, false, false, false)
+        ftype = call_signature(
+            types.Function({}, { types.Invalid() }, false, false, false))
     end
 
-    if ftype.vararg or ftype.varargtype then
+    if ftype.c_vararg or ftype.varargtype then
         checker.typeerror(errors, exps[1].loc,
             "generic for iterator cannot be variadic")
     end
@@ -4824,8 +4820,8 @@ local function checkforin(node, st, errors)
     if #effective_results == 0 then
         checker.typeerror(errors, exps[1].loc,
             "generic for iterator must return at least one value")
-        ftype = types.Function(ftype.params, { types.Invalid() }, false, false,
-            false)
+        ftype = call_signature(types.Function(
+            ftype.params, { types.Invalid() }, false, false, false))
         effective_results = { types.Invalid() }
     else
         local ctrltype = effective_results[1]
@@ -4868,13 +4864,16 @@ local function checkforin(node, st, errors)
             exps[4] = trycoerce(exps[4], close_ftype, errors)
             replace_adjusted_value(tuple_adjustment, old, exps[4])
             close_type = exps[4]._type
+            close_ftype = call_signature(close_ftype)
         else
-            close_ftype, close_cfunc = forin_ftype_from_slot_type(close_type)
+            close_ftype, close_cfunc =
+                forin_signature_from_slot_type(close_type)
         end
     end
     if close_ftype then
         local close_ok = true
-        if close_ftype.vararg or close_ftype.varargtype or #close_ftype.params > 1 then
+        if close_ftype.c_vararg or close_ftype.varargtype
+           or #close_ftype.params > 1 then
             checker.typeerror(errors, exps[4].loc,
                 "generic for close function must accept zero or one state argument")
             close_ok = false
@@ -5305,7 +5304,10 @@ local checkstat_visitor = util.make_visitor({
             -- coercion/tostring path; preserve the dedicated diagnostic below
             -- while still reserving their finite expression-list slot.
             local decl = var._decl
-            local function_decl = var._type._tag == "Type.Function" and decl
+            local function_decl =
+                (var._type._tag == "Type.Function"
+                 or var._type._tag == "Type.CFunction")
+                and decl
                 and (decl._tag == "Ast.TopLevelFunc"
                      or decl._tag == "Type.ModuleMember"
                      or decl._tag == "Type.StaticMethod")
@@ -5329,7 +5331,8 @@ local checkstat_visitor = util.make_visitor({
                 local texp = var._type
                 if texp._tag == "Type.Module" then
                     checker.typeerror(errors, var.loc, "trying to assign to a module")
-                elseif texp._tag == "Type.Function" and var._decl
+                elseif (texp._tag == "Type.Function"
+                        or texp._tag == "Type.CFunction") and var._decl
                        and (var._decl._tag == "Ast.TopLevelFunc"
                             or var._decl._tag == "Type.ModuleMember"
                             or var._decl._tag == "Type.StaticMethod") then
@@ -5770,7 +5773,19 @@ checkvar = util.make_visitor({
                 local pseudo_error
                 node._decl, pseudo_error =
                     c_pseudo_member(ltype, node.name, st)
-                if node._decl then
+                if node._decl
+                   and node._decl._tag == "Checker.CPseudoNew" then
+                    if context == c_pseudo_callee_context then
+                        -- This syntax-bound declaration has no value type. The
+                        -- enclosing ExpCall consumes `_decl` before ordinary
+                        -- invalid-callee recovery.
+                        node._type = types.Invalid()
+                    else
+                        node._type = invalid(errors, node.loc,
+                            "C allocation pseudo-member '%s' can only be called directly",
+                            node.name)
+                    end
+                elseif node._decl then
                     node._type = node._decl.type
                 elseif pseudo_error then
                     node._type = invalid(errors, node.loc,
@@ -5803,7 +5818,7 @@ checkvar = util.make_visitor({
         if node._type and node._type._tag ~= "Type.Invalid" then
             local spelling_only = context
                 and node.exp._type._tag == "Type.CModule"
-                and node._type._tag == "Type.Function"
+                and node._type._tag == "Type.CFunction"
                 and c_function_pointer_type(context) ~= nil
             if not checker._ensure_c_enum_supported(
                     st, node._type, node.loc, errors, nil,
@@ -5921,20 +5936,24 @@ end
 -- surplus expressions for effects; strict C calls neither pad nor relax their
 -- ABI shape. `allow_missing == false` is the existing call-site signal for a C
 -- function pointer/direct FFI/pseudo-constructor.
-local function checkargs(ftype, args, loc, fname, st, errors, allow_missing)
+local function checkargs(callable, args, loc, fname, st, errors,
+                         allow_missing)
+    local signature = assert(call_signature(callable),
+        "call checking requires a callable signature")
     if allow_missing == nil then allow_missing = true end
-    local strict_c = not allow_missing
+    local strict_arity = not allow_missing
     local fixed = {}
-    for i, ptype in ipairs(ftype.params) do fixed[i] = ptype end
-    local tail = ftype.varargtype or (ftype.vararg and INFER_OPEN) or false
+    for i, ptype in ipairs(signature.params) do fixed[i] = ptype end
+    local tail = signature.varargtype
+        or (signature.c_vararg and INFER_OPEN) or false
     local original_count = #args
     local adjusted = adjust_explist(args,
         result_demand(fixed, tail, {
             term = "call to " .. fname,
             open_term = fname,
             loc = loc,
-            missing = strict_c and "ignore" or "nil",
-            explicit_surplus = strict_c and "error" or "discard",
+            missing = strict_arity and "ignore" or "nil",
+            explicit_surplus = strict_arity and "error" or "discard",
             slot_term = function(i)
                 return "argument " .. i .. " of call to " .. fname
             end,
@@ -5943,17 +5962,18 @@ local function checkargs(ftype, args, loc, fname, st, errors, allow_missing)
     -- A runtime-sized Titan run has no C vararg promotion/ABI contract. Keep
     -- ordinary explicit C varargs, but never pass `...` or a flexible-result
     -- run through that boundary.
-    if ftype.vararg and adjusted.open_source then
+    if signature.c_vararg and adjusted.open_source then
         checker.typeerror(errors, adjusted.open_source.loc,
             "cannot pass a runtime-open Titan result sequence to a foreign (C) variadic function")
     end
 
-    if strict_c and (adjusted.missing or adjusted.explicit_surplus) then
+    if strict_arity and (adjusted.missing or adjusted.explicit_surplus) then
         local supplied = adjusted.explicit_surplus and original_count
-            or (#ftype.params - adjusted.missing)
+            or (#signature.params - adjusted.missing)
         checker.typeerror(errors, loc,
             "%s called with %d arguments but expects %d.\n%s",
-            fname, supplied, #ftype.params, types.tostring(ftype))
+            fname, supplied, #signature.params,
+            signature.description or types.tostring(signature.callable))
     end
 
     for i = #args, 1, -1 do args[i] = nil end
@@ -6045,11 +6065,13 @@ local function c_variadic_mutation_target(exp)
     return nil
 end
 
-local function annotate_c_call_mutations(node, ftype)
+local function annotate_c_call_mutations(node, cfunc)
+    assert(cfunc and cfunc._tag == "Type.CFunction",
+        "C call mutation analysis requires a C function declaration")
     local mutated, seen = {}, {}
     for i, arg in ipairs(node.args.args) do
-        local target = (ftype.params or {})[i]
-        if not target and ftype.vararg then
+        local target = (cfunc.params or {})[i]
+        if not target and cfunc.vararg then
             target = c_variadic_mutation_target(arg)
         end
         if target then
@@ -6146,11 +6168,13 @@ end
 -- projection is optional because its runtime slot may be absent. An open run
 -- exists only when both the sink is open and the static callable type declares
 -- a flexible tail.
-annotate_call_results = function(node, ftype, demand, errors)
+annotate_call_results = function(node, callable, demand, errors)
     demand = demand or default_call_result_demand(node)
-    node._callee_type = ftype
-    node._types = ftype.rettypes
-    node._flexrettype = ftype.flexrettype or false
+    local signature = assert(call_signature(callable),
+        "result checking requires a callable signature")
+    node._callee_type = signature.callable
+    node._types = signature.rettypes
+    node._flexrettype = signature.flexrettype or false
     node._visible_types = {}
     node._result_sources = {}
     -- A function value may turn out to be an ordinary Lua callable at run
@@ -6164,7 +6188,7 @@ annotate_call_results = function(node, ftype, demand, errors)
     node._open_results = false
     node._finite_flex_prefix = 0
 
-    local nfixed = #ftype.rettypes
+    local nfixed = #signature.rettypes
     local ndemand = #demand.fixed
     local function add(typ, source)
         table.insert(node._visible_types, typ)
@@ -6176,9 +6200,9 @@ annotate_call_results = function(node, ftype, demand, errors)
     end
 
     for i = 1, math.min(ndemand, nfixed) do
-        add(ftype.rettypes[i], { kind = "fixed", index = i })
+        add(signature.rettypes[i], { kind = "fixed", index = i })
     end
-    if ftype.flexrettype and ndemand > nfixed then
+    if signature.flexrettype and ndemand > nfixed then
         local count = ndemand - nfixed
         if count > TITAN_VARARG_MAX and not demand.suppress_flex_cap then
             checker.typeerror(errors, node.loc,
@@ -6187,7 +6211,7 @@ annotate_call_results = function(node, ftype, demand, errors)
         end
         node._finite_flex_prefix = count
         for i = 1, count do
-            add(optionize(ftype.flexrettype), {
+            add(optionize(signature.flexrettype), {
                 kind = "flex", index = i, may_absent = true,
             })
         end
@@ -6195,24 +6219,24 @@ annotate_call_results = function(node, ftype, demand, errors)
 
     if demand.tail then
         for i = ndemand + 1, nfixed do
-            add(ftype.rettypes[i], { kind = "fixed", index = i })
+            add(signature.rettypes[i], { kind = "fixed", index = i })
         end
-        if ftype.flexrettype then
+        if signature.flexrettype then
             local start = math.max(ndemand - nfixed, 0) + 1
-            local target = expected_type(demand.tail) or ftype.flexrettype
+            local target = expected_type(demand.tail) or signature.flexrettype
             node._open_results = {
                 source = node,
-                source_type = ftype.flexrettype,
+                source_type = signature.flexrettype,
                 target_type = target,
                 start = start,
             }
             node._lua_open_result_dynamic_plan =
-                types.dynamic_coercion(ftype.flexrettype) or false
+                types.dynamic_coercion(signature.flexrettype) or false
             node._strict_open_result_guard_plan =
-                types.gradual_guard(ftype.flexrettype) or false
+                types.gradual_guard(signature.flexrettype) or false
             node._flex_result_demand = "open"
         end
-    elseif ftype.flexrettype then
+    elseif signature.flexrettype then
         node._flex_result_demand = node._finite_flex_prefix
     else
         node._flex_result_demand = nil
@@ -6239,12 +6263,15 @@ local function named_function_metadata(node)
         return decl._paramnames, "titan", false
     elseif decl._tag == "Type.StaticMethod" then
         return decl.paramnames, "titan", false
-    elseif decl._tag == "Type.ModuleMember"
-           and decl.type and decl.type._tag == "Type.Function" then
+    elseif decl._tag == "Type.ModuleMember" and decl.type then
         local foreign = var._tag == "Ast.VarDot"
             and var.exp and var.exp._type
             and var.exp._type._tag == "Type.CModule"
-        return decl.paramnames, foreign and "foreign" or "titan", foreign
+        if decl.type._tag == "Type.Function" then
+            return decl.paramnames, "titan", false
+        elseif foreign and decl.type._tag == "Type.CFunction" then
+            return decl.paramnames, "foreign", true
+        end
     end
     return nil
 end
@@ -6259,9 +6286,11 @@ end
 -- consumed by the existing native/direct-C lowering. The separate order map is
 -- retained so codegen can evaluate explicit expressions in source order before
 -- assembling operands in formal order.
-local function check_named_args(ftype, paramnames, fields, loc, fname, st, errors)
+local function check_named_args(callable, paramnames, fields, loc, fname, st, errors)
+    local signature = assert(call_signature(callable),
+        "named-call checking requires a callable signature")
     assert(type(paramnames) == "table")
-    assert(#paramnames == #ftype.params,
+    assert(#paramnames == #signature.params,
         "declaration parameter-name metadata does not match its fixed arity")
 
     local byname = {}
@@ -6298,7 +6327,7 @@ local function check_named_args(ftype, paramnames, fields, loc, fname, st, error
                     or "")
             checkexp(field.exp, st, errors)
         else
-            local ptype = ftype.params[index]
+            local ptype = signature.params[index]
             checkexp(field.exp, st, errors, ptype)
             local term =
                 "named argument '" .. field.name .. "' of " .. fname
@@ -6317,7 +6346,7 @@ local function check_named_args(ftype, paramnames, fields, loc, fname, st, error
 
     for i, name in ipairs(paramnames) do
         if not supplied[i] then
-            local ptype = ftype.params[i]
+            local ptype = signature.params[i]
             local exp = ast.ExpNil(loc)
             exp._type = types.Nil()
             local adjustment =
@@ -6958,32 +6987,31 @@ checkexp = util.make_visitor({
             node._type = invalid(errors, node.loc,
                 "trying to access module '%s' as a first-class value",
                 node.var.name)
-        elseif texp._tag == "Type.Function" then
-            -- First-class function value. Foreign (C FFI) functions cannot be
-            -- taken as Titan closure values, but they can be converted to a
-            -- compatible C function pointer when the surrounding context asks
-            -- for one. Every other function (Titan top-level function, record
-            -- static, imported module function, or a function-typed local/param/
-            -- field that already holds a value) is allowed as before.
+        elseif c_resolve(texp)
+               and c_resolve(texp)._tag == "Type.CFunction" then
+            -- A direct C declaration is not a value. Its only value-producing
+            -- context is decay to an exactly compatible C function pointer;
+            -- there is no Titan closure or Lua-callable representation.
+            local cfunc = c_resolve(texp)
             local var = node.var
             if var._tag == "Ast.VarDot" and var.exp._type
-               and var.exp._type._tag == "Type.CModule" then
-                if c_function_pointer_accepts_function(context, texp) then
-                    node._type = context
-                    node._foreign_function_pointer = var.name
-                else
-                    node._type = invalid(errors, node.loc,
-                        "a foreign (C) function cannot be used as a first-class value")
-                end
+               and var.exp._type._tag == "Type.CModule"
+               and c_function_pointer_accepts_declaration(context, cfunc) then
+                node._type = context
+                node._foreign_function_pointer = var.name
             else
-                node._type = texp
-                -- Mark a referenced *local* function declaration so the coder
-                -- builds its canonical closure (exported functions and statics
-                -- always get one; a function-typed local is already a value).
-                local decl = var._decl
-                if decl and decl._tag == "Ast.TopLevelFunc" then
-                    decl._valref = true
-                end
+                node._type = invalid(errors, node.loc,
+                    "a foreign (C) function cannot be used as a first-class value")
+            end
+        elseif texp._tag == "Type.Function" then
+            -- Every Type.Function is a first-class Titan/Lua callable value.
+            node._type = texp
+            -- Mark a referenced *local* function declaration so the coder
+            -- builds its canonical closure (exported functions and statics
+            -- always get one; a function-typed local is already a value).
+            local decl = node.var._decl
+            if decl and decl._tag == "Ast.TopLevelFunc" then
+                decl._valref = true
             end
         elseif texp._tag == "Type.Record" or texp._tag == "Type.Union" then
             local kind = texp._tag == "Type.Record" and "record" or "union"
@@ -7289,7 +7317,7 @@ checkexp = util.make_visitor({
         demand = demand or default_call_result_demand(node, context)
         if node.exp._tag == "Ast.ExpVar" then
             local var = node.exp.var
-            checkvar(var, st, errors)
+            checkvar(var, st, errors, c_pseudo_callee_context)
             if var._decl then var._decl._used = true end
             node.exp._type = var._type
         else
@@ -7307,12 +7335,95 @@ checkexp = util.make_visitor({
 
         if not method then
             local ftype = node.exp._type
+            local fname = expname(node.exp)
+            local pseudo_new = node.exp._tag == "Ast.ExpVar"
+                and node.exp.var._decl
+                and node.exp.var._decl._tag == "Checker.CPseudoNew"
+                and node.exp.var._decl or nil
+            if pseudo_new then
+                if named then
+                    node._type = types.Invalid()
+                    named_target_error(errors, node.loc)
+                    check_call_argument_expressions(node.args, st, errors)
+                    return
+                end
+                local alloc_err = c_allocation_error(pseudo_new.ctype, st)
+                if alloc_err then
+                    node._type = invalid(errors, node.loc, alloc_err)
+                    check_call_argument_expressions(node.args, st, errors)
+                    return
+                end
+                annotate_call_arguments(node,
+                    checkargs(pseudo_new, node.args.args, node.loc,
+                        "function '" .. fname .. "'", st, errors, false))
+                annotate_call_results(node, pseudo_new, demand, errors)
+                return
+            end
             if ftype._tag == "Type.Invalid" then
                 node._type = ftype
                 check_call_argument_expressions(node.args, st, errors)
                 return
             end
-            local fname = expname(node.exp)
+
+            local direct_cfunc = node.exp._tag == "Ast.ExpVar"
+                and is_foreign_function_var(node.exp.var)
+                and c_resolve(ftype) or nil
+            if direct_cfunc
+               and direct_cfunc._tag == "Type.CFunction" then
+                if not checker._ensure_c_enum_supported(
+                        st, direct_cfunc, node.loc, errors) then
+                    node._type = types.Invalid()
+                    check_call_argument_expressions(node.args, st, errors)
+                    return
+                end
+
+                if named then
+                    local paramnames, lowering, recognized_ffi =
+                        named_function_metadata(node)
+                    if recognized_ffi and paramnames == false then
+                        node._type = invalid(errors, node.loc,
+                            "parameter names are unavailable for foreign function '%s' "
+                            .. "because its prototypes do not provide one complete unambiguous list",
+                            fname)
+                        check_call_argument_expressions(node.args, st, errors)
+                        return
+                    elseif not recognized_ffi or lowering ~= "foreign"
+                           or type(paramnames) ~= "table" then
+                        node._type = types.Invalid()
+                        named_target_error(errors, node.loc)
+                        check_call_argument_expressions(node.args, st, errors)
+                        return
+                    elseif direct_cfunc.vararg then
+                        node._type = invalid(errors, node.loc,
+                            "named arguments are not supported for variadic function '%s'",
+                            fname)
+                        check_call_argument_expressions(node.args, st, errors)
+                        return
+                    end
+                    local dense, order = check_named_args(
+                        direct_cfunc, paramnames, node.args.fields, node.loc,
+                        "function '" .. fname .. "'", st, errors)
+                    if dense then
+                        node.args = ast.ArgsFunc(node.args.loc, dense)
+                        node._named_arg_order = order
+                        node._named_call_kind = "foreign"
+                    end
+                else
+                    annotate_call_arguments(node,
+                        checkargs(direct_cfunc, node.args.args, node.loc,
+                            "function '" .. fname .. "'", st, errors,
+                            false))
+                end
+                annotate_c_call_mutations(node, direct_cfunc)
+                annotate_call_results(node, direct_cfunc, demand, errors)
+                if node._type._tag == "Type.Void" and not node._voidok
+                   and not demand.tail then
+                    node._type = invalid(errors, node.loc,
+                        "a function returning no values cannot be used as a value")
+                end
+                return
+            end
+
             local cfunc = c_function_pointer_type(ftype)
             if cfunc then
                 if named then
@@ -7327,14 +7438,13 @@ checkexp = util.make_visitor({
                     check_call_argument_expressions(node.args, st, errors)
                     return
                 end
-                local cftype = c_function_as_function_type(cfunc)
                 node._c_pointer_call = cfunc
                 annotate_call_arguments(node,
-                    checkargs(cftype, node.args.args, node.loc,
+                    checkargs(cfunc, node.args.args, node.loc,
                         "function pointer '" .. fname .. "'", st, errors,
                         false))
-                annotate_c_call_mutations(node, cftype)
-                annotate_call_results(node, cftype, demand, errors)
+                annotate_c_call_mutations(node, cfunc)
+                annotate_call_results(node, cfunc, demand, errors)
                 if node._type._tag == "Type.Void" and not node._voidok
                    and not demand.tail then
                     node._type = invalid(errors, node.loc,
@@ -7393,24 +7503,6 @@ checkexp = util.make_visitor({
                 return
             end
 
-            local pseudo_new = node.exp._tag == "Ast.ExpVar"
-                and node.exp.var._decl
-                and node.exp.var._decl._tag == "Type.CPseudoNew"
-            if named and pseudo_new then
-                node._type = types.Invalid()
-                named_target_error(errors, node.loc)
-                check_call_argument_expressions(node.args, st, errors)
-                return
-            elseif pseudo_new then
-                local alloc_err = c_allocation_error(
-                    node.exp.var._decl.ctype, st)
-                if alloc_err then
-                    node._type = invalid(errors, node.loc, alloc_err)
-                    check_call_argument_expressions(node.args, st, errors)
-                    return
-                end
-            end
-
             if named then
                 local paramnames, lowering, recognized_ffi =
                     named_function_metadata(node)
@@ -7426,7 +7518,7 @@ checkexp = util.make_visitor({
                     named_target_error(errors, node.loc)
                     check_call_argument_expressions(node.args, st, errors)
                     return
-                elseif ftype.vararg or ftype.varargtype then
+                elseif ftype.varargtype then
                     node._type = invalid(errors, node.loc,
                         "named arguments are not supported for variadic function '%s'",
                         fname)
@@ -7447,16 +7539,8 @@ checkexp = util.make_visitor({
                 else
                     annotate_call_arguments(node,
                         checkargs(ftype, node.args.args, node.loc,
-                            "function '" .. fname .. "'", st, errors,
-                            not (node.exp._tag == "Ast.ExpVar"
-                                 and (is_foreign_function_var(node.exp.var)
-                                      or (node.exp.var._decl
-                                          and node.exp.var._decl._tag == "Type.CPseudoNew")))))
+                            "function '" .. fname .. "'", st, errors))
                 end
-            end
-            if not pseudo_new and node.exp._tag == "Ast.ExpVar"
-               and is_foreign_function_var(node.exp.var) then
-                annotate_c_call_mutations(node, ftype)
             end
             annotate_call_results(node, ftype, demand, errors)
             check_generic_result_limit(node, errors)
@@ -8107,7 +8191,7 @@ local function isconstructor(node)
     if not decl then
         return false
     end
-    if decl._tag == "Type.CPseudoNew" then
+    if decl._tag == "Checker.CPseudoNew" then
         return true
     end
     if decl._tag ~= "Type.StaticMethod"

@@ -1,4 +1,5 @@
 local h = require 'spec.support.helpers'
+local types = require 'titan-compiler.types'
 
 local probe_session
 
@@ -1515,7 +1516,7 @@ describe("C FFI type checking", function()
             extern int ffi_add1(int x);
             extern int call_callback(ffi_callback cb, int x);
         ]], function(header)
-            local ok, err = run_checker([[
+            local ok, err, tree = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
                 local function call_local(cb: c.ffi_callback): integer
@@ -1530,7 +1531,106 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.truthy(ok, err)
+            local members = tree[1]._type.members
+            assert.equal("Type.CFunction", members.ffi_add1.type._tag)
+            assert.equal("Type.CFunction", members.call_callback.type._tag)
+            local callback = types.resolve_c_typedef(
+                tree[2].params[1]._type)
+            assert.equal("Type.CPointer", callback._tag)
+            assert.equal("Type.CFunction", callback.pointee._tag)
+
+            local calls, seen = {}, {}
+            local function collect(value)
+                if type(value) ~= "table" or seen[value] then return end
+                seen[value] = true
+                if value._tag == "Ast.ExpCall" then
+                    calls[#calls + 1] = value
+                end
+                for key, child in pairs(value) do
+                    if type(key) == "number"
+                       or (type(key) == "string"
+                           and key:sub(1, 1) ~= "_") then
+                        collect(child)
+                    end
+                end
+            end
+            collect(tree)
+            local c_calls, pointer_calls = 0, 0
+            for _, call in ipairs(calls) do
+                if call._callee_type
+                   and call._callee_type._tag == "Type.CFunction" then
+                    c_calls = c_calls + 1
+                    if call._c_pointer_call then
+                        pointer_calls = pointer_calls + 1
+                        assert.equal(call._callee_type,
+                            call._c_pointer_call)
+                    else
+                        assert.equal(call._callee_type,
+                            call.exp._type)
+                    end
+                end
+            end
+            assert.equal(3, c_calls)
+            assert.equal(1, pointer_calls)
         end)
+    end)
+
+    it("rejects direct C declarations in every Titan value context", function()
+        with_header("extern int ffi_call(int value);\n", function(header)
+            local prefix =
+                'local c = foreign import "' .. header .. '"\n'
+            local function assert_rejected(source)
+                local ok, err = run_checker(prefix .. source)
+                assert.falsy(ok)
+                assert.match(
+                    "a foreign %(C%) function cannot be used as a first%-class value",
+                    err)
+            end
+
+            for _, body in ipairs({
+                "local f = c.ffi_call",
+                "local f: (integer) -> integer = c.ffi_call",
+                "local v: value = c.ffi_call",
+                "local fs: {(integer) -> integer} = { c.ffi_call }",
+            }) do
+                assert_rejected(
+                    "function run(): nil\n" .. body ..
+                    "\nreturn nil\nend\n")
+            end
+
+            assert_rejected([[
+                local function take(f: (integer) -> integer): nil
+                    return nil
+                end
+                function run(): nil
+                    take(c.ffi_call)
+                    return nil
+                end
+            ]])
+            assert_rejected([[
+                local function produce(): value
+                    return c.ffi_call
+                end
+                function run(): nil
+                    produce()
+                    return nil
+                end
+            ]])
+        end)
+    end)
+
+    it("keeps C allocation pseudo-members out of callable values", function()
+        local ok, err = run_checker([[
+            local ffi = foreign import "titan/ffi.h"
+
+            function run(): value
+                return ffi.titan_ffi_int.new_array
+            end
+        ]])
+        assert.falsy(ok)
+        assert.match(
+            "C allocation pseudo%-member 'new_array' can only be called directly",
+            err)
     end)
 
     it("keeps function-pointer and pseudo-constructor positional arity strict",

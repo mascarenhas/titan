@@ -25,6 +25,19 @@ local function assert_callable_cast(cast)
 end
 
 describe("closure adjustment wrappers (checker)", function()
+    it("does not classify C declarations as closure adjustments", function()
+        local cfunc = types.CFunction(
+            { types.CInteger("int", true, 3, 32) },
+            types.CInteger("int", true, 3, 32), false, false)
+        local titan = types.Function(
+            { types.Integer() }, { types.Integer() }, false, false, false)
+
+        assert.is_false(types.callable_adjustment(cfunc, titan))
+        assert.is_false(types.callable_adjustment(titan, cfunc))
+        assert.is_false(types.assignment_adjustment(cfunc, titan))
+        assert.is_false(types.assignment_adjustment(titan, cfunc))
+    end)
+
     it("classifies one finite edge and freezes its target-typed cast", function()
         local original = types.assignment_adjustment
         local count = 0

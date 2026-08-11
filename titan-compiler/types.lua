@@ -40,6 +40,13 @@ local types = typedecl("Type", {
     }
 })
 
+-- ABI 0.22 serialized Function constructors retain their third positional
+-- field. It is a reserved false sentinel, not a callable-shape property: C
+-- variadicity belongs exclusively to Type.CFunction.vararg, while Titan input
+-- tails use Type.Function.varargtype. Removing the reserved slot waits for a
+-- future ABI boundary so current provider metadata keeps the same constructor
+-- arity.
+
 -- Array qualification belongs to the element type in C declarator syntax, but
 -- it must remain attached to the array shape until decay. Keep the constructor
 -- source-compatible for existing unqualified callers while making the
@@ -758,7 +765,6 @@ function types.mark_c_ffi_include(typ, include, seen)
         or tag == "Type.CStruct" or tag == "Type.CUnion"
         or tag == "Type.CField" or tag == "Type.CTypedef"
         or tag == "Type.COwned" or tag == "Type.Pointer"
-        or tag == "Type.Function"
         or (tag == "Type.CInteger" and typ._c_enum_identity)
     if declaration_node and not typ._c_origin_header then
         typ._c_origin_header = include
@@ -785,8 +791,6 @@ function types.mark_c_ffi_include(typ, include, seen)
         types.mark_c_ffi_include(typ.pointee, include, seen)
     elseif tag == "Type.Pointer" then
         types.mark_c_ffi_include(typ.type, include, seen)
-    elseif tag == "Type.Function" and typ._c_function then
-        types.mark_c_ffi_include(typ._c_function, include, seen)
     end
 end
 
@@ -1496,30 +1500,14 @@ local function same_list(l1, l2, seen)
     return true
 end
 
--- Compare the callable ABI shape shared by ordinary function values and
--- declaration descriptors for methods/record functions. `vararg` is the
--- foreign-C variadic flag and exists only on Type.Function; the typed Titan
--- input/output tails are present on all three shapes. Declaration-only
--- parameter names deliberately stay outside exact type identity.
-local function callable_shape_equals(t1, t2, seen, compare_c_vararg)
-    local exact_c_signature =
-        compare_c_vararg and t1._c_function and t2._c_function
-    if exact_c_signature then
-        -- Foreign functions retain their declaration carrier because Titan's
-        -- projected result list cannot represent a qualified void return and
-        -- nominal typedef spellings can obscure otherwise equal C signatures.
-        if not c_function_type_equals(
-                t1._c_function, t2._c_function, seen) then
-            return false
-        end
-    else
-        if compare_c_vararg and t1.vararg ~= t2.vararg then
-            return false
-        end
-        if not same_list(t1.params, t2.params, seen)
-           or not same_list(t1.rettypes, t2.rettypes, seen) then
-            return false
-        end
+-- Compare the Titan/Lua callable ABI shape shared by ordinary function values
+-- and declaration descriptors for methods/record functions. C declarations use
+-- Type.CFunction and its separate C compatibility relation. Declaration-only
+-- parameter names deliberately stay outside exact callable identity.
+local function callable_shape_equals(t1, t2, seen)
+    if not same_list(t1.params, t2.params, seen)
+       or not same_list(t1.rettypes, t2.rettypes, seen) then
+        return false
     end
 
     local v1, v2 = t1.varargtype, t2.varargtype
@@ -1546,6 +1534,9 @@ type_equals = function(t1, t2, seen)
         if type(t1) == "table"
            and t1._tag == "Type.Interface" then
             return types.validate_interface_descriptor(t1) ~= nil
+        elseif type(t1) == "table"
+           and t1._tag == "Type.Function" then
+            return t1.vararg == false
         end
         return true
     elseif type(t1) ~= "table" or type(t2) ~= "table" then
@@ -1626,10 +1617,13 @@ type_equals = function(t1, t2, seen)
            and same_value(t1.members, t2.members, seen)
            and same_value(t1.type_members, t2.type_members, seen)
     elseif tag1 == "Type.Function" then
+        -- The third ABI-0.22 constructor slot is reserved, not an identity
+        -- dimension. Malformed non-false shapes are never callable values.
+        if t1.vararg ~= false or t2.vararg ~= false then return false end
         -- Typed input/output tails are part of the exact runtime function tag;
         -- differing tail element types must therefore fall back from the
         -- first-class native path.
-        return callable_shape_equals(t1, t2, seen, true)
+        return callable_shape_equals(t1, t2, seen)
     elseif tag1 == "Type.Variant" then
         return t1.fqtn == t2.fqtn
            and t1.name == t2.name
@@ -1651,7 +1645,7 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.Method" or tag1 == "Type.StaticMethod" then
         return t1.fqtn == t2.fqtn
            and t1.name == t2.name
-           and callable_shape_equals(t1, t2, seen, false)
+           and callable_shape_equals(t1, t2, seen)
     elseif tag1 == "Type.Nominal" then
         return t1.fqtn == t2.fqtn
     elseif tag1 == "Type.Option" then
@@ -1762,7 +1756,7 @@ local function sound_guardable(typ, seen)
     elseif tag == "Type.Option" then
         ok = sound_guardable(typ.base, seen)
     elseif tag == "Type.Function" then
-        ok = not typ.vararg
+        ok = typ.vararg == false
         for _, param in ipairs(typ.params) do
             ok = ok and sound_guardable(param, seen)
         end
@@ -1907,7 +1901,9 @@ callable_adjustment_impl = function(source, target, context)
     source, target = normalized_pair(source, target)
     if not source or not target
        or source._tag ~= "Type.Function"
-       or target._tag ~= "Type.Function" then
+       or target._tag ~= "Type.Function"
+       or source.vararg ~= false
+       or target.vararg ~= false then
         return false
     end
 
@@ -1921,9 +1917,6 @@ callable_adjustment_impl = function(source, target, context)
     end
 
     local exact = relation_identity(source, target)
-    if (source.vararg or target.vararg) and not exact then
-        return false
-    end
 
     local result = plan("callable", {
         source = source,
@@ -2150,11 +2143,7 @@ end
 local consistent_impl
 
 local function callable_shape_consistent(source, target, context)
-    local exact = relation_identity(source, target)
-    if (source.vararg or target.vararg) and not exact then
-        return false
-    end
-
+    if source.vararg ~= false or target.vararg ~= false then return false end
     local nargs = math.min(#source.params, #target.params)
     for index = 1, nargs do
         -- A call through `target` supplies a target parameter to the actual
@@ -2980,16 +2969,8 @@ function types.tostring(t)
         table.insert(out, table.concat(ptypes, ", "))
         table.insert(out, ")")
         local rtypes = {}
-        local c_return_qualifiers =
-            t._return_declaration_qualifiers
-            and #t._return_declaration_qualifiers > 0
-            and table.concat(
-                t._return_declaration_qualifiers, " ") .. " "
-            or ""
-        for index, rettype in ipairs(t.rettypes) do
-            table.insert(rtypes,
-                (index == 1 and c_return_qualifiers or "")
-                    .. types.tostring(rettype))
+        for _, rettype in ipairs(t.rettypes) do
+            table.insert(rtypes, types.tostring(rettype))
         end
         if t.flexrettype then
             table.insert(rtypes, "...: " .. types.tostring(t.flexrettype))
@@ -3006,14 +2987,6 @@ function types.tostring(t)
             table.insert(out, " -> (")
             table.insert(out, table.concat(rtypes, ", "))
             table.insert(out, ")")
-        elseif c_return_qualifiers ~= ""
-           and t._c_return_type then
-            -- Titan projects C void to zero results. Retain its declaration
-            -- qualification in diagnostics even though call semantics stay
-            -- the ordinary zero-result shape.
-            table.insert(out, " -> ")
-            table.insert(out, c_return_qualifiers)
-            table.insert(out, types.tostring(t._c_return_type))
         else
             -- zero return values: canonicalize as `(P...) -> ()`, distinct
             -- from a `nil`-returning function `(P...) -> nil`
@@ -3247,6 +3220,9 @@ function types.serialize(t)
             ",{" .. table.concat(type_members, ",") .. "}" ..
             ")"
     elseif tag == "Type.Function" then
+        if t.vararg ~= false then
+            error("Type.Function reserved vararg field must be false")
+        end
         local ptypes = {}
         for _, pt in ipairs(t.params) do
             table.insert(ptypes, types.serialize(pt))
@@ -3258,7 +3234,7 @@ function types.serialize(t)
         return "Function(" ..
             "{" .. table.concat(ptypes, ",") .. "}" .. "," ..
             "{" .. table.concat(rettypes, ",") .. "}" .. "," ..
-            tostring(t.vararg) .. "," ..
+            "false," ..
             (t.varargtype and types.serialize(t.varargtype) or "false") .. "," ..
             (t.flexrettype and types.serialize(t.flexrettype) or "false") .. ")"
     elseif tag == "Type.Nominal" then
