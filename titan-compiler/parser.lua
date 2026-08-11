@@ -91,9 +91,9 @@ end
 
 function defs.lambdarettypeopt(_, x)
     if not x then
-        -- No return annotation on a lambda means "infer the return type" — a
-        -- distinct case from an explicit `: ()` (which is a zero-return `{}`).
-        -- We return `false` so the checker can tell the two apart.
+        -- Preserve syntactic omission as `false`, distinct in the raw AST from
+        -- an explicit `: ()` (the zero-return `{}`). The checker gives omission
+        -- the same zero-result semantics; it never infers results from context.
         return false, false
     else
         return x.rettypes, x.flexrettype
@@ -747,7 +747,8 @@ local grammar = re.compile([[
                     <- (P  (COLON rettype^TypeInterfaceMethod)?)
                                                                   -> rettypeopt
 
-    -- Lambda return-type: `false` when absent (infer), distinct from `: ()`.
+    -- Lambda result syntax: `false` preserves omission, which the checker
+    -- interprets as zero results; explicit `: ()` carries an empty list.
     lambdarettypeopt<- (P  (COLON rettype^TypeFunc)?)            -> lambdarettypeopt
 
     -- A trailing, last-only typed variadic parameter `...: t` (no name). The

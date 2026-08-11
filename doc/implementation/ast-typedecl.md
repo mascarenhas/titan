@@ -264,7 +264,7 @@ to use it as an expression.
 | `ExpIs` | `exp`, `target` | written `is` type test; the checker resolves `target` and gives the expression type `boolean` |
 | `ExpAdjust` | `exp` | synthesized by the parser only: a parenthesized *call*, truncated to its first value |
 | `ExpExtra` | `exp`, `index`, `_type` | synthesized by the checker only: the index-th (> 1) value of a multi-return call |
-| `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; an absent return annotation may copy both result components from context |
+| `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; the raw AST preserves an absent result annotation as `rettypes = false`, which the checker interprets as zero results; missing input annotations may use context |
 | `ExpUnionInit` | `owner`, `variant`, `value` | parser-synthesized variant-constructor result; `value` is `false` for an empty variant |
 
 Two of these never come from the programmer directly:

@@ -23,15 +23,24 @@ slots owned by a `lua_State`; `L->top.p` points one past the last live
 slot, and the collector treats every slot below the top as a root. (In
 5.5 a stack slot is an `StkId`; `s2v(slot)` views it as a `TValue*`.)
 
+Lua 5.5's collector is **non-moving**: collection never changes the address of
+a string, table, userdata, closure, or other heap object. The Lua stack is a
+separate resizable array. Stack growth or shrinkage may relocate its slots, so a
+raw `StkId`/`TValue *` into that array cannot survive such an operation; Lua
+copies the rooted values to the new stack, however, and their referenced heap
+addresses remain stable. Generated code therefore distinguishes reachability
+roots from stack-position rebasing.
+
 The standalone `lua` 5.5 interpreter switches the collector to
 **generational** mode at startup; freshly created states — including
 Titan standalone executables — run the incremental collector, and
 generated code must be correct for both. Generational mode runs
 frequent *minor* collections that trace only the stack, other roots,
 and old objects explicitly marked as modified — which is what *write
-barriers* are for. Two consequences drive this chapter: a fresh object
-is only safe once it is reachable from a stack slot, and an unbarriered
-store of a collectable value into an older object is not a rare race
+barriers* are for. Two consequences drive this chapter: every fresh
+allocation must acquire its own traced root immediately (before another
+allocation or poll), and an unbarriered store of a collectable value into an
+older object is not a rare race
 but a reliably reproducible use-after-free — see the
 [Lua 5.5 migration report](../lua-5.5-migration.md) and the
 [internals catalogue](../lua-5.3-to-5.5-internals.md) for the project's
@@ -78,10 +87,13 @@ holders; plain locals are declared bare and assigned immediately).
 Flexible input and output runs use the same element-specific
 `TitanVargInteger`/`TitanVargString`/… descriptor structs: a byte-sized actual
 count and a typed `args` pointer. The descriptor itself lives in generated C
-storage and is not traced. Its backing belongs to the caller for an output
-run (and to the caller's incoming argument frame for a borrowed input run), so
-GC visibility must be supplied separately whenever the element type is
-collectable.
+storage and is not traced. Its C backing is never a root either. A borrowed
+input run relies on the upstream native activation roots/range that already own
+its elements. An ordinary open GC-bearing output run uses a caller-owned parallel
+traced range until its sink consumes it. Adapter and repacking conversions use a
+narrower inventory: they add a destination range only for newly allocated
+elements and a source range only when later result work can allocate or move the
+stack.
 
 ### Conversion helpers
 
@@ -125,12 +137,13 @@ function calls therefore share one tag-check family, while genuine-Lua
 entries/writes and written casts share the separate dynamic family. See
 [Type relations and boundary plans](type-relations-and-boundaries.md).
 
-`types.is_gc` in `types.lua` decides which types the collector cares
-about, and therefore which values need anchoring: string, value,
-function, array, map, record/union nominal, Interface wrapper, C `TValue`,
-Lua-internal `Udata *`, owned C userdata, and `T?`
-when `T` is itself GC-able.
-Integers, floats, booleans, nil and ordinary foreign pointers need none.
+`types.is_gc` in `types.lua` decides which types the collector can care
+about, and therefore which values require a traced owner for any lifetime that
+crosses allocation: string, value, function, array, map, record/union nominal,
+Interface wrapper, C `TValue`, Lua-internal `Udata *`, owned C userdata, and
+`T?` when `T` is itself GC-able. A borrowed native C copy does not need a
+second root when its existing owner remains live. Integers, floats, booleans,
+nil, and ordinary foreign pointers need none.
 
 ### Array proxies and function closures
 
@@ -161,8 +174,13 @@ replaces tag/native with target B's tag/adapter, stores the immediate source
 closure at `n-1`, and stores B's consumer-local strict relay at `n`.
 `CClosure.f` remains the source coercive entry. Wrapper chains copy older
 private links and append the new immediate source, so every adapter receives
-the correct `_fn`. If `n == MAXUPVAL`, construction preserves the operand for
-generic fallback. See
+the correct `_fn`. Eligibility checks only a non-null CClosure,
+`5 <= n < MAXUPVAL`, the exact lightuserdata tag in slot 1, and the
+lightuserdata brand in slot 3; the rest of the private branded layout is
+trusted. The final closure is allocated with `luaF_newCclosure`, initialized
+fresh-white with `setobj2n`/`setpvalue`/`setclCvalue`/`setfvalue`, and published
+directly to its own traced result slot. If `n == MAXUPVAL`, construction
+preserves the already rooted operand for generic fallback. See
 [Closure adjustment wrappers](closure-adjustment-wrappers.md#wrapper-layout).
 
 ## Records: a single tagged Udata
@@ -343,13 +361,20 @@ values retain the concrete owner's module Udata and the concrete record/union
 receiver. The payload is copied from a process-static pair array and is not a
 GC graph; both user-value stores need ordinary Udata backward barriers.
 
-Wrapper allocation follows the fresh-object rule below: save `_base` as an
-offset, allocate, rebase, anchor the wrapper, then install its metatable and
-publish both traced edges. A bound Interface method closure adds a strong edge
-to the wrapper in upvalue 4. Adjustment entries root every GC-bearing fixed
-temporary and open descriptor range across conversion and the native method
-call. See [Interfaces](interfaces.md#wrapper-representation) for the complete
-layout and dispatch contract.
+Wrapper allocation follows the fresh-object rule below: the concrete source is
+traced before allocation, and the new Udata receives its own root immediately
+before its metatable and two traced edges are published. The existing lowering
+conservatively treats `luaS_newudata` as a stack-rebase point, saves `_base` as an
+offset, and restores it immediately after allocation. This protects stack-slot
+addresses; the non-moving collector keeps the source and new Udata heap objects
+stable. A bound Interface method closure adds a strong edge to the wrapper in
+upvalue 4. Adjustment entries borrow incoming native roots and add destination
+roots only for newly allocated converted objects. They root native source
+results only when those values span a later allocating/relocating conversion.
+Raw descriptors and allocation-free
+runs receive no parallel root range. See
+[Interfaces](interfaces.md#wrapper-representation) for the complete layout and
+dispatch contract.
 
 ## The module userdata
 
@@ -443,13 +468,17 @@ checks `lua_checkstack` and raises a normal Lua error if capacity cannot be
 reserved; generated code never continues to a raw push or slot write after a
 false result.
 
-### 2. Shadow slots: the dual representation
+### 2. Home roots, shadow slots, and borrowed C copies
 
-Every GC-typed value the function computes with lives **twice**: in a C
-variable (what the code reads and writes) and in a paired stack slot
-(what the collector sees). `newtmp(ctx, typ, isgc)` creates the pair for
-temporaries (`_tmp_N` + `_tmp_N_slot`); `Ast.StatDecl` does the same for
-locals. For
+A GC-bearing value that must live across allocation has a traced **home**: a
+local shadow slot, module/record/container field, caller result slot, or another
+GC object. `newtmp(ctx, typ, true)` creates a C temporary plus a paired stack
+slot (`_tmp_N` + `_tmp_N_slot`) when the temporary itself owns that lifetime;
+`Ast.StatDecl` does the same for locals. Native call sequencing likewise gives
+every GC-bearing callee/receiver/fixed/static-vararg input a dedicated temporary
+stack home for the full callee activation. It cannot merely borrow a module,
+record, capture, or ordinary local home: later argument evaluation or the callee
+can overwrite that home before the raw C value is finished. For
 
 ```lua
 -- Titan
@@ -472,17 +501,19 @@ setsvalue(L, _localslot_t_2, _local_t_1);
 The slot is refreshed at the declaration and at **every assignment** to
 the local (`codeassignment` emits `$CVAR = $CEXP;` followed by the
 `setslot`), so the slot is never stale while the C variable holds a
-live value. Parameters get a shadow slot (`_paramslot_<name>`) only
-when the body *assigns* to them — an unassigned parameter is already
-anchored by its caller ([below](#calls-the-caller-anchors)). Module
-variables need no shadow: their home, a `_mod` user value, is itself a
-GC-visible location.
+live value. Parameters (including method `self`) get a shadow slot
+(`_paramslot_<name>`) only when the body assigns to them or the checker marks
+them for spill across a catchable call. Otherwise the native callee borrows the
+caller's root for the whole activation. Module variables need no shadow: their
+home, a `_mod` user value, is itself a GC-visible location.
 
 ### 3. Anchor fresh objects before the next allocation
 
-Any allocation can trigger a collection, so a freshly created object
-must reach a stack slot before the code allocates again. The record
-constructor shown earlier is simpler now that it is a single object: one
+An allocation may raise and may invoke emergency collection on allocator
+failure; later allocations or explicit polls can collect an unpublished object.
+Every successfully created object therefore receives its own traced root
+immediately, before another allocation or poll. The record constructor shown
+earlier is simpler now that it is a single object: one
 `luaS_newudata` returns the udata already nil-filled and white, and the
 generated code anchors it in its stack slot
 (`setuvalue(L, _tmp_1_slot, _ud)`) *before* any field expression runs.
@@ -502,12 +533,17 @@ Map constructors root their ordinary Table plus key and value temps, boxing an
 Array used as a raw-visible key or value. See
 [Dense Arrays](dense-arrays.md#runtime-construction).
 
-Callable adjustment materializes and anchors its operand before any scratch
-push. Guarded realization pushes copied header/capture values, the anchored
-immediate source, and the target relay, then lets `lua_pushcclosure` construct a
-new white object with traced upvalues. The result is anchored immediately and
-`_base` is restored from `_base_off`; nested callable adjustments are separate
-relocation points. The source link never lives in untraced C storage.
+Callable adjustment evaluates its operand once and borrows that value's existing
+root. Eligible realization calls `luaF_newCclosure` for the final size, fills the
+fresh-white object directly (`source->f`, `setobj2n`, `setpvalue`,
+`setclCvalue`, `setfvalue`), and publishes it immediately into the assigned
+traced result slot. There is no transient stack assembly, `lua_pushcclosure`,
+construction barrier, local GC poll, construction-only root copy, or
+construction rebase. `luaF_newCclosure` can allocate or raise, including after
+an emergency collection, but it does not ordinarily poll and the emergency
+cycle does not shrink the stack. Nested callable conversion is likewise
+allocating/raising but not stack-relocating; every fresh wrapper still receives
+its own immediate root.
 String results —
 literals (`luaS_new`), concatenation,
 number→string casts — are likewise stored to their temp's slot
@@ -516,15 +552,21 @@ immediately after creation.
 ### 4. `luaC_checkGC` at entry and at allocating loop tails
 
 Because Titan-to-Titan calls never enter `luaD_call`, generated code
-must poll the collector itself. `luaC_checkGC(L)` is emitted at exactly
-two kinds of places: function entry, as the first line of the preamble
-(only when the function reserves slots at all); and the tail of every
-`while`/`repeat`/numeric-`for` body **iff** the loop's
-condition-plus-body allocated — measured as the delta of
-`ctx.allocations` (a counter bumped by every `newslot`) across the
-loop's code generation. A pure-arithmetic loop carries no GC polling; a
-loop that builds strings or tables polls once per iteration, so an
-allocating Titan loop cannot starve the collector. (History: commits
+must poll the collector itself. `luaC_checkGC(L)` appears at function entry as
+the first line of a slot-reserving preamble, and at the tail of every
+`while`/`repeat`/numeric-`for` body **iff** the loop's condition-plus-body
+allocated—measured as the delta of `ctx.allocations` across loop generation. A
+synthesized callable or Interface native adapter has no ordinary Titan body, so
+it separately polls at entry iff its frozen action graph can allocate a nested
+wrapper. That poll precedes stack reservation, `_base`, and every raw stack
+pointer; the native caller's activation roots already protect its inputs.
+
+A pure-arithmetic loop carries no GC polling; an allocating Titan loop polls
+once per iteration and cannot starve the collector. Direct callable-wrapper
+construction itself adds no local poll: `luaF_newCclosure` links a fresh-white
+object, and no poll is permitted between allocation and immediate publication.
+The containing ordinary entry/loop or allocating-adapter entry remains the
+polling authority. (History: commits
 `eade55d` "add GC checks to loops and function preambles" and `b839f59`
 "be smarter about avoiding calling GC when the loop does not allocate",
 November 2017.)
@@ -573,11 +615,13 @@ owners that are still `CClosure`s — every store of a captured value into
 a function value's upvalue array ([closures and captured
 variables](codegen-overview.md#closures-and-captured-variables)).
 The strict-entry trailer is installed at source-closure construction like the
-header and captures. A callable wrapper is likewise assembled entirely through
-`lua_pushcclosure`: the new white closure receives copied captures plus the
-traced immediate-source link and target relay before publication, so no manual
-forward/back barrier is emitted for those construction-time edges. A later
-store into an existing closure would still require the forward barrier. A
+header and captures. A callable wrapper is instead initialized directly while
+fresh-white. `setobj2n` copies ordinary upvalues, `setpvalue` installs
+tag/native pointers, `setclCvalue` installs the immediate source, and
+`setfvalue` installs the relay. The completed closure is then published directly
+to its traced result slot.
+Fresh-white construction needs no forward/back barrier. A later store into an
+existing closure would still require the forward barrier. A
 capture *box* is a `Udata`: GC-bearing boxes have one traced user value and use
 the back barrier, while non-GC values use an untraced raw payload and need no
 barrier.
@@ -594,60 +638,69 @@ the [internals catalogue](../lua-5.3-to-5.5-internals.md) record the
 barriers the 5.3-era code skipped and the `obj2gco` signature change
 that all back-barrier sites needed.
 
-## Calls: "the caller anchors"
+## Calls: caller-owned activation roots
 
-The [calling convention](codegen-overview.md) makes the *caller*
-responsible for GC-visibility on both sides of a call:
+The [calling convention](codegen-overview.md) makes the native *caller*
+responsible for preserving GC reachability across the whole callee activation.
 
-* **Arguments.** GC-able argument values must already be anchored when
-  the call happens. No code is emitted at the call site to do this — it
-  falls out of invariants 2 and 3: an argument expression's result is
-  either a local/parameter (anchored at its home) or a temporary
-  (anchored in its `_tmp_N_slot`).
-* **Returns.** The callee returns its first fixed result in C and writes
-  results 2..n through out-parameters, anchoring none of them — safe
-  because merely returning from a C function cannot trigger a
-  collection. The caller re-anchors: `codecall` allocates a temp (with
-  shadow slot when GC-able) per extra return before the call and, when
-  *any* return type is GC-able, stores every GC-able result into its
-  reserved slot immediately after the call. For a Titan function
-  `two(): integer, string` the call site compiles to:
+* **Arguments.** The caller evaluates left-to-right and materializes the
+  first-class callee/receiver and every GC-bearing fixed or static-vararg
+  argument into dedicated traced slots. These roots survive later argument
+  effects, the callee's entry poll/stack growth, and replacement of the value's
+  former module/record/capture home. A forwarded open run retains its upstream
+  caller's activation roots. Interface/callable adapters borrow these roots
+  rather than duplicating them. The callee retains a separate parameter
+  shadow/home only for assignment or spill. A raw `TitanVargX` and its C `args`
+  array are never roots.
+* **Returns.** The callee returns its first fixed result in C and writes later
+  results through out-parameters without rooting them. Merely returning cannot
+  run the collector, although the callee may have moved the Lua stack, so the
+  caller rebases before addressing any stack home. A raw native source result
+  gets a temporary root only if a later conversion can allocate or relocate the
+  stack. A consumer-visible value is then published into its assigned home; a
+  freshly allocated converted callable/Interface wrapper receives its own root
+  immediately. For `two(): integer, string`, lowering schematically separates
+  the raw ABI holders from the visible projection. Only the visible string home
+  is traced:
 
 ```c
-TValue *_tmp_1_slot = s2v(_base + 0);
-TString* _tmp_1 = 0;                    /* out-param for return 2 */
-lua_Integer _tmp_2 = 0;                 /* first return: not GC-able, no slot */
-_tmp_2 = test_two_titan(L, _mod, NULL, &_tmp_1);
-setsvalue(L, _tmp_1_slot, _tmp_1);
+lua_Integer _abi_1 = 0;
+TString *_abi_2 = NULL;                 /* raw out-param, not a root */
+lua_Integer _visible_1 = 0;
+TString *_visible_2 = NULL;
+_abi_1 = test_two_titan(L, _mod, NULL, &_abi_2);
+_base = restorestack(L, _base_off);
+_visible_1 = _abi_1;
+_visible_2 = _abi_2;
+setsvalue(L, s2v(_base + 0), _visible_2); /* assigned result home */
 ```
 
-* **Flexible returns.** The caller additionally passes a typed `_flexout`
-  descriptor and `_flexwant` budget. A finite projection is copied into its
-  ordinary typed result holders. An open run uses bounded caller-owned backing;
-  if the element type is GC-bearing, generated code reserves a parallel Lua
-  stack range, copies the returned live prefix into that traced range before
-  any allocating sink work, and clears it after consumption. The C descriptor
-  and its `args` array never count as roots on their own. A generic
-  `luaD_callnoyield(..., LUA_MULTRET)` obtains the same run from live Lua stack
-  values, converts it while those values are rooted, then hands it to the same
-  consumers. Branded exact-tag mismatches use strict guards in this stack path;
-  non-Titan callables use dynamic boundary conversion. A realized adjustment
-  wrapper instead enters its target-native adapter: the adapter reserves a
-  nil-initialized traced frame, anchors incoming B values, immediately anchors
-  A results after the immediate-source native call, and publishes B results
-  into caller-owned fixed/open roots. Its descriptors and raw backing remain
-  untraced.
+* **Flexible runs.** An input descriptor borrows upstream roots. An ordinary
+  open GC-bearing native result uses bounded caller-owned C backing plus a
+  parallel traced range: after rebasing from the call, the caller copies the live
+  prefix into that range and clears it after the sink consumes the run. Within
+  an adapter, the raw source run gets such a range only if the result phase can
+  allocate or relocate; a repacked/converted destination gets one only when the
+  conversion allocates a fresh wrapper or Interface value. Allocation-free
+  argument and adapter-destination runs get no parallel traced copy. Neither
+  descriptor nor C array ever becomes a root.
 
-The string out-parameter is live in `_tmp_1` the moment the callee
-returns and is in a stack slot before any subsequent allocation can run.
-When a Lua program or a strict Titan declaration/relay is the caller, the
-generated Lua-stack entry plays this role: it reserves stack space for the
-fixed prefix
-and requested flexible capacity
-before invoking the native function, then writes each actual result back with
-`setboxed` — for a record that is just the record's own userdata, while an
-Array becomes its canonical proxy
-([Lua interop internals](lua-interop-internals.md)).
+Callable and Interface adapters follow exactly this inventory. Incoming native
+arguments are borrowed. After the source/concrete native call, fixed/open source
+results are rooted only if a later result action can allocate or genuinely move
+the stack. Nested callable conversion can allocate and raise but does not move
+the stack; its fresh wrapper is published directly to the action's destination
+root. Rebases occur after the native call and after actual stack-moving guards
+or API work, not after direct `luaF_newCclosure` construction.
+
+The generic paths are intentionally different. A non-Titan Lua call and a
+branded strict call push the callee/carrier and arguments because Lua's VM stack
+is their calling convention. `luaD_callnoyield` may resize the stack; saved
+offsets recover positions afterward. Its results remain rooted in VM result
+slots while strict/dynamic conversion runs, then are copied into the same
+consumer homes or caller-owned result ranges used by the native path. A Lua
+entry calling a native body similarly reserves its result area first and boxes
+the returned values there.
 
 A pending `return` that crosses `finally` is the difficult lifetime case: the
 saved action must retain both the flexible count and every GC-bearing element

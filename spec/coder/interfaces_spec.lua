@@ -71,6 +71,44 @@ describe("interfaces (end-to-end)", function()
             tlcontext.owned_c_metatables[types.tostring(owned)])
     end)
 
+    it("polls before an Interface adapter allocates callable views", function()
+        local csrc = h.compile_and_read_c([[
+            interface Transformer
+                function swap(
+                    callback: (value) -> value
+                ): (value) -> value
+            end
+
+            record Impl
+            end
+
+            function Impl:swap(
+                callback: (integer) -> integer
+            ): (integer) -> integer
+                return callback
+            end
+
+            function make(): Transformer
+                return Impl.new()
+            end
+        ]])
+        local pair = interface_pair_id(
+            "test_", "test.Impl", "test.Transformer")
+        local signature = "static TITAN_NOINLINE TValue "
+            .. pair .. "_adapter_0"
+        local declaration = assert(csrc:find(signature, 1, true))
+        local start = assert(csrc:find(
+            signature, declaration + 1, true))
+        local stop = assert(csrc:find(
+            "test_Impl_swap_titanmethod(", start, true))
+        local body = csrc:sub(start, stop - 1)
+        local poll = assert(body:find("luaC_checkGC(L);", 1, true))
+        local reserve = assert(body:find("titan_ensure_stack", poll, true))
+        local allocation = assert(body:find(
+            "luaF_newCclosure", reserve, true))
+        assert.is_true(poll < reserve and reserve < allocation)
+    end)
+
     it("publishes type-only owner artifacts without a Lua module member",
     function()
         local ok, err, ast, modtype = h.run_checker([[
@@ -815,7 +853,7 @@ describe("interfaces (end-to-end)", function()
         assert.truthy(called, callerr)
     end)
 
-    it("anchors incoming GC values before resolving adapter identities",
+    it("uses caller-owned incoming GC roots while resolving adapter identities",
     function()
         local source = [[
             interface Item
@@ -878,26 +916,20 @@ describe("interfaces (end-to-end)", function()
             start, true))
         local body = csrc:sub(start, stop)
         local reserve = assert(csrc:find(
-            "titan_ensure_stack(L,", start, true))
-        local reserved = tonumber(assert(body:match(
-            "titan_ensure_stack%(L, (%d+)%)")))
-        local rooted = tonumber(assert(body:match(
-            "L%->top%.p %+= (%d+);")))
-        assert.equal(rooted + 1, reserved)
-        local first_anchor = assert(csrc:find(
-            "setuvalue(L, s2v((restorestack(L, _base_off)",
-            reserve, true))
-        local value_anchor = assert(csrc:find(
-            "setobj2t(L, s2v((restorestack(L, _base_off)",
-            first_anchor, true))
+            "titan_ensure_stack(L, 1);", start, true))
         local identity = assert(csrc:find(
             '"Titan interface test.Item metatable"',
-            value_anchor, true))
+            reserve, true))
         local conversion = assert(csrc:find(
             "_ia_concrete_arg_1", identity, true))
-        assert.is_true(reserve < first_anchor
-            and first_anchor < value_anchor
-            and value_anchor < identity
+        local before_identity = csrc:sub(start, identity - 1)
+        assert.falsy(before_identity:find(
+            "setuvalue(L, s2v((restorestack(L, _base_off)",
+            1, true), before_identity)
+        assert.falsy(before_identity:find(
+            "setobj2t(L, s2v((restorestack(L, _base_off)",
+            1, true), before_identity)
+        assert.is_true(reserve < identity
             and identity < conversion
             and conversion < stop)
 

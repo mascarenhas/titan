@@ -1589,7 +1589,7 @@ describe("untyped lambda vararg inference (code generator)", function()
     it("infers ...:integer from a typed local and value-calls it", function()
         run_coder([[
             function go(): integer
-                local f: (...: integer) -> integer = function(...)
+                local f: (...: integer) -> integer = function(...): integer
                     local s = 0
                     local i = 1
                     local n = #...
@@ -1611,7 +1611,7 @@ describe("untyped lambda vararg inference (code generator)", function()
                 return f(10, 20, 30)
             end
             function go(): integer
-                return apply(function(...)
+                return apply(function(...): integer
                     return #... * (...[1] + ...[2] + ...[3])
                 end)
             end
@@ -1625,7 +1625,7 @@ describe("untyped lambda vararg inference (code generator)", function()
     it("infers the vararg element from a return-type context", function()
         run_coder([[
             function make(): (...: integer) -> integer
-                return function(...)
+                return function(...): integer
                     local s = 0
                     local i = 1
                     while i <= #... do s = s + ...[i]; i = i + 1 end

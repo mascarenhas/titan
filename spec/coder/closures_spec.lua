@@ -2,7 +2,7 @@
 -- compile it, and run it. Covers boxed (captured-and-mutated) capture, by-value
 -- capture, both call paths through a closure value, gc-typed captures (the box
 -- barrier), transitive multi-level capture, GC stress over live closures/boxes,
--- end-to-end type inference of lambda params/return, and zero-return lambdas.
+-- end-to-end lambda parameter inference, explicit returns, and zero-return defaults.
 --
 -- The frontend (parser/checker/inference) assertions live in spec/parser_spec.lua
 -- and spec/checker/closures_spec.lua; this file is the runtime oracle.
@@ -394,28 +394,27 @@ describe("closures (end-to-end)", function()
         ]])
     end)
 
-    it("infers lambda param and return from a higher-order argument", function()
+    it("infers a lambda parameter with an explicit higher-order result", function()
         run_coder([[
             function apply(f: (integer) -> integer, x: integer): integer
                 return f(x)
             end
             function run(): integer
-                -- f's param type and the lambda's return type are inferred from
-                -- apply's parameter type
-                return apply(function (x) return x * 3 end, 14)
+                -- x comes from apply's parameter type; results stay explicit.
+                return apply(function (x): integer return x * 3 end, 14)
             end
         ]], [[
             assert(test.run() == 42)
         ]])
     end)
 
-    it("infers a closure's types and captures at the same time", function()
+    it("infers a closure parameter while capturing at the same time", function()
         run_coder([[
             function apply(f: (integer) -> integer, x: integer): integer
                 return f(x)
             end
             function run(bias: integer): integer
-                return apply(function (x) return x + bias end, 10)
+                return apply(function (x): integer return x + bias end, 10)
             end
         ]], [[
             assert(test.run(5) == 15)

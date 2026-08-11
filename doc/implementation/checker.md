@@ -202,8 +202,8 @@ The checker-facing summary is:
   directional shape/component plan, including the narrow `nil_fill_result`
   action when a wholly missing expected result accepts nil;
 - the generalized callable freezer turns that raw authority into a closed,
-  relation-free adapter graph with component operations, roots, rebases,
-  demand math, location, and trace name;
+  relation-free adapter graph with component operations, minimal lifetime
+  roots, only genuine stack rebases, demand math, location, and trace name;
 - `types.assignment_adjustment(source, target)` selects identity, direct
   coercion, gradual view, callable adjustment, or rejection;
 - `types.dynamic_coercion(target)` describes the broader conversion authorized
@@ -217,6 +217,19 @@ The checker-facing summary is:
 these classifiers. It does not answer whether an operation is permitted.
 The retired `types.compatible`, `types.coerceable`, and
 `types.explicitly_coerceable` APIs have no checker callers.
+
+The callable freezer also owns lowering-time lifetime facts. A nested
+`callable_view` is `may_raise = true` because `luaF_newCclosure` can allocate,
+but `may_relocate = false`: direct construction performs no stack API operation
+or ordinary GC poll. Native adapter input-source roots are empty because every
+native caller has already installed dedicated call-activation roots for its
+GC-bearing callee/arguments. Fixed/range destination roots are selected
+only for newly allocated wrappers; native result-source roots are selected only
+when a later result action allocates or can really move the stack. Raw
+descriptors and C buffers are explicitly non-roots. Top-level wrapper
+construction records only a conditional result root for an eligible exact
+Titan clone—never a duplicate construction source root—and the rebase ledger
+still always includes the source native call.
 
 Conversion edges are deliberately not consistency leaves. Integer-to-float,
 `T`-to-`T?`, C numeric/address conversions, truthiness, and
@@ -575,10 +588,13 @@ Every Array/Map `Ast.VarBracket` read also carries `_read_guard` for its
 optionized result type. Function declarations, methods, bound-method
 trampolines, and lambdas carry parallel strict GuardPlan arrays for fixed and
 variadic parameters; generic call nodes carry strict fixed/open result guards.
-Frozen callable adapters reuse those component guards plus explicit root/rebase
-and action records, while their consumer-local target relays reuse the strict
-stack shell. These annotations are distinct from the dynamic plans used by
-genuine Lua entries and non-Titan callable results.
+Frozen callable adapters reuse those component guards plus explicit minimal
+root/rebase and action records. Incoming native values borrow caller roots;
+newly allocated wrappers get immediate destination roots; native source results
+are rooted only across later allocating/relocating work; and direct nested
+wrapper allocation is not a rebase point. Consumer-local target relays reuse
+the strict stack shell. These annotations are distinct from the dynamic plans
+used by genuine Lua entries and non-Titan callable results.
 
 `or` implements option defaulting: when the left side is `t?` and the right
 side's type equals `t`, the whole expression has type `t` (`of or 1.0` with
@@ -592,8 +608,8 @@ specified case-by-case in [option types](../language/option-types.md).
 Anonymous functions (`Ast.ExpFunction`) add two pieces of work to the
 checker: deciding which enclosing variables each lambda **captures** (and
 whether each captured variable is mutated, which the coder needs to choose
-the boxed representation), and **inferring** a lambda's missing parameter
-and return types.
+the boxed representation), **inferring** missing input annotations, and
+fixing the result shape to the written annotation or the zero-return default.
 
 ### Function-nesting tracking
 
@@ -653,41 +669,37 @@ additional traced source-closure upvalue, but this does not lower the source
 capture limit: a 255-upvalue source (or full wrapper chain) remains admissible
 and takes the generic fallback at the next non-exact edge.
 
-### Lambda type inference: checking vs synthesis mode
+### Lambda parameter inference and zero-return defaults
 
-The `Ast.ExpFunction` handler reads the 4th `context` argument every
-`checkexp` visitor receives (the expected type). If `context` is a
-`Type.Function` whose arity matches `#node.params`, the lambda is in
-**checking mode**; otherwise in **synthesis mode**. This is exactly the
-`local x: T = exp` (checking) versus `local x = exp` (synthesis)
-distinction, lifted to lambdas. **Both the parameter types and the return
-type are taken from this expected type** — symmetric, context-only
-inference; neither is reverse-engineered from the lambda's body.
+The `Ast.ExpFunction` handler reads the fourth `context` argument every
+`checkexp` visitor receives. If it is a `Type.Function` whose fixed arity
+matches the lambda, the checker may use it to fill missing fixed-parameter and
+input-vararg element annotations. This is the `local x: T = exp` versus `local
+x = exp` distinction, but only for lambda inputs; no type is reverse-engineered
+from the body.
 
-* **Parameters.** An annotated parameter uses its annotation. An
-  unannotated one takes `context.params[i]` in checking mode, and in
-  synthesis mode is the clean error `cannot infer type of parameter 'x'`.
-* **Return shape.** An explicit `node.rettypes`/`node.flexrettype` pair
-  (including empty/false for explicit `: ()`) is used as written. The parser
-  distinguishes *no return annotation* from `: ()` with a sentinel. With no
-  annotation, checking mode copies both `context.rettypes` and
-  `context.flexrettype`; synthesis mode defaults to empty/false, exactly the
-  zero-return default of an unannotated top-level function.
+* **Parameters.** An annotated parameter uses its annotation. An unannotated
+  one takes `context.params[i]` when the arities match, and otherwise receives
+  the clean error `cannot infer type of parameter 'x'`. A bare lambda `...`
+  similarly takes `context.varargtype`; an explicit `...: T` wins.
+* **Return shape.** An explicit `node.rettypes`/`node.flexrettype` pair is used
+  as written. With no return annotation the handler always installs
+  empty/false—the zero-return shape `()`—regardless of context. This matches an
+  unannotated named function. A nonzero fixed result or flexible tail must
+  therefore be explicit.
 
-So the complete result shape is known *before* the body is checked. The
-body's `return`s are never inspected to synthesize a return type — they are
-checked/coerced against the finite/open return demand in `StatReturn`, exactly
-as a top-level function body is. In a synthesis-mode zero-return lambda,
-`return <expr>` evaluates the expression under discard demand; it does not
-infer or expose a result.
+The complete result shape is known before the body is checked. Body `return`
+statements never synthesize it; they are checked/coerced against the
+finite/open demand in `StatReturn`. In a zero-return lambda, `return <expr>`
+evaluates the expression under discard demand and exposes no result.
 
-Because the return types are fixed before the body is checked, the
-all-paths-return rule runs unconditionally inside `checkfuncbody` (no
-special deferral for lambdas), so a lambda with a non-`nil` return whose
-body can fall through gets the usual `function can return nil but return
-type is not nil` error, prompting an annotation. After the handler returns
-with `_type = node._type`, the surrounding context applies its usual
-`trycoerce`/`checkmatch` against the lambda's target.
+After the handler publishes that source `Type.Function`, the surrounding sink
+runs its ordinary `trycoerce`/`checkmatch` path. Thus an unannotated lambda can
+still flow to a result-bearing target when callable adjustment permits it—for
+example `() -> ()` to `() -> value` through one frozen nil-fill wrapper—while a
+target requiring an `integer` result is rejected. An explicitly result-bearing
+lambda still receives the ordinary all-paths-return check inside
+`checkfuncbody`.
 
 ## Per-construct notes for contributors
 

@@ -90,10 +90,13 @@ frozen plan is relation-free data containing at least:
   and result actions;
 * recursively frozen component operations, including nested callable views and
   `nil_fill_result`;
-* fixed and open GC-root inventories for argument and result sources and
-  destinations;
-* every stack-rebase point, including nested wrapper construction and the
-  source native call;
+* minimal fixed/open GC-root inventories: adapters borrow the native caller's
+  dedicated call-activation roots, newly allocated destinations receive
+  immediate roots, and native source
+  results are rooted only when they span a later allocating/relocating action;
+* only genuine stack-rebase points—operations that can move the Lua stack and
+  the source native call; nested wrapper allocation is raising but
+  non-relocating;
 * target flexible-result demand formulas and the `TITAN_VARARG_MAX == 200`
   bound;
 * the real cast/owning-expression location and stable trace name; and
@@ -132,25 +135,28 @@ helper. It must not preserve a mismatched tag silently.
 ## Runtime eligibility and fallback
 
 A static Function carrier is a boxed `TValue`, not proof that its run-time value
-has Titan's private CClosure layout. Wrapper construction therefore begins only
-after evaluating and anchoring the operand exactly once, then uses the existing
-trusted Titan-closure predicate. Realization requires:
+has Titan's private CClosure layout. The operand is evaluated exactly once into
+a C value while its existing allocation/home root remains live. The guarded
+realization checks exactly:
 
-* a C closure with Titan's fixed private header/trailer shape and brand;
-* exact source-`A` function-tag identity; and
-* an upvalue count strictly below Lua's `MAXUPVAL` ceiling.
+* the carrier is a non-null `CClosure`;
+* `5 <= nupvalues < MAXUPVAL`;
+* upvalue 1 is lightuserdata equal to the exact source-`A` function tag; and
+* upvalue 3 is lightuserdata equal to `TITAN_FUNCTION_CLOSURE_BRAND`.
 
-Once that predicate succeeds, generated code may trust the private slots under
-the same supported boundary as exact function dispatch. Debug-library or C-API
-mutation of those slots opts out. The implementation must not add registry
-hardening, adversarial-AST defenses, or shape probes for arbitrary Lua values
-beyond this actual boundary.
+Once the exact tag and brand establish the private Titan carrier, generated code
+trusts the remaining branded layout. Construction deliberately does not probe
+upvalue 0's module shape, upvalue 2's native-pointer shape, or the final strict
+trailer. Debug-library or C-API mutation of private upvalues opts out. The
+implementation adds no registry hardening, adversarial-AST defenses, or extra
+shape probes beyond this supported boundary.
 
-A Lua closure, light C function, foreign C closure, `__call` object, deferred
-non-callable value, differently tagged Titan closure, or closure with
-`n == MAXUPVAL` is returned unchanged. It keeps the existing branded or
-non-Titan generic call behavior and its identity. Titan's source capture limit
-is not reduced merely to reserve the optimization's extra slot.
+A Lua closure, light C function, foreign/unbranded C closure, `__call` object,
+deferred non-callable value, differently tagged Titan closure, or closure with
+`n == MAXUPVAL` is returned unchanged. Any failed count/tag/brand guard takes
+this same fallback. It keeps the existing branded or non-Titan generic call
+behavior and its identity. Titan's source capture limit is not reduced merely
+to reserve the optimization's extra slot.
 
 ## Wrapper layout
 
@@ -174,22 +180,32 @@ wrapper; B in turn delegates to A. Each layer keeps its own private links and
 capture indexing instead of treating a later wrapper as if it had A's trailer
 position.
 
-Construction uses stack-based `lua_pushcclosure` rather than writing a closure
-array manually:
+Construction allocates the final object directly with
+`luaF_newCclosure(L, n + 1)`. While that closure is fresh-white, generated code:
 
-1. materialize and anchor the source before any stack growth or allocation;
-2. save stack positions as offsets and ensure capacity;
-3. push source upvalues `0 .. n-2`, substituting target tag and adapter in slots
-   1 and 2;
-4. push the source closure itself and the generated target strict relay;
-5. call `lua_pushcclosure` with `source->f`;
-6. anchor the new wrapper immediately, discard scratch, and restore `_base`
-   from `_base_off`.
+1. copies `source->f`;
+2. copies source upvalues `0 .. n-2` with `setobj2n`, substituting the target tag
+   and target adapter in slots 1 and 2 with `setpvalue`;
+3. installs the immediate source link at `n-1` with `setclCvalue`;
+4. installs the target strict relay at `n` with `setfvalue`; and
+5. publishes the finished closure directly into the assigned traced result slot
+   with `setclCvalue`.
 
-Construction and every nested callable conversion are relocating operations.
-The new white CClosure traces all copied/new upvalues once constructed; no
-manual forward/back barrier and no untraced side object is required for its
-source link.
+There is no transient Lua-stack assembly, `lua_pushcclosure`, construction
+barrier, local `luaC_checkGC`, construction-only source/result root copy, or
+construction rebase. The source's existing root remains live; fallback is only
+a C copy of that already rooted carrier. A successfully allocated wrapper is a
+new object and receives its own root immediately.
+
+Lua 5.5's collector does not move heap objects. A Lua stack reallocation can
+relocate stack slots and invalidate `StkId`/`TValue *` pointers, but it preserves
+the values in caller-owned roots and leaves their heap addresses unchanged.
+`luaF_newCclosure` may allocate or raise, including after an emergency
+collection, but it does not perform an ordinary GC poll; an emergency cycle does
+not shrink the stack. Direct construction therefore does not relocate the
+stack. Nested callable conversion has the same allocation/raising behavior and
+is not a rebase point, although its fresh destination root is
+allocation-sensitive.
 
 Every realized wrapper is fresh. It is not equal to its source or to a wrapper
 from another evaluation. Chains allocate once per realized non-exact edge.
@@ -205,16 +221,19 @@ invocation backend: Interface adapters call a known concrete method with
 Its order is fixed:
 
 1. validate target input and flexible-output descriptor bounds;
-2. reserve and nil-initialize the complete traced scratch frame, save
-   `_base_off`, and establish its rebase ledger;
-3. anchor every incoming GC-bearing fixed/open `B` argument before an action
-   may allocate;
-4. realize contravariant argument actions into A's fixed and tail storage;
+2. reserve and nil-initialize only the scratch selected by the frozen root
+   inventory, saving stack positions as offsets where a real rebase is needed;
+3. borrow the native caller's dedicated activation roots for fixed/static `B`
+   arguments and the upstream activation range for forwarded open values, then
+   freeze only their C values;
+4. realize contravariant argument actions into A's fixed and tail storage,
+   immediately rooting each newly allocated nested wrapper;
 5. recover the penultimate source closure, then obtain its authoritative module
    and exact native pointer and call `function_sig(A)` with `_fn = source`;
-6. immediately anchor every GC-bearing fixed/flexible A result before a nested
-   conversion can allocate;
-7. realize covariant result actions into B, including `nil_fill_result`;
+6. rebase after that native call, then root only GC-bearing A source results that
+   must survive a later allocating/relocating result action;
+7. realize covariant result actions into B, immediately rooting each newly
+   allocated destination and applying `nil_fill_result`;
 8. publish B's caller-owned flexible output under `_flexwant`, `LUA_MULTRET`,
    and the 200-element cap; and
 9. restore the root frame, write secondary out-parameters, and return B's first
@@ -228,8 +247,11 @@ result or performs a component coercion.
 The adapter retains the Interface engine's demand formulas: finite consumers
 request only the required source prefix/tail capacity; an open target demand is
 bounded; hidden source results are not converted; and source flexible
-projection precedes absence fill. All raw `TitanVargX` buffers remain untraced,
-with parallel Lua roots for GC-bearing live elements.
+projection precedes absence fill. Raw `TitanVargX` descriptors and C arrays are
+never roots. A parallel traced range is reserved only for newly allocated
+converted destinations or source result values that must span a later
+allocating or stack-relocating action; borrowed arguments and allocation-free
+copies use none.
 
 ## Source Lua entry and target strict relay
 
@@ -266,18 +288,38 @@ Wrapper allocation is emitted in expression `stats`, never duplicated in a C
 expression template. Operand and call evaluation remain left-to-right and
 exactly once.
 
-The frozen plan owns all lifetime facts. Incoming and produced GC-bearing fixed
-values have reserved stack anchors; each open descriptor has a parallel traced
-range; the immediate source and new wrapper are anchored across construction;
-and source results are published before an allocating conversion. When an open
-run is repacked into an input-vararg descriptor, each GC-bearing converted
-destination is rooted in its own parallel range as soon as it enters the
-untraced C buffer; source roots alone cannot retain a freshly allocated nested
-wrapper. Raw descriptors, C arrays, and native locals are never treated as
-roots. Every
-stack pointer live across stack growth, wrapper construction, nested callable
-conversion, or the source native call is represented as an offset and restored
-before use.
+An adapter whose frozen argument/result graph can allocate a nested callable
+view begins with `luaC_checkGC(L)`. The poll occurs before stack reservation,
+`_base`, or any raw stack pointer. It provides collector progress across repeated
+adapter calls without inserting a poll between `luaF_newCclosure` and immediate
+publication; callers already treat the later source-native call as the genuine
+relocation point.
+
+The frozen plan owns a minimal lifetime inventory. Before a native fast call,
+the caller publishes the callee value and every GC-bearing fixed/static-vararg
+argument into dedicated traced activation slots. Those roots survive later
+argument effects, the callee's entry poll/stack growth, and mutation of the
+value's former module/record/capture home. Raw input-vararg storage borrows those
+slots; a forwarded open run borrows the upstream caller's still-live activation
+roots. Callable and Interface adapters consume these roots without duplicating
+them. Callee parameter homes remain separate and are needed only when a
+parameter is assigned or must be spilled across a catchable call. Genuine Lua
+and branded-strict slow paths still push their arguments because Lua-stack
+transport is their calling convention.
+
+After a native source call, a GC-bearing fixed result or flexible source run gets
+a temporary root only when it must survive a later action that can allocate or
+move the stack. A nested callable conversion can allocate and raise but cannot
+relocate the stack; the source remains rooted, and every successfully created
+wrapper is published immediately into its own fixed slot or parallel traced
+range. The same rule applies when a general open conversion creates an
+Interface value. Raw descriptors, C arrays, and native C locals are never roots,
+and borrowed or allocation-free runs do not acquire parallel traced copies.
+
+Stack offsets and rebases protect only raw stack positions. Operations that can
+actually grow/shrink the Lua stack and every native call are rebase points;
+direct `luaF_newCclosure` construction and nested wrapper construction are not.
+Heap references remain stable because Lua's GC is non-moving.
 
 Synthetic adapter line directives and component-conversion diagnostics use the
 real cast node's filename, line, and column. An open-run site uses the owning

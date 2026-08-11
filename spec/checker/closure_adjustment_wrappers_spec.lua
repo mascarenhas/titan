@@ -89,12 +89,20 @@ describe("closure adjustment wrappers (checker)", function()
         assert.equal("value",
             frozen.strict_relay.results[1].guard.op)
         assert.is_false(frozen.strict_relay.vararg)
-        assert.is_true(frozen.rooting.construction.source.traced)
+        assert.is_nil(frozen.rooting.construction.source)
         assert.is_true(frozen.rooting.construction.result.traced)
-        assert.equal("after_wrapper_construction",
-            frozen.rebase_points[1].kind)
+        assert.equal("conditional_lua_stack_slot",
+            frozen.rooting.construction.result.storage)
+        assert.equal("eligible_exact_titan_clone",
+            frozen.rooting.construction.result.condition)
+        assert.same({}, frozen.rooting.fixed.argument_source)
+        assert.same({}, frozen.rooting.fixed.argument_destination)
+        assert.same({}, frozen.rooting.fixed.result_source)
+        assert.same({}, frozen.rooting.fixed.result_destination)
+        assert.is_false(frozen.rooting.ranges.argument_source.traced)
+        assert.equal(1, #frozen.rebase_points)
         assert.equal("after_native_call",
-            frozen.rebase_points[#frozen.rebase_points].kind)
+            frozen.rebase_points[1].kind)
         assert.equal(200, frozen.flexible_result_demand.abi_cap)
         assert.same({
             filename = cast.loc.filename,
@@ -306,7 +314,8 @@ describe("closure adjustment wrappers (checker)", function()
             .arguments[1].operation
         assert.equal("callable_view", operation.kind)
         assert.equal("immediate", operation.timing)
-        assert.is_true(operation.may_relocate)
+        assert.is_false(operation.may_relocate)
+        assert.is_false(cast._callable_adapter.arguments[1].rebase_after)
         assert.equal("callable_adapter_plan", operation.adapter.kind)
         assert.equal(operation.adapter.callable, operation.callable)
         assert.equal(operation.adapter,

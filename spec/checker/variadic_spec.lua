@@ -544,7 +544,7 @@ describe("variadic parameters (typechecker)", function()
         it("infers the element type from a typed local context", function()
             assert_type_check([[
                 function foo(): integer
-                    local f: (...: integer) -> integer = function(...)
+                    local f: (...: integer) -> integer = function(...): integer
                         return ...[1]
                     end
                     return f(1, 2)
@@ -558,7 +558,7 @@ describe("variadic parameters (typechecker)", function()
                     return f(1, 2, 3)
                 end
                 function foo(): integer
-                    return apply(function(...) return ...[1] end)
+                    return apply(function(...): integer return ...[1] end)
                 end
             ]])
         end)
@@ -566,7 +566,7 @@ describe("variadic parameters (typechecker)", function()
         it("infers the element type from a return-type context", function()
             assert_type_check([[
                 function make(): (...: string) -> integer
-                    return function(...) return #... end
+                    return function(...): integer return #... end
                 end
             ]])
         end)
@@ -577,7 +577,7 @@ describe("variadic parameters (typechecker)", function()
                     return f(1, 2)
                 end
                 function foo(): integer
-                    return apply(function(...: integer) return ...[1] end)
+                    return apply(function(...: integer): integer return ...[1] end)
                 end
             ]])
         end)

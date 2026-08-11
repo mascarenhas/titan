@@ -2,6 +2,10 @@
 
 Status: implemented and locally verified (2026-07-16)
 
+> **Historical design record.** Later closure work supersedes this plan wherever
+> it says an unannotated lambda inherits fixed or flexible results from context.
+> Omission now always means zero results; nonzero/flexible results are explicit.
+
 Primary feature brief: `/home/mascarenhas/.codex/attachments/57647ba4-d653-4f73-9b92-f2f076248975/pasted-text-1.txt`
 
 Implementation note: source-matched Lua 5.5 lowering exposed a second bound

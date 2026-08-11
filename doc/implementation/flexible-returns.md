@@ -116,9 +116,11 @@ descriptor representation are rejected with return-specific diagnostics.
 `Type.Value`; finite option projection never constructs an artificial
 `value?`.
 
-An unannotated lambda in an expected function context copies both the fixed
-`rettypes` and `flexrettype`. An explicit `: ()` keeps an empty fixed list and
-`flexrettype = false`. The main-function contract requires both
+An unannotated lambda always keeps an empty fixed `rettypes` list and
+`flexrettype = false`, even in an expected flexible-result context. Context may
+supply missing parameter and bare-variadic input types, but never a result
+shape. A nonempty or flexible lambda result must be written explicitly. The
+main-function contract requires both
 `varargtype = false` and `flexrettype = false`, preserving the exact one-fixed-
 parameter `main(args: {string}): integer` shape.
 
@@ -294,8 +296,9 @@ result demand, the `nil_fill_result` action, and one component
 adjustment and no guard; a gradual view contains its strict `GuardPlan`; a
 nested function component contains another `CallablePlan`. The checker
 separately annotates concrete entry/result observations and freezes a
-relation-free `CallableAdapterPlan` with roots, rebases, demand math, location,
-and trace identity. Crucially, callable adjustment uses gradual consistency
+relation-free `CallableAdapterPlan` with minimal lifetime roots, only genuine
+stack rebases, demand math, location, and trace identity. Crucially, callable
+adjustment uses gradual consistency
 recursively; it does not lift ordinary numeric, Option,
 nominal-to-Interface, or other automatic coercions through the function type.
 
@@ -345,10 +348,11 @@ source closure with no allocation. See
 [Type relations and boundary plans](type-relations-and-boundaries.md).
 
 Interface method satisfaction reuses this directional callable machinery.
-The generalized freezer produces the same ordered action/root/rebase graph for
-an adjusted Interface slot and a first-class closure wrapper; only the
-invocation backend differs. The coder emits an Interface plan under the method
-signature and a closure plan under target `function_sig(B)`. Neither treats the
+The generalized freezer produces the same ordered action and minimal
+root/rebase graph for an adjusted Interface slot and a first-class closure
+wrapper; only the invocation backend differs. The coder emits an Interface plan
+under the method signature and a closure plan under target `function_sig(B)`.
+Neither treats the
 direct concrete-to-Interface coercion as a structural result-component
 relation. See
 [Interfaces](interfaces.md#frozen-conversion-and-adapter-plans).
@@ -416,9 +420,14 @@ materializing them in the output buffer.
 ### The coder's result-run abstraction
 
 The coder carries a dynamic sequence as a result run containing the typed
-descriptor, first element/start, element type, finite or open extent, parallel
-Lua root range, ownership, and stack restore/cleanup point. An open expression
-list is an ordered scalar prefix followed by at most one such dynamic run.
+descriptor, first element/start, element type, finite or open extent, ownership,
+stack restore/cleanup point, and an optional parallel Lua root range. Borrowed
+input and non-GC runs need no range; ordinary open GC-bearing call results use
+one until their sink consumes them. Adapter and descriptor-repacking ranges are
+more selective: a destination range exists only for newly allocated conversions,
+and a source range only when later result work can allocate or move the stack.
+An open expression list is an ordered scalar prefix followed by at most one such
+dynamic run.
 
 The same abstraction feeds four paths:
 
@@ -467,17 +476,23 @@ without spuriously applying the open overflow rule.
 ## Exact and generic calls
 
 Direct module functions, record statics, methods, bound methods, lambdas, and
-exact first-class Titan closures use the native entry. At each exact call,
-the coder:
+exact first-class Titan closures use the native entry. At each exact call, the
+coder:
 
-1. evaluates every explicit argument once in lexical order and passes only
+1. evaluates every explicit argument once in lexical order, publishes each
+   GC-bearing native input into a caller-owned activation root, and passes only
    the fixed prefix plus an input-vararg run when declared;
-2. reserves storage for every declared fixed result, even when the consumer
+2. reserves raw storage for every declared fixed result, even when the consumer
    hides some of them;
-3. allocates a source-typed flexible buffer matching the finite/open demand;
-4. invokes the native entry with the complete declared signature;
-5. anchors every GC-bearing result before an allocation can occur; and
-6. exposes only `_visible_types` plus the permitted dynamic run to the sink.
+3. allocates a source-typed flexible buffer matching the finite/open demand and,
+   for an open GC-bearing tail, its parallel traced range;
+4. invokes the native entry with the complete declared signature and rebases
+   afterward because the callee may have moved the Lua stack;
+5. publishes the visible fixed projections to their assigned homes and the live
+   open GC-bearing prefix to its range before surrounding sink work can
+   allocate; and
+6. exposes only `_visible_types` plus the permitted dynamic run to the sink,
+   giving every later freshly allocated conversion its own immediate root.
 
 For each finite flexible projection, the caller tests the requested index
 against `_flexout->n_args` before reading the backing array. A present element
@@ -495,11 +510,14 @@ flexible tail is part of the tag, so a differently shaped closure cannot enter
 unless a prior static non-exact edge actually realized that target tag.
 
 Finite/open callable casts are lowered before dispatch by the shared guarded
-constructor. It evaluates/anchors once, creates a fresh B wrapper only for an
-exact branded A closure with upvalue room, and otherwise preserves the carrier.
-The wrapper adapter receives B's `_flexwant`, calls the immediate source under
-A's demand formula, roots results, and publishes B's fixed/tail shape subject to
-the 200 bound.
+constructor. It evaluates once while borrowing the source's existing root,
+creates a fresh B wrapper only for an exact branded A closure with upvalue room,
+and otherwise preserves the carrier. The final wrapper is allocated directly
+with `luaF_newCclosure`, initialized while fresh-white, and published immediately
+to its own result root; construction allocates/raises but does not relocate the
+stack. The wrapper adapter receives B's `_flexwant`, calls the immediate source
+under A's demand formula, roots only source results that span a later allocating
+or stack-relocating action, and publishes B's fixed/tail shape subject to the 200 bound.
 
 The generic Lua-stack path then splits by brand. An exact-tag mismatch has the
 opaque ABI sentinel in fixed `upvalue[3]`: `codevaluecall` pushes the closure's
@@ -600,34 +618,41 @@ stack.
 The generated C and allocating/nested-`finally` stress coverage enforce the
 following lifetime contract.
 
-`TitanVargX.args` is raw typed C storage and is invisible to Lua's collector.
-The descriptor is not a root. Every collectable element simultaneously lives
-in a traced Lua stack slot or another traced Titan object for its complete
-live range.
+`TitanVargX` and its `args` array are raw typed C storage and are never roots.
+A collectable element instead remains reachable from an upstream traced owner,
+a consumer home, or a deliberately reserved parallel range for its required
+consumer/conversion lifetime.
 
 The ownership/rooting rules are:
 
-* input descriptors borrow backing whose upstream stack roots remain live
-  through the call;
-* exact-call output buffers belong to the caller, which reserves parallel
-  destination roots before entering the callee;
-* return expressions first enter GC-safe saves before their raw values are
-  copied to output backing;
-* source roots remain live while nested and converted runs are copied;
-* no allocating operation occurs between releasing the callee's temporary
-  roots and anchoring the corresponding caller-owned output values;
-* generic Lua results remain rooted in their VM result slots until conversion
-  and destination anchoring finish;
-* a callable target adapter anchors every incoming GC-bearing B value before
-  nested conversion, immediately anchors all A fixed/flexible results after the
-  source native call, and keeps the immediate source/wrapper rooted across each
-  allocating or rebasing operation.
+* native call sites install traced activation roots for every GC-bearing
+  callee/fixed/static-vararg value; input descriptors borrow those roots, and a
+  forwarded open run borrows the upstream caller's still-live range;
+* callable and Interface adapters do not duplicate those activation roots;
+  callee parameter homes are added only for assignment or spill, while
+  Lua/strict generic calls still push arguments as required by the VM
+  convention;
+* exact-call fixed ABI holders and flexible-output buffers belong to the caller
+  but are untraced. Visible fixed results are published to their homes, while an
+  ordinary open GC-bearing result run uses a parallel range until consumption;
+* a conversion that allocates a callable wrapper or Interface value publishes
+  every new object immediately into its own fixed/range destination root;
+* return expressions and pending returns retain their existing traced saves
+  when they themselves cross later allocation or `finally`;
+* generic Lua results remain rooted in VM result slots until conversion and
+  destination publication finish; and
+* a callable/Interface target adapter borrows incoming roots, rebases after the
+  source/concrete native call, roots only source results that span a later
+  allocating/relocating result action, and immediately roots every fresh
+  converted destination. Direct nested callable construction allocates/raises
+  but is not a stack-relocation point.
 
-All stack locations that survive a possible allocation or call are stored as
-offsets and recovered with `restorestack`; raw `StkId` pointers do not cross a
-relocation point. The output buffer itself needs no write barrier because it
-is not a Lua heap owner. Later stores into closures, module/record userdata,
-tables, or arrays use their ordinary forward or back barriers.
+Lua's GC does not move heap objects. Only raw stack positions need offsets:
+operations that can really grow/shrink the stack and native calls are followed
+by `restorestack`; direct `luaF_newCclosure` construction is not. The output
+buffer needs no write barrier because it is not a Lua heap owner. Later stores
+into closures, module/record userdata, tables, or arrays use their ordinary
+forward or back barriers.
 
 ### `finally` and flexible pending returns
 

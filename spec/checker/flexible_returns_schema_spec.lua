@@ -48,12 +48,13 @@ describe("flexible return schemas (typechecker)", function()
         assert.same(types.Boolean(), tree[4]._type.rettypes[1])
     end)
 
-    it("copies both fixed and flexible results into an unannotated lambda", function()
+    it("uses an explicit fixed and flexible lambda result shape", function()
         local ok, err, tree = run_checker([[
             function run(): nil
-                local inferred: () -> (boolean, ...: integer) = function()
-                    return true
-                end
+                local shaped: () -> (boolean, ...: integer) =
+                    function(): (boolean, ...: integer)
+                        return true
+                    end
                 local explicit = function(): ()
                 end
                 return nil
@@ -61,12 +62,25 @@ describe("flexible return schemas (typechecker)", function()
         ]])
         assert.truthy(ok, err)
 
-        local inferred = tree[1].block.stats[1].exps[1]._type
+        local shaped = tree[1].block.stats[1].exps[1]._type
         local explicit = tree[1].block.stats[2].exps[1]._type
-        assert.same(types.Boolean(), inferred.rettypes[1])
-        assert.same(types.Integer(), inferred.flexrettype)
+        assert.same(types.Boolean(), shaped.rettypes[1])
+        assert.same(types.Integer(), shaped.flexrettype)
         assert.same({}, explicit.rettypes)
         assert.is_false(explicit.flexrettype)
+    end)
+
+    it("does not infer a flexible result for an unannotated lambda", function()
+        local ok, err, tree = run_checker([[
+            function run()
+                local adjusted: () -> (...: integer) = function () end
+            end
+        ]])
+        assert.truthy(ok, err)
+        local exp = tree[1].block.stats[1].exps[1]
+        if exp._tag == "Ast.ExpCast" then exp = exp.exp end
+        assert.same({}, exp._type.rettypes)
+        assert.is_false(exp._type.flexrettype)
     end)
 
     it("uses a return-specific diagnostic for an invalid nil tail", function()

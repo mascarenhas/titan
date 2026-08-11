@@ -1,5 +1,12 @@
 # Anonymous Functions with Lexical Closure — Implementation Plan
 
+> **Historical design record.** The later closure-adjustment-wrapper work
+> supersedes this plan's contextual lambda-result inference: an omitted lambda
+> result annotation now always means zero results. Only missing parameter and
+> bare-variadic input annotations use an expected function type. It also
+> supersedes this plan's rejection of lambda module-variable initializers: a
+> lambda is now an ordinary permitted module initializer.
+
 > Status: **reviewed & approved-to-build (v3).** Expands the user's 12-point
 > outline into a full design + implementation + testing plan, grounded in the
 > current code (post first-class-functions, `master` @ `6988960`), **de-risked by

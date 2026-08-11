@@ -422,7 +422,9 @@ Documented the anonymous-functions / closures feature (branch
   "must be constant" error. Bound instance-method references `obj:method`
   (no call) are also values — the method's type with `self` removed and the
   receiver bound — including across a `.so` boundary. Only foreign/FFI
-  functions remain non-values.
+  functions remain non-values. **Later semantic update:** this historical entry's
+  result-inference and module-initializer claims are superseded: omitted lambda
+  results now mean `()`, and lambdas may initialize module variables.
 
 * **New language chapter.** Added `doc/language/closures.md` (syntax,
   inference, lexical capture, fresh-per-evaluation/equality, the recursion

@@ -57,7 +57,7 @@ use the chapters below for the normative language reference.
 | [Defer](defer.md) | `defer <statement>` cleanup, scoping, LIFO order, and interaction with return, break, raise, and catch. |
 | [Functions](functions.md) | Declarations, argument adjustment, multiple return values, visibility, functions as values, and the `main` convention for standalone programs. |
 | [Named arguments](named-arguments.md) | Declaration-based `f { name = value }` and method-call syntax, omissions, evaluation order, record construction, direct C prototype names, and Lua's positional-only boundary. |
-| [Anonymous functions and closures](closures.md) | Lambda expressions, parameter/return type inference, lexical capture of enclosing locals, fresh-value-per-evaluation semantics, and bound method references `obj:method`. |
+| [Anonymous functions and closures](closures.md) | Lambda expressions, contextual parameter inference and explicit result shapes, lexical capture of enclosing locals, fresh-value-per-evaluation semantics, and bound method references `obj:method`. |
 | [Closure adjustment wrappers](closure-adjustment-wrappers.md) | Directional callable actions, missing nil results, conditional target-wrapper realization and fresh identity, source Lua behavior, strict/generic fallback, `as`/`is`, and limits. |
 | [Variadic parameters](variadic-parameters.md) | The trailing `...: t` parameter, `#...`, the raising `...[e]` index, spreading `...` into calls, returns, and positional Array/integer-Map constructors, slot-driven adjust-up, variadic functions as values, and the limits and bans. |
 | [Flexible returns](flexible-returns.md) | Runtime-sized homogeneous result tails, finite option projection, open sinks, contextual calls through `value`, surplus adjustment, and directional callable adjustment. |
@@ -129,9 +129,10 @@ Lua and `value` never discover an implementation from a bare record or union.
   expression evaluates to a fresh function value, and it **closes over**
   the enclosing function's locals and parameters — reading them, and
   mutating them through a shared box when it assigns to them. Omitted lambda
-  parameter types come from the expected function type. Return shape comes
-  from an explicit annotation or that same expected type — never from the
-  body — and defaults to zero results when neither is available
+  parameter and bare-variadic input types come from the expected function
+  type. An omitted result annotation always means zero results, independently
+  of context and body; ordinary callable adjustment may then supply an
+  admissible missing nil-like result
   ([closures](closures.md)).
 * **Bound instance methods are values too.** `obj:method` with no argument
   list is a function value that has the method's type with the implicit

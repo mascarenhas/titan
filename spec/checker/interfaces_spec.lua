@@ -1122,7 +1122,7 @@ describe("interfaces (typechecker)", function()
             tailfill.arguments[2].operation.mode)
         assert.equal("option",
             tailfill.arguments[2].operation.guard.op)
-        assert.is_true(
+        assert.is_false(
             tailfill.rooting.ranges.argument_source.traced)
         assert.is_false(
             tailfill.rooting.ranges.argument_source
@@ -1203,7 +1203,7 @@ describe("interfaces (typechecker)", function()
             passthrough.results[1].kind)
         assert.equal("gradual_inject",
             passthrough.results[1].operation.kind)
-        assert.is_true(
+        assert.is_false(
             passthrough.rooting.ranges.result_destination.traced)
         assert.equal("interface_caller_handoff",
             passthrough.rooting.ranges.result_destination
@@ -1354,9 +1354,7 @@ describe("interfaces (typechecker)", function()
 
         assert.same({
             "after_action",
-            "after_action",
             "after_native_call",
-            "after_action",
             "after_action",
         }, (function()
             local kinds = {}
@@ -1367,22 +1365,19 @@ describe("interfaces (typechecker)", function()
         end)())
         assert.equal("argument:2",
             adapter.rebase_points[1].action)
-        assert.equal("argument:5",
-            adapter.rebase_points[2].action)
-        assert.equal("callable_wrapper_construction",
-            adapter.rebase_points[2].reason)
+        assert.equal("after_native_call",
+            adapter.rebase_points[2].kind)
         assert.equal("result:2",
-            adapter.rebase_points[4].action)
-        assert.equal("result:5",
-            adapter.rebase_points[5].action)
-        assert.equal("callable_wrapper_construction",
-            adapter.rebase_points[5].reason)
+            adapter.rebase_points[3].action)
         assert.is_false(
             adapter.rooting.ranges.argument_source.present)
+        assert.same({}, adapter.rooting.fixed.argument_source)
+        assert.equal(1,
+            #adapter.rooting.fixed.argument_destination)
         assert.is_true(
-            #adapter.rooting.fixed.argument_source > 0)
-        assert.is_true(
-            #adapter.rooting.fixed.result_destination > 0)
+            #adapter.rooting.fixed.result_source > 0)
+        assert.equal(1,
+            #adapter.rooting.fixed.result_destination)
 
         local methods = find_function(ast, "wrap")
             .block.stats[1].exps[1]
@@ -1400,10 +1395,8 @@ describe("interfaces (typechecker)", function()
             box.rebase_points[1].action)
         assert.equal("after_native_call",
             box.rebase_points[2].kind)
-        assert.equal("argument:1",
-            box.rooting.fixed.argument_source[1].action)
-        assert.equal("argument:1",
-            box.rooting.fixed.argument_destination[1].action)
+        assert.same({}, box.rooting.fixed.argument_source)
+        assert.same({}, box.rooting.fixed.argument_destination)
 
         local optional_box = methods[3].interface_adapter
         assert.equal("box_optional", methods[3].name)

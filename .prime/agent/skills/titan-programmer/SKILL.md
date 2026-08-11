@@ -103,8 +103,9 @@ existing tests before inventing a new pattern.
   payload, and `Union.variant(...)` is positional-only. `case` is not required
   to be exhaustive; unmatched/no-`else` does nothing, so add an `else` when
   fallthrough would be wrong.
-- Annotate every named-function parameter. Lambda annotations may be inferred
-  only from an expected function type, never from the body.
+- Annotate every named-function parameter. Missing lambda parameter and bare-
+  variadic input annotations may be inferred only from an expected function
+  type, never from the body; lambda result annotations are never inferred.
 - A function without a return annotation returns **zero values**, not inferred
   results or one nil. Write `: nil` for one nil, `: (A, B)` for fixed multiple
   results, and the documented flexible-tail syntax only for genuinely

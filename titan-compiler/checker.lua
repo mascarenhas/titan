@@ -2103,7 +2103,10 @@ local function freeze_callable_component(
             declared_target = target,
             timing = "immediate",
             may_raise = true,
-            may_relocate = true,
+            -- Direct luaF_newCclosure construction performs no stack API call
+            -- or ordinary GC poll, so successful construction cannot relocate
+            -- the Lua stack. Its allocation may still raise.
+            may_relocate = false,
             adapter = freeze_callable_adapter_plan(
                 adjustment, normalized_source,
                 normalized_target, context.location, context),
@@ -2619,12 +2622,13 @@ freeze_callable_actions = function(raw, source, target, context)
 end
 
 local function adapter_root_range(
-        id, phase, side, element_type, lifetime)
+        id, phase, side, element_type, lifetime, traced)
     local present = element_type ~= nil
         and element_type ~= false
     local gc_bearing =
         present and interface_adapter_is_gc(
             element_type) or false
+    traced = gc_bearing and traced == true
     return {
         kind = "open_root_range",
         id = id,
@@ -2633,9 +2637,8 @@ local function adapter_root_range(
         present = present,
         element_type = element_type or false,
         gc_bearing = gc_bearing,
-        traced = gc_bearing,
-        storage = gc_bearing
-            and "parallel_lua_stack_range" or false,
+        traced = traced,
+        storage = traced and "parallel_lua_stack_range" or false,
         dynamic_start = present and "run_start" or false,
         dynamic_count = present and "run_count" or false,
         retain_until = lifetime,
@@ -2643,35 +2646,110 @@ local function adapter_root_range(
     }
 end
 
-local function adapter_fixed_roots(actions, side)
-    local roots = {}
-    local gc_field = side == "source"
-        and "source_gc" or "destination_gc"
-    local open_field = side == "source"
-        and "source_open" or "destination_open"
-    local type_field = side == "source"
-        and "source_type" or "target_type"
+local function adapter_operation_allocates(action)
+    return action.operation ~= nil
+        and action.operation.kind == "callable_view"
+end
+
+local function adapter_results_need_roots(actions)
     for _, action in ipairs(actions) do
-        if action[gc_field] and not action[open_field] then
-            local lifetime
-            if action.phase == "argument" then
-                lifetime = side == "source"
-                    and "all_arguments_converted"
-                    or "concrete_call_returns"
-            else
-                lifetime = side == "source"
-                    and "all_results_converted"
-                    or "interface_caller_handoff"
-            end
+        if action.operation and (action.operation.may_relocate
+                or adapter_operation_allocates(action)) then
+            return true
+        end
+    end
+    return false
+end
+
+local function adapter_has_open_source(actions)
+    for _, action in ipairs(actions) do
+        if action.operation and action.source_open then return true end
+    end
+    return false
+end
+
+local function adapter_has_open_allocating_destination(actions)
+    for _, action in ipairs(actions) do
+        if adapter_operation_allocates(action)
+           and action.destination_open then
+            return true
+        end
+    end
+    return false
+end
+
+local function adapter_fixed_allocation_roots(actions, lifetime)
+    local roots = {}
+    for _, action in ipairs(actions) do
+        if adapter_operation_allocates(action)
+           and action.destination_gc
+           and not action.destination_open then
             roots[#roots + 1] = {
                 action = action.id,
-                type = action[type_field],
+                type = action.target_type,
                 storage = "lua_stack_slot",
                 retain_until = lifetime,
             }
         end
     end
     return roots
+end
+
+local function adapter_fixed_result_source_roots(actions, lifetime)
+    local roots = {}
+    if not adapter_results_need_roots(actions) then return roots end
+    for _, action in ipairs(actions) do
+        if action.operation and action.source_gc
+           and not action.source_open then
+            roots[#roots + 1] = {
+                action = action.id,
+                type = action.source_type,
+                storage = "lua_stack_slot",
+                retain_until = lifetime,
+            }
+        end
+    end
+    return roots
+end
+
+local function adapter_rooting(source, target, actions, lifetimes, construction)
+    local results_need_roots = adapter_results_need_roots(actions.results)
+    return {
+        raw_descriptors_are_roots = false,
+        raw_buffers_are_roots = false,
+        construction = construction,
+        fixed = {
+            -- Native callers already own every incoming argument root. Only a
+            -- fresh nested wrapper needs a new destination root.
+            argument_source = {},
+            argument_destination = adapter_fixed_allocation_roots(
+                actions.arguments, lifetimes.argument_destination),
+            -- Native results need roots only when a later successful conversion
+            -- can allocate or relocate. Fresh converted wrappers root themselves.
+            result_source = adapter_fixed_result_source_roots(
+                actions.results, lifetimes.result_source),
+            result_destination = adapter_fixed_allocation_roots(
+                actions.results, lifetimes.result_destination),
+        },
+        ranges = {
+            argument_source = adapter_root_range(
+                "argument_source", "argument", "source",
+                target.varargtype, lifetimes.argument_source, false),
+            argument_destination = adapter_root_range(
+                "argument_destination", "argument", "destination",
+                source.varargtype, lifetimes.argument_destination,
+                adapter_has_open_allocating_destination(actions.arguments)),
+            result_source = adapter_root_range(
+                "result_source", "result", "source",
+                source.flexrettype, lifetimes.result_source,
+                results_need_roots
+                    and adapter_has_open_source(actions.results)),
+            result_destination = adapter_root_range(
+                "result_destination", "result", "destination",
+                target.flexrettype, lifetimes.result_destination,
+                adapter_has_open_allocating_destination(actions.results)),
+        },
+    }
 end
 
 local CALLABLE_ADAPTER_VARARG_CAP = 200
@@ -2738,103 +2816,36 @@ local function freeze_strict_relay(target)
     return relay
 end
 
-local function callable_adapter_fixed_roots(actions, side)
-    local roots = {}
-    local gc_field = side == "source"
-        and "source_gc" or "destination_gc"
-    local open_field = side == "source"
-        and "source_open" or "destination_open"
-    local type_field = side == "source"
-        and "source_type" or "target_type"
-    for _, action in ipairs(actions) do
-        if action[gc_field] and not action[open_field] then
-            local lifetime
-            if action.phase == "argument" then
-                lifetime = side == "source"
-                    and "all_arguments_converted"
-                    or "source_native_call_returns"
-            else
-                lifetime = side == "source"
-                    and "all_results_converted"
-                    or "target_caller_handoff"
-            end
-            roots[#roots + 1] = {
-                action = action.id,
-                type = action[type_field],
-                storage = "lua_stack_slot",
-                retain_until = lifetime,
-            }
-        end
-    end
-    return roots
-end
-
 local function callable_adapter_rooting(source, target, actions)
-    return {
-        raw_descriptors_are_roots = false,
-        raw_buffers_are_roots = false,
-        construction = {
-            source = {
-                type = source,
-                gc_bearing = true,
-                traced = true,
-                storage = "lua_stack_slot",
-                retain_until = "wrapper_constructed",
-            },
-            result = {
-                type = target,
-                gc_bearing = true,
-                traced = true,
-                storage = "lua_stack_slot",
-                retain_until = "target_caller_handoff",
-            },
+    return adapter_rooting(source, target, actions, {
+        argument_source = "all_arguments_converted",
+        argument_destination = "source_native_call_returns",
+        result_source = "all_results_converted",
+        result_destination = "target_caller_handoff",
+    }, {
+        result = {
+            type = target,
+            gc_bearing = true,
+            traced = true,
+            storage = "conditional_lua_stack_slot",
+            condition = "eligible_exact_titan_clone",
+            retain_until = "target_caller_handoff",
         },
-        fixed = {
-            argument_source =
-                callable_adapter_fixed_roots(
-                    actions.arguments, "source"),
-            argument_destination =
-                callable_adapter_fixed_roots(
-                    actions.arguments, "destination"),
-            result_source =
-                callable_adapter_fixed_roots(
-                    actions.results, "source"),
-            result_destination =
-                callable_adapter_fixed_roots(
-                    actions.results, "destination"),
-        },
-        ranges = {
-            argument_source = adapter_root_range(
-                "argument_source", "argument", "source",
-                target.varargtype, "all_arguments_converted"),
-            argument_destination = adapter_root_range(
-                "argument_destination", "argument", "destination",
-                source.varargtype, "source_native_call_returns"),
-            result_source = adapter_root_range(
-                "result_source", "result", "source",
-                source.flexrettype, "all_results_converted"),
-            result_destination = adapter_root_range(
-                "result_destination", "result", "destination",
-                target.flexrettype, "target_caller_handoff"),
-        },
-    }
+    })
 end
 
 local function callable_action_rebase_reason(action)
-    if action.operation
-       and action.operation.kind == "callable_view" then
-        return "callable_wrapper_construction"
-    end
+    interface_adapter_assert(
+        action.operation
+            and action.operation.timing == "immediate"
+            and action.operation.may_relocate == true
+            and action.operation.kind ~= "callable_view",
+        "callable adapter has a rebase for a non-relocating action")
     return "immediate_gradual_guard"
 end
 
 local function callable_adapter_rebases(actions)
-    local points = {
-        {
-            kind = "after_wrapper_construction",
-            reason = "wrapper_construction_may_relocate_stack",
-        },
-    }
+    local points = {}
     for _, action in ipairs(actions.arguments) do
         if action.rebase_after then
             points[#points + 1] = {
@@ -3056,38 +3067,13 @@ local function make_interface_adapter(
         uses_base_off = true,
     }
 
-    adapter.rooting = {
-        raw_descriptors_are_roots = false,
-        raw_buffers_are_roots = false,
-        fixed = {
-            argument_source =
-                adapter_fixed_roots(adapter.arguments, "source"),
-            argument_destination =
-                adapter_fixed_roots(adapter.arguments, "destination"),
-            result_source =
-                adapter_fixed_roots(adapter.results, "source"),
-            result_destination =
-                adapter_fixed_roots(adapter.results, "destination"),
-        },
-        ranges = {
-            argument_source = adapter_root_range(
-                "argument_source", "argument", "source",
-                mapping.target.varargtype,
-                "all_arguments_converted"),
-            argument_destination = adapter_root_range(
-                "argument_destination", "argument", "destination",
-                mapping.source.varargtype,
-                "concrete_call_returns"),
-            result_source = adapter_root_range(
-                "result_source", "result", "source",
-                mapping.source.flexrettype,
-                "all_results_converted"),
-            result_destination = adapter_root_range(
-                "result_destination", "result", "destination",
-                mapping.target.flexrettype,
-                "interface_caller_handoff"),
-        },
-    }
+    adapter.rooting = adapter_rooting(
+        mapping.source, mapping.target, actions, {
+            argument_source = "all_arguments_converted",
+            argument_destination = "concrete_call_returns",
+            result_source = "all_results_converted",
+            result_destination = "interface_caller_handoff",
+        }, nil)
 
     local argument_rebases, result_rebases = {}, {}
     for _, action in ipairs(adapter.arguments) do
@@ -7627,12 +7613,11 @@ checkexp = util.make_visitor({
         end
     end,
 
-    -- Anonymous function expression (lambda). Both parameter and return types
-    -- may be inferred from the expected function type (`context`): an unannotated
-    -- parameter takes its type from the context, and a missing return annotation
-    -- is likewise taken from the context. With no usable context the return type
-    -- defaults to zero-return `()`, exactly like an unannotated top-level
-    -- function.
+    -- Anonymous function expression (lambda). An unannotated parameter may be
+    -- inferred from the expected function type (`context`). Return annotations
+    -- follow the ordinary function rule instead: omission always means the
+    -- zero-return shape `()`, independent of context. A nonzero or flexible
+    -- result shape must be written explicitly.
     ["Ast.ExpFunction"] = function(node, st, errors, context)
         -- A trailing vararg `Decl` (`name == false`) is dropped from the fixed
         -- params; its element type is resolved separately below. A lambda vararg
@@ -7689,30 +7674,17 @@ checkexp = util.make_visitor({
             paramtypes[i] = param._type
         end
 
-        -- Resolve / set up return types. Like parameters, the return type comes
-        -- only from the expected function type (`context`); it is never inferred
-        -- from the body's `return`s.
-        local rettypes
-        local flexrettype
+        -- Resolve / set up return types. The body never synthesizes a return
+        -- type, and context is deliberately irrelevant here: just like a named
+        -- function, a lambda without a return annotation returns zero values.
+        local rettypes = {}
+        local flexrettype = false
         if node.rettypes then
             -- Explicit annotation, including `: ()` (an empty list).
-            rettypes = {}
             for _, rt in ipairs(node.rettypes) do
                 table.insert(rettypes, typefromnode(rt, st, errors))
             end
             flexrettype = flexible_return_type(node, st, errors)
-        elseif expected then
-            -- Checking mode: take both fixed and flexible results from the
-            -- context. This is deliberately distinct from an explicit `: ()`,
-            -- whose parser shape is an empty fixed list plus `flexrettype =
-            -- false` and must not inherit the context's tail.
-            rettypes = expected.rettypes
-            flexrettype = expected.flexrettype
-        else
-            -- No annotation, no usable context: default to zero-return `()`,
-            -- exactly like an unannotated top-level function.
-            rettypes = {}
-            flexrettype = false
         end
 
         node._type = types.Function(paramtypes, rettypes, false, varargtype,
@@ -7953,9 +7925,8 @@ function checkfuncbody(node, st, errors, opts)
         end
     end
     if node._type.flexrettype then
-        -- An explicit tail reports at its annotation; an inferred lambda tail
-        -- reports at the lambda itself because the expected Type.Function no
-        -- longer carries an AST source location.
+        -- An explicit tail reports at its annotation. Keep the lambda location
+        -- as a defensive fallback for synthesized/external AST callers.
         local floc = (node.flexrettype and node.flexrettype.loc) or node.loc
         checktype(node._type.flexrettype, floc, errors)
         node._type.flexrettype = check_varg_elem(

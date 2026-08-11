@@ -3,8 +3,11 @@
 ## Status and resolved design choices
 
 This plan replaces the original sketch preserved in commit `3916db5`. It is the
-coordination contract for the implementation; work is complete only when every
-checklist below has been audited.
+finalized coordination contract for the implementation; work is complete only
+when every checklist below has been audited. The post-implementation,
+nonsemantic rooting and construction refinement is recorded here instead of
+leaving stale instructions in the finalized plan; the earlier text remains
+available in git history.
 
 The maintainer resolved the two user-visible questions before implementation:
 
@@ -69,11 +72,13 @@ type.
    wrapper, `B`'s fixed and typed-tail requirements are enforced on its exact
    path; update the historical test that relied on a runtime tag mismatch to let
    non-integer `...: value` elements bypass a static `...: integer` view.
-8. The supported trust boundary is unchanged. Once the existing exact
-   tag/brand/private-header predicate succeeds, generated code may trust Titan's
-   CClosure slots. Debug/C mutation of private upvalues opts out. Arbitrary Lua
-   callables remain outside that trust boundary. Do not add adversarial-AST or
-   registry hardening unrelated to an actual untrusted boundary.
+8. The supported trust boundary is unchanged. Once the non-null `CClosure`,
+   exact source tag, brand, and bounded upvalue-count guard succeeds, generated
+   code may trust Titan's remaining private slots. Debug/C mutation of private
+   upvalues opts out.
+   Arbitrary Lua callables remain outside that trust boundary. Do not add
+   adversarial-AST or registry hardening unrelated to an actual untrusted
+   boundary.
 
 ## Relation and checker contract
 
@@ -131,10 +136,13 @@ second relation in the coder. A frozen `CallableAdapterPlan` must contain:
 * normalized source `A`, target `B`, exactness, dense ordered argument/result
   actions, and recursive component operations;
 * the new `nil_fill_result` action;
-* fixed and open GC-root inventories for argument sources/destinations and
-  result sources/destinations;
-* all stack-rebase points, including wrapper construction/nested callable
-  operations and the source native call;
+* minimal fixed and open GC-root inventories for argument/result sources and
+  destinations: native adapters borrow the caller's dedicated call-activation
+  roots, while newly allocated objects and source results that span a later
+  allocation receive explicit roots;
+* only real stack-rebase points: operations that can move the Lua stack and the
+  source native call; direct wrapper construction and nested callable-wrapper
+  allocation are raising but non-relocating;
 * target flexible-result demand calculations and the 200-element ABI cap;
 * real cast location and stable trace name; and
 * `relation_free = true` plus the no-nested-Interface-conversion invariant.
@@ -170,16 +178,41 @@ adapter reads that closure's module/native slots and passes that same closure as
 `A`'s `_fn`; an `A -> B -> C` chain therefore delegates layer by layer without
 misreading a later wrapper's penultimate slot or losing captures.
 
-Use stack-based `lua_pushcclosure` construction:
+The construction eligibility guard is deliberately narrow: the value must be a
+non-null `CClosure`, `5 <= nupvalues < MAXUPVAL`, upvalue 1 must be the exact
+source tag as lightuserdata, and upvalue 3 must be the Titan brand as
+lightuserdata. Once tag and brand prove the private Titan carrier, the remaining
+layout is trusted; do not recheck the module, native slot, or trailer shape.
 
-* materialize and anchor the operand before any stack growth/allocation;
-* copy upvalues 0 through `n - 2`, substituting tag/native;
-* push the source closure and the generated target strict relay;
-* construct with `source->f`, anchor the result immediately, pop scratch, and
-  restore `_base` from `_base_off`;
-* treat wrapper construction and nested callable conversion as relocating;
-* rely on the new white CClosure's traced upvalues; add no manual forward/back
-  barrier and no untraced C storage for the source.
+Construct the wrapper directly with `luaF_newCclosure(L, n + 1)`:
+
+* evaluate the operand exactly once and borrow its existing allocation/home
+  root; the construction helper freezes a C `TValue` but creates no duplicate
+  source root;
+* while the returned closure is fresh-white, copy upvalues 0 through `n - 2`
+  with `setobj2n`, substitute tag/native with `setpvalue`, install the immediate
+  source with `setclCvalue`, install the strict relay with `setfvalue`, and copy
+  `source->f`;
+* publish the closure directly into the assigned traced result slot before any
+  later allocation; fallback keeps the already rooted source identity and needs
+  no construction-only result root; and
+* emit no transient stack assembly, `lua_pushcclosure`, construction barrier,
+  local GC poll, construction-only source/result root copies, or construction
+  rebase.
+
+Lua 5.5's collector is non-moving. Stack growth can relocate stack slots and
+invalidate raw `StkId`/`TValue *` pointers, but it preserves the values in
+caller-owned roots and does not move their heap objects. `luaF_newCclosure` may
+allocate or raise, including after an emergency collection, but it performs no
+ordinary GC poll; the emergency cycle does not shrink the stack. Thus successful
+direct construction does not relocate the stack. The source is already rooted,
+its heap address remains stable, and the new wrapper receives its own immediate
+root.
+
+A synthesized callable or Interface native adapter whose frozen action graph
+can allocate a nested wrapper polls the GC once at entry, before reserving stack
+space or establishing `_base`. This is the progress authority for repeated
+adapter allocation; never move it inside the fresh-white construction window.
 
 If `n == MAXUPVAL`, leave the value unchanged and use the generic path. Do not
 lower Titan's existing capture limit, add registry state, or invent a side
@@ -199,22 +232,30 @@ unit; do not globally intern by type strings.
 The private `static TITAN_NOINLINE` adapter has exactly `function_sig(B)`. It:
 
 1. validates target input/flexible-output descriptor bounds;
-2. reserves and nil-initializes its complete traced scratch frame and saves
-   `_base_off`;
-3. anchors every incoming GC-bearing fixed/open `B` argument before an operation
-   may allocate;
-4. realizes contravariant argument actions into `A` fixed/tail storage;
+2. reserves and nil-initializes only the traced scratch selected by the frozen
+   root inventory and saves `_base_off` when a real rebase point exists;
+3. borrows the native caller's dedicated activation roots for fixed/static `B`
+   arguments and the upstream activation range for forwarded open values, then
+   freezes only the C values needed by the action graph;
+4. realizes contravariant argument actions into `A` fixed/tail storage, giving
+   every newly allocated nested wrapper its own immediate destination root;
 5. recovers the immediate source CClosure from the penultimate wrapper upvalue,
    obtains its authoritative module and native pointer, and calls it as exact
    `A` with `_fn = source`;
-6. immediately anchors every GC-bearing fixed/flexible `A` result before any
-   allocating conversion;
-7. realizes covariant result actions into `B`, including nil-initializing the
-   first return or an out-parameter for `nil_fill_result`;
+6. after rebasing from that call, roots only GC-bearing `A` source results that
+   must survive a later allocating/relocating result conversion;
+7. realizes covariant result actions into `B`, immediately rooting every newly
+   allocated destination wrapper and including the nil initialization for
+   `nil_fill_result`;
 8. publishes caller-owned flexible output subject to `_flexwant`,
    `LUA_MULTRET`, and `TITAN_VARARG_MAX`; and
 9. restores the root frame, writes out-parameters, and returns `B`'s first result
    or `void`.
+
+Raw descriptors and C arrays are never roots. Parallel traced ranges exist only
+for newly allocated converted values or source result runs that cross a later
+allocating or stack-relocating action; simple borrowed arguments and
+allocation-free copies need none.
 
 Parameterize/generalize the existing Interface adapter engine for these steps.
 Only the invocation backend differs: Interface adapters call a known method with
@@ -262,8 +303,9 @@ coordinate an ABI bump rather than silently extending 0.22.
   consumer expression's location. Honor `--no-line-directives`.
 * Register a stable trace name such as
   `[callable adapter A -> B at file:line:col]`; do not expose generated C paths.
-* Preserve catch/longjmp spill rules, stack rebasing after calls/allocations, and
-  the existing finite Lua VM result limit on fallback paths.
+* Preserve catch/longjmp spill rules, rebase after native calls and only those
+  operations that can really move the Lua stack, and retain the existing finite
+  Lua VM result limit on fallback paths.
 
 ## Scope and non-goals
 
@@ -320,7 +362,12 @@ Out of scope:
 * exact assignment allocates nothing; adjusted wrapper has target tag/fast call;
 * wrapper differs from source and two evaluations differ;
 * top-level/local/imported function, captured/mutated lambda, bound record and
-  Interface methods, GC stress, and stack relocation;
+  Interface methods, GC stress, and stack relocation at genuine relocation
+  points;
+* direct fresh-white `luaF_newCclosure` initialization and immediate result
+  publication, with no stack assembly, construction poll/barrier/rebase, or
+  construction-only duplicate roots; native calls still retain their required
+  caller-owned activation roots;
 * wrapper chains and wrapper -> `value` -> another Function view;
 * genuine Lua closure/C function/`__call`/deferred non-callable and max-upvalue
   fallbacks;
@@ -351,7 +398,9 @@ LuaCov Busted library wrapper.
 
 ## Documentation
 
-This is user-visible and must update both manuals in the same change.
+The wrapper feature is user-visible and therefore updated both manuals in the
+same change. The later rooting/construction optimization changes no language
+semantics; it updates this finalized plan and the implementation manual only.
 
 Add and link:
 

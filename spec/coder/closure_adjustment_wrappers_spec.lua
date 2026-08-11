@@ -167,6 +167,90 @@ describe("closure adjustment wrappers (end-to-end)", function()
         ]])
     end)
 
+    it("allocates and initializes wrapper CClosures without API stack assembly",
+    function()
+        local tree = checked(FIXED_SOURCE)
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_VER)
+        assert.truthy(csrc:find(
+            "CClosure *_ca_wrapper =", 1, true), csrc)
+        assert.truthy(csrc:find(
+            "luaF_newCclosure(L, _ca_nup + 1);", 1, true), csrc)
+        assert.truthy(csrc:find(
+            "setobj2n(L, &_ca_wrapper->upvalue[_ca_i]", 1, true), csrc)
+        assert.truthy(csrc:find(
+            "&_ca_wrapper->upvalue[_ca_nup - 1], _ca_source);",
+            1, true), csrc)
+        assert.truthy(csrc:find(
+            "lua_assert(iswhite(_ca_wrapper));", 1, true), csrc)
+        assert.falsy(csrc:find(
+            "titan_ensure_stack(L, _ca_nup + 1);", 1, true), csrc)
+        assert.falsy(csrc:find(
+            [[lua_pushcclosure(
+                    L, _ca_source->f]],
+            1, true), csrc)
+        assert.falsy(csrc:find(
+            "ttisfulluserdata(&_ca_source->upvalue[0])", 1, true), csrc)
+        assert.falsy(csrc:find(
+            "ttislcf(&_ca_source->upvalue[", 1, true), csrc)
+    end)
+
+    it("polls before an adapter that allocates nested callable views",
+    function()
+        local tree = checked([[
+            local function source(
+                callback: (integer) -> integer
+            ): (integer) -> integer
+                return callback
+            end
+
+            function view(
+                callback: (value) -> value
+            ): (value) -> value
+                local adjusted:
+                    ((value) -> value) -> (value) -> value = source
+                return adjusted(callback)
+            end
+        ]])
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_VER)
+        local signature =
+            "static TITAN_NOINLINE TValue test_callable_adapter_0("
+        local declaration = assert(csrc:find(signature, 1, true))
+        local first = assert(csrc:find(signature, declaration + 1, true))
+        local last = assert(csrc:find(
+            "static int test_callable_adapter_0_titanentry_strict",
+            first, true))
+        local body = csrc:sub(first, last - 1)
+        local poll = assert(body:find("luaC_checkGC(L);", 1, true))
+        local base = assert(body:find("StkId _base", 1, true))
+        local allocation = assert(body:find("luaF_newCclosure", 1, true))
+        assert.is_true(poll < base and base < allocation)
+    end)
+
+    it("adapts an unannotated lambda from its zero-result shape", function()
+        h.run_coder([[
+            local seen = 0
+
+            local function invoke(callback: () -> value): value
+                return callback()
+            end
+
+            function run(): value
+                seen = 0
+                return invoke(function ()
+                    seen = 42
+                end)
+            end
+
+            function observed(): integer
+                return seen
+            end
+        ]], [[
+            assert(select("#", test.run()) == 1)
+            assert(test.run() == nil)
+            assert(test.observed() == 42)
+        ]])
+    end)
+
     it("executes the complete fixed, tail, flexible, and nil-result action matrix",
     function()
         h.run_coder([[
@@ -862,11 +946,12 @@ describe("closure adjustment wrappers (end-to-end)", function()
 
         tree = checked(source)
         cast = find_function(tree, "probe").block.stats[1].exps[1]
-        cast._callable_adapter.rooting.construction.source.traced = false
+        cast._callable_adapter.rooting.construction.result.condition =
+            "always"
         ok, err = pcall(coder.generate,
             "test", tree, {}, driver.TITAN_VER)
         assert.is_false(ok)
-        assert.matches("construction source root", err)
+        assert.matches("construction result root", err)
 
         tree = checked(source)
         cast = find_function(tree, "probe").block.stats[1].exps[1]

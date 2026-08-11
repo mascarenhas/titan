@@ -470,10 +470,10 @@ instead a [bound method reference](closures.md#bound-method-references), a funct
 value. Constructors cover positional Arrays, Maps (computed `[k] = v` fields
 or, for an exact integer key type, all-positional fields), and records
 (`name = v`). Positional and keyed forms cannot be mixed; `,` and `;` are
-interchangeable and a trailing separator is allowed. A `funcexp` is an
-anonymous function: unlike a
-top-level `tlfunc` its parameter annotations are *optional* (inferred when
-omitted, as is the whole return annotation), and because it is a
+interchangeable and a trailing separator is allowed. A `funcexp` is an anonymous function: unlike a top-level `tlfunc`, its
+parameter and bare-variadic input annotations are *optional* and may be inferred
+from context. Its result annotation is not inferred: omission means zero
+results. Because it is a
 `simpleexp` and not a `prefixexp` it cannot be applied directly —
 `(function () … end)(x)` needs the parentheses. See
 [Expressions](expressions.md),

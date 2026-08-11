@@ -141,8 +141,8 @@ An exact mapping needs no adapter. For a non-exact mapping, the generalized
 freezer supplies the same closed, relation-free callable action subgraph used
 by first-class closure adjustments. `make_interface_adapter` then wraps that
 subgraph in a distinct `interface_method_adapter` with Interface-specific hidden
-operands, roots, rebases, lifetime labels, and method invocation backend. The
-shared callable operations are limited to:
+operands, minimal lifetime roots, genuine stack rebases, lifetime labels, and
+method invocation backend. The shared callable operations are limited to:
 
 - identity;
 - gradual injection;
@@ -155,10 +155,14 @@ shared callable operations are limited to:
   hidden surplus results.
 
 The checker explicitly rejects a nested concrete-to-Interface conversion in
-this graph. The Interface wrapper records its own fixed and open-range roots and
-required stack rebases around the shared action subgraph. The coder validates
-both closed records and their dense lists, rechecks types and action sequence
-against the two method descriptors, and never calls a type relation while
+this graph. The Interface adapter records a minimal fixed/open root inventory:
+incoming native roots are borrowed, fresh nested callable destinations get
+immediate roots, and native source results are rooted only across a later
+allocating/relocating result action. Its rebase ledger includes only operations
+that can really move the stack plus the concrete native call; nested callable
+allocation is not a rebase point. The coder validates both closed records and
+their dense lists, rechecks types and action sequence against the two method
+descriptors, and never calls a type relation while
 emitting the adapter. The shared conversion-action emitter is parameterized by
 invocation: this Interface path calls a known method with concrete self, while a
 closure wrapper recovers and calls its penultimate immediate source closure. See
@@ -208,12 +212,15 @@ This happens on both module-initialization branches and before a user module
 initializer can construct a wrapper. Each wrapper copies the complete array
 with `memcpy`; pair arrays and wrappers are not interned.
 
-Wrapper construction evaluates and anchors the concrete value exactly once,
-resolves its concrete-owner module, obtains the Interface metatable from the
-emitting module's cache, and allocates the full userdata with
-`luaS_newudata`. Allocation may relocate the Lua stack, so lowering saves
-`_base_off`, restores `_base` immediately afterward, and anchors the new
-wrapper before publishing edges. It then:
+Wrapper construction evaluates the concrete value exactly once into a traced
+source home, resolves its concrete-owner module, obtains the Interface
+metatable from the emitting module's cache, and allocates the full userdata with
+`luaS_newudata`. This existing path conservatively treats that allocation as a
+stack-rebase point: it saves `_base_off`, restores `_base` immediately after the
+call, and publishes the new Udata to its own root before any later allocation or
+traced-edge publication. Lua's collector does not move heap objects, but saved
+offsets keep the source and destination roots valid if the stack array moves. It
+then:
 
 1. installs the Interface metatable;
 2. stores the concrete module in user value 0 and applies the Udata barrier;
@@ -258,15 +265,30 @@ concrete result. The translation unit that emits the adapter is irrelevant to
 engine; only this known-method invocation differs.
 
 Open input and result runs use the existing typed descriptor ABI and the
-`TITAN_VARARG_MAX` bound. GC-bearing fixed values and open ranges are anchored
-in reserved Lua stack slots; raw descriptors and C buffers are not roots. The
-adapter reserves a separate transient identity-setup range—one slot for
+`TITAN_VARARG_MAX` bound. Raw descriptors and C buffers are never roots. The
+native caller already owns dedicated activation roots for every incoming
+GC-bearing fixed/static argument, while forwarded open values retain their
+upstream activation roots, so the adapter freezes C values without duplicating
+those roots. Converted argument
+or result destinations receive fixed/range roots only when an action allocates
+a fresh nested wrapper; native concrete source results receive roots only when
+a later result action can allocate or relocate the stack. A general open
+conversion outside this graph applies the same immediate-root rule to a newly
+allocated Interface value.
+
+If the shared frozen graph can allocate a nested callable view, the synthesized
+native adapter polls the collector at entry before reserving stack space or
+establishing `_base`; no poll enters a fresh closure's construction window.
+
+The adapter reserves a separate transient identity-setup range—one slot for
 ordinary registry lookup, or three when Array metatable creation must remain
-possible—but advances `L->top` only across the rooted range. It records
-`_base` as an offset, rebases after every immediate operation that may relocate
-the stack, and rebases after the concrete native call before reading or
-anchoring results. A compile-time assertion keeps the adapter's 200-element
-backing bound aligned with the runtime constant.
+possible—but advances `L->top` only across the actually rooted range. It records
+`_base` as an offset, addresses rooted slots through `restorestack` across
+identity setup, rebases after each immediate guard allowed to move the stack,
+and always rebases after the concrete native call before reading result homes.
+Direct nested `luaF_newCclosure` construction may allocate/raise but is not a
+rebase point. A compile-time assertion keeps the adapter's 200-element backing
+bound aligned with the runtime constant.
 
 Adapters resolve any Array, nominal, or owned-C identities needed by immediate
 guards at entry. This is necessary because an adapter may be emitted outside
@@ -277,10 +299,11 @@ concrete owner.
 
 ### Direct Titan method calls
 
-For `wrapper:method(...)`, generated code evaluates and anchors the wrapper,
-checks that its payload contains exactly the Interface's method count, loads
-the declaration-order slot, casts it to the method signature, and calls it
-with:
+For `wrapper:method(...)`, generated code evaluates the wrapper once and
+publishes it into a dedicated caller-owned activation root before later argument
+effects. It checks that
+the payload contains exactly the Interface's method count, loads the
+declaration-order slot, casts it to the method signature, and calls it with:
 
 ```text
 wrapper.user_value_0, NULL, wrapper.user_value_1, arguments...
@@ -452,10 +475,12 @@ preserved.
 
 The wrapper, concrete module, and concrete value use stock Lua reachability.
 The two user values are strong traced edges with ordinary backward barriers;
-the opaque vtable is untraced native data. Bound closures strongly retain the
-wrapper through upvalue 4. Adapters root every GC-bearing temporary or
-runtime-sized range in Lua stack slots across conversion, allocation, native
-calls, and possible collection.
+the opaque vtable is untraced native data. Every new Interface Udata receives
+its own immediate root, and bound closures strongly retain the wrapper through
+upvalue 4. Native adapters borrow caller-owned input roots, root newly allocated converted
+objects individually, and retain native source results only across a later
+allocating/relocating conversion. Raw descriptors/C arrays and allocation-free
+runs never become roots.
 
 All type mismatches raise through the ordinary Titan/Lua error path. Wrapper
 allocation can fail before publication without leaving external native
