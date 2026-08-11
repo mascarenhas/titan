@@ -124,9 +124,9 @@ describe("closure adjustment wrappers (checker)", function()
             end
 
             module_callback: (value) -> value =
-                function(v: value): value return v end
+                function(v) return v end
             module_adjusted_lambda: (value) -> value =
-                function(v: integer): integer return v end
+                function(v: integer) return v end
 
             local function take(callback: (value) -> value)
             end
@@ -137,9 +137,9 @@ describe("closure adjustment wrappers (checker)", function()
 
             function sinks()
                 local contextual: (value) -> value =
-                    function(v: value): value return v end
+                    function(v) return v end
                 local source_lambda: (integer) -> integer =
-                    function(v: integer): integer return v end
+                    function(v) return v end
                 local adjusted_lambda: (value) -> value = source_lambda
                 local declared: (value) -> value = source
                 module_callback = source
@@ -180,8 +180,11 @@ describe("closure adjustment wrappers (checker)", function()
         end
 
         local sinks = find_function(tree, "sinks")
-        assert.equal("Ast.ExpFunction", sinks.block.stats[1].exps[1]._tag)
-        assert.is_nil(sinks.block.stats[1].exps[1]._callable_adapter)
+        local contextual = sinks.block.stats[1].exps[1]
+        assert.equal("Ast.ExpFunction", contextual._tag)
+        assert.is_nil(contextual._callable_adapter)
+        assert.equal("Type.Value", contextual._type.params[1]._tag)
+        assert.equal("Type.Value", contextual._type.rettypes[1]._tag)
 
         local module_adjusted
         for _, node in ipairs(tree) do
@@ -193,7 +196,10 @@ describe("closure adjustment wrappers (checker)", function()
         end
         assert.truthy(module_adjusted)
         assert_callable_cast(module_adjusted.value)
-        assert.equal("Ast.ExpFunction", module_adjusted.value.exp._tag)
+        local adjusted_source = module_adjusted.value.exp
+        assert.equal("Ast.ExpFunction", adjusted_source._tag)
+        assert.equal("Type.Integer", adjusted_source._type.params[1]._tag)
+        assert.equal("Type.Value", adjusted_source._type.rettypes[1]._tag)
     end)
 
     it("leaves exact, is, and dynamic views unchanged and freezes written as",

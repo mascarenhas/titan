@@ -105,7 +105,7 @@ function apply(f: (...: integer) -> integer): integer
     return f(1, 2, 3)
 end
 
-local r = apply(function (...): integer  -- ... inferred as integer
+local r = apply(function (...)           -- ... inferred as integer
     return #... + ...[1]
 end)
 ```

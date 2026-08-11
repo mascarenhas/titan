@@ -226,7 +226,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         assert.is_true(poll < base and base < allocation)
     end)
 
-    it("adapts an unannotated lambda from its zero-result shape", function()
+    it("adapts an explicitly zero-result lambda", function()
         h.run_coder([[
             local seen = 0
 
@@ -236,7 +236,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
 
             function run(): value
                 seen = 0
-                return invoke(function ()
+                return invoke(function (): ()
                     seen = 42
                 end)
             end

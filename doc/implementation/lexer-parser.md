@@ -199,9 +199,8 @@ those captures temporarily as:
 ```
 
 `defs.rettypeopt` returns the pair to `TopLevelFunc`, `TopLevelMethod`, and
-`TopLevelStatic`; `defs.lambdarettypeopt` additionally preserves whether the
-lambda omitted its return annotation. The checker gives that form the ordinary
-zero-return default independently of any parameter-inference context. Function-type
+`TopLevelStatic`; `defs.lambdarettypeopt` additionally preserves the
+no-annotation sentinel needed for contextual lambda inference. Function-type
 nodes carry `argtypes`, `rettypes`, `varargtype`, and `flexrettype` as four
 separate fields. No tail sentinel is inserted into either dense list.
 
@@ -386,9 +385,9 @@ The parser performs several rewrites that later passes rely on:
 * **Missing return types default to zero results.** `defs.rettypeopt` turns an
   absent `: rettype` annotation into an empty fixed list and no flexible tail,
   so `function f() end` has `() -> ()`. A written `: nil` remains one fixed
-  nil result. For lambdas, `defs.lambdarettypeopt` still records whether syntax
-  was absent, but the checker gives both absence and explicit `: ()` the same
-  zero-result shape; only missing input annotations consult an expected type.
+  nil result. For lambdas, `defs.lambdarettypeopt` keeps absence distinct from
+  an explicit `: ()`, because the former may copy fixed and flexible results
+  from an expected function type.
 
 * **Parenthesized calls become `ExpAdjust`.** `defs.adjust_exp` wraps
   `( f() )` in an `Ast.ExpAdjust` node — "adjust call to just first value" —

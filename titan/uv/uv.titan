@@ -34,7 +34,7 @@ end
 local function bootstrap(main_callable: ({string}) -> integer,
                          args: {string}): integer
   local result = 1
-  local task = run_internal(function ()
+  local task = run_internal(function (): ()
     result = main_callable(args)
   end)
   loop()

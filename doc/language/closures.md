@@ -51,7 +51,7 @@ value, a record/union-constructor or array/map element, and so on.
 
 ```lua
 local g = function (x: integer): integer return x + 1 end   -- in a local
-apply(function (x): integer return x * 3 end, 14)            -- as an argument
+apply(function (x) return x * 3 end, 14)                     -- as an argument
 return function (): integer return 42 end                   -- as a return value
 ```
 
@@ -68,37 +68,38 @@ The body block follows the same rules as any function body, including the
 > roughly seven levels (an LPeg sub-capture limit); going past that is a
 > parse error. Real code never approaches it.
 
-## Parameter inference and return annotations
+## Type inference for parameters and return
 
-Lambda parameter annotations are optional when an **expected function type** is
-available—the type of the slot the lambda flows into, whether that is an
-assignment target, an argument position, or a `return`. Return annotations obey
-the ordinary function rule instead: omitting one always means zero results,
-independent of context. Neither parameter nor result types are inferred from the
-lambda body.
+Lambda annotations are optional. When you leave them off, Titan fills them
+in from the **expected function type** — the type of the slot the lambda
+flows into, whether that is an assignment target, an argument position, or a
+`return`. **Both the parameter types and the return type come from this same
+expected type**; neither is reverse-engineered from the lambda's body.
 
-**Parameter types.** An annotated parameter uses its annotation. An
-*unannotated* parameter is filled in from the expected function type:
+**Input types.** An annotated parameter uses its annotation. An *unannotated*
+fixed parameter is filled in from the expected function type. A trailing bare
+`...` similarly inherits the expected input-tail element type; explicit
+`...: T` wins. See [Variadic parameters](variadic-parameters.md).
 
 ```lua
 function f(): integer
-    -- x comes from g's annotation; the result is written explicitly
-    local g: (integer) -> integer = function (x): integer return x + 1 end
+    -- g's parameter and return both come from the annotation on g
+    local g: (integer) -> (integer) = function (x) return x + 1 end
     return g(2)
 end
 
-function apply(g: (integer) -> integer, x: integer): integer
+function apply(g: (integer) -> (integer), x: integer): integer
     return g(x)
 end
 
 function use(): integer
-    -- y comes from apply's first parameter
-    return apply(function (y): integer return y + 1 end, 5)
+    -- y's type is inferred from apply's first parameter
+    return apply(function (y) return y + 1 end, 5)
 end
 ```
 
-If an unannotated parameter has no usable context—there is no expected function
-type to read it from—it is a clean compile-time error:
+If an unannotated parameter has no usable context — there is no expected
+function type to read it from — it is a clean compile-time error:
 
 ```lua
 function f(): integer
@@ -111,47 +112,79 @@ end
 test.titan:2:30: type error: cannot infer type of parameter 'x'
 ```
 
-Annotate the parameter, or use the lambda where its parameter type is known.
+Annotate the parameter, or use the lambda where its type is known. A bare `...`
+without a variadic expected type receives the corresponding inference error.
 
-**Return shape.** An explicit fixed or flexible return annotation is used as
-written. Without one, the lambda has the **zero-return** shape `()` even when an
-expected function type is available. This is exactly the rule for a named
-function:
+**Return shape.** Like the parameters, the fixed return list and any flexible
+result tail come only from the
+expected function type — it is *never* read off the body's `return`
+statements. An explicit return annotation is used as written; otherwise the
+complete return shape is taken from the expected function type when there is
+one. The body is then checked against those results, exactly as a top-level
+function body is checked against its declared returns:
 
 ```lua
 function f(): integer
-    local zero: (integer) -> () = function (x) end
-    local one: (integer) -> integer =
-        function (x): integer return x + 1 end
-    local pair: (integer) -> (integer, integer) =
-        function (x): (integer, integer) return x, x + 1 end
-    local many: () -> (...: integer) =
-        function (): (...: integer) return 1, 2, 3 end
-    zero(1)
-    return one(2)
+    -- g's return (integer) comes from the annotation on g; the body's
+    -- `return x + 1` is checked against it
+    local g: (integer) -> (integer) = function (x) return x + 1 end
+    -- h returns two values, again from h's annotation
+    local h: (integer) -> (integer, integer) = function (x) return x, x + 1 end
+    local many: () -> (...: integer) = function () return 1, 2, 3 end
+    return g(2)
 end
 ```
 
-The default applies whether or not the body contains a `return`. Expressions in
-such a `return` are evaluated for their effects, but their values are discarded
-instead of becoming inferred results:
+An explicit annotation always wins. In particular, write `: ()` when the lambda
+deliberately produces no results even though its context has a result-bearing
+function type:
+
+```lua
+function install(callback: () -> value)
+    -- ...
+end
+
+install(function (): ()
+    record_event()
+end)
+```
+
+The explicit source shape here is `() -> ()`. Ordinary callable adjustment then
+decides whether it can flow to the target: `value` admits the missing nil result,
+while a non-nilable target such as `integer` does not. See
+[Callable adjustment wrappers](closure-adjustment-wrappers.md).
+
+When there is no return annotation and no expected function type, the return
+type defaults to the **zero-return** type `()` — exactly the default an
+unannotated top-level function gets:
 
 ```lua
 function f(): integer
-    local g = function (x: integer) return x + 1 end
-    g(4) -- g is (integer) -> (); x + 1 was evaluated and discarded
+    local g = function (x: integer) end   -- (integer) -> ()
+    g(1)
     return 1
 end
 ```
 
-A context may still apply ordinary callable adjustment after the lambda has
-acquired that zero-result source type. For example, a zero-result callback can
-flow directly to `() -> value`: the adjusted view supplies the missing `nil`
-result. A target requiring a non-nilable result such as `integer` is rejected.
-See [Callable adjustment wrappers](closure-adjustment-wrappers.md).
+This default applies whether or not the body contains a `return`. Because
+the lambda has no expected type, `g`'s return type is `()`. Expressions in a
+`return` are still evaluated for their effects, but their values are discarded
+instead of becoming inferred results — consistent with an unannotated
+top-level function:
 
-To give a lambda any nonzero or flexible return shape, write the return
-annotation explicitly.
+```lua
+function f(): integer
+    -- no annotation, no expected type -> g is (integer) -> ();
+    -- x + 1 is evaluated and its value is discarded
+    local g = function (x: integer) return x + 1 end
+    g(4)
+    return 1
+end
+```
+
+To give such a lambda a return type, either annotate it (`function (x:
+integer): integer ...`) or place it where its function type is known (an
+annotated `local`, an argument slot, or a `return` position).
 
 ## Capturing enclosing locals
 

@@ -608,8 +608,8 @@ specified case-by-case in [option types](../language/option-types.md).
 Anonymous functions (`Ast.ExpFunction`) add two pieces of work to the
 checker: deciding which enclosing variables each lambda **captures** (and
 whether each captured variable is mutated, which the coder needs to choose
-the boxed representation), **inferring** missing input annotations, and
-fixing the result shape to the written annotation or the zero-return default.
+the boxed representation), and **inferring** a lambda's missing parameter
+and return types.
 
 ### Function-nesting tracking
 
@@ -669,37 +669,41 @@ additional traced source-closure upvalue, but this does not lower the source
 capture limit: a 255-upvalue source (or full wrapper chain) remains admissible
 and takes the generic fallback at the next non-exact edge.
 
-### Lambda parameter inference and zero-return defaults
+### Lambda contextual inference: checking vs synthesis mode
 
-The `Ast.ExpFunction` handler reads the fourth `context` argument every
-`checkexp` visitor receives. If it is a `Type.Function` whose fixed arity
-matches the lambda, the checker may use it to fill missing fixed-parameter and
-input-vararg element annotations. This is the `local x: T = exp` versus `local
-x = exp` distinction, but only for lambda inputs; no type is reverse-engineered
-from the body.
+The `Ast.ExpFunction` handler reads the fourth `context` argument received by
+`checkexp`. It selects a usable expected type only when `context` is a
+`Type.Function` whose fixed arity matches the lambda's `nfixed` count (the
+trailing input-vararg declaration is excluded). With that expected type the
+lambda is in **checking mode**; otherwise it is in **synthesis mode**. This is
+the `local x: T = exp` versus `local x = exp` distinction lifted to lambdas.
+Inference is context-only: the checker never reverse-engineers a type from the
+lambda body's `return` statements.
 
-* **Parameters.** An annotated parameter uses its annotation. An unannotated
-  one takes `context.params[i]` when the arities match, and otherwise receives
-  the clean error `cannot infer type of parameter 'x'`. A bare lambda `...`
-  similarly takes `context.varargtype`; an explicit `...: T` wins.
-* **Return shape.** An explicit `node.rettypes`/`node.flexrettype` pair is used
-  as written. With no return annotation the handler always installs
-  empty/false—the zero-return shape `()`—regardless of context. This matches an
-  unannotated named function. A nonzero fixed result or flexible tail must
-  therefore be explicit.
+* **Fixed parameters.** An annotated parameter uses its annotation. An
+  unannotated one takes `expected.params[i]` in checking mode and otherwise
+  receives `cannot infer type of parameter 'x'`.
+* **Input vararg.** An explicit `...: T` wins. A bare trailing `...` takes
+  `expected.varargtype`; a non-variadic expected type or synthesis mode receives
+  the corresponding clean inference error.
+* **Result shape.** An explicit `node.rettypes`/`node.flexrettype` pair is used
+  as written. In particular, the parser's empty-list representation of explicit
+  `: ()` is truthy and therefore fixes the zero-result shape. With syntactic
+  omission (`node.rettypes == false`), checking mode copies both
+  `expected.rettypes` and `expected.flexrettype`; synthesis mode defaults to
+  empty/false, exactly like an unannotated named function.
 
-The complete result shape is known before the body is checked. Body `return`
-statements never synthesize it; they are checked/coerced against the
-finite/open demand in `StatReturn`. In a zero-return lambda, `return <expr>`
-evaluates the expression under discard demand and exposes no result.
+The complete result shape is installed before the body is checked. `StatReturn`
+checks and coerces body results against that finite/open demand. In a
+synthesis-mode zero-result lambda, `return <expr>` evaluates the expression
+under discard demand and exposes no result. For an inferred non-nil result, the
+ordinary all-paths-return rule still rejects a body that may fall through.
 
-After the handler publishes that source `Type.Function`, the surrounding sink
-runs its ordinary `trycoerce`/`checkmatch` path. Thus an unannotated lambda can
-still flow to a result-bearing target when callable adjustment permits it—for
-example `() -> ()` to `() -> value` through one frozen nil-fill wrapper—while a
-target requiring an `integer` result is rejected. An explicitly result-bearing
-lambda still receives the ordinary all-paths-return check inside
-`checkfuncbody`.
+After the handler publishes the lambda's `Type.Function`, the surrounding sink
+runs its ordinary `trycoerce`/`checkmatch` path. Usually an omitted annotation
+makes the lambda exact for its context and needs no callable wrapper. An
+explicit `: ()` may instead create a zero-result source that is adjusted to a
+nil-accepting result-bearing target through the checker-frozen callable plan.
 
 ## Per-construct notes for contributors
 

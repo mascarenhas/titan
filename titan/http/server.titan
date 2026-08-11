@@ -296,7 +296,7 @@ local function read_request_with_idle_timeout(
   local reader = async.run(function (): Request?
     return read_request(parser, encrypted)
   end)
-  local deadline = async.run(function ()
+  local deadline = async.run(function (): ()
     timer.sleep(timeout)
   end)
   local raced = async.race_two(reader, deadline)
@@ -405,7 +405,7 @@ function Server:serve()
     end
     local connection = accepted as io.ReaderWriterCloser
     local server = self
-    async.run(function ()
+    async.run(function (): ()
       serve_connection(connection, server)
     end)
   end

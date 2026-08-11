@@ -1,5 +1,5 @@
 -- Checker-level coverage for anonymous functions (lambdas): capture analysis
--- flags, parameter inference, return-shape defaults, and the errors around them. These run
+-- flags, parameter/return type inference, and the errors around them. These run
 -- the checker only; end-to-end closure behavior lives in the coder specs.
 local h = require 'spec.support.helpers'
 
@@ -189,8 +189,7 @@ describe("closures (parameter inference)", function()
     it("infers a param type from an assignment-target function type", function()
         assert_type_check([[
             function f(): integer
-                local g: (integer) -> (integer) =
-                    function(x): integer return x + 1 end
+                local g: (integer) -> (integer) = function(x) return x + 1 end
                 return g(2)
             end
         ]])
@@ -202,7 +201,7 @@ describe("closures (parameter inference)", function()
                 return g(x)
             end
             function f(): integer
-                return apply(function(y): integer return y + 1 end, 5)
+                return apply(function(y) return y + 1 end, 5)
             end
         ]])
     end)
@@ -210,7 +209,7 @@ describe("closures (parameter inference)", function()
     it("infers a param type from a return-position function type", function()
         assert_type_check([[
             function make(): ((integer) -> (integer))
-                return function(x): integer return x * 2 end
+                return function(x) return x * 2 end
             end
         ]])
     end)
@@ -218,8 +217,7 @@ describe("closures (parameter inference)", function()
     it("uses the annotation when a param is annotated", function()
         assert_type_check([[
             function f(): integer
-                local g: (integer) -> (integer) =
-                    function(x: integer): integer return x end
+                local g: (integer) -> (integer) = function(x: integer) return x end
                 return g(1)
             end
         ]])
@@ -236,80 +234,64 @@ describe("closures (parameter inference)", function()
 
 end)
 
-describe("closures (return annotations and zero-result defaults)", function()
-    it("uses an explicit single return annotation", function()
+describe("closures (return inference)", function()
+    it("infers a single return type from an assignment-target function type", function()
         assert_type_check([[
             function f(): integer
-                local g: (integer) -> (integer) =
-                    function(x): integer return x + 1 end
+                local g: (integer) -> (integer) = function(x) return x + 1 end
                 return g(2)
             end
         ]])
     end)
 
-    it("uses an explicit multiple-return annotation", function()
+    it("infers a multi return type from the context function type", function()
         assert_type_check([[
             function f(): integer
                 local g: (integer) -> (integer, integer) =
-                    function(x): (integer, integer) return x, x + 1 end
+                    function(x) return x, x + 1 end
                 local a: integer, b: integer = g(2)
                 return a + b
             end
         ]])
     end)
 
-    it("uses an explicit return type in argument position", function()
+    it("infers a return type from an argument-position function type", function()
         assert_type_check([[
             function apply(g: (integer) -> (integer), x: integer): integer
                 return g(x)
             end
             function f(): integer
-                return apply(function(y): integer return y + 1 end, 5)
+                return apply(function(y) return y + 1 end, 5)
             end
         ]])
     end)
 
-    it("uses an explicit return type in return position", function()
+    it("infers a return type from a return-position function type", function()
         assert_type_check([[
             function make(): ((integer) -> (integer))
-                return function(x): integer return x * 2 end
+                return function(x) return x * 2 end
             end
         ]])
     end)
 
-    it("checks the body against the explicit return type", function()
-        -- The body's `return` is checked/coerced against its annotation, not
-        -- used to synthesize it: an integer return coerces to float.
+    it("checks the body against the context-inferred return type", function()
+        -- The body's `return` is checked/coerced against the context's return
+        -- type, not used to synthesize it: an integer return coerces to float.
         assert_type_check([[
             function f(): float
-                local g: (integer) -> (float) = function(x): float return x end
+                local g: (integer) -> (float) = function(x) return x end
                 return g(2)
             end
         ]])
     end)
 
-    it("rejects a body return that mismatches its explicit return type", function()
+    it("rejects a body return that mismatches the context return type", function()
         assert_type_error("types in return do not match", [[
             function f(): integer
-                local g: (integer) -> (string) = function(x): string return x end
+                local g: (integer) -> (string) = function(x) return x end
                 return 1
             end
         ]])
-    end)
-
-    it("defaults to zero-return even in a value-returning context", function()
-        local ok, err, ast = run_checker([[
-            function f()
-                local g: (integer) -> value = function(x) end
-            end
-        ]])
-        assert.truthy(ok, err)
-        local cast = tlfunc_stats(ast)[1].exps[1]
-        assert.equal("Ast.ExpCast", cast._tag)
-        assert.equal("callable", cast._adjustment.kind)
-        assert.equal("Ast.ExpFunction", cast.exp._tag)
-        assert.equal(0, #cast.exp._type.rettypes)
-        assert.equal("Type.Value", cast._type.rettypes[1]._tag)
     end)
 
     it("defaults to zero-return with no context and an empty body", function()
@@ -332,9 +314,24 @@ describe("closures (return annotations and zero-result defaults)", function()
         ]])
     end)
 
+    it("lets explicit `: ()` override a result-bearing context", function()
+        local ok, err, ast = run_checker([[
+            function f()
+                local g: (integer) -> value = function(x): () end
+            end
+        ]])
+        assert.truthy(ok, err)
+        local cast = tlfunc_stats(ast)[1].exps[1]
+        assert.equal("Ast.ExpCast", cast._tag)
+        assert.equal("callable", cast._adjustment.kind)
+        assert.equal("Ast.ExpFunction", cast.exp._tag)
+        assert.equal(0, #cast.exp._type.rettypes)
+        assert.equal("Type.Value", cast._type.rettypes[1]._tag)
+    end)
+
     it("zero-return is the default with no context, so body results are discarded", function()
-        -- No return annotation defaults the lambda to zero-return `()`, exactly
-        -- like an unannotated top-level function, so a
+        -- No return annotation and no usable context defaults the lambda to
+        -- zero-return `()`, exactly like an unannotated top-level function, so a
         -- `return <expr>` is checked for effects and its value is ignored.
         assert_type_check([[
             function f(): integer

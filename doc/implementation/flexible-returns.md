@@ -116,11 +116,9 @@ descriptor representation are rejected with return-specific diagnostics.
 `Type.Value`; finite option projection never constructs an artificial
 `value?`.
 
-An unannotated lambda always keeps an empty fixed `rettypes` list and
-`flexrettype = false`, even in an expected flexible-result context. Context may
-supply missing parameter and bare-variadic input types, but never a result
-shape. A nonempty or flexible lambda result must be written explicitly. The
-main-function contract requires both
+An unannotated lambda in an expected function context copies both the fixed
+`rettypes` and `flexrettype`. An explicit `: ()` keeps an empty fixed list and
+`flexrettype = false`. The main-function contract requires both
 `varargtype = false` and `flexrettype = false`, preserving the exact one-fixed-
 parameter `main(args: {string}): integer` shape.
 

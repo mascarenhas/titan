@@ -7613,11 +7613,12 @@ checkexp = util.make_visitor({
         end
     end,
 
-    -- Anonymous function expression (lambda). An unannotated parameter may be
-    -- inferred from the expected function type (`context`). Return annotations
-    -- follow the ordinary function rule instead: omission always means the
-    -- zero-return shape `()`, independent of context. A nonzero or flexible
-    -- result shape must be written explicitly.
+    -- Anonymous function expression (lambda). Both parameter and return types
+    -- may be inferred from the expected function type (`context`): an unannotated
+    -- parameter takes its type from the context, and a missing return annotation
+    -- is likewise taken from the context. With no usable context the return type
+    -- defaults to zero-return `()`, exactly like an unannotated top-level
+    -- function.
     ["Ast.ExpFunction"] = function(node, st, errors, context)
         -- A trailing vararg `Decl` (`name == false`) is dropped from the fixed
         -- params; its element type is resolved separately below. A lambda vararg
@@ -7674,17 +7675,30 @@ checkexp = util.make_visitor({
             paramtypes[i] = param._type
         end
 
-        -- Resolve / set up return types. The body never synthesizes a return
-        -- type, and context is deliberately irrelevant here: just like a named
-        -- function, a lambda without a return annotation returns zero values.
-        local rettypes = {}
-        local flexrettype = false
+        -- Resolve / set up return types. Like parameters, the return type comes
+        -- only from the expected function type (`context`); it is never inferred
+        -- from the body's `return`s.
+        local rettypes
+        local flexrettype
         if node.rettypes then
             -- Explicit annotation, including `: ()` (an empty list).
+            rettypes = {}
             for _, rt in ipairs(node.rettypes) do
                 table.insert(rettypes, typefromnode(rt, st, errors))
             end
             flexrettype = flexible_return_type(node, st, errors)
+        elseif expected then
+            -- Checking mode: take both fixed and flexible results from the
+            -- context. This is deliberately distinct from an explicit `: ()`,
+            -- whose parser shape is an empty fixed list plus `flexrettype =
+            -- false` and must not inherit the context's tail.
+            rettypes = expected.rettypes
+            flexrettype = expected.flexrettype
+        else
+            -- No annotation, no usable context: default to zero-return `()`,
+            -- exactly like an unannotated top-level function.
+            rettypes = {}
+            flexrettype = false
         end
 
         node._type = types.Function(paramtypes, rettypes, false, varargtype,
@@ -7925,8 +7939,9 @@ function checkfuncbody(node, st, errors, opts)
         end
     end
     if node._type.flexrettype then
-        -- An explicit tail reports at its annotation. Keep the lambda location
-        -- as a defensive fallback for synthesized/external AST callers.
+        -- An explicit tail reports at its annotation; an inferred lambda tail
+        -- reports at the lambda itself because the expected Type.Function no
+        -- longer carries an AST source location.
         local floc = (node.flexrettype and node.flexrettype.loc) or node.loc
         checktype(node._type.flexrettype, floc, errors)
         node._type.flexrettype = check_varg_elem(

@@ -644,7 +644,7 @@ end
 
 local function begin_shutdown(runtime: Runtime)
   runtime.closing = true
-  local root = coroutine.create(function (_arg: value)
+  local root = coroutine.create(function (_arg: value): ()
     cleanup_runtime(runtime)
   end, UV_TAG)
   local task = Task.new(root, runtime, TaskStatus.ready(),

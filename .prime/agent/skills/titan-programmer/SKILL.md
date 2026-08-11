@@ -103,13 +103,15 @@ existing tests before inventing a new pattern.
   payload, and `Union.variant(...)` is positional-only. `case` is not required
   to be exhaustive; unmatched/no-`else` does nothing, so add an `else` when
   fallthrough would be wrong.
-- Annotate every named-function parameter. Missing lambda parameter and bare-
-  variadic input annotations may be inferred only from an expected function
-  type, never from the body; lambda result annotations are never inferred.
-- A function without a return annotation returns **zero values**, not inferred
-  results or one nil. Write `: nil` for one nil, `: (A, B)` for fixed multiple
-  results, and the documented flexible-tail syntax only for genuinely
-  run-time-variable arity.
+- Annotate every named-function parameter. Missing lambda parameter,
+  bare-variadic input, and result annotations may be inferred only from a
+  matching expected function type, never from the body.
+- A named function without a return annotation—and a lambda without one when
+  no usable expected function type exists—returns **zero values**. A
+  contextually typed lambda inherits the expected fixed and flexible result
+  shape; write explicit `: ()` to require zero results instead. Write `: nil`
+  for one nil, `: (A, B)` for fixed multiple results, and the documented
+  flexible-tail syntax only for genuinely run-time-variable arity.
 - Fixed calls nil-fill omitted parameters, then type-check them. Surplus
   arguments are still evaluated but discarded unless the function is
   variadic. Do not add a variadic tail merely to ignore extras.

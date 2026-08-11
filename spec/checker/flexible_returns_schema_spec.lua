@@ -48,39 +48,32 @@ describe("flexible return schemas (typechecker)", function()
         assert.same(types.Boolean(), tree[4]._type.rettypes[1])
     end)
 
-    it("uses an explicit fixed and flexible lambda result shape", function()
+    it("infers complete results unless explicit `: ()` overrides them", function()
         local ok, err, tree = run_checker([[
             function run(): nil
-                local shaped: () -> (boolean, ...: integer) =
-                    function(): (boolean, ...: integer)
-                        return true
-                    end
-                local explicit = function(): ()
+                local inferred: () -> (boolean, ...: integer) = function()
+                    return true
+                end
+                local explicit: () -> (value, ...: integer) = function(): ()
                 end
                 return nil
             end
         ]])
         assert.truthy(ok, err)
 
-        local shaped = tree[1].block.stats[1].exps[1]._type
-        local explicit = tree[1].block.stats[2].exps[1]._type
-        assert.same(types.Boolean(), shaped.rettypes[1])
-        assert.same(types.Integer(), shaped.flexrettype)
+        local inferred = tree[1].block.stats[1].exps[1]._type
+        local explicit_cast = tree[1].block.stats[2].exps[1]
+        assert.equal("Ast.ExpCast", explicit_cast._tag)
+        assert.equal("callable", explicit_cast._adjustment.kind)
+        assert.equal("nil_fill_result",
+            explicit_cast._callable_adapter.results[1].kind)
+        assert.equal("end_flex",
+            explicit_cast._callable_adapter.results[2].kind)
+        local explicit = explicit_cast.exp._type
+        assert.same(types.Boolean(), inferred.rettypes[1])
+        assert.same(types.Integer(), inferred.flexrettype)
         assert.same({}, explicit.rettypes)
         assert.is_false(explicit.flexrettype)
-    end)
-
-    it("does not infer a flexible result for an unannotated lambda", function()
-        local ok, err, tree = run_checker([[
-            function run()
-                local adjusted: () -> (...: integer) = function () end
-            end
-        ]])
-        assert.truthy(ok, err)
-        local exp = tree[1].block.stats[1].exps[1]
-        if exp._tag == "Ast.ExpCast" then exp = exp.exp end
-        assert.same({}, exp._type.rettypes)
-        assert.is_false(exp._type.flexrettype)
     end)
 
     it("uses a return-specific diagnostic for an invalid nil tail", function()
