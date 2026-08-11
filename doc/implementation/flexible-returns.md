@@ -43,18 +43,19 @@ The relevant `ast.lua` constructor fields are:
 The corresponding checked constructors in `types.lua` are:
 
 ```text
-Type.Function(params, rettypes, vararg, varargtype, flexrettype)
+Type.Function(params, rettypes, false, varargtype, flexrettype)
 Type.Method(fqtn, name, params, rettypes,
             varargtype, flexrettype, paramnames)
 Type.StaticMethod(fqtn, name, params, rettypes,
                   varargtype, flexrettype, paramnames)
 ```
 
-`vararg` is the disjoint C-FFI variadic bit. `varargtype` is Titan's typed
-input tail, while `flexrettype` is Titan's typed output tail. The two Titan
-tails may coexist. C-derived function types always set `flexrettype = false`,
-and conversion of a flexible-return Titan function type to a C function
-pointer is rejected.
+The third `Type.Function` position is a required ABI-0.22 reserved-false
+sentinel. `varargtype` is Titan's typed input tail, while `flexrettype` is
+Titan's typed output tail; the two may coexist. Direct C declarations instead
+use `Type.CFunction(params, ret, vararg, abi)`: C `...` belongs only to its
+`vararg` bit, and a C signature has neither a flexible result tail nor any
+cross-kind conversion to a Titan/Lua `Type.Function`.
 
 Every recursive type operation descends through `flexrettype`: C-FFI leakage
 checks, nominal-record recovery, local-record interface checks, string
@@ -189,7 +190,7 @@ by the sink; `checkmatch` verifies that elaborated result.
 
 | Annotation | Meaning |
 | --- | --- |
-| `_callee_type` | complete checked callable type; native ABI authority |
+| `_callee_type` | complete checked callable type; `Type.Function` for Titan/Lua or authoritative `Type.CFunction` for a C call |
 | `_types` | declared fixed result prefix; retained for existing coder paths |
 | `_flexrettype` | declared flexible element, or `false` |
 | `_visible_types` | finite and statically visible results for this consumer |
@@ -270,10 +271,13 @@ matches its runtime tag.
 
 ## Identity and callable adjustment
 
-`types.equals` remains strict structural identity. For `Type.Function`, it
-compares the C `vararg` bit, every fixed parameter and result, input-vararg
-presence and element type, and flexible-result presence and element type.
-`Type.Method` and `Type.StaticMethod` carry the same tail in their declaration
+`types.equals` remains strict structural identity. For a valid
+`Type.Function`, it requires the reserved slot to be false and compares every
+fixed parameter and result, input-vararg presence/element type, and
+flexible-result presence/element type. `Type.CFunction` uses the separate C
+signature/declaration compatibility rules; equality, consistency, and callable
+adjustment never relate the two kinds. `Type.Method` and `Type.StaticMethod`
+carry the same Titan tails in their declaration
 and serialized shapes; binding or selecting either produces a
 `Type.Function` whose exact identity includes that tail. Parameter names are
 declaration metadata and do not participate in structural function equality.
@@ -314,7 +318,8 @@ nominal-to-Interface, or other automatic coercions through the function type.
   moved into that tail is checked against its element type.
 * An expected input tail may be ignored by a non-variadic actual. When both
   tails are observed, the actual tail must accept the expected tail element.
-* The untyped C-FFI `vararg` bit remains exact-only.
+* C declarations never enter this relation: their `Type.CFunction.vararg` bit
+  and one-result C signature stay on the separate direct/pointer call paths.
 
 ### Results
 
@@ -684,14 +689,15 @@ The working-tree interface serializer includes `flexrettype` in every callable
 shape:
 
 ```text
-Function(params, rettypes, vararg, varargtype, flexrettype)
+Function(params, rettypes, false, varargtype, flexrettype)
 Method(fqtn, name, params, rettypes,
        varargtype, flexrettype, paramnames)
 StaticMethod(fqtn, name, params, rettypes,
              varargtype, flexrettype, paramnames)
 ```
 
-An absent tail serializes explicitly as `false`. The field precedes
+The reserved Function position and an absent tail serialize explicitly as
+`false`; the decoder rejects a non-false reserved value. The flexible field precedes
 declaration-only `paramnames` on methods and statics. Interface recovery and
 all recursive nominal walkers consume the same position, while
 `types.tostring` includes a present tail in the canonical function tag.

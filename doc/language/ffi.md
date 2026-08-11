@@ -736,9 +736,11 @@ use `owned T[]` and supply the count when allocating.
 
 `T.new()` allocates one zeroed C object and returns `owned *T`.
 `T.new_array(count)` allocates `count` zeroed adjacent objects and returns
-`owned T[]`. The inferred and written shapes remain distinct even when the
-array count is one. Both are full userdata whose lifetime belongs to Titan's
-Lua GC. No finalizer is installed.
+`owned T[]`. These are type-namespace allocation pseudo-functions, not
+first-class callable values: they must be invoked directly rather than stored,
+passed, or returned. The inferred and written shapes remain distinct even when
+the array count is one. Both are full userdata whose lifetime belongs to
+Titan's Lua GC. No finalizer is installed.
 
 A trailing option marker wraps the complete owner:
 

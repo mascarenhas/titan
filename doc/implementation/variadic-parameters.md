@@ -136,15 +136,19 @@ the function-like types, resolves `...` uses through a depth-stamped pseudo-
 symbol, and — its central job — turns every spread into either synthesized
 `...[k]` reads (adjust-up) or a kept `ExpDots` marker (whole-tail).
 
-### `Type.Function.varargtype` vs. the C-FFI `vararg` boolean
+### `Type.Function.varargtype` vs. `Type.CFunction.vararg`
 
 `types.lua` adds `varargtype` to `Type.Function`
 (`{"params","rettypes","vararg","varargtype","flexrettype"}`) and to
 `Type.Method` / `Type.StaticMethod` (whose declaration descriptors also carry
-`paramnames`). It is **distinct** from the pre-existing `vararg` boolean,
-which marks a *C-FFI* variadic (`foreigntypes.lua` sets `vararg = true`,
-`varargtype = false`). A Titan variadic sets `varargtype = t`, `vararg = false`.
-Consumers test `varargtype`; the two never mix. Four type operations change:
+`paramnames`). In the current ABI-0.22 `Type.Function`, the third positional
+`vararg` field is a required **reserved `false` sentinel** retained only to keep
+serialized constructor arity stable; it has no C or Titan variadic meaning. A
+Titan variadic sets `varargtype = T`. A direct foreign declaration instead has
+type `Type.CFunction(params, ret, vararg, abi)`, whose `vararg` boolean alone
+means C `...`; it is never projected to `Type.Function`. Consumers of boxed
+Titan/Lua callables test only `varargtype`, while the checker's private C call
+view exposes the C bit as `c_vararg`. Four type operations change:
 
 * **`callable_adjustment(source_actual, target_expected)`** plans the directional callable
   use. Parameter positions may move between the fixed prefix and the actual
@@ -165,8 +169,9 @@ Consumers test `varargtype`; the two never mix. Four type operations change:
 runtime tags even if a directional callable adjustment is legal.
 * **`serialize`** emits `varargtype` for Function, Method, and StaticMethod (the
   historical 0.9 ABI change), alongside the independent `flexrettype` schema.
-  The latter is not accepted from compiled interfaces until the coordinated
-  flexible-return ABI transition.
+  It emits and validates `false` in the reserved Function position; a hostile
+  non-false value is rejected. The latter tail is not accepted from compiled
+  interfaces until the coordinated flexible-return ABI transition.
 * **`tostring`**: appends `, ...: t` to the parameter list.
 
 `typefromnode`'s `Ast.TypeFunction` handler reads `node.varargtype` and sets the
@@ -291,8 +296,10 @@ equal-representation input run by
 descriptor/start view, or allocate and convert a fresh run when the static
 prefix or element representation changes.
 
-Passing a runtime-open Titan run into a C-FFI variadic (`ftype.vararg`) remains
-an error: the typed Titan descriptor has no C default-promotion contract.
+Passing a runtime-open Titan run into a C-FFI variadic remains an error: the
+checker-local call view sees `Type.CFunction.vararg` as `c_vararg`, and the
+typed Titan descriptor has no C default-promotion contract. Finite written
+arguments still use ordinary C default promotions.
 
 `...` is always the sole, last trailer; a list ending in both a multi-return
 call and `...` is structurally impossible (`f(g(), ...)` truncates `g()` to one
@@ -601,8 +608,11 @@ elements remain internal backing Tables, while generic/Lua-visible runs box
 them as proxies. ABI 0.18 and 0.19 preserved that descriptor contract; ABI
 0.20 kept it while adding the Array writer user value and callable
 strict-entry trailer; 0.21 retained those descriptors while advancing the
-embedded Lua contract to 5.5.1, and 0.22 retains them. Closure adjustment
-wrappers reuse the same descriptor/native signature and add only private
+embedded Lua contract to 5.5.1, and 0.22 retains them. ABI 0.22 also retains
+the historical third `Function` constructor position as `false`; separating
+direct `CFunction` declarations is checker-internal and does not alter that
+schema or native convention. Closure adjustment wrappers reuse the same
+descriptor/native signature and add only private
 consumer adapter/relay artifacts, so this optimization does not advance the
 ABI. See [Dense Arrays](dense-arrays.md#internal-and-boxed-representations) and
 [Closure adjustment wrappers](closure-adjustment-wrappers.md#abi-and-ownership-rationale).

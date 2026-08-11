@@ -1953,7 +1953,7 @@ describe("Titan type checker", function()
                 _tag = "Type.CModule",
                 members = {
                     printf = {
-                        type = {_tag = "Type.Function"}
+                        type = {_tag = "Type.CFunction"}
                     }
                 }
             }

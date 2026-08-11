@@ -271,10 +271,9 @@ describe("compatible C declarations across foreign imports", function()
                         .ffi_oldstyle_composite
                     assert.equal(first.type, second.type)
                     assert.equal(1, #first.type.params)
+                    assert.equal("Type.CFunction", first.type._tag)
                     assert.equal("prototype",
                         first.type._paramstyle)
-                    assert.equal("prototype",
-                        first.type._c_function._paramstyle)
                     assert.same({"value"}, first.paramnames)
                     assert.same({"value"}, second.paramnames)
                 end
@@ -829,12 +828,11 @@ describe("compatible C declarations across foreign imports", function()
 
             local factory =
                 members.ffi_row_factory.type
-            assert.equal("Type.CPointer",
-                factory.rettypes[1]._tag)
+            assert.equal("Type.CFunction", factory._tag)
+            assert.equal("Type.CPointer", factory.ret._tag)
             assert.equal("Type.CArray",
-                factory.rettypes[1].pointee._tag)
-            assert.equal(3,
-                factory.rettypes[1].pointee.len)
+                factory.ret.pointee._tag)
+            assert.equal(3, factory.ret.pointee.len)
         end)
     end)
 
@@ -891,9 +889,9 @@ describe("compatible C declarations across foreign imports", function()
                         .ffi_qualified_void_return.type,
                     ast[2]._type.members
                         .ffi_qualified_void_return.type)
-                assert.same({},
-                    ast[1]._type.members
-                        .ffi_qualified_void_return.type.rettypes)
+                assert.equal("Type.CVoid",
+                    types.resolve_c_typedef(ast[1]._type.members
+                        .ffi_qualified_void_return.type.ret)._tag)
             end)
         end)
 

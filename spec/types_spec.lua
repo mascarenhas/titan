@@ -144,8 +144,6 @@ describe("Titan types", function()
             types.tostring(static))
     end)
 
-    -- TODO test vararg functions (types.Function with third argument as true)
-
     it("checks if a type is garbage collected", function()
         assert.truthy(types.is_gc(types.String()))
         assert.truthy(types.is_gc(types.Array(types.Integer())))
@@ -231,8 +229,24 @@ describe("Titan types", function()
         assert.falsy(types.equals(base, fn({i}, {i, i})))
         assert.falsy(types.equals(base, fn({i}, {i}, i)))
         assert.falsy(types.equals(base, fn({i}, {i}, false, i)))
-        assert.falsy(types.equals(
-            types.Function({i}, {i}, true, false, false), base))
+    end)
+
+    it("keeps the ABI-0.22 Function vararg slot reserved false", function()
+        local valid = types.Function(
+            { types.Integer() }, { types.Integer() }, false, false, false)
+        local malformed = types.Function(
+            { types.Integer() }, { types.Integer() }, true, false, false)
+
+        assert.is_false(types.equals(valid, malformed))
+        assert.is_false(types.equals(malformed, malformed))
+        assert.is_false(types.consistent(valid, malformed))
+        assert.is_false(types.callable_adjustment(valid, malformed))
+        assert.is_false(types.has_sound_gradual_guard(malformed))
+        assert.has_error(function()
+            types.serialize(malformed)
+        end, "Type.Function reserved vararg field must be false")
+        assert.match("Function%([^,]+,[^,]+,false,",
+            types.serialize(valid))
     end)
 
     describe("Interface descriptors and direct implementation matching",
@@ -2045,7 +2059,7 @@ describe("Titan types", function()
             local function_type = types.Function(
                 { int }, { int }, false, false, false)
             types.mark_c_ffi_include(function_type, h1)
-            assert.equal(h1, function_type._c_origin_header)
+            assert.is_nil(function_type._c_origin_header)
             assert.is_nil(int._c_origin_header)
 
             local unrelated = types.Record(
@@ -2135,33 +2149,17 @@ describe("Titan types", function()
             local first_value =
                 types.Function({first_int}, {first_int},
                     false, false, false)
-            first_value._c_function = first
-            first_value._c_return_type = first.ret
             local second_value =
                 types.Function({second_int}, {second_int},
                     false, false, false)
-            second_value._c_function = second
-            second_value._c_return_type = second.ret
-            assert.is_true(types.equals(first_value, second_value))
-
-            local const_void_value =
-                types.Function({}, {}, false, false, false)
-            const_void_value._c_function = const_void
-            const_void_value._c_return_type = const_void.ret
-            const_void_value._return_declaration_qualifiers =
-                {"const"}
-            local plain_void_value =
-                types.Function({}, {}, false, false, false)
-            plain_void_value._c_function =
-                types.CFunction(
-                    {}, types.CVoid(), false, "cdecl")
-            plain_void_value._c_return_type =
-                plain_void_value._c_function.ret
-            assert.equal(
-                "() -> const void",
-                types.tostring(const_void_value))
-            assert.is_false(types.equals(
-                const_void_value, plain_void_value))
+            -- Titan/Lua function identity follows its callable value shape; it
+            -- does not borrow C declaration compatibility or qualifiers.
+            assert.is_false(types.equals(first_value, second_value))
+            assert.is_false(types.equals(first, first_value))
+            assert.is_false(types.consistent(first, first_value))
+            assert.is_false(types.callable_adjustment(first, first_value))
+            assert.is_false(types.callable_adjustment(first_value, first))
+            assert.equal("const void ()", types.tostring(const_void))
 
             local unknown_array =
                 types.CArray(first_int, nil)

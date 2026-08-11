@@ -528,19 +528,39 @@ describe("generic for loops", function()
             static void ffi_close(void) {
                 ffi_closed += 10;
             }
+
+            static ffi_int_ptr (*ffi_next_pointer)(void) = ffi_next;
+            static void (*ffi_close_pointer)(void) = ffi_close;
+
+            static void ffi_reset(void) {
+                ffi_index = 0;
+                ffi_closed = 0;
+            }
         ]], function(header)
             h.run_coder([[
                 local c = foreign import "]] .. header .. [["
 
                 function sum(): integer
+                    c.ffi_reset()
                     local total = 0
                     for p: c.ffi_int_ptr in c.ffi_next, nil, nil, c.ffi_close do
                         total = total + (p[0] as integer)
                     end
                     return total + (c.ffi_closed as integer)
                 end
+
+                function pointer_sum(): integer
+                    c.ffi_reset()
+                    local total = 0
+                    for p: c.ffi_int_ptr in c.ffi_next_pointer, nil, nil,
+                            c.ffi_close_pointer do
+                        total = total + (p[0] as integer)
+                    end
+                    return total + (c.ffi_closed as integer)
+                end
             ]], [[
                 assert(test.sum() == 24)
+                assert(test.pointer_sum() == 24)
             ]])
         end)
     end)

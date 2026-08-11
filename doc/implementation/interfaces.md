@@ -425,8 +425,10 @@ The driver's closed validator requires:
 value-facing positions in recovered metadata. The value graph is closed:
 error-recovery/no-value markers, nested modules, C FFI descriptors, legacy
 wrappers, and unknown tags are rejected as well. A recovered Titan function
-type must have `vararg=false`; typed variadics use `varargtype`. An Option
-cannot contain another Option or `value`, matching source canonicalization.
+type must carry the ABI-0.22 reserved `vararg=false` sentinel; typed variadics
+use `varargtype`, while C variadicity exists only on unexportable
+`Type.CFunction`. An Option cannot contain another Option or `value`, matching
+source canonicalization.
 At the module boundary, `ModuleMember` wraps only functions and direct
 record/union declarations; ordinary values, including function-valued
 variables, use `ModuleVariable`. Every nominal reference is a qualified

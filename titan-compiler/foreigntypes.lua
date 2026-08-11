@@ -366,42 +366,6 @@ declaration_types_compatible = function(left, right, seen,
                 allow_array_bound_candidate,
                 allow_prototype_tag_reextraction,
                 prototype_tag_state)
-    elseif tag == "Type.Function" then
-        -- Foreign functions are represented as ordinary Titan Function values
-        -- whose slots contain C types. C ignores the outer qualification of a
-        -- parameter declaration, hence the true argument below.
-        if ltype._c_function and rtype._c_function then
-            return declaration_types_compatible(
-                ltype._c_function, rtype._c_function, seen, false,
-                allow_anonymous_aggregate,
-                allow_oldstyle_prototype,
-                allow_array_bound_candidate,
-                allow_prototype_tag_reextraction,
-                prototype_tag_state)
-        end
-        return function_paramstyle(ltype)
-                    == function_paramstyle(rtype)
-           and ltype.vararg == rtype.vararg
-           and not ltype.varargtype and not rtype.varargtype
-           and not ltype.flexrettype and not rtype.flexrettype
-           and same_declaration_list(
-                ltype.params, rtype.params, seen, true,
-                allow_anonymous_aggregate,
-                allow_oldstyle_prototype,
-                allow_array_bound_candidate,
-                allow_prototype_tag_reextraction,
-                prototype_tag_state)
-           and #ltype.rettypes == #rtype.rettypes
-           and (#ltype.rettypes == 0
-                or function_returns_compatible(
-                    ltype.rettypes[1], rtype.rettypes[1],
-                    ltype._return_declaration_qualifiers,
-                    rtype._return_declaration_qualifiers, seen,
-                    allow_anonymous_aggregate,
-                    allow_oldstyle_prototype,
-                    allow_array_bound_candidate,
-                    allow_prototype_tag_reextraction,
-                    prototype_tag_state))
     elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
         if allow_prototype_tag_reextraction
            and prototype_tag_reextractions_compatible(
@@ -567,29 +531,6 @@ local function merge_declaration_composite(previous, current, seen)
         end
         merge_declaration_composite(
             previous.ret, current.ret, seen)
-    elseif tag == "Type.Function" then
-        if previous._c_function and current._c_function then
-            merge_declaration_composite(
-                previous._c_function,
-                current._c_function, seen)
-        end
-        if function_paramstyle(previous) == "oldstyle"
-           and function_paramstyle(current) == "prototype" then
-            previous.params = current.params
-            previous.rettypes = current.rettypes
-            previous.vararg = current.vararg
-            previous._paramstyle = "prototype"
-            previous._c_origin_header = current._c_origin_header
-                or previous._c_origin_header
-        end
-        for index, param in ipairs(previous.params or {}) do
-            merge_declaration_composite(
-                param, current.params[index], seen)
-        end
-        for index, ret in ipairs(previous.rettypes or {}) do
-            merge_declaration_composite(
-                ret, current.rettypes[index], seen)
-        end
     end
     return previous
 end
@@ -1079,19 +1020,7 @@ convert_type = function(st, ftype)
 end
 
 local function convert_function(st, ftype)
-    local cfunc, err = convert_function_type(st, ftype)
-    if not cfunc then return nil, err end
-    local resolved_return = types.resolve_c_typedef(cfunc.ret)
-    local rettypes =
-        resolved_return._tag == "Type.CVoid" and {} or { cfunc.ret }
-    local converted =
-        types.Function(cfunc.params, rettypes, cfunc.vararg, false, false)
-    converted._c_function = cfunc
-    converted._c_return_type = cfunc.ret
-    converted._paramstyle = cfunc._paramstyle
-    converted._return_declaration_qualifiers =
-        copy_list(cfunc._return_declaration_qualifiers or {})
-    return converted
+    return convert_function_type(st, ftype)
 end
 
 local function convert_typedef(st, ftype)
@@ -1185,23 +1114,6 @@ local function declaration_array_view(typ, memo)
             view._paramstyle = typ._paramstyle
             view._return_declaration_qualifiers =
                 copy_list(typ._return_declaration_qualifiers or {})
-            cloned = true
-        end
-    elseif tag == "Type.Function" then
-        local cfunc, cfunc_cloned =
-            declaration_array_view(typ._c_function, memo)
-        if cfunc_cloned then
-            local resolved_return =
-                types.resolve_c_typedef(cfunc.ret)
-            local rettypes = resolved_return._tag == "Type.CVoid"
-                and {} or { cfunc.ret }
-            view = types.Function(
-                cfunc.params, rettypes, cfunc.vararg, false, false)
-            view._c_function = cfunc
-            view._c_return_type = cfunc.ret
-            view._paramstyle = cfunc._paramstyle
-            view._return_declaration_qualifiers =
-                copy_list(cfunc._return_declaration_qualifiers or {})
             cloned = true
         end
     end

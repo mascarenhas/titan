@@ -1,6 +1,7 @@
 local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
 local driver = require "titan-compiler.driver"
+local types = require "titan-compiler.types"
 
 local function cleanup_module(name)
     name = name or "test"
@@ -108,6 +109,26 @@ local FIXED_SOURCE = [[
 ]]
 
 describe("closure adjustment wrappers (end-to-end)", function()
+    it("rejects a C declaration at the callable-plan codegen boundary", function()
+        local cint = types.CInteger("int", true, 3, 32)
+        local cfunc = types.CFunction({ cint }, cint, false, false)
+        local titan = types.Function(
+            { types.Integer() }, { types.Integer() }, false, false, false)
+        local plan = {
+            kind = "callable",
+            source = cfunc,
+            target = titan,
+            exact = false,
+            arguments = {},
+            results = {},
+        }
+
+        assert.has_error(function()
+            coder._checked_callable_plan(
+                plan, cfunc, titan, "C declaration isolation")
+        end, "C declaration isolation has non-callable operand types")
+    end)
+
     after_each(function()
         cleanup_module("test")
     end)

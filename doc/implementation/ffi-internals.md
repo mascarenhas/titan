@@ -379,23 +379,27 @@ fields reuse the same owner. When a definition completes that canonical owner,
 `populate_struct_or_union` records the active foreign import's order in
 `owner._definition_order`.
 
-Foreign function declarations are stored in the C module's value namespace with
-a `Type.Function`-shaped signature whose params and returns are C types. That
-shape is an implementation convenience for checking a direct foreign call; it
-does **not** make a foreign function a Titan first-class function value.
-The structural shape sets both Titan tail slots to false: C's `vararg` marker
-is kept separately, and a C function has no Titan `flexrettype`.
-`Ast.ExpVar` rejects taking a foreign function as a value, except when the
-surrounding context asks for a compatible C function pointer. The pre-existing
-`vararg` boolean on `Type.Function` remains the marker for a C variadic
-function. It is distinct from Titan variadic functions, which use `varargtype`.
-The surrounding `Type.ModuleMember` separately copies the raw function CType's
-`paramnames` table or `false`; `foreigntypes.convert` does not put those names
-in the structural signature.
+Foreign function declarations are stored in the C module's value namespace
+as their authoritative `Type.CFunction`. Its `params`, single `ret`, C
+`vararg` bit, ABI, prototype/old-style state, return qualifiers, typedef
+spellings, and origin header remain on the C graph; there is no projected or
+decorated `Type.Function`. The surrounding `Type.ModuleMember` separately
+carries the raw declaration's `paramnames` table or `false`, so parameter
+spellings remain outside structural C signature identity.
+
+The checker obtains argument/result reuse from a private `Checker.CallSignature`
+view. For a `CFunction` the view exposes its C parameters, maps a resolved
+`CVoid` return to zero visible Titan results and any other return to one, has no
+Titan input or flexible-result tail, and exposes C `...` only as `c_vararg`.
+The view never enters the type algebra, AST's value type, serialization, or
+code generation. `Ast.ExpVar` therefore rejects taking a direct declaration as
+a value except when an exact C-function-pointer context performs declaration
+decay.
 
 C function pointer typedefs are represented as `CTypedef` targets that resolve
-to `CPointer(CFunction(...))`. `CFunction` is only a C function signature inside
-a pointer type; it is not a Titan function value.
+to `CPointer(CFunction(...))`. Direct declarations and pointer pointees share
+the same C signature representation, but neither is a Titan/Lua callable value:
+only `Type.Function` denotes that boxed, traced representation.
 
 ## Checker Rules
 
@@ -460,19 +464,25 @@ The checker has FFI-specific handling in a few narrow places:
   pointer's pointee, not the temporary aggregate, is the mutation target.
 * `#exp` accepts C arrays with known static length and counted owned C arrays.
 * `Ast.ExpCall` validates C allocation pseudo-functions through that same
-  helper, including the direct-C-function rejection. A struct/union completed
+  helper, including the direct-C-function rejection. Their narrow
+  `Checker.CPseudoNew` descriptor owns only the pseudo-call parameters/results;
+  it is exposed while the member is a direct callee and is never manufactured
+  as a `Type.Function` value. A struct/union completed
   only by a later foreign import is treated as incomplete while checking an
   earlier module variable.
-* Top-level initializer validation recognizes `Type.CPseudoNew` as a sound
+* Top-level initializer validation recognizes `Checker.CPseudoNew` as a sound
   constructor. `T.new()` and `T.new_array(count)` are accepted when their
   actual argument list is constant; a count that reads module state is
   rejected just like a non-constant record-constructor argument. The
   `Ast.ExpAdjust` introduced by parenthesizing a call is transparent to this
   check. The same validator checks both expression-valued map keys and their
   values in initializer lists.
-* `Ast.ExpCall` also recognizes callees whose resolved type is
-  `CPointer(CFunction(...))`. It checks arguments against the C function
-  signature and records `_c_pointer_call` for codegen.
+* `Ast.ExpCall` has explicit, separate branches for a direct foreign
+  `Type.ModuleMember` whose type is `CFunction` and for a callee whose resolved
+  type is `CPointer(CFunction(...))`. Both use the checker-local signature view
+  for shared argument/result checking; only the pointer branch records
+  `_c_pointer_call`, and neither can fall through to Titan/Lua callable
+  adjustment or dispatch.
 * Direct C and C-function-pointer calls keep exact C arity. The shared
   expression-list demand may project enough finite values from a trailing
   flexible Titan producer to fill fixed C parameters, but it diagnoses a
@@ -489,16 +499,19 @@ The checker has FFI-specific handling in a few narrow places:
   list carries `_named_arg_order` and `_named_call_kind = "foreign"`; see
   [named-argument internals](named-arguments.md).
 * `Ast.ExpVar` rejects foreign functions as Titan first-class values, but allows
-  a foreign function name in a context whose target is a compatible C function
-  pointer type. The node records `_foreign_function_pointer` so codegen can emit
-  a C cast of the bare function name.
-  The reverse conversion also rejects a Titan function type with an input
-  `varargtype`, more than one fixed result, or a flexible `flexrettype`: none of
-  those native Titan calling-convention pieces has a compatible C function
-  pointer signature.
+  a foreign function name in a context whose target is an exactly compatible C
+  function pointer type. The checker compares the target pointee directly with
+  the authoritative `CFunction`, retaining typedefs, qualifiers, ABI,
+  prototype style, and C `...`; it never reconstructs a C signature from a
+  `Type.Function`. The node records `_foreign_function_pointer` so codegen can
+  emit a C cast of the bare function name. Titan-to-C callback adaptation
+  remains unsupported.
 * `checkforin` treats generic-for iterator and close slots as C function-pointer
-  contexts when a foreign function name appears there, then records
-  `_c_pointer_call` on the synthesized calls.
+  contexts when a foreign function name appears there. It decays the exact
+  declaration into the hidden tuple slot, while an already-materialized pointer
+  retains its own pointer/typedef type. Both use the neutral C signature view,
+  and their synthesized calls record the authoritative `CFunction` in
+  `_c_pointer_call`.
 * `trycoerce` and explicit casts recognize mutable address coercion only for
   local/formal C variables. The checker marks those declarations as assigned and
   rejects later capture, so generated C cannot take the address of a boxed
@@ -619,8 +632,11 @@ pointer.
 
 ### Calls And Variables
 
-`codeforeigncall` emits a direct C call of the bare C name. The Titan foreign
-module name is gone by codegen time. Fixed and C-vararg arguments both flow
+`codeforeigncall` requires the callee annotation itself to be the authoritative
+`Type.CFunction` and emits a direct C call of the bare C name. It has no
+`Type.Function` fallback; closure tags, brands, strict relays, and adjustment
+wrappers are therefore unreachable from this path. The Titan foreign module
+name is gone by codegen time. Fixed and C-vararg arguments both flow
 through `codeforeignexp`, so Titan strings become `getstr(TString*)`, owned C
 objects decay to payload pointers when the target is a C pointer, and most
 `value` arguments consume their checker-attached plan when the target C type
@@ -867,7 +883,8 @@ evaluated right-hand side.
 Source-written `owned *T` and `owned T[]` lower to the same
 `COwned(T, false)` and `COwned(T, true)` values already inferred from `.new()`
 and `.new_array(count)`. The pseudo-functions remain checker-only declarations
-(`Type.CPseudoNew`) generated when a type namespace is accessed.
+(`Checker.CPseudoNew`) generated when a type namespace is accessed; their
+narrow call descriptors are not `Type.Function` values.
 `codecpseudonew` allocates Lua userdata directly:
 
 ```c

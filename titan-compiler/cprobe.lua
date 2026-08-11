@@ -317,13 +317,6 @@ local function render_baseline_source(module_context)
     return table.concat(lines, "\n")
 end
 
-local function probe_declaration_type(typ)
-    if typ and typ._tag == "Type.Function" and typ._c_function then
-        return typ._c_function
-    end
-    return typ
-end
-
 local function declaration_qualifiers(declaration)
     if type(declaration) ~= "table" then return nil end
     return declaration.qualifiers
@@ -340,8 +333,6 @@ end
 
 local function render_declaration_compatibility_pair(
         left_type, right_type, left_declaration, right_declaration, name)
-    left_type = probe_declaration_type(left_type)
-    right_type = probe_declaration_type(right_type)
     if not left_type or not right_type then
         error("C declaration compatibility probe requires two types", 2)
     end
