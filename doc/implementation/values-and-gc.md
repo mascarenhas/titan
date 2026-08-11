@@ -670,11 +670,12 @@ for its inputs.
 * **Native returns.** The callee returns its first fixed result in C and writes
   later results through out-parameters without rooting them. Merely returning
   cannot run the collector, although the callee may have relocated the Lua
-  stack. The caller therefore rebases first and then publishes **every live
-  GC-bearing native result immediately** into its caller-owned result slot,
-  before projection or later conversion. This publication is required even for
-  an identity conversion; a transitive callee's allocation root lies above its
-  restored caller top and no longer owns the handoff. A freshly allocated
+  stack. The caller therefore rebases first, performs any nonallocating
+  raw-to-visible projection, and then publishes **every live GC-bearing native
+  result immediately** into its caller-owned result slot before any later
+  allocating work. This publication is required even for an identity
+  conversion; a transitive callee's allocation root lies above its restored
+  caller top and no longer owns the handoff. A freshly allocated
   converted callable/Interface value separately gets its own allocation root.
   For `two(): integer, string`, lowering schematically separates raw ABI holders
   from the visible projection and roots the live string immediately after

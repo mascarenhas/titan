@@ -601,15 +601,16 @@ CCACHE_DISABLE=1 "$PREFIX/bin/luarocks" make
 
    - Allocate a formal-indexed `actuals` array and an empty mapped-index set.
    - Iterate `_named_arg_order` in lexical order. For each formal index, fetch
-     exactly `node.args.args[formal_index]`, generate it once, materialize it
-     immediately into a typed temporary, store the resulting C expression in
+     exactly `node.args.args[formal_index]`, generate it once, freeze it
+     immediately into an untraced typed C temporary, store that C expression in
      `actuals[formal_index]`, and mark the index mapped.
-   - Iterate formal indexes only after all explicit fields have been
-     materialized. Every unmapped dense argument is, by checker invariant, a
-     synthetic nil fill; generate it into its formal slot without revisiting a
-     supplied expression.
-   - Retain the existing GC stack-slot anchoring from `materialize_code` for
-     strings, records, tables, function values, and options.
+   - Iterate formal indexes only after all explicit fields have been frozen.
+     Every unmapped dense argument is, by checker invariant, a synthetic nil
+     fill; generate it into its formal slot without revisiting a supplied
+     expression.
+   - Native inputs borrow their existing allocation/result/semantic/VM
+     provenance. Do not create tracing-only argument slots; retain separate
+     immediate roots only for fresh allocations and native GC results.
    - Assemble the native C operand list strictly as
      `actuals[1], ..., actuals[n]`.
 
@@ -617,9 +618,10 @@ CCACHE_DISABLE=1 "$PREFIX/bin/luarocks" make
    exactly the checker-created omissions. This separates lexical evaluation
    order from formal call order without relying on C argument evaluation order.
 
-3. In method calls, retain the current order: materialize/unwrap the receiver
-   once (`coder.lua:3188-3212`) before evaluating named fields. Do not reevaluate
-   the receiver during metadata lookup or reordering.
+3. In method calls, retain the current order: evaluate/unwrap the receiver once
+   and freeze it only in C before evaluating named fields. Do not publish a
+   receiver root or reevaluate the receiver during metadata lookup or
+   reordering.
 
 4. Teach `codeforeigncall` the corresponding mapping rather than routing C calls
    through Titan materialization:
@@ -1058,9 +1060,10 @@ The feature is complete when all of the following are true:
 - **FFI reordering drops conversions or post-call rooting.** Drive
   `codeforeignexp` and `mutable_out_anchor` from lexical order, retain them by
   formal index, and prove mutable-address behavior with a C fixture.
-- **GC values die in reordered temporaries.** Use the existing typed
-  `materialize_code`/stack-slot anchoring path and add collection-pressure
-  runtime coverage.
+- **Reordering loses native-input provenance.** Freeze values only in typed C
+  temporaries while borrowing their existing allocation/result/semantic/VM
+  provenance; add structural no-input-store assertions plus collection-pressure
+  runtime coverage for real allocation and result roots.
 - **Record omission bypasses privacy.** Reject every outside-module construction
   of a record with any local field before filling; inside the declaring module,
   deliberately apply filling to local and public fields alike.

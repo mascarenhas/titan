@@ -105,9 +105,10 @@ Generated-C assertions now pin every boundary in the inventory:
 - exact first-class calls use C values while strict/Lua branches push complete
   VM frames;
 - static and forwarded input-vararg descriptors contain no tracing-only element
-  stores;
+  stores, including conditional callable fallbacks in both open builders;
 - Interface and bound-method construction have no preliminary source/receiver
-  root, while the fresh wrapper/closure is published immediately;
+  root, while each fresh wrapper/closure—including every element of an open
+  Interface run—is published immediately;
 - callable adapters have empty input-source stores and publish identity fixed and
   open GC results immediately after the source call and rebase; and
 - deterministic finalizer coverage distinguishes initial allocation and
@@ -117,11 +118,11 @@ Local validation from the repository root with the isolated
 `/tmp/titan-mascarenhas-callable-adjustment` prefix:
 
 - `luac -p` on all changed Lua files and `git diff --check`;
-- eight focused checker/coder files: **388 successes**;
-- `spec/support/ci_test_groups.sh compiler` with LuaCov: **2,596 tests** across
+- eight focused checker/coder files: **390 successes**;
+- `spec/support/ci_test_groups.sh compiler` with LuaCov: **2,597 tests** across
   the main, unit, and isolated compiler groups;
 - `make titan-stdlib-test`: **186 native tests**; and
-- canonical `make test`: **2,710 Busted successes**, followed by **186 native
+- canonical `make test`: **2,712 Busted successes**, followed by **186 native
   tests**, with zero failures/errors.
 
 Manual macOS CI remains waived for this PR; the required fresh Linux graph runs

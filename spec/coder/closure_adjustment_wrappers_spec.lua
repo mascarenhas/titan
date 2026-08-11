@@ -250,6 +250,76 @@ describe("closure adjustment wrappers (end-to-end)", function()
             and root_loop < root and root < projection)
     end)
 
+    it("roots only fresh wrappers in both open native-input builders",
+    function()
+        local source = [[
+            local type Source = (integer) -> integer
+            local type Target = (integer, value) -> value
+
+            local function first(...: Target): Target
+                return ...[1]
+            end
+
+            function forwarded(...: Source): Target
+                return first(...)
+            end
+
+            function forwarded_value(...: Source): Target
+                local consumer: (...: Target) -> Target = first
+                return consumer(...)
+            end
+        ]]
+        local function native_body(csrc, name)
+            local signature = "TValue test_" .. name .. "_titan("
+            local declaration = assert(csrc:find(signature, 1, true))
+            local first = assert(csrc:find(
+                signature, declaration + 1, true))
+            local last = assert(csrc:find(
+                "static int test_" .. name .. "_titanentry_lua",
+                first, true))
+            return csrc:sub(first, last - 1)
+        end
+        local function tracing_payload_copy(body, marker_)
+            for line in body:gmatch("[^\n]+") do
+                if line:find(marker_, 1, true)
+                   and line:find("setobj2t(L", 1, true) then
+                    return line
+                end
+            end
+            return nil
+        end
+        local function assert_conditional_root_only(body, marker_)
+            local allocation = assert(body:find(
+                "luaF_newCclosure(L, _ca_nup + 1);", 1, true))
+            local root = assert(body:find(
+                "setclCvalue(L, s2v(", allocation, true))
+            assert.truthy(body:find(marker_, 1, true), body)
+            assert.is_nil(tracing_payload_copy(body, marker_), body)
+            assert.is_true(allocation < root)
+        end
+
+        -- The ordinary checked tree uses the shared adjusted-open builder.
+        local tree = checked(source)
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_VER)
+        assert_conditional_root_only(
+            native_body(csrc, "forwarded"), "_open_vargs_")
+
+        -- Pin the older case-3 template directly as a separate lowering unit:
+        -- preserve the checker-frozen per-open plan while bypassing the newer
+        -- aggregate expression-list route that normally owns this source form.
+        local legacy_tree = checked(source)
+        local func = find_function(legacy_tree, "forwarded_value")
+        local call = func.block.stats[2].exps[1]
+        assert.are.equal("Ast.ExpCall", call._tag)
+        assert.truthy(call._arg_adjustment.open_source)
+        assert.truthy(call._open_args)
+        call._arg_adjustment = nil
+        local legacy_csrc = coder.generate(
+            "test", legacy_tree, {}, driver.TITAN_VER)
+        assert_conditional_root_only(
+            native_body(legacy_csrc, "forwarded_value"), "_varg_")
+    end)
+
     it("allocates and initializes wrapper CClosures without API stack assembly",
     function()
         local tree = checked(FIXED_SOURCE)

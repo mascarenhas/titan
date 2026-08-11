@@ -406,12 +406,13 @@ and after every native call, even when the call had no input slots.
 
 Native fixed results initially occupy raw ABI C holders. Returning cannot run
 the collector, but a transitive callee's allocation root is above the restored
-caller top. After rebasing, the caller therefore publishes every live
-GC-bearing fixed source result immediately into its result root, including an
-identity result, before projection or conversion. An ordinary open GC-bearing
-result similarly copies its complete live prefix into a parallel traced range
-until its sink consumes it. Callable and Interface adapters use the same source
-rule; they add destination roots only for freshly allocated converted wrappers.
+caller top. After rebasing, the caller performs any nonallocating raw-to-visible
+projection and immediately publishes every live GC-bearing fixed source result
+into its result root, including an identity result, before any later allocating
+work. An ordinary open GC-bearing result similarly copies its complete live
+prefix into a parallel traced range before conversion and until its sink
+consumes it. Callable and Interface adapters use the same source rule; they add
+destination roots only in branches that freshly allocate converted wrappers.
 `TitanVargX` descriptors and raw C arrays never become roots.
 
 The Lua-stack and branded-strict slow paths are intentionally different: they
@@ -420,7 +421,6 @@ Lua VM calling convention itself. Native callable/Interface adapters have an
 empty input-source root inventory; they do not mistake those VM transport slots
 or native C inputs for call-activation roots.
 
-### Named direct calls and lexical evaluation order
 ### Named direct calls and lexical evaluation order
 
 The checker has already normalized an eligible named call to a dense
@@ -566,9 +566,10 @@ positions as offsets, and recomputes `_base = restorestack(L, _base_off)` after
 every branch. Before branch selection the callee and arguments are only stable C
 values; the exact Titan branch passes them directly. The branded-strict and Lua
 branches push those same values because the pushed slots are their real VM call
-frame. After the branch joins, every live GC-bearing native result has already
-been published into its caller result slot/range; generic results remain rooted
-in VM slots until conversion copies them into the same destinations.
+frame. Native open runs are published before the branch joins; immediately after
+convergence, each live fixed native result is projected and published into its
+caller result slot. Generic results remain rooted in VM slots through conversion
+and are then copied into the same caller destinations.
 
 ### The two Lua-stack entries
 

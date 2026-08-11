@@ -140,28 +140,30 @@ Obligation is **enforcement, not widening**: `TITAN_VARARG_MAX = 200` [OWNER §8
 `LIST_LIMIT = 100` is a parse-time guardrail only, not a runtime bound. (`start` is also bounded
 by `n_args ≤ 200`, but it travels as an `int` parameter, so its arithmetic never wraps.)
 
-### 2.D Case-3 `Udata0` anchors only itself; elements ride upstream anchors — [OWNER]
+### 2.D Case-3 `Udata0` anchors only itself; elements borrow upstream provenance — [OWNER]
 
 `traverseudata` (`lgc.c:631-638`) marks only `metatable` + `uv[0..nuvalue-1]`, never
 `getudatamem`; a `Udata0` has `nuvalue == 0`, so its payload is invisible to the GC. Invariant:
 
-> Every collectable element reachable through any vararg struct is independently anchored on a
-> live Lua-stack slot for the struct's lifetime; the struct object anchors only its own storage.
+> Every collectable element reachable through a vararg struct remains reachable through its
+> existing allocation, result, semantic, or VM provenance for the struct's lifetime; the struct
+> object anchors only its own storage.
 
-This holds without per-element re-materialization, by LIFO stack discipline:
-- **Pass-through elements** (from the incoming `...`) stay alive via the **original caller's**
-  stack anchors — anchored when the current function was entered (native: the caller anchors GC
-  args, `coder.lua:1429-1435`; generic entry: they *are* the Lua-stack arg slots), and those
-  slots sit below every nested frame and persist through the whole call chain.
-- **Newly-introduced static-prefix elements** (prepended in a case-3 forward) are ordinary
-  arguments the current function passes; the normal "caller anchors GC args" path anchors them.
-- The `Udata0` is stack-anchored so its **buffer** survives a GC during the copy/call. No
-  `__gc`, no metatable, no `uv[]` backing.
+This requires no per-element input publication:
+- **Pass-through elements** from an incoming native `...` borrow the same upstream provenance as
+  the current function's other native inputs; a genuine Lua/generic entry instead already has
+  real VM argument slots.
+- **Newly introduced static-prefix elements** retain the root installed by a fresh allocation or
+  native-result handoff, or an established semantic home. Lexical C freezes and the raw payload
+  do not become roots.
+- The fresh `Udata0` is immediately stack-rooted so its **buffer** survives a GC during the
+  copy/call. It has no `__gc`, metatable, or `uv[]` backing.
 
-Case-3 ordering: ensure all collectable sources are anchored (pass-throughs already are; new
-statics via the normal path) → allocate the `Udata0` (may GC; sources survive) → anchor it →
-copy → call, keeping anchors live across the call. Never drop a source anchor on the theory that
-the `Udata0` covers it — its payload is untraced.
+Case-3 ordering is therefore: evaluate C values while borrowing their upstream provenance →
+allocate the `Udata0` (sources remain reachable) → root it immediately → copy → call. A
+conditional callable conversion writes a separate destination root only when it actually
+allocates a wrapper; its identity fallback stays C-only. The no-copy model intentionally does
+not preserve a raw C formal after the program destroys that value's sole traced provenance.
 
 ### 2.E `return ...` is adjust-up into fixed return arity
 

@@ -5347,8 +5347,9 @@ function coder._emit_interface_adapter_results(
         elseif action.kind == "hide_result"
                or action.kind == "hide_flex"
                or action.kind == "end_flex" then
-            -- Concrete results were evaluated by the call and remain rooted
-            -- for their frozen source lifetime; hidden/end actions publish none.
+            -- Concrete results were evaluated by the call, but these actions
+            -- do not make them live at the target boundary. They publish no
+            -- source or destination root and perform no later allocating work.
         else
             error(use .. " has unsupported result action "
                 .. tostring(action.kind))
@@ -5639,12 +5640,21 @@ end
 -- ordinary traced home (or immediate allocation/result root) remains live while
 -- the fresh wrapper allocation establishes its own root.
 function coder._code_interface_wrapper(
-        ctx, conversion, source_stats, source_exp)
+        ctx, conversion, source_stats, source_exp, result_root)
     local pair = coder._interface_pair(ctx, conversion)
     local frozen_stats, concrete_value = coder._freeze_code(
         ctx, conversion.concrete_type, source_stats, source_exp)
-    local wrapper_decl, wrapper, wrapper_slot =
-        newtmp(ctx, conversion.interface_type, true)
+    local wrapper_decl, wrapper, wrapper_slot
+    if result_root then
+        assert(type(result_root) == "string",
+            "Interface allocation root is not a C expression")
+        wrapper_decl, wrapper =
+            newtmp(ctx, conversion.interface_type, false)
+        wrapper_slot = result_root
+    else
+        wrapper_decl, wrapper, wrapper_slot =
+            newtmp(ctx, conversion.interface_type, true)
+    end
     local metatable_slot =
         type2metatable(ctx, conversion.interface_type)
     local concrete_module =
@@ -5690,6 +5700,9 @@ end
 function coder._code_interface_conversion(ctx, node)
     local conversion = assert(node._interface_conversion,
         "Interface cast is missing its checker conversion")
+    local result_root = node._allocation_result_root
+    assert(result_root == nil or type(result_root) == "string",
+        "Interface conversion allocation root is not a C expression")
     assert(conversion.source and conversion.target
            and types.equals(conversion.source, node.exp._type)
            and types.equals(conversion.target, node._type),
@@ -5701,7 +5714,7 @@ function coder._code_interface_conversion(ctx, node)
             "scalar Interface wrapper has optional endpoints")
         local source_stats, source_exp = codeexp(ctx, node.exp)
         return coder._code_interface_wrapper(
-            ctx, conversion, source_stats, source_exp)
+            ctx, conversion, source_stats, source_exp, result_root)
     end
 
     assert(conversion.option == "option_map"
@@ -5717,7 +5730,7 @@ function coder._code_interface_conversion(ctx, node)
         local source_stats, source_exp = codeexp(ctx, node.exp)
         local wrapper_stats, wrapper =
             coder._code_interface_wrapper(
-                ctx, conversion, source_stats, source_exp)
+                ctx, conversion, source_stats, source_exp, result_root)
         local result_decl, result = newtmp(ctx, node._type)
         return render([[
             $WRAPPER_STATS
@@ -5737,7 +5750,7 @@ function coder._code_interface_conversion(ctx, node)
         newtmp(ctx, conversion.concrete_type)
     local wrapper_stats, wrapper =
         coder._code_interface_wrapper(
-            ctx, conversion, "", concrete)
+            ctx, conversion, "", concrete, result_root)
     local result_decl, result = newtmp(ctx, node._type)
     local nil_arm
     local present_store
@@ -8839,8 +8852,9 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             table.insert(caexps, tail_start)
         else
             -- CASE 3 (fresh copy): k > m (the static prefix grows the tail) OR the
-            -- element representation differs (ctype(ef) != ctype(eg), each element
-            -- converted). Build a fresh Udata0 backing struct of element type eg
+            -- element type differs and each element requires conversion (including
+            -- same-C-representation callable views). Build a fresh Udata0 backing
+            -- struct of element type eg
             -- holding [ surplus static args (only when k > m), then each current
             -- `...` element converted to eg ], sized at RUNTIME, cap-checked
             -- against TITAN_VARARG_MAX, anchored per §2.D, and passed with
@@ -8888,6 +8902,9 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             -- standard coercion: identical ctype -> raw copy; integer->value (and
             -- other gradual `value` widenings) -> setwrapped into a TValue;
             -- value->integer (and similar narrowings) -> checkandget runtime check.
+            -- An allocating conversion receives a distinct destination slot for
+            -- each element and publishes it only in the branch that actually
+            -- creates the fresh object; an identity fallback remains C-only.
             local convbody
             if same_representation then
                 convbody = render("$VNAME->args[$NPREFIX + _vj] = $SRC;", {
@@ -8918,13 +8935,10 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                 convbody = render([[
                     $CONVSTATS
                     $DST = $CONVEXP;
-                    $ROOT
                 ]], {
                     CONVSTATS = convstats,
                     DST = dst,
                     CONVEXP = convexp,
-                    ROOT = result_root
-                        and setslot(eg, result_root, dst) or "",
                 })
             end
             table.insert(castats, render([[
@@ -9310,6 +9324,7 @@ function coder._code_adjustment_value(
         _implicit_coercion = true,
         _adjustment = adjustment,
         _interface_conversion = adjustment.interface_conversion,
+        _allocation_result_root = result_root,
     }
     local convstats, convexp = codeexp(ctx, synthcast)
     return render([[
@@ -9445,9 +9460,11 @@ function coder._codeadjustedopen(
 end
 
 -- Materialize an adjusted scalar-prefix + dynamic run as one input-variadic
--- descriptor. Native inputs remain C values; an open conversion that allocates
--- a fresh callable wrapper establishes that allocation's immediate traced root.
--- The descriptor backing itself is an untraced caller-scoped C array.
+-- descriptor. Native inputs remain C values; each open conversion that actually
+-- allocates a fresh callable/Interface wrapper establishes that allocation's
+-- immediate element-specific traced root. A conditional identity fallback does
+-- not publish the source there. The descriptor backing is an untraced caller C
+-- array.
 function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
                                         run, stats, callargs)
     local elem = assert(callee_ftype.varargtype)
@@ -9466,12 +9483,6 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
         .. stackslotat(root_depth) .. " + " .. runindex .. ")") or nil
     local convstats, convexp = coder._convert_result_run_element(
         ctx, run, elem, "_vai", node.loc, result_root)
-    local function root(index)
-        if not root_depth then return "" end
-        return setslot(elem,
-            "s2v(" .. stackslotat(root_depth) .. " + " .. index .. ")",
-            argsname .. "[" .. index .. "]")
-    end
     local prefixsets = {}
     for i, name in ipairs(tailnames) do
         local index = c_integer_literal(i - 1)
@@ -9495,7 +9506,6 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
         for (int _vai = 0; _vai < $RUNCOUNT; _vai++) {
             $CONVSTATS
             $ARGS[$NPREFIX + _vai] = $VALUE;
-            $RUNROOT
         }
         $STRUCT $DESC = { (lu_byte)$COUNT, $ARGS };
     ]], {
@@ -9510,7 +9520,6 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
         PREFIXSETS = table.concat(prefixsets, "\n"),
         CONVSTATS = convstats,
         VALUE = convexp,
-        RUNROOT = root(runindex),
         STRUCT = varg_struct_name(elem),
         DESC = descname,
     }))

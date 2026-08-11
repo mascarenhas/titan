@@ -575,7 +575,9 @@ convention's no-copy input rule.
   receivers, first-class callees, and static/open variadic elements now use
   untraced C freezes only when lexical order requires them. Interface and bound
   closure construction likewise avoid preliminary source/receiver roots;
-  genuine Lua and branded-strict calls still push complete VM call frames.
+  conditional open callable fallbacks publish only a freshly allocated wrapper,
+  never the unchanged source. Genuine Lua and branded-strict calls still push
+  complete VM call frames.
 * **Immediate ownership handoff.** Fresh allocations retain their immediate
   initial roots, and every live GC-bearing fixed/open native result—including
   identity results inside callable/Interface adapters—is rooted immediately

@@ -853,6 +853,88 @@ describe("interfaces (end-to-end)", function()
         assert.truthy(called, callerr)
     end)
 
+    it("roots only freshly allocated Interfaces in an open input run",
+    function()
+        local source = [[
+            interface View
+                function get(): integer
+            end
+
+            record Item
+                n: integer
+            end
+
+            function Item:get(): integer
+                return self.n
+            end
+
+            local function consume(...: View): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do
+                    junk = { k, k + 1 }
+                    k = k + 1
+                end
+                local total = 0
+                local i = 1
+                while i <= #... do
+                    local view: View = ...[i]
+                    total = total + view:get()
+                    i = i + 1
+                end
+                return total
+            end
+
+            local function produce(): (...: Item)
+                return Item.new(10), Item.new(20), Item.new(30)
+            end
+
+            function open_interfaces(): integer
+                return consume(produce())
+            end
+        ]]
+        local csrc = h.compile_and_read_c(source)
+        local signature =
+            "lua_Integer test_open_interfaces_titan("
+        local declaration = assert(csrc:find(signature, 1, true))
+        local first = assert(csrc:find(
+            signature, declaration + 1, true))
+        local last = assert(csrc:find(
+            "static int test_open_interfaces_titanentry_lua",
+            first, true))
+        local body = csrc:sub(first, last - 1)
+        local allocation = assert(body:find(
+            "= luaS_newudata(", 1, true))
+        local rebase = assert(body:find(
+            "_base = restorestack(L, _base_off);", allocation, true))
+        local root = assert(body:find(
+            "setuvalue(L, s2v(", rebase, true))
+        local root_line = body:sub(root, assert(body:find("\n", root)) - 1)
+        assert.truthy(root_line:find("_vai", 1, true), root_line)
+        assert.is_true(allocation < rebase and rebase < root)
+        for line in body:gmatch("[^\n]+") do
+            assert.is_false(
+                line:find("_open_vargs_", 1, true) ~= nil
+                and line:find("setuvalue(L, s2v(", 1, true) ~= nil,
+                line)
+        end
+
+        local called, callerr = h.call("test", [[
+            for _, mode in ipairs({"incremental", "generational"}) do
+                collectgarbage(mode)
+                for i = 1, 30 do
+                    assert(test.open_interfaces() == 60)
+                    if i % 5 == 0 then
+                        collectgarbage("collect")
+                    else
+                        collectgarbage("step")
+                    end
+                end
+            end
+        ]])
+        assert.truthy(called, callerr)
+    end)
+
     it("emits no native input roots while resolving adapter identities",
     function()
         local source = [[

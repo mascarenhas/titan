@@ -538,9 +538,10 @@ tag **folds in the vararg element** because the full callable shape
 distinguishes `...: integer` from `...: value`. So:
 
 Before dispatch, a statically known non-exact callable cast may conditionally
-construct a fresh target-tagged wrapper. It evaluates/anchors the source once,
-requires an exact branded source tag and one free upvalue, and otherwise leaves
-the carrier unchanged.
+construct a fresh target-tagged wrapper. It freezes the source once in C while
+borrowing its existing traced provenance, requires an exact branded source tag
+and one free upvalue, and otherwise leaves the carrier unchanged. Only the fresh
+wrapper branch writes the reserved allocation root.
 
 * **Tag matches the static type** → the **native fast path**: build the struct
   (the same `emit_vararg_struct` cases 1–3, including a forwarded `...`) and
