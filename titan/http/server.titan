@@ -293,12 +293,11 @@ local function read_request_with_idle_timeout(
   local timeout = server.idle_timeout_ms
   if timeout == 0 then return read_request(parser, encrypted) end
 
-  local reader = async.run(function (): value
+  local reader = async.run(function (): Request?
     return read_request(parser, encrypted)
   end)
-  local deadline = async.run(function (): value
+  local deadline = async.run(function (): ()
     timer.sleep(timeout)
-    return nil
   end)
   local raced = async.race_two(reader, deadline)
   case raced
@@ -406,9 +405,8 @@ function Server:serve()
     end
     local connection = accepted as io.ReaderWriterCloser
     local server = self
-    async.run(function (): value
+    async.run(function (): ()
       serve_connection(connection, server)
-      return nil
     end)
   end
 end

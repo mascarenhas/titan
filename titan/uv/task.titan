@@ -638,15 +638,14 @@ local function CleanupStepCall:dispatch(task: Task): Immediate?
   return nil
 end
 
-local function cleanup_runtime(runtime: Runtime): value
+local function cleanup_runtime(runtime: Runtime)
   while await(Call.cleanup_step(CleanupStepCall.new())) as boolean do end
-  return nil
 end
 
 local function begin_shutdown(runtime: Runtime)
   runtime.closing = true
-  local root = coroutine.create(function (_arg: value): value
-    return cleanup_runtime(runtime)
+  local root = coroutine.create(function (_arg: value): ()
+    cleanup_runtime(runtime)
   end, UV_TAG)
   local task = Task.new(root, runtime, TaskStatus.ready(),
                         nil, nil, nil, 0, true, {}, false, false, true)
