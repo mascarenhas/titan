@@ -565,3 +565,23 @@ artifact identity.
   nested generated artifacts clean correctly, the delayed-FS variant patches
   an isolated folder copy, and bundled/system modes still produce one
   canonical `titan/uv.so`.
+
+## 2026-08-11 — native fast-call GC provenance correction
+
+Reconciled the compiler and implementation manuals with the native calling
+convention's no-copy input rule.
+
+* **C-only native inputs.** Positional/named arguments, method and Interface
+  receivers, first-class callees, and static/open variadic elements now use
+  untraced C freezes only when lexical order requires them. Interface and bound
+  closure construction likewise avoid preliminary source/receiver roots;
+  genuine Lua and branded-strict calls still push complete VM call frames.
+* **Immediate ownership handoff.** Fresh allocations retain their immediate
+  initial roots, and every live GC-bearing fixed/open native result—including
+  identity results inside callable/Interface adapters—is rooted immediately
+  after return and rebasing. Raw descriptors and C buffers remain non-roots.
+* **Documentation and evidence.** Updated the checker, code-generation, GC,
+  Interface, flexible/variadic, named-call, closure-wrapper, coroutine, and AST
+  chapters. Generated-C assertions cover every input form and distinguish real
+  VM/upvalue transport from tracing copies; the complete local suite passes
+  without an ABI change (still 0.22).

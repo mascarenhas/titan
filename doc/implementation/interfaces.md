@@ -156,9 +156,9 @@ method invocation backend. The shared callable operations are limited to:
 
 The checker explicitly rejects a nested concrete-to-Interface conversion in
 this graph. The Interface adapter records a minimal fixed/open root inventory:
-incoming native roots are borrowed, fresh nested callable destinations get
-immediate roots, and native source results are rooted only across a later
-allocating/relocating result action. Its rebase ledger includes only operations
+native input-source inventories are empty, fresh nested callable destinations
+get immediate roots, and every live GC-bearing fixed/open native source result
+is rooted immediately after return. Its rebase ledger includes only operations
 that can really move the stack plus the concrete native call; nested callable
 allocation is not a rebase point. The coder validates both closed records and
 their dense lists, rechecks types and action sequence against the two method
@@ -212,15 +212,15 @@ This happens on both module-initialization branches and before a user module
 initializer can construct a wrapper. Each wrapper copies the complete array
 with `memcpy`; pair arrays and wrappers are not interned.
 
-Wrapper construction evaluates the concrete value exactly once into a traced
-source home, resolves its concrete-owner module, obtains the Interface
-metatable from the emitting module's cache, and allocates the full userdata with
-`luaS_newudata`. This existing path conservatively treats that allocation as a
-stack-rebase point: it saves `_base_off`, restores `_base` immediately after the
-call, and publishes the new Udata to its own root before any later allocation or
-traced-edge publication. Lua's collector does not move heap objects, but saved
-offsets keep the source and destination roots valid if the stack array moves. It
-then:
+Wrapper construction evaluates the concrete value exactly once into an untraced
+C temporary, relying on its ordinary allocation/result/semantic/VM provenance.
+It resolves the concrete-owner module, obtains the Interface metatable from the
+emitting module's cache, and allocates the full userdata with `luaS_newudata`.
+This path conservatively treats that allocation as a stack-rebase point: it
+saves `_base_off`, restores `_base` immediately after the call, and publishes
+the new Udata to its own initial root before any later allocation or traced-edge
+publication. Lua's collector does not move heap objects, while saved offsets
+keep the destination root address valid if the stack array moves. It then:
 
 1. installs the Interface metatable;
 2. stores the concrete module in user value 0 and applies the Udata barrier;
@@ -265,16 +265,15 @@ concrete result. The translation unit that emits the adapter is irrelevant to
 engine; only this known-method invocation differs.
 
 Open input and result runs use the existing typed descriptor ABI and the
-`TITAN_VARARG_MAX` bound. Raw descriptors and C buffers are never roots. The
-native caller already owns dedicated activation roots for every incoming
-GC-bearing fixed/static argument, while forwarded open values retain their
-upstream activation roots, so the adapter freezes C values without duplicating
-those roots. Converted argument
-or result destinations receive fixed/range roots only when an action allocates
-a fresh nested wrapper; native concrete source results receive roots only when
-a later result action can allocate or relocate the stack. A general open
-conversion outside this graph applies the same immediate-root rule to a newly
-allocated Interface value.
+`TITAN_VARARG_MAX` bound. Raw descriptors and C buffers are never roots. Native
+fixed/static arguments and forwarded open values stay in C and borrow their
+existing allocation/result/semantic/VM provenance; the adapter creates no input
+source roots. Converted argument or result destinations receive fixed/range
+roots only when an action allocates a fresh nested wrapper. After the concrete
+native call and rebase, every live GC-bearing fixed/open concrete source result
+is rooted immediately, even for identity conversion. A general open conversion
+outside this graph applies the same immediate-root rule to a newly allocated
+Interface value.
 
 If the shared frozen graph can allocate a nested callable view, the synthesized
 native adapter polls the collector at entry before reserving stack space or
@@ -299,9 +298,9 @@ concrete owner.
 
 ### Direct Titan method calls
 
-For `wrapper:method(...)`, generated code evaluates the wrapper once and
-publishes it into a dedicated caller-owned activation root before later argument
-effects. It checks that
+For `wrapper:method(...)`, generated code evaluates the wrapper once into an
+untraced C temporary before later argument effects. It creates no native input
+root. It checks that
 the payload contains exactly the Interface's method count, loads the
 declaration-order slot, casts it to the method signature, and calls it with:
 
@@ -477,10 +476,10 @@ The wrapper, concrete module, and concrete value use stock Lua reachability.
 The two user values are strong traced edges with ordinary backward barriers;
 the opaque vtable is untraced native data. Every new Interface Udata receives
 its own immediate root, and bound closures strongly retain the wrapper through
-upvalue 4. Native adapters borrow caller-owned input roots, root newly allocated converted
-objects individually, and retain native source results only across a later
-allocating/relocating conversion. Raw descriptors/C arrays and allocation-free
-runs never become roots.
+upvalue 4. Native adapters keep inputs in C, root newly allocated converted
+objects individually, and root every live GC-bearing fixed/open native source
+result immediately after return. Raw descriptors/C arrays and allocation-free
+input/destination runs never become roots.
 
 All type mismatches raise through the ordinary Titan/Lua error path. Wrapper
 allocation can fail before publication without leaving external native

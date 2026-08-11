@@ -167,6 +167,89 @@ describe("closure adjustment wrappers (end-to-end)", function()
         ]])
     end)
 
+    it("roots an identity GC result immediately without native input copies",
+    function()
+        local tree = checked([[
+            local function actual(x: integer): string
+                return "ok"
+            end
+
+            function view(): (integer, value) -> string
+                local adjusted: (integer, value) -> string = actual
+                return adjusted
+            end
+        ]])
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_VER)
+        local signature =
+            "static TITAN_NOINLINE TString* test_callable_adapter_0("
+        local declaration = assert(csrc:find(signature, 1, true))
+        local first = assert(csrc:find(
+            signature, declaration + 1, true))
+        local last = assert(csrc:find(
+            "static int test_callable_adapter_0_titanentry_strict",
+            first, true))
+        local body = csrc:sub(first, last - 1)
+        local call = assert(body:find(
+            "_ia_concrete_result_1 = _ia_source_fp(", 1, true))
+        local before = body:sub(1, call - 1)
+        assert.falsy(before:find(
+            "setobj2t(L, s2v((restorestack(L, _base_off)",
+            1, true), before)
+        assert.falsy(before:find(
+            "setsvalue(L, s2v((restorestack(L, _base_off)",
+            1, true), before)
+        local rebase = assert(body:find(
+            "_base = restorestack(L, _base_off);", call, true))
+        local root = assert(body:find(
+            "setsvalue(L, s2v((restorestack(L, _base_off)",
+            rebase, true))
+        local convert = assert(body:find(
+            "_ia_interface_result_1 = _ia_concrete_result_1;",
+            root, true))
+        assert.is_true(call < rebase and rebase < root and root < convert)
+    end)
+
+    it("roots an identity flexible GC run before adapter projection",
+    function()
+        local tree = checked([[
+            local function actual(x: integer): (...: string)
+                return "a", "b"
+            end
+
+            function view(): (integer, value) -> (...: string)
+                local adjusted:
+                    (integer, value) -> (...: string) = actual
+                return adjusted
+            end
+        ]])
+        local csrc = coder.generate("test", tree, {}, driver.TITAN_VER)
+        local signature =
+            "static TITAN_NOINLINE void test_callable_adapter_0("
+        local declaration = assert(csrc:find(signature, 1, true))
+        local first = assert(csrc:find(
+            signature, declaration + 1, true))
+        local last = assert(csrc:find(
+            "static int test_callable_adapter_0_titanentry_strict",
+            first, true))
+        local body = csrc:sub(first, last - 1)
+        local call = assert(body:find(
+            "_ia_source_fp(L, _ia_source_mod, _ia_source,", 1, true))
+        assert.falsy(body:sub(1, call - 1):find(
+            "setsvalue(L, s2v((restorestack(L, _base_off)",
+            1, true), body)
+        local rebase = assert(body:find(
+            "_base = restorestack(L, _base_off);", call, true))
+        local root_loop = assert(body:find(
+            "for (int _ia_root_i = 0;", rebase, true))
+        local root = assert(body:find(
+            "setsvalue(L, s2v((restorestack(L, _base_off)",
+            root_loop, true))
+        local projection = assert(body:find(
+            "int _ia_interface_fcount = 0;", root, true))
+        assert.is_true(call < rebase and rebase < root_loop
+            and root_loop < root and root < projection)
+    end)
+
     it("allocates and initializes wrapper CClosures without API stack assembly",
     function()
         local tree = checked(FIXED_SOURCE)

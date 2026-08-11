@@ -853,7 +853,7 @@ describe("interfaces (end-to-end)", function()
         assert.truthy(called, callerr)
     end)
 
-    it("uses caller-owned incoming GC roots while resolving adapter identities",
+    it("emits no native input roots while resolving adapter identities",
     function()
         local source = [[
             interface Item
@@ -916,7 +916,7 @@ describe("interfaces (end-to-end)", function()
             start, true))
         local body = csrc:sub(start, stop)
         local reserve = assert(csrc:find(
-            "titan_ensure_stack(L, 1);", start, true))
+            "titan_ensure_stack(L,", start, true))
         local identity = assert(csrc:find(
             '"Titan interface test.Item metatable"',
             reserve, true))
@@ -1065,6 +1065,47 @@ describe("interfaces (end-to-end)", function()
             assert(test.implements(test.Concrete.new()))
         ]])
         assert.truthy(called, callerr)
+    end)
+
+    it("keeps Interface sources in C and roots only the fresh wrapper",
+    function()
+        local csrc = h.compile_and_read_c([[
+            interface Item
+                function get(): integer
+            end
+
+            record Concrete
+                n: integer
+            end
+
+            function Concrete:get(): integer
+                return self.n
+            end
+
+            function wrap(value_: Concrete): Item
+                return value_
+            end
+        ]])
+        local declaration = assert(csrc:find(
+            "Udata* test_wrap_titan(", 1, true))
+        local first = assert(csrc:find(
+            "Udata* test_wrap_titan(", declaration + 1, true))
+        local last = assert(csrc:find(
+            "static int test_wrap_titanentry_lua", first, true))
+        local body = csrc:sub(first, last - 1)
+        local allocation = assert(body:find("luaS_newudata(", 1, true))
+        local before = body:sub(1, allocation - 1)
+        assert.matches(
+            "Udata%* _tmp_%d+ = 0;%s*_tmp_%d+ = _param_value_;",
+            before)
+        assert.falsy(before:find("setuvalue(L", 1, true), before)
+        local rebase = assert(body:find(
+            "_base = restorestack(L, _base_off);", allocation, true))
+        local root = assert(body:find(
+            "setuvalue(L, s2v((restorestack(L, _base_off)",
+            rebase, true))
+        local edge = assert(body:find("->uv[0].uv", root, true))
+        assert.is_true(allocation < rebase and rebase < root and root < edge)
     end)
 
     it("orders exact payloads, roots construction, and preserves fast tags",

@@ -2651,16 +2651,6 @@ local function adapter_operation_allocates(action)
         and action.operation.kind == "callable_view"
 end
 
-local function adapter_results_need_roots(actions)
-    for _, action in ipairs(actions) do
-        if action.operation and (action.operation.may_relocate
-                or adapter_operation_allocates(action)) then
-            return true
-        end
-    end
-    return false
-end
-
 local function adapter_has_open_source(actions)
     for _, action in ipairs(actions) do
         if action.operation and action.source_open then return true end
@@ -2697,7 +2687,6 @@ end
 
 local function adapter_fixed_result_source_roots(actions, lifetime)
     local roots = {}
-    if not adapter_results_need_roots(actions) then return roots end
     for _, action in ipairs(actions) do
         if action.operation and action.source_gc
            and not action.source_open then
@@ -2713,19 +2702,19 @@ local function adapter_fixed_result_source_roots(actions, lifetime)
 end
 
 local function adapter_rooting(source, target, actions, lifetimes, construction)
-    local results_need_roots = adapter_results_need_roots(actions.results)
     return {
         raw_descriptors_are_roots = false,
         raw_buffers_are_roots = false,
         construction = construction,
         fixed = {
-            -- Native callers already own every incoming argument root. Only a
-            -- fresh nested wrapper needs a new destination root.
+            -- Native inputs remain C arguments and acquire no tracing-only
+            -- source roots. Only a freshly allocated nested wrapper needs an
+            -- immediate destination root.
             argument_source = {},
             argument_destination = adapter_fixed_allocation_roots(
                 actions.arguments, lifetimes.argument_destination),
-            -- Native results need roots only when a later successful conversion
-            -- can allocate or relocate. Fresh converted wrappers root themselves.
+            -- Every live GC-bearing native result is rooted immediately after
+            -- return. Fresh converted wrappers separately root their allocation.
             result_source = adapter_fixed_result_source_roots(
                 actions.results, lifetimes.result_source),
             result_destination = adapter_fixed_allocation_roots(
@@ -2742,8 +2731,7 @@ local function adapter_rooting(source, target, actions, lifetimes, construction)
             result_source = adapter_root_range(
                 "result_source", "result", "source",
                 source.flexrettype, lifetimes.result_source,
-                results_need_roots
-                    and adapter_has_open_source(actions.results)),
+                adapter_has_open_source(actions.results)),
             result_destination = adapter_root_range(
                 "result_destination", "result", "destination",
                 target.flexrettype, lifetimes.result_destination,

@@ -420,10 +420,9 @@ materializing them in the output buffer.
 The coder carries a dynamic sequence as a result run containing the typed
 descriptor, first element/start, element type, finite or open extent, ownership,
 stack restore/cleanup point, and an optional parallel Lua root range. Borrowed
-input and non-GC runs need no range; ordinary open GC-bearing call results use
-one until their sink consumes them. Adapter and descriptor-repacking ranges are
-more selective: a destination range exists only for newly allocated conversions,
-and a source range only when later result work can allocate or move the stack.
+input and non-GC runs need no range; every live open GC-bearing native call
+result uses one until its sink consumes it, including identity source runs in
+adapters. A destination range exists only for newly allocated conversions.
 An open expression list is an ordered scalar prefix followed by at most one such
 dynamic run.
 
@@ -477,18 +476,17 @@ Direct module functions, record statics, methods, bound methods, lambdas, and
 exact first-class Titan closures use the native entry. At each exact call, the
 coder:
 
-1. evaluates every explicit argument once in lexical order, publishes each
-   GC-bearing native input into a caller-owned activation root, and passes only
-   the fixed prefix plus an input-vararg run when declared;
+1. evaluates every explicit argument once in lexical order, freezing it in C
+   only when later setup requires a stable value, and passes only the fixed
+   prefix plus an input-vararg run when declared—without native input roots;
 2. reserves raw storage for every declared fixed result, even when the consumer
    hides some of them;
 3. allocates a source-typed flexible buffer matching the finite/open demand and,
    for an open GC-bearing tail, its parallel traced range;
 4. invokes the native entry with the complete declared signature and rebases
    afterward because the callee may have moved the Lua stack;
-5. publishes the visible fixed projections to their assigned homes and the live
-   open GC-bearing prefix to its range before surrounding sink work can
-   allocate; and
+5. publishes every live GC-bearing fixed result and open prefix immediately to
+   its caller-owned slot/range before projection or surrounding sink work; and
 6. exposes only `_visible_types` plus the permitted dynamic run to the sink,
    giving every later freshly allocated conversion its own immediate root.
 
@@ -514,8 +512,8 @@ and otherwise preserves the carrier. The final wrapper is allocated directly
 with `luaF_newCclosure`, initialized while fresh-white, and published immediately
 to its own result root; construction allocates/raises but does not relocate the
 stack. The wrapper adapter receives B's `_flexwant`, calls the immediate source
-under A's demand formula, roots only source results that span a later allocating
-or stack-relocating action, and publishes B's fixed/tail shape subject to the 200 bound.
+under A's demand formula, roots every live GC-bearing fixed/open source result
+immediately after return, and publishes B's fixed/tail shape subject to the 200 bound.
 
 The generic Lua-stack path then splits by brand. An exact-tag mismatch has the
 opaque ABI sentinel in fixed `upvalue[3]`: `codevaluecall` pushes the closure's
@@ -623,27 +621,26 @@ consumer/conversion lifetime.
 
 The ownership/rooting rules are:
 
-* native call sites install traced activation roots for every GC-bearing
-  callee/fixed/static-vararg value; input descriptors borrow those roots, and a
-  forwarded open run borrows the upstream caller's still-live range;
-* callable and Interface adapters do not duplicate those activation roots;
-  callee parameter homes are added only for assignment or spill, while
-  Lua/strict generic calls still push arguments as required by the VM
-  convention;
+* native call sites keep callees, fixed/static-vararg values, and forwarded
+  open runs in C; input descriptors borrow each element's existing
+  allocation/result/semantic/VM provenance and create no tracing-only copies;
+* callee parameter homes are added only for assignment or spill, while
+  Lua/strict generic calls push the callee and actual arguments as real VM
+  transport;
 * exact-call fixed ABI holders and flexible-output buffers belong to the caller
-  but are untraced. Visible fixed results are published to their homes, while an
-  ordinary open GC-bearing result run uses a parallel range until consumption;
+  but are untraced. After return and rebasing, every live GC-bearing fixed
+  result is rooted immediately and every live open result prefix is copied to a
+  parallel traced range until consumption;
 * a conversion that allocates a callable wrapper or Interface value publishes
   every new object immediately into its own fixed/range destination root;
 * return expressions and pending returns retain their existing traced saves
   when they themselves cross later allocation or `finally`;
 * generic Lua results remain rooted in VM result slots until conversion and
   destination publication finish; and
-* a callable/Interface target adapter borrows incoming roots, rebases after the
-  source/concrete native call, roots only source results that span a later
-  allocating/relocating result action, and immediately roots every fresh
-  converted destination. Direct nested callable construction allocates/raises
-  but is not a stack-relocation point.
+* a callable/Interface target adapter has no input-source roots, roots every
+  live fixed/open GC source result after the source/concrete native call, and
+  immediately roots every fresh converted destination. Direct nested callable
+  construction allocates/raises but is not a stack-relocation point.
 
 Lua's GC does not move heap objects. Only raw stack positions need offsets:
 operations that can really grow/shrink the stack and native calls are followed

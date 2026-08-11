@@ -321,15 +321,13 @@ The authoritative statement is the comment above `codefuncdec` in
 
 ```
 -- Titan calling convention:
---     first parameter is a lua_State*, other parameters carry their actual
---     native types. The caller anchors every GC-bearing fixed argument through
---     the native activation: the callee can poll or grow its stack before it is
---     able to establish any local parameter home. The callee installs a separate
---     home only when mutation/spilling requires one. The function returns its
---     first result directly and writes later results through out parameters.
---     GC-bearing results remain raw until the caller roots those that must
---     survive a later allocating or stack-relocating action;
---     returning itself cannot run the collector.
+--     first parameter is a lua_State*; remaining inputs use their actual native
+--     C types. The caller never publishes tracing-only Lua-stack copies of those
+--     arguments. A callee creates a separate local home only when mutation or
+--     setjmp spilling requires one. The function returns its first result
+--     directly and writes later results through out parameters. A native caller
+--     roots each GC-bearing result immediately after return, before later work
+--     can collect it; returning itself cannot run the collector.
 ```
 
 The signature shape, produced by `function_sig`:
@@ -388,61 +386,52 @@ void        strings_titan(lua_State *L, Udata *_mod, CClosure *_fn,
 ```
 
 A Titan-to-Titan call is therefore an ordinary C call — no `CallInfo`, and no
-boxing of integers, floats, or booleans. The caller nevertheless uses reserved
-Lua-stack slots as the GC ownership frame for the native activation. It
-evaluates in lexical order, materializes the first-class callee/receiver and
-every GC-bearing fixed or static-vararg argument, and publishes each to a traced
-slot before later argument effects or dispatch. Non-GC pure trailing arguments
-may remain direct C expressions. The activation roots remain until the native
-callee returns.
+boxing of integers, floats, or booleans. It evaluates inputs in lexical order.
+When later setup is effectful, `coder._freeze_code` freezes the first-class
+callee/receiver and the affected fixed or static/open-vararg inputs in untraced
+C temporaries; a pure trailing suffix may remain direct C expressions. The call
+never publishes tracing-only Lua-stack copies of native inputs. Fresh values
+retain their initial allocation or prior native-result roots, while established
+values retain their semantic module/record/container/local home or an upstream
+Lua VM argument slot. Static and forwarded input-vararg payloads merely borrow
+that provenance; their raw descriptors and C buffers are never roots. A callee
+creates a separate parameter home only when assignment or setjmp spilling makes
+it a real local-storage requirement.
 
-Dedicated call roots are necessary even when a value currently lives in a
-module/userdata/capture field: later argument evaluation or the callee body can
-overwrite that home, and an untraced C parameter is not a root. They also cover
-the callee's entry poll and possible stack growth, which occur before a callee
-could safely establish a new local root. Static input-vararg payloads borrow
-these same activation roots; forwarded open elements retain the originating
-caller's still-live roots. The raw descriptor and C buffer are never roots. A
-callee creates a separate parameter home only when the parameter is assigned or
-must be spilled across a catchable operation.
+Lua 5.5's non-moving GC preserves the heap addresses of reachable strings,
+tables, userdata, and closures, but stack growth can relocate the stack array
+and invalidate raw `StkId`/`TValue *` pointers. Generated code therefore saves
+stack offsets and rebases after every operation that can really move the stack
+and after every native call, even when the call had no input slots.
 
-Lua 5.5's non-moving GC then guarantees that collection preserves the heap
-addresses of these *rooted* strings, tables, userdata, and closures. Stack
-growth or shrinkage can relocate the stack array and invalidate raw
-`StkId`/`TValue *` pointers, so generated code addresses roots by saved offsets
-and rebases after every operation that can really move the stack and after every
-native call.
+Native fixed results initially occupy raw ABI C holders. Returning cannot run
+the collector, but a transitive callee's allocation root is above the restored
+caller top. After rebasing, the caller therefore publishes every live
+GC-bearing fixed source result immediately into its result root, including an
+identity result, before projection or conversion. An ordinary open GC-bearing
+result similarly copies its complete live prefix into a parallel traced range
+until its sink consumes it. Callable and Interface adapters use the same source
+rule; they add destination roots only for freshly allocated converted wrappers.
+`TitanVargX` descriptors and raw C arrays never become roots.
 
-Native fixed results initially occupy raw ABI C holders. Merely returning
-cannot run the collector. A direct caller publishes its visible fixed
-projections to assigned homes; inside an adapter, a raw fixed source result gets
-a temporary root only when the result phase contains allocating or relocating
-work. Every newly allocated wrapper or Interface value receives its own
-immediate destination root.
+The Lua-stack and branded-strict slow paths are intentionally different: they
+push the callee/carrier and every actual argument because those slots are the
+Lua VM calling convention itself. Native callable/Interface adapters have an
+empty input-source root inventory; they do not mistake those VM transport slots
+or native C inputs for call-activation roots.
 
-An ordinary open GC-bearing flexible result uses a caller-owned parallel traced
-range until its sink consumes it. Adapter and descriptor-repacking paths reserve
-a destination range only for allocating conversions and a source range only
-when later result work can allocate or move the stack. `TitanVargX` descriptors
-and their C arrays are never roots.
-
-The Lua-stack and branded-strict slow paths push the callee and arguments as
-part of Lua's VM calling convention; those VM slots are also their activation
-roots. Native callable/Interface adapters borrow whichever activation roots the
-calling path established and do not add another source-root inventory.
-
+### Named direct calls and lexical evaluation order
 ### Named direct calls and lexical evaluation order
 
 The checker has already normalized an eligible named call to a dense
 formal-order `ArgsFunc` or `ArgsMethod`, but leaves `_named_arg_order` with the
 formal indexes of explicit expressions in lexical order. `codecall` sends that
-pair through `named_ordered_call_args`: it generates and immediately
-materializes each explicit expression in lexical order, then materializes the
-synthetic nil omissions, and finally emits the unchanged positional native
-argument list. For a method, the receiver is materialized once before this
-sequence. Immediate materialization freezes effects before formal reordering and publishes
-every GC-bearing receiver/argument into a dedicated caller-owned activation
-root that remains live through the native call.
+pair through `named_ordered_call_args`: it generates and immediately freezes
+each explicit expression in an untraced C temporary in lexical order, then does
+the same for synthetic nil omissions, and finally emits the unchanged
+formal-order native argument list. For a method, the receiver is frozen once
+before this sequence. This C-only materialization preserves effects before
+formal reordering without publishing receiver/argument roots.
 
 Positional direct calls follow the same checked adjustment plan. Every
 explicit argument is evaluated once in lexical order; surplus expressions are
@@ -469,8 +458,8 @@ function, or an object with a `__call` metamethod. `codevaluecall`
 therefore emits three branches.
 
 A finite non-exact Function adjustment is lowered before this call dispatch as
-an `Ast.ExpCast`. Its operand is materialized once while its existing root stays
-live; the guarded constructor may produce a fresh target-tagged CClosure whose
+an `Ast.ExpCast`. Its operand is frozen once in C while its existing traced
+provenance stays live; the guarded constructor may produce a fresh target-tagged CClosure whose
 native pointer is the frozen adapter, or preserve the carrier unchanged.
 Open-run callable elements use the same helper when their shared adjustment is
 consumed. Wrapper construction is an allocating/raising expression effect, not
@@ -572,15 +561,14 @@ wrapper relay) and a non-Titan Lua callable retain the same finite/open shape
 machinery, but their strict versus dynamic element policies remain distinct.
 
 Because the generic branch can grow and relocate the Lua stack,
-`codevaluecall` marks the enclosing function as `uses_base_off`, saves
-the callee stack slot as an offset with `savestack`, and recomputes
-`_base = restorestack(L, _base_off)` after every branch. The callee and every GC-bearing argument already occupy dedicated caller-owned
-activation roots before branch selection. The slow branch additionally pushes
-the same values because those pushed slots form the Lua call frame. Consumer-visible
-GC-bearing fixed results are stored into their assigned caller slots after the
-branch joins. An open GC-bearing source-result run uses its caller-owned
-parallel traced range; generic results stay rooted in VM slots until they have
-been converted and copied there.
+`codevaluecall` marks the enclosing function as `uses_base_off`, saves stack
+positions as offsets, and recomputes `_base = restorestack(L, _base_off)` after
+every branch. Before branch selection the callee and arguments are only stable C
+values; the exact Titan branch passes them directly. The branded-strict and Lua
+branches push those same values because the pushed slots are their real VM call
+frame. After the branch joins, every live GC-bearing native result has already
+been published into its caller result slot/range; generic results remain rooted
+in VM slots until conversion copies them into the same destinations.
 
 ### The two Lua-stack entries
 
@@ -721,10 +709,12 @@ The **strict trampoline** is generated for the self-removed callable shape: it
 preserves the hidden original bound closure, strictly guards the visible
 arguments/results, and invokes the native bound trampoline, which extracts
 `self`.
-At the bind site `obj` is evaluated once into an anchored temp, then the
-closure is built exactly like a one-capture lambda (`_mod`, the
-self-removed tag, the native trampoline pointer, `self`, and the strict
-trampoline trailer). The result is an ordinary source `Type.Function` value. A downstream
+At the bind site `obj` is evaluated once into an untraced C temporary. It is
+then pushed as the closure's real `self` upvalue while the closure is built like
+a one-capture lambda (`_mod`, the self-removed tag, the native trampoline
+pointer, `self`, and the strict trampoline trailer). The fresh closure receives
+its initial result root immediately. The result is an ordinary source
+`Type.Function` value. A downstream
 non-exact callable cast uses the same conditional fresh-wrapper/fallback
 lowering as any other source closure; it does not require a bound-method
 special case.

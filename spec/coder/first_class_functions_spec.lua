@@ -20,6 +20,55 @@ describe("first-class function values (end-to-end)", function()
         if not h.verbose then os.execute("rm -f *.c") end
     end)
 
+    it("keeps exact fast-path inputs in C and pushes only slow-path transport",
+    function()
+        local csrc = h.compile_and_read_c([[
+            function invoke(
+                f: (string) -> string,
+                text: string
+            ): string
+                return f(text)
+            end
+        ]])
+        local declaration = assert(csrc:find(
+            "TString* test_invoke_titan(", 1, true))
+        local first = assert(csrc:find(
+            "TString* test_invoke_titan(", declaration + 1, true))
+        local last = assert(csrc:find(
+            "static int test_invoke_titanentry_lua", first, true))
+        local body = csrc:sub(first, last - 1)
+        local dispatch = assert(body:find(
+            "CClosure *_vc_callee =", 1, true))
+        local before = body:sub(1, dispatch - 1)
+        assert.matches("TValue _tmp_%d+ = .-;%s*_tmp_%d+ = _param_f;",
+            before)
+        assert.matches("TString%* _tmp_%d+ = 0;%s*_tmp_%d+ = _param_text;",
+            before)
+        assert.falsy(before:find("setobj2s(L", 1, true), before)
+        assert.falsy(before:find("setsvalue(L", 1, true), before)
+
+        local fast = assert(body:find(
+            "/* fast path: exact function-type match", dispatch, true))
+        local native = assert(body:find(
+            "_vc_fp(L, _vc_mod, _vc_callee, _tmp_", fast, true))
+        local strict = assert(body:find(
+            "/* Branded non-exact Titan closure", native, true))
+        local strict_callee = assert(body:find(
+            "setobj2s(L, L->top.p, &_tmp_", strict, true))
+        local strict_arg = assert(body:find(
+            "setsvalue(L, s2v(L->top.p), _tmp_", strict_callee, true))
+        local generic = assert(body:find(
+            "/* Genuine Lua/dynamic callable", strict_arg, true))
+        local generic_callee = assert(body:find(
+            "setobj2s(L, L->top.p, &_tmp_", generic, true))
+        local generic_arg = assert(body:find(
+            "setsvalue(L, s2v(L->top.p), _tmp_", generic_callee, true))
+        assert.is_true(fast < native and native < strict
+            and strict < strict_callee and strict_callee < strict_arg
+            and strict_arg < generic and generic < generic_callee
+            and generic_callee < generic_arg)
+    end)
+
     it("references a top-level function and calls it through a value", function()
         run_coder([[
             function dbl(x: integer): integer return x * 2 end

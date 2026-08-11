@@ -221,12 +221,12 @@ The retired `types.compatible`, `types.coerceable`, and
 The callable freezer also owns lowering-time lifetime facts. A nested
 `callable_view` is `may_raise = true` because `luaF_newCclosure` can allocate,
 but `may_relocate = false`: direct construction performs no stack API operation
-or ordinary GC poll. Native adapter input-source roots are empty because every
-native caller has already installed dedicated call-activation roots for its
-GC-bearing callee/arguments. Fixed/range destination roots are selected
-only for newly allocated wrappers; native result-source roots are selected only
-when a later result action allocates or can really move the stack. Raw
-descriptors and C buffers are explicitly non-roots. Top-level wrapper
+or ordinary GC poll. Native adapter input-source roots are empty because native
+callees/arguments remain C values and the call never publishes tracing-only
+copies. Fixed/range destination roots are selected only for newly allocated
+wrappers; fixed/open result-source roots cover every live GC-bearing native
+result immediately after return. Raw descriptors and C buffers are explicitly
+non-roots. Top-level wrapper
 construction records only a conditional result root for an eligible exact
 Titan clone—never a duplicate construction source root—and the rebase ledger
 still always includes the source native call.
@@ -589,10 +589,10 @@ optionized result type. Function declarations, methods, bound-method
 trampolines, and lambdas carry parallel strict GuardPlan arrays for fixed and
 variadic parameters; generic call nodes carry strict fixed/open result guards.
 Frozen callable adapters reuse those component guards plus explicit minimal
-root/rebase and action records. Incoming native values borrow caller roots;
-newly allocated wrappers get immediate destination roots; native source results
-are rooted only across later allocating/relocating work; and direct nested
-wrapper allocation is not a rebase point. Consumer-local target relays reuse
+root/rebase and action records. Incoming native values stay in C and borrow their
+existing provenance; newly allocated wrappers get immediate destination roots;
+every live GC-bearing native source result gets an immediate fixed/open source
+root; and direct nested wrapper allocation is not a rebase point. Consumer-local target relays reuse
 the strict stack shell. These annotations are distinct from the dynamic plans
 used by genuine Lua entries and non-Titan callable results.
 

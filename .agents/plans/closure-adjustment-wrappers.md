@@ -137,9 +137,9 @@ second relation in the coder. A frozen `CallableAdapterPlan` must contain:
   actions, and recursive component operations;
 * the new `nil_fill_result` action;
 * minimal fixed and open GC-root inventories for argument/result sources and
-  destinations: native adapters borrow the caller's dedicated call-activation
-  roots, while newly allocated objects and source results that span a later
-  allocation receive explicit roots;
+  destinations: native input-source inventories are empty, newly allocated
+  objects receive immediate destination roots, and every live GC-bearing
+  fixed/open native source result receives an immediate result root;
 * only real stack-rebase points: operations that can move the Lua stack and the
   source native call; direct wrapper construction and nested callable-wrapper
   allocation are raising but non-relocating;
@@ -186,9 +186,9 @@ layout is trusted; do not recheck the module, native slot, or trailer shape.
 
 Construct the wrapper directly with `luaF_newCclosure(L, n + 1)`:
 
-* evaluate the operand exactly once and borrow its existing allocation/home
-  root; the construction helper freezes a C `TValue` but creates no duplicate
-  source root;
+* evaluate the operand exactly once and borrow its existing
+  allocation/result/semantic/VM provenance; the construction helper freezes a C
+  `TValue` but creates no duplicate source root;
 * while the returned closure is fresh-white, copy upvalues 0 through `n - 2`
   with `setobj2n`, substitute tag/native with `setpvalue`, install the immediate
   source with `setclCvalue`, install the strict relay with `setfvalue`, and copy
@@ -201,8 +201,8 @@ Construct the wrapper directly with `luaF_newCclosure(L, n + 1)`:
   rebase.
 
 Lua 5.5's collector is non-moving. Stack growth can relocate stack slots and
-invalidate raw `StkId`/`TValue *` pointers, but it preserves the values in
-caller-owned roots and does not move their heap objects. `luaF_newCclosure` may
+invalidate raw `StkId`/`TValue *` pointers, but it preserves values in existing
+traced homes and does not move their heap objects. `luaF_newCclosure` may
 allocate or raise, including after an emergency collection, but it performs no
 ordinary GC poll; the emergency cycle does not shrink the stack. Thus successful
 direct construction does not relocate the stack. The source is already rooted,
@@ -234,16 +234,15 @@ The private `static TITAN_NOINLINE` adapter has exactly `function_sig(B)`. It:
 1. validates target input/flexible-output descriptor bounds;
 2. reserves and nil-initializes only the traced scratch selected by the frozen
    root inventory and saves `_base_off` when a real rebase point exists;
-3. borrows the native caller's dedicated activation roots for fixed/static `B`
-   arguments and the upstream activation range for forwarded open values, then
-   freezes only the C values needed by the action graph;
+3. keeps fixed/static `B` arguments and forwarded open values in C, borrowing
+   their existing allocation/result/semantic/VM provenance without input roots;
 4. realizes contravariant argument actions into `A` fixed/tail storage, giving
    every newly allocated nested wrapper its own immediate destination root;
 5. recovers the immediate source CClosure from the penultimate wrapper upvalue,
    obtains its authoritative module and native pointer, and calls it as exact
    `A` with `_fn = source`;
-6. after rebasing from that call, roots only GC-bearing `A` source results that
-   must survive a later allocating/relocating result conversion;
+6. after rebasing from that call, roots every live GC-bearing fixed/open `A`
+   source result immediately, including identity results;
 7. realizes covariant result actions into `B`, immediately rooting every newly
    allocated destination wrapper and including the nil initialization for
    `nil_fill_result`;
@@ -252,10 +251,10 @@ The private `static TITAN_NOINLINE` adapter has exactly `function_sig(B)`. It:
 9. restores the root frame, writes out-parameters, and returns `B`'s first result
    or `void`.
 
-Raw descriptors and C arrays are never roots. Parallel traced ranges exist only
-for newly allocated converted values or source result runs that cross a later
-allocating or stack-relocating action; simple borrowed arguments and
-allocation-free copies need none.
+Raw descriptors and C arrays are never roots. Every live GC-bearing native
+source-result run gets an immediate parallel traced range; a destination range
+exists only for newly allocated converted values. Simple borrowed native inputs
+and allocation-free destination copies need none.
 
 Parameterize/generalize the existing Interface adapter engine for these steps.
 Only the invocation backend differs: Interface adapters call a known method with
@@ -366,8 +365,8 @@ Out of scope:
   points;
 * direct fresh-white `luaF_newCclosure` initialization and immediate result
   publication, with no stack assembly, construction poll/barrier/rebase, or
-  construction-only duplicate roots; native calls still retain their required
-  caller-owned activation roots;
+  construction-only duplicate roots; native inputs remain C-only while every
+  live GC-bearing native result receives its immediate caller root;
 * wrapper chains and wrapper -> `value` -> another Function view;
 * genuine Lua closure/C function/`__call`/deferred non-callable and max-upvalue
   fallbacks;

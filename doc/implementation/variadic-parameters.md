@@ -514,11 +514,13 @@ parameter:
    the callee's fixed params (the prefix grows the tail). Allocate fresh
    `Udata0` element storage (with `luaC_newobj` + `getudatamem`), build a
    C-stack descriptor pointing at it, **cap-check** the runtime count against
-   `TITAN_VARARG_MAX`, anchor the `Udata0` on a reserved slot, copy the static
-   prefix (each gc prefix value anchored on its own slot first — §2.D) then each
-   incoming `...` element converted to the callee element type (identical ctype →
-   raw copy; a `value` widening → `setboxed`; a `value` narrowing →
-   the checker-attached strict guard), set `n_args`, pass `_start = 0`. The fresh allocation can
+   `TITAN_VARARG_MAX`, anchor the freshly allocated `Udata0` on a reserved slot,
+   copy the C-only static prefix and then each incoming `...` element converted
+   to the callee element type (identical ctype → raw copy; a `value` widening →
+   `setboxed`; a `value` narrowing → the checker-attached strict guard), set
+   `n_args`, and pass `_start = 0`. No native input gets a tracing-only element
+   slot; its existing allocation/result/semantic/VM provenance remains live, and
+   a conversion that allocates a fresh wrapper roots that destination. The fresh allocation can
    relocate the Lua stack, so the function records
    `ctx.uses_base_off` and `_base` is recomputed from `_base_off` after the
    call.
@@ -613,46 +615,43 @@ constants.
 
 ## GC discipline: descriptor pointers and untraced payloads
 
-Runtime-sized element arrays live in a `Udata` raw payload (`getudatamem`), and
-`traverseudata` marks only a userdata's `metatable` and its `uv[0..nuvalue-1]`
-user values — **never `getudatamem`**. A 0-uservalue `Udata` (`nuvalue == 0`)
-therefore has a payload that is *invisible* to the collector. The invariant the
-codegen maintains [§2.D]:
+Runtime-sized element arrays can live in a `Udata` raw payload
+(`getudatamem`), and `traverseudata` marks only a userdata's `metatable` and its
+`uv[0..nuvalue-1]` user values—**never `getudatamem`**. A zero-uservalue Udata
+therefore keeps its byte buffer allocated but does not trace GC pointers copied
+into that buffer. Generated code maintains the stronger provenance invariant:
 
-> Every collectable element reachable through any vararg descriptor is
-> independently anchored on a live Lua-stack slot for the descriptor's lifetime;
-> an anchored `Udata0` only keeps the element buffer itself alive.
+> Every collectable element reachable through a live vararg descriptor remains
+> reachable from an independent traced owner for the descriptor's lifetime. The
+> owner may be a semantic variable/container home, an immediate allocation or
+> native-result root, an actual Lua VM argument slot, or an explicit flexible
+> result/destination range. The descriptor and raw backing are never owners.
 
-For input tails those roots are the original caller argument slots or the
-ordinary anchors for a freshly copied prefix. For flexible outputs the
-descriptor backing is caller-owned C storage, so an open GC-bearing result run
-gets a parallel traced Lua-stack range; generated code publishes the actual
-live prefix there before an allocating consumer and clears it after copying.
-Finite projected results use their normal per-result shadow slots. A pending
-return crossing `finally` must save the run count and keep the saved elements
-traced until the pending action resumes or is superseded by a raise.
+A Titan native call keeps fixed/static and forwarded open inputs in C and does
+not create per-call element roots. A pass-through input run borrows whatever
+provenance already owns each element. A newly evaluated prefix likewise retains
+its source home, or the immediate root installed by its allocation/native-result
+expression. If element conversion allocates a callable/Interface wrapper, that
+fresh destination receives its own fixed/range allocation root. A Lua-originated
+entry is different only because its incoming stack slots are the actual VM
+arguments.
+
+For flexible outputs the descriptor backing is caller-owned C storage. After a
+native call and rebase, every live GC-bearing result prefix is copied immediately
+into a parallel traced Lua-stack range and cleared only after its sink consumes
+it. This includes identity source runs inside callable/Interface adapters, not
+just runs followed by allocating conversion. Finite projected GC results receive
+their ordinary immediate caller result roots. A pending return crossing
+`finally` separately saves the run count and keeps the saved elements traced
+until the pending action resumes or is superseded by a raise.
 
 The descriptor may be a C-stack local. That is not a moving-GC hazard: Lua's GC
-does not move objects, so a pointer to a `TString`, `Table`, `Udata`, or a
-payload buffer remains valid across collection. Only pointers into Lua stack
-locations need rebasing after stack growth/shrink.
-
-This holds without per-element re-materialization, by LIFO stack discipline and
-the fact that Lua's GC is **non-moving** (the *object* addresses an element
-points to never change; only the stack array can relocate):
-
-* **Pass-through elements** (the incoming `...`) stay alive via the *original
-  caller's* stack anchors — for a native call the caller anchors gc args; for a
-  Lua-originated call they *are* the Lua-stack arg slots — and those slots sit
-  below every nested frame for the whole call chain.
-* **Newly-introduced prefix elements** in a case-3 forward are ordinary
-  arguments anchored by the normal "caller anchors gc args" path (the coder
-  anchors each gc prefix value on a reserved slot *before* the `Udata0`
-  allocation that may GC).
-* **The `Udata0` itself** is stack-anchored so its *buffer* survives a GC during
-  the copy/call; it has no `__gc`, no metatable, no `uv[]`. The descriptor that
-  points at that buffer can stay on the C stack because it stores no Lua stack
-  slot addresses.
+does not move objects, so a pointer to a `TString`, `Table`, `Udata`, or payload
+buffer remains valid across collection. Only pointers into Lua stack locations
+need rebasing after stack growth/shrink. A case-3 `Udata0` itself is immediately
+rooted so its *buffer* survives copy/call; it has no `__gc`, metatable, or traced
+user values, and therefore does not own collectable elements stored in that
+buffer.
 
 Two more mechanical points:
 

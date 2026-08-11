@@ -134,7 +134,39 @@ describe("named arguments (code generation)", function()
         ]])
     end)
 
-    it("roots reordered strings, records, and function values across collections",
+    it("reorders named native inputs with C-only lexical freezes", function()
+        local csrc = h.compile_and_read_c([[
+            local function sink(
+                first: string,
+                second: string
+            ): integer
+                return #first + #second
+            end
+
+            function named(first: string, second: string): integer
+                return sink { second = second, first = first }
+            end
+        ]])
+        local declaration = assert(csrc:find(
+            "lua_Integer test_named_titan(", 1, true))
+        local first = assert(csrc:find(
+            "lua_Integer test_named_titan(", declaration + 1, true))
+        local last = assert(csrc:find(
+            "static int test_named_titanentry_lua", first, true))
+        local body = csrc:sub(first, last - 1)
+        local second_freeze = assert(body:find(
+            "_tmp_1 = _param_second;", 1, true))
+        local first_freeze = assert(body:find(
+            "_tmp_2 = _param_first;", second_freeze, true))
+        local call = assert(body:find(
+            "_titan(L, _mod, NULL, _tmp_2, _tmp_1);",
+            first_freeze, true))
+        assert.falsy(body:sub(second_freeze, call):find(
+            "setsvalue(L", 1, true), body)
+        assert.is_true(second_freeze < first_freeze and first_freeze < call)
+    end)
+
+    it("retains reordered native results across later collections",
     function()
         with_header([[
             typedef struct lua_State lua_State;

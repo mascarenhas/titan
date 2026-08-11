@@ -90,10 +90,9 @@ frozen plan is relation-free data containing at least:
   and result actions;
 * recursively frozen component operations, including nested callable views and
   `nil_fill_result`;
-* minimal fixed/open GC-root inventories: adapters borrow the native caller's
-  dedicated call-activation roots, newly allocated destinations receive
-  immediate roots, and native source
-  results are rooted only when they span a later allocating/relocating action;
+* minimal fixed/open GC-root inventories: native input-source inventories are
+  empty, newly allocated destinations receive immediate roots, and every live
+  GC-bearing fixed/open native source result is rooted immediately after return;
 * only genuine stack-rebase points—operations that can move the Lua stack and
   the source native call; nested wrapper allocation is raising but
   non-relocating;
@@ -192,14 +191,14 @@ Construction allocates the final object directly with
    with `setclCvalue`.
 
 There is no transient Lua-stack assembly, `lua_pushcclosure`, construction
-barrier, local `luaC_checkGC`, construction-only source/result root copy, or
-construction rebase. The source's existing root remains live; fallback is only
-a C copy of that already rooted carrier. A successfully allocated wrapper is a
-new object and receives its own root immediately.
+barrier, local `luaC_checkGC`, construction-only source root, or construction
+rebase. The source's ordinary traced provenance remains live; fallback is only
+a C copy of that carrier. A successfully allocated wrapper is a new object and
+receives its own root immediately.
 
 Lua 5.5's collector does not move heap objects. A Lua stack reallocation can
 relocate stack slots and invalidate `StkId`/`TValue *` pointers, but it preserves
-the values in caller-owned roots and leaves their heap addresses unchanged.
+values in existing traced homes and leaves their heap addresses unchanged.
 `luaF_newCclosure` may allocate or raise, including after an emergency
 collection, but it does not perform an ordinary GC poll; an emergency cycle does
 not shrink the stack. Direct construction therefore does not relocate the
@@ -223,15 +222,14 @@ Its order is fixed:
 1. validate target input and flexible-output descriptor bounds;
 2. reserve and nil-initialize only the scratch selected by the frozen root
    inventory, saving stack positions as offsets where a real rebase is needed;
-3. borrow the native caller's dedicated activation roots for fixed/static `B`
-   arguments and the upstream activation range for forwarded open values, then
-   freeze only their C values;
+3. keep fixed/static `B` arguments and forwarded open values in C, borrowing
+   their existing allocation/result/semantic/VM provenance without input roots;
 4. realize contravariant argument actions into A's fixed and tail storage,
    immediately rooting each newly allocated nested wrapper;
 5. recover the penultimate source closure, then obtain its authoritative module
    and exact native pointer and call `function_sig(A)` with `_fn = source`;
-6. rebase after that native call, then root only GC-bearing A source results that
-   must survive a later allocating/relocating result action;
+6. rebase after that native call, then root every live GC-bearing fixed/open A
+   source result immediately, including identity results;
 7. realize covariant result actions into B, immediately rooting each newly
    allocated destination and applying `nil_fill_result`;
 8. publish B's caller-owned flexible output under `_flexwant`, `LUA_MULTRET`,
@@ -248,10 +246,10 @@ The adapter retains the Interface engine's demand formulas: finite consumers
 request only the required source prefix/tail capacity; an open target demand is
 bounded; hidden source results are not converted; and source flexible
 projection precedes absence fill. Raw `TitanVargX` descriptors and C arrays are
-never roots. A parallel traced range is reserved only for newly allocated
-converted destinations or source result values that must span a later
-allocating or stack-relocating action; borrowed arguments and allocation-free
-copies use none.
+never roots. Every live GC-bearing source result run receives an immediate
+parallel traced range; a destination range is reserved only for newly allocated
+converted values. Borrowed native inputs and allocation-free destination copies
+use none.
 
 ## Source Lua entry and target strict relay
 
@@ -295,26 +293,24 @@ adapter calls without inserting a poll between `luaF_newCclosure` and immediate
 publication; callers already treat the later source-native call as the genuine
 relocation point.
 
-The frozen plan owns a minimal lifetime inventory. Before a native fast call,
-the caller publishes the callee value and every GC-bearing fixed/static-vararg
-argument into dedicated traced activation slots. Those roots survive later
-argument effects, the callee's entry poll/stack growth, and mutation of the
-value's former module/record/capture home. Raw input-vararg storage borrows those
-slots; a forwarded open run borrows the upstream caller's still-live activation
-roots. Callable and Interface adapters consume these roots without duplicating
-them. Callee parameter homes remain separate and are needed only when a
-parameter is assigned or must be spilled across a catchable call. Genuine Lua
-and branded-strict slow paths still push their arguments because Lua-stack
-transport is their calling convention.
+The frozen plan owns a minimal lifetime inventory. A native fast call keeps its
+callee, fixed/static arguments, and forwarded open values in C; lexical freezes
+are untraced, and the adapter input-source inventories are empty. Inputs borrow
+their existing allocation/result/semantic/VM provenance. Callee parameter homes
+remain separate and are needed only when a parameter is assigned or must be
+spilled across a catchable call. Genuine Lua and branded-strict slow paths still
+push the callee/carrier and actual arguments because Lua-stack transport is their
+calling convention.
 
-After a native source call, a GC-bearing fixed result or flexible source run gets
-a temporary root only when it must survive a later action that can allocate or
-move the stack. A nested callable conversion can allocate and raise but cannot
-relocate the stack; the source remains rooted, and every successfully created
-wrapper is published immediately into its own fixed slot or parallel traced
-range. The same rule applies when a general open conversion creates an
-Interface value. Raw descriptors, C arrays, and native C locals are never roots,
-and borrowed or allocation-free runs do not acquire parallel traced copies.
+After a native source call and rebase, every live GC-bearing fixed result and
+flexible source prefix is rooted immediately, even when its result action is
+identity and cannot allocate. A nested callable conversion can allocate and
+raise but cannot relocate the stack; every successfully created wrapper is
+published immediately into its own fixed slot or parallel traced destination
+range. The same allocation-root rule applies when a general open conversion
+creates an Interface value. Raw descriptors, C arrays, and native C locals are
+never roots, and borrowed or allocation-free *input/destination* runs do not
+acquire parallel traced copies.
 
 Stack offsets and rebases protect only raw stack positions. Operations that can
 actually grow/shrink the Lua stack and every native call are rebase points;

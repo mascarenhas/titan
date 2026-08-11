@@ -3348,6 +3348,30 @@ local function materialize(ctx, node)
     return materialize_code(ctx, node._type, stats, exp)
 end
 
+-- Freeze an already generated value in a C temporary for lexical evaluation
+-- order without publishing a tracing root. Native calls transport arguments in
+-- C formals, not Lua-stack slots. The expression's ordinary allocation/result
+-- publication and traced program homes retain ownership; any fresh allocation
+-- performed while evaluating it establishes its own root immediately.
+function coder._freeze_code(ctx, typ, stats, exp)
+    local decl, name = newtmp(ctx, typ, false)
+    return render([[
+        $STATS
+        $DECL
+        $NAME = $EXP;
+    ]], {
+        STATS = stats,
+        DECL = decl,
+        NAME = name,
+        EXP = exp,
+    }), name
+end
+
+function coder._freeze(ctx, node)
+    local stats, exp = codeexp(ctx, node)
+    return coder._freeze_code(ctx, node._type, stats, exp)
+end
+
 function coder._nominal_owner_module_expr(ctx, fqtn)
     assert(type(fqtn) == "string",
         "nominal owner descriptor has no qualified name")
@@ -4120,16 +4144,6 @@ function coder._adapter_operation_allocates(action)
         and action.operation.kind == "callable_view"
 end
 
-function coder._adapter_results_need_roots(actions)
-    for _, action in ipairs(actions) do
-        if action.operation and (action.operation.may_relocate
-                or coder._adapter_operation_allocates(action)) then
-            return true
-        end
-    end
-    return false
-end
-
 function coder._adapter_has_open_source(actions)
     for _, action in ipairs(actions) do
         if action.operation and action.source_open then return true end
@@ -4160,8 +4174,6 @@ function coder._validate_interface_adapter_fixed_roots(
         roots, actions, policy, use, retain_until)
     coder._interface_dense_list(roots, use)
     local expected = {}
-    local results_need_roots = policy == "result_source"
-        and coder._adapter_results_need_roots(actions)
     for _, action in ipairs(actions) do
         local include
         local typ
@@ -4173,8 +4185,7 @@ function coder._validate_interface_adapter_fixed_roots(
                 and not action.destination_open
             typ = action.target_type
         elseif policy == "result_source" then
-            include = results_need_roots
-                and action.operation ~= nil
+            include = action.operation ~= nil
                 and action.source_gc
                 and not action.source_open
             typ = action.source_type
@@ -4285,8 +4296,6 @@ function coder._validate_adapter_rooting(
         "allocation_destination", use .. " result destination roots",
         lifetimes.result_destination)
 
-    local results_need_roots =
-        coder._adapter_results_need_roots(adapter.results)
     coder._interface_closed_record(rooting.ranges, {
         argument_source = true,
         argument_destination = true,
@@ -4308,7 +4317,7 @@ function coder._validate_adapter_rooting(
         rooting.ranges.result_source,
         "result_source", "result", "source",
         source.flexrettype, lifetimes.result_source,
-        results_need_roots and coder._adapter_has_open_source(adapter.results),
+        coder._adapter_has_open_source(adapter.results),
         use .. " result source range")
     coder._validate_interface_adapter_range(
         rooting.ranges.result_destination,
@@ -4718,9 +4727,10 @@ function coder._interface_adapter_allocate_roots(ctx, adapter)
     local frame_base = ctx.depth
     local frame_end = frame_base
     for _, phase in ipairs({ "argument", "result" }) do
-        -- Argument roots die when the concrete call returns. Result roots are
-        -- born only after that return, so both phases safely reuse one physical
-        -- frame region while retaining distinct frozen logical inventories.
+        -- Fresh argument-destination allocation roots die when the concrete
+        -- call returns. Native result roots are born only after that return, so
+        -- both phases safely reuse one physical frame region while retaining
+        -- distinct frozen logical inventories.
         ctx.depth = frame_base
         local names = {
             phase .. "_source",
@@ -4840,8 +4850,8 @@ function coder._emit_interface_adapter_argument_sources(
         })
     end
 
-    -- Native callers retain the incoming fixed arguments and open run. The
-    -- canonical frozen inventory therefore emits no duplicate source anchors.
+    -- Native fixed arguments and open runs remain C inputs, not tracing-stack
+    -- values. The canonical inventory therefore emits no source anchors.
     for _, action in ipairs(adapter.arguments) do
         local depth = roots.argument_source[action.id]
         if depth ~= nil then
@@ -4979,8 +4989,8 @@ function coder._emit_interface_adapter_arguments(
         elseif action.kind == "empty_tail"
                or action.kind == "ignore_argument"
                or action.kind == "ignore_tail" then
-            -- Parameters have already been evaluated by the caller; ignored
-            -- values/runs remain rooted through the frozen source lifetime.
+            -- Parameters have already been evaluated by the caller. Ignored
+            -- native C values/runs require neither conversion nor a stack copy.
         else
             error(use .. " has unsupported argument action "
                 .. tostring(action.kind))
@@ -5625,12 +5635,13 @@ function coder._interface_pair(ctx, conversion)
 end
 
 -- Build the exact two-uservalue wrapper from an already authorized scalar
--- conversion. `source_stats/source_exp` still describe the concrete value;
--- this helper materializes it once into a traced stack root before allocating.
+-- conversion. Freeze the concrete source once in C for lexical stability; its
+-- ordinary traced home (or immediate allocation/result root) remains live while
+-- the fresh wrapper allocation establishes its own root.
 function coder._code_interface_wrapper(
         ctx, conversion, source_stats, source_exp)
     local pair = coder._interface_pair(ctx, conversion)
-    local rooted_stats, concrete_value = materialize_code(
+    local frozen_stats, concrete_value = coder._freeze_code(
         ctx, conversion.concrete_type, source_stats, source_exp)
     local wrapper_decl, wrapper, wrapper_slot =
         newtmp(ctx, conversion.interface_type, true)
@@ -5639,9 +5650,9 @@ function coder._code_interface_wrapper(
     local concrete_module =
         coder._interface_owner_module_expr(ctx, conversion.concrete)
 
-    -- luaS_newudata may relocate the Lua stack. Both the source and destination
-    -- roots are addressed by saved offsets, so force the ordinary `_base_off`
-    -- preamble and rebase immediately after allocation.
+    -- luaS_newudata may relocate the Lua stack. The fresh destination root is
+    -- addressed by saved offset, so force the ordinary `_base_off` preamble and
+    -- rebase immediately after allocation before publishing it.
     ctx.uses_base_off = true
     return render([[
         $SOURCE_STATS
@@ -5665,7 +5676,7 @@ function coder._code_interface_wrapper(
             memcpy(getudatamem($WRAPPER), $VTABLE, sizeof($VTABLE));
         }
     ]], {
-        SOURCE_STATS = rooted_stats,
+        SOURCE_STATS = frozen_stats,
         WRAPPER_DECL = wrapper_decl,
         WRAPPER = wrapper,
         WRAPPER_SLOT = wrapper_slot,
@@ -5721,7 +5732,7 @@ function coder._code_interface_conversion(ctx, node)
     end
 
     local source_stats, source =
-        materialize(ctx, node.exp)
+        coder._freeze(ctx, node.exp)
     local concrete_decl, concrete =
         newtmp(ctx, conversion.concrete_type)
     local wrapper_stats, wrapper =
@@ -6821,12 +6832,11 @@ function coder._codeis(ctx, node)
     return stats .. "\n" .. predicate_stats, predicate
 end
 
--- Generate call arguments in source order. Every GC-bearing native argument is
--- materialized into a caller-owned traced slot for the whole callee activation:
--- the callee may poll or grow the Lua stack before it can establish a local
--- home, and may overwrite the value's original module/record/capture home. A
--- pure trailing non-GC suffix can remain as direct C expressions; earlier
--- values are frozen whenever later setup is effectful.
+-- Generate native call arguments in source order. A pure trailing suffix may
+-- remain as direct C expressions: with no intervening statements, reordering
+-- those reads is unobservable. Every argument at or before effectful setup is
+-- frozen in a C temporary at its source position. Native arguments never gain
+-- tracing-only Lua-stack copies; this helper preserves evaluation order only.
 local function expression_contains_call(node)
     local tag = node._tag
     if tag == "Ast.ExpCall" then
@@ -6866,9 +6876,9 @@ local function ordered_call_args(ctx, args, n)
     local stats, exps = {}, {}
     for i = 1, n do
         local c = coded[i]
-        if freeze[i] or types.is_gc(c.typ) then
+        if freeze[i] then
             local cstats, cexp =
-                materialize_code(ctx, c.typ, c.stats, c.exp)
+                coder._freeze_code(ctx, c.typ, c.stats, c.exp)
             stats[i], exps[i] = cstats, cexp
         else
             stats[i], exps[i] = c.stats, c.exp
@@ -6892,7 +6902,7 @@ local function named_ordered_call_args(ctx, args, order)
         assert(not args[index]._named_omitted)
         seen[index] = true
         local cstats, cexp = codeexp(ctx, args[index])
-        local mstats, mexp = materialize_code(ctx, args[index]._type,
+        local mstats, mexp = coder._freeze_code(ctx, args[index]._type,
             cstats, cexp)
         table.insert(stats, mstats)
         exps[index] = mexp
@@ -6902,7 +6912,7 @@ local function named_ordered_call_args(ctx, args, order)
             assert(arg._named_omitted,
                 "named call order omitted an explicit argument")
             local cstats, cexp = codeexp(ctx, arg)
-            local mstats, mexp = materialize_code(ctx, arg._type,
+            local mstats, mexp = coder._freeze_code(ctx, arg._type,
                 cstats, cexp)
             table.insert(stats, mstats)
             exps[index] = mexp
@@ -8128,10 +8138,12 @@ function coder._materialize_assignment_lvalue(ctx, var)
 end
 
 -- Evaluate a checker-adjusted finite expression list once in lexical order.
--- Values delivered to fixed sink slots are materialized (and GC-rooted);
--- explicit surplus expressions are forced for effect and never acquire a fake
--- sink/output position. Returns the prelude plus fixed holder names/types.
-function coder._codeadjustedfixed(ctx, node)
+-- Values delivered to fixed sink slots use the supplied stabilizer; ordinary
+-- sinks default to traced materialization, while native-call sites supply
+-- `coder._freeze_code` so arguments remain C-only. Explicit surplus expressions are
+-- forced for effect and never acquire a fake sink/output position.
+function coder._codeadjustedfixed(ctx, node, stabilize)
+    stabilize = stabilize or materialize_code
     local adjusted = node._result_adjustment
         or { exps = node.exps, fixed = node.exps, tail_scalars = {},
              discards = {}, open_source = false }
@@ -8164,7 +8176,7 @@ function coder._codeadjustedfixed(ctx, node)
                     EXP = cexp,
                 })
             else
-                mstats, name = materialize_code(ctx, exp._type,
+                mstats, name = stabilize(ctx, exp._type,
                     cstats, cexp)
             end
             table.insert(stats, mstats)
@@ -8858,9 +8870,9 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             local cntname = "_vcount_" .. suffix
             local nname = "_nvarargs_" .. suffix
             local tailcount = "_vtail_" .. suffix
-            -- Every GC-bearing static-prefix expression was already materialized
-            -- into its call-activation root. The raw TitanVargX payload only
-            -- borrows those values and must not duplicate the roots.
+            -- Static-prefix expressions are stable C values whose fresh
+            -- allocations/call results already own their ordinary roots. The raw
+            -- TitanVargX payload borrows them and is never itself a root.
             local prefix_inits = {}
             for j, cexp in ipairs(vargexps) do
                 table.insert(prefix_inits, render([[
@@ -9257,29 +9269,24 @@ function coder._code_adjustment_value(
         assert(adjustment.guard
                and adjustment.guard.op == "option",
             "structural Option view lacks its strict guard plan")
-        local csrc, srcname, srcslot =
-            newtmp(ctx, source_type, types.is_gc(source_type))
-        local cdst, dstname, dstslot =
-            newtmp(ctx, target, types.is_gc(target))
+        -- The successful guard neither allocates nor changes ownership. Keep
+        -- both sides in C temporaries; the enclosing sink publishes any actual
+        -- local/result/allocation home it requires.
+        local csrc, srcname = newtmp(ctx, source_type, false)
+        local cdst, dstname = newtmp(ctx, target, false)
         return render([[
             $CSRC
             $SRCNAME = $RAW;
-            $ANCHORSRC
             $CDST
             $CHECK
-            $ANCHORDST
         ]], {
             CSRC = csrc,
             SRCNAME = srcname,
             RAW = raw,
-            ANCHORSRC = srcslot
-                and setslot(source_type, srcslot, srcname) or "",
             CDST = cdst,
             CHECK = coder._strictcheckandget(
                 ctx, adjustment.guard, target, dstname, "&" .. srcname,
                 loc, "structural Option view"),
-            ANCHORDST = dstslot
-                and setslot(target, dstslot, dstname) or "",
         }), dstname
     end
     assert(adjustment.kind == "direct_coercion"
@@ -9339,7 +9346,7 @@ function coder._convert_result_run_element(
 end
 
 -- Lower the sole open producer of an adjusted expression list. Input `...`
--- borrows its already-rooted descriptor view; a flexible call publishes a
+-- borrows its descriptor elements' existing traced provenance; a flexible call publishes a
 -- caller-owned run through `_coder_result_run`.  `want` and
 -- `effectively_open` let a flexible-return sink pass its inherited run-time
 -- budget while arrays and variadic arguments use an unconditional open demand.
@@ -9393,7 +9400,8 @@ end
 -- may simultaneously provide a fixed primary value and the dynamic run, so
 -- open-source identity is orthogonal to fixed/tail membership.
 function coder._codeadjustedopen(
-        ctx, adjusted, want, effectively_open)
+        ctx, adjusted, want, effectively_open, stabilize)
+    stabilize = stabilize or materialize_code
     local fixed_index, tail_index, discard_set = {}, {}, {}
     for i, exp in ipairs(adjusted.fixed) do fixed_index[exp] = i end
     for i, exp in ipairs(adjusted.tail_scalars) do tail_index[exp] = i end
@@ -9411,7 +9419,7 @@ function coder._codeadjustedopen(
         end
         local fi, ti = fixed_index[exp], tail_index[exp]
         if fi or ti then
-            local mstats, name = materialize_code(
+            local mstats, name = stabilize(
                 ctx, exp._type, cs, ce)
             table.insert(stats, mstats)
             if fi then fixednames[fi] = name else tailnames[ti] = name end
@@ -9437,10 +9445,9 @@ function coder._codeadjustedopen(
 end
 
 -- Materialize an adjusted scalar-prefix + dynamic run as one input-variadic
--- descriptor. Source roots remain live through the native call, but an open
--- conversion can allocate a fresh callable wrapper that is not reachable from
--- its source. The descriptor backing is an untraced caller-scoped C array, so
--- GC-bearing destination elements also receive a parallel traced root range.
+-- descriptor. Native inputs remain C values; an open conversion that allocates
+-- a fresh callable wrapper establishes that allocation's immediate traced root.
+-- The descriptor backing itself is an untraced caller-scoped C array.
 function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
                                         run, stats, callargs)
     local elem = assert(callee_ftype.varargtype)
@@ -9547,14 +9554,14 @@ local function codevaluecall(ctx, node)
     end
     local stats = {}
 
-    -- 1. evaluate the callee into an anchored TValue. Later argument
-    -- evaluation can replace its original home before dispatch.
+    -- 1. evaluate the callee once into a C temporary. The exact Titan branch
+    -- receives it through the native convention; only the slow branches later
+    -- publish it on the Lua stack as an actual Lua-convention argument.
     local fstat, fexp = codeexp(ctx, node.exp)
-    local fdecl, fname, fslot = newtmp(ctx, ftype, true)
+    local fdecl, fname = newtmp(ctx, ftype, false)
     table.insert(stats, fstat)
     table.insert(stats, fdecl)
     table.insert(stats, fname .. " = " .. fexp .. ";")
-    table.insert(stats, setslot(ftype, fslot, fname))
 
     -- A variadic callee value: `ftype.varargtype` is set. The argument list holds
     -- the fixed-param args (1..nfixed) followed by any surplus static args (each
@@ -9577,16 +9584,17 @@ local function codevaluecall(ctx, node)
     assert(npassed <= nstatic)
     local nfixed = #ftype.params
 
-    -- 2. evaluate arguments into anchored temps. Fixed-param args (1..nfixed) are
-    --    boxed per the callee's declared parameter type; surplus static args are
-    --    boxed per the vararg element type (they become backing-struct elements).
+    -- 2. evaluate arguments into C temporaries. Fixed-param args (1..nfixed)
+    --    use the callee's declared parameter type; surplus static args use the
+    --    vararg element type and become native backing-struct elements. Slow
+    --    branches later box these same values into their Lua argument slots.
     local argnames, argtypes = {}, {}   -- fixed-param args (both paths)
     local vargexps = {}                 -- surplus static-arg C exprs (struct + push)
     local inputrun, inputtail
     if callee_vararg and node._arg_adjustment
        and node._arg_adjustment.open_source then
         local astats, fixednames, tailnames, run = coder._codeadjustedopen(
-            ctx, node._arg_adjustment, "LUA_MULTRET", "1")
+            ctx, node._arg_adjustment, "LUA_MULTRET", "1", coder._freeze_code)
         for _, stat in ipairs(astats) do table.insert(stats, stat) end
         for i, atype in ipairs(ftype.params) do
             argnames[i] = assert(fixednames[i])
@@ -9597,7 +9605,7 @@ local function codevaluecall(ctx, node)
         local astats, anames = coder._codeadjustedfixed(ctx, {
             _result_adjustment = node._arg_adjustment,
             exps = args,
-        })
+        }, coder._freeze_code)
         for _, stat in ipairs(astats) do table.insert(stats, stat) end
         for i, atype in ipairs(ftype.params) do
             argnames[i] = assert(anames[i])
@@ -9611,13 +9619,9 @@ local function codevaluecall(ctx, node)
             if i <= npassed then
                 local atype = (callee_vararg and i > nfixed) and callee_vararg
                               or ftype.params[i]
-                local adecl, aname, aslot = newtmp(ctx, atype,
-                    types.is_gc(atype))
+                local adecl, aname = newtmp(ctx, atype, false)
                 table.insert(stats, adecl)
                 table.insert(stats, aname .. " = " .. aexp .. ";")
-                if aslot then
-                    table.insert(stats, setslot(atype, aslot, aname))
-                end
                 if callee_vararg and i > nfixed then
                     table.insert(vargexps, aname)
                 else
@@ -9663,10 +9667,9 @@ local function codevaluecall(ctx, node)
     -- runtime function -- ever ran). The generic path re-pushes elements directly
     -- from `vargexps`/`ctx.varargs` and does not read the struct.
     --
-    -- Because the build and the native call both live in the fast branch's
-    -- `if`-true block, they materialize together before any caller resets
-    -- L->top.p: collectable vararg elements anchored on source slots (and a
-    -- case-3 fresh Udata0 on its reserved slot) stay live across `$FASTCALL`.
+    -- Because the build and native call both live in the fast branch, a case-3
+    -- fresh Udata0 is allocated and rooted only on that branch. The descriptor's
+    -- native elements remain C arguments and receive no tracing-only copies.
     -- The common `_base = restorestack(L, _base_off);` after the if/else runs on
     -- both paths (a case-3 allocation may have relocated the stack).
     local vargca = {}   -- the two struct C exprs (_varargs ptr, _start)
@@ -10142,7 +10145,7 @@ local function codecall(ctx, node)
                        types.method_function_type(indexed),
                        types.method_function_type(mtype)),
                 "Interface call has a noncanonical method slot")
-            local cstat, wrapper = materialize(ctx, node.exp)
+            local cstat, wrapper = coder._freeze(ctx, node.exp)
             local fptr = fresh_lowering_name(
                 ctx, "_titan_interface_call_")
             table.insert(castats, cstat)
@@ -10202,7 +10205,7 @@ local function codecall(ctx, node)
                     INDEX = c_integer_literal(ctx.modules[mod])
                 })
             end
-            local cstat, cexp = materialize(ctx, node.exp)
+            local cstat, cexp = coder._freeze(ctx, node.exp)
             table.insert(castats, cstat)
             table.insert(caexps, modarg)
             table.insert(caexps, "NULL")
@@ -10261,7 +10264,7 @@ local function codecall(ctx, node)
     elseif callee_vararg and node._arg_adjustment
            and node._arg_adjustment.open_source then
         local astats, fixednames, tailnames, run = coder._codeadjustedopen(
-            ctx, node._arg_adjustment, "LUA_MULTRET", "1")
+            ctx, node._arg_adjustment, "LUA_MULTRET", "1", coder._freeze_code)
         for _, stat in ipairs(astats) do table.insert(castats, stat) end
         for i = 1, #callee_ftype.params do
             local fixedname = assert(fixednames[i])
@@ -10278,7 +10281,7 @@ local function codecall(ctx, node)
         local astats, anames = coder._codeadjustedfixed(ctx, {
             _result_adjustment = node._arg_adjustment,
             exps = args,
-        })
+        }, coder._freeze_code)
         for _, stat in ipairs(astats) do table.insert(castats, stat) end
         for i = 1, #callee_ftype.params do
             local aname = assert(anames[i])
@@ -10310,8 +10313,8 @@ local function codecall(ctx, node)
         end
     end
     -- Build + append the backing struct (`_varargs`, `_start`) for a variadic
-    -- callee. The call is materialized below, so collectable source-slot anchors
-    -- and any case-3 stack-anchored Udata0 remain live until the callee returns.
+    -- callee. Its C payload borrows the already evaluated native values; only a
+    -- case-3 backing allocation acquires a new traced root.
     if callee_vararg and not inputrun then
         emit_vararg_struct(ctx, node, callee_ftype, vargexps, dots_tail,
                            npassed, caexps, castats)
@@ -15012,14 +15015,13 @@ local function codeboxparam(ctx, param)
 end
 
 -- Titan calling convention:
---     first parameter is a lua_State*, other parameters carry their actual
---     native types. The caller anchors every GC-bearing fixed argument through
---     the native activation: the callee can poll or grow its stack before it is
---     able to establish any local parameter home. The callee installs a separate
---     home only when mutation/spilling requires one. The function returns its first result directly and
---     writes later results through out parameters. GC-bearing results remain
---     raw until the caller roots those that must survive a later allocating or
---     stack-relocating action; returning itself cannot run the collector.
+--     first parameter is a lua_State*; remaining inputs use their actual native
+--     C types. The caller never publishes tracing-only Lua-stack copies of those
+--     arguments. A callee creates a separate local home only when mutation or
+--     setjmp spilling requires one. The function returns its first result
+--     directly and writes later results through out parameters. A native caller
+--     roots each GC-bearing result immediately after return, before later work
+--     can collect it; returning itself cannot run the collector.
 local function codefuncdec(tlcontext, node)
     local ctx = newcontext(tlcontext)
     local stats = {}
@@ -15528,7 +15530,7 @@ function codelambda(ctx, node)
 end
 
 -- Use-site code for a bound method reference `obj:m`: evaluate the receiver once
--- into an anchored gc temp, then build a 6-upvalue CClosure exactly like a
+-- into a C temp, then build a 6-upvalue CClosure exactly like a
 -- 1-capture lambda whose capture is `self`:
 --   upvalue[0] = the method's module closure
 --   upvalue[1] = the self-removed function-type tag (light userdata)
@@ -15585,14 +15587,14 @@ function codemethodref(ctx, node)
     ctx.uses_base_off = true
     local stats = {}
 
-    -- 1. evaluate the receiver once into an anchored gc temp (self: Udata*)
+    -- 1. evaluate the receiver once into a C temp (self: Udata*). Its eventual
+    -- stack push below is real closure-upvalue transport, not a tracing copy.
     local rtype = node.exp._type
     local rstat, rexp = codeexp(ctx, node.exp)
-    local rdecl, rname, rslot = newtmp(ctx, rtype, true)
+    local rdecl, rname = newtmp(ctx, rtype, false)
     table.insert(stats, rstat)
     table.insert(stats, rdecl)
     table.insert(stats, rname .. " = " .. rexp .. ";")
-    table.insert(stats, setslot(rtype, rslot, rname))
 
     -- 2. push the six upvalues and build the closure
     table.insert(stats, render([[
@@ -15611,7 +15613,7 @@ function codemethodref(ctx, node)
         STRICTNAME = strictname,
     }))
 
-    -- 3. consume the closure into an anchored gc temp
+    -- 3. consume the freshly allocated closure and publish its initial root
     local cdecl, tmpname, tmpslot = newtmp(ctx, ftype, true)
     table.insert(stats, render([[
         lua_pushcclosure(L, $LUANAME, 6);

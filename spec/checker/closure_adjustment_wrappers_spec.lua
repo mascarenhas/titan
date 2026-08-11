@@ -112,6 +112,48 @@ describe("closure adjustment wrappers (checker)", function()
         assert.match("callable adapter", frozen.trace_name, 1, true)
     end)
 
+    it("roots every live fixed and open GC result at native handoff",
+    function()
+        local ok, err, tree = run_checker([[
+            local function fixed_actual(x: integer): string
+                return "fixed"
+            end
+
+            local function open_actual(x: integer): (...: string)
+                return "open", "tail"
+            end
+
+            function probe()
+                local fixed: (integer, value) -> string = fixed_actual
+                local open: (integer, value) -> (...: string) = open_actual
+            end
+        ]])
+        assert.is_true(ok, err)
+
+        local stats = find_function(tree, "probe").block.stats
+        local fixed = assert(stats[1].exps[1]._callable_adapter)
+        assert.same({}, fixed.rooting.fixed.argument_source)
+        assert.equal(1, #fixed.rooting.fixed.result_source)
+        assert.equal("result:1",
+            fixed.rooting.fixed.result_source[1].action)
+        assert.equal("Type.String",
+            fixed.rooting.fixed.result_source[1].type._tag)
+        assert.equal("lua_stack_slot",
+            fixed.rooting.fixed.result_source[1].storage)
+        assert.is_false(fixed.rooting.ranges.result_source.present)
+
+        local open = assert(stats[2].exps[1]._callable_adapter)
+        assert.same({}, open.rooting.fixed.argument_source)
+        assert.same({}, open.rooting.fixed.result_source)
+        assert.is_true(open.rooting.ranges.result_source.present)
+        assert.is_true(open.rooting.ranges.result_source.gc_bearing)
+        assert.is_true(open.rooting.ranges.result_source.traced)
+        assert.equal("Type.String",
+            open.rooting.ranges.result_source.element_type._tag)
+        assert.equal("parallel_lua_stack_range",
+            open.rooting.ranges.result_source.storage)
+    end)
+
     it("freezes callable views at ordinary sinks without wrapping contextual lambdas",
     function()
         local ok, err, tree = run_checker([[

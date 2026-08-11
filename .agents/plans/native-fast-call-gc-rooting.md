@@ -1,6 +1,6 @@
 # Native Fast-Call GC Rooting Follow-up
 
-Status: **maintainer clarification captured; implementation audit pending.**
+Status: **implemented and locally validated.**
 
 This follow-up starts after the contextual lambda-result inference restoration.
 It records the intended Titan/Lua-stack invariant before any code changes so the
@@ -53,17 +53,76 @@ native inputs into stack slots for tracing. Preserve instead:
 - stack rebasing after operations that can relocate stack slots; and
 - Lua-convention argument setup on genuinely Lua/generic call branches.
 
-## Required evidence
+## Implemented inventory
 
-Before implementation, map every relevant `materialize*`, call builder,
-adapter root inventory, generated stack write, and structural assertion to one
-of the three legitimate situations above. Then add focused generated-C and
-runtime coverage proving that:
+| Boundary | Native representation | Traced publication |
+| --- | --- | --- |
+| positional/named fixed input | direct C expression or `coder._freeze_code` C temp | none |
+| method/Interface receiver | one C temp | none |
+| first-class callee and exact fast-path args | C `TValue`/typed temps | none |
+| static/open input-vararg elements | raw typed C array/descriptor | none; each element borrows existing provenance |
+| Interface/callable conversion source | C temp | none |
+| freshly allocated record/string/closure/Interface/callable destination | native pointer/value | immediate initial allocation root |
+| live fixed GC result from a native Titan call | raw ABI holder, then caller value | immediate caller result-source/home root after rebasing |
+| live open GC result run | caller-owned raw C backing | complete immediate parallel traced range after validation |
+| branded-strict or genuine-Lua call | VM stack frame | actual carrier/callee and argument transport slots |
 
-- native fixed/receiver/callee/static-vararg inputs create no tracing-only stack
-  copies;
-- native result objects are rooted immediately on return;
-- fresh allocations acquire their initial roots immediately;
-- Lua/generic calls still place all required values on the Lua stack; and
-- removing the mistaken input roots does not alter lexical evaluation order,
-  call adjustment, flexible descriptors, or callable/Interface behavior.
+`materialize_code` remains rooted for semantic locals, assignments, pending
+returns, container construction, and other owning sinks. Native input builders
+instead opt into `coder._freeze_code`; this split preserves lexical evaluation
+order without changing ownership. Callable/Interface adapter input-source
+inventories remain canonically empty. Their result-source inventories now cover
+every live GC-bearing fixed/open result, even for identity actions; destination
+inventories cover only fresh allocations.
+
+The no-copy model intentionally does not extend the lifetime of a raw C formal
+if a program destroys that value's sole traced semantic provenance while the
+formal is still in use. Supporting that stronger behavior would require the
+third call-activation root explicitly rejected by the maintainer invariant; do
+not reintroduce it under an allocation/result label.
+
+## Implementation map
+
+- `ordered_call_args`, `named_ordered_call_args`, direct receivers,
+  `codevaluecall`, adjusted fixed/open inputs, and static/open vararg builders use
+  C-only freezes on native paths.
+- Interface wrapper construction and bound-method construction keep their
+  sources/receivers in C; they retain only real upvalue transport and the fresh
+  destination root.
+- Structural Option guarding uses C temporaries; the successful guard does not
+  allocate, and its enclosing sink owns any required semantic/result home.
+- Ordinary fixed/open result handoff and callable/Interface adapters publish live
+  GC results immediately after return/rebase. Raw descriptors and buffers remain
+  non-roots.
+- Lua/generic and strict relays still push complete actual call frames.
+
+## Validation evidence
+
+Generated-C assertions now pin every boundary in the inventory:
+
+- positional and named C freezes preserve lexical order without input stores;
+- ordinary/Interface receivers and first-class callees stay in C;
+- exact first-class calls use C values while strict/Lua branches push complete
+  VM frames;
+- static and forwarded input-vararg descriptors contain no tracing-only element
+  stores;
+- Interface and bound-method construction have no preliminary source/receiver
+  root, while the fresh wrapper/closure is published immediately;
+- callable adapters have empty input-source stores and publish identity fixed and
+  open GC results immediately after the source call and rebase; and
+- deterministic finalizer coverage distinguishes initial allocation and
+  post-native-call result roots from the removed activation copies.
+
+Local validation from the repository root with the isolated
+`/tmp/titan-mascarenhas-callable-adjustment` prefix:
+
+- `luac -p` on all changed Lua files and `git diff --check`;
+- eight focused checker/coder files: **388 successes**;
+- `spec/support/ci_test_groups.sh compiler` with LuaCov: **2,596 tests** across
+  the main, unit, and isolated compiler groups;
+- `make titan-stdlib-test`: **186 native tests**; and
+- canonical `make test`: **2,710 Busted successes**, followed by **186 native
+  tests**, with zero failures/errors.
+
+Manual macOS CI remains waived for this PR; the required fresh Linux graph runs
+after push.

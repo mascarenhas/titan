@@ -152,7 +152,7 @@ describe("call sequencing regressions", function()
         ]])
     end)
 
-    it("roots native GC arguments through the callee activation", function()
+    it("freezes effect-ordered native arguments only in C", function()
         local csrc = compile_and_read_c([[
             local function sink(text: string, n: integer): integer
                 return #text + n
@@ -173,13 +173,17 @@ describe("call sequencing regressions", function()
             "static int test_native_call_titanentry_lua", first, true))
         local body = csrc:sub(first, last - 1)
         local copy = assert(body:find("_tmp_1 = _param_text;", 1, true))
-        local root = assert(body:find("setsvalue(L", copy, true))
-        local call = assert(body:find(", NULL, _tmp_1", root, true), body)
-        assert.is_true(copy < root and root < call)
+        local call = assert(body:find(", NULL, _tmp_1", copy, true), body)
+        assert.falsy(body:find("setsvalue(L", copy, true), body)
+        assert.is_true(copy < call)
     end)
 
-    it("keeps native callees and arguments live when their homes change",
+    it("retains allocation and post-native-call roots through later setup",
     function()
+        -- Constructor results acquire mandatory post-native-call roots in the
+        -- still-active caller; the lambda acquires its initial allocation root.
+        -- Those roots, not tracing-only argument copies, survive later setup or
+        -- callee code that replaces the values' ordinary program homes.
         run_coder([[
             local lua = foreign import "lua.h"
             local ffi = foreign import "titan/ffi.h"
@@ -192,6 +196,7 @@ describe("call sequencing regressions", function()
             finalized_1: boolean = false
             finalized_2: boolean = false
             finalized_3: boolean = false
+            finalized_4: boolean = false
 
             local function mark(v: value)
                 local id = (v as R).id
@@ -201,6 +206,8 @@ describe("call sequencing regressions", function()
                     finalized_2 = true
                 elseif id == 3 then
                     finalized_3 = true
+                elseif id == 4 then
+                    finalized_4 = true
                 end
             end
 
@@ -273,10 +280,40 @@ describe("call sequencing regressions", function()
                 end
                 return current_fn(replace_callee())
             end
+
+            local function make_result(): R
+                local r = R.new(4)
+                install_finalizer(r)
+                return r
+            end
+
+            local function collect_effect(): integer
+                collect()
+                return 0
+            end
+
+            local function take_result(r: R, _unused: integer): integer
+                if finalized_4 then return -1 end
+                return r.id
+            end
+
+            function returned_by_native_call(): integer
+                finalized_4 = false
+                return take_result(make_result(), collect_effect())
+            end
+
+            function finalization_state():
+                (boolean, boolean, boolean, boolean)
+                return finalized_1, finalized_2, finalized_3, finalized_4
+            end
         ]], [[
             assert(test.replaced_inside_callee() == 1)
             assert(test.replaced_by_later_argument() == 2)
             assert(test.replaced_first_class_callee() == 3)
+            assert(test.returned_by_native_call() == 4)
+            collectgarbage("collect")
+            local one, two, three, four = test.finalization_state()
+            assert(one and two and three and four)
         ]])
     end)
 

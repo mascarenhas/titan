@@ -439,25 +439,23 @@ The runtime transfers one `value` at a time in each direction. The
 control transfer is stackful: a `yield` switches C stacks without
 unwinding the Lua/Titan call stack that called `yield`. Therefore:
 
-* the `arg` formal parameter of `Coro:resume` stays rooted while the
-  resumed coroutine runs;
-* the `err` formal parameter of `Coro:error` stays rooted while the
-  target handles or propagates it;
-* the `arg` formal parameter of `coroutine.yield` stays rooted while the
-  yielding coroutine is suspended;
-* active non-nil tags are rooted by the suspended `resume`/`error`
-  parameter frame, by the `Coro` record's `default_tag` field, or by the
-  suspended `yield` parameter frame.
+* the values passed as `arg` to `Coro:resume` and `coroutine.yield`, and as
+  `err` to `Coro:error`, retain their upstream allocation/result/semantic/VM
+  provenance while the preserved caller chain is suspended;
+* a parameter gets a separate traced home only when ordinary assignment or
+  setjmp-spill analysis requires one; native argument transport itself remains
+  C-only; and
+* active non-nil tags are rooted by that preserved upstream provenance or by
+  the `Coro` record's `default_tag` field.
 
-This is the normal Titan calling convention doing useful work: GC-able
-formal parameters are already visible to Lua's collector through the
-frame's stack slots, and a minicoro yield preserves those frames instead
-of unwinding them.
+This is the normal no-copy Titan calling convention: minicoro preserves the
+native caller chain and therefore preserves the existing traced owners without
+inventing tracing-only formal-argument slots.
 
 The runtime may copy `TValue` structs by value between these rooted
 locations and native return slots. That is safe because copying/returning
-a `TValue` does not allocate, and generated callers immediately anchor
-GC-able returns in their own stack slots before any later allocation.
+a `TValue` does not allocate, and generated callers immediately root every
+GC-bearing native return in their own result slots before any later work.
 
 The runtime may copy a `TValue` through minicoro storage with
 `mco_push`/`mco_pop`, but minicoro only copies the struct bytes and does not
