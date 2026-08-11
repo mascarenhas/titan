@@ -48,13 +48,13 @@ describe("flexible return schemas (typechecker)", function()
         assert.same(types.Boolean(), tree[4]._type.rettypes[1])
     end)
 
-    it("copies both fixed and flexible results into an unannotated lambda", function()
+    it("infers complete results unless explicit `: ()` overrides them", function()
         local ok, err, tree = run_checker([[
             function run(): nil
                 local inferred: () -> (boolean, ...: integer) = function()
                     return true
                 end
-                local explicit = function(): ()
+                local explicit: () -> (value, ...: integer) = function(): ()
                 end
                 return nil
             end
@@ -62,7 +62,14 @@ describe("flexible return schemas (typechecker)", function()
         assert.truthy(ok, err)
 
         local inferred = tree[1].block.stats[1].exps[1]._type
-        local explicit = tree[1].block.stats[2].exps[1]._type
+        local explicit_cast = tree[1].block.stats[2].exps[1]
+        assert.equal("Ast.ExpCast", explicit_cast._tag)
+        assert.equal("callable", explicit_cast._adjustment.kind)
+        assert.equal("nil_fill_result",
+            explicit_cast._callable_adapter.results[1].kind)
+        assert.equal("end_flex",
+            explicit_cast._callable_adapter.results[2].kind)
+        local explicit = explicit_cast.exp._type
         assert.same(types.Boolean(), inferred.rettypes[1])
         assert.same(types.Integer(), inferred.flexrettype)
         assert.same({}, explicit.rettypes)

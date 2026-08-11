@@ -76,8 +76,10 @@ flows into, whether that is an assignment target, an argument position, or a
 `return`. **Both the parameter types and the return type come from this same
 expected type**; neither is reverse-engineered from the lambda's body.
 
-**Parameter types.** An annotated parameter uses its annotation. An
-*unannotated* parameter is filled in from the expected function type:
+**Input types.** An annotated parameter uses its annotation. An *unannotated*
+fixed parameter is filled in from the expected function type. A trailing bare
+`...` similarly inherits the expected input-tail element type; explicit
+`...: T` wins. See [Variadic parameters](variadic-parameters.md).
 
 ```lua
 function f(): integer
@@ -110,7 +112,8 @@ end
 test.titan:2:30: type error: cannot infer type of parameter 'x'
 ```
 
-Annotate the parameter, or use the lambda where its type is known.
+Annotate the parameter, or use the lambda where its type is known. A bare `...`
+without a variadic expected type receives the corresponding inference error.
 
 **Return shape.** Like the parameters, the fixed return list and any flexible
 result tail come only from the
@@ -131,6 +134,25 @@ function f(): integer
     return g(2)
 end
 ```
+
+An explicit annotation always wins. In particular, write `: ()` when the lambda
+deliberately produces no results even though its context has a result-bearing
+function type:
+
+```lua
+function install(callback: () -> value)
+    -- ...
+end
+
+install(function (): ()
+    record_event()
+end)
+```
+
+The explicit source shape here is `() -> ()`. Ordinary callable adjustment then
+decides whether it can flow to the target: `value` admits the missing nil result,
+while a non-nilable target such as `integer` does not. See
+[Callable adjustment wrappers](closure-adjustment-wrappers.md).
 
 When there is no return annotation and no expected function type, the return
 type defaults to the **zero-return** type `()` — exactly the default an
@@ -234,6 +256,14 @@ Equality on function values is object identity (raw closure-pointer
 comparison), the same rule that applies to any function value
 ([functions](functions.md#functions-as-values)).
 
+This fresh lambda is the **source closure**. An exact target-typed use preserves
+it. Evaluating an admitted non-exact Function-to-Function edge may, when the
+run-time value is an eligible exact Titan closure, create another fresh
+[target-tagged adjustment wrapper](closure-adjustment-wrappers.md). That wrapper
+is unequal to the lambda and to a wrapper from another evaluation; an
+ineligible generic fallback preserves the lambda's identity. Wrapper allocation
+does not re-evaluate the lambda expression or its capture expressions.
+
 ## Recursion: a lambda cannot name itself
 
 A lambda bound to a `local` cannot refer to itself by that name, because
@@ -255,18 +285,31 @@ For a recursive helper, write a named top-level function (recursion and
 mutual recursion among top-level functions work without forward
 declarations — see [Functions](functions.md#recursion-and-declaration-order)).
 
-## Lambdas live only inside function bodies
+## Lambdas in module-variable initializers
 
-A function expression may appear only inside a function body, never as a
-module-variable initializer. A top-level variable's initializer must be a
-compile-time constant, and a lambda is not, so
+A lambda is a valid module-variable initializer. Constructing the closure does
+not execute its body or read the values mentioned there, so the ordinary
+module-initialization frontier remains sound:
 
 ```lua
-local x = function () end   -- compile-time error
+local transform = function (x: integer): integer return x + 1 end
+
+function apply(x: integer): integer
+    return transform(x)
+end
+
+function replace(f: (integer) -> integer)
+    transform = f
+end
 ```
 
-is the usual "top level variable initialization must be constant" error,
-not a special case.
+This declares an ordinary function-typed module variable, not a named function.
+It is initialized once with a fresh closure, can be reassigned later, and calls
+through it use the first-class function path. The usual initializer rule still
+rejects an expression that immediately reads a module variable whose value is
+not visible at that point. Putting the read of an **already name-visible** module
+variable in the lambda body defers its value access until the closure is called;
+it does not make a later module variable or import visible.
 
 ## Bound method references
 
@@ -292,10 +335,13 @@ function use(): integer
 end
 ```
 
-The receiver expression is evaluated **once**, when the bound value is
-created. The result is an ordinary function value — store it, pass it,
-return it, call it through either path, hand it to Lua — with no special
-handling at the use site. Because the captured receiver is a reference,
+The receiver expression is evaluated **once**, when the bound source value is
+created. The result is an ordinary function value — store it, pass it, return
+it, call it through Titan or Lua — with no special handling at the use site. An
+exact static view preserves that bound closure; a non-exact callable edge has
+the same conditional fresh-wrapper/fallback behavior as any other
+[closure adjustment](closure-adjustment-wrappers.md). Because the captured
+receiver is a reference,
 calling a bound method that mutates record state is visible through the
 record:
 

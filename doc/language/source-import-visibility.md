@@ -40,9 +40,12 @@ way (`state.hidden`, `state:advance()`); the compiler checks that the current
 module has a direct source capability for that nominal owner.
 
 Local module variables refer to the producer's canonical module state. Likewise,
-reading a local function, constructor, method, or nominal function as a value
-returns the producer's canonical closure; each importer does not manufacture a
-new copy.
+reading a local function, constructor, method, or nominal function as an exact
+source value returns the producer's canonical closure; each importer does not
+manufacture a new copy. If the consuming sink instead requires an admitted
+non-exact Function type, that later edge has the ordinary conditional
+[fresh-wrapper rule](closure-adjustment-wrappers.md); it does not change which
+source closure the import selected.
 
 Local Interfaces are not supported. A local concrete method that is visible
 through a direct source import may, however, satisfy an ordinary public

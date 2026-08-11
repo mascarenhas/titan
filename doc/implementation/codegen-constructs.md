@@ -41,9 +41,11 @@ setsvalue(L, _localslot_t_2, _local_t_1);
 ```
 
 A local the checker marked unused generates only `$CSTATS ((void)$CEXP);`
-— the initializer still runs. Parameters (`_param_<name>`) rely on the
-*caller's* anchoring and get a `_paramslot_<name>` only if assigned to
-inside the function (`param._assigned`). Module variables live in `_mod`
+— the initializer still runs. An unassigned/unspilled parameter
+(`_param_<name>`) remains only its C formal and relies on the input's existing
+allocation/result/semantic/VM provenance; native calls create no argument root.
+A `_paramslot_<name>` is a real local/spill home used only when the parameter is
+assigned or must survive setjmp recovery. Module variables live in `_mod`
 user values: reads are `getslot` from `&_mod->uv[i].uv`, writes add
 `luaC_barrierback(L, obj2gco(_mod), <slot>);` for GC-able types (a
 userdata owner, back barrier); imported-module variables go through the
@@ -762,10 +764,10 @@ therefore still propagate.
 ## Calls
 
 `codecall` implements the caller's half of the native calling convention
-([overview](codegen-overview.md)). Argument marshaling is minimal: each
-argument's preliminary statements run in lexical order, then only the
-checker's delivered fixed prefix and accepted input tail are passed — already
-native, already anchored at their sources; there is no per-call pushing.
+([overview](codegen-overview.md)). Argument marshaling is minimal: preliminary
+statements run in lexical order, effect-ordered values are frozen only in C, and
+then the checker's delivered fixed prefix and accepted input tail are passed.
+There is no tracing-only native-input publication or per-call pushing.
 Explicit surplus arguments still run but are discarded. If the source call
 supplied too few fixed arguments, the checker has already appended
 `Ast.ExpNil` expressions and inserted the ordinary coercions, so code
@@ -782,9 +784,10 @@ never published as a live expression value.
 For a flexible producer `_flex_call_buffer` appends a typed caller-owned
 descriptor and `_flexwant` budget to the call. A finite demand gets a
 right-sized buffer; an open demand gets the bounded `TITAN_VARARG_MAX` backing
-and publishes an actual count. GC-able fixed results and open-run elements are
-stored into reserved caller stack slots before the next allocation — the
-callee never pushes native results and the raw descriptor is not a root.
+and publishes an actual count. After return and rebasing, every live GC-bearing
+fixed result and open-run element is immediately stored into its reserved caller
+slot/range—the callee never pushes native results and the raw descriptor is not
+a root.
 
 Real output for
 `local a, b = two()` where `two(): (integer, string)`, caller then

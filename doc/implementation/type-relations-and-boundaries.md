@@ -141,18 +141,25 @@ rejected
 ```
 
 Function assignment is directional even though `consistent` is symmetric.
-`callable_adjustment(source_actual, target_expected)` records the aligned
-fixed arguments/results, ignored surplus, nil-filled positions, input-tail
-transfer, flexible-result projection, hidden results, and end-of-tail
-actions. Every ordinary aligned component may be identical, a gradual
-injection/projection/view, or another callable adjustment. Numeric
-conversion, `T`/`T?` conversion, C conversion, and
+`callable_adjustment(source_actual, target_expected)` records aligned fixed
+arguments/results, ignored surplus, missing-argument nil fill, input-tail
+transfer, flexible-result projection, hidden results, end-of-tail actions, and
+the named missing-result action `nil_fill_result`. Every ordinary aligned
+component may be identical, a gradual injection/projection/view, or another
+callable adjustment. Numeric conversion, `T`/`T?` conversion, C conversion, and
 record/union-to-Interface wrapper construction are rejected as callable
 component matches.
 
-Shape-specific nil and flexible-result absence remain named callable actions.
-For example, a flexible actual tail can supply a finite optional projection;
-that does not make an ordinary fixed result `T` consistent with `T?`.
+`nil_fill_result` is emitted only when an expected fixed result has neither a
+fixed nor flexible source and its target passes `accepts_missing_nil` (Nil,
+Value, Option, Titan Pointer, or CPointer). It records the target index/type and
+has no source component plan. Required scalar and nominal results reject; a
+source-flex action takes precedence. Shape-specific nil and flexible-result
+absence remain named callable actions rather than relation leaves. Thus a
+flexible actual tail can supply a finite optional projection and a truly absent
+result can be filled under the narrow policy, but neither makes an ordinary
+fixed result `T` consistent with `T?`. The complete freezing/lowering contract
+is [Closure adjustment wrappers](closure-adjustment-wrappers.md).
 
 ## Strict gradual guards
 
@@ -184,8 +191,9 @@ conversion. The strict rules are therefore:
 Every typed Titan Array and Map read uses this strict policy. Map reads do so
 regardless of whether the slot was written by Titan or Lua; a raw Lua table
 has no interception or provenance bit from which the compiler could select a
-different policy. A branded non-exact Titan callable also uses strict guards
-for the actual callee's arguments and for the caller's observed results.
+different policy. Callable adjustment components also use strict guards: a realized wrapper
+executes them in its target-native adapter, while a branded exact-tag mismatch
+executes them through the existing strict generic entry/result path.
 
 `has_tvalue_representation(T)` asks only whether `T` can occupy a boxed slot.
 `has_sound_gradual_guard(T)` asks the stronger question above and recurses
@@ -299,11 +307,13 @@ This table controls which of the two run-time policies a lowering may use:
 
 | Site | Checker plan | Run-time policy |
 | --- | --- | --- |
-| exact Titan assignment/call | identity | no boundary check |
+| exact Titan assignment/call | identity | preserve the source value; an exact call uses its native entry with no boundary check |
 | direct Titan scalar/Option/C assignment | `CoercionPlan` | exactly that conversion |
-| implicit `value -> T` assignment | gradual projection | strict guard |
+| finite non-exact Function `A -> B` assignment or written callable `as` | raw `CallablePlan` plus frozen `CallableAdapterPlan` | evaluate once; exact branded A with upvalue room becomes a fresh B wrapper/native adapter, otherwise preserve the value for strict/non-Titan generic fallback |
+| implicit/dynamic `value -> T` assignment | gradual or dynamic projection | strict/dynamic target rule; a Function target preserves the boxed carrier and never realizes a statically known wrapper |
 | Array or Map read yielding `T?` | `GuardPlan(T?)`, or static rejection | strict guard, recursively through Option |
-| branded non-exact Titan callable arguments/results | declaration-attached argument/vararg guards and call-attached result guards | strict guards; the `CallablePlan` establishes that the view is admissible |
+| callable arguments/results in a realized wrapper | frozen component actions and root/rebase ledger | target-native adapter executes strict actions, including nested conditional wrappers and `nil_fill_result` |
+| branded exact-tag-mismatch callable arguments/results | declaration/relay-attached argument/vararg guards and call-attached result guards | strict generic path; the raw `CallablePlan` establishes that the view is admissible |
 | written `value as T` | `WrittenCastPlan(dynamic)` | dynamic coercion or normal error |
 | written `value is T` | same dynamic plan | non-raising dynamic predicate |
 | Lua call into a Titan function | per-formal `DynamicCoercionPlan` | dynamic coercion |
@@ -323,11 +333,15 @@ written/Lua boundary but fails an implicit gradual projection to boolean.
 
 `checker.lua` elaborates accepted edges and retains the decision:
 
-- fixed casts use `_adjustment`;
-- same-representation structural/callable views use
-  `_assignment_adjustment`;
+- fixed casts use `_adjustment`; in particular, every finite non-exact
+  callable edge is an `Ast.ExpCast` whose child remains A and whose cast type is
+  B, with the original raw plan plus its frozen callable-adapter annotation;
+- same-representation Array/Map structural views use
+  `_assignment_adjustment`; callable plans no longer use this exception;
 - `_open_results`, `_open_dots`, `_open_args`, and positional-constructor
-  adjustment records carry their element `adjustment`;
+  adjustment records carry their element `adjustment`; the checker freezes and
+  attaches callable-element adapters at the owning source location, and the
+  coder consumes and registers those already frozen graphs;
 - every typed Array/Map bracket node carries `_read_guard`, including the
   recursive outer Option guard produced by ordinary indexing; if no sound
   guard exists, the checker rejects the read rather than storing an unavailable
@@ -344,11 +358,13 @@ written/Lua boundary but fails an implicit gradual projection to boolean.
 
 `trycoerce` returns the exact decision it obtained for the sink, and
 `checkmatch` consumes that same object; it never calls a type relation. A
-representation-changing decision must already have produced an annotated cast,
-while a same-representation structural/callable decision remains attached to
-the source expression. Code generation consumes that attached decision at the
-sink. Array, Map, and callable views retain their carrier and defer component
-observations, but an Option has no separate mutable backing: establishing
+representation-changing decision and every finite non-exact callable decision
+must already have produced an annotated cast. Only a same-representation
+Array/Map structural decision remains attached to the source expression.
+Callable casts may allocate a wrapper and their frozen adapters perform
+component observations; an ineligible run-time carrier is nevertheless
+preserved for generic fallback. An Option has no separate mutable backing:
+establishing
 `A?` as a gradual `B?` view immediately applies the recursive strict guard to
 its present payload (nil passes unchanged). This prevents a later identity
 Option force or map from forgetting which base tag was actually stored. A
@@ -375,9 +391,11 @@ semantic relation, and must not synthesize an unannotated semantic
 `Ast.ExpCast`.
 
 Written gradual and callable casts use the same plan-consuming adjustment
-lowering as implicit sinks. Array, Map, and callable views preserve their
-carrier. An Option view performs its immediate strict present-payload
-observation. The `is` lowering consumes the same `WrittenCastPlan` as `as`,
+lowering as implicit sinks. Array and Map views preserve their carrier; a
+written non-exact callable `as` conditionally realizes a wrapper, while its
+`is` twin remains allocation-free. An Option view performs its immediate strict
+present-payload observation. The `is` lowering consumes the same
+`WrittenCastPlan` as `as`,
 including partial float-to-integer and recursively composed Option
 coercions; it produces the non-raising acceptance predicate rather than
 assuming every statically admitted cast is total.

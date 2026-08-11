@@ -326,9 +326,12 @@ canonical per-state Interface identity.
 
 An exported function is itself a **first-class value**: besides calling it
 as `geom.norm(p)`, the importer can reference `geom.norm` as a value — pass
-it, store it, return it, and call it indirectly — with stable identity (the
-same function reference each time) and a fast call path. (Only the function
-is first-class; the module alias itself is not, as described next.)
+it, store it, return it, and call it indirectly — with stable **source**
+identity (the same exact function reference each time) and a fast call path. An
+admitted non-exact target-typed use may subsequently realize a fresh
+[closure adjustment wrapper](closure-adjustment-wrappers.md); that wrapper
+does not replace the canonical imported source. (Only the function is
+first-class; the module alias itself is not, as described next.)
 Its imported static type preserves both input-variadic and flexible-result
 tails, so calls through a source or compiled-module interface use the same
 finite projection and open-run rules as local calls.

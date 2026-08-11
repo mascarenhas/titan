@@ -112,6 +112,18 @@ function answer(): integer
     local dynamic: Dynamic = Box.new(20)
     return dynamic:convert(22 as value) as integer
 end
+
+function increment(value_: integer): integer
+    return value_ + 1
+end
+
+function callable(): (integer) -> integer
+    return increment
+end
+
+function identity(value_: value): value
+    return value_
+end
 ]]
     local filename = workspace .. "/fixture_target.titan"
     local ast, parse_err = parser.parse(filename, source)
@@ -217,12 +229,14 @@ describe("static compiled-module native containers", function()
     local duplicate_two
     local original_ar
     local original_ranlib
+    local original_titan_bin_path
 
     setup(function()
         workspace = os.tmpname() .. " static modules"
         make_directory(workspace)
         original_ar = driver.AR
         original_ranlib = driver.RANLIB
+        original_titan_bin_path = driver.TITAN_BIN_PATH
 
         target_object = compile_titan_object(workspace)
         target = assert(driver.derive_target_fingerprint(
@@ -251,6 +265,7 @@ describe("static compiled-module native containers", function()
     teardown(function()
         driver.AR = original_ar
         driver.RANLIB = original_ranlib
+        driver.TITAN_BIN_PATH = original_titan_bin_path
         driver.imported = {}
         types.registry = {}
         if workspace then remove_tree(workspace) end
@@ -259,6 +274,7 @@ describe("static compiled-module native containers", function()
     after_each(function()
         driver.AR = original_ar
         driver.RANLIB = original_ranlib
+        driver.TITAN_BIN_PATH = original_titan_bin_path
     end)
 
     it("derives the authoritative target from one generated module object",
@@ -614,6 +630,83 @@ assert(target.answer() == 42)
             forged, image, { "fixture.target" }, "forged three-way input")
         assert.falsy(equal)
         assert.match("type metadata", equality_err, 1, true)
+    end)
+
+    it("builds consumer-local callable views over an archive-selected source",
+       function()
+        driver.TITAN_BIN_PATH = workspace
+        local archive = workspace .. "/fixture/target.a"
+        make_directory(workspace .. "/fixture")
+        local built = assert(driver.build_static_archive(
+            archive, { target_object }, {}, target, false))
+        assert.truthy(built.archive.entries["fixture.target"])
+        assert.is_nil(lfs.attributes(
+            workspace .. "/fixture/target.so", "mode"))
+
+        types.registry = {}
+        driver.imported = {}
+        local static_deps = {}
+        local consumer_source = [[
+local provider = import "fixture.target"
+
+record Box
+    n: integer;
+end
+
+function main(args: {string}): integer
+    local adjusted: (integer, value) -> value = provider.increment
+    if (adjusted(40, "ignored") as integer) ~= 41 then
+        return 1
+    end
+
+    local erased: value = adjusted
+    local wider: (integer, value, value) -> value = erased
+    if (wider(41, "a", "b") as integer) ~= 42 then
+        return 2
+    end
+
+    local from_result: (integer, value) -> value = provider.callable()
+    if (from_result(42, "ignored") as integer) ~= 43 then
+        return 3
+    end
+
+    local broad: (value) -> value = provider.identity
+    local narrowed: (Box) -> Box = broad
+    local dynamic: value = narrowed
+    local nominal: (Box, value) -> Box = dynamic
+    if nominal(Box.new(44), "ignored").n ~= 44 then
+        return 4
+    end
+    return 0
+end
+]]
+        local filename = workspace .. "/fixture_consumer.titan"
+        local ast, parse_err = parser.parse(filename, consumer_source)
+        assert.truthy(ast, parse_err)
+        local loader = driver.defaultloader(static_deps)
+        local _, errors = driver.with_loader(loader, function(active)
+            return checker.check(
+                "fixture.consumer", ast, consumer_source,
+                filename, active)
+        end)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        assert.equal("static",
+            driver.imported["fixture.target"].kind)
+        assert.is_true(static_deps["fixture.target"])
+
+        local ok, compile_err, object = driver.compile(
+            "fixture.consumer", ast, filename,
+            static_deps, false)
+        assert.truthy(ok, compile_err)
+        local executable = workspace .. "/fixture_consumer_app"
+        local entrypoint =
+            workspace .. "/fixture_consumer__entrypoint.c"
+        local linked, link_err = driver.compile_program(
+            "fixture.consumer", { object }, nil, false, nil,
+            executable, { archive }, entrypoint)
+        assert.truthy(linked, link_err)
+        local ran, output = run({ executable })
+        assert.truthy(ran, output)
     end)
 
     it("compares exact archive logical protocols", function()

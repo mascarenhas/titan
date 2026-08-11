@@ -366,9 +366,11 @@ then brought the documentation in line.
   and called. Function-type annotations are accepted everywhere. A value is a
   boxed `TValue`; a Titan function value is a `CClosure` with upvalue[0]=`_mod`,
   upvalue[1]=a function-type tag (light userdata), upvalue[2]=native entry
-  pointer. Each referenced function has one canonical closure in a dedicated
-  module upvalue slot (stable identity); exported functions always get one, so
-  importers reference them by upvalue index (no hash lookup). Function-type
+  pointer. Each referenced function has one canonical **source** closure in a
+  dedicated module upvalue slot (stable exact identity); exported functions
+  always get one, so importers reference them by upvalue index (no hash lookup).
+  The later closure-adjustment feature preserves this source statement while
+  permitting a fresh conditional target wrapper at a non-exact edge. Function-type
   tags are shared across modules via the Lua registry (publish-or-recover),
   keyed by the canonical type string. Calls take an exact-type fast path
   (direct native call) or a generic path (`luaD_callnoyield` through the Lua
@@ -420,7 +422,11 @@ Documented the anonymous-functions / closures feature (branch
   "must be constant" error. Bound instance-method references `obj:method`
   (no call) are also values — the method's type with `self` removed and the
   receiver bound — including across a `.so` boundary. Only foreign/FFI
-  functions remain non-values.
+  functions remain non-values. **Later semantic update:** results are no longer
+  inferred from the body: an omitted result annotation copies the expected
+  function's fixed and flexible result shape, or defaults to `()` without usable
+  context. The module-initializer claim is also superseded: lambdas may initialize
+  module variables.
 
 * **New language chapter.** Added `doc/language/closures.md` (syntax,
   inference, lexical capture, fresh-per-evaluation/equality, the recursion
@@ -495,9 +501,13 @@ multiple results remain available without weakening an already typed callable.
 * **Native and Lua call paths.** Flexible native entries receive caller-owned
   typed output backing plus a finite/open budget. Exact module, static, method,
   bound-method, lambda, and exactly tagged first-class calls retain the native
-  path. Non-exact Titan values and Lua callables use the generic stack path;
-  statically open producers uniformly request `LUA_MULTRET`, preserve their raw
-  count on the Lua stack, and are trimmed or checked by the Titan sink.
+  path. At this ABI-0.14 milestone, non-exact Titan values and Lua callables
+  used the generic stack path; statically open producers uniformly requested
+  `LUA_MULTRET`, preserved their raw count on the Lua stack, and were trimmed or
+  checked by the Titan sink. The later
+  [closure-adjustment-wrapper feature](language/closure-adjustment-wrappers.md)
+  conditionally gives a statically known non-exact Titan edge a target-native
+  adapter while retaining this generic behavior as its required fallback.
 * **Lifetime and interface work.** Flexible result backing is paired with
   traced roots for GC-bearing elements, including pending returns that cross
   allocating or nested `finally` blocks. Callable serialization, compiled
@@ -555,3 +565,25 @@ artifact identity.
   nested generated artifacts clean correctly, the delayed-FS variant patches
   an isolated folder copy, and bundled/system modes still produce one
   canonical `titan/uv.so`.
+
+## 2026-08-11 — native fast-call GC provenance correction
+
+Reconciled the compiler and implementation manuals with the native calling
+convention's no-copy input rule.
+
+* **C-only native inputs.** Positional/named arguments, method and Interface
+  receivers, first-class callees, and static/open variadic elements now use
+  untraced C freezes only when lexical order requires them. Interface and bound
+  closure construction likewise avoid preliminary source/receiver roots;
+  conditional open callable fallbacks publish only a freshly allocated wrapper,
+  never the unchanged source. Genuine Lua and branded-strict calls still push
+  complete VM call frames.
+* **Immediate ownership handoff.** Fresh allocations retain their immediate
+  initial roots, and every live GC-bearing fixed/open native result—including
+  identity results inside callable/Interface adapters—is rooted immediately
+  after return and rebasing. Raw descriptors and C buffers remain non-roots.
+* **Documentation and evidence.** Updated the checker, code-generation, GC,
+  Interface, flexible/variadic, named-call, closure-wrapper, coroutine, and AST
+  chapters. Generated-C assertions cover every input form and distinguish real
+  VM/upvalue transport from tracing copies; the complete local suite passes
+  without an ABI change (still 0.22).

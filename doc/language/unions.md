@@ -353,8 +353,10 @@ source order but do not introduce file-local namespaces.
 
 From Lua, an exported union name is a read-only namespace on its Titan module.
 It contains public variant constructors and public user-declared union
-functions. Constructor function identity is stable, so repeated reads compare
-equal.
+functions. Exact constructor source identity is stable, so repeated reads
+compare equal. A later non-exact Titan target-typed use may conditionally
+realize a fresh [closure adjustment wrapper](closure-adjustment-wrappers.md)
+without changing that canonical source value.
 
 A union value is userdata. Public methods are available through ordinary
 method lookup. Variants, tags, and payloads are opaque; arbitrary reads and

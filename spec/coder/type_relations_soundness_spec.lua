@@ -718,7 +718,7 @@ describe("type-relation soundness (end-to-end)", function()
         ]])
     end)
 
-    it("compares asymmetric callable views in both operand orders", function()
+    it("compares fresh asymmetric callable views in both operand orders", function()
         run_coder([[
             local function short(x: integer): integer
                 return x
@@ -731,8 +731,8 @@ describe("type-relation soundness (end-to-end)", function()
             end
         ]], [[
             local forward, reverse = test.compare_callable_views()
-            assert(forward)
-            assert(reverse)
+            assert(not forward)
+            assert(not reverse)
         ]])
     end)
 

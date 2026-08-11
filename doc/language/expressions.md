@@ -202,14 +202,17 @@ enumerated symmetric type pairs:
 * **Strings** compare by content (lexicographically for the relational
   operators), exactly as in Lua.
 * **Arrays, maps, records, unions, Interfaces, and function-typed values**
-  compare by identity. Consistent non-exact Array, Map, or Function views still
-  share the same boxed object; nominal records, unions, and Interfaces require
-  their exact type.
+  compare by identity. Consistent non-exact Array/Map views share the same
+  boxed object; nominal records, unions, and Interfaces require their exact
+  type. An exact Function edge likewise preserves its source closure, but an
+  eligible non-exact callable edge may realize a fresh target wrapper. That
+  wrapper is unequal to its source and to a separately realized wrapper; an
+  ineligible fallback preserves the boxed identity.
   Arrays use canonical proxy identities, nominal values compare their userdata
-  identities, and maps use ordinary table identities. A Titan function has
-  its stable canonical `CClosure` identity, while a non-Titan Lua function, C
-  function, or `__call` value retains its own boxed identity. Metamethods are
-  never involved.
+  identities, and maps use ordinary table identities. A referenced Titan
+  declaration has its stable canonical **source** `CClosure`, while a non-Titan
+  Lua function, C function, or `__call` value retains its own boxed identity.
+  Metamethods and wrapper unwrapping are never involved.
   Each record/union-to-Interface conversion makes a fresh wrapper, so wrapper
   equality is the identity of that conversion result. An Interface and its
   concrete implementer are incomparable, as are two distinct nominal
@@ -378,6 +381,7 @@ conversions.
 | --- | --- | --- |
 | a source/target pair admitted by the ordinary written direct-coercion table | that written target | as specified by the coercion; for example, `integer -> float` is total and `float -> integer` can fail |
 | satisfying record or union `R` | Interface `I` | never — constructs a fresh wrapper |
+| statically known Function `A` | non-exact callable-adjustable Function `B` | never — conditionally constructs a fresh target wrapper for an eligible exact Titan `A`; otherwise preserves the boxed fallback value |
 | Interface `I` | any visible concrete record or union `R` | yes — checks whether the wrapper retains that exact concrete type |
 | option `T?` | base `T` | yes — checked (raises on `nil`) |
 | any non-FFI type with a `TValue` representation (including options) | `value` | never |
@@ -417,6 +421,12 @@ This is intentionally broader than an implicit `value -> T` projection or a
 typed Array/Map read, both of which use strict gradual guards and do not apply
 numeric conversion or truthiness. All boundary distinctions are normative in
 [the type-system matrix](types.md#normative-boundary-matrix).
+A written non-exact Function-to-Function cast uses the same conditional
+fresh-wrapper lowering as an implicit callable adjustment. A `value`-to-Function
+cast remains the distinct dynamic case: it stores the boxed value without
+checking callability and creates no wrapper. See
+[Closure adjustment wrappers](closure-adjustment-wrappers.md#implicit-adjustment-as-and-is).
+
 An Interface target is the deliberate exception where both strict projection
 and broad dynamic conversion have the same acceptance condition: the value
 must already contain a wrapper of that exact nominal Interface type. Neither
@@ -453,8 +463,11 @@ For the admitted casts that can fail, the test uses the same checks as `as`:
   an ordinary Lua table is a Map, not an Array proxy, and distinct record
   types do not match.
 * `r is I` for a statically satisfying concrete record or union is always true
-  and allocates no wrapper. `i is R` tests the exact concrete value retained by
-  an Interface wrapper; distinct concrete nominal types do not match.
+  and allocates no Interface wrapper. Likewise, an admitted non-exact
+  Function-to-Function `f is B` allocates no closure wrapper; it tests the
+  written relation rather than wrapper eligibility or callability. `i is R`
+  tests the exact concrete value retained by an Interface wrapper; distinct
+  concrete nominal types do not match.
 * `o is T` for `o: T?` is false only when `o` is nil.
 * A C `char *` or `void *` tested as `string` is false only when the pointer
   is `NULL`.
@@ -618,12 +631,14 @@ functions (local or imported), record/union methods (`r:move(...)`), Interface
 methods (`reader:read(...)`), nominal
 functions (`Point.new(...)`, `Point.origin(...)`), and any function value held in a
 variable, parameter, field, or container slot.
-Function-value dispatch follows the three paths defined in
-[Functions as values](functions.md#functions-as-values): exact Titan native,
-non-exact Titan-branded strict generic, and genuine Lua. These paths use the
-single [normative boundary matrix](types.md#normative-boundary-matrix);
-generic stack representation alone does not turn a Titan call into a coercive
-Lua boundary.
+Function-value dispatch follows the paths defined in
+[Functions as values](functions.md#functions-as-values): exact Titan native
+(including a realized target wrapper's adapter), branded exact-tag-mismatch
+strict generic, and genuine Lua. A statically known non-exact callable edge may
+conditionally create the target wrapper before this dispatch; a dynamic
+Function projection does not. These paths use the single
+[normative boundary matrix](types.md#normative-boundary-matrix); generic stack
+representation alone does not turn a Titan call into a coercive Lua boundary.
 For Titan functions, too few positional arguments are padded with `nil` and
 then type-checked against the missing formals. Surplus argument expressions
 are evaluated, but a non-variadic Titan function ignores their values; a

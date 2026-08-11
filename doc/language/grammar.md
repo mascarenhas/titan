@@ -471,10 +471,12 @@ value. Constructors cover positional Arrays, Maps (computed `[k] = v` fields
 or, for an exact integer key type, all-positional fields), and records
 (`name = v`). Positional and keyed forms cannot be mixed; `,` and `;` are
 interchangeable and a trailing separator is allowed. A `funcexp` is an
-anonymous function: unlike a
-top-level `tlfunc` its parameter annotations are *optional* (inferred when
-omitted, as is the whole return annotation), and because it is a
-`simpleexp` and not a `prefixexp` it cannot be applied directly —
+anonymous function: unlike a top-level `tlfunc`, its fixed-parameter and bare
+input-`...` annotations are optional, and an omitted complete result annotation
+may likewise come from a matching expected function type. Explicit `: ()` fixes
+the zero-result shape; without usable context an omitted result annotation also
+defaults to zero. Because a `funcexp` is a `simpleexp` and not a `prefixexp`, it
+cannot be applied directly —
 `(function () … end)(x)` needs the parentheses. See
 [Expressions](expressions.md),
 [Anonymous functions and closures](closures.md),

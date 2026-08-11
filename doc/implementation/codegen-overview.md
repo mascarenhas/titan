@@ -200,8 +200,10 @@ int luaopen_counter(lua_State *L) {
 }
 ```
 
-For a non-exact branded call, caller-side `codevaluecall` applies the strict
-result guards after this adapter has boxed the native results.
+For a branded exact-tag mismatch, caller-side `codevaluecall` applies the
+strict result actions after the declaration entry or wrapper relay has boxed
+the native results. An exactly tagged realized wrapper instead executes its
+frozen result actions inside the target-native adapter.
 
 Symbol names come from `mangle_qn` (`coder.lua`), which replaces `.` and
 `-` with `_`. The driver has already restricted every logical component to
@@ -282,20 +284,35 @@ Every first-class Titan function has three entry roles:
 
 1. the typed native-convention function used by static/direct and exact-tag
    first-class calls;
-2. a coercive Lua-stack entry used when genuine Lua calls the canonical
-   closure; and
-3. a strict Titan-generic Lua-stack entry used when Titan calls a branded
-   closure through a non-exact gradual callable view.
+2. a coercive Lua-stack entry used when genuine Lua calls the source closure;
+   and
+3. a strict Titan-generic Lua-stack entry used after a branded exact-tag
+   mismatch.
 
 The two stack entries share one generation template but apply different
-checker-produced policies. The canonical closure's public `CClosure.f` is the
-coercive entry; the strict entry is a light C function stored in the closure's
-final upvalue. A local function still has only the native body when it is never
-referenced as a value. Once a canonical value is required, the coder emits
-both stack entries and the same closure layout without exporting it through
-the module member map. Unbound methods use their native/Lua method entries;
-their first-class bound values receive native, Lua, and strict bound
-trampolines.
+checker-produced policies. The canonical **source** closure's public
+`CClosure.f` is the coercive entry; its declaration-specific strict entry is a
+light C function stored in the final upvalue. A local function still has only
+the native body when it is never referenced as a value. Once a canonical source
+value is required, the coder emits both stack entries and the same closure
+layout without exporting it through the module member map. Unbound methods use
+their native/Lua method entries; their first-class bound values receive native,
+Lua, and strict bound trampolines.
+
+A realized non-exact callable adjustment reuses these roles rather than adding
+a fourth ABI entry: its native pointer names a target adapter, its
+`CClosure.f` copies the immediate source's coercive entry, and its final upvalue
+names a consumer-local strict target relay. The guarded constructor checks only
+a non-null `CClosure`, `5 <= nupvalues < MAXUPVAL`, the exact lightuserdata tag
+in slot 1, and the lightuserdata brand in slot 3; the remaining private layout
+is trusted. It allocates the final closure with `luaF_newCclosure`, initializes
+fresh-white upvalues with `setobj2n`/`setpvalue`/`setclCvalue`/`setfvalue`, and
+publishes directly to the assigned result root—never through transient
+`lua_pushcclosure` stack assembly. A synthesized native adapter whose frozen
+action graph can allocate polls at function entry before stack reservation or
+raw stack pointers; the constructor itself never polls between allocation and
+publication. See
+[Closure adjustment wrappers](closure-adjustment-wrappers.md).
 
 ### The Titan-native function and its calling convention
 
@@ -304,16 +321,13 @@ The authoritative statement is the comment above `codefuncdec` in
 
 ```
 -- Titan calling convention:
---     first parameter is a lua_State*, other parameters
---     get the other arguments, with each being its actual
---     native type. Garbage-collectable arguments also need
---     to be pushed to the Lua stack by the *caller*. The
---     function returns its first return value directly.
---     Other return values go in out parameters, following
---     the in parameters. Gc-able return values *do not*
---     need to be pushed by the callee, as it is assumed
---     that the caller is going to push them if needed and
---     just returning from a function does not call GC
+--     first parameter is a lua_State*; remaining inputs use their actual native
+--     C types. The caller never publishes tracing-only Lua-stack copies of those
+--     arguments. A callee creates a separate local home only when mutation or
+--     setjmp spilling requires one. The function returns its first result
+--     directly and writes later results through out parameters. A native caller
+--     roots each GC-bearing result immediately after return, before later work
+--     can collect it; returning itself cannot run the collector.
 ```
 
 The signature shape, produced by `function_sig`:
@@ -371,40 +385,53 @@ void        strings_titan(lua_State *L, Udata *_mod, CClosure *_fn,
                           TitanVargString *_flexout, int _flexwant);
 ```
 
-A Titan-to-Titan call is therefore an ordinary C call — no Lua stack
-traffic, no `CallInfo`, no boxing of integers, floats or booleans. The
-stack is used only as a **GC anchor**, under two rules:
+A Titan-to-Titan call is therefore an ordinary C call — no `CallInfo`, and no
+boxing of integers, floats, or booleans. It evaluates inputs in lexical order.
+When later setup is effectful, `coder._freeze_code` freezes the first-class
+callee/receiver and the affected fixed or static/open-vararg inputs in untraced
+C temporaries; a pure trailing suffix may remain direct C expressions. The call
+never publishes tracing-only Lua-stack copies of native inputs. Fresh values
+retain their initial allocation or prior native-result roots, while established
+values retain their semantic module/record/container/local home or an upstream
+Lua VM argument slot. Static and forwarded input-vararg payloads merely borrow
+that provenance; their raw descriptors and C buffers are never roots. A callee
+creates a separate parameter home only when assignment or setjmp spilling makes
+it a real local-storage requirement.
 
-* **The caller anchors GC-able arguments.** Every garbage-collectable
-  argument must already be visible to the collector from a stack slot
-  owned by the caller. In practice this falls out of the expression
-  discipline: every GC-able intermediate result is computed into a
-  temporary with a paired stack slot (`newtmp` with `isgc`), so by the
-  time it is an argument it is anchored. (Parameters *reassigned* inside
-  the callee additionally get their own slot in the callee's preamble.)
-* **The callee does not push its returns.** This is safe because merely
-  returning from a C function cannot trigger a collection; the caller
-  (`codecall`) stores every GC-able return value into a stack slot it
-  reserved *before* doing anything else that could allocate. The Lua
-  entry wrapper plays the caller's role for Lua callers. A flexible result
-  descriptor likewise points at caller-owned typed storage. For an open
-  GC-bearing run the caller reserves a parallel traced stack range, publishes
-  returned elements there before a later allocation, and clears that live
-  range after the consuming sink has copied or stored it; the descriptor and
-  raw C array are not themselves GC roots.
+Lua 5.5's non-moving GC preserves the heap addresses of reachable strings,
+tables, userdata, and closures, but stack growth can relocate the stack array
+and invalidate raw `StkId`/`TValue *` pointers. Generated code therefore saves
+stack offsets and rebases after every operation that can really move the stack
+and after every native call, even when the call had no input slots.
+
+Native fixed results initially occupy raw ABI C holders. Returning cannot run
+the collector, but a transitive callee's allocation root is above the restored
+caller top. After rebasing, the caller performs any nonallocating raw-to-visible
+projection and immediately publishes every live GC-bearing fixed source result
+into its result root, including an identity result, before any later allocating
+work. An ordinary open GC-bearing result similarly copies its complete live
+prefix into a parallel traced range before conversion and until its sink
+consumes it. Callable and Interface adapters use the same source rule; they add
+destination roots only in branches that freshly allocate converted wrappers.
+`TitanVargX` descriptors and raw C arrays never become roots.
+
+The Lua-stack and branded-strict slow paths are intentionally different: they
+push the callee/carrier and every actual argument because those slots are the
+Lua VM calling convention itself. Native callable/Interface adapters have an
+empty input-source root inventory; they do not mistake those VM transport slots
+or native C inputs for call-activation roots.
 
 ### Named direct calls and lexical evaluation order
 
 The checker has already normalized an eligible named call to a dense
 formal-order `ArgsFunc` or `ArgsMethod`, but leaves `_named_arg_order` with the
 formal indexes of explicit expressions in lexical order. `codecall` sends that
-pair through `named_ordered_call_args`: it generates and immediately
-materializes each explicit expression in lexical order, then materializes the
-synthetic nil omissions, and finally emits the unchanged positional native
-argument list. For a method, the receiver is materialized once before this
-sequence. Immediate materialization both freezes effects before formal
-reordering and gives GC-bearing values their ordinary caller-owned stack
-anchors.
+pair through `named_ordered_call_args`: it generates and immediately freezes
+each explicit expression in an untraced C temporary in lexical order, then does
+the same for synthetic nil omissions, and finally emits the unchanged
+formal-order native argument list. For a method, the receiver is frozen once
+before this sequence. This C-only materialization preserves effects before
+formal reordering without publishing receiver/argument roots.
 
 Positional direct calls follow the same checked adjustment plan. Every
 explicit argument is evaluated once in lexical order; surplus expressions are
@@ -430,6 +457,15 @@ is a boxed `TValue`: it may be a Titan `CClosure`, a Lua closure, a Lua C
 function, or an object with a `__call` metamethod. `codevaluecall`
 therefore emits three branches.
 
+A finite non-exact Function adjustment is lowered before this call dispatch as
+an `Ast.ExpCast`. Its operand is frozen once in C while its existing traced
+provenance stays live; the guarded constructor may produce a fresh target-tagged CClosure whose
+native pointer is the frozen adapter, or preserve the carrier unchanged.
+Open-run callable elements use the same helper when their shared adjustment is
+consumed. Wrapper construction is an allocating/raising expression effect, not
+an inferred branch of `codevaluecall`, but direct `luaF_newCclosure`
+construction does not relocate the Lua stack.
+
 The **exact fast path** is tested first and marked `TITAN_LIKELY`. It requires
 a `CClosure` with at least the five minimum Titan upvalues and raw pointer-bit
 equality between upvalue 1 and the tag for the callee expression's static
@@ -452,11 +488,13 @@ pointer, brand, and strict-trailer slots. It first requires the five-upvalue
 minimum and reads the tag's raw pointer bits, so no `ttis*` discriminator is
 needed on this trusted private slot.
 
-Matching the tag is stricter than gradual consistency or callable adjustment:
-a Titan
-`(value) -> integer` viewed as `(integer) -> integer` through a gradual
-`value` round trip is callable, but its tag does not match the call
-site's exact type and it cannot use this branch.
+Matching the tag is stricter than gradual consistency. A Titan
+`(value) -> integer` viewed as `(integer) -> integer` through a dynamic
+`value` round trip has no statically known source Function edge, so its tag does
+not match and it cannot use this branch. By contrast, a direct checker-approved
+non-exact `A -> B` cast may conditionally realize a closure tagged B; that
+wrapper *does* enter this branch and its upvalue-2 pointer invokes the target
+adapter.
 
 Once the fast predicate holds, the call is again an unboxed native call:
 `_vc_callee = clCvalue(&fn)`, `_vc_mod =
@@ -478,17 +516,21 @@ closure would need both the required upvalue count and the exact random
 sentinel in the exact slot, making accidental classification astronomically
 unlikely.
 
-The branded non-exact path pushes the trailing strict light C function as the
-VM callee, then the original canonical closure as one hidden first argument,
-followed by the already evaluated ordinary arguments. The
-declaration-specific strict entry validates that hidden carrier's header,
-trailer, coercive entry, and exact static function tag; it does not repeat the
-brand check. It then recovers `_mod`, applies the strict guards for its
-already-known callee type, and invokes the native entry with the original
-closure as `_fn`. Results are boxed under that declared type and then strictly
-guarded for the caller's static view. This path never enters the coercive
-`CClosure.f`, so integral-float or truthiness conveniences cannot leak into
-gradual callable adjustment.
+The branded exact-tag-mismatch path pushes the closure's trailing strict light
+C function as the VM callee, then the original closure as one hidden first
+argument, followed by the already evaluated ordinary arguments. For an
+ordinary source closure, the declaration-specific strict entry validates that
+carrier's header, trailer, coercive entry, and exact source tag; it does not
+repeat the brand check. For a realized wrapper, the consumer-local relay
+instead validates the target tag, native adapter/header shapes, brand-selected
+carrier, and its own trailer, deliberately without requiring one source
+`CClosure.f`. It invokes the target adapter with the wrapper as `_fn`.
+
+Either strict entry recovers its authoritative module/native route, executes
+strict guards for the known callable shape, and returns boxed results for the
+call site's strict result actions. This path never calls the coercive
+`CClosure.f`, so integral-float or truthiness conveniences cannot leak into a
+Titan callable adjustment.
 
 The **non-Titan path** is used for Lua closures, Lua light C functions,
 foreign C closures, and `__call` objects. It pushes the boxed callee followed
@@ -514,40 +556,44 @@ remain rooted on the Lua stack while the generic branch measures the raw count,
 nil-pads a missing fixed prefix, converts the retained tail, and applies the
 enclosing finite/open Titan budget. It then resets `L->top.p` to discard the
 call frame and result slots. This is also where non-callable values fail
-cleanly at runtime. A branded non-exact Titan closure's strict entry and a
-non-Titan Lua callable retain the same finite/open shape machinery, but their
-element policies remain distinct.
+cleanly at runtime. A branded exact-tag mismatch (ordinary declaration entry or
+wrapper relay) and a non-Titan Lua callable retain the same finite/open shape
+machinery, but their strict versus dynamic element policies remain distinct.
 
 Because the generic branch can grow and relocate the Lua stack,
-`codevaluecall` marks the enclosing function as `uses_base_off`, saves
-the callee stack slot as an offset with `savestack`, and recomputes
-`_base = restorestack(L, _base_off)` after every branch. GC-able
-arguments were already anchored when evaluated, and GC-able fixed results are
-stored into reserved caller slots immediately after the branch joins. An open
-GC-bearing run is copied into its reserved traced range before the sink can
-allocate.
+`codevaluecall` marks the enclosing function as `uses_base_off`, saves stack
+positions as offsets, and recomputes `_base = restorestack(L, _base_off)` after
+every branch. Before branch selection the callee and arguments are only stable C
+values; the exact Titan branch passes them directly. The branded-strict and Lua
+branches push those same values because the pushed slots are their real VM call
+frame. Native open runs are published before the branch joins; immediately after
+convergence, each live fixed native result is projected and published into its
+caller result slot. Generic results remain rooted in VM slots through conversion
+and are then copied into the same caller destinations.
 
 ### The two Lua-stack entries
 
 `genluaentry` emits one shared arity/tail/result/error-frame shell under two
 policies.
 
-The canonical closure's `CClosure.f` is the **coercive genuine-Lua entry**. It
-pads missing fixed arguments with nil, ignores fixed-function surplus or
+The canonical source closure's `CClosure.f` is the **coercive genuine-Lua
+entry**. A realized adjustment wrapper copies that same pointer rather than
+advertising a target coercive entry. It pads missing fixed arguments with nil,
+ignores fixed-function surplus or
 collects an input tail, installs the Titan error handler, recovers `_fn` and
 `_mod`, and consumes the checker-attached `DynamicCoercionPlan` for every
 formal. It reserves the requested result slots, calls the native function, and
 boxes results for Lua. Written `value as/is T`, record/module/Array Lua writes,
 and this entry use the same target matrix.
 
-The **strict Titan-generic entry** is a light C function stored in the
-canonical closure's final upvalue. `codevaluecall` pushes it as the callee and
-passes the original closure as a hidden argument. The entry excludes that
-argument from arity math, validates the closure/header/trailer and its
-declaration's exact static tag, recovers `_fn` from the hidden carrier, and
-applies strict gradual guards rather than dynamic coercions. It calls the same
-native body with the original closure, preserving captures and bound
-receivers.
+The **strict Titan-generic entry** is a light C function stored in the final
+upvalue. A canonical source closure stores its declaration-specific entry; a
+wrapper stores its consumer-local target relay. `codevaluecall` pushes that
+trailer as the callee and passes the closure as a hidden argument. Both exclude
+the carrier from arity math and apply strict gradual actions rather than
+dynamic coercions. The source entry validates its declaration tag and calls the
+source body. The wrapper relay validates its target header/trailer and calls the
+target adapter, which delegates to the immediate source closure.
 
 Both policies share fixed/variadic arguments, finite/flexible result request,
 stack relocation, and error-handler structure. The full generated anatomy and
@@ -557,10 +603,10 @@ boundary matrix are in
 
 ## Closures and captured variables
 
-An anonymous function ([closures](../language/closures.md)) is a function
-value just like a top-level reference — a `CClosure` whose `f` is the
-coercive genuine-Lua entry, with a four-slot header, one upvalue per captured
-variable, and the strict Titan-generic light C function in a final trailer
+An anonymous function ([closures](../language/closures.md)) is a source function
+value just like a top-level reference — a `CClosure` whose `f` is the coercive
+genuine-Lua entry, with a four-slot header, one upvalue per captured variable,
+and the declaration's strict Titan-generic light C function in a final trailer
 slot:
 
 ```
@@ -572,10 +618,15 @@ upvalue[4 + i] = captured variable i   (a box, or a copied value)
 upvalue[4 + ncaptures] = strict entry  (light C function)
 ```
 
-The trailer is found from the closure's actual upvalue count; capture
+The trailer is found from the source closure's actual upvalue count; capture
 indices therefore remain stable. The constant `4` separates the header from
 the captures, and a closure body reaches capture *i* as
-`_fn->upvalue[4 + i]`. The `_fn`
+`_fn->upvalue[4 + i]`. A realized adjustment wrapper has a distinct layered
+layout: it copies slots through the source's penultimate slot, replaces the tag
+and native pointer, appends the immediate source closure as a traced
+penultimate link, and installs the target relay last. Its copied captures stay
+at the same indexes; see
+[Wrapper layout](closure-adjustment-wrappers.md#wrapper-layout). The `_fn`
 parameter (above) is exactly what makes this work: a top-level call passes
 `NULL`, but a closure is always entered with `_fn` pointing at itself.
 
@@ -616,9 +667,12 @@ transient stack pushes, not
 slot-reserved). `lua_pushcclosure` moves the pushed upvalues into the new
 white closure, so no barrier is needed at construction.
 
-Lua permits at most 255 C-closure upvalues. Five structural slots leave
+Lua permits at most 255 C-closure upvalues. Five structural source slots leave
 **250 captures**; the checker rejects the first larger capture list so code
-generation never depends on a Lua API failure.
+generation never depends on a Lua API failure. A callable wrapper adds one
+source-closure link. If `n == MAXUPVAL`, guarded realization preserves the
+value and uses generic dispatch rather than reducing this source limit or
+inventing side storage.
 
 Each lambda's native, coercive-Lua, and strict-generic entries are **hoisted
 to file scope** and
@@ -656,20 +710,26 @@ The **strict trampoline** is generated for the self-removed callable shape: it
 preserves the hidden original bound closure, strictly guards the visible
 arguments/results, and invokes the native bound trampoline, which extracts
 `self`.
-At the bind site `obj` is evaluated once into an anchored temp, then the
-closure is built exactly like a one-capture lambda (`_mod`, the
-self-removed tag, the native trampoline pointer, `self`, and the strict
-trampoline trailer). The result
-is an ordinary `Type.Function` value with no special downstream handling.
+At the bind site `obj` is evaluated once into an untraced C temporary. It is
+then pushed as the closure's real `self` upvalue while the closure is built like
+a one-capture lambda (`_mod`, the self-removed tag, the native trampoline
+pointer, `self`, and the strict trampoline trailer). The fresh closure receives
+its initial result root immediately. The result is an ordinary source
+`Type.Function` value. A downstream
+non-exact callable cast uses the same conditional fresh-wrapper/fallback
+lowering as any other source closure; it does not require a bound-method
+special case.
 
 Interface method calls use the same native method signatures but take their
 entry from the wrapper's declaration-order payload. The hidden `_mod` and
 `self` values always come from wrapper user values 0 and 1, so an adjustment
 entry generated outside the concrete owner's module still invokes the method
-with its concrete owner. Interface bound methods are six-upvalue branded
+with its concrete owner. Interface bound source methods are six-upvalue branded
 closures: the first four structural function slots are followed by the
-captured wrapper and strict entry. The Interface owner exports the native,
-coercive-Lua, and strict bound trampolines for cross-provider bind sites. Full
+captured wrapper and strict entry. A later adjustment wrapper copies that
+capture and appends its immediate-source link under the ordinary layered
+layout. The Interface owner exports the native, coercive-Lua, and strict bound
+trampolines for cross-provider bind sites. Full
 wrapper layout, pair initialization, and all four dispatch paths are in
 [Interfaces](interfaces.md#four-dispatch-paths).
 
@@ -775,6 +835,13 @@ with the marker (`_0_22`, `TITAN_PATH_0_22`, `lib/titan/0.22`); 0.21 providers
 are rejected before interface rehydration. Existing 0.21 artifacts remain a
 separately versioned prior installation and are not migrated or cleaned up by
 0.22.
+
+Closure adjustment wrappers require no further ABI bump. They reuse the fixed
+0.22 CClosure header and `function_sig` shapes; their target adapters and strict
+relays are private consumer artifacts, with no serialized field, provider
+symbol, or module-state slot. A consumer may therefore wrap an ordinary 0.22
+source/DSO/archive function. Any implementation that needed another fixed slot
+or signature would instead require a coordinated ABI advance.
 
 ## The module protocol
 

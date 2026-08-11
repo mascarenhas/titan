@@ -65,6 +65,78 @@ describe(".so-only cross-module imports", function()
         assert.truthy(rok, out)
     end)
 
+
+    it("builds consumer-local callable views over a .so-selected source",
+       function()
+        local ok, err = build_so_chain({
+            { name = "callable_so_provider", src = [[
+                function increment(value_: integer): integer
+                    return value_ + 1
+                end
+
+                function source(): (integer) -> integer
+                    return increment
+                end
+
+                function identity(value_: value): value
+                    return value_
+                end
+            ]] },
+            { name = "callable_so_consumer", src = [[
+                local provider = import "callable_so_provider"
+
+                record Box
+                    n: integer;
+                end
+
+                function direct(): integer
+                    local adjusted: (integer, value) -> value =
+                        provider.increment
+                    return adjusted(41, "ignored") as integer
+                end
+
+                function relayed(): integer
+                    local adjusted: (integer, value) -> value =
+                        provider.increment
+                    local erased: value = adjusted
+                    local wider: (integer, value, value) -> value = erased
+                    return wider(41, "a", "b") as integer
+                end
+
+                function source(): (integer) -> integer
+                    return provider.source()
+                end
+
+                function view(): (value) -> value
+                    local adjusted: (value) -> value = provider.source()
+                    return adjusted
+                end
+
+                function nominal_relayed(): integer
+                    local broad: (value) -> value = provider.identity
+                    local narrowed: (Box) -> Box = broad
+                    local erased: value = narrowed
+                    local wider: (Box, value) -> Box = erased
+                    return wider(Box.new(42), "ignored").n                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+
+        local rok, out = call("callable_so_consumer", [[
+            assert(callable_so_consumer.direct() == 42)
+            assert(callable_so_consumer.relayed() == 42)
+            assert(callable_so_consumer.nominal_relayed() == 42)
+            local source = callable_so_consumer.source()
+            local first = callable_so_consumer.view()
+            local second = callable_so_consumer.view()
+            assert(not rawequal(first, source))
+            assert(not rawequal(first, second))
+            -- The target wrapper keeps the provider's coercive Lua entry.
+            assert(first(41.0) == 42)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
     it("dispatches exact and adjusted Interfaces through four .so-only modules",
        function()
         local ok, err = build_so_chain({

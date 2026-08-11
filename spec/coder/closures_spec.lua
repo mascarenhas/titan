@@ -760,6 +760,67 @@ describe("closures (end-to-end)", function()
         ]])
     end)
 
+    it("keeps direct and bound receivers in C until real transport",
+    function()
+        local csrc = h.compile_and_read_c([[
+            record Counter
+                n: integer
+            end
+
+            function Counter:get(): integer
+                return self.n
+            end
+
+            function call(value_: Counter): integer
+                return value_:get()
+            end
+
+            function bind(value_: Counter): () -> integer
+                return value_:get
+            end
+        ]])
+        local declaration = assert(csrc:find(
+            "TValue test_bind_titan(", 1, true))
+        local first = assert(csrc:find(
+            "TValue test_bind_titan(", declaration + 1, true))
+        local last = assert(csrc:find(
+            "static int test_bind_titanentry_lua", first, true))
+        local body = csrc:sub(first, last - 1)
+        local ensure = assert(body:find(
+            "titan_ensure_stack(L, 6);", 1, true))
+        local before = body:sub(1, ensure - 1)
+        assert.matches(
+            "Udata%* _tmp_%d+ = 0;%s*_tmp_%d+ = _param_value_;",
+            before)
+        assert.falsy(before:find("setuvalue(L", 1, true), before)
+        local upvalue = assert(body:find(
+            "setuvalue(L, s2v(L->top.p)", ensure, true))
+        local allocation = assert(body:find(
+            "lua_pushcclosure(L, test_Counter_get_titanentry_boundlua, 6);",
+            upvalue, true))
+        local root = assert(body:find(
+            "setobj2t(L, s2v((restorestack(L, _base_off)",
+            allocation, true))
+        assert.is_true(ensure < upvalue
+            and upvalue < allocation and allocation < root)
+
+        local call_declaration = assert(csrc:find(
+            "lua_Integer test_call_titan(", 1, true))
+        local call_first = assert(csrc:find(
+            "lua_Integer test_call_titan(",
+            call_declaration + 1, true))
+        local call_last = assert(csrc:find(
+            "static int test_call_titanentry_lua", call_first, true))
+        local call_body = csrc:sub(call_first, call_last - 1)
+        local freeze = assert(call_body:find(
+            "= _param_value_;", 1, true))
+        local native_call = assert(call_body:find(
+            "test_Counter_get_titanmethod(L, _mod, NULL,", freeze, true))
+        assert.falsy(call_body:sub(freeze, native_call):find(
+            "setuvalue(L", 1, true), call_body)
+        assert.is_true(freeze < native_call)
+    end)
+
     it("a module var initialized with a const-receiver bound method ref runs", function()
         -- The receiver is a constructor call with a const arg, which `isconst`
         -- accepts; the bound method-ref initializer evaluates that receiver at

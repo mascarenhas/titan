@@ -1,7 +1,7 @@
 -- End-to-end tests for variadic parameters (`...`): generate C, compile it, and
 -- run it. Covers scalar and collectable `...` elements, forwarding an existing
 -- `...` to another variadic callee, building `{...}` / `{e1, ..., ...}` arrays
--- from a vararg, GC anchoring of variadic arguments under generational mode, and
+-- from a vararg, GC provenance of variadic arguments under generational mode, and
 -- assorted functional coverage gaps (nested variadic lambdas, map-typed
 -- elements, variadic methods, side-effecting `...[i]`, `...: boolean`, and the
 -- `{...}`-of-a-`value`-vararg-with-a-nil border semantics).
@@ -288,11 +288,58 @@ end)
 describe("collectable variadic parameters (code generator)", function()
     after_each(clean)
 
+    it("keeps static and forwarded native varargs in untraced C storage",
+    function()
+        local csrc = h.compile_and_read_c([[
+            local function sink(...: string): integer
+                return #...
+            end
+
+            function static_list(a: string, b: string): integer
+                return sink(a, b)
+            end
+
+            function forward(prefix: string, ...: string): integer
+                return sink(prefix, ...)
+            end
+        ]])
+        local function native_body(name)
+            local signature = "lua_Integer test_" .. name .. "_titan("
+            local declaration = assert(csrc:find(signature, 1, true))
+            local first = assert(csrc:find(
+                signature, declaration + 1, true))
+            local last = assert(csrc:find(
+                "static int test_" .. name .. "_titanentry_lua",
+                first, true))
+            return csrc:sub(first, last - 1)
+        end
+
+        local fixed = native_body("static_list")
+        assert.truthy(fixed:find(
+            "TString* _vargargs_1[2] = { _param_a, _param_b };",
+            1, true), fixed)
+        assert.falsy(fixed:find("setsvalue(L", 1, true), fixed)
+
+        local open = native_body("forward")
+        local freeze = assert(open:find(
+            "_tmp_1 = _param_prefix;", 1, true))
+        local prefix = assert(open:find(
+            "_open_vargs_2[0] = _tmp_1;", freeze, true))
+        local borrow = assert(open:find(
+            "= _varargs->args[", prefix, true))
+        local call = assert(open:find(
+            "_titan(L, _mod, NULL, &_open_vargdesc_2, 0);",
+            borrow, true))
+        assert.falsy(open:sub(freeze, call):find(
+            "setsvalue(L", 1, true), open)
+        assert.is_true(freeze < prefix and prefix < borrow and borrow < call)
+    end)
+
     -- A `...: string` callee that FORCES a garbage collection in its body (an
     -- allocating loop trips luaC_checkGC) BEFORE reading any `...[i]`. The vararg
-    -- struct's payload (raw TString*) is untraced (§2.D); the elements survive
-    -- only because they stay anchored on the caller's Lua stack. A dropped anchor
-    -- is near-deterministic corruption, so this test pins the anchoring invariant.
+    -- struct's payload (raw TString*) is untraced (§2.D); because this call
+    -- originates in Lua, the actual VM argument slots retain the elements. Losing
+    -- that real transport provenance is near-deterministic corruption.
     it("...: string survives a forced GC in the callee, called from Lua", function()
         run_coder([[
             function totallen(...: string): integer
@@ -323,11 +370,11 @@ describe("collectable variadic parameters (code generator)", function()
         ]])
     end)
 
-    -- Same discipline through the STATIC call site: a Titan caller builds the
-    -- backing struct on its C stack from fresh strings, then tail-calls the
-    -- variadic callee which forces a GC before reading the elements. This is the
-    -- tail-call anchoring path (`return callee(...)` resets L->top.p = _base):
-    -- the call must run while the source string slots are still anchored.
+    -- Same discipline through the STATIC call site: a Titan caller builds an
+    -- untraced descriptor in C and tail-calls a callee that collects before use.
+    -- The caller's parameters retain their upstream Lua VM provenance and the
+    -- literal retains its ordinary allocation provenance; no static-call input
+    -- roots are introduced when `return callee(...)` resets the caller top.
     it("...: string survives a forced GC across a static (Titan) call site", function()
         run_coder([[
             function totallen(...: string): integer
@@ -430,8 +477,9 @@ describe("collectable variadic parameters (code generator)", function()
     end)
 
     -- A `...: value` (TValue element) slice carrying MIXED types, read back after a
-    -- forced GC. The struct holds 16-byte tagged TValues whose collectable payload
-    -- is untraced; the values must ride the caller's stack anchors.
+    -- forced GC. The struct holds 16-byte tagged TValues whose collectable
+    -- payload is untraced; this Lua-originated call borrows the actual VM argument
+    -- slots that transport the values.
     it("...: value carries mixed types through a forced GC", function()
         run_coder([[
             function pick(which: integer, ...: value): value
@@ -584,8 +632,8 @@ describe("forwarding an existing ... to another variadic callee", function()
 
     -- CASE 3 (fresh copy), element-type MISMATCH: forward `...: integer` into a
     -- `...: value` callee. Each integer element is boxed into a TValue in a fresh
-    -- Udata0 backing struct. A forced GC in the deepest callee proves the case-3
-    -- anchoring (the fresh struct is stack-anchored; its elements ride upstream).
+    -- Udata0 backing struct. A forced GC in the deepest callee proves the fresh
+    -- buffer's initial allocation root; these boxed integer elements are non-GC.
     it("case 3 type-mismatch: ...: integer forwarded to ...: value (each element boxed)", function()
         run_coder([[
             -- sink takes ...: value; the forwarder forwards ...: integer, so each
@@ -1098,21 +1146,21 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
 end)
 
 -- The default busted suite runs INCREMENTAL GC, which cannot observe a missing
--- write barrier or a dropped stack anchor: a missed mark is reconciled by the
+-- write barrier or dropped traced provenance: a missed mark is reconciled by the
 -- next sweep regardless. GENERATIONAL mode is different -- a minor collection
 -- sweeps the young generation in one shot, so an unanchored fresh value (or an
 -- unbarriered store of a fresh value into an aged container) is reclaimed
 -- deterministically. Every test here selects generational mode, churns the
 -- young generation, and forces a minor collection (a `step` in generational
--- mode is a minor collection) BEFORE the element read -- so a dropped anchor
+-- mode is a minor collection) BEFORE the element read -- so lost provenance
 -- becomes near-deterministic corruption rather than a rare race.
-describe("variadic GC anchoring under generational mode", function()
+describe("variadic GC provenance under generational mode", function()
     after_each(clean)
 
     -- 1. `...: value` from Lua (genluaentry path): the backing struct holds tagged
     -- TValues whose collectable payload (a long fresh string, fresh tables,
-    -- a fresh record) is untraced. The values survive only because they ride the
-    -- caller's Lua-stack anchors. A forced minor collection runs after heavy
+    -- a fresh record) is untraced. The values survive through the actual Lua VM
+    -- argument slots used to enter Titan. A forced minor collection runs after heavy
     -- young churn, before `#...`/`...[i]` are read.
     it("...: value from Lua survives a generational minor collection", function()
         run_coder([[
@@ -1189,8 +1237,8 @@ describe("variadic GC anchoring under generational mode", function()
     -- generational GC: a forwarder prepends a FRESH string ahead of its whole
     -- forwarded `...: string` (prefix grows the tail -> a fresh Udata0 copy), and a
     -- sink forces a minor collection before concatenating every element. The
-    -- spilled prefix string and the forwarded tail strings must all be anchored
-    -- across the fresh-struct allocation and the collection. Asserts exact
+    -- fresh prefix keeps its allocation/result root and the forwarded tail keeps
+    -- its upstream VM provenance across descriptor construction and collection. Asserts exact
     -- concatenation (not just total length) so a swapped/dropped element shows.
     it("case-3 prefix-grow forwarding of ...: string survives a minor collection", function()
         run_coder([[
@@ -1263,7 +1311,8 @@ describe("variadic GC anchoring under generational mode", function()
     -- 5. STATIC `...: value` call (Titan -> Titan) under generational GC: the
     -- caller builds the backing struct on its C stack from fresh strings, then
     -- tail-calls the variadic callee, which forces a minor collection before
-    -- reading the boxed values. Tail-call anchoring across the static site.
+    -- reading the boxed values. The static site borrows upstream VM/allocation
+    -- provenance and creates no tracing-only input roots.
     it("static ...: value (Titan->Titan) survives a generational minor collection", function()
         run_coder([[
             function totallen(...: value): integer

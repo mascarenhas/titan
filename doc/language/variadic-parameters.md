@@ -370,11 +370,14 @@ A function type with a fixed prefix and a variadic tail is written the
 obvious way, `(integer, ...: integer) -> integer`. Calling a variadic value
 works exactly like calling any [function value](functions.md#functions-as-values):
 when the value's run-time type matches the call's static type, the call takes
-the zero-overhead native path. A non-exact Titan-branded value accepted by
-callable adjustment (for example a `(...: value) -> integer` slot holding a
-`(...: integer) -> integer` function) uses the strict generic trailer. A
-plain Lua function instead uses the ordinary Lua call path and dynamic result
-conversion.
+the native path. A statically known non-exact adjustment conditionally creates
+a fresh target-tagged wrapper, so an eligible exact Titan source then reaches a
+native adapter that implements fixed/tail actions. For example, a
+`(...: value) -> integer` slot may hold a `(...: integer) -> integer` source;
+the adapter strictly establishes the integer elements before invoking the
+source. If wrapper realization is ineligible, the unchanged branded value uses
+its strict generic trailer. A plain Lua function instead uses the ordinary Lua
+call path and dynamic result conversion.
 
 Calling a variadic Interface method follows the same rules. Direct calls use
 the Interface signature's fixed prefix and tail; a bound Interface method is an
@@ -390,11 +393,15 @@ function may also have additional fixed parameters when each accepts nil from
 an omitted expected tail; if the expected type is variadic, those parameters
 must additionally accept its tail element. The reverse direction is rejected
 whenever adjustment would force nil into a non-nilable parameter or feed an
-incompatible value to an observed tail.
-See [Flexible returns](flexible-returns.md#callable-adjustment-is-directional)
-for the combined input/output adjustment rules, and the
-[normative boundary matrix](types.md#normative-boundary-matrix) for strict
-Titan-generic versus coercive Lua entry.
+incompatible value to an observed tail. Once a wrapper is realized, its target
+tag does not erase these obligations: the target typed tail is enforced on the
+exact path, and the adapter then performs any stricter source-side component
+observation. A `value` element cannot use a historical tag mismatch to bypass
+an `integer` view.
+See [Flexible returns](flexible-returns.md#callable-adjustment-is-directional),
+[Closure adjustment wrappers](closure-adjustment-wrappers.md), and the
+[normative boundary matrix](types.md#normative-boundary-matrix) for native
+adapters, strict fallback, and the coercive Lua entry.
 
 ## Using a variadic function from Lua
 

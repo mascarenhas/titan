@@ -62,9 +62,11 @@ cross the boundary as canonical Titan userdata proxies over private Lua
 tables. Titan shares Lua's garbage collector rather than bringing its own.
 Crossing from Lua into Titan costs one target-directed dynamic conversion per argument —
 comparable to what a careful C function would do with the `luaL_check*`
-API. Exact Titan-to-Titan calls cost nothing beyond a C function call; a
-non-exact branded Titan function view uses a strict generic entry instead of
-pretending to be a Lua boundary. Container crossings remain shallow:
+API. Exact Titan-to-Titan calls cost nothing beyond a C function call. A
+statically known non-exact callable edge may realize a fresh target-tagged
+native adapter; when it cannot, a branded value keeps the strict generic entry
+instead of pretending to be a Lua boundary. Genuine Lua still calls the source
+coercive entry. Container crossings remain shallow:
 genuine-Lua Array writes are dynamically converted by the Array's carried
 writer, raw Lua Map writes are not intercepted, and every later typed
 Array/Map read strictly establishes the requested value before native use.
@@ -188,11 +190,14 @@ the existing nominal, function, option, and error-handling models instead of
 creating parallel ones.
 
 Starting with 0.20, the prototype separates gradual consistency from direct
-and written coercions. Typed Array/Map observations and non-exact branded Titan
-calls now use strict guards, while written `value as/is T` and genuine Lua
+and written coercions. Typed Array/Map observations and branded exact-tag
+mismatches use strict guards, while written `value as/is T` and genuine Lua
 boundaries share a broader target-directed conversion. Arrays carry their Lua-write
 policy, and function closures distinguish exact native, strict Titan-generic,
-and coercive Lua entries. It also adds nominal Interface declarations,
+and coercive Lua entries. ABI 0.22 later reuses that fixed closure/native
+contract for conditional non-exact target wrappers: eligible source closures
+get a consumer-local native adapter and strict relay, while other values retain
+the generic fallback. This adds no provider ABI surface. It also adds nominal Interface declarations,
 structural record/union satisfaction at statically known conversion sites,
 fresh wrappers, concrete downcasts, and exact-wrapper-only dynamic boundaries.
 These coordinated representation changes accounted for that ABI advance; ABI

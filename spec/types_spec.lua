@@ -575,6 +575,7 @@ describe("Titan types", function()
                     {types.Integer()}, {types.Option(types.Integer())}),
                 method(iname, "tail",
                     {types.Integer(), types.Integer()}),
+                method(iname, "missing", {}, {types.Value()}),
             })
             local fill = method(
                 rname, "fill",
@@ -584,10 +585,12 @@ describe("Titan types", function()
                 rname, "tail",
                 {types.Integer()}, {}, {},
                 types.Integer(), false)
+            local missing = method(rname, "missing", {}, {})
             local record = types.Record(
                 rname, {}, {}, {
                     fill = fill,
                     tail = tail,
+                    missing = missing,
                 }, 0)
 
             local implementation = assert(
@@ -608,6 +611,13 @@ describe("Titan types", function()
             assert.equal("empty_tail",
                 implementation.methods[2]
                     .adjustment.arguments[3].kind)
+            local missing_result = implementation.methods[3]
+                .adjustment.results[1]
+            assert.equal("nil_fill_result", missing_result.kind)
+            assert.equal(1, missing_result.expected_index)
+            assert.equal("Type.Value",
+                missing_result.expected_type._tag)
+            assert.is_nil(missing_result.adjustment)
         end)
 
         it("rejects non-method and coercion-only implementation slots",
@@ -1284,12 +1294,76 @@ describe("Titan types", function()
             assert.equal("gradual_view",
                 gradual.results[1].adjustment.kind)
 
+            local missing = assert(types.callable_adjustment(
+                fn(), fn({}, {v, types.Option(i)})))
+            assert.equal(2, #missing.results)
+            for index, action in ipairs(missing.results) do
+                assert.equal("nil_fill_result", action.kind)
+                assert.equal(index, action.expected_index)
+                assert.is_true(types.equals(
+                    action.expected_type,
+                    index == 1 and v or types.Option(i)))
+                assert.is_nil(action.adjustment)
+            end
+
+            -- A flexible producer remains authoritative even when the target
+            -- type itself accepts nil; nil-fill is only for a genuinely ended
+            -- result shape.
+            local flexible = assert(types.callable_adjustment(
+                fn({}, {}, false, v), fn({}, {v})))
+            assert.equal("flex_to_result", flexible.results[1].kind)
+
             assert.is_false(types.callable_adjustment(
                 fn({}, {i}), fn({}, {types.Option(i)})))
             assert.is_false(types.callable_adjustment(
                 fn({}, {i}), fn({}, {types.Float()})))
             assert.is_false(types.callable_adjustment(
                 fn({types.Float()}), fn({i})))
+        end)
+
+        it("nil-fills only directly nil-accepting missing results",
+        function()
+            local i = types.Integer()
+            local titan_pointer = {
+                _tag = "Type.Pointer",
+                type = types.Nil(),
+            }
+            local c_pointer = types.CPointer(
+                types.CInteger("int", true, 3, 32), {})
+            local admitted = {
+                types.Nil(),
+                types.Value(),
+                types.Option(i),
+                titan_pointer,
+                c_pointer,
+            }
+            for index, expected in ipairs(admitted) do
+                local adjustment = assert(types.callable_adjustment(
+                    fn(), fn({}, {expected})),
+                    "missing result case " .. tostring(index))
+                assert.is_false(adjustment.exact)
+                assert.equal(1, #adjustment.results)
+                local action = adjustment.results[1]
+                assert.equal("nil_fill_result", action.kind)
+                assert.equal(1, action.expected_index)
+                assert.is_true(types.equals(expected,
+                    action.expected_type))
+                assert.is_nil(action.adjustment)
+            end
+
+            local rejected = {
+                types.Boolean(),
+                i,
+                types.Float(),
+                types.String(),
+                types.Nominal("sample.Record"),
+                fn(),
+            }
+            for index, expected in ipairs(rejected) do
+                assert.is_false(types.callable_adjustment(
+                    fn(), fn({}, {expected})),
+                    "required result case " .. tostring(index))
+            end
         end)
 
         it("covers directional callable arity and tail adjustment",
@@ -1351,8 +1425,12 @@ describe("Titan types", function()
                     fn({}, {i, s}), fn({}, {i}), true,
                 },
                 {
-                    "actual fixed result deficit is rejected",
+                    "actual fixed required-result deficit is rejected",
                     fn({}, {i}), fn({}, {i, i}), false,
+                },
+                {
+                    "actual fixed nil-accepting result deficit is filled",
+                    fn({}, {i}), fn({}, {i, v}), true,
                 },
                 {
                     "flex result projects into an optional fixed slot",

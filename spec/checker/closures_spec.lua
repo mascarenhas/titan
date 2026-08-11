@@ -314,6 +314,21 @@ describe("closures (return inference)", function()
         ]])
     end)
 
+    it("lets explicit `: ()` override a result-bearing context", function()
+        local ok, err, ast = run_checker([[
+            function f()
+                local g: (integer) -> value = function(x): () end
+            end
+        ]])
+        assert.truthy(ok, err)
+        local cast = tlfunc_stats(ast)[1].exps[1]
+        assert.equal("Ast.ExpCast", cast._tag)
+        assert.equal("callable", cast._adjustment.kind)
+        assert.equal("Ast.ExpFunction", cast.exp._tag)
+        assert.equal(0, #cast.exp._type.rettypes)
+        assert.equal("Type.Value", cast._type.rettypes[1]._tag)
+    end)
+
     it("zero-return is the default with no context, so body results are discarded", function()
         -- No return annotation and no usable context defaults the lambda to
         -- zero-return `()`, exactly like an unannotated top-level function, so a

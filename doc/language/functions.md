@@ -106,10 +106,13 @@ A `local` function does not appear in the module's type, is invisible to
 importing Titan modules and to Lua (`require "geometry"` yields a module
 value with `dist2` but no `square`). This is an interface-visibility rule, not
 a different first-class representation: when a local function is materialized
-as a value, it uses the same canonical closure with native, strict
-Titan-generic, and coercive Lua entries. See [Modules](modules.md) for module
-interfaces and [Lua interoperability](lua-interop.md) for what exported
-functions look like from Lua.
+as an unadjusted value, it uses the same canonical source closure with native,
+strict Titan-generic, and coercive Lua entries. A later non-exact target-typed
+edge may conditionally realize a fresh
+[adjustment wrapper](closure-adjustment-wrappers.md), just as it may for an
+exported function. See [Modules](modules.md) for module interfaces and
+[Lua interoperability](lua-interop.md) for what exported functions look like
+from Lua.
 
 ## Argument adjustment
 
@@ -367,51 +370,69 @@ therefore available only while the callee is reached as a direct declaration;
 storing the same function in a variable keeps it callable positionally but
 does not carry its formal names with the value.
 
-**Calling a function value** has three paths, chosen automatically:
+**Calling a function value** still has three run-time dispatch branches, but a
+statically known non-exact Function-to-Function edge may first realize a target
+wrapper:
 
 1. A Titan value whose exact function tag matches the call's static type goes
-   straight to its native entry with no Lua-stack round trip — the same cost
-   as calling the function by name.
-2. A Titan-branded function called through a non-exact static view—whether
-   that view came from callable adjustment or a dynamic Function boundary—uses
-   its strict Titan-generic entry. Arguments and observed results are checked
-   with gradual guards and the static arity/tail demand; ordinary
-   numeric, Option, C, or Interface-wrapper coercions are not lifted through
-   the function type.
+   straight to its native entry with no Lua-stack round trip. For an ordinary
+   source closure this is the declaration body; for a realized adjustment
+   wrapper it is the checker-frozen target adapter.
+2. A Titan-branded value whose tag differs uses its strict Titan-generic entry.
+   An ordinary closure uses its declaration entry; a realized wrapper uses its
+   consumer-local target relay and then its adapter. Arguments and observed
+   results follow strict gradual guards and the static arity/tail demand;
+   ordinary numeric, Option, C, or Interface-wrapper coercions are not lifted
+   through the function type.
 3. A genuine Lua function, C function, or `__call` object uses the ordinary
    Lua call path. Results entering Titan use the shared dynamic coercion, and
    attempting to call a non-callable value raises a normal Lua error.
 
-Lua itself calls the coercive Lua entry of an exported Titan function, so its
-arguments use that same dynamic rule. The three paths are summarized in the
-type system's
+A non-exact static callable adjustment evaluates its operand once. When the
+value is an exact branded closure of the source type and has one free upvalue,
+it creates a fresh closure tagged with the target type; otherwise the value is
+unchanged and branches 2 or 3 provide the generic fallback. A dynamic
+`value -> Function` projection has no known source Function type and never
+creates this wrapper. See
+[Closure adjustment wrappers](closure-adjustment-wrappers.md) for the complete
+conditional rule.
+
+Lua calls a source closure's coercive entry. A realized wrapper deliberately
+copies `source->f`, preserving whatever Lua surface the immediate source value
+already carries—ultimately the original declaration's arity, dynamic
+conversions, and results—rather than synthesizing a target Lua contract. The dispatch branches are summarized in the type system's
 [normative boundary matrix](types.md#normative-boundary-matrix). Passing a Lua
 closure to a function-typed parameter remains the normal way for Titan to
 **call Lua code**; see [Lua interoperability](lua-interop.md).
 
-**Identity is stable.** Each referenced function has one canonical value,
-so `m.f == m.f` and an in-module reference equals the exported
-module-table entry seen from Lua.
+**Exact source identity is stable.** Each referenced function has one canonical
+source value, so `m.f == m.f` and an in-module reference equals the exported
+module entry seen from Lua. Lambdas and bound-method expressions retain their
+separately documented fresh-evaluation rules.
 
-That canonical value is one Lua `CClosure`; Titan does not manufacture a
-companion adapter closure or an entry-descriptor indirection for another
-static view. Its ordinary callable entry is the coercive genuine-Lua entry.
-Private upvalues 0 through 3 retain, respectively, the owning module, exact
-function-type tag, native entry pointer, and an opaque Titan-closure brand.
-Lambda captures or a bound receiver begin at upvalue 4. The final upvalue is a
-light C function for the strict Titan-generic entry.
-When that strict entry runs, the caller also supplies the hidden original
-canonical closure, and the native body uses it as `_fn`, preserving all
+That unadjusted source value is one Lua `CClosure`. Its ordinary callable entry
+is the coercive genuine-Lua entry. Private upvalues 0 through 3 retain,
+respectively, the owning module, exact function-type tag, native entry pointer,
+and an opaque Titan-closure brand. Lambda captures or a bound receiver begin at
+upvalue 4. The final upvalue is a light C function for the declaration's strict
+Titan-generic entry. When that strict entry runs, the caller also supplies the
+hidden original closure, and the native body uses it as `_fn`, preserving all
 captures and bound receivers.
+
+A realized non-exact adjustment is the deliberate identity exception. It is a
+fresh target-tagged `CClosure`, unequal to its source and to a wrapper from a
+separate evaluation. Wrapper chains get one fresh identity per realized edge;
+Titan does not cache, intern, flatten, or equality-unwrap them. An ineligible
+fallback allocates nothing and preserves the operand identity.
 
 Function-type tags are exact identities, not compatibility tokens. After an
 exact-tag mismatch, a generic caller recognizes a Titan closure by the fixed
 opaque 64-bit brand in upvalue 3. An unrelated C closure would need both the
 minimum Titan upvalue count and that exact sentinel in that exact slot, so
-accidental recognition is astronomically unlikely. The brand selects the
-strict trailer only; it never turns one function type tag into another.
-Debug/C extraction or mutation of the closure's private upvalues is
-programmer-responsible and outside Titan's untrusted-code contract.
+accidental recognition is astronomically unlikely. The brand selects a strict
+trailer only; it never treats two type tags as equal. Debug/C extraction or
+mutation of the closure's private upvalues is programmer-responsible and
+outside Titan's supported trust boundary.
 
 **`value` and function types convert both ways.** A function value flows
 into a `value` implicitly, and a `value` flows into a function type
@@ -419,22 +440,27 @@ implicitly as well — the check that it is callable is deferred to the
 moment of the call (so a `value` holding a non-callable raises only when
 you try to call it). A `value` may also be called directly without first
 storing it in a function-typed slot: Titan derives a temporary positional
-function type from the arguments and the surrounding result demand. See
+function type from the arguments and the surrounding result demand. These
+dynamic Function projections preserve the boxed value rather than realizing
+an adjustment wrapper. See
 [Contextual calls through `value`](flexible-returns.md#contextual-calls-through-value).
 
 **Callable adjustment is directional.** An actual function may ignore
 inputs that callers through the expected slot are allowed to supply, and the
-expected slot may hide surplus results that the actual function produces. The
-actual may not require an input or omit a fixed result that future callers rely
-on. Input and output tails participate in the same directional rule. Exact
-identity remains stricter and selects the native fast path. The full rules and
-examples are in
-[Flexible returns](flexible-returns.md#callable-adjustment-is-directional).
+expected slot may hide surplus results that the actual function produces. An
+additional actual input must accept a missing nil. If the actual has no
+corresponding fixed or flexible result, an expected result may likewise be
+nil-filled only when its type accepts a missing nil. Input and output tails
+participate in the same directional rule. Exact identity remains stricter and
+allocates no wrapper. The full rules and examples are in
+[Flexible returns](flexible-returns.md#callable-adjustment-is-directional) and
+[Closure adjustment wrappers](closure-adjustment-wrappers.md).
 
 This directional shape operation is not subtyping and does not lift a direct
 component conversion. For example, neither `() -> integer` to `() -> float`
 nor `() -> integer` to `() -> integer?` is accepted. A `value` hole or
-consistent compound component is instead enforced by the strict generic call.
+consistent compound component is enforced by the frozen adapter when a wrapper
+is realized and by the strict generic path on fallback.
 
 **Anonymous functions are values too.** A `function (...) ... end`
 expression evaluates to a function value of the same kind, and it can
@@ -452,11 +478,15 @@ stored as a Titan function value (see [the FFI chapter](ffi.md)). Assigning
 
 Lua 5.5 permits at most 255 upvalues in a C closure. The four fixed header
 slots and the strict-entry trailer leave 250 slots for captures or a bound
-receiver. Titan diagnoses the first closure that would exceed that budget
-instead of emitting an invalid C closure. ABI 0.20 added the fixed brand and
+receiver. Titan diagnoses the first source closure that would exceed that
+budget instead of emitting an invalid C closure. Adjustment wrappers need one
+additional traced source-closure link, but Titan does not lower the source
+capture limit: an already-full closure (or a wrapper chain that becomes full)
+uses the generic fallback at the next edge. ABI 0.20 added the fixed brand and
 strict trailer; ABI 0.21 retained that layout while advancing the matched Lua
-runtime to 5.5.1, and ABI 0.22 retains it. A prior-ABI provider is rejected
-before function values can be exchanged.
+runtime to 5.5.1, and ABI 0.22 retains it. Adjustment wrappers change no fixed
+slot or native signature and require no further ABI bump. A prior-ABI provider
+is rejected before function values can be exchanged.
 
 ## Recursion and declaration order
 

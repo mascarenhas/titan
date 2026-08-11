@@ -12,10 +12,15 @@
 >   function is the final upvalue. The module reference therefore stays at
 >   slot 0 rather than moving to slot 2 as proposed below.
 > * **Call paths.** There are three entry roles: an exact-type *fast path*
->   makes a direct native call; a branded non-exact Titan function uses its
->   strict trailer through `luaD_callnoyield`; and a genuine Lua call enters
->   the closure's coercive `CClosure.f`. Non-Titan Lua closures, C functions,
->   and `__call` objects use ordinary Lua dispatch.
+>   makes a direct native call; a branded exact-tag mismatch uses its strict
+>   trailer through `luaD_callnoyield`; and a genuine Lua call enters the
+>   closure's coercive `CClosure.f`. A later feature makes a statically known
+>   non-exact callable edge conditionally clone an eligible exact Titan source
+>   into a fresh target-tagged wrapper, whose native adapter can then use the
+>   exact path while its `CClosure.f` remains the source entry. Ineligible and
+>   dynamic Function values keep the strict/non-Titan generic fallback.
+>   Non-Titan Lua closures, C functions, and `__call` objects use ordinary Lua
+>   dispatch. See [closure adjustment wrappers](language/closure-adjustment-wrappers.md).
 > * **Default return type.** A function with no return annotation now
 >   defaults to **zero returns** (`() -> ()`, returning nothing as in Lua),
 >   not a single `nil`.

@@ -153,9 +153,12 @@ Consumers test `varargtype`; the two never mix. Four type operations change:
   missing-nil action; an expected input tail must also be safely observed in
   every such position. The expected output shape then observes
   the actual fixed/flexible results covariantly. No numeric, Option, or other
-  automatic coercion is lifted through the callable shape. See
-  [flexible returns](flexible-returns.md#identity-and-callable-adjustment)
-  for the complete matrix.
+  automatic coercion is lifted through the callable shape. A missing expected
+  fixed result may use the separate `nil_fill_result` action only under the
+  shared nil-acceptance policy. See
+  [flexible returns](flexible-returns.md#identity-and-callable-adjustment) and
+  [closure adjustment wrappers](closure-adjustment-wrappers.md) for the
+  complete raw/frozen matrix.
 * **`equals`** remains exact structural identity: fixed positions, input-tail
   presence/type, and output-tail presence/type must all match. Thus
   `...: integer` and `...: value` are not equal, which gives them different
@@ -314,10 +317,11 @@ name a trailing flexible-result call as its open source.
 After checking, every static element destined for a `TitanVarg*` struct has
 an attached `assignment_adjustment` to the element type, so its store consumes
 the ordinary plan lowering. Runtime run-to-run conversion uses the same
-per-element plan. A strict `value → t` guard can therefore appear in the
-strict generic entry, a fresh forwarding copy, or a flexible result-run
-consumer; it is never replaced by a representation cast. The genuine-Lua
-entry instead consumes the corresponding `DynamicCoercionPlan`.
+per-element plan. A strict `value → t` guard can therefore appear in a realized callable
+wrapper's native adapter, the branded generic fallback, a fresh forwarding
+copy, or a flexible result-run consumer; it is never replaced by a
+representation cast. The genuine-Lua entry instead consumes the corresponding
+`DynamicCoercionPlan`.
 
 An adjusted Interface method uses this same descriptor ABI for an input tail.
 Its checker-frozen adapter records the run actions, element guard/injection,
@@ -510,11 +514,13 @@ parameter:
    the callee's fixed params (the prefix grows the tail). Allocate fresh
    `Udata0` element storage (with `luaC_newobj` + `getudatamem`), build a
    C-stack descriptor pointing at it, **cap-check** the runtime count against
-   `TITAN_VARARG_MAX`, anchor the `Udata0` on a reserved slot, copy the static
-   prefix (each gc prefix value anchored on its own slot first — §2.D) then each
-   incoming `...` element converted to the callee element type (identical ctype →
-   raw copy; a `value` widening → `setboxed`; a `value` narrowing →
-   the checker-attached strict guard), set `n_args`, pass `_start = 0`. The fresh allocation can
+   `TITAN_VARARG_MAX`, anchor the freshly allocated `Udata0` on a reserved slot,
+   copy the C-only static prefix and then each incoming `...` element converted
+   to the callee element type (identical ctype → raw copy; a `value` widening →
+   `setboxed`; a `value` narrowing → the checker-attached strict guard), set
+   `n_args`, and pass `_start = 0`. No native input gets a tracing-only element
+   slot; its existing allocation/result/semantic/VM provenance remains live, and
+   a conversion that allocates a fresh wrapper roots that destination. The fresh allocation can
    relocate the Lua stack, so the function records
    `ctx.uses_base_off` and `_base` is recomputed from `_base_off` after the
    call.
@@ -531,25 +537,32 @@ keys so a C typedef whose spelling resembles a Titan type cannot alias it. The
 tag **folds in the vararg element** because the full callable shape
 distinguishes `...: integer` from `...: value`. So:
 
+Before dispatch, a statically known non-exact callable cast may conditionally
+construct a fresh target-tagged wrapper. It freezes the source once in C while
+borrowing its existing traced provenance, requires an exact branded source tag
+and one free upvalue, and otherwise leaves the carrier unchanged. Only the fresh
+wrapper branch writes the reserved allocation root.
+
 * **Tag matches the static type** → the **native fast path**: build the struct
   (the same `emit_vararg_struct` cases 1–3, including a forwarded `...`) and
   call the native pointer through the fast-path typedef (`function_sig`, which
-  includes the trailing `_varargs` + `_start`), with `_fn = _vc_callee`. The
-  struct build is spliced into the *fast branch only* (`$VARGSTATS`), so a
-  gradual mismatch never allocates it (and a case-3 `checkandget` cannot raise
-  spuriously before the generic path runs).
-* **Tag differs but is branded** (for example a
-  `(integer, ...: value)`-typed view holding a
-  `(integer, ...: integer)` Titan function) → the **strict generic
-  Lua-stack path**: push the closure's strict light C function, the original
-  closure as a hidden carrier, every fixed and surplus static argument, and
-  any forwarded `...` elements. The strict entry rebuilds the descriptor with
-  `GuardPlan`s and invokes the native body with the original closure as `_fn`.
+  includes the trailing `_varargs` + `_start`), with `_fn = _vc_callee`. For a
+  source closure the pointer names its body; for a realized wrapper it names
+  the target adapter, which builds A's fixed/tail view and delegates to the
+  immediate source. The target typed tail is therefore enforced on the exact
+  path. `$VARGSTATS` remains inside the selected native branch.
+* **Tag differs but is branded** (a dynamic Function view or wrapper-ineligible
+  carrier) → the **strict generic Lua-stack path**: push the closure's final
+  strict light C function, the closure as a hidden carrier, every fixed and
+  surplus static argument, and any forwarded `...` elements. An ordinary
+  source uses its declaration entry; a wrapper uses its consumer target relay.
+  The strict shell rebuilds descriptors with `GuardPlan`s before the source or
+  target-adapter native call.
 * **The value is not a branded Titan closure** → the ordinary Lua generic path
-  calls the Lua closure, C function, or `__call` value. It receives arguments
-  already adjusted to the static callable shape and boxed for Lua; results
-  entering Titan use the canonical `DynamicCoercionPlan`, including numeric
-  conversions and truthiness.
+  calls the Lua closure, C function, or `__call` value. A static adjustment
+  never wraps it. It receives arguments already adjusted to the static callable
+  shape and boxed for Lua; results entering Titan use the canonical
+  `DynamicCoercionPlan`, including numeric conversions and truthiness.
 
 `luaD_callnoyield` can relocate the stack, so `codevaluecall` sets
 `ctx.uses_base_off` and recomputes `_base` afterward on every stack path.
@@ -588,8 +601,11 @@ elements remain internal backing Tables, while generic/Lua-visible runs box
 them as proxies. ABI 0.18 and 0.19 preserved that descriptor contract; ABI
 0.20 kept it while adding the Array writer user value and callable
 strict-entry trailer; 0.21 retained those descriptors while advancing the
-embedded Lua contract to 5.5.1, and 0.22 retains them. See
-[Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
+embedded Lua contract to 5.5.1, and 0.22 retains them. Closure adjustment
+wrappers reuse the same descriptor/native signature and add only private
+consumer adapter/relay artifacts, so this optimization does not advance the
+ABI. See [Dense Arrays](dense-arrays.md#internal-and-boxed-representations) and
+[Closure adjustment wrappers](closure-adjustment-wrappers.md#abi-and-ownership-rationale).
 
 Compiled-interface import paths round-trip `varargtype` through the same
 serialization, whether recovered from DSO callables or an archive metadata
@@ -600,46 +616,43 @@ constants.
 
 ## GC discipline: descriptor pointers and untraced payloads
 
-Runtime-sized element arrays live in a `Udata` raw payload (`getudatamem`), and
-`traverseudata` marks only a userdata's `metatable` and its `uv[0..nuvalue-1]`
-user values — **never `getudatamem`**. A 0-uservalue `Udata` (`nuvalue == 0`)
-therefore has a payload that is *invisible* to the collector. The invariant the
-codegen maintains [§2.D]:
+Runtime-sized element arrays can live in a `Udata` raw payload
+(`getudatamem`), and `traverseudata` marks only a userdata's `metatable` and its
+`uv[0..nuvalue-1]` user values—**never `getudatamem`**. A zero-uservalue Udata
+therefore keeps its byte buffer allocated but does not trace GC pointers copied
+into that buffer. Generated code maintains the stronger provenance invariant:
 
-> Every collectable element reachable through any vararg descriptor is
-> independently anchored on a live Lua-stack slot for the descriptor's lifetime;
-> an anchored `Udata0` only keeps the element buffer itself alive.
+> Every collectable element reachable through a live vararg descriptor remains
+> reachable from an independent traced owner for the descriptor's lifetime. The
+> owner may be a semantic variable/container home, an immediate allocation or
+> native-result root, an actual Lua VM argument slot, or an explicit flexible
+> result/destination range. The descriptor and raw backing are never owners.
 
-For input tails those roots are the original caller argument slots or the
-ordinary anchors for a freshly copied prefix. For flexible outputs the
-descriptor backing is caller-owned C storage, so an open GC-bearing result run
-gets a parallel traced Lua-stack range; generated code publishes the actual
-live prefix there before an allocating consumer and clears it after copying.
-Finite projected results use their normal per-result shadow slots. A pending
-return crossing `finally` must save the run count and keep the saved elements
-traced until the pending action resumes or is superseded by a raise.
+A Titan native call keeps fixed/static and forwarded open inputs in C and does
+not create per-call element roots. A pass-through input run borrows whatever
+provenance already owns each element. A newly evaluated prefix likewise retains
+its source home, or the immediate root installed by its allocation/native-result
+expression. If element conversion allocates a callable/Interface wrapper, that
+fresh destination receives its own fixed/range allocation root. A Lua-originated
+entry is different only because its incoming stack slots are the actual VM
+arguments.
+
+For flexible outputs the descriptor backing is caller-owned C storage. After a
+native call and rebase, every live GC-bearing result prefix is copied immediately
+into a parallel traced Lua-stack range and cleared only after its sink consumes
+it. This includes identity source runs inside callable/Interface adapters, not
+just runs followed by allocating conversion. Finite projected GC results receive
+their ordinary immediate caller result roots. A pending return crossing
+`finally` separately saves the run count and keeps the saved elements traced
+until the pending action resumes or is superseded by a raise.
 
 The descriptor may be a C-stack local. That is not a moving-GC hazard: Lua's GC
-does not move objects, so a pointer to a `TString`, `Table`, `Udata`, or a
-payload buffer remains valid across collection. Only pointers into Lua stack
-locations need rebasing after stack growth/shrink.
-
-This holds without per-element re-materialization, by LIFO stack discipline and
-the fact that Lua's GC is **non-moving** (the *object* addresses an element
-points to never change; only the stack array can relocate):
-
-* **Pass-through elements** (the incoming `...`) stay alive via the *original
-  caller's* stack anchors — for a native call the caller anchors gc args; for a
-  Lua-originated call they *are* the Lua-stack arg slots — and those slots sit
-  below every nested frame for the whole call chain.
-* **Newly-introduced prefix elements** in a case-3 forward are ordinary
-  arguments anchored by the normal "caller anchors gc args" path (the coder
-  anchors each gc prefix value on a reserved slot *before* the `Udata0`
-  allocation that may GC).
-* **The `Udata0` itself** is stack-anchored so its *buffer* survives a GC during
-  the copy/call; it has no `__gc`, no metatable, no `uv[]`. The descriptor that
-  points at that buffer can stay on the C stack because it stores no Lua stack
-  slot addresses.
+does not move objects, so a pointer to a `TString`, `Table`, `Udata`, or payload
+buffer remains valid across collection. Only pointers into Lua stack locations
+need rebasing after stack growth/shrink. A case-3 `Udata0` itself is immediately
+rooted so its *buffer* survives copy/call; it has no `__gc`, metatable, or traced
+user values, and therefore does not own collectable elements stored in that
+buffer.
 
 Two more mechanical points:
 

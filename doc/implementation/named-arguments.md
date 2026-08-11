@@ -171,16 +171,16 @@ classification and native signatures therefore remain positional.
 ## Code generation and evaluation order
 
 For a static Titan call, `codecall` uses `named_ordered_call_args` when
-`_named_arg_order` is present. That helper generates and immediately
-materializes every explicit expression in the recorded lexical order. It then
-generates synthetic omissions and returns expressions indexed by formal
-position. The existing `codecall` loop emits those expressions into the
+`_named_arg_order` is present. That helper generates every explicit expression
+in recorded lexical order and immediately freezes it in an untraced C temporary.
+It freezes synthetic omissions afterward and returns expressions indexed by
+formal position. The existing `codecall` loop emits those C values into the
 ordinary positional native call.
 
-Immediate materialization is essential: `codeexp` can produce deferred C
+Immediate C-only freezing is essential: `codeexp` can produce deferred C
 expressions, so merely iterating in source order and later printing them in
-formal order would reorder effects. `materialize_code` also gives GC-bearing
-temporaries their normal stack anchors. For methods, `codecall` materializes the
+formal order would reorder effects. It deliberately does **not** give
+GC-bearing inputs tracing-only call slots. For methods, `codecall` freezes the
 receiver once before invoking `named_ordered_call_args`, matching the language
 order of receiver first, then written arguments.
 

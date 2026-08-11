@@ -71,6 +71,44 @@ describe("interfaces (end-to-end)", function()
             tlcontext.owned_c_metatables[types.tostring(owned)])
     end)
 
+    it("polls before an Interface adapter allocates callable views", function()
+        local csrc = h.compile_and_read_c([[
+            interface Transformer
+                function swap(
+                    callback: (value) -> value
+                ): (value) -> value
+            end
+
+            record Impl
+            end
+
+            function Impl:swap(
+                callback: (integer) -> integer
+            ): (integer) -> integer
+                return callback
+            end
+
+            function make(): Transformer
+                return Impl.new()
+            end
+        ]])
+        local pair = interface_pair_id(
+            "test_", "test.Impl", "test.Transformer")
+        local signature = "static TITAN_NOINLINE TValue "
+            .. pair .. "_adapter_0"
+        local declaration = assert(csrc:find(signature, 1, true))
+        local start = assert(csrc:find(
+            signature, declaration + 1, true))
+        local stop = assert(csrc:find(
+            "test_Impl_swap_titanmethod(", start, true))
+        local body = csrc:sub(start, stop - 1)
+        local poll = assert(body:find("luaC_checkGC(L);", 1, true))
+        local reserve = assert(body:find("titan_ensure_stack", poll, true))
+        local allocation = assert(body:find(
+            "luaF_newCclosure", reserve, true))
+        assert.is_true(poll < reserve and reserve < allocation)
+    end)
+
     it("publishes type-only owner artifacts without a Lua module member",
     function()
         local ok, err, ast, modtype = h.run_checker([[
@@ -815,7 +853,89 @@ describe("interfaces (end-to-end)", function()
         assert.truthy(called, callerr)
     end)
 
-    it("anchors incoming GC values before resolving adapter identities",
+    it("roots only freshly allocated Interfaces in an open input run",
+    function()
+        local source = [[
+            interface View
+                function get(): integer
+            end
+
+            record Item
+                n: integer
+            end
+
+            function Item:get(): integer
+                return self.n
+            end
+
+            local function consume(...: View): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do
+                    junk = { k, k + 1 }
+                    k = k + 1
+                end
+                local total = 0
+                local i = 1
+                while i <= #... do
+                    local view: View = ...[i]
+                    total = total + view:get()
+                    i = i + 1
+                end
+                return total
+            end
+
+            local function produce(): (...: Item)
+                return Item.new(10), Item.new(20), Item.new(30)
+            end
+
+            function open_interfaces(): integer
+                return consume(produce())
+            end
+        ]]
+        local csrc = h.compile_and_read_c(source)
+        local signature =
+            "lua_Integer test_open_interfaces_titan("
+        local declaration = assert(csrc:find(signature, 1, true))
+        local first = assert(csrc:find(
+            signature, declaration + 1, true))
+        local last = assert(csrc:find(
+            "static int test_open_interfaces_titanentry_lua",
+            first, true))
+        local body = csrc:sub(first, last - 1)
+        local allocation = assert(body:find(
+            "= luaS_newudata(", 1, true))
+        local rebase = assert(body:find(
+            "_base = restorestack(L, _base_off);", allocation, true))
+        local root = assert(body:find(
+            "setuvalue(L, s2v(", rebase, true))
+        local root_line = body:sub(root, assert(body:find("\n", root)) - 1)
+        assert.truthy(root_line:find("_vai", 1, true), root_line)
+        assert.is_true(allocation < rebase and rebase < root)
+        for line in body:gmatch("[^\n]+") do
+            assert.is_false(
+                line:find("_open_vargs_", 1, true) ~= nil
+                and line:find("setuvalue(L, s2v(", 1, true) ~= nil,
+                line)
+        end
+
+        local called, callerr = h.call("test", [[
+            for _, mode in ipairs({"incremental", "generational"}) do
+                collectgarbage(mode)
+                for i = 1, 30 do
+                    assert(test.open_interfaces() == 60)
+                    if i % 5 == 0 then
+                        collectgarbage("collect")
+                    else
+                        collectgarbage("step")
+                    end
+                end
+            end
+        ]])
+        assert.truthy(called, callerr)
+    end)
+
+    it("emits no native input roots while resolving adapter identities",
     function()
         local source = [[
             interface Item
@@ -879,25 +999,19 @@ describe("interfaces (end-to-end)", function()
         local body = csrc:sub(start, stop)
         local reserve = assert(csrc:find(
             "titan_ensure_stack(L,", start, true))
-        local reserved = tonumber(assert(body:match(
-            "titan_ensure_stack%(L, (%d+)%)")))
-        local rooted = tonumber(assert(body:match(
-            "L%->top%.p %+= (%d+);")))
-        assert.equal(rooted + 1, reserved)
-        local first_anchor = assert(csrc:find(
-            "setuvalue(L, s2v((restorestack(L, _base_off)",
-            reserve, true))
-        local value_anchor = assert(csrc:find(
-            "setobj2t(L, s2v((restorestack(L, _base_off)",
-            first_anchor, true))
         local identity = assert(csrc:find(
             '"Titan interface test.Item metatable"',
-            value_anchor, true))
+            reserve, true))
         local conversion = assert(csrc:find(
             "_ia_concrete_arg_1", identity, true))
-        assert.is_true(reserve < first_anchor
-            and first_anchor < value_anchor
-            and value_anchor < identity
+        local before_identity = csrc:sub(start, identity - 1)
+        assert.falsy(before_identity:find(
+            "setuvalue(L, s2v((restorestack(L, _base_off)",
+            1, true), before_identity)
+        assert.falsy(before_identity:find(
+            "setobj2t(L, s2v((restorestack(L, _base_off)",
+            1, true), before_identity)
+        assert.is_true(reserve < identity
             and identity < conversion
             and conversion < stop)
 
@@ -1033,6 +1147,47 @@ describe("interfaces (end-to-end)", function()
             assert(test.implements(test.Concrete.new()))
         ]])
         assert.truthy(called, callerr)
+    end)
+
+    it("keeps Interface sources in C and roots only the fresh wrapper",
+    function()
+        local csrc = h.compile_and_read_c([[
+            interface Item
+                function get(): integer
+            end
+
+            record Concrete
+                n: integer
+            end
+
+            function Concrete:get(): integer
+                return self.n
+            end
+
+            function wrap(value_: Concrete): Item
+                return value_
+            end
+        ]])
+        local declaration = assert(csrc:find(
+            "Udata* test_wrap_titan(", 1, true))
+        local first = assert(csrc:find(
+            "Udata* test_wrap_titan(", declaration + 1, true))
+        local last = assert(csrc:find(
+            "static int test_wrap_titanentry_lua", first, true))
+        local body = csrc:sub(first, last - 1)
+        local allocation = assert(body:find("luaS_newudata(", 1, true))
+        local before = body:sub(1, allocation - 1)
+        assert.matches(
+            "Udata%* _tmp_%d+ = 0;%s*_tmp_%d+ = _param_value_;",
+            before)
+        assert.falsy(before:find("setuvalue(L", 1, true), before)
+        local rebase = assert(body:find(
+            "_base = restorestack(L, _base_off);", allocation, true))
+        local root = assert(body:find(
+            "setuvalue(L, s2v((restorestack(L, _base_off)",
+            rebase, true))
+        local edge = assert(body:find("->uv[0].uv", root, true))
+        assert.is_true(allocation < rebase and rebase < root and root < edge)
     end)
 
     it("orders exact payloads, roots construction, and preserves fast tags",

@@ -152,6 +152,171 @@ describe("call sequencing regressions", function()
         ]])
     end)
 
+    it("freezes effect-ordered native arguments only in C", function()
+        local csrc = compile_and_read_c([[
+            local function sink(text: string, n: integer): integer
+                return #text + n
+            end
+            local function effect(): integer
+                return 1
+            end
+            function native_call(text: string): integer
+                return sink(text, effect())
+            end
+        ]])
+        local declaration = assert(csrc:find(
+            "lua_Integer test_native_call_titan(", 1, true))
+        local first = assert(csrc:find(
+            "lua_Integer test_native_call_titan(",
+            declaration + 1, true))
+        local last = assert(csrc:find(
+            "static int test_native_call_titanentry_lua", first, true))
+        local body = csrc:sub(first, last - 1)
+        local copy = assert(body:find("_tmp_1 = _param_text;", 1, true))
+        local call = assert(body:find(", NULL, _tmp_1", copy, true), body)
+        assert.falsy(body:find("setsvalue(L", copy, true), body)
+        assert.is_true(copy < call)
+    end)
+
+    it("retains allocation and post-native-call roots through later setup",
+    function()
+        -- Constructor results acquire mandatory post-native-call roots in the
+        -- still-active caller; the lambda acquires its initial allocation root.
+        -- Those roots, not tracing-only argument copies, survive later setup or
+        -- callee code that replaces the values' ordinary program homes.
+        run_coder([[
+            local lua = foreign import "lua.h"
+            local ffi = foreign import "titan/ffi.h"
+
+            record R
+                id: integer
+            end
+
+            current: R = R.new(0)
+            finalized_1: boolean = false
+            finalized_2: boolean = false
+            finalized_3: boolean = false
+            finalized_4: boolean = false
+
+            local function mark(v: value)
+                local id = (v as R).id
+                if id == 1 then
+                    finalized_1 = true
+                elseif id == 2 then
+                    finalized_2 = true
+                elseif id == 3 then
+                    finalized_3 = true
+                elseif id == 4 then
+                    finalized_4 = true
+                end
+            end
+
+            local function install_finalizer(r: R)
+                local top = lua.lua_gettop(L)
+                ffi.lua_pushtvalue(L, r as value)
+                if lua.lua_getmetatable(L, -1) == 0 then
+                    raise "record has no metatable"
+                end
+                ffi.lua_pushtvalue(L, mark)
+                lua.lua_setfield(L, -2, "__gc")
+                lua.lua_pushvalue(L, -1)
+                lua.lua_setmetatable(L, -3)
+                lua.lua_settop(L, top)
+            end
+
+            local function collect()
+                lua.lua_gc(L, lua.LUA_GCCOLLECT)
+            end
+
+            local function consume(r: R): integer
+                current = R.new(101)
+                collect()
+                if finalized_1 then return -1 end
+                return r.id
+            end
+
+            function replaced_inside_callee(): integer
+                finalized_1 = false
+                current = R.new(1)
+                install_finalizer(current)
+                return consume(current)
+            end
+
+            local function replace_argument(): integer
+                current = R.new(102)
+                collect()
+                return 0
+            end
+
+            local function take(r: R, _unused: integer): integer
+                if finalized_2 then return -1 end
+                return r.id
+            end
+
+            function replaced_by_later_argument(): integer
+                finalized_2 = false
+                current = R.new(2)
+                install_finalizer(current)
+                return take(current, replace_argument())
+            end
+
+            current_fn: (integer) -> integer = function (_n: integer): integer
+                return -99
+            end
+
+            local function replace_callee(): integer
+                current_fn = function (_n: integer): integer return -98 end
+                collect()
+                return 0
+            end
+
+            function replaced_first_class_callee(): integer
+                finalized_3 = false
+                local held = R.new(3)
+                install_finalizer(held)
+                current_fn = function (_n: integer): integer
+                    if finalized_3 then return -1 end
+                    return held.id
+                end
+                return current_fn(replace_callee())
+            end
+
+            local function make_result(): R
+                local r = R.new(4)
+                install_finalizer(r)
+                return r
+            end
+
+            local function collect_effect(): integer
+                collect()
+                return 0
+            end
+
+            local function take_result(r: R, _unused: integer): integer
+                if finalized_4 then return -1 end
+                return r.id
+            end
+
+            function returned_by_native_call(): integer
+                finalized_4 = false
+                return take_result(make_result(), collect_effect())
+            end
+
+            function finalization_state():
+                (boolean, boolean, boolean, boolean)
+                return finalized_1, finalized_2, finalized_3, finalized_4
+            end
+        ]], [[
+            assert(test.replaced_inside_callee() == 1)
+            assert(test.replaced_by_later_argument() == 2)
+            assert(test.replaced_first_class_callee() == 3)
+            assert(test.returned_by_native_call() == 4)
+            collectgarbage("collect")
+            local one, two, three, four = test.finalization_state()
+            assert(one and two and three and four)
+        ]])
+    end)
+
     it("discards a non-void static result without compiler warnings", function()
         local oldflags = driver.CFLAGS
         driver.CFLAGS = oldflags .. " -Werror"

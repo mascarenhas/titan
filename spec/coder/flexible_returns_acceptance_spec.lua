@@ -204,10 +204,13 @@ describe("flexible-return runtime acceptance", function()
             assert(test.optional_projection(true) == 7)
             assert(test.required_projection(true) == 7)
 
+            -- The direct non-exact edge is now an exact fixed-result wrapper,
+            -- so its frozen missing-result arm reports at that adapter instead
+            -- of falling through a generic Lua-entry nil guard.
             local ok, err = pcall(test.required_projection, false)
             assert(not ok)
             assert(tostring(err):find(
-                "expected integer tag but found nil", 1, true), err)
+                "expected result 1", 1, true), err)
 
             local a, b, c = test.consume_fixed_suffix()
             assert(select("#", test.consume_fixed_suffix()) == 3)

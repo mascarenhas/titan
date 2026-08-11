@@ -199,7 +199,11 @@ The checker-facing summary is:
 - `types.coercion(source, target)` returns one direct automatic
   `CoercionPlan`, including named Option operations;
 - `types.callable_adjustment(source_actual, target_expected)` returns a
-  directional shape/component plan;
+  directional shape/component plan, including the narrow `nil_fill_result`
+  action when a wholly missing expected result accepts nil;
+- the generalized callable freezer turns that raw authority into a closed,
+  relation-free adapter graph with component operations, minimal lifetime
+  roots, only genuine stack rebases, demand math, location, and trace name;
 - `types.assignment_adjustment(source, target)` selects identity, direct
   coercion, gradual view, callable adjustment, or rejection;
 - `types.dynamic_coercion(target)` describes the broader conversion authorized
@@ -213,6 +217,19 @@ The checker-facing summary is:
 these classifiers. It does not answer whether an operation is permitted.
 The retired `types.compatible`, `types.coerceable`, and
 `types.explicitly_coerceable` APIs have no checker callers.
+
+The callable freezer also owns lowering-time lifetime facts. A nested
+`callable_view` is `may_raise = true` because `luaF_newCclosure` can allocate,
+but `may_relocate = false`: direct construction performs no stack API operation
+or ordinary GC poll. Native adapter input-source roots are empty because native
+callees/arguments remain C values and the call never publishes tracing-only
+copies. Fixed/range destination roots are selected only for newly allocated
+wrappers; fixed/open result-source roots cover every live GC-bearing native
+result immediately after return. Raw descriptors and C buffers are explicitly
+non-roots. Top-level wrapper
+construction records only a conditional result root for an eligible exact
+Titan clone—never a duplicate construction source root—and the rebase ledger
+still always includes the source native call.
 
 Conversion edges are deliberately not consistency leaves. Integer-to-float,
 `T`-to-`T?`, C numeric/address conversions, truthiness, and
@@ -231,11 +248,12 @@ mismatch; a checked C conversion that already emitted a qualifier/category/probe
 diagnostic carries an explicit marker that suppresses only the duplicate
 generic mismatch.
 
-Identity, gradual structural views, and directional callable plans may reach
-`checkmatch` without changing the producer's representation. The checker
-retains the complete plan on the expression/sink so later code can select a
-strict observation without reconstructing the relation from two types. The
-`term` string still names the diagnostic context (`assignment`, `return`,
+Identity and gradual Array/Map structural views may reach `checkmatch` without
+changing the producer's representation. A finite non-exact directional callable
+plan must already have produced `Ast.ExpCast`; `checkmatch` consumes its same
+raw plan object and does not retain a same-representation callable exception.
+Open runs retain the shared plan on their sink. The `term` string still names
+the diagnostic context (`assignment`, `return`,
 `array indexing`, call argument, and so on). Numeric `for` bounds are not
 assignment sinks: after Option forcing they use a dedicated exact-type check,
 so neither numeric conversion nor a gradual `value` view can reach the C
@@ -245,10 +263,10 @@ control representation.
 
 This is the load-bearing design. **Invariant:** after `checker.check`
 succeeds, every accepted nonidentity semantic edge has a plan. A
-representation-changing fixed conversion is an annotated `Ast.ExpCast`;
-same-representation gradual/callable views retain
-`_assignment_adjustment`; every finite consumed call result beyond the first
-is an explicit `Ast.ExpExtra`; and each shared list consumer carries its
+representation-changing fixed conversion and every finite non-exact callable
+edge is an annotated `Ast.ExpCast`; only same-representation Array/Map gradual
+views retain `_assignment_adjustment`; every finite consumed call result beyond
+the first is an explicit `Ast.ExpExtra`; and each shared list consumer carries its
 finite/open element adjustment. Numeric `for` loops have explicit steps and
 generic `for` loops have hidden iterator tuple/call declarations. The coder
 consumes these decisions and does not call a semantic relation.
@@ -259,8 +277,11 @@ consumes these decisions and does not call a semantic relation.
 `assignment_adjustment(source._type, target)` once:
 
 - identity returns the original expression;
-- a callable or same-representation structural gradual view leaves the source
+- a same-representation Array/Map structural gradual view leaves the source
   carrier intact and stores `_assignment_adjustment`;
+- a non-exact callable decision becomes `Ast.ExpCast` with the child at source
+  type A, the cast at target type B, `_implicit_coercion = true`, and the exact
+  raw `_adjustment`; the checker also freezes its callable-adapter lowering;
 - a `value` injection/projection becomes `Ast.ExpCast` with `_adjustment =
   gradual_view`;
 - a direct conversion becomes `Ast.ExpCast` with `_adjustment =
@@ -288,8 +309,9 @@ The coder also consumes a same-representation Option view at its sink.
 Unlike an Array or Map, an Option has no mutable backing whose element
 observations can remain deferred: nil passes, while a present payload is
 strictly guarded as the target base before the source base view is forgotten.
-Array, Map, and callable structural views keep their ordinary deferred
-component behavior.
+Array and Map structural views keep their ordinary deferred component
+behavior. Callable components are instead executed by a realized wrapper's
+frozen adapter or, on conditional fallback, by the strict generic path.
 
 `tryforce(node)` wraps any Option-typed node in a cast to its base — the
 implicit "must not be nil here" check. It is applied at: `for` bounds;
@@ -307,7 +329,9 @@ record fields, top-level variable initializers, generic-`for` tuple slots
 and visible variables, plus the operator-specific promotions (catalogued in
 the [type system chapter](../language/types.md)). A contributor adding a
 context must preserve the selected plan through `checkmatch` and code
-generation.
+generation. The raw/frozen callable contract and conditional allocation are
+specified in
+[Closure adjustment wrappers](closure-adjustment-wrappers.md#checker-elaboration).
 
 ### `ExpExtra` — materializing finite call results
 
@@ -332,7 +356,10 @@ call instead receives
 `_open_results = {source_type, target_type, start, adjustment}`.
 Computed Map/record fields and named arguments are scalar finite consumers.
 The `?`
-inference marker still applies per finite declaration slot.
+inference marker still applies per finite declaration slot. When an open-run
+element adjustment is callable, there is no per-element `Ast.ExpCast`; the
+checker freezes and attaches the shared adapter at the owning source location,
+and the coder later validates, registers, and emits that already frozen graph.
 
 ### Shared finite/open expression-list demand
 
@@ -561,8 +588,13 @@ Every Array/Map `Ast.VarBracket` read also carries `_read_guard` for its
 optionized result type. Function declarations, methods, bound-method
 trampolines, and lambdas carry parallel strict GuardPlan arrays for fixed and
 variadic parameters; generic call nodes carry strict fixed/open result guards.
-These annotations are distinct from the dynamic plans used by genuine Lua
-entries and non-Titan callable results.
+Frozen callable adapters reuse those component guards plus explicit minimal
+root/rebase and action records. Incoming native values stay in C and borrow their
+existing provenance; newly allocated wrappers get immediate destination roots;
+every live GC-bearing native source result gets an immediate fixed/open source
+root; and direct nested wrapper allocation is not a rebase point. Consumer-local target relays reuse
+the strict stack shell. These annotations are distinct from the dynamic plans
+used by genuine Lua entries and non-Titan callable results.
 
 `or` implements option defaulting: when the left side is `t?` and the right
 side's type equals `t`, the whole expression has type `t` (`of or 1.0` with
@@ -632,43 +664,46 @@ Lua caps a C closure at 255 upvalues. Titan reserves four header slots and the
 final strict Titan-generic entry trailer, so the checker accepts at most
 250 source-level captures. The first larger closure receives
 `function captures too many variables (251, max 250)` during checking rather
-than reaching `lua_pushcclosure`.
+than reaching `lua_pushcclosure`. Callable wrapper realization needs one
+additional traced source-closure upvalue, but this does not lower the source
+capture limit: a 255-upvalue source (or full wrapper chain) remains admissible
+and takes the generic fallback at the next non-exact edge.
 
-### Lambda type inference: checking vs synthesis mode
+### Lambda contextual inference: checking vs synthesis mode
 
-The `Ast.ExpFunction` handler reads the 4th `context` argument every
-`checkexp` visitor receives (the expected type). If `context` is a
-`Type.Function` whose arity matches `#node.params`, the lambda is in
-**checking mode**; otherwise in **synthesis mode**. This is exactly the
-`local x: T = exp` (checking) versus `local x = exp` (synthesis)
-distinction, lifted to lambdas. **Both the parameter types and the return
-type are taken from this expected type** — symmetric, context-only
-inference; neither is reverse-engineered from the lambda's body.
+The `Ast.ExpFunction` handler reads the fourth `context` argument received by
+`checkexp`. It selects a usable expected type only when `context` is a
+`Type.Function` whose fixed arity matches the lambda's `nfixed` count (the
+trailing input-vararg declaration is excluded). With that expected type the
+lambda is in **checking mode**; otherwise it is in **synthesis mode**. This is
+the `local x: T = exp` versus `local x = exp` distinction lifted to lambdas.
+Inference is context-only: the checker never reverse-engineers a type from the
+lambda body's `return` statements.
 
-* **Parameters.** An annotated parameter uses its annotation. An
-  unannotated one takes `context.params[i]` in checking mode, and in
-  synthesis mode is the clean error `cannot infer type of parameter 'x'`.
-* **Return shape.** An explicit `node.rettypes`/`node.flexrettype` pair
-  (including empty/false for explicit `: ()`) is used as written. The parser
-  distinguishes *no return annotation* from `: ()` with a sentinel. With no
-  annotation, checking mode copies both `context.rettypes` and
-  `context.flexrettype`; synthesis mode defaults to empty/false, exactly the
-  zero-return default of an unannotated top-level function.
+* **Fixed parameters.** An annotated parameter uses its annotation. An
+  unannotated one takes `expected.params[i]` in checking mode and otherwise
+  receives `cannot infer type of parameter 'x'`.
+* **Input vararg.** An explicit `...: T` wins. A bare trailing `...` takes
+  `expected.varargtype`; a non-variadic expected type or synthesis mode receives
+  the corresponding clean inference error.
+* **Result shape.** An explicit `node.rettypes`/`node.flexrettype` pair is used
+  as written. In particular, the parser's empty-list representation of explicit
+  `: ()` is truthy and therefore fixes the zero-result shape. With syntactic
+  omission (`node.rettypes == false`), checking mode copies both
+  `expected.rettypes` and `expected.flexrettype`; synthesis mode defaults to
+  empty/false, exactly like an unannotated named function.
 
-So the complete result shape is known *before* the body is checked. The
-body's `return`s are never inspected to synthesize a return type — they are
-checked/coerced against the finite/open return demand in `StatReturn`, exactly
-as a top-level function body is. In a synthesis-mode zero-return lambda,
-`return <expr>` evaluates the expression under discard demand; it does not
-infer or expose a result.
+The complete result shape is installed before the body is checked. `StatReturn`
+checks and coerces body results against that finite/open demand. In a
+synthesis-mode zero-result lambda, `return <expr>` evaluates the expression
+under discard demand and exposes no result. For an inferred non-nil result, the
+ordinary all-paths-return rule still rejects a body that may fall through.
 
-Because the return types are fixed before the body is checked, the
-all-paths-return rule runs unconditionally inside `checkfuncbody` (no
-special deferral for lambdas), so a lambda with a non-`nil` return whose
-body can fall through gets the usual `function can return nil but return
-type is not nil` error, prompting an annotation. After the handler returns
-with `_type = node._type`, the surrounding context applies its usual
-`trycoerce`/`checkmatch` against the lambda's target.
+After the handler publishes the lambda's `Type.Function`, the surrounding sink
+runs its ordinary `trycoerce`/`checkmatch` path. Usually an omitted annotation
+makes the lambda exact for its context and needs no callable wrapper. An
+explicit `: ()` may instead create a zero-result source that is adjusted to a
+nil-accepting result-bearing target through the checker-frozen callable plan.
 
 ## Per-construct notes for contributors
 

@@ -1,5 +1,10 @@
 # Anonymous Functions with Lexical Closure — Implementation Plan
 
+> **Historical design record.** Later closure work preserves this plan's
+> contextual lambda-result inference but supersedes its rejection of lambda
+> module-variable initializers: a lambda is now an ordinary permitted module
+> initializer.
+
 > Status: **reviewed & approved-to-build (v3).** Expands the user's 12-point
 > outline into a full design + implementation + testing plan, grounded in the
 > current code (post first-class-functions, `master` @ `6988960`), **de-risked by

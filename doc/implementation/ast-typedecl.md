@@ -264,7 +264,7 @@ to use it as an expression.
 | `ExpIs` | `exp`, `target` | written `is` type test; the checker resolves `target` and gives the expression type `boolean` |
 | `ExpAdjust` | `exp` | synthesized by the parser only: a parenthesized *call*, truncated to its first value |
 | `ExpExtra` | `exp`, `index`, `_type` | synthesized by the checker only: the index-th (> 1) value of a multi-return call |
-| `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; an absent return annotation may copy both result components from context |
+| `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; the raw AST keeps an omitted result annotation as `rettypes = false`, distinct from explicit `: ()`; a matching expected Function may supply missing fixed/bare-variadic inputs and the complete result shape |
 | `ExpUnionInit` | `owner`, `variant`, `value` | parser-synthesized variant-constructor result; `value` is `false` for an empty variant |
 
 Two of these never come from the programmer directly:
@@ -348,7 +348,7 @@ of these are declared anywhere; this table is the inventory.
 | `_implicit_coercion` | `ExpCast` synthesized by `trycoerce` | checker | coder | distinguishes a demanded sink conversion from a user-written `as`; finite flexible-return lowering may suppress only the sink conversion after its result budget is exhausted |
 | `_decl` | `VarName`, `VarDot` | checker | checker, coder | what the name resolved to: an `Ast.Decl` (local/param/`self`), a top-level AST node, a `Type.ModuleMember`/`Type.ModuleVariable`, a `Type.Field`, or a `Type.StaticMethod` |
 | `_used` | `Decl`, top-level nodes (via `_decl`) | checker, on every read: `ExpVar`, `VarDot` receivers, call callees | coder | "this variable is read somewhere"; unused locals get no C variable — their initializer is evaluated and cast to `(void)` |
-| `_assigned` | `Decl` (via `_decl`) | checker, in `StatAssign` on `VarName` targets | coder | "this variable is reassigned"; GC-able parameters and `self` get their own Lua stack slot only when set (otherwise the caller's anchoring suffices — see [values and the GC](values-and-gc.md)) |
+| `_assigned` | `Decl` (via `_decl`) | checker, in `StatAssign` on `VarName` targets | coder | "this variable is reassigned"; GC-bearing parameters and `self` get a semantic local stack home only when assignment/spill requires it (otherwise they remain C formals and borrow existing allocation/result/semantic/VM provenance—native callers add no argument root; see [values and the GC](values-and-gc.md)) |
 | `_record_constructor` | synthesized `TopLevelStatic` | parser record desugaring | checker | identifies the adjacent synthesized `Rec.new`; explicit record functions, including an explicit `Rec.new`, do not carry it |
 | `_union_constructor`, `_union_variant` | synthesized `TopLevelStatic` | parser union desugaring | checker | identify an adjacent positional-only variant constructor and its `UnionVariant`; explicit union functions do not carry the markers |
 | `_interface_conversion` | coercion-bearing expression, call adjustment, or written cast/test | checker | coder | frozen concrete-to-Interface wrapper plan, including declaration-order method mappings and any adapter graphs; the coder must not rerun structural matching |

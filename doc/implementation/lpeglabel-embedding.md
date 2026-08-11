@@ -180,10 +180,10 @@ adjustment admits those extra `value` slots because its named shape rules can
 nil-fill them and they accept the generic capture tail. LPegLabel always stores the
 internal exact adapter closure required by its raw callback protocol. The
 adapter captures the user-supplied function-typed value and invokes it through
-Titan's ordinary callable machinery: exact Titan functions can use the exact
-fast path, branded non-exact Titan functions use the strict generic entry,
-and Lua functions, C functions, and `__call` objects use the ordinary Lua
-path. There is no `_raw_type` probe or eager raw-function validation of that
+Titan's ordinary callable machinery: exact Titan sources and realized
+target-tagged adjustment wrappers can use the exact native path; unchanged
+branded mismatches use their strict declaration/relay entry; and Lua functions,
+C functions, and `__call` objects use the ordinary Lua path. There is no `_raw_type` probe or eager raw-function validation of that
 captured value; a noncallable value fails only if the engine actually invokes
 the adapter. The relabel adapters for dynamic definition values remain
 genuinely variadic/flexible because their capture arity and result count are
