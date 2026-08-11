@@ -250,6 +250,18 @@ end
 function hidden_result(): Result
     return Result.hidden(99)
 end
+
+function increment(value_: integer): integer
+    return value_ + 1
+end
+
+function callback(): (integer) -> integer
+    return increment
+end
+
+function identity(value_: value): value
+    return value_
+end
 ]]
         local provider_filename = source .. "/rich/api.titan"
         local provider_ast, parse_error =
@@ -271,6 +283,17 @@ end
         local loader = driver.defaultloader({}, { context = context })
         local consumer_source = [[
 local api = import "rich.api"
+
+record LocalBox
+    n: integer
+end
+
+function callable_views()
+    local direct: (integer, value) -> value = api.increment
+    local returned: (integer, value) -> value = api.callback()
+    local broad: (value) -> value = api.identity
+    local narrowed: (LocalBox) -> LocalBox = broad
+end
 
 function use_everything(): integer
     local before: integer = api.counter
@@ -301,6 +324,22 @@ end
             consumer_filename, loader)
         assert.equal(0, #consumer_errors,
             table.concat(consumer_errors, "\n"))
+        local views
+        for _, node in ipairs(consumer_ast) do
+            if node._tag == "Ast.TopLevelFunc"
+               and node.name == "callable_views" then
+                views = node
+                break
+            end
+        end
+        assert.truthy(views)
+        for _, index in ipairs({ 1, 2, 4 }) do
+            local cast = views.block.stats[index].exps[1]
+            assert.equal("Ast.ExpCast", cast._tag)
+            assert.equal("callable_adapter_plan",
+                cast._callable_adapter.kind)
+            assert.is_true(cast._callable_adapter.relation_free)
+        end
         assert.equal("static", driver.imported["rich.api"].kind)
         assert.equal(provider.archive,
             driver.imported["rich.api"].static_archive)

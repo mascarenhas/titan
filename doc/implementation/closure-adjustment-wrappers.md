@@ -251,10 +251,14 @@ error shell plus checker-frozen strict boundary plans.
 The relay validates the wrapper's target tag, target adapter pointer/header
 shape, fixed brand (already selected by `codevaluecall`), and its own final
 trailer. Deliberately, it does not require one declaration-specific
-`CClosure.f`: that field must remain the source Lua entry. It then invokes the
-B native adapter with the wrapper as `_fn`. Thus a later non-exact branded call
-uses the target B protocol and delegates layer by layer, without relaxing every
-ordinary declaration strict entry or depending on which provider built A.
+`CClosure.f`: that field must remain the source Lua entry. Upvalue 0 likewise
+remains the source module, so before checking target nominal, Array, or owned-C
+values the relay recovers the creating consumer's already initialized
+per-state module through its ordinary idempotent init entry. It then invokes
+the B native adapter with the wrapper as `_fn`. Thus a later non-exact branded
+call uses the target B protocol and delegates layer by layer, without relaxing
+every ordinary declaration strict entry or depending on which provider built
+A.
 
 ## Roots, relocation, and errors
 
@@ -265,8 +269,12 @@ exactly once.
 The frozen plan owns all lifetime facts. Incoming and produced GC-bearing fixed
 values have reserved stack anchors; each open descriptor has a parallel traced
 range; the immediate source and new wrapper are anchored across construction;
-and source results are published before an allocating conversion. Raw
-descriptors, C arrays, and native locals are never treated as roots. Every
+and source results are published before an allocating conversion. When an open
+run is repacked into an input-vararg descriptor, each GC-bearing converted
+destination is rooted in its own parallel range as soon as it enters the
+untraced C buffer; source roots alone cannot retain a freshly allocated nested
+wrapper. Raw descriptors, C arrays, and native locals are never treated as
+roots. Every
 stack pointer live across stack growth, wrapper construction, nested callable
 conversion, or the source native call is represented as an offset and restored
 before use.

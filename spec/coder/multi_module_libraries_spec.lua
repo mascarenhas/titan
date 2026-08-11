@@ -354,14 +354,29 @@ function touch(): integer
     visits = visits + 1
     return visits
 end
+
+function identity(value_: value): value
+    return value_
+end
 ]])
         write_file(source_root .. "/pkg/left.titan", [[
 local common = import "pkg.shared"
 local current: integer = 10
 
+record Box
+    n: integer;
+end
+
 function read(): integer
     return current + common.touch()
 end
+
+function callable_relay(): integer
+    local broad: (value) -> value = common.identity
+    local narrowed: (Box) -> Box = broad
+    local dynamic: value = narrowed
+    local wider: (Box, value) -> Box = dynamic
+    return wider(Box.new(42), "ignored").nend
 
 do
     current = current + 1
@@ -837,6 +852,7 @@ local right = require "pkg.right"
 local left = require "pkg.left"
 assert(right.read() == 23)
 assert(left.read() == 13)
+assert(left.callable_relay() == 42)
 assert(require("pkg.right") == right)
 assert(require("pkg.left") == left)
 ]])

@@ -649,42 +649,35 @@ describe("variadic function values (end-to-end)", function()
         ]])
     end)
 
-    -- The struct build is now FAST-PATH-ONLY, so the generic path never narrows.
-    -- This pins the corrected gradual-mismatch-narrowing behaviour: `h` is a
-    -- Titan `(...: value) -> integer`; round-tripped through `value` it is stored in
-    -- a slot whose STATIC type is `(...: integer) -> integer` (compatible both ways).
-    -- A `...: value` forwarder `f` forwards its `...: value` tail into that slot. The
-    -- forward into a STATIC `(...: integer)` type hits the struct build's CASE 3
-    -- (different element representation => per-element conversion), whose narrowing
-    -- arm is a `checkandget` value->integer. But the slot's RUNTIME tag is `h`'s
-    -- `(...: value)`, so the call must go GENERIC and dispatch to `h`, which accepts
-    -- every value. Pre-fix the struct build ran unconditionally (before the runtime
-    -- tag check), so case-3's `checkandget` narrowed value->integer and RAISED on
-    -- the non-integer tail elements ("x", 3.5) before the generic path could run;
-    -- fast-path-only build => no spurious raise, all three values reach `h`.
-    --
-    -- Driven through the normal pcall-wrapping harness: a *generic* (tag-mismatch)
-    -- value call made from inside a VARIADIC Titan function under an enclosing pcall
-    -- frame returns its result correctly (the generic path's savestack/restorestack
-    -- on `_vc_func` is relocation-safe and reads result slot 0 at `_vc_func + 0`,
-    -- where luaD_callnoyield places the callee's return).
-    it("does not narrow a forwarded ...: value tail on a gradual-mismatch generic call", function()
+    -- A direct static non-exact callable edge now realizes an exact target
+    -- wrapper. Its target `...: integer` boundary is therefore authoritative:
+    -- forwarding `...: value` into it must narrow each element before the
+    -- source `...: value` function runs. A value-erased projection remains on
+    -- the historical generic path and preserves the source closure/tag/identity,
+    -- so the same heterogeneous run still reaches that source unchanged.
+    it("enforces a direct typed-tail wrapper while preserving erased generic fallback", function()
         run_coder([[
             function h(...: value): integer
-                -- `h` accepts ANY value; report the count, proving all the
-                -- (non-integer) elements reached it without a narrowing raise.
                 return #...
             end
-            function f(...: value): integer
-                local v: value = h
-                local g: (...: value) -> integer = v   -- runtime tag is h's (...: value)
-                local gi: (...: integer) -> integer = g -- STATIC (...: integer): case-3 narrows
-                return gi(...)                        -- forward f's ...: value tail
+
+            function direct(...: value): integer
+                local g: (...: value) -> integer = h
+                local gi: (...: integer) -> integer = g
+                return gi(...)
+            end
+
+            function erased(...: value): integer
+                local g: (...: value) -> integer = h
+                local v: value = g
+                local gi: (...: integer) -> integer = v
+                return gi(...)
             end
         ]], [[
-            -- the generic path forwards all 3 values to h -> #... == 3
-            -- (case-3 narrowing would have spuriously RAISED on "x"/3.5 pre-fix)
-            assert(test.f(1, "x", 3.5) == 3)
+            local ok, err = pcall(test.direct, 1, "x", 3.5)
+            assert(not ok)
+            assert(tostring(err):match("integer tag"), tostring(err))
+            assert(test.erased(1, "x", 3.5) == 3)
         ]])
     end)
 

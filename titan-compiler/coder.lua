@@ -1893,10 +1893,7 @@ function coder._checked_callable_plan_impl(
                    and action.expected_index == index,
                 use .. " has mismatched fixed-result indexes")
             component(action, actual, expected, "result " .. index)
-        else
-            assert(source.flexrettype,
-                use .. " lacks a source result for expected result "
-                    .. index)
+        elseif source.flexrettype then
             if expected._tag == "Type.Option" then
                 local action = result(
                     "flex_to_optional_result",
@@ -1924,6 +1921,15 @@ function coder._checked_callable_plan_impl(
                 component(action, source.flexrettype, expected,
                     "flexible result " .. index)
             end
+        else
+            local action = result(
+                "nil_fill_result", "missing-result nil-fill action")
+            assert(accepts_missing_nil(expected)
+                   and action.expected_index == index
+                   and action.expected_type
+                   and types.equals(action.expected_type, expected)
+                   and action.adjustment == nil,
+                use .. " has a malformed missing-result nil-fill action")
         end
     end
     for index = #target.rettypes + 1, #source.rettypes do
@@ -3488,7 +3494,7 @@ function coder._validate_interface_adapter_operation(
         source = true, target = true,
         declared_source = true, declared_target = true,
         timing = true, may_raise = true, may_relocate = true,
-        guard = true, callable = true,
+        guard = true, callable = true, adapter = true,
     }, use)
     local source = assert(types.normalize(declared_source),
         use .. " has an unnormalizable declared source")
@@ -3512,7 +3518,8 @@ function coder._validate_interface_adapter_operation(
                and operation.may_raise == false
                and operation.may_relocate == false
                and operation.guard == nil
-               and operation.callable == nil,
+               and operation.callable == nil
+               and operation.adapter == nil,
             use .. " has a malformed identity operation")
     elseif operation.kind == "gradual_inject" then
         local relocates =
@@ -3523,7 +3530,8 @@ function coder._validate_interface_adapter_operation(
                and operation.may_raise == relocates
                and operation.may_relocate == relocates
                and operation.guard == nil
-               and operation.callable == nil,
+               and operation.callable == nil
+               and operation.adapter == nil,
             use .. " has a malformed gradual injection")
     elseif operation.kind == "gradual_guard" then
         local delayed = operation.mode == "structural"
@@ -3535,7 +3543,8 @@ function coder._validate_interface_adapter_operation(
                and operation.may_raise == not delayed
                and operation.may_relocate == not delayed
                and operation.guard ~= nil
-               and operation.callable == nil,
+               and operation.callable == nil
+               and operation.adapter == nil,
             use .. " has a malformed gradual guard")
         coder._validate_interface_frozen_guard(
             operation.guard, target, use .. " guard", {})
@@ -3547,14 +3556,15 @@ function coder._validate_interface_adapter_operation(
         assert(source._tag == "Type.Function"
                and target._tag == "Type.Function"
                and operation.mode == nil
-               and operation.timing == "delayed_call"
-               and operation.may_raise == false
-               and operation.may_relocate == false
+               and operation.timing == "immediate"
+               and operation.may_raise == true
+               and operation.may_relocate == true
                and operation.guard == nil
-               and operation.callable ~= nil,
+               and operation.adapter ~= nil
+               and operation.callable == operation.adapter.callable,
             use .. " has a malformed callable view")
-        coder._validate_interface_callable_actions(
-            operation.callable, source, target,
+        coder._validate_callable_adapter_plan(
+            operation.adapter, source, target,
             use .. " callable view", seen)
     else
         error(use .. " has unknown operation "
@@ -3764,9 +3774,7 @@ function coder._validate_interface_callable_actions(
                 source_kind = "concrete_fixed",
                 destination_kind = "interface_fixed",
             }, actual_type, expected_type)
-        else
-            assert(source.flexrettype,
-                use .. " has a fixed result without a source")
+        elseif source.flexrettype then
             local optional = expected_type._tag == "Type.Option"
             local wraps =
                 callable.results[ri + 1].wrap_present == true
@@ -3797,6 +3805,20 @@ function coder._validate_interface_callable_actions(
             assert(optional
                    or callable.results[ri].wrap_present == false,
                 use .. " has Option wrapping on a non-Option result")
+        else
+            result("nil_fill_result", types.Nil(), expected_type, {
+                expected_index = index,
+                expected_type = expected_type,
+                source_kind = "constant_nil",
+                destination_kind = "interface_fixed",
+                admissible = true,
+                effect = "synthesize_nil",
+                missing_arm = {
+                    kind = "nil_fill",
+                    admissible = true,
+                    target_type = expected_type,
+                },
+            })
         end
     end
     for index = #target.rettypes + 1, #source.rettypes do
@@ -3856,8 +3878,247 @@ function coder._validate_interface_callable_actions(
     seen[callable] = nil
 end
 
+function coder._validate_callable_strict_slot(
+        slot, typ, index, use)
+    coder._interface_closed_record(slot, {
+        index = true, type = true, guard = true,
+    }, use)
+    local normalized = assert(types.normalize(typ),
+        use .. " has an unnormalizable boundary type")
+    assert(slot.index == index
+           and slot.type
+           and types.equals(slot.type, normalized)
+           and slot.guard ~= nil,
+        use .. " has a mismatched boundary slot")
+    if slot.guard ~= false then
+        coder._validate_interface_frozen_guard(
+            slot.guard, normalized, use .. " guard", {})
+        coder._checked_gradual_guard(
+            slot.guard, normalized, use .. " guard")
+    end
+end
+
+function coder._validate_callable_strict_relay(relay, target, use)
+    coder._interface_closed_record(relay, {
+        kind = true, parameters = true, vararg = true,
+        results = true, flexible_result = true,
+    }, use)
+    assert(relay.kind == "callable_strict_relay",
+        use .. " has an unknown relay kind")
+    assert(coder._interface_dense_list(
+        relay.parameters, use .. " parameters") == #target.params,
+        use .. " has a mismatched parameter count")
+    for index, typ in ipairs(target.params) do
+        coder._validate_callable_strict_slot(
+            relay.parameters[index], typ, index,
+            use .. " parameter " .. tostring(index))
+    end
+    if target.varargtype then
+        assert(type(relay.vararg) == "table",
+            use .. " lacks its variadic boundary")
+        coder._validate_callable_strict_slot(
+            relay.vararg, target.varargtype, "vararg",
+            use .. " variadic boundary")
+    else
+        assert(relay.vararg == false,
+            use .. " has an unexpected variadic boundary")
+    end
+    assert(coder._interface_dense_list(
+        relay.results, use .. " results") == #target.rettypes,
+        use .. " has a mismatched result count")
+    for index, typ in ipairs(target.rettypes) do
+        coder._validate_callable_strict_slot(
+            relay.results[index], typ, index,
+            use .. " result " .. tostring(index))
+    end
+    if target.flexrettype then
+        assert(type(relay.flexible_result) == "table",
+            use .. " lacks its flexible-result boundary")
+        coder._validate_callable_strict_slot(
+            relay.flexible_result, target.flexrettype,
+            "flexible_result", use .. " flexible-result boundary")
+    else
+        assert(relay.flexible_result == false,
+            use .. " has an unexpected flexible-result boundary")
+    end
+end
+
+function coder._validate_callable_adapter_demand(
+        demand, source, target, use)
+    coder._interface_closed_record(demand, {
+        kind = true, abi_cap = true,
+        source_has_flex = true, target_has_flex = true,
+        fixed_source_flex_consumed = true,
+        fixed_source_surplus = true,
+        remaining_source_capacity = true,
+        within_abi_cap = true, mode = true,
+        target_demand_parameter = true,
+        unlimited_demand = true,
+    }, use)
+    local consumed = math.max(
+        0, #target.rettypes - #source.rettypes)
+    local surplus = math.max(
+        0, #source.rettypes - #target.rettypes)
+    local source_has_flex = source.flexrettype ~= nil
+        and source.flexrettype ~= false
+    local target_has_flex = target.flexrettype ~= nil
+        and target.flexrettype ~= false
+    local expected = {
+        kind = "callable_flexible_result_demand",
+        abi_cap = 200,
+        source_has_flex = source_has_flex,
+        target_has_flex = target_has_flex,
+        fixed_source_flex_consumed = consumed,
+        fixed_source_surplus = surplus,
+        remaining_source_capacity = 200 - consumed,
+        within_abi_cap = consumed <= 200,
+        mode = not source_has_flex and "none"
+            or (target_has_flex and "forward_target_demand"
+                or "fixed_prefix"),
+        target_demand_parameter = target_has_flex
+            and "_flexwant" or false,
+        unlimited_demand = target_has_flex
+            and "LUA_MULTRET" or false,
+    }
+    assert(coder._interface_frozen_value_equal(demand, expected),
+        use .. " is not canonical")
+end
+
+function coder._callable_action_rebase_reason(action)
+    if action.operation
+       and action.operation.kind == "callable_view" then
+        return "callable_wrapper_construction"
+    end
+    return "immediate_gradual_guard"
+end
+
+function coder._validate_callable_adapter_rebases(adapter, use)
+    coder._interface_dense_list(
+        adapter.rebase_points, use .. " rebase points")
+    local expected = {{
+        kind = "after_wrapper_construction",
+        reason = "wrapper_construction_may_relocate_stack",
+    }}
+    for _, action in ipairs(adapter.arguments) do
+        if action.rebase_after then
+            expected[#expected + 1] = {
+                kind = "after_action",
+                action = action.id,
+                reason = coder._callable_action_rebase_reason(action),
+            }
+        end
+    end
+    expected[#expected + 1] = {
+        kind = "after_native_call",
+        backend = "immediate_source_closure",
+        reason = "source_call_may_relocate_stack",
+    }
+    for _, action in ipairs(adapter.results) do
+        if action.rebase_after then
+            expected[#expected + 1] = {
+                kind = "after_action",
+                action = action.id,
+                reason = coder._callable_action_rebase_reason(action),
+            }
+        end
+    end
+    for index, point in ipairs(adapter.rebase_points) do
+        local wanted = expected[index]
+        assert(wanted, use .. " has an extra rebase point")
+        local allowed
+        if point.kind == "after_action" then
+            allowed = { kind = true, action = true, reason = true }
+        elseif point.kind == "after_native_call" then
+            allowed = { kind = true, backend = true, reason = true }
+        else
+            allowed = { kind = true, reason = true }
+        end
+        coder._interface_closed_record(
+            point, allowed,
+            use .. " rebase point " .. tostring(index))
+        assert(coder._interface_frozen_value_equal(point, wanted),
+            use .. " has a mismatched rebase point " .. tostring(index))
+    end
+    assert(#adapter.rebase_points == #expected,
+        use .. " is missing a rebase point")
+end
+
+function coder._validate_callable_adapter_plan(
+        adapter, source_type, target_type, use, seen)
+    use = use or "callable adapter"
+    coder._interface_closed_record(adapter, {
+        kind = true, source = true, target = true, exact = true,
+        location = true, trace_name = true,
+        callable = true, arguments = true, results = true,
+        dense = true, strict_relay = true, rooting = true,
+        rebase_points = true, flexible_result_demand = true,
+        relation_free = true,
+        no_nested_interface_conversions = true,
+        uses_base_off = true,
+    }, use)
+    local source = assert(types.normalize(source_type),
+        use .. " has an unnormalizable source")
+    local target = assert(types.normalize(target_type),
+        use .. " has an unnormalizable target")
+    assert(source._tag == "Type.Function"
+           and target._tag == "Type.Function"
+           and adapter.kind == "callable_adapter_plan"
+           and adapter.source and adapter.target
+           and types.equals(adapter.source, source)
+           and types.equals(adapter.target, target)
+           and adapter.exact == types.equals(source, target)
+           and adapter.arguments == adapter.callable.arguments
+           and adapter.results == adapter.callable.results
+           and adapter.relation_free == true
+           and adapter.no_nested_interface_conversions == true
+           and adapter.uses_base_off == true,
+        use .. " has mismatched identity/signatures")
+
+    seen = seen or {}
+    assert(not seen[adapter],
+        use .. " contains a recursive adapter cycle")
+    seen[adapter] = true
+
+    coder._interface_closed_record(adapter.location, {
+        filename = true, line = true, col = true,
+    }, use .. " location")
+    local loc = adapter.location
+    assert(type(loc.filename) == "string"
+           and type(loc.line) == "number" and loc.line >= 1
+           and loc.line == math.floor(loc.line)
+           and type(loc.col) == "number" and loc.col >= 1
+           and loc.col == math.floor(loc.col),
+        use .. " lacks a real source location")
+    local expected_trace = string.format(
+        "[callable adapter %s -> %s at %s:%d:%d]",
+        types.tostring(source), types.tostring(target),
+        loc.filename, loc.line, loc.col)
+    assert(adapter.trace_name == expected_trace,
+        use .. " has a mismatched trace name")
+
+    coder._validate_interface_callable_actions(
+        adapter.callable, source, target,
+        use .. " callable actions", seen)
+    coder._interface_closed_record(adapter.dense, {
+        argument_count = true, result_count = true,
+    }, use .. " dense inventory")
+    assert(adapter.dense.argument_count == #adapter.arguments
+           and adapter.dense.result_count == #adapter.results,
+        use .. " has a mismatched dense inventory")
+    coder._validate_callable_strict_relay(
+        adapter.strict_relay, target, use .. " strict relay")
+    coder._validate_callable_adapter_rooting(adapter, use)
+    coder._validate_callable_adapter_rebases(adapter, use)
+    coder._validate_callable_adapter_demand(
+        adapter.flexible_result_demand, source, target,
+        use .. " flexible-result demand")
+
+    seen[adapter] = nil
+    return adapter
+end
+
 function coder._validate_interface_adapter_fixed_roots(
-        roots, actions, side, phase, use)
+        roots, actions, side, phase, use, retain_until)
     coder._interface_dense_list(roots, use)
     local expected = {}
     local gc_field = side == "source"
@@ -3872,13 +4133,14 @@ function coder._validate_interface_adapter_fixed_roots(
                 action = action.id,
                 type = action[type_field],
                 storage = "lua_stack_slot",
-                retain_until = phase == "argument"
-                    and (side == "source"
-                        and "all_arguments_converted"
-                        or "concrete_call_returns")
-                    or (side == "source"
-                        and "all_results_converted"
-                        or "interface_caller_handoff"),
+                retain_until = retain_until
+                    or (phase == "argument"
+                        and (side == "source"
+                            and "all_arguments_converted"
+                            or "concrete_call_returns")
+                        or (side == "source"
+                            and "all_results_converted"
+                            or "interface_caller_handoff")),
             }
         end
     end
@@ -3917,6 +4179,102 @@ function coder._validate_interface_adapter_range(
     }, use)
     assert(coder._interface_frozen_value_equal(range, expected),
         use .. " is not canonical")
+end
+
+function coder._validate_callable_adapter_rooting(adapter, use)
+    local rooting = adapter.rooting
+    coder._interface_closed_record(rooting, {
+        raw_descriptors_are_roots = true,
+        raw_buffers_are_roots = true,
+        construction = true, fixed = true, ranges = true,
+    }, use .. " rooting")
+    assert(rooting.raw_descriptors_are_roots == false
+           and rooting.raw_buffers_are_roots == false,
+        use .. " treats raw adapter storage as a root")
+    coder._interface_closed_record(rooting.construction, {
+        source = true, result = true,
+    }, use .. " construction roots")
+    local expected_construction = {
+        source = {
+            type = adapter.source,
+            gc_bearing = true,
+            traced = true,
+            storage = "lua_stack_slot",
+            retain_until = "wrapper_constructed",
+        },
+        result = {
+            type = adapter.target,
+            gc_bearing = true,
+            traced = true,
+            storage = "lua_stack_slot",
+            retain_until = "target_caller_handoff",
+        },
+    }
+    for name, expected in pairs(expected_construction) do
+        coder._interface_closed_record(rooting.construction[name], {
+            type = true, gc_bearing = true, traced = true,
+            storage = true, retain_until = true,
+        }, use .. " construction " .. name .. " root")
+        assert(coder._interface_frozen_value_equal(
+            rooting.construction[name], expected),
+            use .. " has a mismatched construction " .. name .. " root")
+    end
+
+    coder._interface_closed_record(rooting.fixed, {
+        argument_source = true,
+        argument_destination = true,
+        result_source = true,
+        result_destination = true,
+    }, use .. " fixed roots")
+    coder._validate_interface_adapter_fixed_roots(
+        rooting.fixed.argument_source, adapter.arguments,
+        "source", "argument", use .. " argument source roots",
+        "all_arguments_converted")
+    coder._validate_interface_adapter_fixed_roots(
+        rooting.fixed.argument_destination, adapter.arguments,
+        "destination", "argument",
+        use .. " argument destination roots",
+        "source_native_call_returns")
+    coder._validate_interface_adapter_fixed_roots(
+        rooting.fixed.result_source, adapter.results,
+        "source", "result", use .. " result source roots",
+        "all_results_converted")
+    coder._validate_interface_adapter_fixed_roots(
+        rooting.fixed.result_destination, adapter.results,
+        "destination", "result",
+        use .. " result destination roots",
+        "target_caller_handoff")
+
+    coder._interface_closed_record(rooting.ranges, {
+        argument_source = true,
+        argument_destination = true,
+        result_source = true,
+        result_destination = true,
+    }, use .. " root ranges")
+    coder._validate_interface_adapter_range(
+        rooting.ranges.argument_source,
+        "argument_source", "argument", "source",
+        adapter.target.varargtype,
+        "all_arguments_converted",
+        use .. " argument source range")
+    coder._validate_interface_adapter_range(
+        rooting.ranges.argument_destination,
+        "argument_destination", "argument", "destination",
+        adapter.source.varargtype,
+        "source_native_call_returns",
+        use .. " argument destination range")
+    coder._validate_interface_adapter_range(
+        rooting.ranges.result_source,
+        "result_source", "result", "source",
+        adapter.source.flexrettype,
+        "all_results_converted",
+        use .. " result source range")
+    coder._validate_interface_adapter_range(
+        rooting.ranges.result_destination,
+        "result_destination", "result", "destination",
+        adapter.target.flexrettype,
+        "target_caller_handoff",
+        use .. " result destination range")
 end
 
 function coder._validate_interface_adapter_rooting(adapter, use)
@@ -3991,7 +4349,7 @@ function coder._validate_interface_adapter_rebases(adapter, use)
             expected[#expected + 1] = {
                 kind = "after_action",
                 action = action.id,
-                reason = "immediate_gradual_guard",
+                reason = coder._callable_action_rebase_reason(action),
             }
         end
     end
@@ -4005,7 +4363,7 @@ function coder._validate_interface_adapter_rebases(adapter, use)
             expected[#expected + 1] = {
                 kind = "after_action",
                 action = action.id,
-                reason = "immediate_gradual_guard",
+                reason = coder._callable_action_rebase_reason(action),
             }
         end
     end
@@ -4036,7 +4394,7 @@ function coder._validate_interface_adapter(
         native_signature = true, interface_signature = true,
         hidden_operands = true,
         arguments = true, results = true, callable = true,
-        relation_free = true,
+        callable_adapter = true, relation_free = true,
         no_nested_interface_conversions = true,
         uses_base_off = true, rooting = true,
         rebase_points = true,
@@ -4065,6 +4423,10 @@ function coder._validate_interface_adapter(
            and adapter.interface_signature == mapping.target
            and adapter.arguments == adapter.callable.arguments
            and adapter.results == adapter.callable.results
+           and adapter.callable_adapter
+           and adapter.callable == adapter.callable_adapter.callable
+           and adapter.callable_adapter
+                == mapping.adjustment._callable_adapter
            and adapter.relation_free == true
            and adapter.no_nested_interface_conversions == true
            and adapter.uses_base_off == true,
@@ -4112,6 +4474,9 @@ function coder._validate_interface_adapter(
            and self_operand.forwards_unchanged == true,
         use .. " changes concrete self provenance")
 
+    coder._validate_callable_adapter_plan(
+        adapter.callable_adapter, mapping.source, mapping.target,
+        use .. " shared callable adapter", {})
     coder._validate_interface_callable_actions(
         adapter.callable, mapping.source, mapping.target,
         use .. " callable", {})
@@ -4149,6 +4514,57 @@ function coder._interface_adapter_signature(name, method, is_pointer)
     return cfunctiondecl(
         method.rettypes[1], name,
         table.concat(params, ", "), is_pointer)
+end
+
+function coder._callable_adapter_signature(name, typ, is_pointer)
+    assert(typ._tag == "Type.Function")
+    local params = {
+        "lua_State *L",
+        "Udata *_mod",
+        "CClosure *_fn",
+    }
+    for index, param in ipairs(typ.params) do
+        params[#params + 1] =
+            cvardecl(nil, param, "_ia_param_" .. tostring(index))
+    end
+    if typ.varargtype then
+        params[#params + 1] =
+            varg_struct_name(typ.varargtype) .. " *_varargs"
+        params[#params + 1] = "int _start"
+    end
+    for index = 2, #typ.rettypes do
+        params[#params + 1] = cpointertype(typ.rettypes[index])
+            .. " _ia_out_" .. tostring(index)
+    end
+    if typ.flexrettype then
+        params[#params + 1] =
+            varg_struct_name(typ.flexrettype) .. " *_flexout"
+        params[#params + 1] = "int _flexwant"
+    end
+    return cfunctiondecl(
+        typ.rettypes[1], name,
+        table.concat(params, ", "), is_pointer)
+end
+
+function coder._adapter_source_signature(adapter)
+    if adapter.kind == "callable_adapter_plan" then
+        return adapter.source
+    end
+    assert(adapter.kind == "interface_method_adapter")
+    return adapter.concrete_signature
+end
+
+function coder._adapter_target_signature(adapter)
+    if adapter.kind == "callable_adapter_plan" then
+        return adapter.target
+    end
+    assert(adapter.kind == "interface_method_adapter")
+    return adapter.interface_signature
+end
+
+function coder._adapter_error_kind(adapter)
+    return adapter.kind == "callable_adapter_plan"
+        and "callable adapter" or "Interface adapter"
 end
 
 function coder._interface_adapter_collect_identity(
@@ -4375,10 +4791,15 @@ function coder._emit_interface_adapter_operation(
         ctx, operation, source, destination, loc, use)
     local code
     if operation.kind == "identity"
-       or operation.kind == "callable_view"
        or (operation.kind == "gradual_guard"
            and operation.timing == "delayed_observation") then
         code = destination .. " = " .. source .. ";"
+    elseif operation.kind == "callable_view" then
+        local wrapper_stats, wrapper_value =
+            coder._emit_callable_adapter_value(
+                ctx, operation.adapter, source, loc, use)
+        code = wrapper_stats .. "\n"
+            .. destination .. " = " .. wrapper_value .. ";"
     elseif operation.kind == "gradual_inject" then
         code = setboxed(
             ctx, operation.source, "&" .. destination, source)
@@ -4400,7 +4821,7 @@ end
 function coder._emit_interface_adapter_argument_sources(
         ctx, adapter, roots, loc)
     local code = {}
-    local interface = adapter.interface_signature
+    local interface = coder._adapter_target_signature(adapter)
     if interface.varargtype then
         code[#code + 1] = render([[
             if (TITAN_UNLIKELY(
@@ -4447,7 +4868,7 @@ end
 function coder._emit_interface_adapter_arguments(
         ctx, adapter, roots, loc)
     local code = {}
-    local concrete = adapter.concrete_signature
+    local concrete = coder._adapter_source_signature(adapter)
     if concrete.varargtype then
         code[#code + 1] = render([[
             $ELEM _ia_concrete_vargs[TITAN_VARARG_MAX] = {0};
@@ -4594,8 +5015,8 @@ end
 function coder._emit_interface_adapter_call(
         ctx, adapter, roots)
     local code = {}
-    local concrete = adapter.concrete_signature
-    local interface = adapter.interface_signature
+    local concrete = coder._adapter_source_signature(adapter)
+    local interface = coder._adapter_target_signature(adapter)
     for index, typ in ipairs(concrete.rettypes) do
         code[#code + 1] = render("$DECL = $INIT;", {
             DECL = cvardecl(
@@ -4605,12 +5026,15 @@ function coder._emit_interface_adapter_call(
         })
     end
     if concrete.flexrettype then
-        local consumed = math.max(
-            0, #interface.rettypes - #concrete.rettypes)
-        local fixed_surplus = math.max(
-            0, #concrete.rettypes - #interface.rettypes)
-        assert(consumed <= 200,
-            "Interface adapter fixed flex demand exceeds ABI cap")
+        local demand = adapter.kind == "callable_adapter_plan"
+            and adapter.flexible_result_demand
+            or adapter.callable_adapter.flexible_result_demand
+        local consumed = demand.fixed_source_flex_consumed
+        local fixed_surplus = demand.fixed_source_surplus
+        assert(demand.within_abi_cap
+               and demand.abi_cap == 200,
+            coder._adapter_error_kind(adapter)
+                .. " fixed flex demand exceeds ABI cap")
         code[#code + 1] = render([[
             $ELEM _ia_concrete_fargs[TITAN_VARARG_MAX] = {0};
             $STRUCT _ia_concrete_fdesc = {
@@ -4629,15 +5053,50 @@ function coder._emit_interface_adapter_call(
                             ? TITAN_VARARG_MAX
                             : _flexwant - $SURPLUS + $PREFIX))
             ]], {
-                REMAINING =
-                    c_integer_literal(200 - consumed),
+                REMAINING = c_integer_literal(
+                    demand.remaining_source_capacity),
                 PREFIX = c_integer_literal(consumed),
                 SURPLUS = c_integer_literal(fixed_surplus),
             }) or c_integer_literal(consumed),
         })
     end
 
-    local args = { "L", "_mod", "NULL", "_self" }
+    local args
+    local invocation_name
+    if adapter.kind == "callable_adapter_plan" then
+        code[#code + 1] = render([[
+            if (TITAN_UNLIKELY(_fn == NULL
+                    || _fn->nupvalues < 6
+                    || !ttisCclosure(
+                        &_fn->upvalue[_fn->nupvalues - 2]))) {
+                luaL_error(L, "invalid callable adapter wrapper for %s", $TRACE);
+            }
+            CClosure *_ia_source = clCvalue(
+                &_fn->upvalue[_fn->nupvalues - 2]);
+            if (TITAN_UNLIKELY(_ia_source->nupvalues < 5
+                    || !ttisfulluserdata(&_ia_source->upvalue[0])
+                    || !ttislightuserdata(&_ia_source->upvalue[1])
+                    || !ttislightuserdata(&_ia_source->upvalue[2])
+                    || pvalue(&_ia_source->upvalue[1]) != $SOURCE_TAG)) {
+                luaL_error(L, "invalid callable adapter source for %s", $TRACE);
+            }
+            Udata *_ia_source_mod = uvalue(&_ia_source->upvalue[0]);
+            typedef $SOURCE_FP_DECL;
+            $SOURCE_FP_TYPE _ia_source_fp = titan_cast_func(
+                $SOURCE_FP_TYPE, pvalue(&_ia_source->upvalue[2]));
+        ]], {
+            TRACE = c_string_literal(adapter.trace_name),
+            SOURCE_TAG = function_type_tag(ctx.tlcontext, concrete),
+            SOURCE_FP_DECL = function_sig(
+                "_ia_source_fp_type", concrete, true),
+            SOURCE_FP_TYPE = "_ia_source_fp_type",
+        })
+        args = { "L", "_ia_source_mod", "_ia_source" }
+        invocation_name = "_ia_source_fp"
+    else
+        args = { "L", "_mod", "NULL", "_self" }
+        invocation_name = method_name(adapter.concrete_method)
+    end
     for index = 1, #concrete.params do
         args[#args + 1] =
             "_ia_concrete_arg_" .. tostring(index)
@@ -4654,7 +5113,7 @@ function coder._emit_interface_adapter_call(
         args[#args + 1] = "&_ia_concrete_fdesc"
         args[#args + 1] = "_ia_concrete_fwant"
     end
-    local invocation = method_name(adapter.concrete_method)
+    local invocation = invocation_name
         .. "(" .. table.concat(args, ", ") .. ")"
     if #concrete.rettypes > 0 then
         invocation = "_ia_concrete_result_1 = "
@@ -4662,7 +5121,13 @@ function coder._emit_interface_adapter_call(
     else
         invocation = invocation .. ";"
     end
+    if adapter.kind == "callable_adapter_plan" then
+        code[#code + 1] = emitline({ loc = adapter.location })
+    end
     code[#code + 1] = invocation
+    if adapter.kind == "callable_adapter_plan" then
+        code[#code + 1] = emitline({ loc = adapter.location })
+    end
     code[#code + 1] =
         "_base = restorestack(L, _base_off);"
     for index = 1, #concrete.rettypes do
@@ -4679,7 +5144,7 @@ function coder._emit_interface_adapter_call(
                         && (int)_ia_concrete_fdesc.n_args
                             > _ia_concrete_fwant))) {
                 luaL_error(L,
-                    "malformed flexible result run in Interface adapter %s",
+                    "malformed flexible result run in adapter %s",
                     $TRACE);
             }
         ]], {
@@ -4714,7 +5179,7 @@ end
 function coder._emit_interface_adapter_results(
         ctx, adapter, roots, loc)
     local code = {}
-    local interface = adapter.interface_signature
+    local interface = coder._adapter_target_signature(adapter)
     for index, typ in ipairs(interface.rettypes) do
         code[#code + 1] = render("$DECL = $INIT;", {
             DECL = cvardecl(
@@ -4776,6 +5241,13 @@ function coder._emit_interface_adapter_results(
                         .. tostring(action.expected_index),
                     loc, use)
             code[#code + 1] = anchor_fixed(action)
+        elseif action.kind == "nil_fill_result" then
+            code[#code + 1] =
+                coder._interface_adapter_nil_fill(
+                    action.target_type,
+                    "_ia_interface_result_"
+                        .. tostring(action.expected_index))
+            code[#code + 1] = anchor_fixed(action)
         elseif action.kind == "flex_to_optional_result"
                or action.kind == "flex_to_result" then
             local present
@@ -4825,7 +5297,7 @@ function coder._emit_interface_adapter_results(
             else
                 missing = render([[
                     luaL_error(L,
-                        "Interface adapter %s expected result %d",
+                        "adapter %s expected result %d",
                         $TRACE, $INDEX);
                 ]], {
                     TRACE = c_string_literal(adapter.trace_name),
@@ -4928,7 +5400,7 @@ function coder._emit_interface_adapter(
         coder._emit_interface_adapter_argument_sources(
             ctx, adapter, roots, loc)
     local flex_validation = ""
-    if adapter.interface_signature.flexrettype then
+    if coder._adapter_target_signature(adapter).flexrettype then
         flex_validation = render([[
             if (TITAN_UNLIKELY(
                     _flexout == NULL
@@ -4949,7 +5421,7 @@ function coder._emit_interface_adapter(
         ctx, adapter, roots)
     local results = coder._emit_interface_adapter_results(
         ctx, adapter, roots, loc)
-    local interface = adapter.interface_signature
+    local interface = coder._adapter_target_signature(adapter)
     local handoff = {}
     for index = 2, #interface.rettypes do
         handoff[#handoff + 1] = render([[
@@ -8462,7 +8934,8 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                     "open variadic forwarding lacks checker adjustment")
                 local convstats, convexp =
                     coder._code_adjustment_value(
-                        ctx, adjustment, ef, eg, src, node.loc)
+                        ctx, adjustment, ef, eg, src, node.loc,
+                        node._open_args.callable_adapter)
                 convbody = render([[
                     $CONVSTATS
                     $DST = $CONVEXP;
@@ -8638,18 +9111,154 @@ function coder._cleanup_result_run(run)
     })
 end
 
+function coder._callable_adapter_site(tlcontext, adapter)
+    coder._validate_callable_adapter_plan(
+        adapter, adapter.source, adapter.target,
+        "callable adapter registration", {})
+    assert(not adapter.exact,
+        "exact callable adjustment reached wrapper registration")
+    local prior = tlcontext.callable_adapters[adapter]
+    if prior then return prior end
+    local index = tlcontext.callable_adapter_count
+    tlcontext.callable_adapter_count = index + 1
+    local stem = tlcontext.prefix
+        .. "callable_adapter_" .. tostring(index)
+    local site = {
+        adapter = adapter,
+        index = index,
+        native = stem,
+        strict = stem .. "_" .. TITAN_ENTRY_TAG .. "_strict",
+    }
+    tlcontext.callable_adapters[adapter] = site
+    tlcontext.callable_adapter_list[#tlcontext.callable_adapter_list + 1] = site
+    function_type_tag(tlcontext, adapter.source)
+    function_type_tag(tlcontext, adapter.target)
+    register_trace_name(tlcontext, site.native, adapter.trace_name)
+    register_trace_name(tlcontext, site.strict, adapter.trace_name)
+    return site
+end
+
+-- Construct the target callable view over one already available source value.
+-- The source and fallback/result are independently rooted before the guarded
+-- clone path can grow the Lua stack or allocate. A non-Titan, mistagged, or
+-- upvalue-saturated operand deliberately retains its original identity.
+function coder._emit_callable_adapter_value(
+        ctx, adapter, raw, loc, use)
+    use = use or "callable adapter construction"
+    adapter = coder._validate_callable_adapter_plan(
+        adapter, adapter.source, adapter.target, use, {})
+    assert(not adapter.exact,
+        use .. " unexpectedly constructs an exact callable view")
+    local site = coder._callable_adapter_site(ctx.tlcontext, adapter)
+    local source_decl, source_name, source_slot =
+        newtmp(ctx, adapter.source, true)
+    local result_decl, result_name, result_slot =
+        newtmp(ctx, adapter.target, true)
+    ctx.uses_base_off = true
+    local location = adapter.location
+    if loc then
+        assert(type(loc) == "table" and loc.filename,
+            use .. " lacks its owning source location")
+    end
+    local code = render([[
+        $SOURCE_DECL
+        $SOURCE_NAME = $RAW;
+        $ANCHOR_SOURCE
+        $RESULT_DECL
+        $RESULT_NAME = $SOURCE_NAME;
+        $ANCHOR_RESULT
+        {
+            CClosure *_ca_source = ttisCclosure(&$SOURCE_NAME)
+                ? clCvalue(&$SOURCE_NAME) : NULL;
+            if (_ca_source != NULL
+                    && _ca_source->nupvalues >= 5
+                    && _ca_source->nupvalues < MAXUPVAL
+                    && ttisfulluserdata(&_ca_source->upvalue[0])
+                    && ttislightuserdata(&_ca_source->upvalue[1])
+                    && ttislightuserdata(&_ca_source->upvalue[2])
+                    && ttislightuserdata(&_ca_source->upvalue[3])
+                    && ttislcf(&_ca_source->upvalue[
+                        _ca_source->nupvalues - 1])
+                    && pvalue(&_ca_source->upvalue[1]) == $SOURCE_TAG
+                    && pvalue(&_ca_source->upvalue[3])
+                        == TITAN_FUNCTION_CLOSURE_BRAND) {
+                int _ca_nup = (int)_ca_source->nupvalues;
+                titan_ensure_stack(L, _ca_nup + 1);
+                for (int _ca_i = 0; _ca_i < _ca_nup - 1; _ca_i++) {
+                    if (_ca_i == 1) {
+                        lua_pushlightuserdata(L, (void *)$TARGET_TAG);
+                    } else if (_ca_i == 2) {
+                        lua_pushlightuserdata(L,
+                            titan_cast_func(void *, $TARGET_ADAPTER));
+                    } else {
+                        setobj2s(L, L->top.p,
+                            &_ca_source->upvalue[_ca_i]);
+                        L->top.p++;
+                    }
+                }
+                setobj2s(L, L->top.p, &$SOURCE_NAME);
+                L->top.p++;
+                lua_pushcfunction(L, $TARGET_STRICT);
+                $LINE
+                lua_pushcclosure(
+                    L, _ca_source->f, _ca_nup + 1);
+                _base = restorestack(L, _base_off);
+                setobj2t(L, $RESULT_SLOT, s2v(L->top.p - 1));
+                $READ_RESULT;
+                L->top.p--;
+            }
+        }
+    ]], {
+        SOURCE_DECL = source_decl,
+        SOURCE_NAME = source_name,
+        RAW = raw,
+        ANCHOR_SOURCE = setslot(
+            adapter.source, source_slot, source_name),
+        RESULT_DECL = result_decl,
+        RESULT_NAME = result_name,
+        ANCHOR_RESULT = setslot(
+            adapter.target, result_slot, result_name),
+        SOURCE_TAG = function_type_tag(
+            ctx.tlcontext, adapter.source),
+        TARGET_TAG = function_type_tag(
+            ctx.tlcontext, adapter.target),
+        TARGET_ADAPTER = site.native,
+        TARGET_STRICT = site.strict,
+        LINE = emitline({ loc = location }),
+        RESULT_SLOT = result_slot,
+        READ_RESULT = getslot(
+            adapter.target, result_name, "s2v(L->top.p - 1)"),
+    })
+    return code, result_name
+end
+
 -- Lower one checker-produced assignment adjustment over an already available
 -- C expression. Identity, structural gradual views, and callable adjustments
 -- preserve representation. Every representation-changing edge is reified as
 -- an annotated cast carrying the exact checker plan; code generation never
 -- reruns a type relation to rediscover permission.
 function coder._code_adjustment_value(
-        ctx, adjustment, source_type, target, raw, loc)
+        ctx, adjustment, source_type, target, raw, loc, adapter_alias)
     adjustment = coder._checked_adjustment_plan(
         adjustment, source_type, target, "value adjustment")
-    if adjustment.kind == "identity"
-       or adjustment.kind == "callable" then
+    if adjustment.kind == "identity" then
+        assert(adapter_alias == nil or adapter_alias == false,
+            "identity adjustment has an unexpected callable adapter")
         return "", raw
+    elseif adjustment.kind == "callable" then
+        if adjustment.exact then
+            assert(adapter_alias == nil or adapter_alias == false,
+                "exact callable adjustment has an unexpected adapter")
+            return "", raw
+        end
+        local adapter = assert(adjustment._callable_adapter,
+            "callable adjustment lacks its frozen adapter")
+        assert(adapter_alias == nil or adapter_alias == adapter,
+            "callable adjustment alias differs from its raw frozen adapter")
+        coder._validate_callable_adapter_plan(
+            adapter, source_type, target, "value callable adjustment", {})
+        return coder._emit_callable_adapter_value(
+            ctx, adapter, raw, loc, "value callable adjustment")
     end
     if adjustment.kind == "gradual_view"
        and adjustment.op == "structural" then
@@ -8744,7 +9353,8 @@ function coder._convert_result_run_element(ctx, run, target, index, loc)
         return "", raw
     end
     return coder._code_adjustment_value(
-        ctx, run.adjustment, run.elem, target, raw, loc)
+        ctx, run.adjustment, run.elem, target, raw, loc,
+        run.callable_adapter)
 end
 
 -- Lower the sole open producer of an adjusted expression list. Input `...`
@@ -8832,13 +9442,22 @@ function coder._codeadjustedopen(ctx, adjusted, want, effectively_open)
     assert(run, "adjusted open expression list produced no result run")
     run.adjustment = assert(adjusted.open_adjustment,
         "open expression list lacks checker adjustment")
+    run.callable_adapter = adjusted.open_callable_adapter or false
+    if run.adjustment.kind == "callable" then
+        assert(run.callable_adapter == run.adjustment._callable_adapter,
+            "open callable adapter alias differs from its raw plan")
+    else
+        assert(run.callable_adapter == false,
+            "non-callable open adjustment has a callable adapter alias")
+    end
     return stats, fixednames, tailnames, run
 end
 
 -- Materialize an adjusted scalar-prefix + dynamic run as one input-variadic
--- descriptor.  Source roots (including the run's parallel root range) remain
--- live through the native call; the temporary descriptor backing is therefore
--- intentionally untraced and caller-scoped.
+-- descriptor. Source roots remain live through the native call, but an open
+-- conversion can allocate a fresh callable wrapper that is not reachable from
+-- its source. The descriptor backing is an untraced caller-scoped C array, so
+-- GC-bearing destination elements also receive a parallel traced root range.
 function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
                                         run, stats, callargs)
     local elem = assert(callee_ftype.varargtype)
@@ -8847,16 +9466,33 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
     local argsname = "_open_vargs_" .. suffix
     local descname = "_open_vargdesc_" .. suffix
     local countname = "_open_vargcount_" .. suffix
-    local prefixsets = {}
-    for i, name in ipairs(tailnames) do
-        table.insert(prefixsets, render("$ARGS[$INDEX] = $VALUE;", {
-            ARGS = argsname,
-            INDEX = c_integer_literal(i - 1),
-            VALUE = name,
-        }))
-    end
     local convstats, convexp = coder._convert_result_run_element(
         ctx, run, elem, "_vai", node.loc)
+    local root_depth
+    if types.is_gc(elem) then
+        root_depth = ctx.depth
+        for _ = 1, 200 do reserveslot(ctx) end
+    end
+    local function root(index)
+        if not root_depth then return "" end
+        return setslot(elem,
+            "s2v(" .. stackslotat(root_depth) .. " + " .. index .. ")",
+            argsname .. "[" .. index .. "]")
+    end
+    local prefixsets = {}
+    for i, name in ipairs(tailnames) do
+        local index = c_integer_literal(i - 1)
+        table.insert(prefixsets, render([[
+            $ARGS[$INDEX] = $VALUE;
+            $ROOT
+        ]], {
+            ARGS = argsname,
+            INDEX = index,
+            VALUE = name,
+            ROOT = root(index),
+        }))
+    end
+    local runindex = c_integer_literal(#tailnames) .. " + _vai"
     table.insert(stats, render([[
         int $COUNT = $NPREFIX + $RUNCOUNT;
         if (TITAN_UNLIKELY($COUNT > TITAN_VARARG_MAX)) {
@@ -8869,6 +9505,7 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
         for (int _vai = 0; _vai < $RUNCOUNT; _vai++) {
             $CONVSTATS
             $ARGS[$NPREFIX + _vai] = $VALUE;
+            $RUNROOT
         }
         $STRUCT $DESC = { (lu_byte)$COUNT, $ARGS };
     ]], {
@@ -8883,6 +9520,7 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
         PREFIXSETS = table.concat(prefixsets, "\n"),
         CONVSTATS = convstats,
         VALUE = convexp,
+        RUNROOT = root(runindex),
         STRUCT = varg_struct_name(elem),
         DESC = descname,
     }))
@@ -13118,23 +13756,29 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
     elseif tag == "Ast.ExpCast" and types.equals(node.exp._type, node._type) then
         return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast"
-           and node._written_cast
-           and (node._written_cast.op == "gradual"
-                or node._written_cast.op == "callable") then
-        -- Written structural consistency and callable adjustment are views,
-        -- not scalar coercions. Reuse the same checker-owned adjustment
-        -- lowering as implicit assignments: Array/Map/callable representations
-        -- are preserved, while an Option view eagerly guards its immediate
-        -- present payload before the source base type is forgotten.
-        local cast = node._written_cast
-        local adjustment = cast.op == "gradual"
-            and assert(cast.view,
-                "written gradual cast lacks its checker view plan")
-            or assert(cast.callable,
-                "written callable cast lacks its checker adjustment")
+           and ((node._adjustment
+                    and node._adjustment.kind == "callable")
+                or (node._written_cast
+                    and (node._written_cast.op == "gradual"
+                        or node._written_cast.op == "callable"))) then
+        -- A finite callable edge is an allocating target view; a written
+        -- structural gradual cast remains the existing representation view.
+        -- Both consume only the checker-owned plan attached to this cast.
+        local adjustment
+        if node._adjustment then
+            adjustment = node._adjustment
+        else
+            local cast = node._written_cast
+            adjustment = cast.op == "gradual"
+                and assert(cast.view,
+                    "written gradual cast lacks its checker view plan")
+                or assert(cast.callable,
+                    "written callable cast lacks its checker adjustment")
+        end
         local cstats, cexp = codeexp(ctx, node.exp, iscondition)
         local astats, aexp = coder._code_adjustment_value(
-            ctx, adjustment, node.exp._type, node._type, cexp, node.loc)
+            ctx, adjustment, node.exp._type, node._type, cexp, node.loc,
+            node._callable_adapter)
         return cstats .. astats, aexp
     elseif tag == "Ast.ExpCast"
            and (node.exp._type._tag == "Type.Typedef"
@@ -14104,37 +14748,94 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
     local carrier
     if strict then
         assert(options.strict_name)
-        assert(options.lua_entry)
-        carrier = render([[
-        ptrdiff_t _strict_raw_nargs = L->top.p - func - 1;
-        if (TITAN_UNLIKELY(_strict_raw_nargs < 1
-                || !ttisCclosure(s2v(func + 1)))) {
-            return luaL_error(L, "invalid Titan strict-call carrier");
-        }
-        CClosure *_fn = clCvalue(s2v(func + 1));
-        if (TITAN_UNLIKELY(_fn->nupvalues < 5
-                || _fn->f != $LUAENTRY
-                || !ttisfulluserdata(&_fn->upvalue[0])
-                || !ttislightuserdata(&_fn->upvalue[1])
-                || !ttislightuserdata(&_fn->upvalue[2])
-                || !ttislcf(&_fn->upvalue[_fn->nupvalues - 1])
-                || fvalue(&_fn->upvalue[_fn->nupvalues - 1])
-                    != $STRICTENTRY)) {
-            return luaL_error(L, "invalid Titan strict-call closure");
-        }
-        if (TITAN_UNLIKELY(
-                pvalue(&_fn->upvalue[1]) != $FUNCTAG)) {
-            return luaL_error(L, "mistagged Titan strict-call closure");
-        }
-        ]], {
-            LUAENTRY = options.lua_entry,
-            STRICTENTRY = options.strict_name,
-            FUNCTAG = function_type_tag(tlcontext, typ),
-        })
+        if options.callable_adapter then
+            local adapter = options.callable_adapter
+            assert(adapter.target == typ
+                   or types.equals(adapter.target, typ),
+                "callable strict relay has a mismatched target")
+            carrier = render([[
+            ptrdiff_t _strict_raw_nargs = L->top.p - func - 1;
+            if (TITAN_UNLIKELY(_strict_raw_nargs < 1
+                    || !ttisCclosure(s2v(func + 1)))) {
+                return luaL_error(L,
+                    "invalid callable strict-relay carrier");
+            }
+            CClosure *_fn = clCvalue(s2v(func + 1));
+            if (TITAN_UNLIKELY(_fn->nupvalues < 6
+                    || !ttisfulluserdata(&_fn->upvalue[0])
+                    || !ttislightuserdata(&_fn->upvalue[1])
+                    || !ttislightuserdata(&_fn->upvalue[2])
+                    || !ttislightuserdata(&_fn->upvalue[3])
+                    || !ttisCclosure(
+                        &_fn->upvalue[_fn->nupvalues - 2])
+                    || !ttislcf(&_fn->upvalue[
+                        _fn->nupvalues - 1])
+                    || pvalue(&_fn->upvalue[1]) != $FUNCTAG
+                    || pvalue(&_fn->upvalue[2])
+                        != titan_cast_func(void *, $ADAPTER)
+                    || pvalue(&_fn->upvalue[3])
+                        != TITAN_FUNCTION_CLOSURE_BRAND
+                    || fvalue(&_fn->upvalue[_fn->nupvalues - 1])
+                        != $STRICTENTRY)) {
+                return luaL_error(L,
+                    "invalid callable strict-relay wrapper");
+            }
+            ]], {
+                STRICTENTRY = options.strict_name,
+                ADAPTER = titan_entry,
+                FUNCTAG = function_type_tag(tlcontext, typ),
+            })
+        else
+            assert(options.lua_entry)
+            carrier = render([[
+            ptrdiff_t _strict_raw_nargs = L->top.p - func - 1;
+            if (TITAN_UNLIKELY(_strict_raw_nargs < 1
+                    || !ttisCclosure(s2v(func + 1)))) {
+                return luaL_error(L, "invalid Titan strict-call carrier");
+            }
+            CClosure *_fn = clCvalue(s2v(func + 1));
+            if (TITAN_UNLIKELY(_fn->nupvalues < 5
+                    || _fn->f != $LUAENTRY
+                    || !ttisfulluserdata(&_fn->upvalue[0])
+                    || !ttislightuserdata(&_fn->upvalue[1])
+                    || !ttislightuserdata(&_fn->upvalue[2])
+                    || !ttislcf(&_fn->upvalue[_fn->nupvalues - 1])
+                    || fvalue(&_fn->upvalue[_fn->nupvalues - 1])
+                        != $STRICTENTRY)) {
+                return luaL_error(L, "invalid Titan strict-call closure");
+            }
+            if (TITAN_UNLIKELY(
+                    pvalue(&_fn->upvalue[1]) != $FUNCTAG)) {
+                return luaL_error(L, "mistagged Titan strict-call closure");
+            }
+            ]], {
+                LUAENTRY = options.lua_entry,
+                STRICTENTRY = options.strict_name,
+                FUNCTAG = function_type_tag(tlcontext, typ),
+            })
+        end
     else
         carrier = [[
         CClosure *_fn = clCvalue(s2v(func));
         ]]
+    end
+    local module_setup
+    if strict and options.callable_adapter then
+        -- The wrapper deliberately retains the immediate source closure's
+        -- module in upvalue 0. Its consumer-local strict relay, however, must
+        -- interpret target nominal/Array/owned-C identities through the
+        -- consumer module that froze and emitted this adapter. Recover that
+        -- already initialized module through its ordinary idempotent init
+        -- entry, then refresh `func` because the registry lookup may relocate
+        -- the Lua stack.
+        module_setup = render([[
+            Udata *_mod = $INIT(L);
+            func = L->ci->func.p;
+        ]], {
+            INIT = tlcontext.prefix .. "init",
+        })
+    else
+        module_setup = "Udata *_mod = uvalue(&_fn->upvalue[0]);"
     end
     return render([[
     $STORAGE int $LUANAME(lua_State *L) {
@@ -14149,7 +14850,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             L->errfunc = savestack(L, L->top.p - 1);
             __installed_errfunc = 1;
         }
-        Udata *_mod = uvalue(&_fn->upvalue[0]);
+        $MODULE_SETUP
         $ENTRYLINE$BODY
     }]], {
         LUANAME = lua_name,
@@ -14158,6 +14859,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         ARGCHECK = argcheck,
         ERRORSLOT = (not strict and #params == 0)
             and "lua_pushnil(L);" or "",
+        MODULE_SETUP = module_setup,
         NAME = c_string_literal(titan_name),
         -- Stamp the Lua-entry wrapper to the function definition's .titan loc
         -- so its native frame, and any arg-coercion throw within it, symbolizes
@@ -14166,6 +14868,144 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         ENTRYLINE = emitline({ loc = loc }),
         BODY = table.concat(stats, "\n"),
     })
+end
+
+function coder._emit_callable_adapter(tlcontext, site)
+    local adapter = coder._validate_callable_adapter_plan(
+        site.adapter, site.adapter.source, site.adapter.target,
+        "callable adapter emission", {})
+    local ctx = newcontext(tlcontext)
+    local roots = coder._interface_adapter_allocate_roots(ctx, adapter)
+    local identities, identity_scratch =
+        coder._interface_adapter_identity_prelude(ctx, adapter)
+    local loc = adapter.location
+    local argument_sources =
+        coder._emit_interface_adapter_argument_sources(
+            ctx, adapter, roots, loc)
+    local flex_validation = ""
+    if adapter.target.flexrettype then
+        flex_validation = render([[
+            if (TITAN_UNLIKELY(
+                    _flexout == NULL
+                    || (_flexwant != LUA_MULTRET
+                        && (_flexwant < 0
+                            || _flexwant > TITAN_VARARG_MAX)))) {
+                luaL_error(L,
+                    "malformed callable adapter flexible-result demand for %s",
+                    $TRACE);
+            }
+        ]], {
+            TRACE = c_string_literal(adapter.trace_name),
+        })
+    end
+    local arguments = coder._emit_interface_adapter_arguments(
+        ctx, adapter, roots, loc)
+    local call = coder._emit_interface_adapter_call(
+        ctx, adapter, roots)
+    local results = coder._emit_interface_adapter_results(
+        ctx, adapter, roots, loc)
+    local handoff = {}
+    for index = 2, #adapter.target.rettypes do
+        handoff[#handoff + 1] = render([[
+            *_ia_out_$INDEX = _ia_interface_result_$INDEX;
+        ]], {
+            INDEX = c_integer_literal(index),
+        })
+    end
+    local finish
+    if #adapter.target.rettypes == 0 then
+        finish = "L->top.p = _base;\nreturn;"
+    else
+        finish = [[
+            L->top.p = _base;
+            return _ia_interface_result_1;
+        ]]
+    end
+    local root_preamble
+    if ctx.nslots > 0 then
+        root_preamble = render([[
+            titan_ensure_stack(L, $NRESERVE);
+            StkId _base = L->top.p;
+            L->top.p += $NSLOTS;
+            for (StkId _ia_slot = L->top.p - 1;
+                 _base <= _ia_slot; _ia_slot--) {
+                setnilvalue2s(_ia_slot);
+            }
+            ptrdiff_t _base_off = savestack(L, _base);
+        ]], {
+            NSLOTS = c_integer_literal(ctx.nslots),
+            NRESERVE = c_integer_literal(
+                ctx.nslots + identity_scratch),
+        })
+    elseif identity_scratch > 0 then
+        root_preamble = render([[
+            titan_ensure_stack(L, $NRESERVE);
+            StkId _base = L->top.p;
+            ptrdiff_t _base_off = savestack(L, _base);
+        ]], {
+            NRESERVE = c_integer_literal(identity_scratch),
+        })
+    else
+        root_preamble = [[
+            StkId _base = L->top.p;
+            ptrdiff_t _base_off = savestack(L, _base);
+        ]]
+    end
+    local native_signature = coder._callable_adapter_signature(
+        site.native, adapter.target, false)
+    local native_body = render([[
+        static TITAN_NOINLINE $SIGNATURE {
+            (void)_mod;
+            $LINE$ROOT_PREAMBLE
+            $ARGUMENT_SOURCES
+            $FLEX_VALIDATION
+            $IDENTITIES
+            $ARGUMENTS
+            $CALL
+            $RESULTS
+            $HANDOFF
+            $FINISH
+        }
+    ]], {
+        SIGNATURE = native_signature,
+        LINE = emitline({ loc = loc }),
+        ROOT_PREAMBLE = root_preamble,
+        ARGUMENT_SOURCES = argument_sources,
+        FLEX_VALIDATION = flex_validation,
+        IDENTITIES = identities,
+        ARGUMENTS = arguments,
+        CALL = call,
+        RESULTS = results,
+        HANDOFF = table.concat(handoff, "\n"),
+        FINISH = finish,
+    })
+
+    local strict_plans = {}
+    for index, slot in ipairs(adapter.strict_relay.parameters) do
+        strict_plans[index] = slot.guard
+    end
+    local strict_body = genluaentry(
+        tlcontext, adapter.trace_name, site.native,
+        adapter.target, loc, site.strict, {
+            strict = true,
+            strict_name = site.strict,
+            callable_adapter = adapter,
+            strict_plans = strict_plans,
+            strict_vararg_plan = adapter.strict_relay.vararg
+                and adapter.strict_relay.vararg.guard or nil,
+        })
+    local declarations = table.concat({
+        -- The consumer-local strict relay recovers this module's per-state
+        -- identity slots instead of mistaking the captured source module for
+        -- its target context. Adapter declarations precede the generated init
+        -- definition, so provide the ordinary external prototype here.
+        "Udata *" .. tlcontext.prefix .. "init(lua_State *L);",
+        "static TITAN_NOINLINE "
+            .. coder._callable_adapter_signature(
+                site.native, adapter.target, false) .. ";",
+        "static int " .. site.strict .. "(lua_State *L);",
+    }, "\n")
+    return declarations, native_body .. "\n" .. strict_body
 end
 
 -- A captured-and-mutated parameter is boxed: its incoming value is anchored in
@@ -15982,6 +16822,9 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         array_writer_count = 0,
         interface_pairs = {}, -- canonical concrete/interface key -> exact pair
         interface_pair_list = {}, -- pair entries in discovery order
+        callable_adapters = {}, -- frozen plan object -> translation-unit site
+        callable_adapter_list = {}, -- growing discovery-order site registry
+        callable_adapter_count = 0,
         bound_luas = {},     -- mangled bound-Lua-trampoline name -> { module }
         bound_stricts = {},  -- mangled bound-strict-entry name -> { module }
         static_slots = {},   -- "fqtn.name" -> module upvalue slot of a static's closure
@@ -16323,6 +17166,33 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                 INDEX = c_integer_literal(index - 1),
                 METHOD = entry,
             }))
+        end
+    end
+
+    -- Closure-adapter emission is deliberately a growing drain: nested
+    -- callable component operations are discovered only while an enclosing
+    -- adapter body is rendered. All declarations still land in $SIGS before
+    -- every function body, and function tags/trace names are finalized only
+    -- after this registry is complete.
+    do
+        local i = 1
+        while i <= #tlcontext.callable_adapter_list do
+            if not emitted_adapter_cap_assert then
+                table.insert(sigs, render([[
+                    typedef char $NAME[
+                        (TITAN_VARARG_MAX == 200) ? 1 : -1];
+                ]], {
+                    NAME = tlcontext.prefix
+                        .. "callable_adapter_vararg_cap_must_match",
+                }))
+                emitted_adapter_cap_assert = true
+            end
+            local site = tlcontext.callable_adapter_list[i]
+            local adapter_sig, adapter_body =
+                coder._emit_callable_adapter(tlcontext, site)
+            table.insert(sigs, adapter_sig)
+            table.insert(code, adapter_body)
+            i = i + 1
         end
     end
 

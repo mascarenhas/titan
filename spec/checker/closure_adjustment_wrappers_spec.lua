@@ -104,6 +104,76 @@ describe("closure adjustment wrappers (checker)", function()
         assert.match("callable adapter", frozen.trace_name, 1, true)
     end)
 
+    it("freezes callable views at ordinary sinks without wrapping contextual lambdas",
+    function()
+        local ok, err, tree = run_checker([[
+            local function source(x: integer): integer
+                return x
+            end
+
+            record Holder
+                callback: (value) -> value;
+            end
+
+            module_callback: (value) -> value =
+                function(v: value): value return v end
+
+            local function take(callback: (value) -> value)
+            end
+
+            function returned(): (value) -> value
+                return source
+            end
+
+            function sinks()
+                local contextual: (value) -> value =
+                    function(v: value): value return v end
+                local source_lambda: (integer) -> integer =
+                    function(v: integer): integer return v end
+                local adjusted_lambda: (value) -> value = source_lambda
+                local declared: (value) -> value = source
+                module_callback = source
+                declared = source
+                take(source)
+                take { callback = source }
+                local holder = Holder.new(source)
+                holder.callback = source
+                local array: {(value) -> value} = {source}
+                local map: {string: (value) -> value} = {["x"] = source}
+            end
+        ]])
+        assert.is_true(ok, err)
+
+        local casts, seen = {}, {}
+        local function collect(value)
+            if type(value) ~= "table" or seen[value] then return end
+            seen[value] = true
+            if value._tag == "Ast.ExpCast" and value._callable_adapter then
+                casts[#casts + 1] = value
+            end
+            for key, child in pairs(value) do
+                if type(key) ~= "string" or key:sub(1, 1) ~= "_" then
+                    collect(child)
+                end
+            end
+        end
+        collect(tree)
+        assert.equal(11, #casts)
+        for _, cast in ipairs(casts) do
+            assert.equal("Ast.ExpCast", cast._tag)
+            assert.is_true(cast._implicit_coercion)
+            assert.equal("callable", cast._adjustment.kind)
+            assert.equal(cast.target, cast._type)
+            assert.equal(cast.exp._type, cast._callable_adapter.source)
+            assert.equal(cast._type, cast._callable_adapter.target)
+            assert.is_true(cast._callable_adapter.relation_free)
+        end
+
+        local sinks = find_function(tree, "sinks")
+        assert.equal("Ast.ExpFunction", sinks.block.stats[1].exps[1]._tag)
+        assert.is_nil(sinks.block.stats[1].exps[1]._callable_adapter)
+    end)
+
     it("leaves exact, is, and dynamic views unchanged and freezes written as",
     function()
         local ok, err, tree = run_checker([[
@@ -161,6 +231,15 @@ describe("closure adjustment wrappers (checker)", function()
                 return {produce()}
             end
 
+            local function consume(
+                ...: (integer, value) -> value
+            )
+            end
+
+            function forward(...: (integer) -> integer)
+                consume(...)
+            end
+
             local function accepts_wide(
                 callback: (integer, integer) -> ()
             )
@@ -183,6 +262,15 @@ describe("closure adjustment wrappers (checker)", function()
         assert.equal(frozen, raw._callable_adapter)
         assert.equal(frozen,
             constructor.open_source._open_results.callable_adapter)
+
+        local call = find_function(tree, "forward")
+            .block.stats[1].callexp
+        raw = assert(call._arg_adjustment.open_adjustment)
+        frozen = assert(call._arg_adjustment.open_callable_adapter)
+        assert.equal("callable", raw.kind)
+        assert.equal(frozen, raw._callable_adapter)
+        assert.equal(frozen,
+            call.args.args[1]._open_dots.callable_adapter)
 
         local cast = find_function(tree, "nested")
             .block.stats[1].exps[1]
