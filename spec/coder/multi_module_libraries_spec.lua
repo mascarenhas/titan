@@ -376,7 +376,8 @@ function callable_relay(): integer
     local narrowed: (Box) -> Box = broad
     local dynamic: value = narrowed
     local wider: (Box, value) -> Box = dynamic
-    return wider(Box.new(42), "ignored").nend
+    return wider(Box.new(42), "ignored").n
+end
 
 do
     current = current + 1

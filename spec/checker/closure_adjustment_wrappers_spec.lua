@@ -117,6 +117,8 @@ describe("closure adjustment wrappers (checker)", function()
 
             module_callback: (value) -> value =
                 function(v: value): value return v end
+            module_adjusted_lambda: (value) -> value =
+                function(v: integer): integer return v end
 
             local function take(callback: (value) -> value)
             end
@@ -158,7 +160,7 @@ describe("closure adjustment wrappers (checker)", function()
             end
         end
         collect(tree)
-        assert.equal(11, #casts)
+        assert.equal(12, #casts)
         for _, cast in ipairs(casts) do
             assert.equal("Ast.ExpCast", cast._tag)
             assert.is_true(cast._implicit_coercion)
@@ -172,6 +174,18 @@ describe("closure adjustment wrappers (checker)", function()
         local sinks = find_function(tree, "sinks")
         assert.equal("Ast.ExpFunction", sinks.block.stats[1].exps[1]._tag)
         assert.is_nil(sinks.block.stats[1].exps[1]._callable_adapter)
+
+        local module_adjusted
+        for _, node in ipairs(tree) do
+            if node._tag == "Ast.TopLevelVar"
+               and node.decl.name == "module_adjusted_lambda" then
+                module_adjusted = node
+                break
+            end
+        end
+        assert.truthy(module_adjusted)
+        assert_callable_cast(module_adjusted.value)
+        assert.equal("Ast.ExpFunction", module_adjusted.value.exp._tag)
     end)
 
     it("leaves exact, is, and dynamic views unchanged and freezes written as",
@@ -231,6 +245,11 @@ describe("closure adjustment wrappers (checker)", function()
                 return {produce()}
             end
 
+            function open_return():
+                (...: (integer, value) -> value)
+                return produce()
+            end
+
             local function consume(
                 ...: (integer, value) -> value
             )
@@ -262,6 +281,14 @@ describe("closure adjustment wrappers (checker)", function()
         assert.equal(frozen, raw._callable_adapter)
         assert.equal(frozen,
             constructor.open_source._open_results.callable_adapter)
+
+        local returned = find_function(tree, "open_return").block.stats[1]
+        raw = assert(returned._result_adjustment.open_adjustment)
+        frozen = assert(returned._result_adjustment.open_callable_adapter)
+        assert.equal("callable", raw.kind)
+        assert.equal(frozen, raw._callable_adapter)
+        assert.equal(frozen,
+            returned.exps[1]._open_results.callable_adapter)
 
         local call = find_function(tree, "forward")
             .block.stats[1].callexp
