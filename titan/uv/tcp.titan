@@ -1,4 +1,4 @@
-local type AddressList = owned shim.titan_uvshim_address[]
+local type AddressList = owned libuv.sockaddr_storage[]
 
 -- Each record below is the ordinary argument bundle for one callback-taking
 -- libuv call. A Task yields one Call, its dispatcher submits that operation,
@@ -35,7 +35,7 @@ local record TcpAcceptCall
   local tcp: uv_tcp_t
 end
 
--- The native bridge reads the callback from field 2. Everything after it
+-- The foreign callback reads the callback from field 2. Everything after it
 -- is the exact state owned by that callback-taking libuv operation.
 local record uv_getaddrinfo_t
   local native: owned *libuv.uv_getaddrinfo_t
@@ -51,6 +51,73 @@ end
 local record uv_shutdown_t
   local native: owned *libuv.uv_shutdown_t
   local callback: (uv_shutdown_t, integer) -> ()
+end
+
+foreign function uv_getaddrinfo_cb(req: *libuv.uv_getaddrinfo_t,
+                                   status: ffi.titan_ffi_int,
+                                   result: *libuv.addrinfo)
+  local owner = libuv.uv_req_get_data(
+      req as *libuv.uv_req_t) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local L = libuv.uv_loop_get_data(req.loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvIntegerPointerCallbackEntry
+  local top = lua.lua_gettop(L)
+  ffi.titan_ffi_pushudata(L, owner)
+  entry(L, module, callback, owner, status as lua.lua_Integer,
+        result as ffi.titan_ffi_void_ptr)
+  lua.lua_settop(L, top)
+end
+
+foreign function uv_connect_cb(req: *libuv.uv_connect_t,
+                               status: ffi.titan_ffi_int)
+  local owner = libuv.uv_req_get_data(
+      req as *libuv.uv_req_t) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local handle = req.handle as *libuv.uv_handle_t
+  local loop = libuv.uv_handle_get_loop(handle)
+  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvIntegerCallbackEntry
+  local top = lua.lua_gettop(L)
+  ffi.titan_ffi_pushudata(L, owner)
+  entry(L, module, callback, owner, status as lua.lua_Integer)
+  lua.lua_settop(L, top)
+end
+
+foreign function uv_shutdown_cb(req: *libuv.uv_shutdown_t,
+                                status: ffi.titan_ffi_int)
+  local owner = libuv.uv_req_get_data(
+      req as *libuv.uv_req_t) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local handle = req.handle as *libuv.uv_handle_t
+  local loop = libuv.uv_handle_get_loop(handle)
+  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvIntegerCallbackEntry
+  local top = lua.lua_gettop(L)
+  ffi.titan_ffi_pushudata(L, owner)
+  entry(L, module, callback, owner, status as lua.lua_Integer)
+  lua.lua_settop(L, top)
+end
+
+foreign function uv_connection_cb(server: *libuv.uv_stream_t,
+                                   status: ffi.titan_ffi_int)
+  local handle = server as *libuv.uv_handle_t
+  local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[3].uv)
+  local loop = libuv.uv_handle_get_loop(handle)
+  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvIntegerCallbackEntry
+  local top = lua.lua_gettop(L)
+  ffi.titan_ffi_pushudata(L, owner)
+  entry(L, module, callback, owner, status as lua.lua_Integer)
+  lua.lua_settop(L, top)
 end
 
 local record TcpConnectionState
@@ -76,8 +143,8 @@ local union TcpRole
 end
 
 -- Persistent TCP handles own their exact long-lived stream state directly.
--- The bridge reads alloc, read, and connection callbacks from fields 2, 3,
--- and 4. Libuv, not Titan, tracks and orders concurrent write requests.
+-- The foreign callbacks read alloc, read, and connection closures from fields
+-- 2, 3, and 4. Libuv, not Titan, tracks and orders concurrent write requests.
 local record uv_tcp_t
   local native: owned *libuv.uv_tcp_t
   local alloc_callback: (uv_tcp_t, libuv.size_t,
@@ -130,7 +197,7 @@ local function require_server(tcp: uv_tcp_t,
 end
 
 local function service_text(port: integer): string
-  local storage: ffi.titan_ffi_char[5]
+  local storage = ffi.titan_ffi_char.new_array(5)
   local bytes = storage as *ffi.titan_ffi_char
   local digits = "0123456789" as const *ffi.titan_ffi_char
   local divisor = 1
@@ -151,7 +218,7 @@ local function usable_address(entry: *libuv.addrinfo): boolean
   return entry.ai_addr ~= nil and
       (entry.ai_family == libuv.AF_INET or
        entry.ai_family == libuv.AF_INET6) and
-      entry.ai_addrlen <= shim.titan_uvshim_address.sizeof
+      entry.ai_addrlen <= libuv.sockaddr_storage.sizeof
 end
 
 -- The addrinfo chain belongs to libuv only until the getaddrinfo callback
@@ -165,13 +232,13 @@ local function copy_addresses(first: *libuv.addrinfo): AddressList
     entry = entry.ai_next
   end
 
-  local addresses = shim.titan_uvshim_address.new_array(count)
-  local destination: *shim.titan_uvshim_address = addresses
+  local addresses = libuv.sockaddr_storage.new_array(count)
+  local destination: *libuv.sockaddr_storage = addresses
   local index = 0
   entry = first
   while entry ~= nil do
     if usable_address(entry) then
-      cstring.memcpy((destination + index).bytes, entry.ai_addr,
+      cstring.memcpy(destination + index, entry.ai_addr,
                      entry.ai_addrlen as cstring.size_t)
       index = index + 1
     end
@@ -182,8 +249,8 @@ end
 
 local function address_at(addresses: AddressList,
                           index: integer): const *libuv.sockaddr
-  local data: *shim.titan_uvshim_address = addresses
-  return (data + index - 1).bytes as const *libuv.sockaddr
+  local data: *libuv.sockaddr_storage = addresses
+  return (data + index - 1) as const *libuv.sockaddr
 end
 
 local function take_chunk(tcp: uv_tcp_t): string
@@ -261,7 +328,7 @@ local function new_server_role(): TcpRole
 end
 
 local function new_tcp(runtime: Runtime, role: TcpRole): uv_tcp_t
-  local native = libuv.uv_tcp_t.new()
+  local native: owned *libuv.uv_tcp_t = libuv.uv_tcp_t.new()
   local tcp: uv_tcp_t = {
     native = native,
     alloc_callback = tcp_alloc_dispatch,
@@ -286,8 +353,8 @@ end
 
 local function start_tcp_read(tcp: uv_tcp_t): integer
   return libuv.uv_read_start(
-      tcp_stream(tcp), shim.titan_uvshim_alloc_cb,
-      shim.titan_uvshim_read_cb)
+      tcp_stream(tcp), uv_alloc_cb,
+      uv_read_cb)
 end
 
 local function begin_tcp_close(tcp: uv_tcp_t, closer: Task?): boolean
@@ -448,9 +515,10 @@ catch
 end
 
 local function GetaddrinfoCall:dispatch(task: Task): Immediate?
-  local native = libuv.uv_getaddrinfo_t.new()
+  local native: owned *libuv.uv_getaddrinfo_t =
+      libuv.uv_getaddrinfo_t.new()
   local request: *libuv.uv_getaddrinfo_t = native
-  local hints: libuv.addrinfo
+  local hints = libuv.addrinfo.new()
   hints.ai_family = libuv.AF_UNSPEC
   hints.ai_socktype = libuv.SOCK_STREAM
   hints.ai_protocol = libuv.IPPROTO_TCP
@@ -468,7 +536,7 @@ local function GetaddrinfoCall:dispatch(task: Task): Immediate?
   local status = libuv.uv_getaddrinfo {
     loop = task.runtime.loop,
     req = request,
-    getaddrinfo_cb = shim.titan_uvshim_getaddrinfo_cb,
+    getaddrinfo_cb = uv_getaddrinfo_cb,
     node = node,
     service = service,
     hints = hints,
@@ -477,7 +545,7 @@ local function GetaddrinfoCall:dispatch(task: Task): Immediate?
 end
 
 local function TcpConnectCall:dispatch(task: Task): Immediate?
-  local native = libuv.uv_connect_t.new()
+  local native: owned *libuv.uv_connect_t = libuv.uv_connect_t.new()
   local request: *libuv.uv_connect_t = native
   local callback = function (_owner: uv_connect_t, status: integer)
     complete_status(task, status, "net.connect")
@@ -491,7 +559,7 @@ local function TcpConnectCall:dispatch(task: Task): Immediate?
     req = request,
     handle = handle,
     addr = address_at(self.addresses, self.address_index),
-    cb = shim.titan_uvshim_connect_cb,
+    cb = uv_connect_cb,
   }
   return submitted(task, status, "net.connect")
 end
@@ -531,7 +599,7 @@ local function TcpWriteCall:dispatch(task: Task): Immediate?
 end
 
 local function TcpShutdownCall:dispatch(task: Task): Immediate?
-  local native = libuv.uv_shutdown_t.new()
+  local native: owned *libuv.uv_shutdown_t = libuv.uv_shutdown_t.new()
   local request: *libuv.uv_shutdown_t = native
   local callback = function (_owner: uv_shutdown_t, status: integer)
     complete_status(task, status, "net.shutdown")
@@ -541,7 +609,7 @@ local function TcpShutdownCall:dispatch(task: Task): Immediate?
   libuv.uv_req_set_data(request as *libuv.uv_req_t,
                         owner as ffi.titan_ffi_void_ptr)
   local status = libuv.uv_shutdown(
-      request, tcp_stream(self.tcp), shim.titan_uvshim_shutdown_cb)
+      request, tcp_stream(self.tcp), uv_shutdown_cb)
   return submitted(task, status, "net.shutdown")
 end
 
@@ -641,7 +709,7 @@ local function net_listen(host: string, port: integer,
     if status >= 0 then
       status = libuv.uv_listen(
           tcp_stream(tcp), backlog as ffi.titan_ffi_int,
-          shim.titan_uvshim_connection_cb)
+          uv_connection_cb)
     end
     if status >= 0 then return tcp end
     last_status = status

@@ -425,7 +425,7 @@ The driver's closed validator requires:
 value-facing positions in recovered metadata. The value graph is closed:
 error-recovery/no-value markers, nested modules, C FFI descriptors, legacy
 wrappers, and unknown tags are rejected as well. A recovered Titan function
-type must carry the ABI-0.22 reserved `vararg=false` sentinel; typed variadics
+type must carry the ABI-0.23 reserved `vararg=false` sentinel; typed variadics
 use `varargtype`, while C variadicity exists only on unexportable
 `Type.CFunction`. An Option cannot contain another Option or `value`, matching
 source canonicalization.
@@ -465,7 +465,7 @@ covers:
 
 ABI 0.20 also introduced the two-user-value Array proxy and strict generic
 function entry. ABI 0.21 retained those layouts while advancing the matched
-Lua runtime to 5.5.1, and ABI 0.22 retains them. The generalized callable
+Lua runtime to 5.5.1, and ABIs 0.22 and 0.23 retain them. The generalized callable
 action graph, `nil_fill_result`, and first-class closure wrappers add no
 Interface schema/payload slot or provider symbol. Target wrapper adapters and
 strict relays are consumer-private and use existing signatures, so there is no

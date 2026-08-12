@@ -379,7 +379,7 @@ function time(year: integer?, month: integer?, day: integer?,
   if min then actual_minute = min as integer end
   if sec then actual_second = sec as integer end
 
-  local calendar: ctime.tm
+  local calendar = ctime.tm.new()
   calendar.tm_year = checked_time_field(year as integer, 1900, "year")
   calendar.tm_mon = checked_time_field(month as integer, 1, "month")
   calendar.tm_mday = checked_time_field(day as integer, 0, "day")

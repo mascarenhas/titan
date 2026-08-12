@@ -1362,22 +1362,40 @@ describe("C FFI type checking", function()
         end)
     end)
 
-    it("rejects owned allocation for structs with flexible array members", function()
+    it("requires a FAM count and rejects arrays of extended structs", function()
         with_header([[
             typedef struct ffi_packet {
                 int len;
                 char data[];
             } ffi_packet;
         ]], function(header)
-            local ok, err = run_checker([[
+            local prefix = [[
                 local c = foreign import "]] .. header .. [["
+            ]]
+            local ok, err = run_checker(prefix .. [[
+                function accepted()
+                    local packet = c.ffi_packet.new(3)
+                    packet.data[2] = 1
+                    local count = #packet.data
+                end
+            ]])
+            assert.truthy(ok, err)
 
-                function f()
-                    local p = c.ffi_packet.new()
+            ok, err = run_checker(prefix .. [[
+                function bad()
+                    local packet = c.ffi_packet.new()
                 end
             ]])
             assert.falsy(ok)
-            assert.match("flexible array member", err)
+            assert.match("expects 1", err)
+
+            ok, err = run_checker(prefix .. [[
+                function bad()
+                    local packets = c.ffi_packet.new_array(2)
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("new_array.-unavailable.-flexible array member", err)
         end)
     end)
 

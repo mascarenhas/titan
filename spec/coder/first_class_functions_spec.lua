@@ -31,11 +31,11 @@ describe("first-class function values (end-to-end)", function()
             end
         ]])
         local declaration = assert(csrc:find(
-            "TString* test_invoke_titan(", 1, true))
+            "TString* test_\\u2133_invoke_titan(", 1, true))
         local first = assert(csrc:find(
-            "TString* test_invoke_titan(", declaration + 1, true))
+            "TString* test_\\u2133_invoke_titan(", declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_invoke_titanentry_lua", first, true))
+            "static int test_\\u2133_invoke_titanentry_lua", first, true))
         local body = csrc:sub(first, last - 1)
         local dispatch = assert(body:find(
             "CClosure *_vc_callee =", 1, true))

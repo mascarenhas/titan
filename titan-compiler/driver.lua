@@ -16,8 +16,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.22"
-driver.TITAN_VER_SUFFIX = "_0_22"
+driver.TITAN_VER = "0.23"
+driver.TITAN_VER_SUFFIX = "_0_23"
 driver.LUA_VERSION = "5.5"
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
@@ -434,14 +434,28 @@ function driver.get_probe_service(context)
 end
 
 function driver.close_resolver_context(context)
-    if not context or not context.probe_service then return true end
-    local service = context.probe_service
-    context.probe_service = nil
-    local ok, err = service:close()
-    if not ok then
-        context.probe_service_error = err
-        return nil, err
+    if not context then return true end
+    local first_error
+    for _, filename in ipairs(
+            context.source_foreign_header_temporaries or {}) do
+        local removed, remove_err = os.remove(filename)
+        if not removed and lfs.symlinkattributes(filename) and not first_error then
+            first_error = remove_err or
+                ("could not remove temporary source foreign header '" ..
+                    filename .. "'")
+        end
     end
+    context.source_foreign_header_temporaries = nil
+    if context.probe_service then
+        local service = context.probe_service
+        context.probe_service = nil
+        local ok, err = service:close()
+        if not ok then
+            context.probe_service_error = err
+            first_error = first_error or err
+        end
+    end
+    if first_error then return nil, first_error end
     return true
 end
 
@@ -1652,6 +1666,30 @@ function driver.defaultloader(static_deps, options)
                 end,
             })
         table.remove(dependency_stack)
+        local has_foreign = driver.ast_has_foreign_functions(ast)
+        local foreign_header = has_foreign and driver.foreign_header_filename(
+            source.native_output or source.main) or nil
+        local checking_foreign_header
+        if has_foreign and #errors == 0 then
+            checking_foreign_header = driver.sibling_temporary_path(
+                foreign_header .. ".check")
+            local contents = coder.generate_foreign_header(
+                modname, ast, { module = modname })
+            contents = contents and pretty.reindent_c(contents)
+            local wrote, write_err = contents and util.set_file_contents(
+                checking_foreign_header, contents)
+            if not wrote then
+                table.insert(errors, "could not prepare source foreign header '"
+                    .. checking_foreign_header .. "': " ..
+                    tostring(write_err or "no generated contents"))
+                checking_foreign_header = nil
+            else
+                context.source_foreign_header_temporaries =
+                    context.source_foreign_header_temporaries or {}
+                context.source_foreign_header_temporaries[#context.source_foreign_header_temporaries + 1] =
+                    checking_foreign_header
+            end
+        end
         driver.imported[modname] = {
             kind = "source",
             ast = ast,
@@ -1661,9 +1699,20 @@ function driver.defaultloader(static_deps, options)
             source_files = source.files,
             program_output = source.program_output,
             deps = direct_deps,
+            foreign_header = foreign_header,
+            checking_foreign_header = checking_foreign_header,
         }
         static_deps[modname] = true
-        return true, modt, errors, { kind = "source" }
+        if foreign_header and foreign_header:sub(1, 1) ~= "/" then
+            foreign_header = normalize_absolute_path(
+                lfs.currentdir() .. "/" .. foreign_header)
+        end
+        return true, modt, errors, {
+            kind = "source",
+            filename = source.main,
+            foreign_header = checking_foreign_header,
+            foreign_header_for_check = checking_foreign_header ~= nil,
+        }
     end
 
     local function recover_contextual_owner(modname, request)
@@ -1809,7 +1858,20 @@ function driver.defaultloader(static_deps, options)
             local mod = driver.imported[modname]
             remember_dependency_closure(modname)
             remember_direct_dependency(modname)
-            return true, mod.type, {}, { kind = mod.kind }
+            local info = { kind = mod.kind }
+            if mod.kind == "source" and mod.filename then
+                local foreign_header = mod.checking_foreign_header
+                    or mod.foreign_header
+                if foreign_header and foreign_header:sub(1, 1) ~= "/" then
+                    foreign_header = normalize_absolute_path(
+                        lfs.currentdir() .. "/" .. foreign_header)
+                end
+                info.filename = mod.filename
+                info.foreign_header = foreign_header
+                info.foreign_header_for_check =
+                    mod.checking_foreign_header ~= nil
+            end
+            return true, mod.type, {}, info
         end
 
         if source_preferred then
@@ -2109,7 +2171,15 @@ function driver.tableloader(modtable, imported, deps, options)
 
     local function selected_interface(mod)
         if source_view and mod.kind == "source" and mod.source_type then
-            return mod.source_type, { kind = "source" }
+            local header = mod.filename and mod.ast
+                and driver.ast_has_foreign_functions(mod.ast)
+                and driver.foreign_header_filename(
+                    mod.native_output or mod.filename) or nil
+            return mod.source_type, {
+                kind = "source",
+                filename = mod.filename,
+                foreign_header = header,
+            }
         end
         return mod.type, { kind = mod.kind == "source"
             and "compiled" or mod.kind }
@@ -2205,15 +2275,11 @@ local RUNTIME_ARCHIVE_INPUTS = {
     "titan_longjmp.h",
     "titan_coro.c",
     "minicoro.h",
-    "titan/coro.h",
     "titan/ffi.h",
-    "titan_uv.c",
-    "titan/uv.h",
 }
 local RUNTIME_ARCHIVE_MEMBERS = {
     "titan.o",
     "titan_coro.o",
-    "titan_uv.o",
 }
 
 local function is_archive_symbol_index(member)
@@ -2419,6 +2485,140 @@ end
 
 local ensure_output_parent
 
+driver.FOREIGN_HEADER_MARKER =
+    "/* Generated by Titan: source foreign function interface. */"
+
+function driver.foreign_header_filename(sourcef)
+    local stem, count = sourcef:gsub("[.]titan$", "")
+    assert(count == 1, "foreign header source path must end in .titan")
+    return stem .. ".titan.h"
+end
+
+function driver.ast_has_foreign_functions(ast)
+    for _, node in ipairs(ast or {}) do
+        if not node._ignore and node._tag == "Ast.TopLevelForeignFunc" then
+            return true
+        end
+    end
+    return false
+end
+
+function driver.plan_foreign_header(modname, ast, sourcef)
+    sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
+    local headername = driver.foreign_header_filename(sourcef)
+    local has_foreign = driver.ast_has_foreign_functions(ast)
+    local absolute_header = headername
+    if absolute_header:sub(1, 1) ~= "/" then
+        absolute_header = normalize_absolute_path(
+            lfs.currentdir() .. "/" .. absolute_header)
+    end
+    ast._foreign_header_output = has_foreign and absolute_header or nil
+    local contents = has_foreign and coder.generate_foreign_header(
+        modname, ast, { module = modname }) or nil
+    if contents then contents = pretty.reindent_c(contents) end
+    return {
+        modname = modname,
+        ast = ast,
+        filename = headername,
+        absolute = absolute_header,
+        contents = contents,
+    }
+end
+
+function driver.validate_foreign_header_plan(plan)
+    local attr = lfs.symlinkattributes(plan.filename)
+    local existing = attr and attr.mode == "file"
+        and util.get_file_contents(plan.filename) or nil
+    local owned = existing
+        and existing:sub(1, #driver.FOREIGN_HEADER_MARKER)
+            == driver.FOREIGN_HEADER_MARKER
+    if plan.contents and attr and (attr.mode ~= "file" or not owned) then
+        return nil, "refusing to overwrite user-owned generated-header path '"
+            .. plan.filename .. "'"
+    end
+    plan.managed = plan.contents ~= nil or owned and true or false
+    return true
+end
+
+function driver.write_foreign_header_plan(plan)
+    local ok, err = driver.validate_foreign_header_plan(plan)
+    if not ok then return nil, err end
+    local parent_ok, parent_err = ensure_output_parent(plan.filename)
+    if not parent_ok then return nil, parent_err end
+    local existing = util.get_file_contents(plan.filename)
+    if existing and existing:sub(1, #driver.FOREIGN_HEADER_MARKER)
+       == driver.FOREIGN_HEADER_MARKER then
+        os.remove(plan.filename)
+    end
+    if plan.contents then
+        local write_ok, write_err = util.set_file_contents(
+            plan.filename, plan.contents)
+        if not write_ok then return nil, write_err end
+    end
+    plan.ast._foreign_header_prepared = true
+    return true
+end
+
+function driver.plan_foreign_headers(names, imported)
+    local plans = {}
+    local by_name = {}
+    local occupied = {}
+    for _, name in ipairs(names) do
+        local mod = assert(imported[name])
+        if mod.ast and not mod.compiled then
+            local plan = driver.plan_foreign_header(
+                name, mod.ast, mod.native_output or mod.filename)
+            local previous = occupied[plan.absolute]
+            if previous and previous ~= name then
+                return nil, "generated foreign-header path '" .. plan.filename
+                    .. "' is shared by source modules '" .. previous
+                    .. "' and '" .. name .. "'"
+            end
+            occupied[plan.absolute] = name
+            plans[#plans + 1] = plan
+            by_name[name] = plan
+        end
+    end
+
+    -- Header identity follows the finalized physical native output, not the
+    -- source lookup filename. Resolve every direct source edge from the full
+    -- plan before rendering any consumer header or C translation unit.
+    for _, plan in ipairs(plans) do
+        for _, node in ipairs(plan.ast) do
+            if not node._ignore and node._tag == "Ast.TopLevelImport"
+               and node._source_import then
+                local dependency = by_name[node.modname]
+                node._foreign_header = dependency and dependency.contents
+                    and dependency.absolute or nil
+            end
+        end
+    end
+    for _, plan in ipairs(plans) do
+        if plan.contents then
+            plan.contents = coder.generate_foreign_header(
+                plan.modname, plan.ast, { module = plan.modname })
+            plan.contents = pretty.reindent_c(plan.contents)
+        end
+        local ok, err = driver.validate_foreign_header_plan(plan)
+        if not ok then return nil, err end
+    end
+    return plans
+end
+
+function driver.write_foreign_header_plans(plans)
+    for _, plan in ipairs(plans or {}) do
+        local ok, err = driver.write_foreign_header_plan(plan)
+        if not ok then return nil, err end
+    end
+    return true
+end
+
+function driver.prepare_foreign_headers(names, imported)
+    local plans, err = driver.plan_foreign_headers(names, imported)
+    if not plans then return nil, err end
+    return driver.write_foreign_header_plans(plans)
+end
+
 function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
     if not staticmetadata.valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
@@ -2428,12 +2628,18 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
     if not runtime_ok then return nil, runtime_err end
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
     static_deps = static_deps or {}
+    local filename = sourcef:gsub("[.]titan$", "") .. ".c"
+    local libname = sourcef:gsub("[.]titan$", "") .. ".o"
+    if not ast._foreign_header_prepared then
+        local header_plan = driver.plan_foreign_header(modname, ast, sourcef)
+        local header_ok, header_err =
+            driver.write_foreign_header_plan(header_plan)
+        if not header_ok then return nil, header_err end
+    end
     local code, native_references =
         coder.generate(modname, ast, static_deps, driver.TITAN_VER,
             driver.EMIT_LINE_DIRECTIVES)
     code = pretty.reindent_c(code)
-    local filename = sourcef:gsub("[.]titan$", "") .. ".c"
-    local libname = sourcef:gsub("[.]titan$", "") .. ".o"
     local output_ok, output_err = ensure_output_parent(filename)
     if not output_ok then return nil, output_err end
     os.remove(filename)
@@ -4058,6 +4264,12 @@ function driver.validate_program_output_paths(
         ok, err = add_output(stem .. ".o",
             "logical module '" .. source.modname .. "'", "file")
         if not ok then return nil, err end
+        if source.foreign_header then
+            ok, err = add_output(source.foreign_header,
+                "generated foreign header for logical module '" ..
+                    source.modname .. "'", "file")
+            if not ok then return nil, err end
+        end
     end
     local ok, err = add_output(
         entrypoint_c, "standalone entrypoint", "file")
@@ -4102,62 +4314,96 @@ function driver.validate_program_output_paths(
     return true
 end
 
-function driver.validate_provider_output_paths(public_dso, native_inputs)
+function driver.validate_provider_output_paths(
+        public_dso, native_inputs, generated_outputs)
     local public_archive = public_dso:gsub("[.]so$", ".a")
     if public_archive == public_dso then
         return nil, "provider DSO path '" .. tostring(public_dso) ..
             "' does not end in .so"
     end
-    for _, path in ipairs({ public_dso, public_archive }) do
+
+    local outputs = {}
+    local function below(path, parent)
+        return #path > #parent
+            and path:sub(1, #parent + 1) == parent .. "/"
+    end
+    local function add_output(path, owner, mode)
         local ancestors_ok, ancestors_err = validate_output_ancestors(path)
         if not ancestors_ok then return nil, ancestors_err end
         local attr = lfs.symlinkattributes(path)
-        if attr and attr.mode ~= "file" then
-            return nil, "refusing to replace nonregular native provider path '" ..
-                path .. "'"
+        if attr and attr.mode ~= mode then
+            local expected = mode == "directory"
+                and "a nonlink directory" or "a regular nonlink file"
+            return nil, "native provider output '" ..
+                normalized_absolute_filename(path) .. "' for " .. owner ..
+                " is not " .. expected
         end
-    end
-    local dsym = public_dso .. ".dSYM"
-    local dsym_attr = lfs.symlinkattributes(dsym)
-    if dsym_attr and dsym_attr.mode ~= "directory" then
-        return nil, "refusing to replace non-directory dSYM path '" ..
-            dsym .. "'"
+        local output = {
+            raw = absolute_filename(path),
+            normalized = normalized_absolute_filename(path),
+            physical = physical_absolute_filename(path),
+            owner = owner,
+            mode = mode,
+        }
+        for _, previous in ipairs(outputs) do
+            if output.normalized == previous.normalized
+               or output.physical == previous.physical
+               or same_existing_file(output.raw, previous.raw) then
+                return nil, "native provider output '" .. output.normalized ..
+                    "' for " .. owner .. " aliases output for " ..
+                    previous.owner
+            end
+            if below(output.normalized, previous.normalized)
+               or below(previous.normalized, output.normalized)
+               or below(output.physical, previous.physical)
+               or below(previous.physical, output.physical) then
+                return nil, "native provider output '" .. output.normalized ..
+                    "' for " .. owner ..
+                    " has a path hierarchy conflict with output '" ..
+                    previous.normalized .. "' for " .. previous.owner
+            end
+        end
+        outputs[#outputs + 1] = output
+        return true
     end
 
-    local outputs = {
-        {
-            raw = absolute_filename(public_dso),
-            normalized = normalized_absolute_filename(public_dso),
-            physical = physical_absolute_filename(public_dso),
-        },
-        {
-            raw = absolute_filename(public_archive),
-            normalized = normalized_absolute_filename(public_archive),
-            physical = physical_absolute_filename(public_archive),
-        },
-        {
-            raw = absolute_filename(dsym),
-            normalized = normalized_absolute_filename(dsym),
-            physical = physical_absolute_filename(dsym),
-        },
-    }
+    local ok, err = add_output(public_dso, "provider DSO", "file")
+    if not ok then return nil, err end
+    ok, err = add_output(public_archive, "provider archive", "file")
+    if not ok then return nil, err end
+    if driver.IS_DARWIN then
+        ok, err = add_output(
+            public_dso .. ".dSYM", "provider dSYM", "directory")
+        if not ok then return nil, err end
+    end
+    for _, generated in ipairs(generated_outputs or {}) do
+        ok, err = add_output(assert(generated.path),
+            assert(generated.owner), generated.mode or "file")
+        if not ok then return nil, err end
+    end
+
     for _, input in ipairs(native_inputs or {}) do
         local path = archive_input_path(input)
         if type(path) == "string" then
             local raw_input = absolute_filename(path)
-            local absolute_input = normalized_absolute_filename(path)
+            local normalized_input = normalized_absolute_filename(path)
             local physical_input = physical_absolute_filename(path)
             for _, output in ipairs(outputs) do
-                if absolute_input == output.normalized or
-                   physical_input == output.physical or
-                   same_existing_file(raw_input, output.raw) or
-                   absolute_input:sub(1, #output.normalized + 1) ==
-                       output.normalized .. "/" or
-                   physical_input:sub(1, #output.physical + 1) ==
-                       output.physical .. "/" then
+                if normalized_input == output.normalized
+                   or physical_input == output.physical
+                   or same_existing_file(raw_input, output.raw) then
                     return nil, "native provider output '" ..
-                        output.normalized ..
-                        "' aliases input '" .. absolute_input .. "'"
+                        output.normalized .. "' for " .. output.owner ..
+                        " aliases input '" .. normalized_input .. "'"
+                end
+                if below(normalized_input, output.normalized)
+                   or below(output.normalized, normalized_input)
+                   or below(physical_input, output.physical)
+                   or below(output.physical, physical_input) then
+                    return nil, "native provider output '" ..
+                        output.normalized .. "' for " .. output.owner ..
+                        " has a path hierarchy conflict with input '" ..
+                        normalized_input .. "'"
                 end
             end
         end

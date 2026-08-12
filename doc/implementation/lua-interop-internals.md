@@ -59,8 +59,8 @@ after a branded exact-tag mismatch. A realized callable wrapper fills those
 same roles with its target adapter, copied source `CClosure.f`, and
 consumer-local target relay. `genluaentry` in `coder.lua` emits the two
 stack-convention entries for every non-`local` top-level function
-(`<mod>_<name>_titanentry_lua` and `…_strict`, modulo C identifier
-mangling) and every static (`…_titanentry_luastatic` and `…_strictstatic`).
+(`<mod>_\u2133_<name>_titanentry_lua` and `…_strict` in C source, with the
+UCN separator becoming UTF-8 at linkage) and every static (`…_titanentry_luastatic` and `…_strictstatic`).
 A method has its ordinary `…_titanentry_luamethod`; each method's
 self-removed first-class bound value has separate `…_boundlua` and
 `…_boundstrict` trampolines. A local declaration that is never used as a value
@@ -80,7 +80,7 @@ The following is the coercive entry for `fmod`, trimmed only of the two
 argument conversions:
 
 ```c
-static int interop_fmod_titanentry_lua(lua_State *L) {
+static int interop_\u2133_fmod_titanentry_lua(lua_State *L) {
     StkId func = L->ci->func.p;
     ptrdiff_t _nargs = L->top.p - func - 1;
     if (_nargs < 2) {
@@ -113,7 +113,7 @@ static int interop_fmod_titanentry_lua(lua_State *L) {
     titan_ensure_stack(L, 2);
     ptrdiff_t _firstret_off = savestack(L, L->top.p);
     L->top.p += 2;
-    lua_Number res = interop_fmod_titan(L, _mod, _fn, _param_1, _param_2, &_outparam_2);
+    lua_Number res = interop_\u2133_fmod_titan(L, _mod, _fn, _param_1, _param_2, &_outparam_2);
     StkId _firstret = restorestack(L, _firstret_off);
     setfltvalue(s2v(_firstret), res);;
     _firstret++;
@@ -645,7 +645,7 @@ The UUID-string constants are defined in `titan-runtime/titan.h`.
 
 ## Four shared-library loading paths
 
-The current 0.22 layout retains the four deliberately separate paths
+The current 0.23 layout retains the four deliberately separate paths
 established by 0.20. They share the ordinary
 per-logical-module symbols but differ in selection, flags, cache, and whether
 module initialization runs.
@@ -682,8 +682,8 @@ Udata* (*some_dep_init)(lua_State *L) =
         loadsym(L, some_dep_handle, "some_dep_init"));
 ```
 
-`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_22`,
-`TITAN_PATH`, or `".;<root>/lib/titan/0.22"`, with `;;` splicing the
+`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_23`,
+`TITAN_PATH`, or `".;<root>/lib/titan/0.23"`, with `;;` splicing the
 ordinary default. It maps `dir/file` with `RTLD_LAZY | RTLD_GLOBAL`, caches
 the handle by relative provider for the state, invalidates native backtrace
 state, and never calls `dlclose`. Two logical modules in one image reuse the
@@ -720,7 +720,7 @@ eager load. A second Lua state repeats its own cache insertion and promotion
 request while the operating-system loader may reuse the mapped image.
 
 The installed standard layout has paired providers at
-`<root>/lib/titan/0.22/{titan.so,titan.a}` and eighteen generated shims below
+`<root>/lib/titan/0.23/{titan.so,titan.a}` and eighteen generated shims below
 `<root>/share/lua/5.5/titan/`; the shims use the DSO form. A direct-libuv
 extension explicitly imports
 `uv` and foreign-imports `uv.h`; Titan runtime initialization loads the
@@ -828,7 +828,7 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
   `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
   Titan module-path default from that root, and ensures
-  `<root>/lib/titan/0.22/?.so` is present in `package.cpath`. The
+  `<root>/lib/titan/0.23/?.so` is present in `package.cpath`. The
   prefix-configured Titan-owned Lua already places that template before its
   `lib/lua` entries. It then
   registers the module's `luaopen_` function in

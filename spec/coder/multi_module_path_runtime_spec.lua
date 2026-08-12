@@ -71,7 +71,7 @@ local function compiler_argv(output_root, source_root, titan_path, ...)
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "CCACHE_DISABLE=1",
         "TITAN_PATH_0_18=/obsolete/titan-0.18",
-        "TITAN_PATH_0_22=" .. titan_path,
+        "TITAN_PATH_0_23=" .. titan_path,
         "TITAN_PATH=",
     }
     if PREFIX then
@@ -119,7 +119,7 @@ local function run_lua(cwd, titan_path, package_path, cpath_roots, code)
     for _, root in ipairs(cpath_roots) do
         table.insert(cpath, root .. "/?.so")
     end
-    table.insert(cpath, PREFIX .. "/lib/titan/0.22/?.so")
+    table.insert(cpath, PREFIX .. "/lib/titan/0.23/?.so")
     table.insert(cpath, PREFIX .. "/lib/lua/5.5/?.so")
 
     return run({
@@ -127,7 +127,7 @@ local function run_lua(cwd, titan_path, package_path, cpath_roots, code)
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "TITAN_PATH_0_18=/obsolete/titan-0.18",
-        "TITAN_PATH_0_22=" .. titan_path,
+        "TITAN_PATH_0_23=" .. titan_path,
         "TITAN_PATH=",
         LUA, "-e", string.format([[
 package.path = %q
@@ -219,7 +219,7 @@ end
         -- root_one_only exists only in R1, so successful checking proves that
         -- the compiler selected R1 before emitting this native call.
         assert.truthy(generated:find(
-            "route_item_root_one_only_titan", 1, true), generated)
+            "route_item_\\u2133_root_one_only_titan", 1, true), generated)
 
         local ok, output = run_lua(
             consumer_root, titan_path, consumer_root, { consumer_root }, [[

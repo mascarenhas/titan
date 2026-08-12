@@ -10,7 +10,7 @@ local MODULE = "ffi_operators"
 
 local function clean_module()
     for _, suffix in ipairs({
-        ".c", ".o", ".so", ".a", ".lua",
+        ".c", ".o", ".so", ".a", ".lua", ".titan.h",
         "__entrypoint.c", "__entrypoint.o",
     }) do
         os.remove(MODULE .. suffix)
@@ -34,7 +34,7 @@ end
 
 local function native_body(csrc, name)
     return assert(csrc:match(
-        "[^\n]*ffi_operators_" .. name .. "_titan%b()%s*(%b{})"))
+        "[^\n]*ffi_operators_\\u2133_" .. name .. "_titan%b()%s*(%b{})"))
 end
 
 local declarations = [[

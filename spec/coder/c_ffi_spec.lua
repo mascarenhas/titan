@@ -40,7 +40,7 @@ local function c_function_body(csrc, name)
 end
 
 local function native_body(csrc, name)
-    return c_function_body(csrc, "test_" .. name .. "_titan")
+    return c_function_body(csrc, "test_\\u2133_" .. name .. "_titan")
 end
 
 local FIELD_PROJECTION_HEADER = [[
@@ -800,13 +800,15 @@ describe("C FFI code generation", function()
                 end
 
                 function read_nested_owner(item: value): integer
-                    local owner = c.ffi_owner.new()
+                    local owner: owned *c.ffi_owner =
+                        c.ffi_owner.new()
                     owner = item
                     return owner.inner.x as integer
                 end
 
                 function read_nested_array(item: value): integer
-                    local owner = c.ffi_owner.new()
+                    local owner: owned *c.ffi_owner =
+                        c.ffi_owner.new()
                     owner = item
                     return owner.values[0] as integer
                 end
@@ -1733,7 +1735,7 @@ describe("C FFI code generation", function()
                 end
 
                 function bad(): integer
-                    local p = c.ffi_point.new()
+                    local p: owned *c.ffi_point = c.ffi_point.new()
                     local v: value = R.new(7)
                     p = v
                     return p.x as integer

@@ -1,6 +1,8 @@
 #ifndef TITAN_FFI_H
 #define TITAN_FFI_H
 
+#include "lstate.h"
+
 #define TITAN_BACKTRACE_KEY "57d80578-2534-4856-ad3b-bde8cba4c445"
 #define TITAN_TRACE_PINNED "5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"
 #define TITAN_TRACE_APPEND_KEY "4f895b66-bae0-4e97-afb3-83a31f2f9e96"
@@ -10,6 +12,7 @@
 
 typedef void titan_ffi_void;
 typedef void *titan_ffi_void_ptr;
+typedef char *titan_ffi_char_ptr;
 typedef _Bool titan_ffi_bool;
 typedef char titan_ffi_char;
 typedef signed char titan_ffi_signed_char;
@@ -26,13 +29,30 @@ typedef float titan_ffi_float;
 typedef double titan_ffi_double;
 typedef long double titan_ffi_long_double;
 
-typedef struct lua_State lua_State;
-typedef struct TValue TValue;
-typedef struct Udata Udata;
-
 TValue lua_totvalue(lua_State *L, int idx);
 void lua_pushtvalue(lua_State *L, TValue v);
 void *lua_togco(lua_State *L, int idx);
 lua_State *titan_newthread(lua_State *L);
+
+static inline lua_State *lmacro_thvalue(const TValue *o) {
+    return thvalue(o);
+}
+
+static inline Udata *lmacro_uvalue(const TValue *o) {
+    return uvalue(o);
+}
+
+static inline CClosure *lmacro_clCvalue(const TValue *o) {
+    return clCvalue(o);
+}
+
+static inline void *lmacro_pvalue(const TValue *o) {
+    return pvalue(o);
+}
+
+static inline void titan_ffi_pushudata(lua_State *L, Udata *owner) {
+    setuvalue(L, s2v(L->top.p), owner);
+    L->top.p++;
+}
 
 #endif

@@ -52,9 +52,9 @@ describe("flexible return code generation", function()
             end
         ]])
 
-        assert.match("lua_Integer test_fixed_titan%(lua_State %*L, Udata %*_mod, CClosure %*_fn, lua_Integer _param_n, TString%* %*_outparam_2%)",
+        assert.match("lua_Integer test_\\u2133_fixed_titan%(lua_State %*L, Udata %*_mod, CClosure %*_fn, lua_Integer _param_n, TString%* %*_outparam_2%)",
             csrc)
-        assert.match("lua_Integer test_flexible_titan%(lua_State %*L, Udata %*_mod, CClosure %*_fn, lua_Integer _param_n, TString%* %*_outparam_2, TitanVargBoolean %*_flexout, int _flexwant%)",
+        assert.match("lua_Integer test_\\u2133_flexible_titan%(lua_State %*L, Udata %*_mod, CClosure %*_fn, lua_Integer _param_n, TString%* %*_outparam_2, TitanVargBoolean %*_flexout, int _flexwant%)",
             csrc)
     end)
 
@@ -73,7 +73,7 @@ describe("flexible return code generation", function()
         assert.match("TString%* _flexargs_%d+%[1%] = {0};", csrc)
         assert.match("TitanVargString _flexdesc_%d+ = { 0, _flexargs_%d+ };",
             csrc)
-        assert.match("test_values_titan%([^;]-, &_flexdesc_%d+, 1%)", csrc)
+        assert.match("test_\\u2133_values_titan%([^;]-, &_flexdesc_%d+, 1%)", csrc)
         assert.match("if %(_flexdesc_%d+%.n_args >= 1%)", csrc)
         assert.match("setnilvalue%(&_tmp_%d+%);", csrc)
     end)
@@ -95,10 +95,10 @@ describe("flexible return code generation", function()
                 return 1, effect()
             end
         ]])
-        local _, calls = csrc:gsub("test_effect_titan%(L, _mod, NULL%)", "")
+        local _, calls = csrc:gsub("test_\\u2133_effect_titan%(L, _mod, NULL%)", "")
         assert.equal(1, calls)
         assert.not_match("_outparam_2", csrc:match(
-            "lua_Integer test_one_titan%b()%s*{.-\n%s*}"))
+            "lua_Integer test_\\u2133_one_titan%b()%s*{.-\n%s*}"))
     end)
 
     it("preserves Lua finite and MULTRET demand through the wrapper", function()

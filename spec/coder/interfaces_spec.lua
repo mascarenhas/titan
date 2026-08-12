@@ -895,12 +895,12 @@ describe("interfaces (end-to-end)", function()
         ]]
         local csrc = h.compile_and_read_c(source)
         local signature =
-            "lua_Integer test_open_interfaces_titan("
+            "lua_Integer test_\\u2133_open_interfaces_titan("
         local declaration = assert(csrc:find(signature, 1, true))
         local first = assert(csrc:find(
             signature, declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_open_interfaces_titanentry_lua",
+            "static int test_\\u2133_open_interfaces_titanentry_lua",
             first, true))
         local body = csrc:sub(first, last - 1)
         local allocation = assert(body:find(
@@ -1139,7 +1139,7 @@ describe("interfaces (end-to-end)", function()
             "test_", "test.Concrete", "test.Dynamic")
         assert.is_nil(csrc:find(pair, 1, true))
         local body = assert(csrc:match(
-            "int test_implements_titan%b()%s*{.-\n%s*}"))
+            "int test_\\u2133_implements_titan%b()%s*{.-\n%s*}"))
         assert.is_nil(body:find("luaS_newudata", 1, true))
         assert.is_nil(body:find("TitanInterfaceMethod", 1, true))
         local called, callerr = h.call("test", [[
@@ -1169,11 +1169,11 @@ describe("interfaces (end-to-end)", function()
             end
         ]])
         local declaration = assert(csrc:find(
-            "Udata* test_wrap_titan(", 1, true))
+            "Udata* test_\\u2133_wrap_titan(", 1, true))
         local first = assert(csrc:find(
-            "Udata* test_wrap_titan(", declaration + 1, true))
+            "Udata* test_\\u2133_wrap_titan(", declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_wrap_titanentry_lua", first, true))
+            "static int test_\\u2133_wrap_titanentry_lua", first, true))
         local body = csrc:sub(first, last - 1)
         local allocation = assert(body:find("luaS_newudata(", 1, true))
         local before = body:sub(1, allocation - 1)

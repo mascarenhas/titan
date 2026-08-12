@@ -197,13 +197,31 @@ table.sort(linked_names, util.bytewise_less)
 for name in pairs(output_name_set) do table.insert(output_names, name) end
 table.sort(output_names, util.bytewise_less)
 
+local header_plans = {}
+local header_plan_by_name = {}
+if #errors == 0 then
+    local planned, header_err = driver.plan_foreign_headers(
+        linked_names, driver.imported)
+    if not planned then
+        table.insert(errors, header_err)
+    else
+        header_plans = planned
+        for _, plan in ipairs(planned) do
+            header_plan_by_name[plan.modname] = plan
+        end
+    end
+end
+
 if main_module then
     local source_outputs = {}
     for _, name in ipairs(linked_names) do
         local mod = driver.imported[name]
+        local header = header_plan_by_name[name]
         source_outputs[#source_outputs + 1] = {
             modname = name,
             output = mod.native_output or mod.filename,
+            foreign_header = header and header.managed
+                and header.filename or nil,
         }
     end
     local program_output = test_program_output or
@@ -329,9 +347,38 @@ if not main_module then
         for _, input in ipairs(args.extra_object or {}) do
             native_inputs[#native_inputs + 1] = input
         end
+        local generated_outputs = {}
+        for _, name in ipairs(linked_names) do
+            local mod = driver.imported[name]
+            local stem = (mod.native_output or mod.filename):gsub(
+                "[.]titan$", "")
+            generated_outputs[#generated_outputs + 1] = {
+                path = stem .. ".c",
+                owner = "generated C for logical module '" .. name .. "'",
+            }
+            generated_outputs[#generated_outputs + 1] = {
+                path = stem .. ".o",
+                owner = "generated object for logical module '" .. name .. "'",
+            }
+            local header = header_plan_by_name[name]
+            if header and header.managed then
+                generated_outputs[#generated_outputs + 1] = {
+                    path = header.filename,
+                    owner = "generated foreign header for logical module '"
+                        .. name .. "'",
+                }
+            end
+        end
+        for _, shim in ipairs(shim_plans or {}) do
+            generated_outputs[#generated_outputs + 1] = {
+                path = shim.filename,
+                owner = "generated Lua shim for logical module '"
+                    .. shim.modname .. "'",
+            }
+        end
         local outputs_ok, outputs_err =
             driver.validate_provider_output_paths(
-                provider_output, native_inputs)
+                provider_output, native_inputs, generated_outputs)
         if not outputs_ok then table.insert(errors, outputs_err) end
     end
 end
@@ -340,6 +387,10 @@ if #errors > 0 then exit(table.concat(errors, "\n")) end
 
 local libnames = {}
 local used_native_names = {}
+
+local headers_ok, headers_err =
+    driver.write_foreign_header_plans(header_plans)
+if not headers_ok then exit(headers_err) end
 
 for _, name in ipairs(linked_names) do
     local mod = driver.imported[name]

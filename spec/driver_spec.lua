@@ -30,7 +30,7 @@ end
 describe("compiler installation discovery", function()
     it("uses the first literal Lua 5.5 C-module prefix", function()
         local cpath = table.concat({
-            "/first prefix/lib/titan/0.22/?.so",
+            "/first prefix/lib/titan/0.23/?.so",
             "/wrong/lib/lua/5.4/?.so",
             "/also-wrong/lib/lua/5.5/?.dylib",
             "/first prefix/lib/lua/5.5/?.so",
@@ -101,10 +101,10 @@ describe("compiler installation discovery", function()
             libtitan = "/opt/titan/lib/libtitan.a",
             libbacktrace = "/opt/titan/lib/libbacktrace.a",
             liblua = "/opt/titan/lib/liblua.a",
-            titan_bin = "/opt/titan/lib/titan/0.22",
-            lua_cpath = "/opt/titan/lib/titan/0.22/?.so",
+            titan_bin = "/opt/titan/lib/titan/0.23",
+            lua_cpath = "/opt/titan/lib/titan/0.23/?.so",
             test_source =
-                "/opt/titan/share/titan/0.22/src/titan/test.titan",
+                "/opt/titan/share/titan/0.23/src/titan/test.titan",
         }, paths)
 
         assert.same({
@@ -150,19 +150,19 @@ describe("compiler installation discovery", function()
             checkout))
     end)
 
-    it("requires exactly the three runtime archive members", function()
+    it("requires exactly the two runtime archive members", function()
         assert.is_true(driver.runtime_archive_members_are_exact(
+            "titan.o\ntitan_coro.o\n"))
+        assert.is_true(driver.runtime_archive_members_are_exact(
+            "__.SYMDEF SORTED\ntitan.o\ntitan_coro.o\n"))
+        assert.is_true(driver.runtime_archive_members_are_exact(
+            "__.SYMDEF_64\ntitan.o\ntitan_coro.o\n"))
+        assert.is_false(driver.runtime_archive_members_are_exact(
             "titan.o\ntitan_coro.o\ntitan_uv.o\n"))
-        assert.is_true(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF SORTED\ntitan.o\ntitan_coro.o\ntitan_uv.o\n"))
-        assert.is_true(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF_64\ntitan.o\ntitan_coro.o\ntitan_uv.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "titan.o\ntitan_coro.o\ntitan_uv.o\nstale.o\n"))
+            "__.SYMDEF\ntitan.o\ntitan_coro.o\nstale.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF\ntitan.o\ntitan_coro.o\ntitan_uv.o\nstale.o\n"))
-        assert.is_false(driver.runtime_archive_members_are_exact(
-            "titan_coro.o\ntitan.o\ntitan_uv.o\n"))
+            "titan_coro.o\ntitan.o\n"))
     end)
 
     it("links source builds through the complete runtime archive", function()
@@ -472,6 +472,27 @@ describe("standalone output ownership", function()
         ok, message = driver.validate_program_output_paths({},
             "suite", "suite__test_entrypoint.c",
             { "suite__test_entrypoint.o" })
+        assert.is_nil(ok)
+        assert.matches("aliases input", message, 1, true)
+
+        ok, message = driver.validate_program_output_paths({
+            {
+                modname = "generated",
+                output = "generated.titan",
+                foreign_header = "suite",
+            },
+        }, "suite", "suite__test_entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("aliases output", message, 1, true)
+
+        ok, message = driver.validate_program_output_paths({
+            {
+                modname = "generated",
+                output = "generated.titan",
+                foreign_header = "generated.titan.h",
+            },
+        }, "suite", "suite__test_entrypoint.c",
+            { "generated.titan.h" })
         assert.is_nil(ok)
         assert.matches("aliases input", message, 1, true)
     end)

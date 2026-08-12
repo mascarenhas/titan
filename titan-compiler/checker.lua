@@ -464,6 +464,7 @@ local finally_loop_floor = 0
 -- reset).
 local func_stack = {}
 local active_check_state
+checker._foreign_function_depth = 0
 
 function checker.typeerror(errors, loc, fmt, ...)
     local errmsg = location.format_error(loc, "type error: "..fmt, ...)
@@ -1365,10 +1366,29 @@ local function c_function_pointer_accepts_declaration(target, cfunc)
        and types.c_function_types_equal(expected, cfunc)
 end
 
-local function is_foreign_function_var(var)
-    return var and var._tag == "Ast.VarDot"
-        and var.exp and var.exp._type
-        and var.exp._type._tag == "Type.CModule"
+function checker._foreign_function_reference(var)
+    if not var or not var._decl then return nil end
+    local decl = var._decl
+    if decl._tag == "Ast.TopLevelForeignFunc" then
+        return {
+            source = true,
+            module = assert(decl._foreign_module),
+            name = decl.name,
+        }
+    elseif decl._tag == "Type.ModuleMember"
+           and decl.type and c_resolve(decl.type)._tag == "Type.CFunction"
+           and var._tag == "Ast.VarDot" and var.exp and var.exp._type then
+        if var.exp._type._tag == "Type.CModule" then
+            return { name = var.name }
+        elseif var.exp._type._tag == "Type.Module"
+               and decl._foreign_source then
+            return {
+                source = true,
+                module = decl.modname,
+                name = decl.name,
+            }
+        end
+    end
 end
 
 local function incomplete_c_object_error(typ, st, subject, seen)
@@ -1413,74 +1433,6 @@ local function report_incomplete_c_object(typ, st, subject, loc, errors)
     return true
 end
 
-local function automatic_c_layout_error(typ, st, seen)
-    typ = c_resolve(typ)
-    if not typ or typ._tag == "Type.Invalid" then return nil end
-    seen = seen or {}
-    if seen[typ] then return nil end
-    seen[typ] = true
-
-    if typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion" then
-        if not st:foreign_definition_visible(typ) then
-            return string.format(
-                "automatic C object type '%s' is incomplete or not yet visible",
-                types.tostring(typ))
-        elseif typ._tag == "Type.CStruct" and typ.has_fam then
-            return string.format(
-                "automatic C object type '%s' has a flexible array member",
-                types.tostring(typ))
-        end
-    elseif typ._tag == "Type.CArray" then
-        if math.type(typ.len) ~= "integer" or typ.len <= 0 then
-            return string.format(
-                "automatic C array type '%s' requires a positive "
-                .. "compile-time integer literal extent",
-                types.tostring(typ))
-        end
-        local elem = c_resolve(typ.elem)
-        if not elem or elem._tag == "Type.Invalid" then
-            return nil
-        elseif elem._tag == "Type.CVoid" then
-            return "an automatic C array cannot have void elements"
-        elseif elem._tag == "Type.CFunction" then
-            return "an automatic C array cannot have function elements"
-        elseif elem._tag == "Type.CArray"
-            or elem._tag == "Type.CStruct"
-            or elem._tag == "Type.CUnion" then
-            return automatic_c_layout_error(elem, st, seen)
-        elseif elem._tag ~= "Type.CInteger"
-           and elem._tag ~= "Type.CFloat"
-           and elem._tag ~= "Type.CPointer" then
-            return string.format(
-                "type '%s' is not a complete C object type usable as an "
-                .. "automatic C array element",
-                types.tostring(typ.elem))
-        end
-    end
-end
-
-local function automatic_c_object_error(typ, st)
-    local resolved = c_resolve(typ)
-    if not resolved or resolved._tag == "Type.Invalid" then return nil end
-    if resolved._tag ~= "Type.CStruct"
-       and resolved._tag ~= "Type.CUnion"
-       and resolved._tag ~= "Type.CArray" then
-        return string.format(
-            "initializer-less local declarations require a complete C "
-            .. "struct, union, or fixed array, not '%s'",
-            types.tostring(typ))
-    end
-
-    local bearing, offender = types.c_automatic_gc_bearing(typ)
-    if bearing then
-        return string.format(
-            "automatic C object type '%s' transitively contains "
-            .. "GC-bearing FFI storage '%s', which automatic C objects do "
-            .. "not trace",
-            types.tostring(typ), types.tostring(offender))
-    end
-    return automatic_c_layout_error(typ, st)
-end
 
 -- C allocation pseudo-members are syntax-bound checker declarations, not
 -- boxed callable values. The singleton context lets VarDot expose their narrow
@@ -1489,15 +1441,24 @@ end
 local c_pseudo_callee_context = {}
 
 local function c_pseudo_member(typ, name, st)
+    local resolved = c_resolve(typ)
+    local has_fam = resolved and resolved._tag == "Type.CStruct"
+        and resolved.has_fam == true
     if name == "new" then
         return {
             _tag = "Checker.CPseudoNew",
             ctype = typ,
             name = name,
-            params = {},
+            fam = has_fam,
+            params = has_fam and { types.Integer() } or {},
             rettypes = { c_owned_type(typ, false) },
         }
     elseif name == "new_array" then
+        if has_fam then
+            return nil, string.format(
+                "C pseudo-member '.new_array' is unavailable for struct type '%s' because it has a flexible array member",
+                types.tostring(typ))
+        end
         return {
             _tag = "Checker.CPseudoNew",
             ctype = typ,
@@ -1772,7 +1733,7 @@ local function has_c_length(typ)
         or (typ._tag == "Type.COwned" and typ.count)
 end
 
-local function c_allocation_error(typ, st)
+local function c_allocation_error(typ, st, allow_automatic_array)
     local rtyp = c_resolve(typ)
     if not rtyp or rtyp._tag == "Type.Invalid" then
         return nil
@@ -1805,12 +1766,170 @@ local function c_allocation_error(typ, st)
                 types.tostring(rtyp))
         end
         return layout_error
-    elseif rtyp._tag == "Type.CStruct" and rtyp.has_fam then
+    elseif rtyp._tag == "Type.CArray" and not allow_automatic_array then
+        return "cannot allocate C array typedefs as owned storage in this FFI version"
+    end
+end
+
+function checker._c_flexible_array_member(typ)
+    local resolved = c_resolve(typ)
+    if not resolved or resolved._tag ~= "Type.CStruct"
+       or not resolved.has_fam then
+        return nil
+    end
+    for _, field in ipairs(resolved.fields or {}) do
+        if field.flexible_array then return field end
+    end
+    error("C struct has_fam metadata lacks its flexible-array field")
+end
+
+function checker._allocation_integer_literal(exp)
+    while exp and (exp._tag == "Ast.ExpCast"
+                   or exp._tag == "Ast.ExpAdjust") do
+        exp = exp.exp
+    end
+    if exp and exp._tag == "Ast.ExpInteger"
+       and math.type(exp.value) == "integer" then
+        return exp.value
+    end
+end
+
+function checker._automatic_allocation_error(typ, st, allow_fam)
+    local resolved = c_resolve(typ)
+    if not resolved or resolved._tag == "Type.Invalid" then return nil end
+    if resolved._tag ~= "Type.CStruct"
+       and resolved._tag ~= "Type.CUnion" then
         return string.format(
-            "cannot allocate C struct type '%s' with a flexible array member in this FFI version",
-            types.tostring(rtyp))
-    elseif rtyp._tag == "Type.CArray" then
-        return "cannot allocate C array typedefs in this FFI version"
+            "automatic allocation requires a C struct or union, not '%s'",
+            types.tostring(typ))
+    end
+    if not st:foreign_definition_visible(resolved) then
+        return string.format("automatic C object type '%s' is incomplete or not yet visible",
+            types.tostring(typ))
+    end
+    if resolved._tag == "Type.CStruct" and resolved.has_fam
+       and not allow_fam then
+        return string.format(
+            "automatic C object type '%s' has a flexible array member",
+            types.tostring(typ))
+    end
+    local bearing, offender = types.c_automatic_gc_bearing(typ)
+    if bearing then
+        return string.format(
+            "automatic C object type '%s' transitively contains GC-bearing FFI storage '%s', which automatic C objects do not trace",
+            types.tostring(typ), types.tostring(offender))
+    end
+end
+
+function checker._pointer_to_allocation_payload(target, payload)
+    local resolved = c_resolve(target)
+    return resolved and resolved._tag == "Type.CPointer"
+       and types.equals(resolved.pointee, payload)
+end
+
+function checker._plan_c_allocation(node, pseudo, demand, st, errors)
+    local decl = demand and demand.allocation_decl
+    local payload = pseudo.ctype
+    local resolved_payload = c_resolve(payload)
+    local target = decl and decl._type or nil
+    local plan = {
+        kind = "c_allocation",
+        payload_type = payload,
+        array = pseudo.array == true,
+        fam = pseudo.fam == true,
+        storage = "owned",
+        result_type = pseudo.rettypes[1],
+    }
+
+    if pseudo.array then
+        local count = checker._allocation_integer_literal(node.args.args[1])
+        plan.array_count_literal = count
+        if target and target._tag == "Type.COwned" then
+            -- An explicit owner always wins over literal-driven inference.
+        elseif target and target._tag == "Type.CArray" then
+            plan.storage = "automatic_array"
+            plan.result_type = target
+            if math.type(target.len) ~= "integer" or target.len <= 0 then
+                checker.typeerror(errors, decl.loc,
+                    "constructor-initialized fixed C array '%s' requires a positive extent",
+                    decl.name)
+            elseif count == nil then
+                checker.typeerror(errors, node.loc,
+                    "fixed C array local '%s' requires a compile-time integer literal allocation count",
+                    decl.name)
+            elseif count ~= target.len then
+                checker.typeerror(errors, node.loc,
+                    "fixed C array local '%s' has extent %d but '.new_array' allocates %d element(s)",
+                    decl.name, target.len, count)
+            else
+                plan.array_count_literal = count
+            end
+        elseif target and checker._pointer_to_allocation_payload(target, payload) then
+            plan.storage = count and count > 0
+                and "automatic_array_borrow" or "owned_borrow"
+            plan.result_type = target
+        elseif decl and not target and count and count > 0 then
+            plan.storage = "automatic_array"
+            plan.result_type = types.CArray(payload, count)
+        end
+    elseif resolved_payload
+           and (resolved_payload._tag == "Type.CStruct"
+                or resolved_payload._tag == "Type.CUnion") then
+        local fam_count = pseudo.fam
+            and checker._allocation_integer_literal(node.args.args[1]) or nil
+        plan.fam_count_literal = fam_count
+        local explicit_owner = target and target._tag == "Type.COwned"
+        local pointer_target = target
+            and checker._pointer_to_allocation_payload(target, payload)
+        local can_automatic = decl ~= nil
+            and not explicit_owner and not pointer_target
+            and (not target or types.equals(target, payload))
+            and (not pseudo.fam or (fam_count and fam_count >= 0))
+        if can_automatic then
+            local alloc_err = checker._automatic_allocation_error(
+                payload, st, pseudo.fam)
+            if alloc_err then
+                checker.typeerror(errors, node.loc, "%s", alloc_err)
+            else
+                plan.storage = pseudo.fam
+                    and "automatic_fam" or "automatic_object"
+                plan.result_type = payload
+                plan.fam_field = pseudo.fam
+                    and checker._c_flexible_array_member(payload) or nil
+            end
+        elseif pointer_target then
+            plan.storage = "owned_borrow"
+            plan.result_type = target
+        end
+    end
+
+    if resolved_payload and resolved_payload._tag == "Type.CArray"
+       and not plan.storage:match("^automatic") then
+        checker.typeerror(errors, node.loc,
+            "cannot allocate C array typedefs as owned storage in this FFI version")
+    end
+
+    if plan.storage == "automatic_array"
+       or plan.storage == "automatic_array_borrow" then
+        local bearing, offender = types.c_automatic_gc_bearing(payload)
+        if bearing then
+            checker.typeerror(errors, node.loc,
+                "automatic C array element type '%s' transitively contains GC-bearing FFI storage '%s', which automatic C objects do not trace",
+                types.tostring(payload), types.tostring(offender))
+        end
+    end
+
+    if pseudo.fam then
+        plan.fam_field = checker._c_flexible_array_member(payload)
+    end
+    pseudo.rettypes = { plan.result_type }
+    node._c_allocation_plan = plan
+    if decl and plan.storage:match("^automatic") then
+        decl._c_allocation_plan = plan
+        decl._c_automatic_object = true
+        node._c_automatic_allocation = true
+    elseif decl and plan.storage == "owned_borrow" then
+        decl._c_allocation_plan = plan
     end
 end
 
@@ -3227,6 +3346,57 @@ local function interface_method_index(interface, name)
     return nil
 end
 
+function checker._foreign_signature_component(
+        typenode, st, errors, subject, allow_void)
+    local typ = typefromnode(typenode, st, errors, true)
+    local resolved = c_resolve(typ)
+    if typ._tag == "Type.Invalid" then return typ end
+    if not types.is_direct_c(typ) or not resolved
+       or resolved._tag == "Type.CModule"
+       or resolved._tag == "Type.COwned"
+       or resolved._tag == "Type.CFunction"
+       or resolved._tag == "Type.CArray"
+       or (resolved._tag == "Type.CVoid" and not allow_void) then
+        return invalid(errors, typenode.loc,
+            "%s must be a direct C FFI type%s, not '%s'",
+            subject, allow_void and "" or " other than void",
+            types.tostring(typ))
+    end
+    return typ
+end
+
+function checker._foreign_function_signature(
+        argnodes, rettypenodes, varargtype, flexrettype,
+        st, errors, subject)
+    local params = {}
+    for index, typenode in ipairs(argnodes) do
+        params[index] = checker._foreign_signature_component(
+            typenode, st, errors,
+            string.format("parameter %d of %s", index, subject), false)
+    end
+
+    if varargtype then
+        checker.typeerror(errors, varargtype.loc,
+            "%s cannot have variadic parameters", subject)
+    end
+    if flexrettype then
+        checker.typeerror(errors, flexrettype.loc,
+            "%s cannot have flexible returns", subject)
+    end
+    if #rettypenodes > 1 then
+        checker.typeerror(errors, rettypenodes[2].loc,
+            "%s can return at most one value", subject)
+    end
+
+    local ret = types.CVoid()
+    if rettypenodes[1] then
+        ret = checker._foreign_signature_component(
+            rettypenodes[1], st, errors,
+            "return type of " .. subject, false)
+    end
+    return types.CFunction(params, ret, false, false)
+end
+
 -- Converts an AST type declaration into a typechecker type
 --   node: AST node
 --   errors: list of compile-time errors
@@ -3403,6 +3573,13 @@ typefromnode = util.make_visitor({
         return types.Map(key,
             deoptionize(typefromnode(
                 node.valuestype, st, errors, defer_c_enum_carrier)))
+    end,
+
+    ["Ast.TypeForeignFunction"] = function(node, st, errors)
+        local cfunction = checker._foreign_function_signature(
+            node.argtypes, node.rettypes, node.varargtype,
+            node.flexrettype, st, errors, "foreign function type")
+        return types.CPointer(cfunction, {})
     end,
 
     ["Ast.TypeFunction"] = function(node, st, errors,
@@ -4483,11 +4660,32 @@ end
 --   st: symbol table
 --   errors: list of compile-time errors
 --   returns whether the statement cannot fall through (always false here)
+local function checkcondition(node, st, errors)
+    if checker._foreign_function_depth == 0 then
+        checkexp(node, st, errors, types.Boolean())
+        return
+    end
+
+    checkexp(node, st, errors)
+    local typ = c_resolve(node._type)
+    if not typ or (typ._tag ~= "Type.CInteger"
+                   and typ._tag ~= "Type.CFloat"
+                   and typ._tag ~= "Type.CPointer"
+                   and typ._tag ~= "Type.CArray"
+                   and typ._tag ~= "Type.Boolean") then
+        checker.typeerror(errors, node.loc,
+            "a foreign function condition must have a C scalar type, found %s",
+            types.tostring(node._type))
+    else
+        node._foreign_condition = true
+    end
+end
+
 local function checkrepeat(node, st, errors)
     for _, stat in ipairs(node.block.stats) do
         checkstat(stat, st, errors)
     end
-    checkexp(node.condition, st, errors, types.Boolean())
+    checkcondition(node.condition, st, errors)
     return false
 end
 
@@ -4517,7 +4715,28 @@ local function checkfor(node, st, errors)
     node.decl._forcontrol = true
 
     local loop_type_is_valid
-    if node.decl._type._tag == "Type.Integer" then
+    local resolved_control = c_resolve(node.decl._type)
+    if checker._foreign_function_depth > 0
+       and resolved_control
+       and (resolved_control._tag == "Type.CInteger"
+            or resolved_control._tag == "Type.CFloat") then
+        loop_type_is_valid = true
+        if not node.inc then
+            node.inc = resolved_control._tag == "Type.CInteger"
+                and ast.ExpInteger(node.finish.loc, 1)
+                or ast.ExpFloat(node.finish.loc, 1.0)
+            node.inc._type = node.decl._type
+            node.inc._foreign_literal = true
+        end
+        for _, bound in ipairs({ node.start, node.finish, node.inc }) do
+            if bound._foreign_literal then bound._type = node.decl._type end
+        end
+        local literal_step = checker._allocation_integer_literal(node.inc)
+        if literal_step == 0 then
+            checker.typeerror(errors, node.inc.loc,
+                "a numeric for loop inside a foreign function requires a nonzero step")
+        end
+    elseif node.decl._type._tag == "Type.Integer" then
         loop_type_is_valid = true
         if not node.inc then
             node.inc = ast.ExpInteger(node.finish.loc, 1)
@@ -5004,54 +5223,31 @@ end
 --   returns whether the statement cannot fall through
 local checkstat_visitor = util.make_visitor({
     ["Ast.StatDecl"] = function(node, st, errors)
-        -- The parser reserves an empty RHS for the one-declaration automatic
-        -- C-object form. It is not an arity-adjusted expression list: the
-        -- declaration itself owns deterministic C zero initialization.
         if #node.exps == 0 then
-            if #node.decls ~= 1 or not node.decls[1].type then
-                checker.typeerror(errors, node.loc,
-                    "an initializer-less local must declare exactly one "
-                    .. "explicitly typed automatic C object")
-                for _, decl in ipairs(node.decls) do
-                    decl._type = decl.type
-                        and typefromnode(decl.type, st, errors)
-                        or types.Invalid()
-                    declare(decl, st, errors)
-                end
-                return
+            checker.typeerror(errors, node.loc,
+                "a local declaration requires an initializer")
+            for _, decl in ipairs(node.decls) do
+                decl._type = decl.type
+                    and typefromnode(decl.type, st, errors)
+                    or types.Invalid()
+                declare(decl, st, errors)
             end
-
-            local decl = node.decls[1]
-            decl._type = typefromnode(decl.type, st, errors)
-            checktype(decl._type, decl.loc, errors)
-            local automatic_error =
-                automatic_c_object_error(decl._type, st)
-            if automatic_error then
-                local errloc = decl.loc
-                if decl.type._tag == "Ast.TypeCArray"
-                   and (math.type(decl.type.length.value) ~= "integer"
-                        or decl.type.length.value <= 0) then
-                    errloc = decl.type.length.loc or errloc
-                end
-                checker.typeerror(errors, errloc, "%s", automatic_error)
-            else
-                decl._c_zero_init = true
-                decl._c_automatic_object = true
-                node._c_zero_init = true
-            end
-            declare(decl, st, errors)
             return
         end
 
         local fixed = {}
         for i, decl in ipairs(node.decls) do
             if decl.type then
-                checkdecl(decl, st, errors)
-                fixed[i] = decl._type
-                if types.is_c_array(decl._type) then
-                    checker.typeerror(errors, decl.loc,
-                        "cannot initialize a local by copying a whole C array")
+                if decl.type._tag == "Ast.TypeCArray"
+                   and not decl.type.length then
+                    local written = typefromnode(decl.type, st, errors)
+                    decl._written_c_array_view = written
+                    decl._type = types.CPointer(written.elem, {})
+                    checktype(decl._type, decl.loc, errors)
+                else
+                    checkdecl(decl, st, errors)
                 end
+                fixed[i] = decl._type
             else
                 fixed[i] = UNKNOWN_SLOT
             end
@@ -5069,6 +5265,11 @@ local checkstat_visitor = util.make_visitor({
                         ("declaration of local variable " .. decl.name)
                         or "local declaration"
                 end,
+                check_expression = function(exp, est, eerrors, context,
+                                             subdemand, sink_index)
+                    subdemand.allocation_decl = node.decls[sink_index]
+                    checkexp(exp, est, eerrors, context, subdemand)
+                end,
             }), st, errors)
         node.exps = adjusted.exps
         node._result_adjustment = adjusted
@@ -5084,7 +5285,9 @@ local checkstat_visitor = util.make_visitor({
                     decl._type = exp._type
                 end
                 checkdecl(decl, st, errors)
-                if types.is_c_array(decl._type) then
+                if types.is_c_array(decl._type)
+                   and not (decl._c_allocation_plan
+                            and decl._c_allocation_plan.storage == "automatic_array") then
                     checker.typeerror(errors, decl.loc,
                         "cannot initialize a local by copying a whole C array")
                 end
@@ -5092,6 +5295,12 @@ local checkstat_visitor = util.make_visitor({
                     "declaration of local variable " .. decl.name,
                     errors, decl.loc)
                 replace_adjusted_value(adjusted, old, exp)
+            end
+            if exp and decl.type and types.is_c_array(decl._type)
+               and not (decl._c_allocation_plan
+                        and decl._c_allocation_plan.storage == "automatic_array") then
+                checker.typeerror(errors, decl.loc,
+                    "cannot initialize a local by copying a whole C array")
             end
             if not decl._type then
                 -- no initializer reached this declaration (too few values on
@@ -5114,7 +5323,7 @@ local checkstat_visitor = util.make_visitor({
     end,
 
     ["Ast.StatWhile"] = function(node, st, errors)
-        checkexp(node.condition, st, errors, types.Boolean())
+        checkcondition(node.condition, st, errors)
         local frame = { has_break = false }
         loop_depth = loop_depth + 1
         table.insert(loop_frames, frame)
@@ -5309,6 +5518,7 @@ local checkstat_visitor = util.make_visitor({
                  or var._type._tag == "Type.CFunction")
                 and decl
                 and (decl._tag == "Ast.TopLevelFunc"
+                     or decl._tag == "Ast.TopLevelForeignFunc"
                      or decl._tag == "Type.ModuleMember"
                      or decl._tag == "Type.StaticMethod")
             fixed[i] = (var._type._tag == "Type.Module" or function_decl)
@@ -5334,6 +5544,7 @@ local checkstat_visitor = util.make_visitor({
                 elseif (texp._tag == "Type.Function"
                         or texp._tag == "Type.CFunction") and var._decl
                        and (var._decl._tag == "Ast.TopLevelFunc"
+                            or var._decl._tag == "Ast.TopLevelForeignFunc"
                             or var._decl._tag == "Type.ModuleMember"
                             or var._decl._tag == "Type.StaticMethod") then
                     -- Cannot rebind a function *declaration* (top-level
@@ -5391,8 +5602,10 @@ local checkstat_visitor = util.make_visitor({
                 "cannot 'return' from inside a finally block")
         end
         local ftype = st:find_symbol("$function")._type
-        if #node.exps == 0 and #ftype.rettypes == 1
-           and ftype.rettypes[1]._tag == "Type.Nil" then
+        local signature = assert(call_signature(ftype),
+            "return statement lacks a callable signature")
+        if #node.exps == 0 and #signature.rettypes == 1
+           and signature.rettypes[1]._tag == "Type.Nil" then
             -- A bare `return` in a nil-returning function means `return nil`.
             local nilexp = ast.ExpNil(node.loc)
             nilexp._type = types.Nil()
@@ -5400,9 +5613,9 @@ local checkstat_visitor = util.make_visitor({
         end
 
         local fixed = {}
-        for i, typ in ipairs(ftype.rettypes) do fixed[i] = typ end
+        for i, typ in ipairs(signature.rettypes) do fixed[i] = typ end
         local adjusted = adjust_explist(node.exps,
-            result_demand(fixed, ftype.flexrettype, {
+            result_demand(fixed, signature.flexrettype, {
                 term = "return",
                 loc = node.loc,
                 missing = "error",
@@ -5507,7 +5720,7 @@ local checkstat_visitor = util.make_visitor({
     ["Ast.StatIf"] = function(node, st, errors)
         local ret = true
         for _, thn in ipairs(node.thens) do
-            checkexp(thn.condition, st, errors, types.Boolean())
+            checkcondition(thn.condition, st, errors)
             ret = checkstat(thn.block, st, errors) and ret
         end
         if node.elsestat then
@@ -5545,14 +5758,20 @@ checkvar = util.make_visitor({
         local decl = st:find_symbol(node.name)
         if not decl then
             local alias = st:find_type_alias(node.name)
-            local namespace = alias and alias_namespace_type(
-                resolve_type_alias(alias, st, errors), st)
+            local resolved_alias = alias
+                and resolve_type_alias(alias, st, errors) or nil
+            local namespace = resolved_alias
+                and alias_namespace_type(resolved_alias, st)
             local interface = st.interface_declarations
                 and st.interface_declarations[node.name]
             if namespace then
                 node._alias_namespace = true
                 node._alias_decl = alias
                 node._type = namespace
+            elseif resolved_alias and types.is_direct_c(resolved_alias) then
+                node._ctype_namespace = true
+                node._alias_decl = alias
+                node._type = resolved_alias
             elseif interface then
                 node._type = invalid(errors, node.loc,
                     "interface '%s' is a type and has no runtime value",
@@ -5564,6 +5783,18 @@ checkvar = util.make_visitor({
         else
             node._decl = decl
             node._type = decl._type
+            if checker._foreign_function_depth > 0 then
+                local tag = decl._tag
+                local allowed = tag == "Ast.Decl"
+                    or tag == "Ast.TopLevelForeignFunc"
+                    or tag == "Ast.TopLevelForeignImport"
+                    or (tag == "Ast.TopLevelImport" and decl._source_import)
+                if not allowed then
+                    node._type = invalid(errors, node.loc,
+                        "ordinary Titan declaration '%s' is not visible inside a foreign function",
+                        node.name)
+                end
+            end
             -- Capture detection (single chokepoint). A local/param (`Ast.Decl`,
             -- which excludes top-level functions/vars and module members) used
             -- from a function nested deeper than where it was declared is
@@ -5815,6 +6046,38 @@ checkvar = util.make_visitor({
                 "trying to access a member of value of type '%s'",
                 types.tostring(ltype))
         end
+        if node._decl and node._decl._tag == "Type.CField"
+           and node._decl.flexible_array then
+            local resolved_base = c_resolve(ltype)
+            if resolved_base._tag == "Type.COwned"
+               and not resolved_base.count then
+                local owner = c_resolve(resolved_base.pointee)
+                if owner._tag == "Type.CStruct" and owner.has_fam then
+                    node._c_fam_access = {
+                        kind = "owned",
+                        field = node._decl,
+                    }
+                end
+            elseif node.exp._tag == "Ast.ExpVar"
+                   and node.exp.var._tag == "Ast.VarName" then
+                local root = node.exp.var._decl
+                local plan = root and root._c_allocation_plan
+                if plan and plan.storage == "automatic_fam" then
+                    node._c_fam_access = {
+                        kind = "automatic",
+                        field = node._decl,
+                        count = plan.fam_count_literal,
+                        root = root,
+                    }
+                end
+            end
+        end
+        if checker._foreign_function_depth > 0 and ltype._tag == "Type.Module"
+           and not checker._foreign_function_reference(node) then
+            node._type = invalid(errors, node.loc,
+                "ordinary Titan member '%s.%s' is not visible inside a foreign function",
+                ltype.name, node.name)
+        end
         if node._type and node._type._tag ~= "Type.Invalid" then
             local spelling_only = context
                 and node.exp._type._tag == "Type.CModule"
@@ -5832,7 +6095,16 @@ checkvar = util.make_visitor({
         checkexp(node.exp1, st, errors)
         node.exp1 = tryforce(node.exp1)
         local keystype, term
-        local celem, cterm, cerr = c_index_elem_type(node.exp1._type)
+        local fam_access = node.exp1._c_fam_access
+        local celem, cterm, cerr
+        if fam_access then
+            local array = c_resolve(fam_access.field.type)
+            celem, cterm = c_resolve(array.elem),
+                "flexible C array member indexing"
+            node._c_fam_access = fam_access
+        else
+            celem, cterm, cerr = c_index_elem_type(node.exp1._type)
+        end
         if node.exp1._type._tag == "Type.Array" then
             local elem = node.exp1._type.elem
             node._type = optionize(elem)
@@ -5857,7 +6129,15 @@ checkvar = util.make_visitor({
             term = "map indexing"
         elseif celem then
             node._type, term = celem, cterm
-            keystype = types.Integer()
+            if checker._foreign_function_depth > 0 then
+                local spelling = st.c_profile and st.c_profile.int or "int"
+                keystype = st.c_profile and st.c_profile.integers
+                    and st.c_profile.integers[spelling]
+                    and st.c_profile.integers[spelling].type
+                    or types.CInteger("int", true, 3, 32)
+            else
+                keystype = types.Integer()
+            end
         elseif cerr then
             node._type = invalid(errors, node.exp1.loc, cerr)
             return
@@ -6261,12 +6541,12 @@ local function named_function_metadata(node)
         return nil
     elseif decl._tag == "Ast.TopLevelFunc" then
         return decl._paramnames, "titan", false
+    elseif decl._tag == "Ast.TopLevelForeignFunc" then
+        return decl._paramnames, "foreign", true
     elseif decl._tag == "Type.StaticMethod" then
         return decl.paramnames, "titan", false
     elseif decl._tag == "Type.ModuleMember" and decl.type then
-        local foreign = var._tag == "Ast.VarDot"
-            and var.exp and var.exp._type
-            and var.exp._type._tag == "Type.CModule"
+        local foreign = checker._foreign_function_reference(var) ~= nil
         if decl.type._tag == "Type.Function" then
             return decl.paramnames, "titan", false
         elseif foreign and decl.type._tag == "Type.CFunction" then
@@ -6723,20 +7003,54 @@ checkexp = util.make_visitor({
         node._type = types.Nil()
     end,
 
-    ["Ast.ExpBool"] = function(node)
-        node._type = types.Boolean()
+    ["Ast.ExpBool"] = function(node, st)
+        if checker._foreign_function_depth > 0 then
+            node._type = st.c_profile and st.c_profile.integers
+                and st.c_profile.integers._Bool
+                and st.c_profile.integers._Bool.type
+                or types.CInteger("_Bool", false, 0, 8)
+            node._foreign_literal = true
+        else
+            node._type = types.Boolean()
+        end
     end,
 
-    ["Ast.ExpInteger"] = function(node)
-        node._type = types.Integer()
+    ["Ast.ExpInteger"] = function(node, st)
+        if checker._foreign_function_depth > 0 then
+            local spelling = st.c_profile and st.c_profile.int or "int"
+            node._type = st.c_profile and st.c_profile.integers
+                and st.c_profile.integers[spelling]
+                and st.c_profile.integers[spelling].type
+                or types.CInteger("int", true, 3, 32)
+            node._foreign_literal = true
+        else
+            node._type = types.Integer()
+        end
     end,
 
-    ["Ast.ExpFloat"] = function(node)
-        node._type = types.Float()
+    ["Ast.ExpFloat"] = function(node, st)
+        if checker._foreign_function_depth > 0 then
+            node._type = st.c_profile and st.c_profile.floats
+                and st.c_profile.floats.double
+                and st.c_profile.floats.double.type
+                or types.CFloat("double")
+            node._foreign_literal = true
+        else
+            node._type = types.Float()
+        end
     end,
 
-    ["Ast.ExpString"] = function(node)
-        node._type = types.String()
+    ["Ast.ExpString"] = function(node, st)
+        if checker._foreign_function_depth > 0 then
+            local char = st.c_profile and st.c_profile.integers
+                and st.c_profile.integers.char
+                and st.c_profile.integers.char.type
+                or types.CInteger("char", true, 1, 8)
+            node._type = types.CPointer(char, { "const" })
+            node._foreign_string_literal = true
+        else
+            node._type = types.String()
+        end
     end,
 
     ["Ast.ExpUnionInit"] = function(node, st, errors, _)
@@ -6994,11 +7308,14 @@ checkexp = util.make_visitor({
             -- there is no Titan closure or Lua-callable representation.
             local cfunc = c_resolve(texp)
             local var = node.var
-            if var._tag == "Ast.VarDot" and var.exp._type
-               and var.exp._type._tag == "Type.CModule"
+            local reference = checker._foreign_function_reference(var)
+            if reference
                and c_function_pointer_accepts_declaration(context, cfunc) then
                 node._type = context
-                node._foreign_function_pointer = var.name
+                node._foreign_function_reference = reference
+                if not reference.source then
+                    node._foreign_function_pointer = reference.name
+                end
             else
                 node._type = invalid(errors, node.loc,
                     "a foreign (C) function cannot be used as a first-class value")
@@ -7020,6 +7337,9 @@ checkexp = util.make_visitor({
                 kind, texp.name)
         else
             node._type = texp
+        end
+        if node.var._c_fam_access then
+            node._c_fam_access = node.var._c_fam_access
         end
     end,
 
@@ -7053,10 +7373,14 @@ checkexp = util.make_visitor({
             elseif texp._tag ~= "Type.Array"
                and texp._tag ~= "Type.Map"
                and texp._tag ~= "Type.String"
+               and not node.exp._c_fam_access
                and not has_c_length(texp) then
                 checker.typeerror(errors, loc,
                     "trying to take the length of a %s instead of an array, integer-keyed map, string, C array, or counted owned C array",
                     types.tostring(texp))
+            end
+            if node.exp._c_fam_access then
+                node._c_fam_access = node.exp._c_fam_access
             end
             node._type = types.Integer()
         elseif op == "-" then
@@ -7347,7 +7671,24 @@ checkexp = util.make_visitor({
                     check_call_argument_expressions(node.args, st, errors)
                     return
                 end
-                local alloc_err = c_allocation_error(pseudo_new.ctype, st)
+                local allocation_decl = demand and demand.allocation_decl
+                local allocation_target = allocation_decl
+                    and allocation_decl._type or nil
+                local resolved_payload = c_resolve(pseudo_new.ctype)
+                local literal_count = pseudo_new.array
+                    and checker._allocation_integer_literal(
+                        node.args.args[1]) or nil
+                local allow_automatic_array = pseudo_new.array
+                    and resolved_payload
+                    and resolved_payload._tag == "Type.CArray"
+                    and allocation_decl ~= nil
+                    and literal_count and literal_count > 0
+                    and (allocation_target == nil
+                         or allocation_target._tag == "Type.CArray"
+                         or checker._pointer_to_allocation_payload(
+                             allocation_target, pseudo_new.ctype))
+                local alloc_err = c_allocation_error(
+                    pseudo_new.ctype, st, allow_automatic_array)
                 if alloc_err then
                     node._type = invalid(errors, node.loc, alloc_err)
                     check_call_argument_expressions(node.args, st, errors)
@@ -7356,6 +7697,8 @@ checkexp = util.make_visitor({
                 annotate_call_arguments(node,
                     checkargs(pseudo_new, node.args.args, node.loc,
                         "function '" .. fname .. "'", st, errors, false))
+                checker._plan_c_allocation(
+                    node, pseudo_new, demand, st, errors)
                 annotate_call_results(node, pseudo_new, demand, errors)
                 return
             end
@@ -7365,11 +7708,13 @@ checkexp = util.make_visitor({
                 return
             end
 
-            local direct_cfunc = node.exp._tag == "Ast.ExpVar"
-                and is_foreign_function_var(node.exp.var)
+            local direct_foreign_reference = node.exp._tag == "Ast.ExpVar"
+                and checker._foreign_function_reference(node.exp.var) or nil
+            local direct_cfunc = direct_foreign_reference
                 and c_resolve(ftype) or nil
             if direct_cfunc
                and direct_cfunc._tag == "Type.CFunction" then
+                node._direct_foreign_reference = direct_foreign_reference
                 if not checker._ensure_c_enum_supported(
                         st, direct_cfunc, node.loc, errors) then
                     node._type = types.Invalid()
@@ -7963,20 +8308,24 @@ end
 function checkfuncbody(node, st, errors, opts)
     opts = opts or {}
     st:add_symbol("$function", node) -- for return type
+    local signature = assert(call_signature(node._type),
+        "function body lacks a callable signature")
     local frame = { depth = #func_stack + 1, captures = {}, capture_set = {} }
     table.insert(func_stack, frame)
-    local ldecl = ast.Decl(node.loc, "L", false, false)
-    ldecl._type = lua_state_pointer_type(st)
-    ldecl._funcdepth = #func_stack
-    ldecl._cvar = "L"
-    ldecl._readonly = true
-    st:add_symbol("L", ldecl)
-    local mdecl = ast.Decl(node.loc, "M", false, false)
-    mdecl._type = module_udata_pointer_type(st)
-    mdecl._funcdepth = #func_stack
-    mdecl._cvar = "_mod"
-    mdecl._readonly = true
-    st:add_symbol("M", mdecl)
+    if not opts.foreign then
+        local ldecl = ast.Decl(node.loc, "L", false, false)
+        ldecl._type = lua_state_pointer_type(st)
+        ldecl._funcdepth = #func_stack
+        ldecl._cvar = "L"
+        ldecl._readonly = true
+        st:add_symbol("L", ldecl)
+        local mdecl = ast.Decl(node.loc, "M", false, false)
+        mdecl._type = module_udata_pointer_type(st)
+        mdecl._funcdepth = #func_stack
+        mdecl._cvar = "_mod"
+        mdecl._readonly = true
+        st:add_symbol("M", mdecl)
+    end
     if opts.self_decl then
         -- `self` belongs to this function's own depth, so a lambda nested in a
         -- method captures it just like any other parameter.
@@ -7987,13 +8336,13 @@ function checkfuncbody(node, st, errors, opts)
     -- depth-stamped `$vararg` symbol. The depth (`#func_stack`, the frame just
     -- pushed) enforces scope rule 4: an inner lambda walking the symbol table
     -- finds this `$vararg` but rejects it because its stamped depth differs.
-    if node._type.varargtype then
+    if signature.varargtype then
         st:add_symbol("$vararg",
-            { elem = node._type.varargtype, funcdepth = #func_stack })
+            { elem = signature.varargtype, funcdepth = #func_stack })
     end
-    local ptypes = node._type.params
+    local ptypes = signature.params
     local pnames = {}
-    for i, rettype in ipairs(node._type.rettypes) do
+    for i, rettype in ipairs(signature.rettypes) do
         -- Report an invalid return type at the precise return-type node when one
         -- exists (top-level functions/methods); a lambda's `node.rettypes` may be
         -- `false` (inferred) or shorter, so fall back to the function location.
@@ -8010,14 +8359,17 @@ function checkfuncbody(node, st, errors, opts)
                 .. "pointer to its storage instead")
         end
     end
-    if node._type.flexrettype then
+    if signature.flexrettype then
         -- An explicit tail reports at its annotation; an inferred lambda tail
         -- reports at the lambda itself because the expected Type.Function no
         -- longer carries an AST source location.
         local floc = (node.flexrettype and node.flexrettype.loc) or node.loc
-        checktype(node._type.flexrettype, floc, errors)
-        node._type.flexrettype = check_varg_elem(
-            node._type.flexrettype, floc, errors, "return")
+        checktype(signature.flexrettype, floc, errors)
+        local checked = check_varg_elem(
+            signature.flexrettype, floc, errors, "return")
+        if node._type._tag == "Type.Function" then
+            node._type.flexrettype = checked
+        end
     end
     -- A lambda (Ast.ExpFunction) has no `name`; describe it generically in the
     -- duplicate-parameter diagnostic instead of printing "function 'nil'".
@@ -8050,7 +8402,7 @@ function checkfuncbody(node, st, errors, opts)
             end
         end
     end
-    annotate_lua_function_boundary(node)
+    if not opts.foreign then annotate_lua_function_boundary(node) end
     -- The error-handling context counters do not cross a function boundary: a
     -- lambda body starts fresh (a bare `raise`/`return`/`break` inside it is the
     -- lambda's own, not the enclosing catch/finally's). Save and reset to 0
@@ -8062,14 +8414,16 @@ function checkfuncbody(node, st, errors, opts)
         catch_depth, in_finally, finally_loop_floor, loop_depth, loop_frames
     catch_depth, in_finally, finally_loop_floor, loop_depth = 0, 0, 0, 0
     loop_frames = {}
+    if opts.foreign then checker._foreign_function_depth = checker._foreign_function_depth + 1 end
     local ret = st:with_block(checkstat, node.block, st, errors)
+    if opts.foreign then checker._foreign_function_depth = checker._foreign_function_depth - 1 end
     catch_depth, in_finally, finally_loop_floor, loop_depth =
         saved_catch, saved_in_finally, saved_floor, saved_loop
     loop_frames = saved_loop_frames
     -- A zero-return `() -> ()` function (empty rettypes) may fall off the end,
     -- exactly like a `nil`-returning one; only a function whose first declared
     -- return type is some non-`nil` value must not fall off the end.
-    local firstret = node._type.rettypes[1]
+    local firstret = signature.rettypes[1]
     if not ret and firstret and firstret._tag ~= "Type.Nil" then
         checker.typeerror(errors, node.loc,
             "function can return nil but return type is not nil")
@@ -8126,6 +8480,114 @@ local function check_user_value_slot_type(
     end
 end
 
+checker._foreign_forbidden_statements = {
+    ["Ast.StatForIn"] = "generic for loops",
+    ["Ast.StatCase"] = "case statements",
+    ["Ast.StatRaise"] = "raise statements",
+}
+
+checker._foreign_forbidden_expressions = {
+    ["Ast.ExpInitList"] = "Titan constructors",
+    ["Ast.ExpFunction"] = "anonymous functions",
+    ["Ast.ExpMethodRef"] = "bound methods",
+    ["Ast.ExpUnionInit"] = "Titan union constructors",
+    ["Ast.ExpDots"] = "variadic expressions",
+    ["Ast.ExpDotsIndex"] = "variadic expressions",
+    ["Ast.ExpDotsLen"] = "variadic expressions",
+    ["Ast.ExpConcat"] = "string concatenation",
+    ["Ast.ExpIs"] = "Titan type tests",
+}
+
+function checker._valid_foreign_local_type(typ)
+    local resolved = c_resolve(typ)
+    return typ and typ._tag ~= "Type.Invalid"
+       and types.is_direct_c(typ)
+       and resolved and resolved._tag ~= "Type.COwned"
+       and resolved._tag ~= "Type.CFunction"
+       and resolved._tag ~= "Type.CModule"
+       and resolved._tag ~= "Type.CVoid"
+end
+
+function checker._validate_foreign_body_node(node, errors, seen)
+    if type(node) ~= "table" or seen[node] then return end
+    seen[node] = true
+    local tag = node._tag
+    if type(tag) == "string" and tag:match("^Ast%.") then
+        local forbidden = checker._foreign_forbidden_statements[tag]
+            or checker._foreign_forbidden_expressions[tag]
+        if tag == "Ast.StatTry" then
+            forbidden = node._defer_tail and "defer statements"
+                or "catch/finally blocks"
+        end
+        if forbidden then
+            checker.typeerror(errors, node.loc,
+                "%s are not available inside a foreign function", forbidden)
+        elseif tag == "Ast.StatDecl" then
+            if #node.exps == 0 then
+                checker.typeerror(errors, node.loc,
+                    "a local declaration inside a foreign function requires an initializer")
+            end
+            for _, decl in ipairs(node.decls) do
+                if decl._type and decl._type._tag ~= "Type.Invalid"
+                   and not checker._valid_foreign_local_type(decl._type) then
+                    checker.typeerror(errors, decl.loc,
+                        "local variable '%s' inside a foreign function must have a direct C FFI type, not '%s'",
+                        decl.name, types.tostring(decl._type))
+                end
+            end
+        elseif tag == "Ast.StatReturn" and #node.exps > 1 then
+            checker.typeerror(errors, node.loc,
+                "a foreign function return statement can return at most one value")
+        elseif tag == "Ast.ExpCall" and node.exp and node.exp.var
+               and node.exp.var._decl
+               and node.exp.var._decl._tag == "Checker.CPseudoNew" then
+            checker.typeerror(errors, node.loc,
+                "C allocation pseudo-functions are not available inside a foreign function")
+        elseif tag == "Ast.ExpBinop"
+               and (node.op == ".." or node.op == "and" or node.op == "or") then
+            checker.typeerror(errors, node.loc,
+                "Titan operator '%s' is not available inside a foreign function",
+                node.op)
+        elseif tag == "Ast.ExpUnop" and node.op == "not" then
+            checker.typeerror(errors, node.loc,
+                "Titan operator 'not' is not available inside a foreign function")
+        elseif tag == "Ast.ExpCast" then
+            local source = node.exp and node.exp._type
+            local target = node._type
+            local literal = node.exp and (node.exp._tag == "Ast.ExpInteger"
+                or node.exp._tag == "Ast.ExpFloat"
+                or node.exp._tag == "Ast.ExpString"
+                or node.exp._tag == "Ast.ExpNil")
+            local nil_pointer = source and source._tag == "Type.Nil"
+                and target and c_resolve(target)
+                and c_resolve(target)._tag == "Type.CPointer"
+            if not (types.is_direct_c(source) and types.is_direct_c(target))
+               and not literal and not nil_pointer then
+                checker.typeerror(errors, node.loc,
+                    "casts between Titan values and C FFI values are not available inside a foreign function")
+            end
+        end
+    end
+    for key, value in pairs(node) do
+        if type(key) ~= "string" or key:sub(1, 1) ~= "_" then
+            if type(value) == "table" then
+                if value._tag then
+                    checker._validate_foreign_body_node(value, errors, seen)
+                else
+                    for _, child in ipairs(value) do
+                        checker._validate_foreign_body_node(child, errors, seen)
+                    end
+                end
+            end
+        end
+    end
+end
+
+function checker._checkforeignfunc(node, st, errors)
+    checkfuncbody(node, st, errors, { foreign = true })
+    checker._validate_foreign_body_node(node.block, errors, {})
+end
+
 -- Checks function bodies
 --   ast: AST for the whole module
 --   st: symbol table
@@ -8135,6 +8597,8 @@ local function checkbodies(ast, st, errors)
         if not node._ignore then
             if node._tag == "Ast.TopLevelFunc" then
                 st:with_block(checkfunc, node, st, errors)
+            elseif node._tag == "Ast.TopLevelForeignFunc" then
+                st:with_block(checker._checkforeignfunc, node, st, errors)
             elseif node._tag == "Ast.TopLevelMethod" then
                 st:with_block(checkmethod, node, st, errors)
             elseif node._tag == "Ast.TopLevelStatic" then
@@ -8325,6 +8789,7 @@ local function toplevel_name(node)
         -- Interfaces are likewise type-only declarations.
         return nil
     elseif tag == "Ast.TopLevelFunc" or
+           tag == "Ast.TopLevelForeignFunc" or
            tag == "Ast.TopLevelRecord" or
            tag == "Ast.TopLevelUnion" then
         return node.name
@@ -8350,6 +8815,14 @@ local toplevel_visitor = util.make_visitor({
                 and import_info.kind == "source"
                 and modtype._source == true
             if node._source_import then
+                for _, member in ipairs(modtype.source_members or {}) do
+                    if member._foreign_source then
+                        node._foreign_header = import_info.foreign_header
+                        node._foreign_header_for_check =
+                            import_info.foreign_header_for_check == true
+                        break
+                    end
+                end
                 -- Visibility is direct. C headers are not inherited as a
                 -- context: each source-only C type retains its own origin
                 -- header, and code generation adds that header only when it
@@ -8646,6 +9119,30 @@ local toplevel_visitor = util.make_visitor({
         node._type = types.Function(ptypes, rettypes, false, varargtype,
             flexrettype)
         node._paramnames = paramnames
+    end,
+
+    ["Ast.TopLevelForeignFunc"] = function(node, st, errors)
+        local argnodes = {}
+        local paramnames = {}
+        local varargtype = false
+        for _, param in ipairs(node.params) do
+            if param.name == false then
+                varargtype = param.type
+            else
+                argnodes[#argnodes + 1] = param.type
+                paramnames[#paramnames + 1] = param.name
+            end
+        end
+        node._type = checker._foreign_function_signature(
+            argnodes, node.rettypes, varargtype, node.flexrettype,
+            st, errors, "foreign function '" .. node.name .. "'")
+        node._foreign_module = st.modname
+        node._paramnames = paramnames
+        for index, param in ipairs(node.params) do
+            if param.name ~= false then
+                param._type = node._type.params[index]
+            end
+        end
     end,
 
     ["Ast.StatBlock"] = function(node)
@@ -9005,6 +9502,51 @@ local function collect_nominal_constructors(ast)
     return constructors
 end
 
+local function apply_source_foreign_headers(ast, st, errors)
+    local seen = {}
+    for _, node in ipairs(ast) do
+        local filename = node._tag == "Ast.TopLevelImport"
+            and node._source_import and node._foreign_header_for_check
+            and node._foreign_header or nil
+        if filename and not seen[filename] then
+            seen[filename] = true
+            local service, err = ensure_probe_service(st)
+            local ftypes, include
+            if service then
+                local options
+                options, err = service:cdriver_process_options()
+                if options then
+                    options.source_dir = st.source_dir
+                    ftypes, err, include =
+                        cdriver.process_file(filename, options)
+                end
+            end
+            if ftypes then
+                local normalized
+                normalized, err = cprobe.normalize_include_descriptor(include, {
+                    source_dir = st.source_dir,
+                })
+                if normalized then include = normalized else ftypes = nil end
+            end
+            if not ftypes then
+                checker.typeerror(errors, node.loc,
+                    "could not process source foreign header for module '%s': %s",
+                    node.modname, tostring(err))
+            else
+                st.foreign_includes[#st.foreign_includes + 1] = include
+                st.foreign_includes_version =
+                    st.foreign_includes_version + 1
+                st.module_probe = nil
+                st.module_probe_error = nil
+                st.module_probe_includes_version = nil
+                st.module_probe_error_includes_version = nil
+                st:apply_foreign_macro_changes(
+                    ftypes.macro_changes, ftypes.macro_definitions)
+            end
+        end
+    end
+end
+
 local function visit_toplevel(node, st, errors, loader)
     st.current_toplevel_order = node._toplevel_order
     toplevel_visitor(node, st, errors, loader)
@@ -9028,6 +9570,11 @@ local function checktoplevel(ast, st, errors, loader)
             visit_toplevel(node, st, errors, loader)
         end
     end
+    -- Generated C places direct-source foreign headers after this module's
+    -- direct C imports. Replay those headers in the same order before checking
+    -- aliases, declarations, initializers, or bodies so macro projections and
+    -- contextual probes see exactly the environment the C compiler will see.
+    apply_source_foreign_headers(ast, st, errors)
     finalize_foreign_redeclarations(st, errors)
 
     for _, node in ipairs(ast) do
@@ -9058,8 +9605,10 @@ local function checktoplevel(ast, st, errors, loader)
     for _, node in ipairs(ast) do
         if not node._ignore then
             local tag = node._tag
-            if tag == "Ast.TopLevelFunc" or node._module_initializer or
-               tag == "Ast.StatBlock" or tag == "Ast.StatTry" then
+            if tag == "Ast.TopLevelFunc"
+               or tag == "Ast.TopLevelForeignFunc"
+               or node._module_initializer
+               or tag == "Ast.StatBlock" or tag == "Ast.StatTry" then
                 visit_toplevel(node, st, errors, loader)
             end
         end
@@ -9452,6 +10001,11 @@ local function makemoduletype(modname, modast, st)
                 else
                     members[#members + 1] = member
                 end
+            elseif tag == "Ast.TopLevelForeignFunc" then
+                local member = types.ModuleMember(modname, tlnode.name,
+                    tlnode._type, tlnode._paramnames)
+                member._foreign_source = true
+                add_source_member(member)
             elseif tag == "Ast.TopLevelRecord"
                    or tag == "Ast.TopLevelUnion" then
                 local member = types.ModuleMember(
@@ -9602,6 +10156,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
         return nil, "you must pass a loader to import modules"
     end
     func_stack = {}
+    checker._foreign_function_depth = 0
     catch_depth = 0
     in_finally = 0
     finally_loop_floor = 0

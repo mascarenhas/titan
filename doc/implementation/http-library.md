@@ -20,8 +20,9 @@ titan/http/native.titan     private parser owner and callback event Array
 titan/http/server.titan     Request, Response, and per-connection serving
 ```
 
-The only HTTP-owned native boundary is the synchronous callback bridge in
-`titan/http/native/titan_httpshim.{c,h}`. It has no network or Task operation.
+The only HTTP-owned native boundary is the eight synchronous source
+`foreign function` callbacks in `titan/http/native.titan`. They have no network
+or Task operation.
 HTTP obtains every byte from the public `io.ReaderWriterCloser` view of either
 a `net.Connection` or an `ssl.Connection`, and writes through that same view.
 URL parsing calls the independent public `titan.url` module without an
@@ -30,22 +31,22 @@ HTTP-specific C bridge. The module neither imports nor changes `titan.uv`.
 ## Synchronous llhttp callback bridge
 
 llhttp invokes callbacks synchronously inside `llhttp_execute` and
-`llhttp_finish`, but a Titan closure is not a C function pointer. The private
-`titan_httpshim.{c,h}` boundary therefore follows the established `titan.uv`
-callback-owner protocol without introducing an asynchronous boundary.
+`llhttp_finish`. Ordinary Titan closures are not C function pointers, so
+`native.titan` defines the exact restricted source foreign entries and follows
+the same callback-owner protocol without introducing an asynchronous boundary.
 
 The Titan `Parser` record owns its `llhttp_t` and `llhttp_settings_t` as
 GC-managed foreign objects. Its first fields also hold the Lua state active for
 the current synchronous parse and one exact Titan closure for each registered
 llhttp callback: URL, status, header field, header value, header-value complete,
 headers complete, body, and message complete. `llhttp_t.data` points back to
-that Parser owner. Each correspondingly named C trampoline only recovers the
+that Parser owner. Each correspondingly named source callback recovers the
 owner and active Lua state, extracts the fixed closure's module and native
 entry, temporarily stack-roots the owner, invokes that exact generated Titan
 signature, and restores the previous stack top.
 
-The C boundary allocates no parser, event descriptor, arena, or copied byte
-storage. It has no execute, finish, reset, getter, event-accessor, pause-policy,
+The foreign-function boundary allocates no parser, event descriptor, arena, or
+copied byte storage. It has no execute, finish, reset, getter, event-accessor, pause-policy,
 or error-policy wrapper. There are no non-callback trampolines; Titan calls the
 ordinary llhttp API directly.
 
@@ -64,8 +65,8 @@ collect. `execute_input` therefore stack-roots the immutable input string for
 the entire execute, callback, consumed-suffix, and event-drain interval. The
 span pointers remain valid only during their individual synchronous callbacks,
 and no callback retains one. Both execute and finish first reserve Lua stack
-space for the trampoline's temporary owner root and the generated callback
-frame.
+space for the source foreign entry's temporary owner root and the generated
+callback frame.
 
 ## Pausing and streaming ownership
 
@@ -267,18 +268,18 @@ connection-local watchdog or generation protocol.
 
 The build pins llhttp 9.4.3 and verifies its source tarball. The three generated
 sources `llhttp.c`, `http.c`, and `api.c` compile as hidden PIC objects in a
-private deterministic `libtitan-llhttp.a`; the adapter is a separate
-`titan_httpshim.o`. Both are metadata-free standard-provider payload and are
-force-carried into the DSO and flattened into the static provider. There is no
+private deterministic `libtitan-llhttp.a`. Its three objects are the complete
+metadata-free llhttp payload force-carried into the DSO and flattened into the
+static provider; there is no adapter object. There is no
 system-llhttp mode, and neither the private archive nor headers are installed
 as runtime-SDK files.
 
 The HTTP root adds one logical protocol, archive key, generated shim, and
 `luaopen_titan_http`. The later addition of the independent `titan.test` module
 makes the coordinated current image eighteen logical modules and shims with
-nineteen DSO openers including bare `luaopen_titan` support. ABI 0.22 publishes that
-complete image in its own namespace; it neither recognizes ABI 0.21 as a
-publication predecessor nor removes the preserved prior-version provider.
+nineteen DSO openers including bare `luaopen_titan` support. ABI 0.23 retains that complete image in its own namespace; it neither
+recognizes ABI 0.22 as a publication predecessor nor removes the preserved
+prior-version provider.
 
 Focused standard-library tests run outside LuaCov. They fragment protocol
 input down to individual bytes, exercise fixed/chunked/EOF bodies, duplicate

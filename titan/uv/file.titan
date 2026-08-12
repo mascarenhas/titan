@@ -77,6 +77,20 @@ local record uv_fs_t
   local callback: (uv_fs_t) -> ()
 end
 
+foreign function uv_fs_cb(req: *libuv.uv_fs_t)
+  local owner = libuv.uv_req_get_data(
+      req as *libuv.uv_req_t) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local L = libuv.uv_loop_get_data(req.loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvNoargCallbackEntry
+  local top = lua.lua_gettop(L)
+  ffi.titan_ffi_pushudata(L, owner)
+  entry(L, module, callback, owner)
+  lua.lua_settop(L, top)
+end
+
 local type FsResult = (Task, uv_fs_t, integer, value) -> value
 
 local function fs_open_flags(mode: string): integer
@@ -111,7 +125,7 @@ end
 -- local no-descriptor sentinel used by deferred cleanup after ownership moves.
 local function close_descriptor(descriptor: libuv.uv_file): integer
   if descriptor < 0 then return 0 end
-  local request: libuv.uv_fs_t
+  local request = libuv.uv_fs_t.new()
   local status = libuv.uv_fs_close(nil, request, descriptor, nil)
   libuv.uv_fs_req_cleanup(request)
   return status
@@ -122,7 +136,7 @@ local function new_fs_request(task: Task,
                               keepalive: value,
                               success: FsResult): uv_fs_t
   accepting_work(task.runtime, operation)
-  local native = libuv.uv_fs_t.new()
+  local native: owned *libuv.uv_fs_t = libuv.uv_fs_t.new()
   local callback = function (owner: uv_fs_t)
     local result = libuv.uv_fs_get_result(owner.handle) as integer
     complete_fs(task, owner, result, operation, keepalive, success)
@@ -172,7 +186,7 @@ local function list_result(task: Task, owner: uv_fs_t,
                            result: integer,
                            keepalive: value): value
   local names: {string} = {}
-  local entry: libuv.uv_dirent_t
+  local entry = libuv.uv_dirent_t.new()
   while true do
     local status = libuv.uv_fs_scandir_next(owner.handle, entry)
     if status == libuv.UV_EOF then break end
@@ -252,14 +266,14 @@ local function FsOpenCall:dispatch(task: Task): Immediate?
     path = self.path,
     flags = self.flags as ffi.titan_ffi_int,
     mode = 438 as ffi.titan_ffi_int,
-    cb = shim.titan_uvshim_fs_cb,
+    cb = uv_fs_cb,
   }
   return submitted_fs_request(task, owner, status, "fs.open")
 end
 
 local function FsReadCall:dispatch(task: Task): Immediate?
   local bytes = ffi.titan_ffi_char.new_array(self.maximum)
-  local descriptor: libuv.uv_buf_t
+  local descriptor = libuv.uv_buf_t.new()
   descriptor.base = bytes
   descriptor.len = self.maximum as libuv.size_t
   local owner = new_fs_request(
@@ -271,13 +285,13 @@ local function FsReadCall:dispatch(task: Task): Immediate?
     bufs = descriptor,
     nbufs = 1,
     offset = -1,
-    cb = shim.titan_uvshim_fs_cb,
+    cb = uv_fs_cb,
   }
   return submitted_fs_request(task, owner, status, "fs.read")
 end
 
 local function FsWriteCall:dispatch(task: Task): Immediate?
-  local descriptor: libuv.uv_buf_t
+  local descriptor = libuv.uv_buf_t.new()
   local base: *ffi.titan_ffi_char = self.data
   descriptor.base = base + self.offset
   descriptor.len = (#self.data - self.offset) as libuv.size_t
@@ -290,7 +304,7 @@ local function FsWriteCall:dispatch(task: Task): Immediate?
     bufs = descriptor,
     nbufs = 1,
     offset = -1,
-    cb = shim.titan_uvshim_fs_cb,
+    cb = uv_fs_cb,
   }
   return submitted_fs_request(task, owner, status, "fs.write")
 end
@@ -299,7 +313,7 @@ local function FsFlushCall:dispatch(task: Task): Immediate?
   local owner = new_fs_request(task, "fs.flush", nil, unit_result)
   local status = libuv.uv_fs_fsync(task.runtime.loop, owner.handle,
                                   self.file,
-                                  shim.titan_uvshim_fs_cb)
+                                  uv_fs_cb)
   return submitted_fs_request(task, owner, status, "fs.flush")
 end
 
@@ -307,7 +321,7 @@ local function FsCloseCall:dispatch(task: Task): Immediate?
   local owner = new_fs_request(task, "fs.close", nil, unit_result)
   local status = libuv.uv_fs_close(task.runtime.loop, owner.handle,
                                   self.file,
-                                  shim.titan_uvshim_fs_cb)
+                                  uv_fs_cb)
   local immediate? = submitted_fs_request(
       task, owner, status, "fs.close")
   if not immediate then self.accepted = true end
@@ -318,7 +332,7 @@ local function FsStatCall:dispatch(task: Task): Immediate?
   local owner = new_fs_request(task, "fs.stat", nil, stat_result)
   local status = libuv.uv_fs_stat(task.runtime.loop, owner.handle,
                                  self.path,
-                                 shim.titan_uvshim_fs_cb)
+                                 uv_fs_cb)
   return submitted_fs_request(task, owner, status, "fs.stat")
 end
 
@@ -326,7 +340,7 @@ local function FsLstatCall:dispatch(task: Task): Immediate?
   local owner = new_fs_request(task, "fs.lstat", nil, stat_result)
   local status = libuv.uv_fs_lstat(task.runtime.loop, owner.handle,
                                   self.path,
-                                  shim.titan_uvshim_fs_cb)
+                                  uv_fs_cb)
   return submitted_fs_request(task, owner, status, "fs.lstat")
 end
 
@@ -335,7 +349,7 @@ local function FsTmpnameCall:dispatch(task: Task): Immediate?
       task, "fs.tmpname", nil, tmpname_result)
   local status = libuv.uv_fs_mkstemp(task.runtime.loop, owner.handle,
                                     self.path,
-                                    shim.titan_uvshim_fs_cb)
+                                    uv_fs_cb)
   return submitted_fs_request(task, owner, status, "fs.tmpname")
 end
 
@@ -346,7 +360,7 @@ local function FsMkdirCall:dispatch(task: Task): Immediate?
     req = owner.handle,
     path = self.path,
     mode = 511 as ffi.titan_ffi_int,
-    cb = shim.titan_uvshim_fs_cb,
+    cb = uv_fs_cb,
   }
   return submitted_fs_request(task, owner, status, "fs.mkdir")
 end
@@ -355,7 +369,7 @@ local function FsUnlinkCall:dispatch(task: Task): Immediate?
   local owner = new_fs_request(task, "fs.unlink", nil, unit_result)
   local status = libuv.uv_fs_unlink(task.runtime.loop, owner.handle,
                                    self.path,
-                                   shim.titan_uvshim_fs_cb)
+                                   uv_fs_cb)
   return submitted_fs_request(task, owner, status, "fs.unlink")
 end
 
@@ -363,7 +377,7 @@ local function FsRmdirCall:dispatch(task: Task): Immediate?
   local owner = new_fs_request(task, "fs.rmdir", nil, unit_result)
   local status = libuv.uv_fs_rmdir(task.runtime.loop, owner.handle,
                                   self.path,
-                                  shim.titan_uvshim_fs_cb)
+                                  uv_fs_cb)
   return submitted_fs_request(task, owner, status, "fs.rmdir")
 end
 
@@ -371,7 +385,7 @@ local function FsRenameCall:dispatch(task: Task): Immediate?
   local owner = new_fs_request(task, "fs.rename", nil, unit_result)
   local status = libuv.uv_fs_rename(task.runtime.loop, owner.handle,
                                    self.from, self.to,
-                                   shim.titan_uvshim_fs_cb)
+                                   uv_fs_cb)
   return submitted_fs_request(task, owner, status, "fs.rename")
 end
 
@@ -382,7 +396,7 @@ local function FsListCall:dispatch(task: Task): Immediate?
     req = owner.handle,
     path = self.path,
     flags = 0,
-    cb = shim.titan_uvshim_fs_cb,
+    cb = uv_fs_cb,
   }
   return submitted_fs_request(task, owner, status, "fs.list")
 end

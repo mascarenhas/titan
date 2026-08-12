@@ -475,9 +475,9 @@ unchanged.
 
 An installed compiler links `<root>/lib/libtitan.a`; compiler development
 directly from the repository lazily rebuilds and links
-`titan-runtime/libtitan.a`. Both archives contain exactly `titan.o`,
-`titan_coro.o`, and `titan_uv.o`; neither driver mode links `titan.o`
-directly. Vendored `libbacktrace.a` and the matching `liblua.a` remain separate
+`titan-runtime/libtitan.a`. Both archives contain exactly `titan.o` and `titan_coro.o`; source-defined
+foreign callbacks live in their generated module objects, and neither driver
+mode links `titan.o` directly. Vendored `libbacktrace.a` and the matching `liblua.a` remain separate
 link inputs. The native Lua support entry is compiled from `titanlib.c`: a
 private support-only bootstrap enables installation, while the canonical
 installed provider pair carries that entry together with the standard logical
@@ -503,8 +503,8 @@ the structure of the generated C is in
   directory, as described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of plain directories taken from
-  `TITAN_PATH_0_22`, or `TITAN_PATH` if that is unset. Otherwise the default
-  is `.;<root>/lib/titan/0.22`. An installed `titanc` recovers `<root>` from
+  `TITAN_PATH_0_23`, or `TITAN_PATH` if that is unset. Otherwise the default
+  is `.;<root>/lib/titan/0.23`. An installed `titanc` recovers `<root>` from
   the first literal `package.cpath` entry ending in
   `/lib/lua/5.5/?.so`. For logical `a.b.c`, the default performs a complete
   pass over `a.so`, `a/b.so`, and exact `a/b/c.so`, then a complete pass over
@@ -553,14 +553,14 @@ Lua's `require`, for its part, finds a generated logical loader through
 `package.cpath`, loads it globally, and invokes the module's exact
 `luaopen_*` entry (see [Requiring a Titan
 module](lua-interop.md#requiring-a-titan-module)). Titan's installed Lua
-default includes `<root>/lib/titan/0.22/?.so` and the standard loader root.
+default includes `<root>/lib/titan/0.23/?.so` and the standard loader root.
 A qualified standard name such as `titan.os` therefore runs
 `<root>/share/lua/5.5/titan/os.lua`, which opens the canonical DSO
-`<root>/lib/titan/0.22/titan.so`. Default Titan imports select that same
+`<root>/lib/titan/0.23/titan.so`. Default Titan imports select that same
 physical file by validating the `titan.os` callable metadata; `--static`
 prefers the paired self-describing `titan.a`. Installation creates no child
 DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
-ABI 0.22 does not migrate or clean up a separately installed 0.21 provider;
+ABI 0.23 does not migrate or clean up a separately installed 0.22 provider;
 that versioned directory remains preserved prior-version state and is not on
 the active default path.
 
@@ -654,7 +654,7 @@ dynamic. Qualified standard-library dependencies therefore use the installed
 `titan.so` by default, while `--static` prefers `titan.a`.
 After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
-`<root>/lib/titan/0.22/?.so` if it is absent, and initializes the Titan module
+`<root>/lib/titan/0.23/?.so` if it is absent, and initializes the Titan module
 path from that same root. Deploy the standard provider and loaders as described
 under [where modules are found](#where-modules-are-found). `args[1]` onward
 contain only the user-supplied arguments; index 0 is absent and the executable
@@ -721,11 +721,11 @@ Titan's configured search paths with:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.22/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.23/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
 The ordinary `/lib/lua/5.5/?.so` template is Titan's root-discovery anchor. If
 it is omitted, also set
-`TITAN_PATH_0_22="$ROCKS_TREE/lib/titan/0.22"`. Titan still targets the exact
+`TITAN_PATH_0_23="$ROCKS_TREE/lib/titan/0.23"`. Titan still targets the exact
 Lua 5.5 runtime ABI and internals; using the stock loader does not make a module
 compatible with another Lua version or configuration.

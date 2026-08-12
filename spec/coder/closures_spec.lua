@@ -780,11 +780,11 @@ describe("closures (end-to-end)", function()
             end
         ]])
         local declaration = assert(csrc:find(
-            "TValue test_bind_titan(", 1, true))
+            "TValue test_\\u2133_bind_titan(", 1, true))
         local first = assert(csrc:find(
-            "TValue test_bind_titan(", declaration + 1, true))
+            "TValue test_\\u2133_bind_titan(", declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_bind_titanentry_lua", first, true))
+            "static int test_\\u2133_bind_titanentry_lua", first, true))
         local body = csrc:sub(first, last - 1)
         local ensure = assert(body:find(
             "titan_ensure_stack(L, 6);", 1, true))
@@ -805,12 +805,12 @@ describe("closures (end-to-end)", function()
             and upvalue < allocation and allocation < root)
 
         local call_declaration = assert(csrc:find(
-            "lua_Integer test_call_titan(", 1, true))
+            "lua_Integer test_\\u2133_call_titan(", 1, true))
         local call_first = assert(csrc:find(
-            "lua_Integer test_call_titan(",
+            "lua_Integer test_\\u2133_call_titan(",
             call_declaration + 1, true))
         local call_last = assert(csrc:find(
-            "static int test_call_titanentry_lua", call_first, true))
+            "static int test_\\u2133_call_titanentry_lua", call_first, true))
         local call_body = csrc:sub(call_first, call_last - 1)
         local freeze = assert(call_body:find(
             "= _param_value_;", 1, true))

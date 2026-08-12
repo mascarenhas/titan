@@ -95,7 +95,8 @@ describe("unsafe C object-pointer conversion code generation", function()
                 local c = foreign import "]] .. header .. [["
 
                 function arrays(): integer
-                    local local_sources: c.ffi_source[2]
+                    local local_sources: c.ffi_source[2] =
+                        c.ffi_source.new_array(2)
                     return c.ffi_read_target(c.ffi_sources) as integer
                         + c.ffi_read_target(local_sources) as integer
                         + c.ffi_read_const(c.ffi_const_values) as integer
@@ -378,8 +379,8 @@ describe("unsafe C object-pointer conversion code generation", function()
                     end
 
                     local function direct(): integer
-                        local tcp: c.uv_tcp_t
-                        local fs: c.uv_fs_t
+                        local tcp = c.uv_tcp_t.new()
+                        local fs = c.uv_fs_t.new()
                         c.uv_close(tcp, nil)
                         return c.uv_cancel(fs) as integer
                     end

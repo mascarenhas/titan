@@ -88,9 +88,10 @@ The paired `titan.so`/`titan.a` therefore contains eighteen logical protocols
 and eighteen archive metadata keys. The DSO exposes nineteen Lua openers: bare
 `luaopen_titan` support plus one entry per logical module. The provider's
 metadata-free payload begins with `titanlib.o`, then the private
-`libtitan-lpeglabel.a`, then the selected libuv payload, private HTTP adapter
-and llhttp archive, and the selected OpenSSL payload used directly by
-`titan.ssl`.
+`libtitan-lpeglabel.a`, then the selected libuv payload, private llhttp
+archive, and the selected OpenSSL payload used directly by `titan.ssl`. The
+source-defined HTTP foreign callbacks live in the generated logical-module
+object and require no adapter payload.
 Those native inputs have no Titan metadata keys and their private
 archives/headers are not installed in the compiler SDK.
 

@@ -1,5 +1,6 @@
 local h = require "spec.support.helpers"
 local installed_prefix = require "spec.support.installed_prefix"
+local coder = require "titan-compiler.coder"
 
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
@@ -131,8 +132,18 @@ describe("named C tag code generation", function()
         h.with_libuv_feature_flags(function()
             local csrc, ast = h.compile_and_read_c([[
                 local libuv = foreign import "uv.h"
-                local shim = foreign import "titan/uv.h"
                 local ffi = foreign import "titan/ffi.h"
+
+                foreign function dns_callback(
+                    request: *libuv.uv_getaddrinfo_t,
+                    status: ffi.titan_ffi_int,
+                    result: *libuv.addrinfo): ()
+                end
+
+                foreign function connect_callback(
+                    request: *libuv.uv_connect_t,
+                    status: ffi.titan_ffi_int): ()
+                end
 
                 local function dns_shape(
                     loop: *libuv.uv_loop_t,
@@ -141,10 +152,11 @@ describe("named C tag code generation", function()
                     tcp: *libuv.uv_tcp_t,
                     node: const *ffi.titan_ffi_char):
                     (ffi.titan_ffi_int, ffi.titan_ffi_int)
-                    local service: ffi.titan_ffi_char[6]
-                    local hints: libuv.addrinfo
-                    local address: libuv.sockaddr
-                    local storage: libuv.sockaddr_storage
+                    local service: ffi.titan_ffi_char[6] =
+                        ffi.titan_ffi_char.new_array(6)
+                    local hints = libuv.addrinfo.new()
+                    local address = libuv.sockaddr.new()
+                    local storage = libuv.sockaddr_storage.new()
                     hints.ai_family = libuv.AF_UNSPEC
                     hints.ai_socktype = libuv.SOCK_STREAM
                     hints.ai_protocol = libuv.IPPROTO_TCP
@@ -153,13 +165,11 @@ describe("named C tag code generation", function()
                         address.sa_family = 0
                     end
                     local dns_status = libuv.uv_getaddrinfo(
-                        loop, dns, shim.titan_uvshim_getaddrinfo_cb,
-                        node, service, hints)
+                        loop, dns, dns_callback, node, service, hints)
                     local generic =
                         storage as const *libuv.sockaddr
                     local connect_status = libuv.uv_tcp_connect(
-                        connect, tcp, generic,
-                        shim.titan_uvshim_connect_cb)
+                        connect, tcp, generic, connect_callback)
                     return dns_status, connect_status
                 end
             ]])
@@ -186,8 +196,8 @@ describe("named C tag code generation", function()
             for _, spelling in ipairs({
                 "AF_UNSPEC", "AF_INET", "AF_INET6", "SOCK_STREAM",
                 "IPPROTO_TCP", "AI_NUMERICSERV",
-                "titan_uvshim_getaddrinfo_cb",
-                "titan_uvshim_connect_cb",
+                coder._foreign_func_name("test", "dns_callback"),
+                coder._foreign_func_name("test", "connect_callback"),
                 "uv_getaddrinfo(", "uv_tcp_connect(",
             }) do
                 assert.matches(spelling, csrc, 1, true)

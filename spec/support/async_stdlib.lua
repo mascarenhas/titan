@@ -64,7 +64,7 @@ local function find_standard_layout()
     local prefix = os.getenv("PREFIX")
     if prefix and prefix ~= "" then
         layouts[#layouts + 1] = production_layout(
-            prefix .. "/lib/titan/0.22", prefix .. "/share/lua/5.5")
+            prefix .. "/lib/titan/0.23", prefix .. "/share/lua/5.5")
     end
 
     -- Discover the two owners independently. The supported installation puts
@@ -79,7 +79,7 @@ local function find_standard_layout()
         installed_shim:match("^(.*)/titan/coroutine%.lua$")
     if installed_abi_root and installed_shim_root then
         layouts[#layouts + 1] = production_layout(
-            installed_abi_root .. "/lib/titan/0.22", installed_shim_root)
+            installed_abi_root .. "/lib/titan/0.23", installed_shim_root)
     end
 
     layouts[#layouts + 1] = production_layout(REPO, REPO)
@@ -267,7 +267,7 @@ function M.compile(workspace, modname, options)
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
-        "TITAN_PATH_0_22=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_23=" .. quote(layout.abi_root),
         "TITAN_PATH=",
     }
     if options.cppflags then
@@ -323,7 +323,7 @@ function M.compile_bundle(workspace, roots, options)
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
-        "TITAN_PATH_0_22=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_23=" .. quote(layout.abi_root),
         "TITAN_PATH=",
     }
     if options.cppflags and #options.cppflags > 0 then
@@ -469,7 +469,7 @@ function M.run_lua_source(workspace, source, options)
     local command = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-        "TITAN_PATH_0_22=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_23=" .. quote(layout.abi_root),
         "TITAN_PATH=",
         "LUA_PATH=" .. quote(lua_path),
         "LUA_PATH_5_5=" .. quote(lua_path),
@@ -497,7 +497,7 @@ local function app_command(workspace, modname)
     end
     return "env -u LUA_PATH -u LUA_CPATH" ..
         " -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
-        " TITAN_PATH_0_22=" .. quote(layout.abi_root) .. " " ..
+        " TITAN_PATH_0_23=" .. quote(layout.abi_root) .. " " ..
         "TITAN_PATH= " .. quote(workspace .. "/" .. program_output)
 end
 

@@ -796,7 +796,7 @@ callee:
 ```c
 TString* _tmp_1 = 0;                /* paired with _tmp_1_slot */
 lua_Integer _tmp_2 = 0;
-_tmp_2 = test_two_titan(L, _mod, NULL, &_tmp_1);
+_tmp_2 = test_\u2133_two_titan(L, _mod, NULL, &_tmp_1);
 setsvalue(L, _tmp_1_slot, _tmp_1);  /* re-anchor the GC-able result */
 ```
 

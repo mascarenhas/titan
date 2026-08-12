@@ -414,7 +414,6 @@ The standard provider's metadata-free `-X` payload has this order:
 titanlib.o
 libtitan-lpeglabel.a
 [bundled libuv.a]
-titan_httpshim.o
 libtitan-llhttp.a
 [bundled OpenSSL libssl.a + libcrypto.a]
 ```

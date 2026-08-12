@@ -123,30 +123,30 @@ describe("dense Array code generation and boundaries", function()
         ]])
 
         assert.match(
-            "Table%* test_exact_titan%(lua_State %*L, Udata %*_mod, " ..
+            "Table%* test_\\u2133_exact_titan%(lua_State %*L, Udata %*_mod, " ..
             "CClosure %*_fn, Table%* _param_a%)", csrc)
         assert.match("TitanVargArrayOrMap %*_varargs", csrc)
         assert.not_match(
-            "Udata %*test_exact_titan%(lua_State", csrc)
+            "Udata %*test_\\u2133_exact_titan%(lua_State", csrc)
 
         local exact = generated_function(
-            csrc, "test_exact_titan(lua_State *L")
+            csrc, "test_\\u2133_exact_titan(lua_State *L")
         local exact_entry = generated_function(
-            csrc, "test_exact_titanentry_lua(lua_State *L")
+            csrc, "test_\\u2133_exact_titanentry_lua(lua_State *L")
         local first_entry = generated_function(
-            csrc, "test_first_titanentry_lua(lua_State *L")
+            csrc, "test_\\u2133_first_titanentry_lua(lua_State *L")
         local length = generated_function(
-            csrc, "test_length_titan(lua_State *L")
+            csrc, "test_\\u2133_length_titan(lua_State *L")
         local mutate = generated_function(
-            csrc, "test_mutate_value_titan(lua_State *L")
+            csrc, "test_\\u2133_mutate_value_titan(lua_State *L")
         local holder_new = generated_function(
             csrc, "test_Holder_new_titanstatic(lua_State *L")
         local as_value = generated_function(
-            csrc, "test_as_value_titan(lua_State *L")
+            csrc, "test_\\u2133_as_value_titan(lua_State *L")
         local map_value = generated_function(
-            csrc, "test_map_value_titan(lua_State *L")
+            csrc, "test_\\u2133_map_value_titan(lua_State *L")
         local nested = generated_function(
-            csrc, "test_nested_titan(lua_State *L")
+            csrc, "test_\\u2133_nested_titan(lua_State *L")
 
         -- Exact and compiler-owned typed slots retain raw backing Tables.
         assert.match("sethvalue", exact)
@@ -232,9 +232,9 @@ describe("dense Array code generation and boundaries", function()
         ]]
         local csrc = generate(source)
         local fixed = generated_function(
-            csrc, "test_fixed_titan(lua_State *L")
+            csrc, "test_\\u2133_fixed_titan(lua_State *L")
         local opened = generated_function(
-            csrc, "test_opened_titan(lua_State *L")
+            csrc, "test_\\u2133_opened_titan(lua_State *L")
         local fixed_flat = fixed:gsub("%s+", " ")
         local opened_flat = opened:gsub("%s+", " ")
         local backscan =
@@ -359,11 +359,11 @@ describe("dense Array code generation and boundaries", function()
                 ", &_mod%->uv%[(%d+)%]%.uv%)$"))
         end
         assert.equal(
-            constructor_writer("test_ints_one_titan(lua_State *L"),
-            constructor_writer("test_ints_two_titan(lua_State *L"))
+            constructor_writer("test_\\u2133_ints_one_titan(lua_State *L"),
+            constructor_writer("test_\\u2133_ints_two_titan(lua_State *L"))
         assert.not_equal(
-            constructor_writer("test_ints_one_titan(lua_State *L"),
-            constructor_writer("test_values_titan(lua_State *L"))
+            constructor_writer("test_\\u2133_ints_one_titan(lua_State *L"),
+            constructor_writer("test_\\u2133_values_titan(lua_State *L"))
     end)
 
     it("applies carried writers only at genuine Lua Array writes", function()
@@ -937,41 +937,41 @@ describe("dense Array code generation and boundaries", function()
 
         local csrc = generate(source)
         local array_variadic = generated_function(
-            csrc, "test_array_variadic_titan(lua_State *L")
+            csrc, "test_\\u2133_array_variadic_titan(lua_State *L")
         local map_variadic = generated_function(
-            csrc, "test_map_variadic_titan(lua_State *L")
+            csrc, "test_\\u2133_map_variadic_titan(lua_State *L")
         local option_variadic = generated_function(
-            csrc, "test_option_variadic_titan(lua_State *L")
+            csrc, "test_\\u2133_option_variadic_titan(lua_State *L")
         local array_variadic_entry = generated_function(
-            csrc, "test_array_variadic_titanentry_lua(lua_State *L")
+            csrc, "test_\\u2133_array_variadic_titanentry_lua(lua_State *L")
         local map_variadic_entry = generated_function(
-            csrc, "test_map_variadic_titanentry_lua(lua_State *L")
+            csrc, "test_\\u2133_map_variadic_titanentry_lua(lua_State *L")
         local option_variadic_entry = generated_function(
-            csrc, "test_option_variadic_titanentry_lua(lua_State *L")
+            csrc, "test_\\u2133_option_variadic_titanentry_lua(lua_State *L")
         local array_flexible = generated_function(
-            csrc, "test_array_flexible_titan(lua_State *L")
+            csrc, "test_\\u2133_array_flexible_titan(lua_State *L")
         local map_flexible = generated_function(
-            csrc, "test_map_flexible_titan(lua_State *L")
+            csrc, "test_\\u2133_map_flexible_titan(lua_State *L")
         local option_flexible = generated_function(
-            csrc, "test_option_flexible_titan(lua_State *L")
+            csrc, "test_\\u2133_option_flexible_titan(lua_State *L")
         local array_flexible_entry = generated_function(
-            csrc, "test_array_flexible_titanentry_lua(lua_State *L")
+            csrc, "test_\\u2133_array_flexible_titanentry_lua(lua_State *L")
         local map_flexible_entry = generated_function(
-            csrc, "test_map_flexible_titanentry_lua(lua_State *L")
+            csrc, "test_\\u2133_map_flexible_titanentry_lua(lua_State *L")
         local option_flexible_entry = generated_function(
-            csrc, "test_option_flexible_titanentry_lua(lua_State *L")
+            csrc, "test_\\u2133_option_flexible_titanentry_lua(lua_State *L")
         local call_array_variadic = generated_function(
-            csrc, "test_call_array_variadic_titan(lua_State *L")
+            csrc, "test_\\u2133_call_array_variadic_titan(lua_State *L")
         local call_map_variadic = generated_function(
-            csrc, "test_call_map_variadic_titan(lua_State *L")
+            csrc, "test_\\u2133_call_map_variadic_titan(lua_State *L")
         local call_option_variadic = generated_function(
-            csrc, "test_call_option_variadic_titan(lua_State *L")
+            csrc, "test_\\u2133_call_option_variadic_titan(lua_State *L")
         local call_array_flexible = generated_function(
-            csrc, "test_call_array_flexible_titan(lua_State *L")
+            csrc, "test_\\u2133_call_array_flexible_titan(lua_State *L")
         local call_map_flexible = generated_function(
-            csrc, "test_call_map_flexible_titan(lua_State *L")
+            csrc, "test_\\u2133_call_map_flexible_titan(lua_State *L")
         local call_option_flexible = generated_function(
-            csrc, "test_call_option_flexible_titan(lua_State *L")
+            csrc, "test_\\u2133_call_option_flexible_titan(lua_State *L")
 
         -- Array and Map deliberately share Table ** exact descriptors.
         assert.match("TitanVargArrayOrMap %*_varargs", array_variadic)

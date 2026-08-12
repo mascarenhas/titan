@@ -927,7 +927,7 @@ end
         local ok, err =
             driver.validate_provider_output_paths(public_dso, {})
         assert.falsy(ok)
-        assert.match("nonregular native provider path", err, 1, true)
+        assert.match("not a regular nonlink file", err, 1, true)
         remove_tree(public_archive)
 
         write_file(public_dso, "selected dynamic input")
@@ -950,6 +950,29 @@ end
             })
         assert.falsy(ok)
         assert.match("aliases input", err, 1, true)
+
+        local header = workspace .. "/module.titan.h"
+        ok, err = driver.validate_provider_output_paths(
+            workspace .. "/generated.so", {}, {
+                { path = workspace .. "/generated.so", owner = "header" },
+            })
+        assert.falsy(ok)
+        assert.match("aliases output", err, 1, true)
+
+        ok, err = driver.validate_provider_output_paths(
+            workspace .. "/generated.so", { header }, {
+                { path = header, owner = "header" },
+            })
+        assert.falsy(ok)
+        assert.match("aliases input", err, 1, true)
+
+        ok, err = driver.validate_provider_output_paths(
+            workspace .. "/generated.so", {}, {
+                { path = header, owner = "header one" },
+                { path = header, owner = "header two" },
+            })
+        assert.falsy(ok)
+        assert.match("aliases output", err, 1, true)
     end)
 
     it("rechecks planned shim ownership at publication", function()

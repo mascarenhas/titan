@@ -110,13 +110,13 @@ The same qualified Lua identity applies to every standard module, including
 and HTTP use the documented short Titan imports alongside the other public
 modules; math, Lua loading, iteration, and GC retain qualified Titan imports. Requiring
 `titan.string` does not mutate Lua's `string` table or string metatable. In an
-installed Titan 0.22 tree, generated
+installed Titan 0.23 tree, generated
 loaders under `<root>/share/lua/5.5/titan/` all open the DSO form
-`<root>/lib/titan/0.22/titan.so` and invoke their own exact Lua entries. Titan
+`<root>/lib/titan/0.23/titan.so` and invoke their own exact Lua entries. Titan
 imports may instead select the paired self-describing `titan.a`; both forms
 expose the same logical-module ABI/types. The installation does not create
 child DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
-Separately versioned ABI-0.21 providers remain preserved; the active 0.22
+Separately versioned ABI-0.22 providers remain preserved; the active 0.23
 loader neither migrates nor cleans them up.
 
 ## How values map between the two languages

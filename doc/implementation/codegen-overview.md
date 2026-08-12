@@ -164,22 +164,22 @@ generates:
 #include <stdlib.h>
 ...                /* C library and Lua internal headers, titan.h, pragmas */
 
-lua_Integer counter_inc_titan(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer _param_n);
+lua_Integer counter_\u2133_inc_titan(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer _param_n);
 
-lua_Integer counter_inc_titan(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer _param_n) {
+lua_Integer counter_\u2133_inc_titan(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer _param_n) {
     {
         return (_param_n+ ivalue(&_mod->uv[0].uv));
     }
 }
 
-static int counter_inc_titanentry_lua(lua_State *L) {
+static int counter_\u2133_inc_titanentry_lua(lua_State *L) {
     ...    /* argument count adjustment, error handler, dynamic argument plan */
-    lua_Integer res = counter_inc_titan(L, _mod, _fn, _param_1);
+    lua_Integer res = counter_\u2133_inc_titan(L, _mod, _fn, _param_1);
     setivalue(s2v(_firstret), res);
     ...
 }
 
-static int counter_inc_titanentry_strict(lua_State *L) {
+static int counter_\u2133_inc_titanentry_strict(lua_State *L) {
     ...    /* hidden original closure plus strict argument guards */
 }
 
@@ -205,19 +205,27 @@ strict result actions after the declaration entry or wrapper relay has boxed
 the native results. An exactly tagged realized wrapper instead executes its
 frozen result actions inside the target-native adapter.
 
-Symbol names come from `mangle_qn` (`coder.lua`), which replaces `.` and
-`-` with `_`. The driver has already restricted every logical component to
-`[A-Za-z_][A-Za-z0-9_-]*`, so this produces a portable C identifier rather
-than admitting arbitrary path or template bytes. Module `foo.bar` yields
-`foo_bar_init`, `foo_bar_abi`,
-`foo_bar_types` and
-`luaopen_foo_bar`; a function `f` in it becomes `foo_bar_f_titan` /
-`foo_bar_f_titanentry_lua` / `foo_bar_f_titanentry_strict`. An unbound method
-uses `<mangled-fqtn>_<name>_titanmethod` /
+Module protocol names come from `mangle_qn` (`coder.lua`), which replaces `.`
+and `-` with `_`. The driver has already restricted every logical component to
+`[A-Za-z_][A-Za-z0-9_-]*`, so this does not admit arbitrary path or template
+bytes. Module `foo.bar` yields `foo_bar_init`, `foo_bar_abi`, `foo_bar_types`,
+and `luaopen_foo_bar`.
+
+ABI 0.23's `_function_prefix` separates that flattened module prefix from a
+top-level member with the C99 UCN `_\u2133_`. A function `f`
+therefore becomes `foo_bar_\u2133_f_titan` /
+`foo_bar_\u2133_f_titanentry_lua` /
+`foo_bar_\u2133_f_titanentry_strict`; a source `foreign function f` owns
+only the first spelling. U+2133 cannot occur in Titan's identifier alphabet,
+so the boundary is injective even when module components themselves contain
+underscores or hyphens. Generated C retains the UCN spelling, while
+`_linkage_symbol_name` converts it to U+2133's UTF-8 bytes for comparisons with
+object-file, DWARF, libbacktrace, and native-tool names.
+
+An unbound method uses `<mangled-fqtn>_<name>_titanmethod` /
 `_titanentry_luamethod`; its first-class bound value adds `_boundmethod`,
 `_titanentry_boundlua`, and `_titanentry_boundstrict`. A record static uses
-`_titanstatic`, `_titanentry_luastatic`, and
-`_titanentry_strictstatic`.
+`_titanstatic`, `_titanentry_luastatic`, and `_titanentry_strictstatic`.
 
 `coder.external_symbols` inventories the non-file-local subset of these names
 plus each module protocol. Library-mode orchestration compares that exact set
@@ -356,7 +364,7 @@ It comes **immediately after `_mod` and before the method `self`**, and
 *every* Titan function takes it even when the body never reads it: the
 fast value-call path dispatches purely on the function-type tag, so all
 native entries of a given `Type.Function` must share one ABI. This type is
-exclusively a boxed Titan/Lua callable; its ABI-0.22 third constructor position
+exclusively a boxed Titan/Lua callable; its ABI-0.23 third constructor position
 is reserved `false`, not C variadicity. Its value at a call site depends on the
 path:
 
@@ -382,8 +390,8 @@ module:
 
 ```c
 TString*    packtest_Point_getname_titanmethod(lua_State *L, Udata *_mod, CClosure *_fn, Udata* __self__);
-lua_Integer packtest_two_titan(lua_State *L, Udata *_mod, CClosure *_fn, TString* *_outparam_2);
-void        strings_titan(lua_State *L, Udata *_mod, CClosure *_fn,
+lua_Integer packtest_\u2133_two_titan(lua_State *L, Udata *_mod, CClosure *_fn, TString* *_outparam_2);
+void        packtest_\u2133_strings_titan(lua_State *L, Udata *_mod, CClosure *_fn,
                           TitanVargString *_flexout, int _flexwant);
 ```
 
@@ -805,7 +813,7 @@ Udata. Generated modules also reserve a per-state Array-metatable cache and
 use explicit internal-versus-boxed conversions. A 0.16 module would
 misinterpret Array values even when a serialized interface happens not to
 mention one, so the semantic/runtime boundary requires a full rebuild. See
-[Dense Arrays](dense-arrays.md#abi-017-020-021-and-022-boundaries).
+[Dense Arrays](dense-arrays.md#abi-017-020-021-022-and-023-boundaries).
 
 ABI **0.18** preserved those generated Array shapes and the ordinary module
 protocol, but made standard-library archive objects directly reference
@@ -831,22 +839,23 @@ that payload. The standard `titan.uv` schema also exports the nominal
 implementation selects the appropriate pipe-or-TTY native handle while the
 high-level stream facades retain their parent-facing endpoints. ABI 0.21
 retained those 0.20 layouts while advancing the embedded Lua contract from
-5.5.0 to 5.5.1. The active ABI is now **0.22**: the source-local
-`titan.uv` surface/private-provider boundary changes its serialized public
+5.5.0 to 5.5.1. ABI 0.22 introduced the source-local
+`titan.uv` surface/private-provider boundary, changing its serialized public
 schema and reconstructible module-userdata prefix while retaining Lua 5.5.1
 and the other value/native-call layouts from 0.21. Every generated module also
-adds one fixed compiler-private, ABI-visible physical-provider identity slot so
+added one fixed compiler-private, ABI-visible physical-provider identity slot so
 a direct source importer can reject canonical state installed by another
-provider. The active suffix and provider namespace advance
-with the marker (`_0_22`, `TITAN_PATH_0_22`, `lib/titan/0.22`); 0.21 providers
-are rejected before interface rehydration. Existing 0.21 artifacts remain a
-separately versioned prior installation and are not migrated or cleaned up by
-0.22.
+provider. ABI 0.23 retains those layouts while source foreign callbacks and the
+injective top-level native-entry separator change the native symbol contract.
+The active marker is `_0_23`, the search variable is `TITAN_PATH_0_23`, and the
+provider namespace is `lib/titan/0.23`; older providers are rejected before
+interface rehydration. Existing 0.22 artifacts remain separately versioned and
+are not migrated or cleaned up.
 
-Closure adjustment wrappers require no further ABI bump. They reuse the fixed
-0.22 CClosure header and `function_sig` shapes; their target adapters and strict
-relays are private consumer artifacts, with no serialized field, provider
-symbol, or module-state slot. A consumer may therefore wrap an ordinary 0.22
+Closure adjustment wrappers reuse the fixed CClosure header and `function_sig`
+shapes retained through ABI 0.23; their target adapters and strict relays are
+private consumer artifacts, with no serialized field, provider symbol, or
+module-state slot. A consumer may therefore wrap an ordinary ABI-0.23
 source/DSO/archive function. Any implementation that needed another fixed slot
 or signature would instead require a coordinated ABI advance.
 
@@ -1046,11 +1055,11 @@ name with the runtime's lazy/global `loadlib` and handle-scoped `loadsym`
 error on failure):
 
 ```c
-static Udata* (*dep_mk_titan)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer);
+static Udata* (*dep_\u2133_mk_titan)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer);
 /* in _init ($LOADMODULES1), at first init in the process: */
 void *dep_handle = loadlib(L, "selected/provider.so");
-dep_mk_titan = titan_cast_func(Udata* (*)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer),
-                               loadsym(L, dep_handle, "dep_mk_titan"));
+dep_\u2133_mk_titan = titan_cast_func(Udata* (*)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer),
+                               loadsym(L, dep_handle, "dep_\u2133_mk_titan"));
 ```
 
 A direct-libuv DSO follows this exact regime. Its explicit `import "uv"` is
@@ -1067,7 +1076,7 @@ The dep's `_init` is fetched and called the same way inside
 `$INITMODULES`. In both regimes the *call sites are identical* C calls —
 only the storage class of the callee name differs — and the caller passes
 the callee's module `Udata` read from its own user value and `NULL` for
-the direct-call `_fn`: `dep_mk_titan(L, uvalue(&_mod->uv[1].uv), NULL, 7)`.
+the direct-call `_fn`: `dep_\u2133_mk_titan(L, uvalue(&_mod->uv[1].uv), NULL, 7)`.
 Imported record metatables are not wired through symbols at all: they are
 recovered through the Lua registry at init time under
 `"Titan record <fqtn> metatable"`. The metatable pointer itself is the record's
@@ -1124,7 +1133,8 @@ bound-method closure and must copy a live exact tag into it. First-use private
 objects are filled by `init_data_from_other_modules` or the module
 initializer. Thus all private slots, beginning with the Array cache and fixed
 provider-identity token, come *after* the importer-visible public prefix. Their
-fixed header is part of ABI 0.22, while later inventory/first-use slots remain
+fixed header was introduced in ABI 0.22 and is retained in 0.23, while later
+inventory/first-use slots remain
 coder-private and do not perturb the public importer slot math.
 
 An importing module never sees this module's AST: it recomputes the complete

@@ -7,11 +7,14 @@ includes the same header, so the host C compiler sees the real prototypes; the
 Lua-side pipeline exists to typecheck Titan source before code generation.
 
 For user-facing behavior see [the C FFI](../language/ffi.md),
-[C FFI declarations and expressions](../language/c-ffi-expressions.md), and
+[C FFI declarations and expressions](../language/c-ffi-expressions.md),
+[Foreign functions](../language/foreign-functions.md), and
 [Named arguments](../language/named-arguments.md). The exact tag, declarator,
-probe, contextual-conversion, automatic-storage, and C-operator machinery is
-covered in
-[C FFI declarations and expressions](c-ffi-expressions.md).
+probe, contextual-conversion, and C-operator machinery is covered in
+[C FFI declarations and expressions](c-ffi-expressions.md); the restricted
+raw-C checker/lowering, generated source headers, target-directed allocation,
+and ABI-0.23 callback boundary are in
+[Foreign-function implementation](foreign-functions.md).
 
 ## Import Pipeline
 
@@ -129,15 +132,19 @@ The installed compiler ships `<root>/include/titan/ffi.h` and passes
 Checkout developer mode instead searches upward from the loaded compiler
 module for `titan-runtime/titan/ffi.h`. Thus `foreign import "titan/ffi.h"`
 works without depending on the process cwd while keeping an installed compiler
-inside one SDK root. The file exposes selected primitive aliases:
-`titan_ffi_void`, `titan_ffi_bool`, `titan_ffi_char`,
-`titan_ffi_signed_char`, `titan_ffi_unsigned_char`, `titan_ffi_short`,
-`titan_ffi_unsigned_short`, `titan_ffi_int`, `titan_ffi_unsigned_int`,
-`titan_ffi_long`, `titan_ffi_unsigned_long`, `titan_ffi_long_long`,
-`titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, an
-opaque `lua_State` typedef, and Lua's internal `TValue` type. `TValue` remains a
-distinct C type in Titan's FFI type graph. Private runtime helpers can move
-values across that boundary through explicit `value` <-> C `TValue` coercions.
+inside one SDK root. The file exposes selected primitive aliases (including
+`void *`, `char *`, every ordinary integer spelling, `float`, `double`, and
+`long double`) and includes the matched Lua internal declarations for
+`lua_State`, `TValue`, `Udata`, and `CClosure`. `TValue` remains a distinct C
+type in Titan's FFI type graph. Private runtime helpers can move values across
+that boundary through explicit `value` <-> C `TValue` coercions.
+
+Five typed inline bridges—`lmacro_thvalue`, `lmacro_uvalue`,
+`lmacro_clCvalue`, `lmacro_pvalue`, and `titan_ffi_pushudata`—evaluate the real
+Lua function-like macros inside C, where the host preprocessor can see them.
+They are the deliberately narrow callback-migration exception to Titan's lack
+of general function-like-macro inference; the uv, HTTP, and coroutine foreign
+entries use them to recover and temporarily root generated callback state.
 
 Generated C in installed mode compiles with `-I <root>/include` (checkout mode
 uses `-I titan-runtime`), so the emitted `#include <titan/ffi.h>` resolves
@@ -424,8 +431,10 @@ The checker has FFI-specific handling in a few narrow places:
 * `Ast.TypeCOwned` accepts the source `owned *c.T` and `owned c.T[]`
   forms. It shares `c_allocation_error` with the allocation
   pseudo-constructors, rejecting non-C and nested owners, `void`, direct C
-  functions, incomplete aggregates, C array typedefs, and
-  flexible-array-member structs before any generated `sizeof` can be formed.
+  functions, incomplete aggregates, and C array typedefs before any generated
+  `sizeof` can be formed. A complete FAM struct is an eligible scalar owner;
+  construction is the separate `.new(count)` path, while counted outer
+  `.new_array` remains unavailable.
 * `Ast.TypeOption` requires its base to satisfy
   `types.has_tvalue_representation`. This admits `COwned` and other boxable C
   scalars while rejecting by-value C aggregates/arrays, direct C functions,
@@ -451,7 +460,9 @@ The checker has FFI-specific handling in a few narrow places:
   visible at the ordinary module-variable frontier. An active object-like macro
   with an unsupported final expansion is terminal rather than falling back.
 * `Ast.VarBracket` accepts C pointers, C arrays with known static length, and
-  counted owned C arrays. C indexing is 0-based.
+  counted owned C arrays. A marked FAM field additionally accepts 0-based
+  indexing while its automatic/owner allocation provenance remains attached;
+  erasing the enclosing object to a raw pointer erases that count.
 * After checking each `Ast.StatAssign` target, `check_c_assignment_storage`
   recursively verifies that a by-value `CStruct`, `CUnion`, or `CArray`
   receiver ends in persistent storage. `CPointer` and `COwned` expressions
@@ -462,7 +473,8 @@ The checker has FFI-specific handling in a few narrow places:
   `C assignment receiver must have persistent storage; expression of type 'T' is a by-value C aggregate`.
   Extracting a pointer value from such a temporary is accepted because the
   pointer's pointee, not the temporary aggregate, is the mutation target.
-* `#exp` accepts C arrays with known static length and counted owned C arrays.
+* `#exp` accepts C arrays with known static length, counted owned C arrays,
+  and provenance-marked FAM field projections.
 * `Ast.ExpCall` validates C allocation pseudo-functions through that same
   helper, including the direct-C-function rejection. Their narrow
   `Checker.CPseudoNew` descriptor owns only the pseudo-call parameters/results;
@@ -498,14 +510,15 @@ The checker has FFI-specific handling in a few narrow places:
   Titan-visible type passes `nil_can_adjust_to`. The resulting dense positional
   list carries `_named_arg_order` and `_named_call_kind = "foreign"`; see
   [named-argument internals](named-arguments.md).
-* `Ast.ExpVar` rejects foreign functions as Titan first-class values, but allows
-  a foreign function name in a context whose target is an exactly compatible C
-  function pointer type. The checker compares the target pointee directly with
-  the authoritative `CFunction`, retaining typedefs, qualifiers, ABI,
-  prototype style, and C `...`; it never reconstructs a C signature from a
-  `Type.Function`. The node records `_foreign_function_pointer` so codegen can
-  emit a C cast of the bare function name. Titan-to-C callback adaptation
-  remains unsupported.
+* `Ast.ExpVar` rejects imported and source-defined foreign declarations as
+  Titan first-class values, but allows a foreign name in a context whose target
+  is an exactly compatible C function pointer type. The checker compares the
+  target pointee directly with the authoritative `CFunction`, retaining
+  typedefs, qualifiers, ABI, prototype style, and C `...`; it never
+  reconstructs a C signature from a `Type.Function`. The node records
+  `_foreign_function_pointer` so codegen can emit a C cast of the bare function
+  name. Automatic adaptation of an ordinary Titan closure remains unsupported;
+  a top-level source `foreign function` is already the exact C entry.
 * `checkforin` treats generic-for iterator and close slots as C function-pointer
   contexts when a foreign function name appears there. It decays the exact
   declaration into the hidden tuple slot, while an already-materialized pointer
@@ -516,8 +529,10 @@ The checker has FFI-specific handling in a few narrow places:
   local/formal C variables. The checker marks those declarations as assigned and
   rejects later capture, so generated C cannot take the address of a boxed
   captured local.
-* `checkfuncbody` synthesizes the read-only local `L` for every function-like
-  body. `lua_state_pointer_type` gives it type `CPointer(CTypedef("lua_State",
+* `checkfuncbody` synthesizes the read-only local `L` for every ordinary
+  Titan function-like body. A restricted source foreign body deliberately gets
+  neither `L` nor `M`; it must declare any C state parameter explicitly.
+  `lua_state_pointer_type` gives ordinary `L` type `CPointer(CTypedef("lua_State",
   ...))`, reusing an imported `lua_State` type when one is already present in
   the visible C type namespace. Ordinary callable bodies see the completed
   module environment; a lambda inside a module-variable initializer retains
@@ -880,12 +895,14 @@ evaluated right-hand side.
 
 ### Owned C Objects
 
-Source-written `owned *T` and `owned T[]` lower to the same
-`COwned(T, false)` and `COwned(T, true)` values already inferred from `.new()`
-and `.new_array(count)`. The pseudo-functions remain checker-only declarations
-(`Checker.CPseudoNew`) generated when a type namespace is accessed; their
-narrow call descriptors are not `Type.Function` values.
-`codecpseudonew` allocates Lua userdata directly:
+Source-written `owned *T` and `owned T[]` lower to
+`COwned(T, false)` and `COwned(T, true)`. The pseudo-functions remain
+checker-only declarations (`Checker.CPseudoNew`) generated when a type namespace
+is accessed; their narrow call descriptors are not `Type.Function` values. At
+a direct initialized local sink the checker may instead record automatic or
+borrowed backing, as detailed in
+[Foreign-function implementation](foreign-functions.md#target-directed-allocation-plans).
+In an owned plan, `codecpseudonew` allocates Lua userdata directly:
 
 ```c
 size_t _nbytes = (size_t)_count * sizeof(T);
@@ -897,8 +914,11 @@ memset(getudatamem(_box), 0, _nbytes);
 
 There is no finalizer. Titan owns the lifetime through the Lua GC, and the
 payload size in `Udata.len` is enough to reconstruct the dynamic count for
-counted owned arrays. The userdata is anchored in a stack slot immediately after
-allocation, before any later operation can trigger a collection.
+ordinary counted owned arrays. A FAM owner instead allocates the exact host
+layout extent and stores its logical element count in one private integer user
+value because byte padding cannot recover that count. The userdata is anchored
+in a stack slot immediately after allocation, before any later operation can
+trigger a collection.
 
 The top-level constant-expression check admits these pseudo-constructors when
 all arguments are constant. The allocation still occurs once per module
@@ -947,7 +967,9 @@ left for a later FFI iteration.
 * Some preprocessor paths still raise raw Lua errors instead of diagnostics
   (`#if` operators outside the implemented set, unterminated function-like
   macros).
-* Function-like macros are invisible to Titan. An object-like macro is
+* Function-like macros are invisible to general Titan FFI inference. The five
+  typed inline callback bridges in `titan/ffi.h` are ordinary C functions whose
+  bodies evaluate the selected Lua macros. An object-like macro is
   expression-valued through bounded recognized forms, including supported
   integer-constant expressions and typed dereferenced accessors, or when it
   fully expands to an outer cast to a supported scalar type. A pure dotted

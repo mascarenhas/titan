@@ -190,7 +190,7 @@ describe("contextual unsafe C object-pointer conversions", function()
         ]], function(header)
             local ok, err, ast, calls = fake_check(header, [[
                 local function convert(p: *c.ffi_source)
-                    local holder: c.ffi_holder
+                    local holder = c.ffi_holder.new()
                     holder.pointer = p
                 end
             ]])
@@ -517,7 +517,7 @@ describe("contextual unsafe C object-pointer conversions", function()
             local ok, err, ast, calls = fake_check(header, [[
                 local function arrays()
                     c.ffi_take(c.ffi_sources)
-                    local local_sources: c.ffi_source[2]
+                    local local_sources = c.ffi_source.new_array(2)
                     c.ffi_take(local_sources)
                 end
             ]])
@@ -596,8 +596,8 @@ describe("contextual unsafe C object-pointer conversions", function()
                     end
 
                     local function direct()
-                        local tcp: c.uv_tcp_t
-                        local request: c.uv_fs_t
+                        local tcp = c.uv_tcp_t.new()
+                        local request = c.uv_fs_t.new()
                         c.uv_close(tcp, nil)
                         c.uv_cancel(request)
                     end

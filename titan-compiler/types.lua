@@ -899,6 +899,10 @@ function types.is_c_function_pointer_void_cast(source, target)
     return is_c_function_pointer(source) and is_c_void_pointer(target)
 end
 
+function types.is_c_void_function_pointer_cast(source, target)
+    return is_c_void_pointer(source) and is_c_function_pointer(target)
+end
+
 local function c_pointer_category(t)
     t = resolved_c(t)
     if not (t and t._tag == "Type.CPointer") then return nil end
@@ -2502,6 +2506,17 @@ local function coercion_impl(source, target, policy, seen)
         result = coercion_plan("float_to_c_float", source, target)
     elseif source._tag == "Type.Integer" and is_c_float(target) then
         result = coercion_plan("integer_to_c_float", source, target)
+    elseif target._tag == "Type.COwned"
+       and not target.count
+       and (types.resolve_c_typedef(source)._tag == "Type.CStruct"
+            or types.resolve_c_typedef(source)._tag == "Type.CUnion")
+       and types.equals(source, types.normalize(target.pointee)) then
+        result = coercion_plan("c_automatic_to_owned", source, target)
+    elseif target._tag == "Type.COwned" and target.count
+       and source._tag == "Type.CArray"
+       and type(source.len) == "number"
+       and types.equals(source.elem, target.pointee) then
+        result = coercion_plan("c_automatic_array_to_owned", source, target)
     elseif source._tag == "Type.COwned"
        and target._tag == "Type.Boolean" then
         result = coercion_plan("c_owner_truthiness", source, target)
@@ -2711,6 +2726,8 @@ local function explicit_conversion(source, target)
         op = "legacy_pointer_to_c_void"
     elseif types.is_c_function_pointer_void_cast(source, target) then
         op = "c_function_pointer_to_void"
+    elseif types.is_c_void_function_pointer_cast(source, target) then
+        op = "c_void_to_function_pointer"
     elseif types.is_counted_c_character_owner(source)
        and target._tag == "Type.String" then
         op = "counted_owner_to_string"

@@ -609,13 +609,16 @@ function count(): integer
 end
 ```
 
-Unsized C arrays, including flexible array members, cannot be indexed or
-measured in this version.
+An uncounted `T[]` local is a borrowed pointer view, so it has no length and
+uses unchecked pointer indexing. A flexible-array member reached through an
+owned or automatic parent created by `T.new(count)` retains count provenance:
+its indexing is checked and `#parent.field` returns that count. Converting the
+parent to raw `T *` erases it.
 
-Functions may also declare a zero-initialized automatic fixed array with
-`local values: c.element_type[N]`; the declaration, decay, copy, capture, and
-lifetime rules are in
-[Fixed C arrays](c-ffi-expressions.md#fixed-c-arrays).
+Functions request automatic fixed arrays explicitly with a direct initialized
+allocation such as `local values: c.element_type[N] =
+c.element_type.new_array(N)`. The selection, decay, copy, and lifetime rules
+are in [Target-directed C allocation](c-ffi-expressions.md#target-directed-c-allocation).
 
 ## Structs, Unions, And Fields
 
@@ -640,8 +643,8 @@ Bitfields are parsed and typed, but they remain C bitfields: assignment follows
 the C compiler's rules. Anonymous fields are not exposed as Titan members.
 
 Named file-scope tag-only aggregates are available as `c.Tag` without a C
-typedef. A function may also declare a complete aggregate without an
-initializer to request C `{0}` initialization. See
+typedef. Every local requires an initializer; use `c.Tag.new()` at a direct
+local sink to request zeroed automatic storage. See
 [C FFI declarations and expressions](c-ffi-expressions.md).
 
 A Titan [union](unions.md) is unrelated to a C `union`: it is nominal tagged
@@ -730,17 +733,19 @@ layer in the payload. Consequently, `owned **T` owns one `T *` object, while
 
 The payload must be an imported, complete, allocatable C object type. Titan
 rejects `void`, direct C function types, incomplete structs and unions, C array
-typedefs, structs with flexible array members, Titan types, and nested owned
-storage. Fixed extents such as `owned T[4]` are not part of the owner syntax;
-use `owned T[]` and supply the count when allocating.
+typedefs, Titan types, and nested owned storage. Fixed extents such as
+`owned T[4]` are not part of the owner syntax; use `owned T[]` and supply the
+count when allocating. A flexible-array-member struct is a scalar owner and is
+allocated with its dedicated `T.new(fam_count)` form.
 
-`T.new()` allocates one zeroed C object and returns `owned *T`.
-`T.new_array(count)` allocates `count` zeroed adjacent objects and returns
-`owned T[]`. These are type-namespace allocation pseudo-functions, not
-first-class callable values: they must be invoked directly rather than stored,
-passed, or returned. The inferred and written shapes remain distinct even when
-the array count is one. Both are full userdata whose lifetime belongs to
-Titan's Lua GC. No finalizer is installed.
+Outside a direct function-local declaration sink, `T.new()` produces one
+zeroed `owned *T` and `T.new_array(count)` produces a zeroed `owned T[]`.
+At a direct local sink the target/literal may instead select automatic or
+borrowed storage; see
+[Target-directed C allocation](c-ffi-expressions.md#target-directed-c-allocation).
+These are type-namespace allocation pseudo-functions, not first-class callable
+values. Owned results are full userdata whose lifetime belongs to Titan's Lua
+GC, and no finalizer is installed.
 
 A trailing option marker wraps the complete owner:
 
@@ -906,9 +911,11 @@ process-global state.
 
 ## Current Limitations
 
-* Foreign functions are not Titan first-class values. They can only be called by
-  name or converted to compatible C function pointer types.
-* Titan functions and closures cannot be adapted to C callback ABIs.
+* Imported C functions and source `foreign function` declarations are not Titan
+  first-class values. They can only be called directly or converted to exactly
+  compatible C function-pointer types. Restricted source foreign functions are
+  the supported way to write a callback; ordinary Titan closures are not
+  adapted to C callback ABIs.
 * C types are local to the importing Titan module and cannot appear in exported
   compiled-module interfaces.
 * Function-like macros are not imported. Object-like macros are values only
@@ -919,8 +926,9 @@ process-global state.
   not generally supported. Conditional macro behavior that depends on state
   from a separate earlier import, or a later import changing a scalar macro
   already typed through another module namespace, requires an umbrella header.
-* Owned allocation does not support `void`, incomplete aggregate types, C array
-  typedefs, or structs with flexible array members.
+* Owned allocation does not support `void`, incomplete aggregate types, or C
+  array typedef payloads. A flexible-array-member structure uses only
+  `T.new(count)`; `T.new_array` remains unavailable for it.
 * C adopted pointers/lifetimes are parked for a later design; v1 has borrowed C
   pointers and Titan-owned userdata only.
 * The C ordinary-identifier namespace is shared across all foreign imports in

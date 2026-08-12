@@ -1,207 +1,362 @@
 # FFI wrapup
 
-This discharges the "FFI with C, continued" roadmap item, with adopted pointers dropped from the roadmap.
+Status: complete design for the ABI-0.23 implementation on
+`feature/ffi-wrapup`. This closes the roadmap item formerly called “FFI with C,
+continued”. Adopted pointers are not part of the design or the roadmap.
 
-## `foreign` functions (replaces the callback part of the roadmap item)
+## Supported trust model
 
-Introduce a new kind of Titan function, the `foreign` function, that
-lets the programmer write effetively an FFI function with Titan
-code.
+The C FFI is a boundary for a trusted C programmer. Titan preserves the checked
+C declaration and target profile and preserves Titan source evaluation order,
+but it does not turn raw C into a memory-safe language. In particular, a
+Titan-written C-ABI function uses raw C pointer, indexing, arithmetic, cast, and
+callback behavior. It has no hidden Lua state from which the compiler could
+manufacture Titan null, bounds, range, ownership, or error checks. Undefined C
+behavior remains undefined C behavior.
 
-The main use of this is to write functions that can be used as-is
-as callbacks to C code, where they can replace existing callback
-trampoline shims used in titan_coro.c, titan_uv.c, and titan_httpshim.c.
+This is intentional, not an adversarial-input gap. The design does not add
+registry indirection, callback registries, compatibility objects, pointer
+provenance recovery, or defensive validation beyond the actual typed/source
+boundary.
 
-An example for one of the titan_uv.c callback trampolines (replacing
-titan_uvshim_fs_cb):
+## Titan-written C-ABI functions
 
-```
-local type uv_fs_cb_closure = foreign (*lua.lua_State, *lobject.Udata, *lobject.CClosure, *lobject.Udata, lua.lua_Integer) -> ()
+### Declaration and type syntax
 
-foreign function uv_fs_cb_trampoline(req: *libuv.uv_fs_t)
-  local owner = libuv.uv_req_get_data(req as *libuv.uv_req_t) as *lobject.Udata
-  local result = libuv.uv_fs_get_result(req) as lua.lua_Integer
-  local callback = ffi.lmacro_clCValue(owner.uv[1].uv)
-  local L = libuv.uv_loop_get_data(req.loop) as *lua.lua_State
-  local module = ffi.lmacro_uvalue(callback.upvalue[0])
-  local top = lua.lua_gettop(L)
-  ffi.lua_pushtvalue(L, callback.upvalue[0])
-  local entry = ffi.lmacro_pvalue(callback.upvalue[2]) as uv_fs_cb_closure
-  entry(L, module, callback, owner, result)
-  lua.lua_settop(L, top)
+A source module may define a top-level foreign function:
+
+```titan
+foreign function compare(left: *c.Item,
+                         right: *c.Item): c.int
+  if left.key < right.key then return -1 as c.int end
+  if left.key > right.key then return 1 as c.int end
+  return 0 as c.int
 end
 ```
 
-There is no `foreign local` declaraton, since foreign functions are always
-local module functions due to their FFI type.
+There is no `local` modifier, method form, record-static form, or nested form.
+Every foreign function is source-only even though its non-inline C definition
+has hidden external linkage so another co-generated source translation unit can
+call it.
 
-A foreign function compiles to a local C function  without the `L`, 
-`_mod`, and `_fn` parameters that are part of the Titan ABI and would tie it
-to the Titan runtime. This makes it usable for C callbacks, but means it has several
-restrictions, since it is essentially an FFI function, just written as
-Titan code:
+The corresponding source-written function-pointer type is:
 
-1. The type it has to Titan code is an FFI function type, so parameter types
-and the return type must all be FFI types
-2. It must have at most a single return type, multiple returns and flexible returns
-are not allowed, and variadic parameters are also not allowed
-3. No catch blocks, no defer statements, no raise statement, as error handling needs
-to plug into the Lua state
-4. All local variables must have FFI types, casts to/from non-FFI types not allowed (including
-casts to/from `value`)
-5. Ordinary module functions and variables are not visible, including from imported
-Titan modules. Only foreign functions and FFI imports are visible. Together
-with `foreign` members being local it means nothing from an imported Titan module is going
-to be visible unless it is a direct source import
-6. No for/in loops, no match statement (moot point since Titan unions are forbidden anyway)
-7. Literal strings are allowed but they have the FFI `const char*` type, so no string concatenation
-through `..`.
-8. `nil` is allowed, but gets translated to `NULL`
-
-The name of this function in the generated code is the same name as a Titan native entry point
-(so includes the module name).
-
-The "only FFI types" restriction means that even `value` is not allowed, the example
-above uses the FFI type `TValue`, but in this context it is not a Titan `value`.
-
-Imported FFI modules are visible normally, and their types and functions can be
-called.
-
-This is better enforced as a specialized type checker for the bodies of these functions that
-enforces all of the above, together with a specialized code generator, mostly so that the
-allowable statements (if, assignment, while, numeric for, repeat, return) get translated
-properly. The expressions involving FFI types that Titan already allows are also
-allowed.
-
-The type syntax is extended with a `foreign <function type>` type constructor that allows
-defining an FFI function pointer type within Titan code. This is used in the example above to
-express the type of the Titan entry point of a Titan closure.
-
-The `lmacro_` definitions in the example above are convenience additions to the Titan
-`titan/ffi.h` header that wrap some useful Lua function-like macros as inline functions
-so they are visible to the FFI. **As an alternative for this, do some exploration about
-what it would take to support simple function-like C macros in the FFI, so
-`lobject.{clCvalue/uvalue/pvalue}` could be used directly. The Titan code generator should
-not be doing macro-expansion itself, it should emit C that uses the macro.**
-
-This should be enough to remove all of the remaining C shims that the stdlib is using
-(titan_coro.c, titan_uv.c, titan_httpshim.c, plus related header files).
-
-A module with foreign members generates not just the regular `.c` file a Titan module has,
-but also a `.h` file with the function prototypes for the foreign functions it has,
-plus `#include`s for any FFI imports and direct source imports of modules that have
-foreign members.
-
-A foreign function that has either of these body shapes:
-
-```
-<local variable declarations>
-return <exp>
+```titan
+local type Compare = foreign (*c.Item, *c.Item) -> c.int
+local type Notify = foreign (*c.Item) -> ()
 ```
 
-```
-<local variable declarations>
-if <exp> then
-  return <exp>
-else
-  return <exp>
-end
-```
+`foreign (P...) -> R` denotes a pointer to the raw C function type, while a
+`foreign function` declaration is the C function designator itself. It does not
+add another semantic callable type: the checker lowers the type constructor to
+`CPointer(CFunction(...))` and the declaration to `CFunction(...)`. A foreign
+declaration is callable directly and can decay only to an exactly compatible C
+function pointer. It is never a Titan `Type.Function`, closure, module value,
+or Lua-callable member.
 
-```
-<local variable declarations>
-if <exp> then
-  return <exp>
-end
-return <exp>
-```
+Parameters and the optional single result must be direct declarable C FFI
+types. `()` means C `void`. Written `void` parameters/results, `owned` views,
+direct function/array values, Titan types (including `value`), input variadics,
+multiple results, and flexible results are rejected. Use a pointer for an array
+or callback parameter. Complete by-value C aggregates are allowed; incomplete
+aggregates are allowed only behind pointers.
 
-Should be compiled to a `static inline` function directly in the emitted header. This should
-be used for defining foreign "constants" that can still be used as such by the host C compiler.
+Direct C calls retain C arity. Named-call syntax is available only when the
+direct declaration supplies one complete fixed parameter-name list.
 
-## Owned structs with FAMs
+### Source-only visibility
 
-Right now structs with flexible-array members are not allowed. The FFI should lift this
-restriction, and for these structs the `new` pseudo-function to allocate an owned struct
-should take an integer parameter with the number of elements to allocate for
-the flexible array member.
+The current module can use its own foreign declarations. A direct source import
+can use the producer's foreign functions through the written module alias. This
+is the same direct-only compiler capability as other source-private members:
 
-For `new_array` this should be the second parameter (each element of the array has the same
-number of elements for its FAM).
+* the producer records the function only in its source collaboration view;
+* a consumer must have its own direct source edge to the producer;
+* another module cannot relay the capability transitively;
+* a `.so`/`.a` interface, Lua, static co-residence, registry state, and symbol
+  discovery expose no foreign member; and
+* the producer's `foreign import` aliases are never imported as Titan names.
 
-## Stack-allocated FFI aggregates from `.new/.new_array`
+A generated C-header include is declaration plumbing, not authorization.
 
-When used to initialize a new local variable the `.new` pseudo-function should use
-stack allocation if the local variable's type is not a pointer type:
+### Restricted raw-C body
 
-...
--- options is stack-allocated `uv_process_options_t`, not payload in an owned UData*
-local options = libuv.uv_process_options_t.new()
-```
+A foreign body has its own raw-C checking and lowering context. It can see only
+its parameters and locals, current-module foreign functions, direct-source
+foreign members, imported C namespaces, and the C types/pseudo-values needed by
+those declarations. Ordinary Titan module variables/functions/nominals and the
+implicit ordinary-function locals `L` and `M` are absent.
 
-...
--- options is stack-allocated `uv_process_options_t`, not payload in an owned UData*
-local options: libuv.uv_process_options_t = libuv.uv_process_options_t.new()
-```
+The admitted statements are blocks/`do`, initialized local declarations,
+assignment, C call statements, `if`/`elseif`/`else`, `while`, `repeat`, numeric
+`for`, `break`, and `return`. The body rejects generic `for`, `case`,
+`raise`, `catch`, `finally`, `defer`, lambdas, bound methods, Titan
+constructors, variadic expressions, `is`, concatenation, Titan `and`/`or`/`not`,
+and Lua-owned `.new`/`.new_array` allocation.
 
-...
--- options is an owned UData*, struct in payload
-local options: owned *libuv.uv_process_options_t = libuv.uv_process_options_t.new()
-```
+All locals have direct C types and an initializer. Conditions use C scalar
+truth. A numeric `for` uses C integer/floating comparison and addition; its
+start, limit, and step are evaluated once in source order. Literal zero steps
+are rejected, and a dynamically computed zero step violates the trusted
+programmer precondition. C overflow and other C operator behavior are not
+replaced with Titan numeric semantics.
 
-...
--- struct in payload of anonymous owned UData*, options is bare native pointer to payload
-local options: *libuv.uv_process_options_t = libuv.uv_process_options_t.new()
-```
+Literals are contextual raw C values: booleans are `_Bool`, integers default to
+the target `int`, floats to `double`, strings to `const char *` with static
+storage, and `nil` to contextual `NULL`. Calls, operands, and assignment values
+are materialized so Titan's left-to-right, evaluate-once source rule survives
+C's otherwise unspecified operand/argument evaluation order.
 
-In the first two cases, coercion of `options` to a bare FFI `*libuv.uv_process_options_t`
-should just take the address of the stack-allocated variable. Coercion to
-`owned *libuv.uv_process_options_t` should allocate a new `UData*` and copy the struct
-into its payload.
+Raw pointer field/index/call lowering adds no Titan NULL or bounds check. A
+foreign body may explicitly call the Lua C API when it has an explicit
+`lua_State *`; any longjmp from that call crosses the boundary according to the
+C API contract. Titan installs no `setjmp`, roots, cleanup, or recovery frame.
 
-This extends to `.new_array` and structs with FAMs (in both `.new(<count>)` and `.new_array(<array count>, <FAM count>)`)
-**if counts are known at compile time**:
+### C names and entry families
 
-```
--- stack-allocated array of `uv_stdio_container_t`
--- inferred type for stdio is `libuv.uv_stdio_container_t[3]`
-local stdio = libuv.uv_stdio_container_t.new_array(3)
-```
+ABI 0.23 gives every top-level function family one readable module/member
+boundary. The separator is the C99 universal-character-name spelling
+`_\u2133_` (SCRIPT CAPITAL M), which cannot occur in a Titan identifier:
 
-```
--- array is payload in owned Udata*
--- inferred type for stdio is `owned libuv.uv_stdio_container_t[]`
--- stdio is the owned Udata*
-local stdio = libuv.uv_stdio_container_t.new_array(count_from_variable)
-```
-
-```
--- compile-time-error
-local stdio: libuv.uv_stdio_container_t[3] = libuv.uv_stdio_container_t.new_array(count_from_variable)
+```text
+module foo.bar, function baz -> foo_bar_\u2133_baz_titan
 ```
 
-```
--- array is payload in owned Udata*
--- stdio is bare pointer to payload
-local stdio: libuv.uv_stdio_container_t[] = libuv.uv_stdio_container_t.new_array(count_from_variable)
+Ordinary public and local top-level functions use that prefix for the native,
+Lua-stack, and strict entries, for example:
+
+```text
+foo_bar_\u2133_baz_titan
+foo_bar_\u2133_baz_titanentry_lua
+foo_bar_\u2133_baz_titanentry_strict
 ```
 
-```
--- stack-allocated array of `uv_stdio_container_t`
--- stdio is bare pointer to stack array
-local stdio: libuv.uv_stdio_container_t[] = libuv.uv_stdio_container_t.new_array(3)
+A foreign function uses the same native-family spelling and has no Lua or
+strict entry. Public/local/foreign is a visibility and representation property,
+not a second mangling scheme. There is no universal `titan_` symbol prefix and
+no source-private hexadecimal encoding. Existing independent preflight checks
+still reject flattened module-name collisions and collisions in other symbol
+families.
+
+### Generated `*.titan.h` artifact
+
+A logical source module with at least one foreign function owns one reserved,
+source-adjacent generated header:
+
+```text
+flat foo/bar.titan        -> foo/bar.titan.h
+folder foo/bar/bar.titan  -> foo/bar/bar.titan.h
 ```
 
-```
--- array is payload in owned Udata*
--- stdio is the owned Udata*
-local stdio: owned libuv.uv_stdio_container_t[] = libuv.uv_stdio_container_t.new_array(3)
+Only the flat source or canonical folder main owns it; contributors never own
+headers. The same rule applies under an external `--tree`. The `*.titan.h`
+spelling is compiler-owned and is deliberately distinct from an author-owned
+same-stem `.h`.
+
+Before compiling any source object, the driver prepares every header in the
+source graph. A header has a generated-file banner and guard, ordered direct C
+imports, supplemental origin headers required by rendered C types, generated
+headers of direct source dependencies that define foreign functions, all
+function declarations, and then eligible inline bodies. Generated C includes
+its own companion header, so C checks prototype/definition agreement.
+
+A foreign function is emitted `static inline` in the header only when, after an
+optional prefix of direct local declarations, its root body is exactly one of:
+
+1. `return expression`;
+2. one `if` with a single returning `then` and returning `else`; or
+3. one single-returning `if` without `else`, followed by `return expression`.
+
+Every other function has a `TITAN_SOURCE_LOCAL` prototype in the header and one
+hidden external definition in the owning generated C object. Inline addresses
+may differ between translation units; no canonical out-of-line identity is
+silently added.
+
+The driver refuses to overwrite a non-generated reserved path, replaces a
+banner-owned header, and removes a stale banner-owned header after the module
+loses its last foreign function. The header is a source build artifact only. It
+is absent from serialized types, `.titan.meta`, provider key sets, DSO/archive
+publication, Lua shims, the installed SDK, and standard-image transactions.
+
+## Target-directed C allocation
+
+### No initializer-less declarations
+
+Every local declaration now requires `= ...`, including C aggregates and
+arrays. There is no special `local x: c.T` or `local x: c.T[N]` zero-initializer
+production. Zeroed automatic storage is requested explicitly with `.new()` or
+`.new_array(...)`.
+
+Source `c.T[N]` and `c.T[]` spellings exist only as the written target of an
+initialized local allocation declaration. They are not general first-class
+Titan type forms. `T[N]` is a real fixed C array; `T[]` is lowered to an
+uncounted borrowed `T *` view.
+
+### Selection happens at the direct local sink
+
+The checker freezes one allocation plan while checking a direct constructor
+call delivered to a newly declared function local. Code generation consumes
+that plan and never rediscovers storage from endpoint tags. Module variables,
+returns, call arguments, assignments to existing variables, nested expressions,
+and discarded calls retain the ordinary owned result.
+
+For an ordinary complete non-GC-bearing C struct or union `T`, `.new()` follows
+this matrix:
+
+| Direct local | Storage and local type |
+| --- | --- |
+| `local x = T.new()` | zeroed automatic `T` |
+| `local x: T = T.new()` | zeroed automatic `T` |
+| `local x: owned *T = T.new()` | zeroed owner userdata |
+| `local x: *T = T.new()` | anonymous owner userdata plus a borrowed payload pointer; the hidden owner is rooted for the frame |
+| non-direct-local context | `owned *T` |
+
+Automatic scalar/pointer/enum allocation is not inferred: the automatic-object
+case is specifically a struct/union aggregate. Existing allocation eligibility
+still rejects `void`, direct C functions, incomplete objects, nested owners, and
+automatic aggregates that contain GC-bearing storage. A C array typedef cannot
+be an owned payload or use `.new()`, but a positive-literal `.new_array(N)` may
+use an imported array typedef as an element when the direct sink selects nested
+fixed automatic storage.
+
+For non-FAM `T.new_array(count)`:
+
+| Direct local | Storage and local type |
+| --- | --- |
+| inferred positive integer literal `N` | zeroed automatic `T[N]` |
+| written `T[N]` | automatic array only when the positive extent and literal allocation count match |
+| written `T[]` or `*T`, positive literal `N` | borrowed pointer over zeroed automatic `T[N]` backing |
+| written `T[]` or `*T`, dynamic/zero count | borrowed pointer over hidden owned backing |
+| written `owned T[]` | owned userdata for every count |
+| inferred dynamic/zero count or non-direct-local context | `owned T[]` |
+
+“Compile-time count” means a source integer literal. A fixed extent must be
+positive. The borrowed `T[]` target intentionally carries no count: it is a raw
+pointer view, so `#view` is unavailable and indexing has raw-pointer bounds
+semantics. The backing only supplies lifetime. This avoids creating a second
+counted owner type.
+
+Automatic aggregate/array storage has ordinary C block lifetime and no escape
+analysis. A pointer can dangle after its block/frame. A hidden owned backing is
+rooted for the containing function frame, but returning its borrowed pointer
+still loses ownership. Use an explicit `owned` target whenever storage must
+escape.
+
+A matching automatic struct/union can coerce to `owned *T`; a matching fixed
+array can coerce to `owned T[]`. The conversion allocates and roots a userdata,
+copies the complete object representation, and then publishes the owner. It is
+one direct checker-owned allocation/copy operation, not subtyping and not a
+structural conversion that lifts through Option or containers.
+
+### Flexible-array-member structs
+
+For a complete C struct `T` whose final field is `E field[]`:
+
+```titan
+local automatic = T.new(8)              -- literal count: extended stack object
+local owned: owned *T = T.new(count)     -- GC-owned extended object
 ```
 
-This is a semantic change for existing code, so audit uses of `.new()`/`.new_array()` in
-the stdlib to fix sites where static allocation would be used for a struct that outlives the
-function's frame.
+`T.new(fam_count)` is the only FAM constructor. `T.new()` has the wrong arity,
+and **`T.new_array` is unavailable for a FAM struct**. Titan therefore never
+pretends that multiple variably extended objects form an ISO C array or invents
+a custom outer stride.
 
-This also removes the need for the `local var: <ffi_type>[<literal>]` syntax for declaring
-stack-allocated arrays, these should stop being special-cased so they become a compile-time
-error since the implicit ` = nil` initialization would not typecheck.
+A direct inferred/by-value local with a nonnegative integer literal gets aligned
+automatic backing. An explicit owner, an explicit `*T`, a dynamic count, or a
+non-direct-local context uses one owner userdata (the pointer target receives a
+borrowed pointer to that hidden owner). Both forms zero the complete extent. The
+target C compiler determines the byte layout:
+
+```text
+extent = max(sizeof(T), offsetof(T, field) + count * sizeof(E))
+```
+
+Owned allocation evaluates the count once, rejects a negative count, and checks
+addition/multiplication overflow before `luaS_newudata`. One private integer
+uservalue stores the logical FAM count; payload bytes alone are not used to
+infer it. Automatic literal storage records the same count in its checker plan.
+
+While that provenance is intact, `owner.field[i]` and an automatic FAM local's
+`field[i]` are 0-based and bounds-checked, and `#owner.field`/`#local.field`
+return the logical count. Converting the owner/local to raw `T *` erases the
+count. A FAM field reached only through that raw pointer remains an unsized C
+array: it has no `#` and cannot use the count-aware indexing path.
+
+Automatic FAM byte backing participates in the same volatile full-extent spill
+and reload protocol as other automatic aggregates across ordinary Titan
+`catch`/`finally` longjmps. Foreign functions themselves have no Titan
+error-recovery path.
+
+## Standard-library callback migration
+
+The standard library now dogfoods the source feature rather than carrying C
+callback shims.
+
+* `titan.coroutine` defines `coro_entry_trampoline` as a foreign function and
+  stores it directly in `mco_desc.func`. `titan_coro.c` remains only as the one
+  `MINICORO_IMPL` translation unit and the translation-unit-local fixed Lua
+  tag comparator. `titan_coro_entry` and `titan/coro.h` are gone.
+* The six `titan.uv` contributors define the thirteen exact libuv callbacks for
+  filesystem, signal, process exit, DNS/connect/shutdown/connection,
+  write/alloc/read/close/walk, and timers. `titan_uv.c` and `titan/uv.h` are
+  gone. Address storage uses imported `sockaddr_storage`; argv storage uses the
+  portable `titan_ffi_char_ptr` alias.
+* `titan/http/native.titan` defines the eight synchronous llhttp callbacks.
+  `titan_httpshim.{c,h}` and its standalone metadata-free object are gone;
+  private `libtitan-llhttp.a` still contains exactly `llhttp.o`, `http.o`, and
+  `api.o`.
+
+`titan/ffi.h` supplies the narrow, typed inline Lua-internal bridges required by
+those trusted callbacks: `lmacro_thvalue`, `lmacro_uvalue`,
+`lmacro_clCvalue`, `lmacro_pvalue`, and `titan_ffi_pushudata`. General
+function-like macros remain outside the FFI; the host C preprocessor expands
+the real Lua macros inside these audited wrappers.
+
+Every libuv/HTTP foreign callback preserves the old reviewed owner protocol:
+it recovers the exact owner and stored Titan callback closure, obtains the Lua
+state, saves the stack top, pushes the **owner** as a full-userdata root, casts
+the closure's native entry through `foreign (...) -> ...`, invokes it with the
+exact callback shape, and restores the top. The filesystem callback remains the
+one-owner-argument protocol; its Titan continuation reads `uv_fs_get_result`.
+No event-kind dispatcher or callback registry is introduced.
+
+The installed runtime SDK archive now has exactly `titan.o` and
+`titan_coro.o`. Its namespaced installed header set is only `titan/ffi.h`
+(alongside the top-level `minicoro.h`, `titan.h`, and `titan_longjmp.h`; bundled
+mode separately installs libuv headers). The standard provider's native payload
+is `titanlib.o`, private LPegLabel, the selected libuv payload, private llhttp,
+and the selected OpenSSL payload; there is no HTTP adapter object.
+
+## ABI 0.23 boundary
+
+The complete change advances the compiled-module ABI from 0.22 to 0.23. The
+source syntax and local C types are not serialized, but two native contracts do
+change:
+
+1. generated standard objects now define their source foreign callbacks while
+   the former runtime/HTTP callback symbols and `titan_uv.o` are absent; and
+2. top-level ordinary/local/foreign function entry families use the
+   `_\u2133_` member separator rather than the old ambiguous/private split.
+
+An ABI-0.22 object or provider must therefore not be paired with the ABI-0.23
+runtime or generated objects. `TITAN_VER`, `_0_23`, `TITAN_PATH_0_23`,
+`lib/titan/0.23`, `share/titan/0.23`, and `stdlib_0_23` advance together.
+Versioned 0.22 state is preserved, never migrated, cleaned, or treated as an
+active-layout predecessor.
+
+The generated foreign header and source collaboration view do not add metadata
+keys or module-state slots. The standard provider still has eighteen logical
+keys and nineteen DSO openers including bare `luaopen_titan`.
+
+## Explicit non-goals
+
+* no ordinary Titan-function/closure adapter to an arbitrary C callback ABI;
+  write a restricted foreign function instead;
+* no adopted/external ownership or finalizer model;
+* no generic function-like C macro inference;
+* no FAM `new_array`, custom-stride FAM collection, or count recovery from a raw
+  pointer;
+* no escape analysis or arbitrary stack-allocation size cap;
+* no serialized C/foreign types or generated-header binary interface; and
+* no ABI migration or compatibility callback object.

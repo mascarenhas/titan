@@ -253,10 +253,6 @@ function defs.negativecarraylength(_, _, loc, n)
     return true, length
 end
 
-function defs.automaticlocal(pos, decl)
-    return ast.StatDecl(pos, { decl }, {})
-end
-
 function defs.ifstat(pos, exp, block, thens, elseopt)
     table.insert(thens, 1, ast.Then(pos, exp, block))
     return ast.StatIf(pos, thens, elseopt)
@@ -630,6 +626,14 @@ function defs.typefunc(pos, argtypes, varargtype, result)
         result.flexrettype)
 end
 
+-- `foreign (P...) -> R` is a C function-pointer type written without a C
+-- typedef. Keep its source shape distinct until the checker validates the C
+-- parameter/result restrictions and lowers it to Type.CPointer(Type.CFunction).
+function defs.typeforeignfunc(pos, argtypes, varargtype, result)
+    return ast.TypeForeignFunction(pos, argtypes, result.rettypes, varargtype,
+        result.flexrettype)
+end
+
 function defs.makeprogram(_, init)
     local nodes = assert(PROGRAM_NODES)
     if init then
@@ -667,6 +671,7 @@ local grammar = re.compile([[
                         (P (( toplevelinterface
                               / method
                               / static
+                              / foreignfunc
                               / toplevelfunc
                               / topleveltype
                               / toplevelvar
@@ -687,6 +692,10 @@ local grammar = re.compile([[
     toplevelfunc    <- (P  localopt FUNCTION NAME^NameFunc
                            LPAREN^LParPList paramlist RPAREN^RParPList
                            rettypeopt block END^EndFunc)         -> TopLevelFunc
+
+    foreignfunc     <- (P  FOREIGN FUNCTION NAME^NameFunc
+                           LPAREN^LParPList paramlist RPAREN^RParPList
+                           rettypeopt block END^EndFunc)         -> TopLevelForeignFunc
 
     topleveltype    <- (P  localopt TYPE NAME^NameTypeAlias
                            ASSIGN^AssignTypeAlias
@@ -790,29 +799,30 @@ local grammar = re.compile([[
 
     decllist        <- {| decl (COMMA decl^DeclParList)* |}      -- produces {Decl}
 
-    -- A source-written fixed C array is deliberately not part of the general
-    -- type grammar. It is available only to the single, initializer-less
-    -- automatic-local statement below. Its signed integer token is retained as
-    -- an ExpInteger so the checker receives both the value and its source
-    -- location when enforcing the positive-extent rule.
+    -- Fixed and unknown-length C array spellings are declaration-target syntax
+    -- for constructor-initialized locals. They do not enter the general type
+    -- grammar: the checker lowers `T[]` to an uncounted borrowed pointer view.
+    localcarrayextent
+                     <- (((P  SUB NUMBER) => negativecarraylength)
+                        / ((P  NUMBER) => carraylength))
+
+    localcarraytype <- (P  qualifiedtype LBRACKET
+                            ((localcarrayextent)? -> opt)
+                            RBRACKET^RBracketCArray)              -> TypeCArray
+
+    localdecl       <- (P  NAME COLON
+                            (localcarraytype / type)^TypeDecl)     -> typeddecl
+                     / (P  NAME OPT COLON type^TypeDecl)          -> optiondecl
+                     / (P  NAME OPT)                              -> optiondecl
+                     / (P  NAME)                                  -> inferreddecl
+
+    localdecllist   <- {| localdecl
+                            (COMMA localdecl^DeclLocal)* |}
+
     membername      <- NAME
                      / (CNAME -> contextual_c_name)
 
     qualifiedtype   <- (P  NAME DOT membername^QualName)         -> qualifiedtype
-
-    carraylength    <- (((P  SUB NUMBER) => negativecarraylength)
-                       / ((P  NUMBER) => carraylength)
-                       / %{CArrayExtent})
-
-    automaticlocaltype
-                    <- (P  qualifiedtype
-                            LBRACKET carraylength
-                            RBRACKET^RBracketCArray)             -> TypeCArray
-                     / qualifiedtype
-
-    automaticlocaldecl
-                    <- (P  NAME COLON
-                            automaticlocaltype)                  -> typeddecl
 
     -- An owned payload is deliberately optionless: the sole trailing `?` in
     -- `simpletype` wraps the complete owner. The array alternative is selected
@@ -899,15 +909,20 @@ local grammar = re.compile([[
     -- arrow follows. This disambiguates `(...: T)` as a flexible result list
     -- from `(...: T) -> R` as a function type without running the input-vararg
     -- capture path and then backtracking through it.
+    foreignfunctype <- (P  FOREIGN arglist RARROW
+                            rettype^TypeReturnTypes)             -> typeforeignfunc
+
     rettype         <- (resulttypelist !RARROW)
                      / (P  arglist RARROW
                             rettype^TypeReturnTypes)             -> functionreturnshape
                      / (P  {| simpletype |} (''->tofalse) RARROW
                              rettype^TypeReturnTypes)            -> functionreturnshape
+                     / (foreignfunctype                         -> singlereturn)
                      / (simpletype                              -> singlereturn)
                      / (DOTS %{FlexRetParens})
 
-    type            <- (P  arglist RARROW
+    type            <- foreignfunctype
+                     / (P  arglist RARROW
                            rettype^TypeReturnTypes)              -> typefunc
                      / (P  {| simpletype |} (''->tofalse) RARROW
                            rettype^TypeReturnTypes)              -> typefunc
@@ -954,11 +969,9 @@ local grammar = re.compile([[
                            elseifstats elseopt END^EndIf)        -> ifstat
                      / casestat
                      / forstat
-                     / (P  LOCAL automaticlocaldecl
-                                !ASSIGN !COMMA
-                                !(OPT / LBRACKET))               -> automaticlocal
-                     / (P  LOCAL decllist^DeclLocal ASSIGN^AssignLocal
-                                 explist^ExpLocal)                   -> StatDecl
+                     / (P  LOCAL localdecllist^DeclLocal
+                                 ASSIGN^AssignLocal
+                                 explist^ExpLocal)                 -> StatDecl
                      / (P  varlist ASSIGN^AssignAssign
                                explist^ExpAssign)                    -> StatAssign
                      / &(exp ASSIGN) %{AssignNotLValue}

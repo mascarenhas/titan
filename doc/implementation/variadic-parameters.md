@@ -141,7 +141,7 @@ symbol, and — its central job — turns every spread into either synthesized
 `types.lua` adds `varargtype` to `Type.Function`
 (`{"params","rettypes","vararg","varargtype","flexrettype"}`) and to
 `Type.Method` / `Type.StaticMethod` (whose declaration descriptors also carry
-`paramnames`). In the current ABI-0.22 `Type.Function`, the third positional
+`paramnames`). In the current ABI-0.23 `Type.Function`, the third positional
 `vararg` field is a required **reserved `false` sentinel** retained only to keep
 serialized constructor arity stable; it has no C or Titan variadic meaning. A
 Titan variadic sets `varargtype = T`. A direct foreign declaration instead has
@@ -410,7 +410,7 @@ params and before the out-params**. If the same function also has a flexible
 result, its `_flexout`/`_flexwant` pair follows every fixed out-parameter:
 
 ```c
-lua_Integer mod_f_titan(lua_State *L, Udata *_mod, CClosure *_fn,
+lua_Integer mod_\u2133_f_titan(lua_State *L, Udata *_mod, CClosure *_fn,
                         lua_Integer _param_x,
                         TitanVargInteger *_varargs, int _start,   /* trailing, before out-params */
                         lua_Integer *_outparam_2,
@@ -599,7 +599,7 @@ flexible-array object (`lu_byte n_args; T args[]`) to a descriptor
 the struct layout did not; mixing 0.9 and 0.10 modules would misread the bytes
 after `n_args`, so they must live under different `TITAN_PATH` directories.
 
-The current ABI is **0.22**, newer than this variadic change. Flexible outputs
+The current ABI is **0.23**, newer than this variadic change. Flexible outputs
 reuse these descriptors but add `flexrettype` to serialized callable shapes and
 `_flexout`/`_flexwant` to native signatures. They shipped as ABI 0.14 rather
 than accepting both layouts under one marker. ABI 0.17 introduced the current
@@ -608,7 +608,7 @@ elements remain internal backing Tables, while generic/Lua-visible runs box
 them as proxies. ABI 0.18 and 0.19 preserved that descriptor contract; ABI
 0.20 kept it while adding the Array writer user value and callable
 strict-entry trailer; 0.21 retained those descriptors while advancing the
-embedded Lua contract to 5.5.1, and 0.22 retains them. ABI 0.22 also retains
+embedded Lua contract to 5.5.1, and 0.22/0.23 retain them. ABI 0.23 also retains
 the historical third `Function` constructor position as `false`; separating
 direct `CFunction` declarations is checker-internal and does not alter that
 schema or native convention. Closure adjustment wrappers reuse the same

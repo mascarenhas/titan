@@ -5,6 +5,7 @@
 local cpreamble = {}
 
 cpreamble.fixed_includes = [[#include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 #include <math.h>
 

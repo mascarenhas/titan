@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.22 prototype compiler: lexical conventions, the complete syntactic
+0.23 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
@@ -149,11 +149,13 @@ for a folder module only its main source may contain that initializer. Its `bloc
 
 ```
 program  ::= {tldecl} [moduleinit]
-tldecl   ::= tlmethod | tlrecfunc | tlfunc | tlvar | tlrecord | tlunion
-           | tlinterface | tltype | tlimport | tlforeignimport
+tldecl   ::= tlmethod | tlrecfunc | tlfunc | tlforeignfunc | tlvar
+           | tlrecord | tlunion | tlinterface | tltype | tlimport
+           | tlforeignimport
 tlmethod ::= [local] function Name ':' Name '(' [parlist] ')' [':' rettype] block end
 tlrecfunc ::= [local] function Name '.' Name '(' [parlist] ')' [':' rettype] block end
 tlfunc   ::= [local] function Name '(' [parlist] ')' [':' rettype] block end
+tlforeignfunc ::= foreign function Name '(' [parlist] ')' [':' rettype] block end
 tlvar    ::= [local] decl '=' exp
 tlrecord ::= [local] record Name {recordfield} end
 tlunion  ::= [local] union Name unionvariant {unionvariant} end
@@ -298,8 +300,9 @@ the ownership marker, so another pointer layer belongs to the payload:
 `simpletype` wraps the complete owner. The parser accepts the shared payload
 shape above; the checker then requires a complete, allocatable imported C
 object type and rejects Titan, `void`, function, incomplete, fixed-array
-typedef, flexible-array-member, and nested-owner payloads. A numeral between
-the brackets is not owner syntax.
+typedef, and nested-owner payloads. A flexible-array-member struct is a scalar
+owner allocated through its special `.new(count)` constructor. A numeral
+between the brackets is not owner syntax.
 
 A bare `resulttypes` form is valid only in
 `rettype` position — a function's return annotation or the right side
@@ -322,6 +325,11 @@ to a function type: `((integer) -> integer)?` is a syntax error. The type
 system does support options of functions; name the function type with an alias
 and suffix the name instead, for example `type F = (integer) -> integer`
 followed by `local f: F? = nil`.
+
+`foreign (P...) -> R` is a C function-pointer type, not an ordinary Titan
+function type; `()` on its right means C `void`. A top-level `foreign function`
+uses the same restricted C signature and body described in
+[Foreign functions](foreign-functions.md).
 
 Function types are valid, checked types in any type position: functions
 are first-class values, so a function type may annotate a variable,
@@ -563,10 +571,11 @@ confused rule is not syntax at all:
 6. **Lvalues cannot be parenthesized.** `(x) = 1` is a syntax error
    (`Expected a valid lvalue in the left side of assignment but found
    a regular expression.`).
-7. **Declarations need initializers, except automatic C aggregates.** Module
-   variables and ordinary `local` statements require `= explist`. The narrow
-   `local name: module.CType` / `local name: module.CType[N]` production is
-   reserved for one zero-initialized automatic C aggregate.
+7. **Every declaration needs an initializer.** Module variables and `local`
+   statements require `= explist`, including C aggregates and arrays. The
+   declaration-only `module.CType[N]` and `module.CType[]` spellings select a
+   fixed automatic array or borrowed view only when initialized directly by
+   `.new_array(...)`.
 8. **Parenthesizing a call truncates it.** `(f())` adjusts a
    multiple-value call to exactly its first value, as in Lua. See
    [Functions](functions.md).

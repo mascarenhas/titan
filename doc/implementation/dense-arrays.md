@@ -5,7 +5,7 @@ dense backing while preserving its native C representation as `Table *`.
 ABI 0.20 kept that hot representation and one shared proxy metatable, but
 added a construction-selected Lua writer as the proxy's second traced user
 value. ABI 0.21 retained that representation while advancing the embedded
-Lua contract to 5.5.1, and ABI 0.22 retains it. Typed Titan reads are strict;
+Lua contract to 5.5.1, and ABIs 0.22 and 0.23 retain it. Typed Titan reads are strict;
 non-nil writes through Lua's `__newindex` run the writer's target-directed
 dynamic coercion before any mutation.
 
@@ -492,7 +492,7 @@ module's Lua entry wrapper. The wrapper validates/unboxes it before calling
 the exact native `main` with `Table *`. Consequently the executable name is
 not in the Array, `args[0]` is nil, and `#args == argc - 1`.
 
-## ABI 0.17, 0.20, 0.21, and 0.22 boundaries
+## ABI 0.17, 0.20, 0.21, 0.22, and 0.23 boundaries
 
 ABI 0.17 is a semantic and boundary-protocol break even though serialized
 `Array(...)` text, native pointer width, exact `Table *` signatures, and
@@ -523,9 +523,9 @@ satisfaction remains an outer scalar coercion: it does not make `{R}` and
 `{I}` consistent, and typed Array reads only accept an already wrapped exact
 Interface element.
 ABI 0.21 retained the ABI-0.20 Array and function layouts while advancing the
-matched Lua internal-header/runtime contract to 5.5.1. Current ABI-0.22
-providers live under `lib/titan/0.22` and use `TITAN_PATH_0_22`; they retain
-those Array, function, and Lua layouts. An ABI-0.22 compiler/runtime rejects
+matched Lua internal-header/runtime contract to 5.5.1. Current ABI-0.23
+providers live under `lib/titan/0.23` and use `TITAN_PATH_0_23`; they retain
+those Array, function, and Lua layouts. An ABI-0.23 compiler/runtime rejects
 ABI-0.21 DSOs and archives before any Array or function value can cross the
 provider boundary. Separately installed 0.17, 0.18, 0.19, 0.20, and 0.21 trees
 remain versioned predecessors and are not migrated, cleaned up, or treated as
@@ -544,7 +544,7 @@ compatible.
   storage. Closures are reused per constructed element type within a module.
 - Oversized construction/growth fails before narrowing or Table overflow.
 - The backing/length contract introduced in ABI 0.17 and retained through ABI
-  0.22 has no shrinking resize.
+  0.23 has no shrinking resize.
 
 ### Raw and stock table-library boundary
 

@@ -343,21 +343,15 @@ end
         })
     end)
 
-    it("can parse initializer-less automatic C object and array locals",
+    it("parses constructor-initialized fixed and borrowed C array locals",
     function()
         assert_statements_ast([[
-            local options: ffi.Options
-            local storage: ffi.Item[3]
-            local zero: ffi.Item[0]
-            local negative: ffi.Item[-2]
+            local storage: ffi.Item[3] = ffi.Item.new_array(3)
+            local borrowed: ffi.Item[] = ffi.Item.new_array(count)
+            local zero: ffi.Item[0] = ffi.Item.new_array(0)
+            local negative: ffi.Item[-2] = ffi.Item.new_array(2)
+            local first: ffi.Item[1], second: ffi.Other[] = a, b
         ]], {
-            { _tag = "Ast.StatDecl", decls = {
-                { _tag = "Ast.Decl", name = "options", type = {
-                    _tag = "Ast.TypeQualName",
-                    module = "ffi",
-                    name = "Options",
-                }, option = false },
-            }, exps = {} },
             { _tag = "Ast.StatDecl", decls = {
                 { _tag = "Ast.Decl", name = "storage", type = {
                     _tag = "Ast.TypeCArray",
@@ -368,25 +362,40 @@ end
                     },
                     length = { _tag = "Ast.ExpInteger", value = 3 },
                 }, option = false },
-            }, exps = {} },
+            }, exps = { { _tag = "Ast.ExpCall" } } },
+            { _tag = "Ast.StatDecl", decls = {
+                { name = "borrowed", type = {
+                    _tag = "Ast.TypeCArray",
+                    base = { _tag = "Ast.TypeQualName", name = "Item" },
+                    length = false,
+                } },
+            }, exps = { { _tag = "Ast.ExpCall" } } },
             { _tag = "Ast.StatDecl", decls = {
                 { name = "zero", type = {
                     _tag = "Ast.TypeCArray",
                     length = { _tag = "Ast.ExpInteger", value = 0 },
                 } },
-            }, exps = {} },
+            } },
             { _tag = "Ast.StatDecl", decls = {
                 { name = "negative", type = {
                     _tag = "Ast.TypeCArray",
                     length = { _tag = "Ast.ExpInteger", value = -2 },
                 } },
-            }, exps = {} },
+            } },
+            { _tag = "Ast.StatDecl", decls = {
+                { name = "first", type = { _tag = "Ast.TypeCArray" } },
+                { name = "second", type = {
+                    _tag = "Ast.TypeCArray", length = false,
+                } },
+            }, exps = {
+                { _tag = "Ast.ExpVar" }, { _tag = "Ast.ExpVar" },
+            } },
         })
 
         -- Zero and negative integer tokens reach the checker so it can issue
         -- the semantic positive-extent diagnostic. Keep the sign position on
         -- the literal node for that diagnostic.
-        local source = "function f() local storage: ffi.Item[-8] end"
+        local source = "function f() local storage: ffi.Item[-8] = source end"
         local program = assert(parser.parse("automatic.titan", source))
         local arraytype = program[1].block.stats[1].decls[1].type
         assert.same({
@@ -424,42 +433,41 @@ end
         })
     end)
 
-    it("rejects malformed automatic C array extents precisely", function()
-        for _, extent in ipairs({ "", "count", "3.0", "-2.5" }) do
+    it("rejects malformed constructor-local C array extents precisely",
+    function()
+        for _, extent in ipairs({ "count", "3.0", "-2.5", "1 + 2" }) do
             assert_statements_syntax_error(
-                "local storage: ffi.Item[" .. extent .. "]",
-                "CArrayExtent")
+                "local storage: ffi.Item[" .. extent .. "] = source",
+                "RBracketCArray")
         end
         assert_statements_syntax_error(
-            "local storage: ffi.Item[1 + 2]", "RBracketCArray")
-        assert_statements_syntax_error(
-            "local storage: ffi.Item[3", "RBracketCArray")
+            "local storage: ffi.Item[3 = source", "RBracketCArray")
     end)
 
-    it("keeps fixed C array syntax out of general type positions", function()
+    it("keeps C array targets out of general type positions", function()
         local programs = {
             "function f(x: ffi.Item[3]) end",
             "function f(): ffi.Item[3] end",
             "type Items = ffi.Item[3]",
             "record R item: ffi.Item[3] end",
-            "local items: ffi.Item[3] = nil",
             "function f() local x = y as ffi.Item[3] end",
-            "function f() local items: ffi.Item[3] = source end",
-            "function f() local items: ffi.Item?[3] end",
-            "function f() local items: ffi.Item[3]? end",
-            "function f() local items: ffi.Item[3][4] end",
-            "function f() local a: ffi.Item[3], b: ffi.Item[3] end",
-            "function f() local items: Item[3] end",
-            "function f() local items: integer[3] end",
+            "function f() local items: ffi.Item?[3] = source end",
+            "function f() local items: Item[3] = source end",
+            "function f() local items: integer[3] = source end",
         }
         for _, program in ipairs(programs) do
             assert_program_syntax_error(program, "CArrayOnlyAutomatic")
         end
 
-        -- The initializer-less object form is single-declaration only, while
-        -- the existing initialized multiple-declaration form remains legal.
-        assert_statements_syntax_error(
-            "local first: ffi.Item, second: ffi.Item", "AssignLocal")
+        for _, declaration in ipairs({
+            "local object: ffi.Item",
+            "local fixed: ffi.Item[3]",
+            "local borrowed: ffi.Item[]",
+            "local optional: ffi.Item[3]? = source",
+            "local nested: ffi.Item[3][4] = source",
+        }) do
+            assert_statements_syntax_error(declaration, "AssignLocal")
+        end
     end)
 
     it("can parse toplevel function declarations", function()
@@ -499,6 +507,68 @@ end
                     { _tag = "Ast.Decl", name = "y" },
                 },
                 block = { _tag = "Ast.StatBlock", stats = {} } },
+        })
+    end)
+
+    it("parses foreign declarations and foreign function-pointer types",
+    function()
+        assert_program_ast([[
+            foreign function notify(): ()
+                return
+            end
+
+            foreign function apply(
+                item: *c.Item,
+                callback: foreign (c.int) -> c.int
+            ): c.int
+                return callback(0)
+            end
+
+            local type Nested =
+                foreign (foreign (c.int) -> c.int) -> ()
+            local type RejectedShapes =
+                foreign (c.int, ...: c.int) -> (c.int, ...: c.int)
+        ]], {
+            { _tag = "Ast.TopLevelForeignFunc",
+                name = "notify",
+                params = {},
+                rettypes = {},
+                flexrettype = false,
+                block = { _tag = "Ast.StatBlock", stats = {
+                    { _tag = "Ast.StatReturn", exps = {} },
+                } } },
+            { _tag = "Ast.TopLevelForeignFunc",
+                name = "apply",
+                params = {
+                    { _tag = "Ast.Decl", name = "item", type = {
+                        _tag = "Ast.TypeCPointer",
+                        subtype = { _tag = "Ast.TypeQualName",
+                            module = "c", name = "Item" },
+                    } },
+                    { _tag = "Ast.Decl", name = "callback", type = {
+                        _tag = "Ast.TypeForeignFunction",
+                        argtypes = { { _tag = "Ast.TypeQualName",
+                            module = "c", name = "int" } },
+                        rettypes = { { _tag = "Ast.TypeQualName",
+                            module = "c", name = "int" } },
+                        varargtype = false,
+                        flexrettype = false,
+                    } },
+                },
+                rettypes = { { _tag = "Ast.TypeQualName",
+                    module = "c", name = "int" } } },
+            { _tag = "Ast.TopLevelTypeAlias", name = "Nested", type = {
+                _tag = "Ast.TypeForeignFunction",
+                argtypes = { { _tag = "Ast.TypeForeignFunction" } },
+                rettypes = {},
+            } },
+            { _tag = "Ast.TopLevelTypeAlias", name = "RejectedShapes",
+                type = {
+                    _tag = "Ast.TypeForeignFunction",
+                    varargtype = { _tag = "Ast.TypeQualName" },
+                    rettypes = { { _tag = "Ast.TypeQualName" } },
+                    flexrettype = { _tag = "Ast.TypeQualName" },
+                } },
         })
     end)
 
@@ -1434,7 +1504,7 @@ end
         ]], "DeclLocal")
         assert_statements_syntax_error([[
             local x, = 10, 20
-        ]], "DeclParList")
+        ]], "DeclLocal")
         assert_statements_syntax_error([[
             local x =
         ]], "ExpLocal")

@@ -111,9 +111,13 @@
    0.21 -> 0.22: titan.uv localizes its source-local surface, changing its
    serialized public schema and reconstructible module-userdata prefix. This
    is a private-provider boundary; Lua 5.5.1 and the other 0.21 layouts remain
-   unchanged. */
-#define TITAN_VER "0.22"
-#define TITAN_VER_SUFFIX "_0_22"
+   unchanged.
+   0.22 -> 0.23: source-defined foreign callback entries replace the runtime
+   and standard-provider callback shim objects. The runtime archive and the
+   generated standard modules therefore expose and consume a different native
+   symbol contract; 0.22 and 0.23 objects must not be mixed. */
+#define TITAN_VER "0.23"
+#define TITAN_VER_SUFFIX "_0_23"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"

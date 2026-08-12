@@ -106,7 +106,7 @@ local function compiler_argv(workspace, source_root, ...)
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "CCACHE_DISABLE=1",
-        "TITAN_PATH_0_22=" .. workspace,
+        "TITAN_PATH_0_23=" .. workspace,
         "TITAN_PATH=",
     }
     if PREFIX then
@@ -1970,6 +1970,131 @@ function get(): integer return dep.get() + 1 end
         assert.is_nil(lfs.attributes(workspace .. "/clash.a", "mode"))
     end)
 
+    it("prepares source foreign headers before compiling direct consumers",
+       function()
+        write_file(source_root .. "/headers/types.h", [[
+typedef int ffi_int;
+]])
+        write_file(source_root .. "/headers/provider.titan", [[
+local c = foreign import "types.h"
+
+foreign function increment(input: c.ffi_int): c.ffi_int
+    return input + 1
+end
+]])
+        write_file(source_root .. "/headers/consumer.titan", [[
+local c = foreign import "types.h"
+local provider = import "headers.provider"
+
+foreign function twice(input: c.ffi_int): c.ffi_int
+    return provider.increment(provider.increment(input))
+end
+
+function run(): integer
+    return twice(4 as c.ffi_int) as integer
+end
+]])
+
+        local ok, output = compile(workspace, source_root, "headers.consumer")
+        assert.truthy(ok, output)
+        local provider_header =
+            source_root .. "/headers/provider.titan.h"
+        local consumer_header =
+            source_root .. "/headers/consumer.titan.h"
+        assert.equal("file", lfs.attributes(provider_header, "mode"))
+        assert.equal("file", lfs.attributes(consumer_header, "mode"))
+        local header = read_file(consumer_header)
+        local dependency = assert(header:find(
+            '#include "' .. provider_header .. '"', 1, true))
+        local declaration = assert(header:find("twice_titan", dependency, true))
+        assert.is_true(dependency < declaration)
+        assert.truthy(read_file(source_root .. "/headers/consumer.c"):find(
+            '#include "' .. consumer_header .. '"', 1, true))
+
+        local ran, result = run_lua(workspace, [[
+local consumer = require "headers.consumer"
+io.write(consumer.run())
+]])
+        assert.truthy(ran, result)
+        assert.equal("6", result)
+    end)
+
+    it("checks consumer macros in the emitted source-header environment",
+       function()
+        write_file(source_root .. "/macro/provider.h", [[
+#define TITAN_SOURCE_COLLISION 2
+typedef int ffi_int;
+]])
+        write_file(source_root .. "/macro/consumer.h", [[
+#define TITAN_SOURCE_COLLISION 1
+typedef int consumer_int;
+]])
+        write_file(source_root .. "/macro/provider.titan", [[
+local c = foreign import "provider.h"
+foreign function identity(input: c.ffi_int): c.ffi_int return input end
+]])
+        write_file(source_root .. "/macro/consumer.titan", [[
+local c = foreign import "consumer.h"
+local provider = import "macro.provider"
+function collision(): integer return c.TITAN_SOURCE_COLLISION end
+]])
+
+        local ok, output = compile(workspace, source_root, "macro.consumer")
+        assert.truthy(ok, output)
+        local generated = read_file(source_root .. "/macro/consumer.c")
+        local direct = assert(generated:find(
+            '/macro/consumer.h"', 1, true))
+        local dependency = assert(generated:find(
+            '/macro/provider.titan.h"', direct, true))
+        assert.is_true(direct < dependency)
+        local ran, result = run_lua(workspace, [[
+local consumer = require "macro.consumer"
+io.write(consumer.collision())
+]])
+        assert.truthy(ran, result)
+        assert.equal("2", result)
+    end)
+
+    it("removes stale owned foreign headers and preserves reserved user files",
+       function()
+        write_file(source_root .. "/stale/types.h", "typedef int ffi_int;\n")
+        write_file(source_root .. "/stale/item.titan", [[
+local c = foreign import "types.h"
+foreign function identity(input: c.ffi_int): c.ffi_int
+    return input
+end
+function answer(): integer return identity(7 as c.ffi_int) as integer end
+]])
+        local ok, output = compile(workspace, source_root, "stale.item")
+        assert.truthy(ok, output)
+        local header = source_root .. "/stale/item.titan.h"
+        assert.equal("file", lfs.attributes(header, "mode"))
+
+        write_file(source_root .. "/stale/item.titan",
+            "function answer(): integer return 8 end\n")
+        ok, output = compile(workspace, source_root, "stale.item")
+        assert.truthy(ok, output)
+        assert.is_nil(lfs.attributes(header, "mode"))
+
+        write_file(source_root .. "/reserved/types.h", "typedef int ffi_int;\n")
+        write_file(source_root .. "/reserved/item.titan", [[
+local c = foreign import "types.h"
+foreign function identity(input: c.ffi_int): c.ffi_int return input end
+]])
+        local reserved = source_root .. "/reserved/item.titan.h"
+        write_file(reserved, "/* user-owned */\n")
+        ok, output = compile(workspace, source_root, "reserved.item")
+        assert.falsy(ok)
+        assert.truthy(output:find(
+            "refusing to overwrite user-owned generated-header path", 1,
+            true), output)
+        assert.equal("/* user-owned */\n", read_file(reserved))
+        assert.is_nil(lfs.attributes(
+            source_root .. "/reserved/item.c", "mode"))
+        assert.is_nil(lfs.attributes(
+            source_root .. "/reserved/item.o", "mode"))
+    end)
+
     it("keeps source-private symbols injective across module boundaries",
        function()
         write_file(source_root .. "/private/root.titan", [[
@@ -1993,38 +2118,23 @@ io.write(root.expose(), " ", child.expose())
         assert.equal("1 2", result)
     end)
 
-    it("rejects module/member boundary symbol collisions before code generation",
-       function()
+    it("keeps module/member boundary symbols injective", function()
         write_file(source_root .. "/boundary/root.titan", [[
 function child_leaf(): integer return 1 end
-function main(args: {string}): integer return 0 end
 ]])
         write_file(source_root .. "/boundary/root/child.titan",
             "function leaf(): integer return 2 end\n")
 
         local ok, output = compile(workspace, source_root,
             "boundary.root", "boundary.root.child")
-        assert.falsy(ok)
-        assert.truthy(output:find(
-            "cannot link C symbol 'boundary_root_child_leaf_titan'", 1,
-            true), output)
-        assert.truthy(output:find("function 'boundary.root.child_leaf'", 1,
-            true), output)
-        assert.truthy(output:find("function 'boundary.root.child.leaf'", 1,
-            true), output)
-        for _, path in ipairs({
-            source_root .. "/boundary/root.c",
-            source_root .. "/boundary/root.o",
-            source_root .. "/boundary/root/child.c",
-            source_root .. "/boundary/root/child.o",
-            workspace .. "/boundary/root.so",
-            workspace .. "/boundary/root.a",
-            workspace .. "/boundary/root.lua",
-            workspace .. "/boundary/root/child.lua",
-            workspace .. "/boundary/root",
-        }) do
-            assert.is_nil(lfs.attributes(path, "mode"), path)
-        end
+        assert.truthy(ok, output)
+        local ran, result = run_lua(workspace, [[
+local root = require "boundary.root"
+local child = require "boundary.root.child"
+io.write(root.child_leaf(), " ", child.leaf())
+]])
+        assert.truthy(ran, result)
+        assert.equal("1 2", result)
     end)
 
     it("preflights symbols from producer-dynamic contextual owners",
@@ -2056,23 +2166,18 @@ type R = owner.R
             "function c(): integer return 2 end\n")
         write_file(source_root .. "/app.titan", [[
 local facade = import "facade.api"
+local peer = import "a_b"
 
 function main(args: {string}): integer
-    return 0
+    if peer.c() == 2 then return 0 else return 1 end
 end
 ]])
-        ok, output = compile(
+        ok, output, why, code = compile(
             workspace, source_root, "--static", "app", "a_b")
-        assert.falsy(ok)
-        assert.truthy(output:find(
-            "cannot link C symbol 'a_b_c_titan'", 1, true), output)
-        assert.truthy(output:find(
-            "function 'a.b_c'", 1, true), output)
-        assert.truthy(output:find(
-            "function 'a_b.c'", 1, true), output)
-        assert.is_nil(lfs.attributes(source_root .. "/app.c", "mode"))
-        assert.is_nil(lfs.attributes(source_root .. "/a_b.c", "mode"))
-        assert.is_nil(lfs.attributes(workspace .. "/app", "mode"))
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        local ran, result = run({ workspace .. "/app" }, workspace)
+        assert.truthy(ran, result)
     end)
 
     it("preflights record-function and bound-method symbols", function()

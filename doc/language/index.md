@@ -30,7 +30,7 @@ local m = require "sum"
 print(m.sum_list(m.sample())) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.22
+This is the reference for the language as implemented by the Titan 0.23
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -88,18 +88,19 @@ use the chapters below for the normative language reference.
 | [Iteration standard library](standard-library-iter.md) | Lua-compatible Map traversal, corrected generic-for iterator tuples, and Array iteration that preserves inner nil elements. |
 | [Garbage-collection standard library](standard-library-gc.md) | Weak Maps and ephemerons, collector actions and mode switches, byte counts, and Lua 5.5 tuning parameters. |
 | [Testing Titan code](standard-library-test.md) | The `titan.test` API, native `titanc --test` discovery, subtests and cleanup, filtering, failure output, and process statuses. |
-| [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, limitations. |
-| [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, host-validated pointer conversions, zero-initialized automatic aggregates and fixed arrays, typed object-macro values, macro-projected fields, and target-correct C operators. |
+| [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, ownership, allocation, and limitations. |
+| [Foreign functions](foreign-functions.md) | Source-defined exact C-ABI entry points, the restricted raw-C body, pointer types, direct source collaboration, generated companions, sequencing, and callback use. |
+| [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, host-validated pointer conversions, target-directed automatic/owned allocation (including flexible tails), typed object-macro values, macro-projected fields, and target-correct C operators. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.22. The language documented here is
+Titan is a working prototype, version 0.23. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
 
-Interfaces were introduced in ABI 0.20 and remain part of ABI 0.22. A record
+Interfaces were introduced in ABI 0.20 and remain part of ABI 0.23. A record
 or union satisfies an Interface structurally at a statically known conversion
 site, but the conversion constructs a fresh wrapper; it is not subtyping or
 gradual consistency and does not lift through containers or functions. Dynamic
@@ -169,17 +170,18 @@ Lua and `value` never discover an implementation from a bare record or union.
   distinct from Titan types, can be used in local annotations, and support
   regular `as <type>` casts; they cannot be exported from Titan modules.
   C arrays are 0-based (`T[N]` bounds-checked, pointers unchecked, counted
-  owned arrays dynamically checked), `#` works for static/count-owned
-  arrays, struct/union fields can be read and written, and `.new()` /
-  `.new_array(count)` allocate zeroed Lua-GC-owned userdata with no
-  finalizer. Explicit C variadic calls are supported; Titan functions cannot yet be
-  passed to C, adopted lifetimes are parked, and owned structs with
-  flexible array members are deliberately rejected for this version.
-  Zero-initialized automatic aggregates/fixed arrays, named tag-only
-  structures, contextual object-pointer casts, and target-correct C operators
-  are described in
-  [C FFI declarations and expressions](c-ffi-expressions.md);
-  see also [the full FFI limitation list](ffi.md#current-limitations).
+  owned arrays dynamically checked), `#` works for static/count-owned arrays,
+  and struct/union fields can be read and written. Direct local `.new()` /
+  `.new_array(count)` calls select explicit automatic, borrowed, or GC-owned
+  zeroed storage from their sink; `T.new(count)` supports one
+  flexible-array-member object while FAM `new_array` remains unavailable.
+  Restricted [foreign functions](foreign-functions.md) supply plain C callback
+  entries without adapting ordinary Titan closures. Explicit C variadic calls
+  are supported and adopted lifetimes remain parked. Target-directed
+  allocation, named tag-only structures, contextual object-pointer casts, and
+  target-correct C operators are described in
+  [C FFI declarations and expressions](c-ffi-expressions.md); see also
+  [the full FFI limitation list](ffi.md#current-limitations).
 
 ### Other
 

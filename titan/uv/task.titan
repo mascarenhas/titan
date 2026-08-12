@@ -143,6 +143,21 @@ local record TimerOwner
   local root_index: integer
 end
 
+foreign function uv_timer_cb(timer: *libuv.uv_timer_t)
+  local handle = timer as *libuv.uv_handle_t
+  local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local loop = libuv.uv_handle_get_loop(handle)
+  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvNoargCallbackEntry
+  local top = lua.lua_gettop(L)
+  ffi.titan_ffi_pushudata(L, owner)
+  entry(L, module, callback, owner)
+  lua.lua_settop(L, top)
+end
+
 -- A repeating timer retains only its latest tick and at most one waiter.
 local record uv_timer_t
   local handle: owned *libuv.uv_timer_t
@@ -470,7 +485,7 @@ local function activate_timer(runtime: Runtime,
       timer_handle as *libuv.uv_handle_t,
       owner_pointer)
   status = libuv.uv_timer_start(
-      native, shim.titan_uvshim_timer_cb,
+      native, uv_timer_cb,
       milliseconds as libuv.uint64_t,
       repeat_time as libuv.uint64_t)
   if status < 0 then
@@ -488,7 +503,7 @@ local function start_timer(task: Task, milliseconds: integer,
                            failed: boolean,
                            payload: value): TimerOwner
   local runtime = task.runtime
-  local native = libuv.uv_timer_t.new()
+  local native: owned *libuv.uv_timer_t = libuv.uv_timer_t.new()
   local completion = function ()
     do
       resume_task_from_callback(task, failed, payload)
@@ -533,7 +548,7 @@ end
 local function start_ticker(task: Task,
                             milliseconds: integer): uv_timer_t
   local runtime = task.runtime
-  local native = libuv.uv_timer_t.new()
+  local native: owned *libuv.uv_timer_t = libuv.uv_timer_t.new()
   local ticker = uv_timer_t.new(native, ticker_callback, runtime,
                                 nil, false, 0)
   ticker.root_index = activate_timer(

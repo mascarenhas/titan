@@ -165,12 +165,12 @@ describe("call sequencing regressions", function()
             end
         ]])
         local declaration = assert(csrc:find(
-            "lua_Integer test_native_call_titan(", 1, true))
+            "lua_Integer test_\\u2133_native_call_titan(", 1, true))
         local first = assert(csrc:find(
-            "lua_Integer test_native_call_titan(",
+            "lua_Integer test_\\u2133_native_call_titan(",
             declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_native_call_titanentry_lua", first, true))
+            "static int test_\\u2133_native_call_titanentry_lua", first, true))
         local body = csrc:sub(first, last - 1)
         local copy = assert(body:find("_tmp_1 = _param_text;", 1, true))
         local call = assert(body:find(", NULL, _tmp_1", copy, true), body)

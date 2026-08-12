@@ -9,8 +9,8 @@ local url = import "url"
 local ffi = foreign import "titan/ffi.h"
 
 -- This folder module is intentionally layered over the public net, ssl, io,
--- and async modules. Its C boundary contains only exact llhttp callback
--- trampolines; synchronous parsing policy and event storage remain in Titan.
+-- and async modules. Its C boundary contains only exact llhttp foreign
+-- callbacks; synchronous parsing policy and event storage remain in Titan.
 
 local function parse_url_or_raise(source: string): url.Url
   local parsed?, parse_error? = url.parse(source)
