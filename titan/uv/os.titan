@@ -21,7 +21,6 @@ foreign function uv_signal_cb(signal: *libuv.uv_signal_t,
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvIntegerCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   entry(L, module, callback, owner, signum as lua.lua_Integer)
   lua.lua_settop(L, top)
 end

@@ -78,9 +78,10 @@ local record Parser
 end
 
 -- These callbacks mirror the first eleven Parser fields as zero-based raw
--- Udata slots: state at 2 and the exact llhttp closures at 3 through 10. Each
--- one roots the Parser owner across its synchronous Titan entry call and
--- restores the pre-callback Lua stack before returning the exact C result.
+-- Udata slots: state at 2 and the exact llhttp closures at 3 through 10. The
+-- Parser owner remains traced throughout each synchronous Titan entry call;
+-- each callback restores the pre-callback Lua stack before returning its exact
+-- C result.
 foreign function llhttp_url_cb(
     parser: *llhttp.llhttp_t, data: const *ffi.titan_ffi_char,
     length: llhttp.size_t): ffi.titan_ffi_int
@@ -91,7 +92,6 @@ foreign function llhttp_url_cb(
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   local result = entry(L, module, callback, owner, data, length)
   lua.lua_settop(L, top)
   return result
@@ -107,7 +107,6 @@ foreign function llhttp_status_cb(
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   local result = entry(L, module, callback, owner, data, length)
   lua.lua_settop(L, top)
   return result
@@ -123,7 +122,6 @@ foreign function llhttp_header_field_cb(
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   local result = entry(L, module, callback, owner, data, length)
   lua.lua_settop(L, top)
   return result
@@ -139,7 +137,6 @@ foreign function llhttp_header_value_cb(
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   local result = entry(L, module, callback, owner, data, length)
   lua.lua_settop(L, top)
   return result
@@ -154,7 +151,6 @@ foreign function llhttp_header_value_complete_cb(
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   local result = entry(L, module, callback, owner)
   lua.lua_settop(L, top)
   return result
@@ -169,7 +165,6 @@ foreign function llhttp_headers_complete_cb(
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   local result = entry(L, module, callback, owner)
   lua.lua_settop(L, top)
   return result
@@ -185,7 +180,6 @@ foreign function llhttp_body_cb(
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   local result = entry(L, module, callback, owner, data, length)
   lua.lua_settop(L, top)
   return result
@@ -200,7 +194,6 @@ foreign function llhttp_message_complete_cb(
   local entry =
     ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   local result = entry(L, module, callback, owner)
   lua.lua_settop(L, top)
   return result

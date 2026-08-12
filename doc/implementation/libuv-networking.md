@@ -34,9 +34,10 @@ Each callback is a source-defined
 [`foreign function`](foreign-functions.md) with the exact libuv shape. Its
 raw-C body obtains the loop's captured main `lua_State *` and uses the typed
 `titan/ffi.h` bridges to recover the exact callback closure, its module Udata,
-and its native Titan entry. It pushes the owner as full userdata, passes the
-original closure as hidden `_fn`, and calls that exact entry with only the
-callback's native parameters. There is no C shim, event-kind argument, or
+and its native Titan entry. The already-traced owner remains reachable through
+the call; the callback passes the original closure as hidden `_fn` and calls
+that exact entry with only the callback's native parameters. There is no C
+shim, event-kind argument, or
 common event dispatcher. The record fields read by these trusted entries remain
 an implementation detail, not an owner shape to reproduce elsewhere.
 

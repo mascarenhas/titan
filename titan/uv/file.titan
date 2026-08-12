@@ -86,7 +86,6 @@ foreign function uv_fs_cb(req: *libuv.uv_fs_t)
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvNoargCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   entry(L, module, callback, owner)
   lua.lua_settop(L, top)
 end

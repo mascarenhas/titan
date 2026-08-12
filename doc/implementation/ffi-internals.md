@@ -139,12 +139,20 @@ inside one SDK root. The file exposes selected primitive aliases (including
 type in Titan's FFI type graph. Private runtime helpers can move values across
 that boundary through explicit `value` <-> C `TValue` coercions.
 
-Five typed inline bridges—`lmacro_thvalue`, `lmacro_uvalue`,
-`lmacro_clCvalue`, `lmacro_pvalue`, and `titan_ffi_pushudata`—evaluate the real
-Lua function-like macros inside C, where the host preprocessor can see them.
-They are the deliberately narrow callback-migration exception to Titan's lack
-of general function-like-macro inference; the uv, HTTP, and coroutine foreign
-entries use them to recover and temporarily root generated callback state.
+Four typed inline bridges—`lmacro_thvalue`, `lmacro_uvalue`,
+`lmacro_clCvalue`, and `lmacro_pvalue`—evaluate the real Lua function-like
+macros inside C, where the host preprocessor can see them. They are the
+deliberately narrow callback-migration exception to Titan's lack of general
+function-like-macro inference; the uv, HTTP, and coroutine foreign entries use
+them to recover generated callback state. The callback owners are already
+reachable through their traced runtime/parser ownership, so no duplicate stack
+root is needed.
+
+The same header defines `lua_totvalue`, `lua_pushtvalue`, `lua_togco`, and
+`titan_newthread` as small typed `static inline` functions. Keeping these
+Lua-internal bridges with their FFI declarations avoids exporting runtime
+symbols solely for trusted source modules; `titan_newthread` still reserves the
+initial coroutine stack and installs Titan's shared `errorhandler`.
 
 Generated C in installed mode compiles with `-I <root>/include` (checkout mode
 uses `-I titan-runtime`), so the emitted `#include <titan/ffi.h>` resolves
@@ -967,7 +975,7 @@ left for a later FFI iteration.
 * Some preprocessor paths still raise raw Lua errors instead of diagnostics
   (`#if` operators outside the implemented set, unterminated function-like
   macros).
-* Function-like macros are invisible to general Titan FFI inference. The five
+* Function-like macros are invisible to general Titan FFI inference. The four
   typed inline callback bridges in `titan/ffi.h` are ordinary C functions whose
   bodies evaluate the selected Lua macros. An object-like macro is
   expression-valued through bounded recognized forms, including supported

@@ -313,15 +313,17 @@ callback shims.
 
 `titan/ffi.h` supplies the narrow, typed inline Lua-internal bridges required by
 those trusted callbacks: `lmacro_thvalue`, `lmacro_uvalue`,
-`lmacro_clCvalue`, `lmacro_pvalue`, and `titan_ffi_pushudata`. General
-function-like macros remain outside the FFI; the host C preprocessor expands
-the real Lua macros inside these audited wrappers.
+`lmacro_clCvalue`, and `lmacro_pvalue`. General function-like macros remain
+outside the FFI; the host C preprocessor expands the real Lua macros inside
+these audited wrappers. The same header defines the small
+`lua_totvalue`, `lua_pushtvalue`, `lua_togco`, and `titan_newthread` bridges as
+`static inline`; they no longer require out-of-line runtime symbols.
 
 Every libuv/HTTP foreign callback preserves the old reviewed owner protocol:
-it recovers the exact owner and stored Titan callback closure, obtains the Lua
-state, saves the stack top, pushes the **owner** as a full-userdata root, casts
-the closure's native entry through `foreign (...) -> ...`, invokes it with the
-exact callback shape, and restores the top. The filesystem callback remains the
+it recovers the exact already-traced owner and stored Titan callback closure,
+obtains the Lua state, saves the stack top, casts the closure's native entry
+through `foreign (...) -> ...`, invokes it with the exact callback shape, and
+restores the top. The filesystem callback remains the
 one-owner-argument protocol; its Titan continuation reads `uv_fs_get_result`.
 No event-kind dispatcher or callback registry is introduced.
 

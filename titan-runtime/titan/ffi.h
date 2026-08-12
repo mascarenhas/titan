@@ -1,6 +1,8 @@
 #ifndef TITAN_FFI_H
 #define TITAN_FFI_H
 
+#include "lauxlib.h"
+#include "ldo.h"
 #include "lstate.h"
 
 #define TITAN_BACKTRACE_KEY "57d80578-2534-4856-ad3b-bde8cba4c445"
@@ -29,10 +31,38 @@ typedef float titan_ffi_float;
 typedef double titan_ffi_double;
 typedef long double titan_ffi_long_double;
 
-TValue lua_totvalue(lua_State *L, int idx);
-void lua_pushtvalue(lua_State *L, TValue v);
-void *lua_togco(lua_State *L, int idx);
-lua_State *titan_newthread(lua_State *L);
+int errorhandler(lua_State *L);
+
+static inline TValue lua_totvalue(lua_State *L, int idx) {
+    TValue value;
+    lua_pushvalue(L, idx);
+    value = *s2v(L->top.p - 1);
+    L->top.p--;
+    return value;
+}
+
+static inline void lua_pushtvalue(lua_State *L, TValue value) {
+    setobj2s(L, L->top.p, &value);
+    L->top.p++;
+}
+
+static inline void *lua_togco(lua_State *L, int idx) {
+    TValue value = lua_totvalue(L, idx);
+    return gcvalue(&value);
+}
+
+static inline lua_State *titan_newthread(lua_State *L) {
+    lua_State *thread = lua_newthread(L);
+    /* Native coroutine entry bypasses a Lua entry wrapper. Reserve enough
+     * stack while the parent call still owns the ordinary protected boundary,
+     * so the generated function-scope catch can install its jump target before
+     * its first potentially allocating GC check. */
+    if (!lua_checkstack(thread, LUA_MINSTACK))
+        luaL_error(L, "cannot reserve stack for Titan coroutine entry");
+    lua_pushcfunction(thread, errorhandler);
+    thread->errfunc = savestack(thread, thread->top.p - 1);
+    return thread;
+}
 
 static inline lua_State *lmacro_thvalue(const TValue *o) {
     return thvalue(o);
@@ -48,11 +78,6 @@ static inline CClosure *lmacro_clCvalue(const TValue *o) {
 
 static inline void *lmacro_pvalue(const TValue *o) {
     return pvalue(o);
-}
-
-static inline void titan_ffi_pushudata(lua_State *L, Udata *owner) {
-    setuvalue(L, s2v(L->top.p), owner);
-    L->top.p++;
 }
 
 #endif

@@ -64,7 +64,6 @@ foreign function uv_getaddrinfo_cb(req: *libuv.uv_getaddrinfo_t,
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvIntegerPointerCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   entry(L, module, callback, owner, status as lua.lua_Integer,
         result as ffi.titan_ffi_void_ptr)
   lua.lua_settop(L, top)
@@ -82,7 +81,6 @@ foreign function uv_connect_cb(req: *libuv.uv_connect_t,
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvIntegerCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   entry(L, module, callback, owner, status as lua.lua_Integer)
   lua.lua_settop(L, top)
 end
@@ -99,7 +97,6 @@ foreign function uv_shutdown_cb(req: *libuv.uv_shutdown_t,
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvIntegerCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   entry(L, module, callback, owner, status as lua.lua_Integer)
   lua.lua_settop(L, top)
 end
@@ -115,7 +112,6 @@ foreign function uv_connection_cb(server: *libuv.uv_stream_t,
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvIntegerCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   entry(L, module, callback, owner, status as lua.lua_Integer)
   lua.lua_settop(L, top)
 end

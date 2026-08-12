@@ -685,6 +685,34 @@ describe("libuv Makefile configuration", function()
         assert.truthy(nm_has_symbol(output, "llhttp_execute"), output)
     end)
 
+    it("keeps trusted Lua value bridges inline in the FFI header", function()
+        local header = read_file("titan-runtime/titan/ffi.h")
+        for _, name in ipairs({
+            "lua_totvalue",
+            "lua_pushtvalue",
+            "lua_togco",
+            "titan_newthread",
+            "lmacro_thvalue",
+            "lmacro_uvalue",
+            "lmacro_clCvalue",
+            "lmacro_pvalue",
+        }) do
+            assert.truthy(header:match(
+                "static inline [^\n]-" .. name .. "%s*%("), name)
+        end
+        assert.falsy(header:find("titan_ffi_pushudata", 1, true), header)
+
+        local runtime = read_file("titan-runtime/titan.c")
+        for _, signature in ipairs({
+            "TValue lua_totvalue(",
+            "void lua_pushtvalue(",
+            "void *lua_togco(",
+            "lua_State *titan_newthread(",
+        }) do
+            assert.falsy(runtime:find(signature, 1, true), signature)
+        end
+    end)
+
     it("keeps HTTP parser storage, callbacks, and policy in Titan", function()
         local path = "titan/http/native.titan"
         local native = read_file(path)
@@ -706,8 +734,8 @@ describe("libuv Makefile configuration", function()
             assert.truthy(body:find(
                 "owner.uv[" .. callback.slot .. "].uv", 1, true), body)
             assert.truthy(body:find("owner.uv[2].uv", 1, true), body)
-            assert.truthy(body:find(
-                "ffi.titan_ffi_pushudata(L, owner)", 1, true), body)
+            assert.falsy(body:find(
+                "titan_ffi_pushudata", 1, true), body)
             assert.truthy(body:find("lua.lua_settop(L, top)", 1, true), body)
             local call = callback.no_data and
                 "entry(L, module, callback, owner)" or
@@ -766,8 +794,8 @@ describe("libuv Makefile configuration", function()
                     "callback.upvalue[2]", 1, true), body)
                 assert.truthy(body:find(
                     "libuv.uv_loop_get_data", 1, true), body)
-                assert.truthy(body:find(
-                    "ffi.titan_ffi_pushudata(L, owner)", 1, true), body)
+                assert.falsy(body:find(
+                    "titan_ffi_pushudata", 1, true), body)
                 assert.truthy(body:find(
                     callback.call, 1, true), body)
                 assert.truthy(body:find(

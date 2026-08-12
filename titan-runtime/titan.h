@@ -441,11 +441,9 @@ LUAI_FUNC Table *titan_array_require_backing(lua_State *L,
                                              const TValue *value,
                                              Table *metatable);
 
-TValue lua_totvalue(lua_State *L, int idx);
-void lua_pushtvalue(lua_State *L, TValue v);
-void *lua_togco(lua_State *L, int idx);
-lua_State *titan_newthread(lua_State *L);
-
 int errorhandler(lua_State *L);
+
+/* Small trusted Lua-internal value bridges live with their FFI declarations. */
+#include "titan/ffi.h"
 
 #endif

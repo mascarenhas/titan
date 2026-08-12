@@ -50,7 +50,6 @@ foreign function uv_process_exit_cb(process: *libuv.uv_process_t,
   local entry = ffi.lmacro_pvalue(
       callback.upvalue[2]) as UvTwoIntegerCallbackEntry
   local top = lua.lua_gettop(L)
-  ffi.titan_ffi_pushudata(L, owner)
   entry(L, module, callback, owner,
         exit_status as lua.lua_Integer,
         term_signal as lua.lua_Integer)

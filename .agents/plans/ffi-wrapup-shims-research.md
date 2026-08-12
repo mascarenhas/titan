@@ -111,20 +111,20 @@ All eight settings assignments are in `titan/http/native.titan:199-209`, so this
 
 The first eleven `Parser` fields are a raw callback ABI within this generated module. Foreign bodies cannot read ordinary Titan constants, so either use literal indices with one audited comment/test or retain C enum constants in a narrow support header. Retaining a header only for eight indices is more machinery than the literals; the raw layout is already tested and private.
 
-### Rooting and stack restoration: correction to the draft example
+### Rooting and stack restoration: final review correction
 
-The current libuv and HTTP bridges call `titan_pushmodule(L, owner)`. Despite its historical name, that macro pushes the supplied `Udata *`; here it roots the **callback owner**. A callback can remove the Task/request/handle root and trigger GC while its raw `owner`, closure, and arguments are still in use. Pushing `callback.upvalue[0]` only roots the module, which was already reachable through the closure, and does not preserve this invariant.
+The retired libuv and HTTP bridges called `titan_pushmodule(L, owner)`. Despite
+its historical name, that macro pushed the supplied `Udata *`, so the initial
+migration reproduced it with a typed `titan_ffi_pushudata` helper. Final review
+established that this was redundant: every libuv owner remains reachable through
+its traced runtime owner set or callback/task ownership chain, and each llhttp
+callback is synchronous while its Parser owner remains traced. The raw pointer
+is therefore backed by an existing GC path throughout every callback.
 
-Add a narrowly typed inline helper, conceptually:
-
-```c
-static inline void titan_ffi_pushudata(lua_State *L, Udata *owner) {
-  setuvalue(L, s2v(L->top.p), owner);
-  L->top.p++;
-}
-```
-
-Its precondition is the same as the existing generated `titan_pushmodule`: the callback boundary has stack capacity. Save `lua_gettop` before this call and restore it after the exact Titan entry returns. Do not replace this with lightuserdata, a registry lookup, or a new runtime-global root.
+The final implementation has no push helper and does not create a duplicate
+stack root. It still saves and restores the Lua top because the invoked Titan
+entry may use the stack. This correction does not introduce a registry lookup or
+runtime-global root.
 
 ## Build, SDK, and source-rock wiring
 
@@ -258,7 +258,7 @@ It makes raw generated calls expand when the macro is active, but silently falls
 
 ### Compiler-level wrapper/foreign-function tests
 
-* Parse/check/generate one callback-shaped foreign function using all four `lmacro_*` wrappers and `titan_ffi_pushudata`.
+* Parse/check/generate one callback-shaped foreign function using all four `lmacro_*` wrappers and verify that no redundant owner-push helper is emitted.
 * Compile the installed `titan/ffi.h` as C99 in the normal final include order; exercise both GCC/Clang in CI where available through the existing Linux/macOS toolchains rather than adding an unrelated matrix.
 * Assert the correct `lmacro_clCvalue` spelling and pointer constness.
 * Verify a foreign callback can take an imported inline wrapper's result, cast native entry `void *` to a `foreign (...) -> ...` function pointer, call it, and restore the stack.

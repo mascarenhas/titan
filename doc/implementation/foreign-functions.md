@@ -456,16 +456,21 @@ callback boundaries:
   `llhttp.o`, `http.o`, and `api.o`; there is no separate HTTP adapter object.
 
 The trusted callbacks need a few Lua-internal operations that remain awkward as
-function-like C macros. `titan/ffi.h` supplies only five typed inline bridges:
-`lmacro_thvalue`, `lmacro_uvalue`, `lmacro_clCvalue`, `lmacro_pvalue`, and
-`titan_ffi_pushudata`. The host preprocessor expands the real Lua macros inside
-those wrappers; general function-like macro inference remains unsupported.
+function-like C macros. `titan/ffi.h` supplies only four typed inline bridges:
+`lmacro_thvalue`, `lmacro_uvalue`, `lmacro_clCvalue`, and `lmacro_pvalue`. The
+host preprocessor expands the real Lua macros inside those wrappers; general
+function-like macro inference remains unsupported. The same header owns small
+typed inline definitions of `lua_totvalue`, `lua_pushtvalue`, `lua_togco`, and
+`titan_newthread`, so trusted source modules do not depend on separate runtime
+exports for those bridges.
 
 Each uv/HTTP callback preserves the reviewed owner protocol in source: recover
-the exact owner and callback closure, recover the loop/main Lua state and module
-from their fixed slots, read the closure's native entry through an exact
-`foreign (...) -> ...` type, save the stack top, push the owner as full userdata,
-invoke the entry with the original closure as `_fn`, and restore the top. The
+the exact already-traced owner and callback closure, recover the loop/main Lua
+state and module from their fixed slots, read the closure's native entry through
+an exact `foreign (...) -> ...` type, save the stack top, invoke the entry with
+the original closure as `_fn`, and restore the top. The owner remains reachable
+through its runtime/parser ownership throughout the callback, so pushing the
+same userdata would add no GC protection. The
 filesystem path deliberately passes only its owner; its Titan handler reads the
 result through `uv_fs_get_result`. No event-kind dispatcher, registry callback
 table, or compatibility shim replaces the deleted C files.

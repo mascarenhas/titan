@@ -234,14 +234,14 @@ owners.
 The `titan.uv` initializer captures the stable Lua main-thread `lua_State *`
 once in a private module variable. Each new Runtime stores that pointer in its
 sole `uv_loop_t` with `uv_loop_set_data`; each foreign callback recovers it with
-`uv_loop_get_data`. The callback body then uses the five typed bridges in
+`uv_loop_get_data`. The callback body then uses the four typed bridges in
 `titan/ffi.h` to recover the exact owner userdata, stored callback closure,
-closure module, and native Titan entry. It saves the stack top, pushes the owner
-as full userdata, and calls the entry with the original closure as Titan's
-hidden `_fn` argument, so captures retain their ordinary generated-function
-ABI. The temporary stack root is necessary because a terminal handler can
-remove the owner from its Runtime live set while the generated callback is
-still using it. The body restores the saved stack top after its exact handler
+closure module, and native Titan entry. It saves the stack top and calls the
+entry with the original closure as Titan's hidden `_fn` argument, so captures
+retain their ordinary generated-function ABI. The owner remains reachable
+through its traced Runtime or callback/task ownership chain throughout the
+callback, including terminal delivery, so a duplicate stack root adds no GC
+protection. The body restores the saved stack top after its exact handler
 returns.
 
 There is no common native dispatcher. Each libuv-shaped foreign declaration
