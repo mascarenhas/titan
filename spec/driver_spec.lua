@@ -478,22 +478,31 @@ end)
 
 describe("generated C formatting", function()
     local original_execute
+    local original_rename
     local original_print
     local original_formatter
     local original_format_generated_file
+    local original_get_file_contents
+    local original_set_file_contents
 
     before_each(function()
         original_execute = os.execute
+        original_rename = os.rename
         original_print = _G.print
         original_formatter = driver.CLANG_FORMAT
         original_format_generated_file = driver.format_generated_file
+        original_get_file_contents = util.get_file_contents
+        original_set_file_contents = util.set_file_contents
     end)
 
     after_each(function()
         os.execute = original_execute
+        os.rename = original_rename
         _G.print = original_print
         driver.CLANG_FORMAT = original_formatter
         driver.format_generated_file = original_format_generated_file
+        util.get_file_contents = original_get_file_contents
+        util.set_file_contents = original_set_file_contents
     end)
 
     it("quotes configured argv and generated paths in verbose mode", function()
@@ -544,6 +553,33 @@ describe("generated C formatting", function()
         assert(os.remove(path))
     end)
 
+    it("reports post-format read and normalization write failures", function()
+        local path = os.tmpname() .. " generated.c"
+        write_file(path, '#line 1 "test.titan"\n\nint value;\n')
+        driver.CLANG_FORMAT = "clang-format"
+        os.execute = function()
+            assert(os.remove(path))
+            return true, "exit", 0
+        end
+        local ok, err = driver.format_generated_file(path, false)
+        assert.is_nil(ok)
+        assert.matches("failed to normalize", err, 1, true)
+        assert.matches(path, err, 1, true)
+
+        write_file(path, '#line 1 "test.titan"\n\nint value;\n')
+        os.execute = function() return true, "exit", 0 end
+        util.set_file_contents = function(filename, contents)
+            assert.equal(path, filename)
+            assert.equal('#line 1 "test.titan"\nint value;\n', contents)
+            return false, "injected normalization write failure"
+        end
+        ok, err = driver.format_generated_file(path, false)
+        assert.is_nil(ok)
+        assert.matches("failed to normalize", err, 1, true)
+        assert.matches("injected normalization write failure", err, 1, true)
+        assert(os.remove(path))
+    end)
+
     it("reports formatter failures with the path and exit status", function()
         local status = 23
         os.execute = function() return nil, "exit", status end
@@ -577,6 +613,39 @@ describe("generated C formatting", function()
         assert.is_nil(ok)
         assert.matches(path, err, 1, true)
         assert.matches("CLANG_FORMAT command is empty", err, 1, true)
+    end)
+
+    it("preserves a generated header when staging or rename fails", function()
+        local root = os.tmpname() .. " formatter transaction"
+        assert(lfs.mkdir(root))
+        local header = root .. "/module.titan.h"
+        local old = driver.FOREIGN_HEADER_MARKER .. "\n/* old */\n"
+        local plan = {
+            filename = header,
+            contents = driver.FOREIGN_HEADER_MARKER .. "\nint value;\n",
+            ast = {},
+        }
+        write_file(header, old)
+
+        util.set_file_contents = function()
+            return nil, "injected stage write failure"
+        end
+        local ok, err = driver.write_foreign_header_plan(plan)
+        assert.is_nil(ok)
+        assert.matches("injected stage write failure", err, 1, true)
+        assert.equal(old, assert(original_get_file_contents(header)))
+
+        util.set_file_contents = original_set_file_contents
+        driver.format_generated_file = function() return true end
+        os.rename = function()
+            return nil, "injected stage rename failure"
+        end
+        ok, err = driver.write_foreign_header_plan(plan)
+        assert.is_nil(ok)
+        assert.matches("injected stage rename failure", err, 1, true)
+        assert.equal(old, assert(original_get_file_contents(header)))
+        assert.is_nil(plan.ast._foreign_header_prepared)
+        remove_tree(root)
     end)
 
     it("publishes a generated header only after its staged copy formats",
