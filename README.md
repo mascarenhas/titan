@@ -829,56 +829,45 @@ they are in the roadmap:
 
 ## Supported
 
-* control structures
-* integers
-* floats
-* booleans
-* strings
-* dense-capacity arrays with positive-only indexing, nil holes, deterministic
-  highest-present length, and canonical Lua userdata proxies
-* top-level functions
-* early-bound modules
-* folder modules: one logical namespace and artifact assembled
-  deterministically from a canonical main plus immediate contributors
-* order-independent records, unions, aliases, functions, methods, and nominal functions,
-  with source-ordered import/module-variable initialization frontiers
+* control structures from Lua, including generic for..in
+* errors and error handling with `raise`/`catch`/`defer` integrated with
+Lua error handling, unified Lua/Titan backtraces
 * multiple assignment/multiple returns
-* FFI with C (C primitive types, pointers, arrays, structs/unions, owned
-  buffers, explicit C varargs, and C function calls)
-* records (structs) with `:` method calls
-* nominal unions with positional empty/single-payload constructors and
-  non-exhaustive `case`/`when` dispatch; arms are full blocks with ordinary
-  `catch`, `finally`, and `defer` behavior
+* scalar types: integers, floats, booleans, strings
+* `value` type with gradual typing guarantees
+* arrays that can have internal holes with no effect on O(1) length
 * maps as ordinary Lua tables, including positional construction and `#` for
-  exact integer-keyed maps
-* transparent type aliases, including public record re-exports
-* first-class functions
-* anonymous functions and closures, with proper lexical scoping
-* bound methods (`obj:method`) as first-class values
-* variadic parameters in functions (Lua `...`)
-* flexible return tails (`...: T`), including contextual multiple-result
-  calls through Lua `value` callables
-* generic `for ... in` iterators with optional state, start value, and close
-  callable
-* error handling with `raise`, `catch`, `finally`, Lua `pcall`, and
-  unified Lua/Titan backtraces via `titan.backtrace()`
+exact integer-keyed maps
+* variadic functions with `...: T` variadic tail, and flexible multiple
+returns also with a`...: T` tail
+* first-class functions, including anonymous functions with proper lexical scoping
+* modules: early-bound, can be spread over multiple `.titan` files within a single folder,
+module metadata published in `.a`/`.so` files for binary import, direct source import
+allows visibility for module-local declarations ("friend" modules), visibility of module
+declarations not dependent on order
+* module initializers (a `do ... end` block that executes on module startup)
+* FFI with C (C primitive types, pointers, arrays/structs/unions including
+stack allocation and FAMs, owned heap allocation, explicit C varargs, C function calls)
+* `foreign` functions, for defining C callbacks entirely in Titan
+* nominal records: fields map to compact slots, module-local fields, `{ ... }`
+constructor syntax, record functions, methods with `:` method declaration and call
+syntax, bound methods (`rec:method`) as first-class values
+* nominal unions: variants map to dense integer tags, immutable, `case/when`
+statement for dispatching on the tag, union functions and methods
+* transparent type aliases, including public nominal type re-exports
 * asymmetric, tagged (nested) coroutines as building block for async IO
-* libuv-backed `async` Tasks, timers, asynchronous binary filesystem I/O, DNS,
-  TCP, verified TLS, streaming HTTP/1.1 clients and servers,
-  portable OS helpers, one-shot signal waits, direct child processes with
-  binary stdio, and shell-based merged-output `popen`
+* libuv-backed async tasks, timers, filesystem I/O, DNS,
+TCP, verified TLS, streaming HTTP/1.1 clients and servers,
+OS utilities and signals, child processes with pipes, graceful process exit
 * typed PEG construction/captures and a byte-oriented string library with
-  Lua-compatible formatting/packing, `tostring`, and compiled regular
-  expressions
+Lua-compatible formatting/packing, `tostring`, and compiled regular
+expressions
 * typed math and random-number helpers, dynamic Lua loading, generic
-  map/array iteration, explicit garbage-collector control and table/userdata
-  finalizer ownership, formatted output, ownership-safe line iteration, and
-  graceful process exit
+map/array iteration, explicit garbage-collector control and table/userdata
+finalizer ownership, formatted output
 
 ## Next
 
-* FFI with C, continued (Titan-function adapters for C callback ABIs,
-  adopted-pointer lifetimes, and owned structs with flexible array members)
 * parametric polymorphism (via type erasure and boxed values)
 * Language server
 * ...Titan 1.0!
