@@ -3,6 +3,7 @@
 
 #include "lauxlib.h"
 #include "ldo.h"
+#include "lobject.h"
 #include "lstate.h"
 #include "lua.h"
 
@@ -47,10 +48,16 @@ typedef long double titan_ffi_long_double;
 int errorhandler(lua_State *L);
 
 static inline TValue lua_totvalue(lua_State *L, int idx) {
-  if (TITAN_UNLIKELY(idx >= 0 || idx <= LUA_REGISTRYINDEX)) {
-    luaL_error(L, "invalid index for lua_totvalue, mus be negative: %d", idx);
+  if (TITAN_UNLIKELY(idx > 0)) {
+    return *s2v(L->ci->func.p + idx);
   }
-  return *s2v(L->top.p + idx);
+  if (TITAN_LIKELY(idx > LUA_REGISTRYINDEX)) {
+    return *s2v(L->top.p + idx);
+  }
+  if (TITAN_LIKELY(idx < LUA_REGISTRYINDEX)) {
+    return clCvalue(s2v(L->ci->func.p))->upvalue[LUA_REGISTRYINDEX - idx - 1];
+  }
+  return G(L)->l_registry;
 }
 
 static inline void lua_pushtvalue(lua_State *L, TValue value) {
