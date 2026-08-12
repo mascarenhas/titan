@@ -3,6 +3,7 @@
 
 #include <float.h>
 #include <math.h>
+#include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -12,10 +13,46 @@
 #include "luaconf.h"
 #include "lvm.h"
 
-/* The vendored `lua_longjmp` struct + statement-form `TITAN_SETJMP`, used by
- * the
- ** generated module C to install the inline catch/finally setjmp boundary. */
-#include "titan_longjmp.h"
+/*
+** ===========================================================================
+** VENDORED FROM Lua 5.5.1 src/ldo.c lines 61-109 (keep VERBATIM; re-sync on
+** every Lua upgrade). The struct must stay byte-compatible with the linked
+** liblua.a: lstate.h only forward-declares `struct lua_longjmp`, so providing
+** the full definition here is conflict-free, and the generated module C uses it
+** to install an inline setjmp boundary for catch/finally without calling into
+** Lua's (private) luaD_rawrunprotected with a thunk.
+**
+** Titan generates C and builds Lua with longjmp (the `make lua` build), so the
+** C++-exception arm of the upstream ladder is intentionally OUT OF SCOPE here:
+** we only vendor the _setjmp/setjmp arms and add a statement-form TITAN_SETJMP
+** selected by the SAME #ifdef ladder.
+** ===========================================================================
+*/
+
+/* --- BEGIN verbatim from lua-5.5.1/src/ldo.c:61-65 --- */
+
+/* chained list of long jump buffers */
+typedef struct lua_longjmp {
+  struct lua_longjmp *previous;
+  jmp_buf b;
+  volatile TStatus status;  /* error code */
+} lua_longjmp;
+
+/* --- END verbatim --- */
+
+/*
+** Statement-form setjmp selector, mirroring the upstream LUAI_THROW/LUAI_TRY
+** #ifdef ladder (lua-5.5.1/src/ldo.c:74-107) but expressed as a value usable in
+** an `if (TITAN_SETJMP(buf) == 0) { ... }` boundary (the upstream LUAI_TRY is
+** function-form and takes a Pfunc; we cannot use it for inline straight-line C).
+** The same selection (_setjmp on POSIX, setjmp otherwise) keeps the buffer
+** read/written by the same routine the linked liblua.a uses for LUAI_THROW.
+*/
+#if defined(LUA_USE_POSIX)
+#define TITAN_SETJMP(buf)  _setjmp(buf)
+#else
+#define TITAN_SETJMP(buf)  setjmp(buf)
+#endif
 
 #ifdef __GNUC__
 #define TITAN_LIKELY(x) __builtin_expect((x), 1)
@@ -111,9 +148,14 @@
    0.21 -> 0.22: titan.uv localizes its source-local surface, changing its
    serialized public schema and reconstructible module-userdata prefix. This
    is a private-provider boundary; Lua 5.5.1 and the other 0.21 layouts remain
-   unchanged. */
-#define TITAN_VER "0.22"
-#define TITAN_VER_SUFFIX "_0_22"
+   unchanged.
+   0.22 -> 0.23: source-defined foreign callback entries replace the runtime
+   and standard-provider callback shim objects. Generated callable names also
+   use injective module/nominal/member separators. The runtime archive and
+   generated modules therefore expose and consume a different native symbol
+   contract; 0.22 and 0.23 objects must not be mixed. */
+#define TITAN_VER "0.23"
+#define TITAN_VER_SUFFIX "_0_23"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"
@@ -400,11 +442,9 @@ LUAI_FUNC Table *titan_array_require_backing(lua_State *L,
                                              const TValue *value,
                                              Table *metatable);
 
-TValue lua_totvalue(lua_State *L, int idx);
-void lua_pushtvalue(lua_State *L, TValue v);
-void *lua_togco(lua_State *L, int idx);
-lua_State *titan_newthread(lua_State *L);
-
 int errorhandler(lua_State *L);
+
+/* Small trusted Lua-internal value bridges live with their FFI declarations. */
+#include "titan/ffi.h"
 
 #endif

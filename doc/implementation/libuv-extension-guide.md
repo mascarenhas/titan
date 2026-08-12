@@ -26,7 +26,7 @@ registration. A one-shot request normally has a variant whose dispatcher
 submits that request. A persistent callback source may be initialized and
 started synchronously; its variants consume buffered events, install a waiter,
 or await close. A synchronous libuv function needs no variant, callback owner,
-or native callback shim.
+or source-defined foreign callback.
 
 ## Start from the pinned source and compatibility floor
 
@@ -51,10 +51,11 @@ system modes. Do not hide an unavailable symbol behind a forwarding shim or a
 run-time identity trick.
 
 The supported targets are Linux and macOS. Prefer the public portable libuv
-operation to a POSIX alternative. A C boundary is ordinary only for a callback
-ABI. A non-callback shim requires an exceptional gap that Titan cannot express,
-such as a function-like macro or a compile-time portability fact, and its
-justification must appear in a comment immediately above the C definition.
+operation to a POSIX alternative. A restricted Titan `foreign function` is the ordinary boundary for a callback
+ABI. Hand-written C requires an exceptional gap that neither the imported FFI
+nor that raw-C surface can express, such as a function-like macro or a
+compile-time portability fact, and its justification must appear in a comment
+immediately above the C definition.
 Ordinary public struct fields are handled directly through Titan's FFI. When a
 native ABI spells borrowed bytes as mutable but promises not to mutate them,
 Titan's direct `string`-to-`char *` conversion can initialize the field. For an
@@ -64,13 +65,13 @@ FFI rule against C retaining an otherwise unanchored string pointer.
 
 ## Classify the addition before adding state
 
-| Native operation | `Call` variant | Owner | C shim |
+| Native operation | `Call` variant | Owner | Source foreign entry |
 | --- | --- | --- | --- |
 | Synchronous function without a callback | No | No persistent owner; automatic storage unless the documented call retains a pointer | No |
-| Synchronous function that calls back into Titan before returning | One boundary variant when the callback must not enter a running Task coroutine | One callback owner for the call | Reuse the exact protocol or add one |
-| One-shot request whose result suspends a Task | One submission variant | One request owner, normally rooted by `Task.pending` | Reuse the exact protocol or add one |
-| One-shot callback on a newly initialized handle | Usually one submission variant | One rooted handle owner, followed by `uv_close` | Reuse the exact protocol or add one |
-| Persistent multi-shot callback source | Wait/consume and close variants; start need not be a variant | One rooted handle owner with natural buffered state and one waiter | One exact shim per callback protocol |
+| Synchronous function that calls back into Titan before returning | One boundary variant when the callback must not enter a running Task coroutine | One callback owner for the call | Reuse or define the exact protocol |
+| One-shot request whose result suspends a Task | One submission variant | One request owner, normally rooted by `Task.pending` | Reuse or define the exact protocol |
+| One-shot callback on a newly initialized handle | Usually one submission variant | One rooted handle owner, followed by `uv_close` | Reuse or define the exact protocol |
+| Persistent multi-shot callback source | Wait/consume and close variants; start need not be a variant | One rooted handle owner with natural buffered state and one waiter | One exact entry per callback protocol |
 | New `uv_handle_t` subtype | As required by its logical operations | One rooted wrapper for the initialized handle | As required by its callbacks |
 
 This classification prevents the old design from growing back. Do not add a
@@ -87,8 +88,8 @@ public async/fs/net/os/timer/io operation
     -> await(Call.variant(payload)) when the Task must suspend
     -> payload:dispatch(Task)
     -> direct uv_* submission
-    -> exact C callback shim
-    -> exact Titan callback handler
+    -> exact source-defined foreign callback
+    -> exact ordinary Titan callback handler
     -> buffer persistent state or resume_task_from_callback
 ```
 
@@ -116,68 +117,43 @@ Keep the one existing `UV_TAG`. The union payload says which operation was
 yielded; adding a second coroutine tag would split one runtime protocol into
 unnecessary identities.
 
-## Decide whether the native shim must grow
+## Add an exact source foreign callback when needed
 
 Ordinary libuv functions are called directly from Titan. Never add a C
 function whose only job is to forward the same arguments to `uv_*`.
 
-Titan closures cannot be C function pointers, so a new callback protocol may
-need one plain-C trampoline in `titan-runtime/titan_uv.c` and one declaration
-in `titan-runtime/titan/uv.h`. Reuse an existing trampoline only when the
-libuv callback typedef, owner lookup, loop lookup, callback slot, and Titan
-handler signature are the same protocol. Similar parameter counts are not
-enough. The existing connect, write, and shutdown callbacks remain separately
-named even though their native callbacks all receive a request and status and
-their Titan result shapes coincide. Conversely, TCP and process-stdio writes
-correctly share
-`titan_uvshim_write_cb`: both use the same `uv_write_cb` protocol, request-data
-owner channel, callback slot, loop relation, and Titan handler signature.
+An ordinary Titan closure is not a C function pointer. When a new callback
+protocol is needed, define one restricted `foreign function` in the semantic
+`titan.uv` contributor that owns it and pass that declaration directly to
+libuv. Reuse an existing source callback only when the libuv callback typedef,
+owner lookup, loop lookup, callback slot, and Titan handler signature are the
+same protocol. Similar parameter counts are not enough. Connect, write, and
+shutdown therefore remain separately named even though each native callback
+receives a request and status.
 
-The shim header deliberately does not include `uv.h`. When a prototype names
-a new libuv type, add only the required `struct uv_X_s;` forward declaration
-and any unavoidable standard typedef include; do not widen the header's native
-namespace merely for convenience.
+Every callback follows the reviewed sequence:
 
-Every new trampoline follows the same narrow sequence:
+1. recover the owner through the protocol's documented channel, usually
+   `uv_req_get_data` or `uv_handle_get_data`, or the explicit `uv_walk`
+   argument;
+2. recover the main Lua state from the loop;
+3. recover the exact stored Titan callback closure, module, and native entry;
+4. save the Lua stack top and push the **owner** as full userdata;
+5. invoke the exact native Titan entry with its original closure as `_fn`; and
+6. restore the stack top before returning to libuv.
 
-1. recover the owner through the callback protocol's documented channel,
-   usually `uv_req_get_data` or `uv_handle_get_data`, but an explicit callback
-   argument for `uv_walk`;
-2. obtain the owning loop from the documented request or handle relation;
-3. call `titan_uvshim_callback_context_for` with the callback's exact record
-   slot;
-4. cast and call the exact Titan callback entry, including its hidden `_fn`
-   closure and only the real libuv callback parameters; and
-5. release the context so the main Lua stack returns to its saved top.
+Keep filesystem's owner-only Titan protocol: the continuation reads
+`uv_fs_get_result` itself. Do not add an event-kind dispatcher, callback
+registry, or generic status convention. `foreign function` bodies are trusted
+raw C, so their pointer operations and Lua API use receive no implicit Titan
+checks or unwind frame. The ordinary Titan handler they enter must contain every
+error and return normally; otherwise the saved-stack restoration would be
+skipped and a Lua longjmp would escape through libuv.
 
-There is no event-kind value and no generic native dispatcher. The common
-helper extracts context; the libuv-shaped trampoline itself chooses and calls
-the exact Titan handler.
-
-The owner layout is private, but it is a real internal C/Titan ABI within one
-build. `titan_uvshim_callback_context_for` reads a callback closure from a
-fixed zero-based Titan record slot. The primary callback currently occupies
-slot 1, the second record field; stream read and connection callbacks use the
-additional slots declared in `enum titan_uvshim_callback_c_index`. Operation
-owners conventionally put native storage first and the primary callback
-second, but native-first is not a bridge requirement: `CloseOwner` and
-`WalkOwner` put other state first. Keep each new owner declaration and its C
-callback index in lockstep.
-
-The context helper pushes the owner onto the captured main Lua stack and keeps
-that temporary root until context release restores the saved stack top. This
-is the terminal handoff: `resume_task_from_callback` may clear `Task.pending`,
-and `close_cb` may remove a handle root, while the current C-to-Titan callback
-still safely holds its owner. A new shim must use the context helper rather
-than bypassing this callback-entry root.
-
-No Titan error may unwind through libuv. The Titan callback handler catches at
-its boundary, and the C trampoline must always reach context release. A
-worker-thread callback is an even harder boundary: Titan values and the Lua GC
-may be touched only on the loop thread. For `uv_queue_work`, for example, any
-worker function and its working data would have to remain separately C-owned;
-only the loop-thread after-work callback could touch Titan values or resume a
-Titan Task.
+The compiler-generated `titan/uv/uv.titan.h` includes `uv.h`, the narrow typed
+`titan/ffi.h` bridges, and prototypes for all callbacks. It is a source build
+intermediate; do not install or hand-edit it. `titan-runtime/libtitan.a` has no
+libuv callback object.
 
 ## Adding a single-shot callback operation
 
@@ -354,7 +330,7 @@ one record.
 The owner contains:
 
 - stable owned FFI handle storage;
-- callback closures at the exact shim slots;
+- callback closures at the exact fields read by the source foreign entries;
 - its Runtime and root index;
 - one waiter;
 - the minimal buffered or terminal state above; and
@@ -592,21 +568,24 @@ Adding an operation also changes a small amount of reviewed inventory. Update
 only the entries that the new binding actually introduces:
 
 - `UV_TITAN_SOURCES` in the Makefile when a new contributor file is added;
-- `DIRECT_CALLBACKS` and `PROVIDER_CALLBACK_REFERENCES` in
-  `spec/libuv_build_spec.lua` when the C bridge gains a callback shim; and
+- `UV_FOREIGN_CALLBACKS` in `spec/libuv_build_spec.lua` when a new source
+  foreign entry or its exact owner/closure protocol is added; and
 - `DIRECT_LIBUV_CALLS` there when the generated provider must be proved to
   call a new public libuv function directly.
 
-Those lists are compiled-symbol and build-input checks, not assertions about
-the spelling or internal architecture of Titan source. Do not replace them
-with searches through `titan/uv/*.titan`.
+Those inventories prove both source shape and compiled-symbol ownership: every
+reviewed foreign callback must be declared in the expected contributor, use the
+expected owner field and exact native entry, appear as a definition in the one
+generated `titan.uv` object, and leave no reference to a retired shim. Keep them
+aligned with the real callback protocol rather than inferring correctness from
+parameter count alone.
 
 After rebuilding the canonical eighteen-root provider, mechanically extract
 its exact serialized interface and compare it with
 `spec/fixtures/libuv/titan_uv_types.lua`:
 
 ```sh
-TITAN_UV_PROVIDER="$PREFIX/lib/titan/0.22/titan.so" \
+TITAN_UV_PROVIDER="$PREFIX/lib/titan/0.23/titan.so" \
 "$PREFIX/bin/lua" -e '
 local support = require "titan"
 local types = assert(support._loadlib(
@@ -675,7 +654,7 @@ header, docs, implementation, and tests:
 - request cleanup and native-result release happen exactly once;
 - every callback enters Titan only on the loop thread and catches before
   returning through libuv;
-- callback closure slots agree between the Titan owner and C shim;
+- callback closure fields agree between the Titan owner and source foreign body;
 - initialized handles remain rooted until `close_cb` and need no registry;
 - cancellation does not release accepted native work early or synchronously
   resume another Task;
@@ -689,11 +668,10 @@ header, docs, implementation, and tests:
 
 This is **binding breadth**, not line, branch, or behavioral-test coverage.
 Importing `uv.h` makes a declaration available to the FFI parser but does not
-count as covering it. A function counts only when production `titan.uv` or its
-native callback bridge actually references that public entry point. One
-function name counts once even when Titan uses several modes or call sites.
-Callback typedefs, types, constants, macros, `uv__*` internals, and
-`titan_uvshim_*` helpers do not count.
+count as covering it. A function counts only when production `titan.uv`
+actually references that public entry point. One function name counts once even
+when Titan uses several modes or call sites. Callback typedefs, types, constants,
+macros, and `uv__*` internals do not count.
 
 Against bundled libuv 1.52.1:
 
@@ -794,7 +772,6 @@ used_candidates() {
       rg -o --no-filename 'libuv\.uv_[a-z0-9_]+' "$source"
     done < <(production_titan_sources) |
       sed 's/^libuv\.//'
-    rg -o --no-filename '\buv_[a-z0-9_]+' titan-runtime/titan_uv.c
   } |
     sort -u
 }

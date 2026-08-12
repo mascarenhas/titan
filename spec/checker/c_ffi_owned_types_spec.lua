@@ -46,6 +46,11 @@ local declarations = [[
         unsigned char bytes[];
     } ffi_flexible;
 
+    typedef struct ffi_wide_flexible {
+        int tag;
+        int items[];
+    } ffi_wide_flexible;
+
     static int ffi_read(const ffi_item *item) {
         return item->number;
     }
@@ -470,6 +475,122 @@ describe("source-written owned C types", function()
         end)
     end)
 
+    it("allocates flexible-array-member structs with count provenance",
+    function()
+        with_header(declarations, function(header)
+            local ok, err, ast = check_with_header(header, [[
+                local function allocations(count: integer)
+                    local automatic = c.ffi_flexible.new(4)
+                    local owner: owned *c.ffi_flexible =
+                        c.ffi_flexible.new(count)
+                    local dynamic = c.ffi_flexible.new(count)
+
+                    automatic.bytes[3] = 1
+                    owner.bytes[0] = 2
+                    local automatic_count = #automatic.bytes
+                    local owner_count = #owner.bytes
+                end
+            ]])
+            assert.truthy(ok, err)
+
+            local stats = ast[2].block.stats
+            local automatic = stats[1].decls[1]
+            local owner = stats[2].decls[1]
+            local dynamic = stats[3].decls[1]
+            assert.equal("automatic_fam",
+                automatic._c_allocation_plan.storage)
+            assert.equal(4,
+                automatic._c_allocation_plan.fam_count_literal)
+            assert.equal("Type.CStruct",
+                types.resolve_c_typedef(automatic._type)._tag)
+
+            assert.equal("owned",
+                stats[2].exps[1]._c_allocation_plan.storage)
+            assert.equal("Type.COwned", owner._type._tag)
+            assert.equal("owned",
+                stats[3].exps[1]._c_allocation_plan.storage)
+            assert.equal("Type.COwned", dynamic._type._tag)
+
+            local automatic_length = stats[6].exps[1]
+            local owner_length = stats[7].exps[1]
+            assert.equal("automatic", automatic_length._c_fam_access.kind)
+            assert.equal(4, automatic_length._c_fam_access.count)
+            assert.same(automatic,
+                automatic_length._c_fam_access.root)
+            assert.equal("owned", owner_length._c_fam_access.kind)
+        end)
+    end)
+
+    it("rejects overflowing automatic flexible-array extents", function()
+        with_header(declarations, function(header)
+            local ok, err = check_with_header(header, [[
+                local function bad()
+                    local item = c.ffi_wide_flexible.new(4611686018427387904)
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("flexible%-array field 'ffi_wide_flexible%.items'", err)
+            assert.match("count 4611686018427387904 exceeds SIZE_MAX", err)
+
+            ok, err = check_with_header(header, [[
+                local function keep_owned()
+                    local item: owned *c.ffi_flexible =
+                        c.ffi_flexible.new(4611686018427387904)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("restricts FAM constructors and erases counts at raw-pointer views",
+    function()
+        with_header(declarations, function(header)
+            local rejected = {
+                {
+                    [[local function bad()
+                          local item = c.ffi_flexible.new()
+                      end]],
+                    "expects 1",
+                },
+                {
+                    [[local function bad()
+                          local items = c.ffi_flexible.new_array(2)
+                      end]],
+                    "'.new_array' is unavailable.*flexible array member",
+                },
+                {
+                    [[local function bad(count: integer)
+                          local item: c.ffi_flexible =
+                              c.ffi_flexible.new(count)
+                      end]],
+                    "types in declaration",
+                },
+                {
+                    [[local function bad(count: integer)
+                          local owner: owned *c.ffi_flexible =
+                              c.ffi_flexible.new(count)
+                          local raw: *c.ffi_flexible = owner
+                          local length = #raw.bytes
+                      end]],
+                    "trying to take the length",
+                },
+                {
+                    [[local function bad(count: integer)
+                          local raw: *c.ffi_flexible =
+                              c.ffi_flexible.new(count)
+                          local length = #raw.bytes
+                      end]],
+                    "trying to take the length",
+                },
+            }
+            for _, case in ipairs(rejected) do
+                local ok, err = check_with_header(header, case[1])
+                assert.falsy(ok)
+                assert.match(case[2], err)
+            end
+        end)
+    end)
+
     for _, rejected in ipairs({
         {
             name = "Titan values",
@@ -490,11 +611,6 @@ describe("source-written owned C types", function()
             name = "C array typedefs",
             declaration = "local item: owned *c.ffi_row = nil",
             diagnostic = "array typedef",
-        },
-        {
-            name = "flexible-array-member aggregates",
-            declaration = "local item: owned *c.ffi_flexible = nil",
-            diagnostic = "flexible array member",
         },
         {
             name = "nested owners",

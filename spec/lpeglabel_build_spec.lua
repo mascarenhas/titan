@@ -507,7 +507,7 @@ exec %s "$@"
         assert.falsy(makefile:find(
                 "TITAN_RUNTIME_OBJECTS :=", 1, true) and
             makefile:find(
-                "TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(CORO_O) $(UV_O) " ..
+                "TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(MINICORO_O) " ..
                 "$(LPEGLABEL", 1, true), makefile)
     end)
 end)

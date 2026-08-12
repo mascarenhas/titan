@@ -30,14 +30,16 @@ connection and a server disjoint state: connections keep read buffering and
 one reader, while servers keep accepted clients and one accept waiter. Libuv's
 handle queries remain authoritative for live close and write-side state.
 
-Each plain-C callback shim follows its libuv callback shape. A small common C
-helper obtains the loop's captured main `lua_State *`, the exact callback
-closure, its module Udata, and its native Titan entry. The particular shim
-then passes that closure as the hidden `_fn`, casts and calls the exact entry,
-and supplies the owner plus its actual callback parameters. There is no
-event-kind argument and no common event dispatcher. The record layout that
-supports this private bridge is an implementation detail, not an owner shape
-to reproduce elsewhere.
+Each callback is a source-defined
+[`foreign function`](foreign-functions.md) with the exact libuv shape. Its
+raw-C body obtains the loop's captured main `lua_State *` and uses the typed
+`titan/ffi.h` bridges to recover the exact callback closure, its module Udata,
+and its native Titan entry. The already-traced owner remains reachable through
+the call; the callback passes the original closure as hidden `_fn` and calls
+that exact entry with only the callback's native parameters. There is no C
+shim, event-kind argument, or
+common event dispatcher. The record fields read by these trusted entries remain
+an implementation detail, not an owner shape to reproduce elsewhere.
 
 ## DNS extraction and connection attempts
 
@@ -46,12 +48,14 @@ Titan string. `uv_getaddrinfo` receives an `AF_UNSPEC`, `SOCK_STREAM`,
 `IPPROTO_TCP`, `AI_NUMERICSERV` hint and copies those text arguments during
 submission. Its result chain is borrowed only for the callback.
 
-The callback accepts IPv4 and IPv6 entries whose addresses fit the opaque
-`titan_uvshim_address` cell, copies them in resolver order into a GC-owned
-array, and calls `uv_freeaddrinfo` before resuming the Task. No continuation
-retains a pointer into libuv's result chain. The opaque cell is aligned and
-large enough for `sockaddr_storage`; Titan never interprets its bytes except
-to pass one selected cell back to libuv as `const sockaddr *`.
+The callback accepts IPv4 and IPv6 entries whose reported length fits the
+host's `sockaddr_storage`, counts them, allocates a GC-owned
+`owned sockaddr_storage[]`, and copies each exact byte prefix with direct
+`memcpy` in resolver order. It calls `uv_freeaddrinfo` before resuming the Task,
+so no continuation retains a pointer into libuv's result chain. The generated
+storage has the host type's real alignment and stride; Titan treats each copied
+cell as normalized opaque address bytes and passes a selected cell back to
+libuv as `const sockaddr *`.
 
 Connect and listen try copied addresses in resolver order. Each attempt owns a
 fresh TCP handle. Failure initiates that candidate's ordinary `uv_close`
@@ -125,11 +129,13 @@ native owners live until callbacks; they are not the source of traversal.
 
 ## Portable native boundary
 
-Titan calls the public libuv request, stream, handle, and request-data APIs
-directly through the host's `uv.h`. The C support layer contains the
-libuv-shaped callback shims and the opaque normalized-address cell. Titan
-initializes `uv_buf_t` fields directly through the FFI. There is no POSIX
-socket, read, write, poll, or resolver fallback.
+Titan calls the public libuv request, stream, handle, request-data, and address
+APIs directly through the host's `uv.h`. Source-defined foreign callbacks and
+target-directed owned storage remove both the old callback shims and the opaque
+normalized-address helper. Titan initializes `uv_buf_t` and copies
+`sockaddr_storage` directly through the FFI. There is no installed
+`titan/uv.h`, native `titan_uv.o`, or POSIX socket/read/write/poll/resolver
+fallback.
 
 Compiler tests cover the FFI and callback mechanisms. The focused
 standard-library suite, run outside LuaCov, covers binary listen/connect/

@@ -6,12 +6,13 @@ The `coroutine` standard module is split deliberately:
   strings, result-code checks, `resume` versus `error`, the
   success/error payload convention, Lua-thread/userdata setup, traceback
   handoff, and the transfer choreography around minicoro.
-* `titan-runtime/titan_coro.c` owns only the pieces that still need C:
-  compiling the single-file minicoro implementation, the Lua raw-equality
-  tag comparator, and a tiny minicoro entry trampoline that calls the native
-  Titan entry function stored in the owner userdata. The Titan module itself
-  installs and clears pending-transfer roots through public Lua stack and
-  uservalue APIs plus Titan's existing raw-`TValue` push bridge.
+* `titan-runtime/minicoro.c` owns only the pieces that still need C:
+  compiling the single-file minicoro implementation and the Lua raw-equality
+  tag comparator. The exact `void (*)(mco_coro *)` entry is now the
+  source-defined `foreign function coro_entry_trampoline` in
+  `titan/coroutine.titan`. The Titan module also installs and clears
+  pending-transfer roots through public Lua stack and uservalue APIs plus
+  Titan's existing raw-`TValue` push bridge.
 * `titan-runtime/minicoro.h` is a vendored copy of minicoro extended with
   tagged nested yield and a `MCO_STACKED` state.
 
@@ -19,7 +20,7 @@ The source compiles under the qualified Titan identity `titan.coroutine`.
 Titan code uses `import "coroutine"`, which the parser desugars to that name;
 Lua uses the ordinary `luaopen_titan_coroutine` entry through
 `require "titan.coroutine"`. Titan prefix lookup claims that logical module
-from `<root>/lib/titan/0.22/titan.so`; Lua finds the generated
+from `<root>/lib/titan/0.23/titan.so`; Lua finds the generated
 `<root>/share/lua/5.5/titan/coroutine.lua` shim, promotes/maps the same provider
 through `titan._loadlibglobal`, and invokes `luaopen_titan_coroutine`. The
 module keeps its own state and initializer beside the other logical standard
@@ -31,7 +32,7 @@ Coroutine payloads use `value`, so an Array crossing `resume`, `yield`, or
 `error` remains its canonical proxy Udata; the private backing Table never
 leaks through the coroutine boundary. Exact typed Array paths elsewhere still
 use backing `Table *`. This internal/boxed distinction was introduced by ABI
-0.17, remained part of ABI 0.20, and is retained through ABI 0.22; see
+0.17, remained part of ABI 0.20, and is retained through ABI 0.23; see
 [Dense Arrays](dense-arrays.md#exact-and-generic-call-paths).
 
 ## Public Wrapper
@@ -44,7 +45,6 @@ local mco = foreign import "minicoro.h"
 local lua = foreign import "lua.h"
 local lual = foreign import "lauxlib.h"
 local ffi = foreign import "titan/ffi.h"
-local coro_native = foreign import "titan/coro.h"
 ```
 
 The exported `Coro` record has local fields:
@@ -220,8 +220,9 @@ not been established.
 Each coroutine owner userdata holds five uservalues: the `lua_newthread`
 thread, the owning module state, the native Titan entry closure, the callback
 value, and the pending transfer root. Creation stores the userdata pointer in
-`mco_coro->user_data` and installs a minicoro descriptor whose C entry is
-`titan_coro_entry`.
+`mco_coro->user_data` and assigns the source-defined
+`coro_entry_trampoline` foreign function directly to the minicoro descriptor's
+`void (*)(mco_coro *)` field.
 
 The built-in `M` expression is a native `Udata *`. The coder recognizes that
 specific Lua-internal pointer type as GC-bearing: converting a non-NULL
@@ -229,14 +230,21 @@ specific Lua-internal pointer type as GC-bearing: converting a non-NULL
 Creation can therefore store `M` directly in owner slot 2 as the actual module
 root. It does not need to recover an equivalent value from a closure upvalue.
 
-The C trampoline recovers the first four values from the owner userdata,
-reads the native function pointer from the Titan entry closure, and calls
-that native Titan entry directly with the child thread, module state,
-callback value, and `mco_coro *`. It does not enter through the Lua-stack
-wrapper on every resume and does not install a protected call of its own.
-The trusted Titan entry calls the callback value using Titan's normal
-function-value call path and contains failure with its trailing
-function-level `catch`: exact Titan closures can take the native fast
+The foreign trampoline recovers the first four values from the owner userdata
+with the typed Lua-internal bridges in `titan/ffi.h`: the child thread, module
+state, Titan entry closure, and callback value. It reads the native entry from
+the closure's fixed native-pointer upvalue, casts it to the exact source alias
+
+```titan
+foreign (*ffi.lua_State, *ffi.Udata, *ffi.CClosure,
+         ffi.TValue, *mco.mco_coro) -> ()
+```
+
+and calls it directly with `_fn = nil`. The trampoline is emitted as raw C: it
+does not enter through a Lua-stack wrapper on every resume and does not install
+a protected call of its own. The trusted Titan entry calls the callback value
+using Titan's normal function-value call path and contains failure with its
+trailing function-level `catch`: exact Titan closures can take the native fast
 path, while other Lua callables use the generic Lua-stack path.
 
 On success, the entry records `ok=true`, roots the result in owner slot 5,
@@ -271,17 +279,19 @@ moves arbitrary Lua values as by-value `TValue`s, and owns the order of
 `mco_push`/`mco_pop` operations. That raw pointer surface is deliberately
 private to `titan/coroutine.titan`; it is not a safe general-purpose
 coroutine FFI.
-The pieces that remain in C are the ones that still require capabilities
-outside the current FFI or a native callback ABI:
+The callback ABI itself no longer requires hand-written C:
+`coro_entry_trampoline` uses the restricted
+[`foreign function`](foreign-functions.md) body and an exact
+`foreign (*mco.mco_coro) -> ()`-compatible signature. The two pieces that remain
+in `minicoro.c` are the ones that genuinely require a single implementation
+translation unit or a raw Lua-internal operation:
 
-* exposing the trusted native Titan entry through minicoro's
-  `void (*)(mco_coro *)` callback ABI;
 * defining `MINICORO_IMPL` exactly once while forcing Titan's minicoro
-  compile-time options;
+  compile-time options; and
 * supplying the C tag comparator that compares arbitrary Lua values with
   `luaV_equalobj(NULL, ...)`.
 
-The pending-transfer update no longer belongs to that C surface:
+The pending-transfer update likewise does not belong to that C surface:
 `titan/coroutine.titan` uses public `lua_checkstack`, `lua_setiuservalue`, and
 `lua_settop` directly, with Titan's existing `lua_pushtvalue` support bridge
 for raw `TValue` pushes. The runtime header and archive therefore export neither
@@ -302,7 +312,7 @@ int mco_is_yieldable(mco_coro *co, void *tag);
 
 All resumes and yields are tagged. Generic minicoro builds retain the
 implementation-level `mco_set_tag_comparator` setting. Titan instead compiles
-its image with `MCO_TAG_COMPARATOR=titan_coro_tag_equal`, making the comparator
+its image with `MCO_TAG_COMPARATOR=minicoro_tag_equal`, making the comparator
 a fixed implementation constant rather than mutable global state or a
 per-call argument. Minicoro stores tags as opaque `void *`; it knows nothing
 about Lua. Titan passes pointers to in-flight `TValue`s, and the C comparator

@@ -59,11 +59,13 @@ after a branded exact-tag mismatch. A realized callable wrapper fills those
 same roles with its target adapter, copied source `CClosure.f`, and
 consumer-local target relay. `genluaentry` in `coder.lua` emits the two
 stack-convention entries for every non-`local` top-level function
-(`<mod>_<name>_titanentry_lua` and `…_strict`, modulo C identifier
-mangling) and every static (`…_titanentry_luastatic` and `…_strictstatic`).
+(`<mod>_\u2133_<name>_titanentry_lua` and `…_strict` in C source, with the
+UCN separator becoming UTF-8 at linkage) and every static (`…_titanentry_luastatic` and `…_strictstatic`).
 A method has its ordinary `…_titanentry_luamethod`; each method's
 self-removed first-class bound value has separate `…_boundlua` and
-`…_boundstrict` trampolines. A local declaration that is never used as a value
+`…_boundstrict` trampolines. Static, method, bound, and Interface entries use
+`<module>_\u2133_<owner>_\u2131_<member><role>`; their object linkage names
+contain UTF-8 `ℳ` and `ℱ`. A local declaration that is never used as a value
 needs neither stack entry; a first-class local value needs both even though it
 is not exported to Lua. For methods, the parameter list is prefixed with
 the record's nominal type, so `self` is checked like any record-typed
@@ -80,7 +82,7 @@ The following is the coercive entry for `fmod`, trimmed only of the two
 argument conversions:
 
 ```c
-static int interop_fmod_titanentry_lua(lua_State *L) {
+static int interop_\u2133_fmod_titanentry_lua(lua_State *L) {
     StkId func = L->ci->func.p;
     ptrdiff_t _nargs = L->top.p - func - 1;
     if (_nargs < 2) {
@@ -113,7 +115,7 @@ static int interop_fmod_titanentry_lua(lua_State *L) {
     titan_ensure_stack(L, 2);
     ptrdiff_t _firstret_off = savestack(L, L->top.p);
     L->top.p += 2;
-    lua_Number res = interop_fmod_titan(L, _mod, _fn, _param_1, _param_2, &_outparam_2);
+    lua_Number res = interop_\u2133_fmod_titan(L, _mod, _fn, _param_1, _param_2, &_outparam_2);
     StkId _firstret = restorestack(L, _firstret_off);
     setfltvalue(s2v(_firstret), res);;
     _firstret++;
@@ -350,11 +352,12 @@ lua_rawset(L, -3);
 lua_pushliteral(L, "move");
 /* Module is upvalue of Lua entry point of method */
 titan_pushmodule(L, _mod);
-lua_pushcclosure(L, interop_Point_move_titanentry_luamethod, 1);
+lua_pushcclosure(L, interop_\u2133_Point_\u2131_move_titanentry_luamethod, 1);
 lua_rawset(L, -3);
 lua_pushliteral(L, "__index");
-lua_pushvalue(L, -2);
-lua_pushcclosure(L, __index_interop_Point, 1);
+lua_pushvalue(L, -2);            /* fieldmap */
+titan_pushmodule(L, _mod);       /* module */
+lua_pushcclosure(L, interop_\u2133_Point_\u2131_meta_index, 2);
 lua_rawset(L, -4);
 /* ... __newindex wired the same way ... */
 ```
@@ -364,9 +367,9 @@ lua_rawset(L, -4);
 `setmetatable` on a record raises, as it does on any userdata
 (`debug.getmetatable` still sees the real table; the cross-module
 identity spec compares metatables that way). The **fieldmap** table is
-the single upvalue shared by
-`__index_<rec>` and `__newindex_<rec>`: it maps each field name to its
-integer user-value index (`uv[0..n-1]` in declaration order) and each public
+the first upvalue shared by the
+`<module>_\u2133_<rec>_\u2131_meta_index` and `..._meta_newindex` closures;
+the second is the module. The fieldmap maps each field name to its integer user-value index (`uv[0..n-1]` in declaration order) and each public
 method name to the method's Lua-entry C closure, itself closed over the module.
 Local fields and local methods are not entered in this table, but public fields
 keep their original indices even when a local field came before them.
@@ -374,7 +377,7 @@ keep their original indices even when a local field came before them.
 ### `__index`: fields and methods
 
 ```c
-static int __index_interop_Point(lua_State *L) {
+static int interop_\u2133_Point_\u2131_meta_index(lua_State *L) {
     TValue *_recslot = s2v(L->ci->func.p + 1);
     Udata *_rec = NULL;
     /* ... full nominal checkandget of the receiver: tag compare,
@@ -415,7 +418,7 @@ declaration.
 
 ### `__newindex`: checked writes
 
-`__newindex_<rec>` does the same receiver re-validation and fieldmap
+`<module>_\u2133_<rec>_\u2131_meta_newindex` does the same receiver re-validation and fieldmap
 lookup, but additionally requires the hit to be an **integer** — so
 assigning to a method name (`p.move = 2`) raises the same "not found"
 error; methods are not assignable. The write consumes the field's
@@ -637,15 +640,15 @@ inventory:
 | `TITAN_TRACE_APPEND_KEY` (`"4f895b66-bae0-4e97-afb3-83a31f2f9e96"`) | temporary coroutine trace handoff slot used before appending resume/error propagation frames |
 | `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | the native-symbol display-name table used by unified trace formatting |
 | `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for bare re-raise |
-| `TITAN_LAZY_LIBS_KEY` (private to `titanlib.c`) | compiler `_loadlib`'s per-state lazy/local handle cache |
-| `TITAN_LAZY_GLOBAL_LIBS_KEY` (private to `titanlib.c`) | generated-shim `_loadlibglobal`'s per-state canonical-path lazy/global handle cache |
+| `TITAN_LAZY_LIBS_KEY` (private to `ltitanlib.c`) | compiler `_loadlib`'s per-state lazy/local handle cache |
+| `TITAN_LAZY_GLOBAL_LIBS_KEY` (private to `ltitanlib.c`) | generated-shim `_loadlibglobal`'s per-state canonical-path lazy/global handle cache |
 | `"Titan function type <serialized type> tag"` | a shared light-userdata identity tag for each first-class function type |
 
 The UUID-string constants are defined in `titan-runtime/titan.h`.
 
 ## Four shared-library loading paths
 
-The current 0.22 layout retains the four deliberately separate paths
+The current 0.23 layout retains the four deliberately separate paths
 established by 0.20. They share the ordinary
 per-logical-module symbols but differ in selection, flags, cache, and whether
 module initialization runs.
@@ -682,8 +685,8 @@ Udata* (*some_dep_init)(lua_State *L) =
         loadsym(L, some_dep_handle, "some_dep_init"));
 ```
 
-`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_22`,
-`TITAN_PATH`, or `".;<root>/lib/titan/0.22"`, with `;;` splicing the
+`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_23`,
+`TITAN_PATH`, or `".;<root>/lib/titan/0.23"`, with `;;` splicing the
 ordinary default. It maps `dir/file` with `RTLD_LAZY | RTLD_GLOBAL`, caches
 the handle by relative provider for the state, invalidates native backtrace
 state, and never calls `dlclose`. Two logical modules in one image reuse the
@@ -720,7 +723,7 @@ eager load. A second Lua state repeats its own cache insertion and promotion
 request while the operating-system loader may reuse the mapped image.
 
 The installed standard layout has paired providers at
-`<root>/lib/titan/0.22/{titan.so,titan.a}` and eighteen generated shims below
+`<root>/lib/titan/0.23/{titan.so,titan.a}` and eighteen generated shims below
 `<root>/share/lua/5.5/titan/`; the shims use the DSO form. A direct-libuv
 extension explicitly imports
 `uv` and foreign-imports `uv.h`; Titan runtime initialization loads the
@@ -791,7 +794,7 @@ unavailable (`TITAN_NO_LIBBACKTRACE`, e.g. musl/Alpine) it falls back to
 raw Lua traceback lines plus raw `execinfo` C frames.
 
 The retrieval side is the bare `titan` Lua support entry: Make compiles
-`titan-runtime/titanlib.c` into `titanlib.o`, links that object alone into the
+`titan-runtime/ltitanlib.c` into `ltitanlib.o`, links that object alone into the
 private bootstrap, and carries it once into each form of the full standard
 `titan.so`/`titan.a` provider pair.
 `titan.backtrace()` rawgets that
@@ -828,7 +831,7 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
   `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
   Titan module-path default from that root, and ensures
-  `<root>/lib/titan/0.22/?.so` is present in `package.cpath`. The
+  `<root>/lib/titan/0.23/?.so` is present in `package.cpath`. The
   prefix-configured Titan-owned Lua already places that template before its
   `lib/lua` entries. It then
   registers the module's `luaopen_` function in

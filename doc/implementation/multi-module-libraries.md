@@ -61,7 +61,7 @@ a/b/c.so
 ```
 
 The exact historical location is therefore the final candidate. The compiler
-first expands the selected `TITAN_PATH_0_22`/`TITAN_PATH` with the runtime's
+first expands the selected `TITAN_PATH_0_23`/`TITAN_PATH` with the runtime's
 `;;` default-insertion semantics. It then searches **root-major**: all
 shallow-to-exact candidates in the first path root, then all candidates in the
 second root, and so on.
@@ -97,7 +97,7 @@ The states are deliberately strict:
 * an exact candidate with neither symbol retains the markerless-binary error
   instead of falling through to source.
 
-The ABI marker must return exactly one string equal to `0.22`. The types entry
+The ABI marker must return exactly one string equal to `0.23`. The types entry
 must return exactly one serialized `Type.Module` for the requested logical
 name, with a canonical public schema. The loader does not scan later images
 after a claim; visible duplicate providers are resolved by ordinary first
@@ -166,15 +166,15 @@ linker flags are final-link inputs and are not copied into the produced
 archive.
 
 The compiler preflights the coder's complete externally visible symbol set.
-Distinct logical names that both map to one coder prefix (for example through
-dot/dash replacement) are rejected by name. It also catches a boundary that a
-prefix-only check would miss: module `a` function `b_c` and module `a.b`
-function `c` both produce `a_b_c_titan`. The same inventory covers public
-methods, their bound trampolines, record/union functions and constructors,
-the three exported bound trampolines for every public Interface method, and
-each module protocol,
-so every collision is reported before code generation instead of as an opaque
-duplicate-symbol linker error.
+Distinct logical module names that map to one flattened protocol prefix (for
+example through dot/dash replacement) are rejected by name. Callable names use
+`_\u2133_` and `_\u2131_`, so module `a` function `b_c` and module `a.b`
+function `c` produce distinct `a_\u2133_b_c_titan` and
+`a_b_\u2133_c_titan` entries. The same inventory covers public methods, their
+bound trampolines, record/union functions and constructors, the three exported
+bound trampolines for every public Interface method, each module protocol, and
+cross-family protocol collisions, so every real collision is reported before
+code generation instead of as an opaque duplicate-symbol linker error.
 
 Both native provider forms contain independent copies of every logical
 protocol:
@@ -251,7 +251,7 @@ root explicitly.
 
 Stock Lua's `package.loadlib(path, "*")` is eager/global and shares Lua's own
 pathname cache, so it cannot provide the required lazy promotion contract.
-`titanlib.c` therefore exposes a separate internal
+`ltitanlib.c` therefore exposes a separate internal
 `titan._loadlibglobal(path, symbol)`:
 
 * it canonicalizes an existing pathname with `realpath` and keys its own
@@ -279,30 +279,36 @@ module or installs the async program bootstrap.
 The bare logical module name `titan` is reserved in library mode because it
 belongs to the Lua support API and every shim requires it. A **physical**
 provider named `titan` is valid only when its final image also contains
-`titanlib.o`'s genuine `luaopen_titan`. The driver checks that entry in a fresh
+`ltitanlib.o`'s genuine `luaopen_titan`. The driver checks that entry in a fresh
 Lua process and requires exactly one support table exposing `_loadlib` and
 `_loadlibglobal`; compiler-side `package.loaded` state cannot satisfy the
 proof.
 
 The production standard library is the canonical example. One compiler
 invocation names all eighteen logical roots and publishes root `titan.so` and
-`titan.a`. Internal standard imports are direct. `titanlib.o` is shared `-X`
+`titan.a`. Internal standard imports are direct. `ltitanlib.o` is shared `-X`
 payload and supplies bare `luaopen_titan` without adding a logical metadata
 key. The private namespaced five-member LPegLabel archive follows it as
 metadata-free payload. The selected libuv payload follows it, then the private
-HTTP adapter and llhttp archive, and finally the selected OpenSSL payload used
-directly by `titan.ssl`. Bundled archives are force-carried into the DSO and flattened
-into the archive; system-mode libuv/OpenSSL settings remain final-link inputs
+llhttp archive, and finally the selected OpenSSL payload used directly by
+`titan.ssl`. The eight HTTP callback definitions already live in the generated
+`titan.http` object; there is no adapter object. Bundled archives are
+force-carried into the DSO and flattened into the archive; system-mode libuv/OpenSSL settings remain final-link inputs
 and are never copied into `titan.a`. The DSO exports nineteen Lua entries
 (`luaopen_titan` plus the eighteen logical entries); both forms define the
 eighteen logical protocols, and the archive advertises exactly eighteen
 metadata keys.
 The private LPegLabel archive and its headers remain source-build inputs; they
-are not installed in the compiler/runtime SDK.
+are not installed in the compiler/runtime SDK. The callback-bearing
+`titan/coroutine.titan.h`, `titan/uv/uv.titan.h`, and
+`titan/http/http.titan.h` companions are
+likewise generated source-build intermediates: they are available before the
+standard objects compile but never become provider members, publication-stage
+artifacts, or installed headers.
 
 `make titan` builds a distinct private bootstrap at
-`titan-runtime/bootstrap/titan.so`, linked only from `titanlib.o`. During a
-source-rock install it is staged at `<root>/lib/titan/0.22/titan.so` only when
+`titan-runtime/bootstrap/titan.so`, linked only from `ltitanlib.o`. During a
+source-rock install it is staged at `<root>/lib/titan/0.23/titan.so` only when
 that pathname is absent. A usable existing bootstrap or full image is
 preserved, so a repeated build never replaces a full library with the smaller
 bootstrap. An incompatible existing image is an error and is not overwritten.
@@ -310,9 +316,9 @@ bootstrap. An incompatible existing image is an error and is not overwritten.
 After LuaRocks deploys `titanc`, the post-install hook builds all roots once in
 a private directory on the destination filesystem under the same effective
 `CC`, `AR`, `RANLIB`, Titan extra flags, runtime root, and libuv policy used by
-the installer, together with the matching OpenSSL policy and private HTTP
-native inputs. TLS uses the selected OpenSSL library directly and has no
-adapter object. The exact `titan/test.titan` used by this generation is copied
+the installer, together with the matching OpenSSL policy and private llhttp
+archive. TLS uses the selected OpenSSL library directly and has no adapter
+object. The exact `titan/test.titan` used by this generation is copied
 into the same private stage. The hook then executes the source-only
 `scripts/stdlib_installer.lua` directly with the installed Lua; the publisher
 is not an installed compiler module. The script rescans `titan.a`, requires
@@ -331,11 +337,11 @@ The canonical installed files are the provider pair (plus the DSO's macOS
 dSYM), eighteen Lua shims, and the canonical test-support source:
 
 ```text
-<root>/lib/titan/0.22/titan.so
-<root>/lib/titan/0.22/titan.a
-<root>/lib/titan/0.22/titan.so.dSYM          # macOS only
+<root>/lib/titan/0.23/titan.so
+<root>/lib/titan/0.23/titan.a
+<root>/lib/titan/0.23/titan.so.dSYM          # macOS only
 <root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc,test}.lua
-<root>/share/titan/0.22/src/titan/test.titan
+<root>/share/titan/0.23/src/titan/test.titan
 ```
 
 These remain direct Titan artifacts outside the source-rock manifest. The
@@ -355,7 +361,7 @@ canonical compiler source around compiler groups; its system-libuv/system-OpenSS
 paired generation rather than one logical child, while the prepared artifact retains the
 bundled generation.
 
-## ABI 0.16 through 0.22 and test-only exact providers
+## ABI 0.16 through 0.23 and test-only exact providers
 
 ABI 0.16 changed neither per-module serialized type shapes nor Titan's native
 calling convention. It is nevertheless a mandatory compatibility boundary:
@@ -374,10 +380,10 @@ those pointers now denote private backing Tables paired one-to-one with
 canonical Lua proxy Udata. Every generated module also caches the per-state
 Array metatable. Since 0.16 code could expose or mutate a backing as an
 ordinary table, 0.16 and 0.17 providers must never be mixed. Current lookup
-uses `TITAN_PATH_0_22` and `lib/titan/0.22`; installed
+uses `TITAN_PATH_0_23` and `lib/titan/0.23`; installed
 0.17/0.18/0.19/0.20/0.21 trees are preserved only as separately versioned
 predecessors. See
-[Dense Arrays](dense-arrays.md#abi-017-020-021-and-022-boundaries).
+[Dense Arrays](dense-arrays.md#abi-017-020-021-022-and-023-boundaries).
 
 ABI 0.18 preserved the provider model and Array protocol, but the generated
 standard-library archive objects now reference callback trampolines promoted
@@ -402,10 +408,14 @@ the source-local `titan.uv` surface/private-provider boundary: its public schema
 and reconstructible module-userdata prefix change while Lua 5.5.1 and the other
 value/native-call layouts remain unchanged. Every generated module additionally
 reserves the fixed physical-provider identity slot that authenticates direct
-source-private state. Its marker rejects 0.21 before schema decoding
-or native linking. The 0.22 publisher does not migrate, clean up, or otherwise
-consume the preserved 0.21 tree, and there is no retained historical cutover
-canary.
+source-private state. Its marker rejects 0.21 before schema decoding or native
+linking. ABI 0.23 retains that public schema and module-state layout but changes
+the native contract: generated standard objects now own the coroutine, libuv,
+and llhttp callback entries formerly supplied by runtime/adapter objects, and
+callable entry families use injective module/nominal/member UCN separators. Its
+marker rejects 0.22 before metadata decoding or native linking. The 0.23 publisher does not
+migrate, clean up, or otherwise consume the preserved 0.22 tree, and there is
+no retained historical cutover canary.
 
 Production, installed, and native standard-library behavior tests use the
 combined image; the uv redesign has no delayed-callback source variant,

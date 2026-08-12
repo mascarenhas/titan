@@ -214,10 +214,14 @@ channel's capacity, single-waiter, no-barging, cancellation, and wake rules.
 
 ## Native callback bridge
 
-Titan functions and closures cannot be converted to C callback pointers. The
-small `titan-runtime/titan_uv.c` bridge therefore provides one plain-C
-trampoline per libuv callback shape: timer, close, filesystem, DNS, connect,
-write, shutdown, alloc/read, connection, signal, process exit, and walk.
+Ordinary Titan functions and closures cannot be converted to C callback
+pointers. The thirteen exact callbacks are instead source-defined
+[`foreign function`](foreign-functions.md) declarations in the `file`, `os`,
+`process`, `runtime`, `task`, and `tcp` contributors: filesystem, signal,
+process exit, write, alloc, read, close, walk, timer, DNS, connect, shutdown,
+and connection. Each has a plain libuv C signature and is assigned directly to
+the corresponding callback parameter. The former `titan_uv.c` and
+`titan/uv.h` callback bridge are gone.
 
 Each callback owner is the smallest record needed to hide its unexportable FFI
 storage and keep the callback's Titan values reachable. A one-shot request
@@ -229,20 +233,22 @@ owners.
 
 The `titan.uv` initializer captures the stable Lua main-thread `lua_State *`
 once in a private module variable. Each new Runtime stores that pointer in its
-sole `uv_loop_t` with
-`uv_loop_set_data`; the bridge recovers it with `uv_loop_get_data`. A common C
-helper extracts that state plus the stored callback closure, its module, and
-its native Titan entry. The exact closure is passed as Titan's hidden `_fn`
-argument so captured callback values retain their ordinary generated-function
-ABI. Before entry, the helper also pushes the owner on that main-thread stack.
-This temporary root is necessary because a terminal handler can remove the
-owner from its Runtime live set while the generated callback is still using
-it. Each trampoline restores the saved stack top after its exact callback
-returns. The helper does not dispatch. Each libuv-shaped C callback selects
-the handler for its own callback shape, casts the corresponding exact Titan
-signature, and calls it with only that callback's parameters. There is no
-event-kind tag or generic callback payload at this boundary, and the manuals
-do not make the owners' private record layouts part of the design contract.
+sole `uv_loop_t` with `uv_loop_set_data`; each foreign callback recovers it with
+`uv_loop_get_data`. The callback body then uses the four typed bridges in
+`titan/ffi.h` to recover the exact owner userdata, stored callback closure,
+closure module, and native Titan entry. It saves the stack top and calls the
+entry with the original closure as Titan's hidden `_fn` argument, so captures
+retain their ordinary generated-function ABI. The owner remains reachable
+through its traced Runtime or callback/task ownership chain throughout the
+callback, including terminal delivery, so a duplicate stack root adds no GC
+protection. The body restores the saved stack top after its exact handler
+returns.
+
+There is no common native dispatcher. Each libuv-shaped foreign declaration
+selects its own owner field and exact entry-pointer alias, and calls the handler
+with only that callback's parameters. There is no event-kind tag or generic
+callback payload at this boundary, and the manuals do not make the owners'
+private record layouts part of the design contract.
 
 The Task-resume boundary catches errors raised by a user continuation and
 retires only that Task. Operation callbacks use ordinary `catch`/`finally`
@@ -277,12 +283,14 @@ Accepted operations produce exactly one callback. Titan does not suppress that
 callback by cancelling an accepted request underneath its continuation. A
 negative submission result produces none.
 
-The Titan filesystem callback reads its result with public
-`uv_fs_get_result`, runs `uv_fs_req_cleanup` exactly once, and only then
-resumes the Task; the C trampoline only enters that callback. Read storage and
-the original string used by a write remain rooted through that point. DNS
-callbacks copy normalized address cells before `uv_freeaddrinfo`. Connect,
-write, and shutdown requests
+The Titan filesystem handler reads its result with public
+`uv_fs_get_result`, runs `uv_fs_req_cleanup` exactly once, and only then resumes
+the Task; its source-defined foreign entry passes only the exact owner and
+native callback parameters. Read storage and the original string used by a
+write remain rooted through that point. DNS handling counts usable `addrinfo`
+entries, allocates one GC-owned `sockaddr_storage` array, and copies each
+reported byte prefix directly with `memcpy` before `uv_freeaddrinfo`; there is
+no address-copy shim. Connect, write, and shutdown requests
 likewise retain exactly the native storage and borrowed values required until
 their callbacks.
 

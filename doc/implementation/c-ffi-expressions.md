@@ -100,7 +100,7 @@ layout is required:
 
 * by-value parameters and results;
 * module variables and initialized locals;
-* initializer-less automatic locals;
+* constructor-initialized automatic locals;
 * by-value casts;
 * fixed-array elements;
 * allocation;
@@ -109,8 +109,8 @@ layout is required:
 
 Typedefs and array elements are resolved recursively. Pointers to incomplete
 objects remain valid. Flexible-array-member structs are complete for
-`sizeof`/`alignof`, while their existing allocation and automatic-storage bans
-remain.
+`sizeof`/`alignof` and have the dedicated scalar `T.new(count)` allocation
+path; they remain ineligible for `T.new_array`.
 
 ### Dual type/value lookup
 
@@ -385,28 +385,35 @@ it formed an address or array decay. The direct source declaration is added to
 the call's `_c_mutated_decls`, marks address-taken/assigned state, and feeds the
 try-spill analysis below.
 
-## Automatic aggregates and fixed arrays
+## Target-directed automatic aggregates and fixed arrays
 
-The parser adds `Ast.TypeCArray` only in the dedicated single,
-initializer-less automatic-local production. Source-written `T[N]` is not a
-general Titan type form. The checker accepts the no-RHS statement only for a
-complete non-GC-bearing C struct, union, or recursively complete fixed array;
-the source extent must be a positive integer literal.
+The parser adds `Ast.TypeCArray` only to an initialized local target. A fixed
+`T[N]` or uncounted `T[]` is not a general Titan type form. The old
+initializer-less automatic-local production is gone; `.new()` and
+`.new_array(...)` make zero initialization explicit.
 
-Accepted statements and declarations carry `_c_zero_init` and
-`_c_automatic_object`. `cdeclarator.render_declaration` gives the coder an
-exact object declaration and the coder emits `{0}`.
+During `StatDecl` checking, the result-demand callback identifies a direct
+allocation sink. `_plan_c_allocation` records one immutable plan on the call and
+declaration. An inferred/by-value eligible struct or union `.new()` becomes
+`automatic_object`; an explicit owner remains owned, and a raw pointer target
+uses hidden rooted owner backing. A positive literal array count can become
+`automatic_array` or `automatic_array_borrow`; dynamic/zero borrowed views use
+hidden owner backing. A written fixed extent must be positive and match the
+literal count. Whole-array assignment, return, and capture remain rejected.
 
-Whole struct/union assignment retains C copy behavior. Whole-array inference,
-copy, assignment, return, and capture are rejected. Array indexing and `#`
-reuse the established static-array paths, and contextual adjustment performs
-normal C decay. Aggregate capture is rejected because boxing would change the
-object's address; a derived pointer remains an ordinary unsafe C pointer and
-may escape.
+The coder consumes only that plan. Automatic declarations emit exact C storage
+with `{0}`; borrowed automatic arrays add a pointer to their separate fixed
+backing. The transitive eligibility walk rejects `TValue`, `Udata *`, and other
+recognized GC-bearing fields because Lua does not trace ordinary C automatic
+storage. The storage has ordinary block lifetime and no escape analysis.
 
-The transitive eligibility walk rejects `TValue`, `Udata *`, and recognized
-GC-bearing fields. Generated automatic storage is not recursively traced by
-Lua's collector.
+A FAM struct has a separate `automatic_fam` plan for a nonnegative literal
+count and an owned/hidden-owner plan otherwise. Its aligned backing and logical
+count provenance are described in
+[Foreign-function implementation](foreign-functions.md#flexible-array-member-provenance).
+The narrow automatic-to-owned coercions copy a complete aggregate/fixed-array
+representation (or the complete FAM extent) into a freshly rooted owner; they
+are checker-owned operations, not structural subtyping.
 
 ### Longjmp-safe aggregate spills
 

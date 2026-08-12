@@ -85,7 +85,7 @@ describe("folder modules through the public compiler", function()
             "-u", "LUA_PATH", "-u", "LUA_CPATH",
             "-u", "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5",
             "CCACHE_DISABLE=1",
-            "TITAN_PATH_0_22=" .. workspace,
+            "TITAN_PATH_0_23=" .. workspace,
             "TITAN_PATH=",
         }
         if USE_CHECKOUT_COMPILER then
@@ -274,7 +274,7 @@ end
         assert.truthy(generated:find("foldercase_init", 1, true))
         assert.truthy(generated:find("Titan module foldercase", 1, true))
         assert.truthy(generated:find(
-            "foldercase_Reader_read_interface_boundmethod", 1, true))
+            "foldercase_\\u2133_Reader_\\u2131_read_interface_boundmethod", 1, true))
         assert.falsy(generated:find("foldercase_a_", 1, true))
         assert.falsy(generated:find("foldercase_trace_", 1, true))
         assert.falsy(generated:find("must_not_exist", 1, true))

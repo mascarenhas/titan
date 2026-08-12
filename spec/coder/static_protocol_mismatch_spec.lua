@@ -74,9 +74,10 @@ local function compiler_argv(workspace, source_root, ...)
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "CCACHE_DISABLE=1",
-        "TITAN_PATH_0_22=" .. workspace,
+        "TITAN_PATH_0_23=" .. workspace,
         "TITAN_PATH=",
-        "PATH=" .. PREFIX .. "/bin:/usr/bin:/bin",
+        "PATH=" .. PREFIX .. "/bin:" ..
+            (os.getenv("PATH") or "/usr/bin:/bin"),
     }
 
     local installed = not USE_CHECKOUT_COMPILER and
@@ -141,8 +142,7 @@ end
 local function metadata_initializer(csource, modname)
     local symbol =
         driver.mangle_module_name(modname) .. "_titan_metadata"
-    local header =
-        "static const unsigned char " .. symbol .. "[] = "
+    local header = symbol .. "[] = "
     local _, header_end = csource:find(header, 1, true)
     assert.truthy(header_end, "missing generated metadata array " .. symbol)
     local value_start = header_end + 1

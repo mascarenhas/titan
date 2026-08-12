@@ -148,11 +148,11 @@ describe("named arguments (code generation)", function()
             end
         ]])
         local declaration = assert(csrc:find(
-            "lua_Integer test_named_titan(", 1, true))
+            "lua_Integer test_\\u2133_named_titan(", 1, true))
         local first = assert(csrc:find(
-            "lua_Integer test_named_titan(", declaration + 1, true))
+            "lua_Integer test_\\u2133_named_titan(", declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_named_titanentry_lua", first, true))
+            "static int test_\\u2133_named_titanentry_lua", first, true))
         local body = csrc:sub(first, last - 1)
         local second_freeze = assert(body:find(
             "_tmp_1 = _param_second;", 1, true))
@@ -374,7 +374,7 @@ describe("named arguments (code generation)", function()
                 end
 
                 function ffi_contextual_keywords(): integer
-                    local holder: c.ffi_keyword_holder
+                    local holder = c.ffi_keyword_holder.new()
                     holder.when = 5
                     local result: c.type = c.when { when = holder.when }
                     return result + c.repeat

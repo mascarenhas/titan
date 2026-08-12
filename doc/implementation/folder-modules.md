@@ -179,13 +179,15 @@ actual contributor filename and line.
 `driver.compile` already derives its `.c` and `.o` paths from the cached
 source filename, so storing the canonical main gives the required output:
 
-| Form for `foo.bar` | Cached filename | C/object |
-| --- | --- | --- |
-| flat | `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` |
-| folder | `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` |
+| Form for `foo.bar` | Cached filename | C/object | Foreign companion when needed |
+| --- | --- | --- | --- |
+| flat | `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.titan.h` |
+| folder | `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar/bar.titan.h` |
 
 Only one compile call is made, so contributors produce no standalone C,
-object, provider, or Lua-shim artifacts. In library mode the logical module's
+object, generated header, provider, or Lua-shim artifacts. Foreign declarations
+from the combined AST share the canonical main's companion; all companions for
+an invocation are planned and written before the first object is compiled. In library mode the logical module's
 object joins the invocation-wide source union. A single `foo.bar` root derives
 the exact provider pair `foo/bar.so` and `foo/bar.a`; several compatible roots
 may derive a shallower common pair. Either way exactly one generated shim
@@ -290,6 +292,13 @@ together with the fixed physical-provider identity slot now carried by every
 module, are why this source-private transition advances the ABI; contributor
 filenames still have no runtime identity of their own.
 
+ABI 0.23 again leaves folder composition unchanged. `Ast.TopLevelForeignFunc`
+declarations in any contributor are checked and lowered as declarations of the
+one logical module. Their prototypes and eligible inline bodies enter the
+canonical main's single generated `*.titan.h`; out-of-line bodies enter its
+single C/object pair. The callback-symbol and UCN top-level-entry changes are
+native ABI reasons for 0.23, not contributor identities or new folder metadata.
+
 ## `titan.uv` dogfooding
 
 The production `titan.uv` source is the folder ensemble
@@ -313,15 +322,15 @@ titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.
   titan.ssl titan.url titan.http titan.os \
   titan.peg titan.string \
   titan.math titan.lua titan.iter titan.gc titan.test \
-  -X titan-runtime/titanlib.o lpeglabel-build/libtitan-lpeglabel.a \
-     libuv-build/libuv.a llhttp-build/titan_httpshim.o \
-     llhttp-build/libtitan-llhttp.a \
+  -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
+     libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
      openssl-build/libssl.a openssl-build/libcrypto.a  # bundled modes
 ```
 
-Generated `titan/uv/uv.c` and `titan/uv/uv.o` are build artifacts and are
-removed by `make clean`. No contributor DSO, archive, or contributor shim is
-built or installed. The one logical `titan.uv` object, its one generated
+Generated `titan/uv/uv.c`, `titan/uv/uv.o`, and the callback-bearing
+`titan/uv/uv.titan.h` are build artifacts and are removed by `make clean`. No
+contributor C/object/header, DSO, archive, or contributor shim is built or
+installed. The one logical `titan.uv` object, its one generated
 `titan/uv.lua` shim, and the remaining seventeen logical modules (eighteen in
 total) reside in the physical `titan.so`/`titan.a` pair. The private
 five-member LPegLabel archive is shared metadata-free payload for the
@@ -342,9 +351,10 @@ public net/SSL/I/O/async layers; `titan.url` is synchronous composition over
 rules: each has one canonical main, immediate contributors sharing
 module-private scope, one generated C/object pair, and one logical shim.
 `titan.http`, like `titan.uv`, keeps public declarations with their semantic
-contributors. The `titan.peg` and `titan.string` mains instead own their
-complete public APIs and their contributors have only module-local top-level
-declarations. Contributor filenames do not become modules or archive metadata
+contributors and owns one callback-bearing `titan/http/http.titan.h` companion.
+The `titan.peg` and `titan.string` mains instead own their complete public APIs
+and their contributors have only module-local top-level declarations; neither
+currently needs a foreign companion. Contributor filenames do not become modules or archive metadata
 keys.
 
 See [Driver and toolchain](driver.md) for the complete search/build flow,

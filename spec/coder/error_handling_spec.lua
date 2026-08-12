@@ -1197,7 +1197,7 @@ describe("catch", function()
             end
         ]])
         local native_callback =
-            coder._source_private_prefix("test", "native_callback") ..
+            coder._function_prefix("test", "native_callback") ..
             "_titan"
         local _, prototype = assert(csrc:find(native_callback, 1, true))
         local definition = assert(csrc:find(

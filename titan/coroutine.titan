@@ -2,7 +2,21 @@ local mco = foreign import "minicoro.h"
 local lua = foreign import "lua.h"
 local lual = foreign import "lauxlib.h"
 local ffi = foreign import "titan/ffi.h"
-local coro_native = foreign import "titan/coro.h"
+
+local type coro_entry_func = foreign (
+  *ffi.lua_State, *ffi.Udata, *ffi.CClosure,
+  ffi.TValue, *mco.mco_coro
+) -> ()
+
+foreign function coro_entry_trampoline(co: *mco.mco_coro)
+  local owner = mco.mco_get_user_data(co) as *ffi.Udata
+  local T = ffi.lmacro_thvalue(owner.uv[0].uv)
+  local module = ffi.lmacro_uvalue(owner.uv[1].uv)
+  local callback = ffi.lmacro_clCvalue(owner.uv[2].uv)
+  local func = owner.uv[3].uv
+  local entry = ffi.lmacro_pvalue(callback.upvalue[2]) as coro_entry_func
+  entry(T, module, nil, func, co)
+end
 
 local STACK_SIZE = 2 * 1024 * 1024
 local TITAN_CORO_OWNER_USERVALUES = 5
@@ -257,7 +271,7 @@ function create(func: (value) -> value, default_tag: value): Coro
 
   local desc = mco.mco_desc_init(nil, STACK_SIZE)
   desc.runtime = runtime
-  desc.func = coro_native.titan_coro_entry
+  desc.func = coro_entry_trampoline
   desc.user_data = ffi.lua_togco(L, -1)
 
   local res = mco.mco_create(slot, desc)

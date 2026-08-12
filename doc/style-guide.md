@@ -403,11 +403,10 @@ returning from that boundary.
 Ordinary C operations belong in Titan code behind `foreign import`. This
 includes calls to reviewed public libuv APIs: keep the operation, error
 translation, rooting, and ownership in the Titan wrapper rather than adding a
-C forwarding function. Reserve C shim code for callback ABI trampolines,
-opaque-layout normalization, or compile-time portability facts that Titan
-cannot express. For example, `titan/uv.h` may normalize both the presence and
-value of a platform constant, while Titan still invokes the corresponding
-ordinary C operation directly through the FFI. A non-callback forwarding
+C forwarding function. Write callback ABI trampolines as restricted
+`foreign function` declarations when their types and bodies fit that source
+boundary. Reserve hand-written C shim code for opaque-layout normalization or
+compile-time portability facts that Titan cannot express. A forwarding
 function needs an exceptional boundary that the FFI cannot spell, such as a
 required function-like macro, and an immediately preceding code comment must
 name and justify that exception. Keep every such shim narrow and namespaced.

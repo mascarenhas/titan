@@ -291,12 +291,12 @@ describe("closure adjustment wrappers (end-to-end)", function()
             end
         ]]
         local function native_body(csrc, name)
-            local signature = "TValue test_" .. name .. "_titan("
+            local signature = "TValue test_\\u2133_" .. name .. "_titan("
             local declaration = assert(csrc:find(signature, 1, true))
             local first = assert(csrc:find(
                 signature, declaration + 1, true))
             local last = assert(csrc:find(
-                "static int test_" .. name .. "_titanentry_lua",
+                "static int test_\\u2133_" .. name .. "_titanentry_lua",
                 first, true))
             return csrc:sub(first, last - 1)
         end

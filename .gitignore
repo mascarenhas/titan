@@ -51,6 +51,9 @@
 /titan/http/http.c
 /titan/peg/peg.c
 /titan/string/string.c
+/titan/coroutine.titan.h
+/titan/uv/uv.titan.h
+/titan/http/http.titan.h
 
 # Generated logical-module shims for the combined standard-library image
 /titan/coroutine.lua

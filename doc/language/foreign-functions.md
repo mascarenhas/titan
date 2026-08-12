@@ -1,0 +1,268 @@
+# Foreign functions
+
+Titan can define a function with a plain C ABI directly in Titan source. This is
+useful for callbacks and other small native entry points that would otherwise
+need a hand-written C trampoline.
+
+```titan
+local c = foreign import "callback_api.h"
+
+foreign function compare(left: *c.Item,
+                         right: *c.Item): c.int
+  if left.key < right.key then return -1 as c.int end
+  if left.key > right.key then return 1 as c.int end
+  return 0 as c.int
+end
+
+local function sort(items: *c.Item, count: c.size_t)
+  c.sort_items(items, count, compare)
+end
+```
+
+A foreign function is C code written with a restricted Titan surface. It is not
+an ordinary Titan function with an automatically generated callback adapter.
+The [C FFI chapter](ffi.md) remains the reference for imported declarations,
+C types, calls, ownership, and allocation.
+
+## Declaration syntax
+
+A foreign function is a top-level declaration:
+
+```titan
+foreign function name(p1: C1, p2: C2): CResult
+  body
+end
+```
+
+Omit the result annotation for a C `void` function:
+
+```titan
+foreign function notify(item: *c.Item)
+  c.mark_notified(item)
+end
+```
+
+There is no `local` form, foreign method, foreign record function, or nested
+foreign declaration. A foreign function is source-private by definition; its
+availability to another Titan module is described under
+[Source visibility](#source-visibility).
+
+Every parameter and the optional result must be a direct C FFI type. A complete
+C struct or union can be passed or returned by value. Pointers to incomplete
+objects are valid, but an incomplete object by value is not. Titan types,
+including `integer`, `string`, `boolean`, and `value`, are not foreign-signature
+types. `owned` views, direct array/function values, multiple results, flexible
+results, and variadic parameters are also unavailable. Use a pointer in the
+signature when C expects an array or callback.
+
+A direct foreign call follows C arity rather than Titan call adjustment:
+missing and surplus arguments are errors. Named-call syntax is available only
+when the declaration has one complete fixed parameter-name list.
+
+## Foreign function-pointer types
+
+The source-written type
+
+```titan
+foreign (P1, P2) -> R
+```
+
+denotes a pointer to a C function taking `P1, P2` and returning `R`. Use `()`
+for a C `void` result:
+
+```titan
+local type Compare = foreign (*c.Item, *c.Item) -> c.int
+local type Notify = foreign (*c.Item) -> ()
+```
+
+The type is already a pointer. Consequently, `*foreign (...) -> ...` means a
+pointer to a function pointer, not another spelling of the callback type.
+
+A foreign declaration is a C function designator. It can be called directly or
+used where an exactly compatible foreign function-pointer type is expected:
+
+```titan
+local callback: Compare = compare
+c.install_compare(compare)
+```
+
+It is not a Titan function value. It cannot inhabit `(P...) -> R`, cross through
+Lua, be boxed in `value`, or receive Titan callable adjustment. Conversely, an
+ordinary Titan function or closure is not automatically adapted to a C callback
+ABI. Write a foreign function that implements the required C boundary.
+
+## Source visibility
+
+The defining module can call or take the address of its foreign functions by
+name. A module compiled from source can use a directly imported producer's
+foreign functions through the written alias:
+
+```titan
+local bridge = import "internal.bridge"
+
+local function install()
+  c.install_callback(bridge.callback)
+end
+```
+
+This permission is direct and source-only. It does not propagate through an
+intermediate module. A consumer of a `.so` or `.a` sees only the producer's
+public Titan interface; compiled metadata contains no foreign function.
+Physical co-residence in one provider and static linking do not change that
+rule, and Lua cannot see foreign functions through `require`.
+
+The imported module's C-import alias is not re-exported. The compiler carries
+only the generated C declarations and exact origin headers required to compile
+the direct source consumer. See
+[Visibility through source imports](source-import-visibility.md).
+
+## Body subset
+
+A foreign body can use:
+
+* its parameters and initialized C-typed locals;
+* foreign functions in the current module;
+* foreign functions reached through a direct source import;
+* imported C namespaces and their functions, values, fields, types,
+  `sizeof`, and `alignof`;
+* C calls, field and pointer/array indexing, C casts and C-mode operators;
+* assignment and call statements;
+* `do`, `if`/`elseif`/`else`, `while`, `repeat`, numeric `for`, `break`, and
+  `return`.
+
+It cannot see ordinary Titan module variables, functions, records, unions, or
+methods, including ordinary members of an imported Titan module. Ordinary
+functions receive built-in `L` and `M` locals; foreign functions do not. A
+foreign body can call the Lua C API only when an explicit C parameter or other
+C declaration supplies a `lua_State *`.
+
+The following Titan facilities are unavailable in a foreign body:
+
+* `raise`, `catch`, `finally`, and `defer`;
+* generic `for ... in` and `case`;
+* lambdas, bound methods, and Titan record/union/Array/Map constructors;
+* `...`, flexible results, `is`, concatenation, and Titan `and`/`or`/`not`;
+* Lua-owned `.new()` and `.new_array()` allocation.
+
+Every local needs an initializer and must have a direct C type. A non-void
+foreign function must return one C value on every path; a void function may
+fall through or use bare `return`.
+
+### Literals and control flow
+
+Literals in a foreign body are C values:
+
+| Source literal | Foreign-body C type/meaning |
+| --- | --- |
+| `true`, `false` | target `_Bool`, emitted as 1 or 0 |
+| integer numeral | target C `int` by default, or a compatible contextual C type |
+| float numeral | C `double` by default, or a compatible contextual C float |
+| string literal | `const char *` with static storage |
+| `nil` | contextual `NULL` for a pointer or function pointer |
+
+An untyped `local p = nil` has no pointee type and is rejected; write an
+annotation such as `local p: *c.Item = nil`.
+
+Conditions use C scalar truth rather than Lua truthiness. A numeric `for` uses a
+C integer or floating control type and C comparison/addition. Its start, limit,
+and step are evaluated once, from left to right. The compiler rejects a literal
+zero step. A dynamically computed step is a trusted precondition and must be
+nonzero.
+
+## The trusted C boundary
+
+A foreign function is inside the unsafe C boundary. Its generated body has no
+implicit Lua state, GC-root frame, `setjmp` frame, or Titan error path. Pointer
+field access, indexing, and function-pointer calls use raw C behavior: Titan
+does not insert its ordinary FFI NULL or bounds checks. C integer overflow,
+division, shifts, pointer arithmetic, casts, and other undefined or
+implementation-defined cases retain C semantics.
+
+The compiler still preserves Titan's source sequencing. Operands, callees, and
+arguments are evaluated once from left to right before the generated C operation
+or call, even though C would not otherwise promise argument evaluation order.
+
+A foreign function that explicitly calls a Lua API capable of longjmp must obey
+that API's C contract. The compiler does not turn such a call into `raise` and
+cannot run a Titan `defer` while it unwinds.
+
+## Generated header
+
+A source module containing a foreign function owns one compiler-generated,
+source-adjacent header with the reserved suffix `.titan.h`:
+
+| Module source | Generated header |
+| --- | --- |
+| flat `foo/bar.titan` | `foo/bar.titan.h` |
+| folder main `foo/bar/bar.titan` | `foo/bar/bar.titan.h` |
+
+A folder contributor produces no separate header. With `--tree`, the header is
+beside the selected external canonical source just like generated C and object
+files.
+
+The compiler prepares all needed headers before compiling any source object, so
+a consumer may sort before its producer. A header contains the relevant C
+includes, generated headers for direct source dependencies, every foreign
+prototype, and eligible inline bodies. Generated C includes its own companion
+header.
+
+The `.titan.h` path is compiler-owned. Titan refuses to overwrite a file that
+does not carry its generated banner, replaces a prior generated header, and
+removes a stale generated header when the module no longer defines foreign
+functions. Do not use that reserved path for an author-written header.
+
+The header is not a binary interface. It is not placed in `.titan.meta`, a
+provider archive, an installed SDK, a Lua shim, or a standard-library
+publication transaction. A binary consumer cannot recover or name the foreign
+functions it declared.
+
+### Inline subset and function identity
+
+A foreign function is emitted as `static inline` in the generated header only
+when its root body consists of optional direct local declarations followed by
+exactly one of:
+
+1. one expression return;
+2. one `if` whose sole `then` and required `else` each contain one expression
+   return; or
+3. one `if` without `else` whose sole `then` returns, followed by one expression
+   return.
+
+Every other foreign function has a hidden external definition in the module's
+generated C file. The inline form is an optimization/header-availability rule,
+not a C constant-expression promise. Taking one inline function's address in
+two translation units may yield different addresses.
+
+## Native C names and ABI
+
+ABI 0.23 uses C99 universal-character-name separators in generated callable
+names. `_\u2133_` separates a flattened logical module from the remaining
+signature, while `_\u2131_` separates a record, union, or Interface owner from
+its static, constructor, variant, method, bound, or metamethod role. For
+example:
+
+```text
+foo.bar + compare        -> foo_bar_\u2133_compare_titan
+foo.bar + Point.move     -> foo_bar_\u2133_Point_\u2131_move_titanstatic
+foo.bar + Point:move     -> foo_bar_\u2133_Point_\u2131_move_titanmethod
+```
+
+Foreign functions share the top-level native-entry family with ordinary
+functions. There is no universal `titan_` prefix and no separate hexadecimal
+source-private scheme. A foreign function has only the native C entry; it has
+no Lua or strict entry and no module-state closure slot. Generated C retains
+the UCN spellings; object and tool names contain UTF-8 `ℳ` and `ℱ`.
+
+The naming change and the removal of the old standard-library callback symbols
+are part of the ABI-0.23 clean boundary. ABI-0.22 providers and objects must be
+rebuilt rather than mixed with an ABI-0.23 compiler/runtime.
+
+## Related chapters
+
+* [The C FFI](ffi.md) covers imported headers, C values, allocation, FAMs, and
+  ownership.
+* [C FFI declarations and expressions](c-ffi-expressions.md) covers C operator
+  semantics and target-directed automatic storage.
+* [Functions](functions.md) covers ordinary Titan functions and closures.
+* [Foreign-function internals](../implementation/foreign-functions.md)
+  describes checking, lowering, headers, and native naming.

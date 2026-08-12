@@ -324,7 +324,7 @@ encodes three field forms:
 | `[keyexp] = exp` | the key *expression node* |
 
 At the semantic-type layer every Titan/Lua `Type.Function` shape carries a
-separate `flexrettype` and keeps its ABI-0.22 third constructor position as a
+separate `flexrettype` and keeps its ABI-0.23 third constructor position as a
 required reserved `false`; Titan input tails live in `varargtype`. A direct
 foreign module member instead retains the independent `Type.CFunction` shape,
 with C's single-result model and `vararg` bit, and a C function pointer is

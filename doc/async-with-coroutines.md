@@ -197,7 +197,6 @@ local mco = foreign import "minicoro.h"
 local lua = foreign import "lua.h"
 local lual = foreign import "lauxlib.h"
 local ffi = foreign import "titan/ffi.h"
-local coro_native = foreign import "titan/coro.h"
 ```
 
 The FFI calls that need the current Lua state use Titan's existing
@@ -205,20 +204,13 @@ built-in `L` local. The functions in `titan/coroutine.titan` that
 create handles already have that `L`; no new language surface is needed
 to pass the calling state to C.
 
-The C helper interface is deliberately tiny. `titan/coroutine.titan` imports
-`minicoro.h` directly, reads the `mco_coro` fields it needs, constructs
-the owner userdata and typed handle, and calls the minicoro
-storage/control APIs directly.
-The C helper surface used by `titan/coroutine.titan` consists only of the
-entry trampoline and fixed tag comparator. The owner-userdata slot count is a
-private `titan/coroutine.titan` module variable. The header therefore contains
-only a bare forward declaration and the two native entry points:
-
-```c
-struct mco_coro;
-void titan_coro_entry(struct mco_coro *co);
-int titan_coro_tag_equal(void *t1, void *t2);
-```
+There is no coroutine shim header. `titan/coroutine.titan` imports
+`minicoro.h` directly, reads the `mco_coro` fields it needs, constructs the
+owner userdata and typed handle, calls the storage/control APIs directly, and
+defines the exact `foreign function coro_entry_trampoline` assigned to
+`mco_desc.func`. The reduced `minicoro.c` only compiles `MINICORO_IMPL` and a
+translation-unit-local fixed tag comparator. The owner-userdata slot count
+remains a private Titan module variable.
 
 The complete `mco_runtime` layout is available through `minicoro.h`, so Titan
 allocates one GC-owned runtime as a local top-level module variable. This keeps
@@ -603,7 +595,7 @@ The minicoro extension should remain unaware of Lua and Titan values. The
 Titan C shim supplies a comparator equivalent to:
 
 ```c
-static int titan_coro_tag_equal(void *t1, void *t2) {
+static int minicoro_tag_equal(void *t1, void *t2) {
   return luaV_equalobj(NULL, (const TValue *)t1, (const TValue *)t2);
 }
 ```
@@ -619,9 +611,9 @@ Build `titan/coroutine.titan` as the ordinary qualified logical Titan module
 `titan.coroutine`. The combined standard binary exports `titan_coroutine_init`,
 `titan_coroutine_abi`, `titan_coroutine_types`, and
 `luaopen_titan_coroutine`. Install the paired physical standard provider as
-`<root>/lib/titan/0.22/{titan.so,titan.a}` and the generated logical shim as
+`<root>/lib/titan/0.23/{titan.so,titan.a}` and the generated logical shim as
 `<root>/share/lua/5.5/titan/coroutine.lua`. Titan's configured module path
-contains `<root>/lib/titan/0.22`; the parser desugars `import "coroutine"` to
+contains `<root>/lib/titan/0.23`; the parser desugars `import "coroutine"` to
 that qualified identity and prefix lookup claims it from the preferred native
 form.
 `require "titan.coroutine"` uses the shim to promote/map that provider and
@@ -646,7 +638,7 @@ The rockspec and Makefile make `luarocks make` and `make test` build all eightee
 logical standard modules in paired `titan.so`/`titan.a` providers plus
 generated shims, together with the shared runtime archive containing the
 coroutine helper C object and vendored minicoro implementation. A final native
-link extracts `titan_coro.o` from the runtime archive because
+link extracts `minicoro.o` from the runtime archive because
 `titan.coroutine` references it.
 
 Avoid semantic mutable process-global state in runtime or generated code. The

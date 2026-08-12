@@ -16,6 +16,7 @@ return typedecl("Ast", {
         TypeArray       = {"loc", "subtype"},
         TypeMap         = {"loc", "keystype", "valuestype"},
         TypeFunction    = {"loc", "argtypes", "rettypes", "varargtype", "flexrettype"},
+        TypeForeignFunction = {"loc", "argtypes", "rettypes", "varargtype", "flexrettype"},
         TypeOption      = {"loc", "basetype"}
     },
 
@@ -23,6 +24,7 @@ return typedecl("Ast", {
         TopLevelMethod  = {"loc", "class", "name", "params", "rettypes", "flexrettype", "block"},
         TopLevelStatic  = {"loc", "class", "name", "params", "rettypes", "flexrettype", "block"},
         TopLevelFunc    = {"loc", "islocal", "name", "params", "rettypes", "flexrettype", "block"},
+        TopLevelForeignFunc = {"loc", "name", "params", "rettypes", "flexrettype", "block"},
         TopLevelVar     = {"loc", "islocal", "decl", "value"},
         TopLevelTypeAlias = {"loc", "islocal", "name", "type"},
         TopLevelRecord  = {"loc", "name", "fields"},

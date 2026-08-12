@@ -36,6 +36,7 @@ end
 
 local ENVIRONMENT_KEYS = {
     "CC",
+    "CLANG_FORMAT",
     "CCACHE_DISABLE",
     "MAKE",
     "TITAN_EXTRA_CPPFLAGS",
@@ -46,6 +47,7 @@ local ENVIRONMENT_KEYS = {
 local function titanc(overrides, ...)
     local environment = {
         CC = "cc",
+        CLANG_FORMAT = "clang-format",
         CCACHE_DISABLE = "1",
         MAKE = "make",
         TITAN_EXTRA_CPPFLAGS = "",
@@ -200,6 +202,18 @@ describe("Titan driver generic build flags", function()
     end)
 
     it("prints the complete effective argv with shell-safe quoting", function()
+        local format_lines = command_lines(verbose_output,
+            "'clang-format' '-i'")
+        assert.equal(1, #format_lines, verbose_output)
+        assert.truthy(format_lines[1]:find(
+            "'--style={BasedOnStyle: LLVM, IndentWidth: 4, " ..
+                "SortIncludes: false}' '--' '" .. APPLICATION .. "/" ..
+                MODULE .. ".c'", 1, true), format_lines[1])
+        local format_at = assert(verbose_output:find(format_lines[1], 1, true))
+        local compile_at = assert(verbose_output:find(
+            "'-c' '" .. APPLICATION .. "/" .. MODULE .. ".c'", 1, true))
+        assert.is_true(format_at < compile_at, verbose_output)
+
         assert.truthy(verbose_output:find("'--std=c99'", 1, true),
             verbose_output)
         assert.truthy(verbose_output:find("'-iquote' '" .. INCLUDE .. "'", 1,
@@ -240,17 +254,45 @@ describe("Titan driver generic build flags", function()
     end)
 end)
 
+describe("Titan generated-source formatter failures", function()
+    after_each(clean)
+
+    it("stops before compiling a generated module C file", function()
+        local ok, output, why, code = titanc({
+            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
+            CLANG_FORMAT = "sh -c 'exit 23' --",
+            MAKE = "true",
+            TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
+                "-DTITAN_DRIVER_CPP_BRANCH=37",
+        }, "-v", "--tree", APPLICATION, MODULE)
+        assert.falsy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        local cfile = APPLICATION .. "/" .. MODULE .. ".c"
+        local ofile = APPLICATION .. "/" .. MODULE .. ".o"
+        assert.is_true(file_exists(cfile))
+        assert.is_false(file_exists(ofile))
+        assert.truthy(output:find(
+            "failed to format generated file '" .. cfile .. "'", 1, true),
+            output)
+        assert.truthy(output:find("exit 23", 1, true), output)
+        assert.falsy(output:find("'-c' '" .. cfile .. "'", 1, true),
+            output)
+    end)
+end)
+
 describe("Titan driver malformed build flags", function()
     after_each(clean)
 
     for _, variable in ipairs({
+        "CLANG_FORMAT",
         "TITAN_EXTRA_CPPFLAGS",
         "TITAN_EXTRA_CFLAGS",
         "TITAN_EXTRA_LDFLAGS",
     }) do
         it("rejects malformed " .. variable .. " before invoking the toolchain",
            function()
-            local ok, output = titanc({ [variable] = "'unterminated" },
+            local overrides = { [variable] = "'unterminated" }
+            local ok, output = titanc(overrides,
                 "--tree", APPLICATION, MODULE)
             assert.falsy(ok, output)
             local expected = "invalid " .. variable ..

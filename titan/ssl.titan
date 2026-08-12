@@ -269,7 +269,7 @@ local function drain_output(connection: Connection): integer
     local requested = pending
     if requested > TLS_RECORD_BYTES then requested = TLS_RECORD_BYTES end
     local buffer = ffi.titan_ffi_char.new_array(requested)
-    local lengths: cstddef.size_t[1]
+    local lengths = cstddef.size_t.new_array(1)
     lengths[0] = 0 as cstddef.size_t
     openssl_err.ERR_clear_error()
     local ok = openssl.BIO_read_ex(
@@ -330,7 +330,7 @@ local function feed_input(connection: Connection, operation: string)
   local bytes = input as const *ffi.titan_ffi_char
   local offset = 0
   while offset < #input do
-    local lengths: cstddef.size_t[1]
+    local lengths = cstddef.size_t.new_array(1)
     lengths[0] = 0 as cstddef.size_t
     openssl_err.ERR_clear_error()
     local ok = openssl.BIO_write_ex(
@@ -455,7 +455,7 @@ local function read_locked(connection: Connection): string?
 
   local buffer = ffi.titan_ffi_char.new_array(TLS_RECORD_BYTES)
   while true do
-    local lengths: cstddef.size_t[1]
+    local lengths = cstddef.size_t.new_array(1)
     lengths[0] = 0 as cstddef.size_t
     openssl_err.ERR_clear_error()
     local result = openssl.SSL_read_ex(
@@ -504,7 +504,7 @@ end
 local function write_piece_locked(connection: Connection, piece: string)
   local bytes = piece as const *ffi.titan_ffi_char
   while true do
-    local lengths: cstddef.size_t[1]
+    local lengths = cstddef.size_t.new_array(1)
     lengths[0] = 0 as cstddef.size_t
     openssl_err.ERR_clear_error()
     local result = openssl.SSL_write_ex(
@@ -674,10 +674,10 @@ end
 
 local function read_pem_block(bio: *openssl_pem.BIO,
                               operation: string): PemBlock?
-  local names: ffi.titan_ffi_void_ptr[1]
-  local headers: ffi.titan_ffi_void_ptr[1]
-  local data: ffi.titan_ffi_void_ptr[1]
-  local lengths: ffi.titan_ffi_long[1]
+  local names = ffi.titan_ffi_void_ptr.new_array(1)
+  local headers = ffi.titan_ffi_void_ptr.new_array(1)
+  local data = ffi.titan_ffi_void_ptr.new_array(1)
+  local lengths = ffi.titan_ffi_long.new_array(1)
   names[0] = nil
   headers[0] = nil
   data[0] = nil
@@ -729,7 +729,7 @@ end
 
 local function decode_certificate(block: PemBlock,
                                   operation: string): *openssl_pem.X509
-  local cursors: ffi.titan_ffi_void_ptr[1]
+  local cursors = ffi.titan_ffi_void_ptr.new_array(1)
   cursors[0] = block.data_buffer
   openssl_err.ERR_clear_error()
   local certificate: *openssl_pem.X509 = nil
@@ -761,7 +761,7 @@ local function decode_private_key(block: PemBlock): *openssl_pem.EVP_PKEY
                     "encrypted private keys are not supported",
                     "ssl.server.private-key")
   end
-  local cursors: ffi.titan_ffi_void_ptr[1]
+  local cursors = ffi.titan_ffi_void_ptr.new_array(1)
   cursors[0] = block.data_buffer
   openssl_err.ERR_clear_error()
   local private_key = openssl_pem.d2i_AutoPrivateKey(

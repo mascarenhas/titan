@@ -1,6 +1,7 @@
 local assert = require "luassert"
 local async_stdlib = require "spec.support.async_stdlib"
 local cdriver = require "c-parser.cdriver"
+local coder = require "titan-compiler.coder"
 local lfs = require "lfs"
 local parser = require "titan-compiler.parser"
 local staticmetadata = require "titan-compiler.staticmetadata"
@@ -29,8 +30,6 @@ local STDLIB_SHIMS = {
 }
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
-local HTTP_NATIVE_INCLUDE =
-    "-I" .. lfs.currentdir() .. "/titan/http/native"
 local LLHTTP_NATIVE_INCLUDE =
     "-I" .. lfs.currentdir() .. "/llhttp-release-v9.4.3/include"
 local BUNDLED_OPENSSL_INCLUDES = table.concat({
@@ -39,47 +38,65 @@ local BUNDLED_OPENSSL_INCLUDES = table.concat({
     "-DOPENSSL_API_COMPAT=30000",
 }, " ")
 local HTTP_SSL_BUNDLED_PAYLOAD = table.concat({
-    "llhttp-build/titan_httpshim.o",
     "llhttp-build/libtitan-llhttp.a",
     "openssl-build/libssl.a",
     "openssl-build/libcrypto.a",
 }, " ")
-local HTTP_SSL_SYSTEM_PAYLOAD = table.concat({
-    "llhttp-build/titan_httpshim.o",
-    "llhttp-build/libtitan-llhttp.a",
-}, " ")
-local HTTP_PARSER_CALLBACKS = {
-    "titan_httpshim_url_cb",
-    "titan_httpshim_status_cb",
-    "titan_httpshim_header_field_cb",
-    "titan_httpshim_header_value_cb",
-    "titan_httpshim_header_value_complete_cb",
-    "titan_httpshim_headers_complete_cb",
-    "titan_httpshim_body_cb",
-    "titan_httpshim_message_complete_cb",
+local HTTP_SSL_SYSTEM_PAYLOAD = "llhttp-build/libtitan-llhttp.a"
+local HTTP_FOREIGN_CALLBACKS = {
+    { name = "llhttp_url_cb", slot = 3, setting = "on_url" },
+    { name = "llhttp_status_cb", slot = 4, setting = "on_status" },
+    { name = "llhttp_header_field_cb", slot = 5,
+        setting = "on_header_field" },
+    { name = "llhttp_header_value_cb", slot = 6,
+        setting = "on_header_value" },
+    { name = "llhttp_header_value_complete_cb", slot = 7,
+        setting = "on_header_value_complete", no_data = true },
+    { name = "llhttp_headers_complete_cb", slot = 8,
+        setting = "on_headers_complete", no_data = true },
+    { name = "llhttp_body_cb", slot = 9, setting = "on_body" },
+    { name = "llhttp_message_complete_cb", slot = 10,
+        setting = "on_message_complete", no_data = true },
 }
 local STDLIB_CONTAINER = "titan.so"
 local STDLIB_STATIC_ARCHIVE = "titan.a"
-local DIRECT_CALLBACKS = {
-    "titan_uvshim_signal_cb",
-    "titan_uvshim_process_exit_cb",
-    "titan_uvshim_getaddrinfo_cb",
-    "titan_uvshim_connect_cb",
-    "titan_uvshim_write_cb",
-    "titan_uvshim_shutdown_cb",
-    "titan_uvshim_alloc_cb",
-    "titan_uvshim_read_cb",
-    "titan_uvshim_connection_cb",
-    "titan_uvshim_close_cb",
-    "titan_uvshim_walk_cb",
-    "titan_uvshim_timer_cb",
-    "titan_uvshim_fs_cb",
+local UV_FOREIGN_CALLBACKS = {
+    { name = "uv_fs_cb", source = "titan/uv/file.titan", slot = 1,
+      call = "entry(L, module, callback, owner)" },
+    { name = "uv_signal_cb", source = "titan/uv/os.titan", slot = 1,
+      call = "entry(L, module, callback, owner, signum as lua.lua_Integer)" },
+    { name = "uv_process_exit_cb", source = "titan/uv/process.titan", slot = 1,
+      call = "entry(L, module, callback, owner, " ..
+          "exit_status as lua.lua_Integer, term_signal as lua.lua_Integer)" },
+    { name = "uv_write_cb", source = "titan/uv/runtime.titan", slot = 1,
+      call = "entry(L, module, callback, owner, status as lua.lua_Integer)" },
+    { name = "uv_alloc_cb", source = "titan/uv/runtime.titan", slot = 1,
+      call = "entry(L, module, callback, owner, suggested_size, " ..
+          "buf as ffi.titan_ffi_void_ptr)" },
+    { name = "uv_read_cb", source = "titan/uv/runtime.titan", slot = 2,
+      call = "entry(L, module, callback, owner, nread as lua.lua_Integer)" },
+    { name = "uv_close_cb", source = "titan/uv/runtime.titan", slot = 1,
+      call = "entry(L, module, callback, owner)" },
+    { name = "uv_walk_cb", source = "titan/uv/runtime.titan", slot = 1,
+      call = "entry(L, module, callback, owner, " ..
+          "handle as ffi.titan_ffi_void_ptr)" },
+    { name = "uv_timer_cb", source = "titan/uv/task.titan", slot = 1,
+      call = "entry(L, module, callback, owner)" },
+    { name = "uv_getaddrinfo_cb", source = "titan/uv/tcp.titan", slot = 1,
+      call = "entry(L, module, callback, owner, status as lua.lua_Integer, " ..
+          "result as ffi.titan_ffi_void_ptr)" },
+    { name = "uv_connect_cb", source = "titan/uv/tcp.titan", slot = 1,
+      call = "entry(L, module, callback, owner, status as lua.lua_Integer)" },
+    { name = "uv_shutdown_cb", source = "titan/uv/tcp.titan", slot = 1,
+      call = "entry(L, module, callback, owner, status as lua.lua_Integer)" },
+    { name = "uv_connection_cb", source = "titan/uv/tcp.titan", slot = 3,
+      call = "entry(L, module, callback, owner, status as lua.lua_Integer)" },
 }
-local PROVIDER_CALLBACK_REFERENCES = {
-    "titan_uvshim_timer_cb",
-    "titan_uvshim_fs_cb",
+local LEGACY_UV_CALLBACKS = {
     "titan_uvshim_signal_cb",
     "titan_uvshim_process_exit_cb",
+    "titan_uvshim_getaddrinfo_cb",
+    "titan_uvshim_connect_cb",
     "titan_uvshim_write_cb",
     "titan_uvshim_shutdown_cb",
     "titan_uvshim_alloc_cb",
@@ -87,8 +104,8 @@ local PROVIDER_CALLBACK_REFERENCES = {
     "titan_uvshim_connection_cb",
     "titan_uvshim_close_cb",
     "titan_uvshim_walk_cb",
-    "titan_uvshim_getaddrinfo_cb",
-    "titan_uvshim_connect_cb",
+    "titan_uvshim_timer_cb",
+    "titan_uvshim_fs_cb",
 }
 local DIRECT_LIBUV_CALLS = {
     "uv_accept",
@@ -192,13 +209,13 @@ end
 local function installed_stdlib_container()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.22/" .. STDLIB_CONTAINER
+    return prefix .. "/lib/titan/0.23/" .. STDLIB_CONTAINER
 end
 
 local function installed_stdlib_archive()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.22/" .. STDLIB_STATIC_ARCHIVE
+    return prefix .. "/lib/titan/0.23/" .. STDLIB_STATIC_ARCHIVE
 end
 
 local function quote(word)
@@ -607,10 +624,6 @@ describe("libuv Makefile configuration", function()
             makefile_words("LLHTTP_SOURCE_NAMES"))
         assert.same({ "-std=c99", "-fPIC", "-fvisibility=hidden" },
             makefile_words("LLHTTP_CFLAGS"))
-        assert.same({ "titan/http/native/titan_httpshim.c" },
-            makefile_words("TITAN_HTTPSHIM_SOURCE"))
-        assert.same({ "titan/http/native/titan_httpshim.h" },
-            makefile_words("TITAN_HTTPSHIM_HEADER"))
         assert.same({ "3.5.7" }, makefile_words("OPENSSL_VERSION"))
         assert.same({ "3.0.0" }, makefile_words("OPENSSL_MIN_VERSION"))
         assert.same({
@@ -627,7 +640,7 @@ describe("libuv Makefile configuration", function()
             makefile_words("OPENSSL_REQUIRED_CFLAGS"))
         local makefile = read_file("Makefile")
         for _, contract in ipairs({
-            "llhttp: $(TITAN_HTTPSHIM_O) $(LLHTTP_ARCHIVE)",
+            "llhttp: $(LLHTTP_ARCHIVE)",
             "$(LLHTTP_ARCHIVE): FORCE $(LLHTTP_OBJECTS) " ..
                 "$(LLHTTP_ARCHIVE_CONFIG)",
             "expected=\"$$(printf '%s\\n' $(notdir " ..
@@ -659,8 +672,6 @@ describe("libuv Makefile configuration", function()
     it("builds the exact three-member private llhttp archive", function()
         local archive = "llhttp-build/libtitan-llhttp.a"
         assert.truthy(file_exists(archive), "run make llhttp first")
-        assert.truthy(file_exists("llhttp-build/titan_httpshim.o"),
-            "run make llhttp first")
         local ok, output, why, code = run_argv(tool_argv(
             "AR", "ar", "t", archive))
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
@@ -672,29 +683,70 @@ describe("libuv Makefile configuration", function()
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         assert.truthy(nm_has_symbol(output, "llhttp_execute"), output)
-        for _, callback in ipairs(HTTP_PARSER_CALLBACKS) do
-            assert.falsy(nm_has_symbol(output, callback), callback)
+    end)
+
+    it("keeps trusted Lua value bridges inline in the FFI header", function()
+        local header = read_file("titan-runtime/titan/ffi.h")
+        for _, name in ipairs({
+            "lua_totvalue",
+            "lua_pushtvalue",
+            "lua_togco",
+            "titan_newthread",
+            "lmacro_thvalue",
+            "lmacro_uvalue",
+            "lmacro_clCvalue",
+            "lmacro_pvalue",
+        }) do
+            assert.truthy(header:match(
+                "static inline [^\n]-" .. name .. "%s*%("), name)
+        end
+        assert.falsy(header:find("titan_ffi_pushudata", 1, true), header)
+
+        local runtime = read_file("titan-runtime/titan.c")
+        for _, signature in ipairs({
+            "TValue lua_totvalue(",
+            "void lua_pushtvalue(",
+            "void *lua_togco(",
+            "lua_State *titan_newthread(",
+        }) do
+            assert.falsy(runtime:find(signature, 1, true), signature)
         end
     end)
 
-    it("keeps HTTP parser storage and policy in Titan", function()
-        local header = read_file("titan/http/native/titan_httpshim.h")
-        local source = read_file("titan/http/native/titan_httpshim.c")
-        local native = read_file("titan/http/native.titan")
+    it("keeps HTTP parser storage, callbacks, and policy in Titan", function()
+        local path = "titan/http/native.titan"
+        local native = read_file(path)
+        local ast, parse_error = parser.parse(path, native)
+        assert.truthy(ast, parse_error and parser.error_to_string(parse_error))
         local declarations = {}
-        for name in header:gmatch("(titan_httpshim_[%w_]+)%s*%(") do
-            declarations[#declarations + 1] = name
+        for _, node in ipairs(ast) do
+            if node._tag == "Ast.TopLevelForeignFunc" then
+                declarations[#declarations + 1] = node.name
+            end
         end
-        assert.same(HTTP_PARSER_CALLBACKS, declarations)
-
-        for _, forbidden in ipairs({
-            "malloc(", "calloc(", "realloc(", "free(", "memcpy(",
-            "titan_httpshim_event", "arena", "llhttp_execute(",
-            "llhttp_finish(", "HPE_",
-        }) do
-            assert.falsy(source:find(forbidden, 1, true), forbidden)
-            assert.falsy(header:find(forbidden, 1, true), forbidden)
+        local expected = {}
+        for _, callback in ipairs(HTTP_FOREIGN_CALLBACKS) do
+            expected[#expected + 1] = callback.name
+            local marker = "foreign function " .. callback.name .. "("
+            local first = assert(native:find(marker, 1, true), marker)
+            local last = assert(native:find("\nend", first, true), marker)
+            local body = native:sub(first, last)
+            assert.truthy(body:find(
+                "owner.uv[" .. callback.slot .. "].uv", 1, true), body)
+            assert.truthy(body:find("owner.uv[2].uv", 1, true), body)
+            assert.falsy(body:find(
+                "titan_ffi_pushudata", 1, true), body)
+            assert.truthy(body:find("lua.lua_settop(L, top)", 1, true), body)
+            local call = callback.no_data and
+                "entry(L, module, callback, owner)" or
+                "entry(L, module, callback, owner, data, length)"
+            assert.truthy(body:find("local result = " .. call, 1, true), body)
+            assert.truthy(body:find("return result", 1, true), body)
+            assert.truthy(native:find(
+                "settings." .. callback.setting .. " = " .. callback.name,
+                1, true), callback.name)
         end
+        assert.same(expected, declarations)
 
         assert.truthy(native:find("local events: {Event}", 1, true), native)
         assert.truthy(native:find(
@@ -707,61 +759,90 @@ describe("libuv Makefile configuration", function()
             "llhttp.llhttp_finish(", 1, true), native)
         assert.truthy(native:find(
             "llhttp.llhttp_get_error_pos(", 1, true), native)
-        assert.falsy(native:find("titan_httpshim_event", 1, true), native)
-
-        local object = "llhttp-build/titan_httpshim.o"
-        assert.truthy(file_exists(object), "run make llhttp first")
-        local ok, output, why, code = run_argv(tool_argv(
-            "NM", "nm", "-g", object))
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        for _, callback in ipairs(HTTP_PARSER_CALLBACKS) do
-            assert.truthy(nm_has_symbol(output, callback), callback)
-        end
-        for _, retired in ipairs({
-            "titan_httpshim_parser_new", "titan_httpshim_parser_free",
-            "titan_httpshim_execute", "titan_httpshim_finish",
-            "titan_httpshim_event_count", "titan_httpshim_event_data_at",
-        }) do
-            assert.falsy(nm_has_symbol(output, retired), retired)
-        end
     end)
 
-    it("exports callbacks and records direct libuv archive references",
+    it("defines the exact libuv callbacks in generated Titan code",
     function()
-            local runtime_object = "titan-runtime/titan_uv.o"
-            assert.truthy(file_exists(runtime_object), runtime_object)
-            local ok, output, why, code = run_argv(tool_argv(
-                "NM", "nm", "-g", runtime_object))
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
-            for _, callback in ipairs(DIRECT_CALLBACKS) do
-                assert.truthy(nm_has_symbol(output, callback), callback)
+            local declarations = {}
+            local contents = {}
+            local seen_sources = {}
+            for _, callback in ipairs(UV_FOREIGN_CALLBACKS) do
+                if not seen_sources[callback.source] then
+                    seen_sources[callback.source] = true
+                    local source = read_file(callback.source)
+                    contents[#contents + 1] = source
+                    local ast, parse_error = parser.parse(
+                        callback.source, source)
+                    assert.truthy(ast, parse_error and
+                        parser.error_to_string(parse_error))
+                    for _, node in ipairs(ast) do
+                        if node._tag == "Ast.TopLevelForeignFunc" then
+                            declarations[#declarations + 1] = node.name
+                        end
+                    end
+                end
+                local source = read_file(callback.source)
+                local marker = "foreign function " .. callback.name .. "("
+                local first = assert(source:find(marker, 1, true), marker)
+                local last = assert(source:find("\nend", first, true), marker)
+                local body = source:sub(first, last):gsub("%s+", " ")
+                assert.truthy(body:find(
+                    "owner.uv[" .. callback.slot .. "].uv", 1, true), body)
+                assert.truthy(body:find(
+                    "callback.upvalue[0]", 1, true), body)
+                assert.truthy(body:find(
+                    "callback.upvalue[2]", 1, true), body)
+                assert.truthy(body:find(
+                    "libuv.uv_loop_get_data", 1, true), body)
+                assert.falsy(body:find(
+                    "titan_ffi_pushudata", 1, true), body)
+                assert.truthy(body:find(
+                    callback.call, 1, true), body)
+                assert.truthy(body:find(
+                    "lua.lua_settop(L, top)", 1, true), body)
             end
-            assert.falsy(nm_has_symbol(output, "uv_fs_get_result"),
-                "filesystem result extraction belongs in Titan")
-            for _, wrapper in ipairs(RETIRED_UV_WRAPPERS) do
-                assert.falsy(nm_has_symbol(output, wrapper), wrapper)
+            local expected = {}
+            for _, callback in ipairs(UV_FOREIGN_CALLBACKS) do
+                expected[#expected + 1] = callback.name
             end
-            for _, helper in ipairs(RETIRED_UV_HELPERS) do
-                assert.falsy(nm_has_symbol(output, helper), helper)
+            assert.same(expected, declarations)
+
+            local all_sources = table.concat(contents, "\n")
+            for _, legacy in ipairs(LEGACY_UV_CALLBACKS) do
+                assert.falsy(all_sources:find(legacy, 1, true), legacy)
             end
-            for _, helper in ipairs(RETIRED_NETWORK_HELPERS) do
-                assert.falsy(nm_has_symbol(output, helper), helper)
+            assert.is_nil(lfs.attributes("titan-runtime/titan_uv.c"))
+            assert.is_nil(lfs.attributes("titan-runtime/titan/uv.h"),
+                "the retired libuv shim header still exists")
+
+            local makefile = read_file("Makefile")
+            for _, retired in ipairs({
+                "UV_O", "UV_CONFIG_STAMP", "titan_uv.c", "titan_uv.o",
+            }) do
+                assert.falsy(makefile:find(retired, 1, true), retired)
             end
-            for _, helper in ipairs(FFI_RETIRED_HELPERS) do
-                assert.falsy(nm_has_symbol(output, helper), helper)
-            end
+            assert.same({ "$(RUNTIME_O)", "$(MINICORO_O)" },
+                makefile_words("TITAN_RUNTIME_OBJECTS"))
 
             local logical_object = "titan/uv/uv.o"
             assert.truthy(file_exists(logical_object), logical_object)
+            local ok, output, why, code = run_argv(tool_argv(
+                "NM", "nm", logical_object))
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            for _, callback in ipairs(UV_FOREIGN_CALLBACKS) do
+                local symbol = coder._linkage_symbol_name(
+                    coder._foreign_func_name("titan.uv", callback.name))
+                assert.truthy(nm_has_symbol(output, symbol), symbol)
+            end
+
             ok, output, why, code = run_argv(tool_argv(
                 "NM", "nm", "-u", logical_object))
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
-            for _, callback in ipairs(PROVIDER_CALLBACK_REFERENCES) do
-                assert.truthy(nm_has_symbol(output, callback),
-                    logical_object .. ": " .. callback)
+            for _, legacy in ipairs(LEGACY_UV_CALLBACKS) do
+                assert.falsy(nm_has_symbol(output, legacy),
+                    logical_object .. ": " .. legacy)
             end
             for _, function_name in ipairs(DIRECT_LIBUV_CALLS) do
                 assert.truthy(nm_has_symbol(output, function_name),
@@ -771,21 +852,14 @@ describe("libuv Makefile configuration", function()
                 assert.truthy(nm_has_symbol(output, function_name),
                     logical_object .. ": " .. function_name)
             end
-            for _, wrapper in ipairs(RETIRED_UV_WRAPPERS) do
-                assert.falsy(nm_has_symbol(output, wrapper),
-                    logical_object .. ": " .. wrapper)
-            end
-            for _, helper in ipairs(RETIRED_UV_HELPERS) do
-                assert.falsy(nm_has_symbol(output, helper),
-                    logical_object .. ": " .. helper)
-            end
-            for _, helper in ipairs(RETIRED_NETWORK_HELPERS) do
-                assert.falsy(nm_has_symbol(output, helper),
-                    logical_object .. ": " .. helper)
-            end
-            for _, helper in ipairs(FFI_RETIRED_HELPERS) do
-                assert.falsy(nm_has_symbol(output, helper),
-                    logical_object .. ": " .. helper)
+            for _, retired in ipairs({
+                RETIRED_UV_WRAPPERS, RETIRED_UV_HELPERS,
+                RETIRED_NETWORK_HELPERS, FFI_RETIRED_HELPERS,
+            }) do
+                for _, symbol in ipairs(retired) do
+                    assert.falsy(nm_has_symbol(output, symbol),
+                        logical_object .. ": " .. symbol)
+                end
             end
 
             local archive = installed_stdlib_archive()
@@ -794,8 +868,8 @@ describe("libuv Makefile configuration", function()
                 "NM", "nm", "-u", archive))
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
-            for _, callback in ipairs(PROVIDER_CALLBACK_REFERENCES) do
-                assert.truthy(nm_has_symbol(output, callback), callback)
+            for _, legacy in ipairs(LEGACY_UV_CALLBACKS) do
+                assert.falsy(nm_has_symbol(output, legacy), legacy)
             end
             for _, function_name in ipairs(DIRECT_LIBUV_CALLS) do
                 assert.truthy(nm_has_symbol(output, function_name), function_name)
@@ -803,17 +877,13 @@ describe("libuv Makefile configuration", function()
             for _, function_name in ipairs(SIGPIPE_EXTERNAL_HOST_CALLS) do
                 assert.truthy(nm_has_symbol(output, function_name), function_name)
             end
-            for _, wrapper in ipairs(RETIRED_UV_WRAPPERS) do
-                assert.falsy(nm_has_symbol(output, wrapper), wrapper)
-            end
-            for _, helper in ipairs(RETIRED_UV_HELPERS) do
-                assert.falsy(nm_has_symbol(output, helper), helper)
-            end
-            for _, helper in ipairs(RETIRED_NETWORK_HELPERS) do
-                assert.falsy(nm_has_symbol(output, helper), helper)
-            end
-            for _, helper in ipairs(FFI_RETIRED_HELPERS) do
-                assert.falsy(nm_has_symbol(output, helper), helper)
+            for _, retired in ipairs({
+                RETIRED_UV_WRAPPERS, RETIRED_UV_HELPERS,
+                RETIRED_NETWORK_HELPERS, FFI_RETIRED_HELPERS,
+            }) do
+                for _, symbol in ipairs(retired) do
+                    assert.falsy(nm_has_symbol(output, symbol), symbol)
+                end
             end
         end)
 
@@ -823,18 +893,17 @@ describe("libuv Makefile configuration", function()
             assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
             assert.same(STDLIB_SHIMS, makefile_words("STDLIB_SHIMS"))
             assert.same({
-                "$(TITANLIB_O)", "$(LPEGLABEL_ARCHIVE)",
-                "$(LIBUV_EXTRA_OBJECTS)", "$(TITAN_HTTPSHIM_O)",
-                "$(LLHTTP_ARCHIVE)", "$(OPENSSL_EXTRA_OBJECTS)",
+                "$(LTITANLIB_O)", "$(LPEGLABEL_ARCHIVE)",
+                "$(LIBUV_EXTRA_OBJECTS)", "$(LLHTTP_ARCHIVE)",
+                "$(OPENSSL_EXTRA_OBJECTS)",
             }, makefile_words("STDLIB_EXTRA_OBJECTS"))
             assert.same({
-                "$(LPEGLABEL_ARCHIVE)", "$(TITAN_HTTPSHIM_O)",
-                "$(LLHTTP_ARCHIVE)", "$(OPENSSL_EXTRA_OBJECTS)",
-            },
-                makefile_words("STDLIB_NATIVE_IDENTITY_PREREQS"))
+                "$(LPEGLABEL_ARCHIVE)", "$(LLHTTP_ARCHIVE)",
+                "$(OPENSSL_EXTRA_OBJECTS)",
+            }, makefile_words("STDLIB_NATIVE_IDENTITY_PREREQS"))
             assert.same({ "$(LPEGLABEL_CPPFLAGS)" },
                 makefile_words("STDLIB_LPEGLABEL_CPPFLAGS"))
-            assert.same({ "$(TITAN_HTTPSHIM_CPPFLAGS)", "$(LLHTTP_CPPFLAGS)" },
+            assert.same({ "$(LLHTTP_CPPFLAGS)" },
                 makefile_words("STDLIB_HTTP_CPPFLAGS"))
             assert.same({ "$(OPENSSL_CPPFLAGS)" },
                 makefile_words("STDLIB_OPENSSL_CPPFLAGS"))
@@ -985,7 +1054,7 @@ describe("libuv Makefile configuration", function()
             "unroot_handle(runtime, owner.root_index)", 1, true))
         local complete = assert(close_body:find("completion()", 1, true))
         local submit = assert(close_body:find(
-            "libuv.uv_close(handle, shim.titan_uvshim_close_cb)", 1, true))
+            "libuv.uv_close(handle, uv_close_cb)", 1, true))
         assert.is_true(unroot < complete)
         assert.is_true(complete < submit)
     end)
@@ -1251,9 +1320,6 @@ describe("libuv Makefile configuration", function()
         local private_symbols = {
             "llhttp_execute", "SSL_do_handshake", "BIO_read",
         }
-        for _, callback in ipairs(HTTP_PARSER_CALLBACKS) do
-            private_symbols[#private_symbols + 1] = callback
-        end
         for _, symbol in ipairs(private_symbols) do
             assert.falsy(nm_has_symbol(output, symbol),
                 "private symbol is exported: " .. symbol)
@@ -1436,10 +1502,10 @@ describe("libuv Makefile configuration", function()
                 "$(TITAN_RUNTIME_LUA_SOURCE_PATH)",
                 "LUA_AR=$(LUA_AR)",
                 "LUA_RANLIB=$(LUA_RANLIB)",
-                "$(UV_CONFIG_STAMP) $(RUNTIME_BUILD_CONFIG)",
+                "$(RUNTIME_BUILD_CONFIG) | $(TITAN_RUNTIME_LUA_LIB) " ..
+                "$(LIBBT_LIB)",
                 "LIBUV_PROVIDER_LDFLAGS=$(LIBUV_PROVIDER_LDFLAGS)",
                 "MEMBERS=$(notdir $(TITAN_RUNTIME_OBJECTS))",
-                "UV_CONFIG_STAMP := titan-runtime/.titan-uv-build-config",
                 "STDLIB_NATIVE_PREREQS := $(TITAN_RUNTIME_OBJECTS)",
                 "$(STDLIB_EXTRA_OBJECTS)",
                 "STDLIB_RUNTIME_ARCHIVE_PREREQ := $(TITAN_RUNTIME_LIB)",
@@ -1468,7 +1534,7 @@ describe("libuv Makefile configuration", function()
                 driver_source)
             local _, include_count = makefile:gsub(
                 "%-I %$%(TITAN_RUNTIME_LUA_SOURCE_PATH%)", "")
-            assert.is_true(include_count >= 3, tostring(include_count))
+            assert.equal(2, include_count, makefile)
         end)
 
     it("keeps the private Lua bootstrap separate from the runtime archive",
@@ -1477,7 +1543,7 @@ describe("libuv Makefile configuration", function()
             local makefile = file:read("*a")
             file:close()
             local first = assert(makefile:find(
-                "$(TITAN_BOOTSTRAP_SO): $(TITANLIB_O)", 1, true))
+                "$(TITAN_BOOTSTRAP_SO): $(LTITANLIB_O)", 1, true))
             local last = assert(makefile:find(
                 "\n\n# The active ABI path", first, true))
             local rule = makefile:sub(first, last - 1)
@@ -1486,7 +1552,7 @@ describe("libuv Makefile configuration", function()
                 1, true), rule)
             for _, forbidden in ipairs({
                 "$(TITAN_RUNTIME_LIB)", "$(LIBBT_LIB)", "$(RUNTIME_O)",
-                "$(CORO_O)", "$(UV_O)", "$(LPEGLABEL_ARCHIVE)",
+                "$(MINICORO_O)", "$(UV_O)", "$(LPEGLABEL_ARCHIVE)",
             }) do
                 assert.falsy(rule:find(forbidden, 1, true),
                     forbidden .. " in:\n" .. rule)
@@ -1505,9 +1571,9 @@ describe("libuv Makefile configuration", function()
             local normalized = output:gsub("%s+", " ")
             assert.truthy(normalized:find(
                 '-bundle -undefined dynamic_lookup -o ' ..
-                '"$tmp" "titan-runtime/titanlib.o"', 1, true), normalized)
+                '"$tmp" "titan-runtime/ltitanlib.o"', 1, true), normalized)
             assert.falsy(normalized:find(
-                '-shared -o "$tmp" "titan-runtime/titanlib.o"',
+                '-shared -o "$tmp" "titan-runtime/ltitanlib.o"',
                 1, true), normalized)
         end)
 
@@ -1520,15 +1586,14 @@ describe("libuv Makefile configuration", function()
             local build_log = root .. "/archive-builds"
             local objects = {
                 root .. "/titan.o",
-                root .. "/titan_coro.o",
-                root .. "/titan_uv.o",
+                root .. "/minicoro.o",
             }
             for _, object in ipairs(objects) do
                 write_file(object, "isolated fake-archive fixture\n")
             end
             write_file(fake_ar, string.format([[#!/bin/sh
 if test "$1" = t; then
-  printf '%%s\n' '__.SYMDEF SORTED' titan.o titan_coro.o titan_uv.o
+  printf '%%s\n' '__.SYMDEF SORTED' titan.o minicoro.o
   exit 0
 fi
 if test "$1" = rcs; then
@@ -1576,7 +1641,7 @@ exit 64
             end)
             for _, path in ipairs({
                 archive, config, config .. ".tmp", fake_ar, build_log,
-                objects[1], objects[2], objects[3],
+                objects[1], objects[2],
             }) do
                 os.remove(path)
             end
@@ -1705,7 +1770,7 @@ exit 64
                     "./titanc " .. table.concat(STDLIB_ROOTS, " "), 1, true),
                 command)
             assert.equal(1, count_plain(command,
-                "-X titan-runtime/titanlib.o " ..
+                "-X titan-runtime/ltitanlib.o " ..
                 "lpeglabel-build/libtitan-lpeglabel.a " ..
                 "libuv-build/libuv.a " .. HTTP_SSL_BUNDLED_PAYLOAD), command)
             assert.falsy(command:find("titan_uv.o", 1, true), command)
@@ -1715,8 +1780,8 @@ exit 64
                 command)
             assert.truthy(command:find(
                 "TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 " ..
-                LPEGLABEL_INCLUDE .. " " .. HTTP_NATIVE_INCLUDE .. " " ..
-                LLHTTP_NATIVE_INCLUDE .. " " .. BUNDLED_OPENSSL_INCLUDES ..
+                LPEGLABEL_INCLUDE .. " " .. LLHTTP_NATIVE_INCLUDE .. " " ..
+                BUNDLED_OPENSSL_INCLUDES ..
                 " -Ilibuv-v1.52.1/include -D_GNU_SOURCE'",
                 1, true), command)
             assert.truthy(command:find(
@@ -1735,15 +1800,15 @@ exit 64
                     "./titanc " .. table.concat(STDLIB_ROOTS, " "), 1, true),
                 command)
             assert.equal(1, count_plain(command,
-                "-X titan-runtime/titanlib.o " ..
+                "-X titan-runtime/ltitanlib.o " ..
                 "lpeglabel-build/libtitan-lpeglabel.a " ..
                 HTTP_SSL_BUNDLED_PAYLOAD), command)
             assert.falsy(command:find("titan_uv.o", 1, true), command)
             assert.falsy(command:find("libuv-build/libuv.a", 1, true), command)
             assert.truthy(command:find(
                 "TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 " ..
-                LPEGLABEL_INCLUDE .. " " .. HTTP_NATIVE_INCLUDE .. " " ..
-                LLHTTP_NATIVE_INCLUDE .. " " .. BUNDLED_OPENSSL_INCLUDES ..
+                LPEGLABEL_INCLUDE .. " " .. LLHTTP_NATIVE_INCLUDE .. " " ..
+                BUNDLED_OPENSSL_INCLUDES ..
                 " -I/opt/libuv/include -DUV_FAKE_PKG=1 -D_GNU_SOURCE'",
                 1, true), command)
             local system_flags =
@@ -1756,7 +1821,7 @@ exit 64
                 tostring(code) .. ")")
             command = stdlib_command(output)
             assert.equal(1, count_plain(command,
-                    "-X titan-runtime/titanlib.o " ..
+                    "-X titan-runtime/ltitanlib.o " ..
                     "lpeglabel-build/libtitan-lpeglabel.a " ..
                     "libuv-build/libuv.a " .. HTTP_SSL_BUNDLED_PAYLOAD),
                 command)
@@ -1790,7 +1855,7 @@ esac
                 tostring(code) .. ")")
             local command = stdlib_command(output)
             assert.equal(1, count_plain(command,
-                "-X titan-runtime/titanlib.o " ..
+                "-X titan-runtime/ltitanlib.o " ..
                 "lpeglabel-build/libtitan-lpeglabel.a " ..
                 "libuv-build/libuv.a " .. HTTP_SSL_SYSTEM_PAYLOAD), command)
             assert.falsy(command:find("openssl-build/libssl.a", 1, true),
@@ -1799,8 +1864,7 @@ esac
                 command)
             assert.truthy(command:find(
                 "TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 " ..
-                LPEGLABEL_INCLUDE .. " " .. HTTP_NATIVE_INCLUDE .. " " ..
-                LLHTTP_NATIVE_INCLUDE ..
+                LPEGLABEL_INCLUDE .. " " .. LLHTTP_NATIVE_INCLUDE ..
                 " -I/opt/openssl/include -DOPENSSL_FAKE_PKG=1 " ..
                 "-DOPENSSL_API_COMPAT=30000 " ..
                 "-Ilibuv-v1.52.1/include -D_GNU_SOURCE'", 1, true), command)
@@ -1846,7 +1910,7 @@ esac
                 assert.equal(1, count_plain(command,
                     "./titanc " .. table.concat(STDLIB_ROOTS, " ")), command)
                 assert.truthy(command:find(
-                    "-X titan-runtime/titanlib.o " ..
+                    "-X titan-runtime/ltitanlib.o " ..
                     "lpeglabel-build/libtitan-lpeglabel.a " ..
                     "libuv-build/libuv.a " .. HTTP_SSL_BUNDLED_PAYLOAD,
                     1, true), command)
@@ -1871,13 +1935,12 @@ esac
             local prepared = root .. "/prepared"
             local llhttp_build_config = root .. "/llhttp-build.config"
             local llhttp_archive_config = root .. "/llhttp-archive.config"
-            local httpshim_object = root .. "/httpshim.o"
             local llhttp_archive = root .. "/llhttp.a"
             local fake_titanc = root .. "/fake-titanc"
             local build_log = root .. "/build.log"
 
             local payload = assert(staticmetadata.render(
-                "fixture.module", "0.22", "{}"))
+                "fixture.module", "0.23", "{}"))
             local initializer = assert(staticmetadata.c_initializer(payload))
             write_file(source, string.format([[
 #if defined(__APPLE__)
@@ -1908,8 +1971,7 @@ int fixture_native_payload(void) { return 1; }
             write_file(fixture_shim, "fixture shim\n")
             write_file(prepared, "prepared\n")
             for _, input in ipairs({
-                llhttp_build_config, llhttp_archive_config, httpshim_object,
-                llhttp_archive,
+                llhttp_build_config, llhttp_archive_config, llhttp_archive,
             }) do
                 write_file(input, "prepared native identity\n")
             end
@@ -1950,7 +2012,6 @@ printf 'build\n' >> %s
                     "STDLIB_NATIVE_IDENTITY_PREREQS=",
                     "LLHTTP_BUILD_CONFIG=" .. llhttp_build_config,
                     "LLHTTP_ARCHIVE_CONFIG=" .. llhttp_archive_config,
-                    "TITAN_HTTPSHIM_O=" .. httpshim_object,
                     "LLHTTP_ARCHIVE=" .. llhttp_archive,
                     "OPENSSL_EXTRA_OBJECTS=",
                     "STDLIB_SOS=",
@@ -1995,7 +2056,7 @@ printf 'build\n' >> %s
                     tostring(code) .. ")")
                 assert.equal("build\nbuild\nbuild\n", read_file(build_log))
                 assert.truthy(staticmetadata.scan_archive(static_archive, {
-                    expected_abi = "0.22",
+                    expected_abi = "0.23",
                 }))
 
                 assert.truthy(os.remove(provider))
@@ -2171,7 +2232,7 @@ exit 73
                 "STDLIB_STATIC_ARCHIVE := " .. STDLIB_STATIC_ARCHIVE,
                 "STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) " ..
                 "$(STDLIB_STATIC_ARCHIVE)",
-                "STDLIB_EXTRA_OBJECTS := $(TITANLIB_O) " ..
+                "STDLIB_EXTRA_OBJECTS := $(LTITANLIB_O) " ..
                 "$(LPEGLABEL_ARCHIVE)",
                 "STDLIB_NATIVE_IDENTITY_PREREQS := $(LPEGLABEL_ARCHIVE)",
                 "TITAN_COMPILER_LUA := " ..
@@ -2186,9 +2247,11 @@ exit 73
                 "$(STDLIB_EMBEDDED_FORMAT_INPUTS)",
                 "AR=$(call make_shell_quote,$(AR))",
                 "RANLIB=$(call make_shell_quote,$(RANLIB))",
+                "CLANG_FORMAT ?= clang-format",
                 "TITAN_NO_LINE_DIRECTIVES ?=",
-                "export TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_CFLAGS " ..
-                "TITAN_EXTRA_LDFLAGS \\\n\tTITAN_NO_LINE_DIRECTIVES",
+                "export CLANG_FORMAT TITAN_EXTRA_CPPFLAGS " ..
+                "TITAN_EXTRA_CFLAGS \\\n\t" ..
+                "TITAN_EXTRA_LDFLAGS TITAN_NO_LINE_DIRECTIVES",
                 "TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)",
                 "for output in $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS)",
                 "STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)",
@@ -2232,9 +2295,13 @@ exit 73
                 stdlib_config_start, true))
             local stdlib_config = makefile:sub(
                 stdlib_config_start, stdlib_config_end - 1)
-            assert.truthy(stdlib_config:find(
+            for _, contract in ipairs({
+                "CLANG_FORMAT=$(CLANG_FORMAT)",
                 "TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)",
-                1, true), stdlib_config)
+            }) do
+                assert.truthy(stdlib_config:find(contract, 1, true),
+                    stdlib_config)
+            end
             local rock_post_install_start = assert(makefile:find(
                 "rock-post-install:", 1, true))
             local rock_post_install_end = assert(makefile:find(
@@ -2304,7 +2371,7 @@ exit 73
                 '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
                 '"$shim_dir/math.lua" "$shim_dir/lua.lua"',
                 '"$shim_dir/iter.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"',
-                'test_source=$prefix_rel/share/titan/0.22/src/titan/test.titan',
+                'test_source=$prefix_rel/share/titan/0.23/src/titan/test.titan',
                 '"$test_source"',
                 'rm -f "$test_source"',
                 '"$shim_dir/io.lua"',
@@ -2705,12 +2772,13 @@ exit 73
                 "Canary source-rock installation with system libuv and OpenSSL",
                 "LIBUV_MODE=system OPENSSL_MODE=system",
                 "OPENSSL_MODE=system",
-                "brew install cmake libuv openssl@3 pkgconf",
+                "brew install clang-format cmake libuv openssl@3 pkgconf",
                 "test_ssl_http_fresh_process_sanitizer_composition$",
                 "libssl-dev", "perl",
             }) do
                 assert.truthy(workflow:find(contract, 1, true), contract)
             end
+            assert.equal(4, count_literal(workflow, "clang-format"), workflow)
             assert.equal(2, select(2, workflow:gsub(
                 'TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE=' ..
                 '"%$GITHUB_WORKSPACE/libuv%-build/libuv[.]a"', "")))
@@ -2727,7 +2795,7 @@ exit 73
                 "http os peg string math lua iter gc test; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
-                "share/titan/0.22/src/titan/test.titan", 1, true), workflow)
+                "share/titan/0.23/src/titan/test.titan", 1, true), workflow)
 
             local groups = read_file("spec/support/ci_test_groups.sh")
             for _, retained in ipairs({

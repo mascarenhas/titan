@@ -65,7 +65,7 @@ Unlike Lua, an ordinary declaration *must* have an initializer —
 (`Expected '=' after variable declaration.`). The narrow exception is an
 explicit complete C aggregate or fixed-array local, whose missing right-hand
 side requests C `{0}` initialization; see
-[zero-initialized automatic C objects](c-ffi-expressions.md#zero-initialized-automatic-c-objects).
+[zero-initialized automatic C objects](c-ffi-expressions.md#target-directed-c-allocation).
 There is no implicit `nil` default for Titan values; if you want a variable
 that starts out as "no value yet", give it an
 [option type](option-types.md) and initialize it with `nil`:

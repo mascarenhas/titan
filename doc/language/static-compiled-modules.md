@@ -116,7 +116,7 @@ module key:
 ```lua
 return {
     ["geometry.shape"] = {
-        abi = "0.22",
+        abi = "0.23",
         types = "Module(...)",
     },
 }
@@ -225,13 +225,13 @@ behavior, not a hidden dependency manifest.
 The canonical installed ABI directory contains:
 
 ```text
-$ROCKS_TREE/lib/titan/0.22/titan.so
-$ROCKS_TREE/lib/titan/0.22/titan.a
+$ROCKS_TREE/lib/titan/0.23/titan.so
+$ROCKS_TREE/lib/titan/0.23/titan.a
 ```
 
 Both contain the eighteen `titan.*` logical standard modules, including
 `titan.io`, `titan.ssl`, `titan.url`, `titan.http`, and `titan.test`, under
-ABI 0.22. The DSO also
+ABI 0.23. The DSO also
 contains bare native `require "titan"` support, and the archive carries that
 support object without inventing a logical module named `titan`.
 
@@ -240,8 +240,9 @@ payload. Its five objects are carried into both forms for `titan.peg` and
 `titan.string`, but the archive and headers are not installed in the SDK and
 it does not advertise a Titan logical metadata key.
 
-The private llhttp archive and HTTP adapter are likewise metadata-free payload.
-`titan.ssl` uses OpenSSL directly and adds no adapter object. Bundled-OpenSSL
+The private llhttp archive is likewise metadata-free payload; the generated
+`titan.http` object owns its eight source-defined foreign callbacks and needs no
+adapter. `titan.ssl` uses OpenSSL directly and adds no adapter object. Bundled-OpenSSL
 mode carries the pinned OpenSSL objects into both provider forms.
 System-OpenSSL mode leaves the pkg-config-selected libraries as final-link
 inputs, so a static consumer must repeat that ordered link result just as it

@@ -442,10 +442,11 @@ convention, self passed as the raw `Udata*` right after `_mod` (and the
 `_fn` slot):
 
 ```c
-return test_Point_getx_titanmethod(L, _mod, NULL, _param_p);
+return test_\u2133_Point_\u2131_getx_titanmethod(L, _mod, NULL, _param_p);
 ```
 
-(naming: `<mangled-fqtn>_<name>_titanmethod` / `..._titanstatic`).
+(naming: `<mangled-module>_\u2133_<owner>_\u2131_<name>_titanmethod` /
+`..._titanstatic`).
 Cross-module calls are still direct C calls — the caller holds the
 target module's `Udata` in one of its own user values and passes
 `uvalue(&_mod->uv[i].uv)` as the callee's `_mod`; dependencies selected from
@@ -454,10 +455,12 @@ selected from a DSO become `static` **function pointers** stitched in `_init`
 from the dlopened library:
 
 ```c
-static lua_Integer (*dep_mk_titan)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer);
+static lua_Integer (*dep_\u2133_mk_titan)(lua_State *L, Udata *_mod,
+                                                CClosure *_fn, lua_Integer);
 /* in _init: */
-dep_mk_titan = titan_cast_func(lua_Integer (*)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer),
-                               loadsym(L, dep_handle, "dep_mk_titan"));
+dep_\u2133_mk_titan = titan_cast_func(
+    lua_Integer (*)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer),
+    loadsym(L, dep_handle, "dep_\u2133_mk_titan"));
 ```
 
 Records cross the Lua boundary unchanged — the value Titan computes with
@@ -796,7 +799,7 @@ callee:
 ```c
 TString* _tmp_1 = 0;                /* paired with _tmp_1_slot */
 lua_Integer _tmp_2 = 0;
-_tmp_2 = test_two_titan(L, _mod, NULL, &_tmp_1);
+_tmp_2 = test_\u2133_two_titan(L, _mod, NULL, &_tmp_1);
 setsvalue(L, _tmp_1_slot, _tmp_1);  /* re-anchor the GC-able result */
 ```
 

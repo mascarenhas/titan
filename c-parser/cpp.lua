@@ -907,6 +907,11 @@ cpp.tokenize = typed("string -> table", function(line)
 end)
 
 local function find_file(ctx, filename, mode, is_next)
+    if filename:sub(1, 1) == SEP then
+        local fd = io.open(filename, "r")
+        if fd then return filename, fd end
+        return nil, nil, "file not found"
+    end
     local paths = {}
     local current_dir = ctx.current_dir[#ctx.current_dir]
     if mode == "quote" or is_next then

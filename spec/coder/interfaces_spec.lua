@@ -27,6 +27,12 @@ local function interface_pair_id(prefix, concrete, interface)
         .. fragment(concrete) .. "_to_" .. fragment(interface)
 end
 
+local function normalize_c_whitespace(source)
+    source = source:gsub("%s+", " ")
+    return (source:gsub(
+        "%s*([%(%)%[%]{},;*=/+<>!&|?:.%%%-])%s*", "%1"))
+end
+
 describe("interfaces (end-to-end)", function()
     after_each(function()
         for _, name in ipairs({
@@ -72,7 +78,7 @@ describe("interfaces (end-to-end)", function()
     end)
 
     it("polls before an Interface adapter allocates callable views", function()
-        local csrc = h.compile_and_read_c([[
+        local csrc = normalize_c_whitespace(h.compile_and_read_c([[
             interface Transformer
                 function swap(
                     callback: (value) -> value
@@ -91,7 +97,7 @@ describe("interfaces (end-to-end)", function()
             function make(): Transformer
                 return Impl.new()
             end
-        ]])
+        ]]))
         local pair = interface_pair_id(
             "test_", "test.Impl", "test.Transformer")
         local signature = "static TITAN_NOINLINE TValue "
@@ -100,7 +106,7 @@ describe("interfaces (end-to-end)", function()
         local start = assert(csrc:find(
             signature, declaration + 1, true))
         local stop = assert(csrc:find(
-            "test_Impl_swap_titanmethod(", start, true))
+            "test_\\u2133_Impl_\\u2131_swap_titanmethod(", start, true))
         local body = csrc:sub(start, stop - 1)
         local poll = assert(body:find("luaC_checkGC(L);", 1, true))
         local reserve = assert(body:find("titan_ensure_stack", poll, true))
@@ -126,9 +132,9 @@ describe("interfaces (end-to-end)", function()
         local recovered_symbols =
             coder.interface_external_symbols("test", modtype)
         local expected = {
-            "test_Reader_read_interface_boundmethod",
-            "test_Reader_read_titanentry_interface_boundlua",
-            "test_Reader_read_titanentry_interface_boundstrict",
+            "test_\\u2133_Reader_\\u2131_read_interface_boundmethod",
+            "test_\\u2133_Reader_\\u2131_read_titanentry_interface_boundlua",
+            "test_\\u2133_Reader_\\u2131_read_titanentry_interface_boundstrict",
         }
         for _, symbol in ipairs(expected) do
             local source_found, recovered_found = false, false
@@ -782,27 +788,28 @@ describe("interfaces (end-to-end)", function()
                 runs:consume({10}, {20}, {30})
             end
         ]]
-        local csrc = h.compile_and_read_c(source)
+        local csrc = normalize_c_whitespace(
+            h.compile_and_read_c(source))
         assert.matches(
-            "interface_adapter_vararg_cap_must_match%[%s*"
-                .. "%(TITAN_VARARG_MAX == 200%) %? 1 : %-1%]",
+            "interface_adapter_vararg_cap_must_match%["
+                .. "%(TITAN_VARARG_MAX==200%)%?1:%-1%]",
             csrc)
         assert.matches(
-            "_ia_interface_tail_count%s*=%s*"
-                .. "%(int%)_varargs%->n_args %- _start;",
+            "_ia_interface_tail_count="
+                .. "%(int%)_varargs%->n_args%-_start;",
             csrc)
         assert.matches(
-            "_ia_concrete_vcount >= TITAN_VARARG_MAX",
+            "_ia_concrete_vcount>=TITAN_VARARG_MAX",
             csrc)
         assert.matches(
-            "_ia_interface_fcount >= TITAN_VARARG_MAX",
+            "_ia_interface_fcount>=TITAN_VARARG_MAX",
             csrc)
         assert.matches(
             "titan_array_require_proxy",
             csrc)
         assert.matches(
-            "restorestack%(L, _base_off%) %+ %d+%) "
-                .. "%+ _ia_root_i",
+            "restorestack%(L,_base_off%)%+%d+%)"
+                .. "%+_ia_root_i",
             csrc)
         local pair = interface_pair_id(
             "test_", "test.Concrete", "test.Runs")
@@ -812,16 +819,16 @@ describe("interfaces (end-to-end)", function()
         local definition = assert(
             csrc:find(adapter_name, declaration + 1, true))
         local reserved = tonumber(assert(csrc:match(
-            "titan_ensure_stack%(L, (%d+)%)", definition)))
+            "titan_ensure_stack%(L,(%d+)%)", definition)))
         local rooted = tonumber(assert(csrc:match(
-            "L%->top%.p %+= (%d+);", definition)))
+            "L%->top%.p%+=(%d+);", definition)))
         assert.equal(rooted + 3, reserved)
         local demand_guard = assert(
-            csrc:find("_flexout == NULL", definition, true))
+            csrc:find("_flexout==NULL", definition, true))
         local negative_guard = assert(
-            csrc:find("_flexwant < 0", demand_guard, true))
+            csrc:find("_flexwant<0", demand_guard, true))
         local concrete_call = assert(csrc:find(
-            "test_Concrete_produce_titanmethod(",
+            "test_\\u2133_Concrete_\\u2131_produce_titanmethod(",
             negative_guard, true))
         assert.is_true(definition < demand_guard
             and demand_guard < negative_guard
@@ -895,12 +902,12 @@ describe("interfaces (end-to-end)", function()
         ]]
         local csrc = h.compile_and_read_c(source)
         local signature =
-            "lua_Integer test_open_interfaces_titan("
+            "lua_Integer test_\\u2133_open_interfaces_titan("
         local declaration = assert(csrc:find(signature, 1, true))
         local first = assert(csrc:find(
             signature, declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_open_interfaces_titanentry_lua",
+            "static int test_\\u2133_open_interfaces_titanentry_lua",
             first, true))
         local body = csrc:sub(first, last - 1)
         local allocation = assert(body:find(
@@ -983,7 +990,8 @@ describe("interfaces (end-to-end)", function()
                 return (kept as Item):get()
             end
         ]]
-        local csrc = h.compile_and_read_c(source)
+        local csrc = normalize_c_whitespace(
+            h.compile_and_read_c(source))
         local pair = interface_pair_id(
             "test_", "test.ProtectorImpl", "test.Protector")
         local adapter = pair .. "_adapter_0"
@@ -994,7 +1002,7 @@ describe("interfaces (end-to-end)", function()
             "static TITAN_NOINLINE TValue " .. adapter,
             declaration + 1, true))
         local stop = assert(csrc:find(
-            "test_ProtectorImpl_protect_titanmethod(",
+            "test_\\u2133_ProtectorImpl_\\u2131_protect_titanmethod(",
             start, true))
         local body = csrc:sub(start, stop)
         local reserve = assert(csrc:find(
@@ -1006,10 +1014,10 @@ describe("interfaces (end-to-end)", function()
             "_ia_concrete_arg_1", identity, true))
         local before_identity = csrc:sub(start, identity - 1)
         assert.falsy(before_identity:find(
-            "setuvalue(L, s2v((restorestack(L, _base_off)",
+            "setuvalue(L,s2v((restorestack(L,_base_off)",
             1, true), before_identity)
         assert.falsy(before_identity:find(
-            "setobj2t(L, s2v((restorestack(L, _base_off)",
+            "setobj2t(L,s2v((restorestack(L,_base_off)",
             1, true), before_identity)
         assert.is_true(reserve < identity
             and identity < conversion
@@ -1032,7 +1040,7 @@ describe("interfaces (end-to-end)", function()
     end)
 
     it("uses deterministic pair and adjusted-slot symbols", function()
-        local csrc = h.compile_and_read_c([[
+        local csrc = normalize_c_whitespace(h.compile_and_read_c([[
             interface ZedInterface
                 function exact(x: integer): integer
                 function adjusted(x: value): value
@@ -1078,7 +1086,7 @@ describe("interfaces (end-to-end)", function()
             function zed_again(): ZedInterface
                 return ZedRecord.new()
             end
-        ]])
+        ]]))
         local alpha = interface_pair_id(
             "test_", "test.AlphaRecord", "test.AlphaInterface")
         local zed = interface_pair_id(
@@ -1092,13 +1100,13 @@ describe("interfaces (end-to-end)", function()
         assert.is_true(alpha_decl < zed_decl)
         assert.matches(alpha .. "%[0%]%s*=%s*titan_cast_func%(%s*"
             .. "TitanInterfaceMethod,%s*"
-            .. "test_AlphaRecord_exact_titanmethod%)", csrc)
+            .. "test_\\u2133_AlphaRecord_\\u2131_exact_titanmethod%)", csrc)
         assert.matches(alpha .. "%[1%]%s*=%s*titan_cast_func%(%s*"
             .. "TitanInterfaceMethod,%s*"
             .. alpha .. "_adapter_1%)", csrc)
         assert.matches(zed .. "%[0%]%s*=%s*titan_cast_func%(%s*"
             .. "TitanInterfaceMethod,%s*"
-            .. "test_ZedRecord_exact_titanmethod%)", csrc)
+            .. "test_\\u2133_ZedRecord_\\u2131_exact_titanmethod%)", csrc)
         assert.matches(zed .. "%[1%]%s*=%s*titan_cast_func%(%s*"
             .. "TitanInterfaceMethod,%s*"
             .. zed .. "_adapter_1%)", csrc)
@@ -1139,7 +1147,7 @@ describe("interfaces (end-to-end)", function()
             "test_", "test.Concrete", "test.Dynamic")
         assert.is_nil(csrc:find(pair, 1, true))
         local body = assert(csrc:match(
-            "int test_implements_titan%b()%s*{.-\n%s*}"))
+            "int test_\\u2133_implements_titan%b()%s*{.-\n%s*}"))
         assert.is_nil(body:find("luaS_newudata", 1, true))
         assert.is_nil(body:find("TitanInterfaceMethod", 1, true))
         local called, callerr = h.call("test", [[
@@ -1151,7 +1159,7 @@ describe("interfaces (end-to-end)", function()
 
     it("keeps Interface sources in C and roots only the fresh wrapper",
     function()
-        local csrc = h.compile_and_read_c([[
+        local csrc = normalize_c_whitespace(h.compile_and_read_c([[
             interface Item
                 function get(): integer
             end
@@ -1167,24 +1175,24 @@ describe("interfaces (end-to-end)", function()
             function wrap(value_: Concrete): Item
                 return value_
             end
-        ]])
+        ]]))
         local declaration = assert(csrc:find(
-            "Udata* test_wrap_titan(", 1, true))
+            "Udata*test_\\u2133_wrap_titan(", 1, true))
         local first = assert(csrc:find(
-            "Udata* test_wrap_titan(", declaration + 1, true))
+            "Udata*test_\\u2133_wrap_titan(", declaration + 1, true))
         local last = assert(csrc:find(
-            "static int test_wrap_titanentry_lua", first, true))
+            "static int test_\\u2133_wrap_titanentry_lua", first, true))
         local body = csrc:sub(first, last - 1)
         local allocation = assert(body:find("luaS_newudata(", 1, true))
         local before = body:sub(1, allocation - 1)
         assert.matches(
-            "Udata%* _tmp_%d+ = 0;%s*_tmp_%d+ = _param_value_;",
+            "Udata%*_tmp_%d+=0;_tmp_%d+=_param_value_;",
             before)
         assert.falsy(before:find("setuvalue(L", 1, true), before)
         local rebase = assert(body:find(
-            "_base = restorestack(L, _base_off);", allocation, true))
+            "_base=restorestack(L,_base_off);", allocation, true))
         local root = assert(body:find(
-            "setuvalue(L, s2v((restorestack(L, _base_off)",
+            "setuvalue(L,s2v((restorestack(L,_base_off)",
             rebase, true))
         local edge = assert(body:find("->uv[0].uv", root, true))
         assert.is_true(allocation < rebase and rebase < root and root < edge)
@@ -1244,7 +1252,8 @@ describe("interfaces (end-to-end)", function()
                 end
             end
         ]]
-        local csrc = h.compile_and_read_c(source)
+        local csrc = normalize_c_whitespace(
+            h.compile_and_read_c(source))
         local pair = interface_pair_id(
             "test_", "test.Caller", "test.Callback")
         local function locate(fragment, start)
@@ -1261,13 +1270,13 @@ describe("interfaces (end-to-end)", function()
         -- protocol and performs no allocating/raising work after publishing
         -- the half-built wrapper and before installing both ownership edges.
         local allocation =
-            locate("L, sizeof(" .. pair .. "), 2);")
+            locate("L,sizeof(" .. pair .. "),2);")
         local rebase =
-            locate("_base = restorestack(L, _base_off);", allocation)
+            locate("_base=restorestack(L,_base_off);", allocation)
         local anchor =
-            locate("setuvalue(L, s2v((restorestack(L, _base_off)", rebase)
+            locate("setuvalue(L,s2v((restorestack(L,_base_off)", rebase)
         local metatable =
-            locate("->metatable = _titan_interface_metatable;", anchor)
+            locate("->metatable=_titan_interface_metatable;", anchor)
         local module_value = locate("->uv[0].uv,", metatable)
         local module_barrier =
             locate("luaC_barrierback", module_value)
@@ -1290,24 +1299,24 @@ describe("interfaces (end-to-end)", function()
         -- All dispatch variants use overflow-free exact payload-length checks,
         -- and every vtable call supplies a null closure operand.
         assert.matches(
-            "%% sizeof%(TitanInterfaceMethod%) != 0", csrc)
+            "%%sizeof%(TitanInterfaceMethod%)!=0", csrc)
         assert.matches(
-            "/ sizeof%(TitanInterfaceMethod%)", csrc)
-        locate(", NULL, uvalue(&")
+            "/sizeof%(TitanInterfaceMethod%)", csrc)
+        locate(",NULL,uvalue(&")
 
         -- Both init branches publish function tags before pair pointers. In
         -- the fresh branch, pairs precede canonical closures/trace names and
         -- the user initializer that allocates the eager wrapper.
-        local fresh = locate("if(lua_isnil(L, -1))")
+        local fresh = locate("if(lua_isnil(L,-1))")
         local first_tag =
             locate("titan_publish_function_type_tag", fresh)
         local first_pair =
-            locate(pair .. "[0] = titan_cast_func(", fresh)
+            locate(pair .. "[0]=titan_cast_func(", fresh)
         local first_closure =
             locate("TITAN_FUNCTION_CLOSURE_BRAND", first_pair)
         local names = locate("TITAN_NAMES_KEY", first_closure)
         local eager_allocation =
-            locate("sizeof(" .. pair .. "), 2", names)
+            locate("sizeof(" .. pair .. "),2", names)
         assert.is_true(first_tag < first_pair
             and first_pair < first_closure
             and first_closure < names
@@ -1317,14 +1326,14 @@ describe("interfaces (end-to-end)", function()
         local second_tag =
             locate("titan_publish_function_type_tag", existing)
         local second_pair =
-            locate(pair .. "[0] = titan_cast_func(",
+            locate(pair .. "[0]=titan_cast_func(",
                 first_pair + 1)
         local second_names = locate("TITAN_NAMES_KEY", second_pair)
         assert.is_true(existing < second_tag
             and second_tag < second_pair
             and second_pair < second_names)
         assert.is_nil(csrc:find(
-            pair .. "[0] = titan_cast_func(",
+            pair .. "[0]=titan_cast_func(",
             second_pair + 1, true))
 
         local called, callerr = h.call("test", h.DEPTH_PROBE .. [[

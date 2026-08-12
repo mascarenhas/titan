@@ -23,8 +23,8 @@ local record Runtime
 end
 
 -- The callback closure retains the native owner and optional suspended Task.
--- The record itself contains only the root slot and the callback field at the
--- native shim's common callback index.
+-- The record itself contains only the root slot and the callback in reviewed
+-- zero-based Udata slot 1 used by uv_close_cb.
 local record CloseOwner
   local root_index: integer
   local callback: (CloseOwner) -> ()
@@ -33,6 +33,82 @@ end
 local record WalkOwner
   local handle: ffi.titan_ffi_void_ptr
   local callback: (WalkOwner, ffi.titan_ffi_void_ptr) -> ()
+end
+
+foreign function uv_write_cb(req: *libuv.uv_write_t,
+                             status: ffi.titan_ffi_int)
+  local owner = libuv.uv_req_get_data(
+      req as *libuv.uv_req_t) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local handle = req.handle as *libuv.uv_handle_t
+  local loop = libuv.uv_handle_get_loop(handle)
+  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvIntegerCallbackEntry
+  local top = lua.lua_gettop(L)
+  entry(L, module, callback, owner, status as lua.lua_Integer)
+  lua.lua_settop(L, top)
+end
+
+foreign function uv_alloc_cb(handle: *libuv.uv_handle_t,
+                             suggested_size: libuv.size_t,
+                             buf: *libuv.uv_buf_t)
+  local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local loop = libuv.uv_handle_get_loop(handle)
+  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvSizePointerCallbackEntry
+  local top = lua.lua_gettop(L)
+  entry(L, module, callback, owner, suggested_size,
+        buf as ffi.titan_ffi_void_ptr)
+  lua.lua_settop(L, top)
+end
+
+foreign function uv_read_cb(stream: *libuv.uv_stream_t,
+                            nread: libuv.ssize_t,
+                            buf: const *libuv.uv_buf_t)
+  local handle = stream as *libuv.uv_handle_t
+  local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[2].uv)
+  local loop = libuv.uv_handle_get_loop(handle)
+  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvIntegerCallbackEntry
+  local top = lua.lua_gettop(L)
+  entry(L, module, callback, owner, nread as lua.lua_Integer)
+  lua.lua_settop(L, top)
+end
+
+foreign function uv_close_cb(handle: *libuv.uv_handle_t)
+  local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local loop = libuv.uv_handle_get_loop(handle)
+  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvNoargCallbackEntry
+  local top = lua.lua_gettop(L)
+  entry(L, module, callback, owner)
+  lua.lua_settop(L, top)
+end
+
+foreign function uv_walk_cb(handle: *libuv.uv_handle_t,
+                            arg: ffi.titan_ffi_void_ptr)
+  local owner = arg as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local loop = libuv.uv_handle_get_loop(handle)
+  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvPointerCallbackEntry
+  local top = lua.lua_gettop(L)
+  entry(L, module, callback, owner,
+        handle as ffi.titan_ffi_void_ptr)
+  lua.lua_settop(L, top)
 end
 
 local function main_thread_state(): *lua.lua_State
@@ -108,10 +184,10 @@ local function submit_stream_write(task: Task,
                                     stream: *libuv.uv_stream_t,
                                     data: string,
                                     operation: string): Immediate?
-  local descriptor: libuv.uv_buf_t
+  local descriptor = libuv.uv_buf_t.new()
   descriptor.base = data
   descriptor.len = #data as libuv.size_t
-  local native = libuv.uv_write_t.new()
+  local native: owned *libuv.uv_write_t = libuv.uv_write_t.new()
   local callback = function (_owner: StreamWriteOwner, status: integer)
     -- Libuv borrows the string bytes through write_cb, so retain the string.
     local _data = data
@@ -127,7 +203,7 @@ local function submit_stream_write(task: Task,
     handle = stream,
     bufs = descriptor,
     nbufs = 1,
-    cb = shim.titan_uvshim_write_cb,
+    cb = uv_write_cb,
   }
   return submitted(task, status, operation)
 end
@@ -227,7 +303,7 @@ local function accepting_work(runtime: Runtime, operation: string)
 end
 
 local function new_runtime(): Runtime
-  local native = libuv.uv_loop_t.new()
+  local native: owned *libuv.uv_loop_t = libuv.uv_loop_t.new()
   -- Allocate every GC-owned Runtime field before uv_loop_init gives the native
   -- loop resources that require an explicit uv_loop_close.
   local runtime = Runtime.new {
@@ -268,7 +344,7 @@ local function begin_close(runtime: Runtime, handle: *libuv.uv_handle_t,
   owner.root_index = root_handle(runtime, owner)
   if old_root_index > 0 then unroot_handle(runtime, old_root_index) end
   libuv.uv_handle_set_data(handle, owner as ffi.titan_ffi_void_ptr)
-  libuv.uv_close(handle, shim.titan_uvshim_close_cb)
+  libuv.uv_close(handle, uv_close_cb)
 end
 
 local function close_handle(runtime: Runtime, handle: *libuv.uv_handle_t,
@@ -302,7 +378,7 @@ end
 
 local function collect_handle(runtime: Runtime): ffi.titan_ffi_void_ptr
   local owner = WalkOwner.new(nil, walk_callback)
-  libuv.uv_walk(runtime.loop, shim.titan_uvshim_walk_cb,
+  libuv.uv_walk(runtime.loop, uv_walk_cb,
                 owner as ffi.titan_ffi_void_ptr)
   return owner.handle
 end
@@ -314,7 +390,7 @@ local function loop_owns_handle(runtime: Runtime,
     if pointer == target then owner.handle = pointer end
   end
   local owner = WalkOwner.new(nil, callback)
-  libuv.uv_walk(runtime.loop, shim.titan_uvshim_walk_cb,
+  libuv.uv_walk(runtime.loop, uv_walk_cb,
                 owner as ffi.titan_ffi_void_ptr)
   return owner.handle ~= nil
 end

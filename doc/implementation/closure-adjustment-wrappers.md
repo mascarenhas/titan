@@ -262,7 +262,7 @@ edge's static source tag. It also passes the wrapper as `_fn`; copied
 capture/bound-receiver slots and layered source links preserve the source
 body's expectations.
 
-The source declaration's strict trailer cannot simply be copied. ABI-0.22
+The source declaration's strict trailer cannot simply be copied. ABI-0.22/0.23
 providers compile a declaration-specific source-tag check, which would reject a
 consumer-created target-tagged wrapper. Instead the creating translation unit
 emits a strict relay for B using the existing strict-entry arity/tail/result and
@@ -332,17 +332,17 @@ existing rules.
 
 ## ABI and ownership rationale
 
-The wrapper uses the ABI-0.22 closure header, function tags, native signatures,
+The wrapper uses the ABI-0.23 closure header, function tags, native signatures,
 and strict stack shell already present. It adds no serialized descriptor field,
 provider symbol, module-state slot, or fixed header position. Its target adapter
 and strict relay are consumer-private translation-unit artifacts. A new
 consumer can therefore adjust source-linked, DSO, or archive functions from an
-ordinary ABI-0.22 provider without requiring that provider to export a target
+ordinary same-ABI provider without requiring that provider to export a target
 adapter.
 
 Consequently this feature does **not** bump the ABI. If implementation ever
 requires a new fixed slot, changed native signature, or serialized/provider
-contract, that is an ABI change and must not be hidden under 0.22.
+contract, that is an ABI change and must not be hidden under 0.23.
 
 See [Type relations and boundary plans](type-relations-and-boundaries.md),
 [The type checker](checker.md), [Code generator: overview](codegen-overview.md),

@@ -36,7 +36,7 @@ adds generated `titan.test.runner` contents. It does not add the standard
 library checkout to the user's source path. Checkout mode locates
 `<checkout>/titan/test.titan` from `driver.lua`'s own provenance. Installed
 mode uses the transactionally published
-`<root>/share/titan/0.22/src/titan/test.titan`; a missing/nonregular file is an
+`<root>/share/titan/0.23/src/titan/test.titan`; a missing/nonregular file is an
 explicit test-mode diagnostic. This real direct source edge is what grants the
 runner access to private declarations. Binary metadata remains public-only.
 
@@ -265,10 +265,9 @@ module and not a LuaRocks manifest C module. `stdlib_installer.lua` validates,
 backs up, commits, and rolls it back in the same recoverable transaction before
 renaming `titan.so` last.
 
-The addition does not change any existing native calling convention, module
-state layout, or serialized type schema, so the compiler ABI remains 0.22. The
-immediately preceding canonical seventeen-key 0.22 pair is a supported bounded
-predecessor: publication may transactionally replace it with the eighteen-key
-pair and restores the exact prior pair plus the absence of the new shim/source
-on a caught failure. This is same-ABI additive publication, not a general
-historical-layout or cross-ABI migration path.
+The addition did not change an existing native calling convention, module
+state layout, or serialized schema, so it was published within ABI 0.22. During
+that release only, the immediately preceding canonical seventeen-key 0.22 pair
+was a bounded publication predecessor. ABI 0.23 starts clean: its publisher
+accepts only its bootstrap/current state and does not treat an ABI-0.22 pair as
+an active-layout predecessor or migration source.

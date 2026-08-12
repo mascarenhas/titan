@@ -2,6 +2,7 @@ local lfs = require "lfs"
 local assert = require "luassert"
 
 local driver = require "titan-compiler.driver"
+local coder = require "titan-compiler.coder"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
@@ -30,7 +31,7 @@ end
 describe("compiler installation discovery", function()
     it("uses the first literal Lua 5.5 C-module prefix", function()
         local cpath = table.concat({
-            "/first prefix/lib/titan/0.22/?.so",
+            "/first prefix/lib/titan/0.23/?.so",
             "/wrong/lib/lua/5.4/?.so",
             "/also-wrong/lib/lua/5.5/?.dylib",
             "/first prefix/lib/lua/5.5/?.so",
@@ -101,10 +102,10 @@ describe("compiler installation discovery", function()
             libtitan = "/opt/titan/lib/libtitan.a",
             libbacktrace = "/opt/titan/lib/libbacktrace.a",
             liblua = "/opt/titan/lib/liblua.a",
-            titan_bin = "/opt/titan/lib/titan/0.22",
-            lua_cpath = "/opt/titan/lib/titan/0.22/?.so",
+            titan_bin = "/opt/titan/lib/titan/0.23",
+            lua_cpath = "/opt/titan/lib/titan/0.23/?.so",
             test_source =
-                "/opt/titan/share/titan/0.22/src/titan/test.titan",
+                "/opt/titan/share/titan/0.23/src/titan/test.titan",
         }, paths)
 
         assert.same({
@@ -150,19 +151,19 @@ describe("compiler installation discovery", function()
             checkout))
     end)
 
-    it("requires exactly the three runtime archive members", function()
+    it("requires exactly the two runtime archive members", function()
         assert.is_true(driver.runtime_archive_members_are_exact(
-            "titan.o\ntitan_coro.o\ntitan_uv.o\n"))
+            "titan.o\nminicoro.o\n"))
         assert.is_true(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF SORTED\ntitan.o\ntitan_coro.o\ntitan_uv.o\n"))
+            "__.SYMDEF SORTED\ntitan.o\nminicoro.o\n"))
         assert.is_true(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF_64\ntitan.o\ntitan_coro.o\ntitan_uv.o\n"))
+            "__.SYMDEF_64\ntitan.o\nminicoro.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "titan.o\ntitan_coro.o\ntitan_uv.o\nstale.o\n"))
+            "titan.o\nminicoro.o\ntitan_uv.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF\ntitan.o\ntitan_coro.o\ntitan_uv.o\nstale.o\n"))
+            "__.SYMDEF\ntitan.o\nminicoro.o\nstale.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "titan_coro.o\ntitan.o\ntitan_uv.o\n"))
+            "minicoro.o\ntitan.o\n"))
     end)
 
     it("links source builds through the complete runtime archive", function()
@@ -426,6 +427,36 @@ describe("loader resolver ownership", function()
         assert.truthy(ran, failure)
     end)
 
+    it("removes source-header temporaries with or without a probe service",
+    function()
+        local first = os.tmpname()
+        local second = os.tmpname()
+        write_file(first, "first")
+        write_file(second, "second")
+        local context = {
+            source_foreign_header_temporaries = { first, second },
+            probe_service = {
+                close = function()
+                    return nil, "injected probe close failure"
+                end,
+            },
+        }
+        local ok, err = driver.close_resolver_context(context)
+        assert.is_nil(ok)
+        assert.equal("injected probe close failure", err)
+        assert.is_nil(context.source_foreign_header_temporaries)
+        assert.is_nil(context.probe_service)
+        assert.is_nil(lfs.symlinkattributes(first))
+        assert.is_nil(lfs.symlinkattributes(second))
+
+        local third = os.tmpname()
+        write_file(third, "third")
+        assert.is_true(driver.close_resolver_context({
+            source_foreign_header_temporaries = { third },
+        }))
+        assert.is_nil(lfs.symlinkattributes(third))
+    end)
+
     it("reports an owned resolver close failure after a successful body",
     function()
         local original_close = driver.close_resolver_context
@@ -441,6 +472,316 @@ describe("loader resolver ownership", function()
         assert.matches("failed to close loader resolver context", err)
         assert.matches("injected resolver close failure", err)
         assert.is_true(driver.close_loader(loader))
+    end)
+end)
+
+
+describe("generated C formatting", function()
+    local original_execute
+    local original_rename
+    local original_print
+    local original_formatter
+    local original_format_generated_file
+    local original_get_file_contents
+    local original_set_file_contents
+
+    before_each(function()
+        original_execute = os.execute
+        original_rename = os.rename
+        original_print = _G.print
+        original_formatter = driver.CLANG_FORMAT
+        original_format_generated_file = driver.format_generated_file
+        original_get_file_contents = util.get_file_contents
+        original_set_file_contents = util.set_file_contents
+    end)
+
+    after_each(function()
+        os.execute = original_execute
+        os.rename = original_rename
+        _G.print = original_print
+        driver.CLANG_FORMAT = original_formatter
+        driver.format_generated_file = original_format_generated_file
+        util.get_file_contents = original_get_file_contents
+        util.set_file_contents = original_set_file_contents
+    end)
+
+    it("quotes configured argv and generated paths in verbose mode", function()
+        local commands = {}
+        local printed = {}
+        os.execute = function(command)
+            commands[#commands + 1] = command
+            return true, "exit", 0
+        end
+        _G.print = function(command) printed[#printed + 1] = command end
+        driver.CLANG_FORMAT = "'/tools with spaces/clang-format' --Werror"
+        local path = os.tmpname() .. " generated module.c"
+        write_file(path, "int value;\n")
+
+        assert.is_true(driver.format_generated_file(path, true))
+        assert.equal(1, #commands)
+        assert.same(commands, printed)
+        assert.matches("'/tools with spaces/clang%-format'", commands[1])
+        assert.matches(path, commands[1], 1, true)
+        assert.matches("'%-%-Werror'", commands[1])
+        assert(os.remove(path))
+    end)
+
+    it("removes every blank physical line after a line directive", function()
+        local path = os.tmpname() .. " generated.c"
+        write_file(path, table.concat({
+            '#line 7 "first.titan"',
+            '',
+            '    ',
+            'int first;',
+            '#line 11 "second.titan"',
+            '	',
+            'int second;',
+            '',
+        }, "\n"))
+        os.execute = function() return true, "exit", 0 end
+        driver.CLANG_FORMAT = "clang-format"
+
+        assert.is_true(driver.format_generated_file(path, false))
+        local contents = assert(util.get_file_contents(path))
+        assert.equal(table.concat({
+            '#line 7 "first.titan"',
+            'int first;',
+            '#line 11 "second.titan"',
+            'int second;',
+            '',
+        }, "\n"), contents)
+        assert(os.remove(path))
+    end)
+
+    it("reports post-format read and normalization write failures", function()
+        local path = os.tmpname() .. " generated.c"
+        write_file(path, '#line 1 "test.titan"\n\nint value;\n')
+        driver.CLANG_FORMAT = "clang-format"
+        os.execute = function()
+            assert(os.remove(path))
+            return true, "exit", 0
+        end
+        local ok, err = driver.format_generated_file(path, false)
+        assert.is_nil(ok)
+        assert.matches("failed to normalize", err, 1, true)
+        assert.matches(path, err, 1, true)
+
+        write_file(path, '#line 1 "test.titan"\n\nint value;\n')
+        os.execute = function() return true, "exit", 0 end
+        util.set_file_contents = function(filename, contents)
+            assert.equal(path, filename)
+            assert.equal('#line 1 "test.titan"\nint value;\n', contents)
+            return false, "injected normalization write failure"
+        end
+        ok, err = driver.format_generated_file(path, false)
+        assert.is_nil(ok)
+        assert.matches("failed to normalize", err, 1, true)
+        assert.matches("injected normalization write failure", err, 1, true)
+        assert(os.remove(path))
+    end)
+
+    it("reports formatter failures with the path and exit status", function()
+        local status = 23
+        os.execute = function() return nil, "exit", status end
+        driver.CLANG_FORMAT = "clang-format"
+        local path = "/tmp/generated failure.c"
+        local ok, err = driver.format_generated_file(path, false)
+        assert.is_nil(ok)
+        assert.matches("clang%-format", err)
+        assert.matches(path, err, 1, true)
+        assert.matches("exit 23", err, 1, true)
+
+        status = 127 -- the ordinary shell status for a missing executable
+        ok, err = driver.format_generated_file(path, false)
+        assert.is_nil(ok)
+        assert.matches(path, err, 1, true)
+        assert.matches("exit 127", err, 1, true)
+    end)
+
+    it("reports malformed and empty formatter commands without executing",
+    function()
+        os.execute = function() error("unexpected formatter execution") end
+        local path = "/tmp/generated malformed.c"
+        driver.CLANG_FORMAT = "'unterminated"
+        local ok, err = driver.format_generated_file(path, false)
+        assert.is_nil(ok)
+        assert.matches(path, err, 1, true)
+        assert.matches("invalid CLANG_FORMAT", err, 1, true)
+
+        driver.CLANG_FORMAT = ""
+        ok, err = driver.format_generated_file(path, false)
+        assert.is_nil(ok)
+        assert.matches(path, err, 1, true)
+        assert.matches("CLANG_FORMAT command is empty", err, 1, true)
+    end)
+
+    it("preserves a generated header when staging or rename fails", function()
+        local root = os.tmpname() .. " formatter transaction"
+        assert(lfs.mkdir(root))
+        local header = root .. "/module.titan.h"
+        local old = driver.FOREIGN_HEADER_MARKER .. "\n/* old */\n"
+        local plan = {
+            filename = header,
+            contents = driver.FOREIGN_HEADER_MARKER .. "\nint value;\n",
+            ast = {},
+        }
+        write_file(header, old)
+
+        util.set_file_contents = function()
+            return nil, "injected stage write failure"
+        end
+        local ok, err = driver.write_foreign_header_plan(plan)
+        assert.is_nil(ok)
+        assert.matches("injected stage write failure", err, 1, true)
+        assert.equal(old, assert(original_get_file_contents(header)))
+
+        util.set_file_contents = original_set_file_contents
+        driver.format_generated_file = function() return true end
+        os.rename = function()
+            return nil, "injected stage rename failure"
+        end
+        ok, err = driver.write_foreign_header_plan(plan)
+        assert.is_nil(ok)
+        assert.matches("injected stage rename failure", err, 1, true)
+        assert.equal(old, assert(original_get_file_contents(header)))
+        assert.is_nil(plan.ast._foreign_header_prepared)
+        remove_tree(root)
+    end)
+
+    it("publishes a generated header only after its staged copy formats",
+    function()
+        local root = os.tmpname() .. " formatter space"
+        assert(lfs.mkdir(root))
+        local header = root .. "/module.titan.h"
+        local old = driver.FOREIGN_HEADER_MARKER .. "\n/* old */\n"
+        local new = driver.FOREIGN_HEADER_MARKER .. "\nint value;\n"
+        write_file(header, old)
+        local plan = {
+            filename = header,
+            contents = new,
+            ast = {},
+        }
+        local calls = {}
+        driver.format_generated_file = function(path)
+            calls[#calls + 1] = path
+            return nil, "injected formatter failure"
+        end
+        local ok, err = driver.write_foreign_header_plan(plan)
+        assert.is_nil(ok)
+        assert.matches("injected formatter failure", err, 1, true)
+        assert.equal(old, assert(util.get_file_contents(header)))
+        assert.is_nil(plan.ast._foreign_header_prepared)
+        assert.equal(1, #calls)
+        assert.is_nil(lfs.symlinkattributes(calls[1]))
+
+        driver.format_generated_file = function(path)
+            local contents = assert(util.get_file_contents(path))
+            assert(util.set_file_contents(path,
+                contents .. "/* formatted */\n"))
+            return true
+        end
+        assert.is_true(driver.write_foreign_header_plan(plan))
+        assert.equal(new .. "/* formatted */\n",
+            assert(util.get_file_contents(header)))
+        assert.is_true(plan.ast._foreign_header_prepared)
+        remove_tree(root)
+    end)
+end)
+
+describe("source foreign-header planning", function()
+    it("plans dependency headers, writes owned outputs, and removes stale ones",
+    function()
+        local root = os.tmpname()
+        assert(os.remove(root))
+        assert(lfs.mkdir(root))
+        local producer_source = root .. "/producer.titan"
+        local consumer_source = root .. "/consumer.titan"
+        local producer_import = {
+            _tag = "Ast.TopLevelForeignFunc",
+            name = "callback",
+        }
+        local import = {
+            _tag = "Ast.TopLevelImport",
+            modname = "producer",
+            _source_import = true,
+        }
+        local producer_ast = { producer_import }
+        local consumer_ast = { import, {
+            _tag = "Ast.TopLevelForeignFunc",
+            name = "wrapper",
+        } }
+        local imported = {
+            producer = {
+                ast = producer_ast,
+                filename = producer_source,
+                native_output = producer_source,
+            },
+            consumer = {
+                ast = consumer_ast,
+                filename = consumer_source,
+                native_output = consumer_source,
+            },
+        }
+
+        local original = coder.generate_foreign_header
+        coder.generate_foreign_header = function(name, ast)
+            local dependency = ast[1] and ast[1]._foreign_header
+            return driver.FOREIGN_HEADER_MARKER .. "\n/* " .. name .. " "
+                .. tostring(dependency) .. " */\n"
+        end
+        local ok, plans_or_err = pcall(
+            driver.plan_foreign_headers,
+            { "producer", "consumer" }, imported)
+        coder.generate_foreign_header = original
+        assert.truthy(ok, plans_or_err)
+        local plans = plans_or_err
+        assert.equal(2, #plans)
+        assert.equal(root .. "/producer.titan.h", import._foreign_header)
+        assert.truthy(plans[2].contents:find(import._foreign_header, 1, true))
+        assert.is_true(driver.write_foreign_header_plans(plans))
+        assert.equal("file", lfs.attributes(root .. "/producer.titan.h", "mode"))
+        assert.equal("file", lfs.attributes(root .. "/consumer.titan.h", "mode"))
+
+        producer_ast[1]._ignore = true
+        consumer_ast[2]._ignore = true
+        local stale = assert(driver.plan_foreign_headers(
+            { "producer", "consumer" }, imported))
+        assert.is_true(driver.write_foreign_header_plans(stale))
+        assert.is_nil(lfs.symlinkattributes(root .. "/producer.titan.h"))
+        assert.is_nil(lfs.symlinkattributes(root .. "/consumer.titan.h"))
+        remove_tree(root)
+    end)
+
+    it("rejects shared and user-owned planned header paths", function()
+        local root = os.tmpname()
+        assert(os.remove(root))
+        assert(lfs.mkdir(root))
+        local shared = root .. "/shared.titan"
+        local ast = { { _tag = "Ast.TopLevelForeignFunc", name = "f" } }
+        local original = coder.generate_foreign_header
+        coder.generate_foreign_header = function()
+            return driver.FOREIGN_HEADER_MARKER .. "\n"
+        end
+        local plans, err = driver.plan_foreign_headers({ "left", "right" }, {
+            left = { ast = ast, filename = shared, native_output = shared },
+            right = { ast = ast, filename = shared, native_output = shared },
+        })
+        coder.generate_foreign_header = original
+        assert.is_nil(plans)
+        assert.matches("is shared by source modules", err, 1, true)
+
+        local reserved = root .. "/reserved.titan"
+        write_file(root .. "/reserved.titan.h", "/* user-owned */\n")
+        coder.generate_foreign_header = function()
+            return driver.FOREIGN_HEADER_MARKER .. "\n"
+        end
+        local plan = driver.plan_foreign_header("reserved", ast, reserved)
+        coder.generate_foreign_header = original
+        local ok
+        ok, err = driver.validate_foreign_header_plan(plan)
+        assert.is_nil(ok)
+        assert.matches("refusing to overwrite user-owned", err, 1, true)
+        remove_tree(root)
     end)
 end)
 
@@ -472,6 +813,27 @@ describe("standalone output ownership", function()
         ok, message = driver.validate_program_output_paths({},
             "suite", "suite__test_entrypoint.c",
             { "suite__test_entrypoint.o" })
+        assert.is_nil(ok)
+        assert.matches("aliases input", message, 1, true)
+
+        ok, message = driver.validate_program_output_paths({
+            {
+                modname = "generated",
+                output = "generated.titan",
+                foreign_header = "suite",
+            },
+        }, "suite", "suite__test_entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("aliases output", message, 1, true)
+
+        ok, message = driver.validate_program_output_paths({
+            {
+                modname = "generated",
+                output = "generated.titan",
+                foreign_header = "generated.titan.h",
+            },
+        }, "suite", "suite__test_entrypoint.c",
+            { "generated.titan.h" })
         assert.is_nil(ok)
         assert.matches("aliases input", message, 1, true)
     end)

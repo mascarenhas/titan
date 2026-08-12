@@ -1179,19 +1179,6 @@ static int titan_trace_pinned(lua_State *L) {
   return pinned;
 }
 
-lua_State *titan_newthread(lua_State *L) {
-  lua_State *T = lua_newthread(L);
-  /* Native coroutine entry bypasses a Lua entry wrapper. Reserve enough stack
-  ** while the parent call still owns the ordinary protected boundary, so the
-  ** generated function-scope catch can install its jump target before its
-  ** first potentially allocating GC check. */
-  if (!lua_checkstack(T, LUA_MINSTACK))
-    luaL_error(L, "cannot reserve stack for Titan coroutine entry");
-  lua_pushcfunction(T, errorhandler);
-  T->errfunc = savestack(T, T->top.p - 1);
-  return T;
-}
-
 int errorhandler(lua_State *L) {
   int top = lua_gettop(L);
   /* Pin discipline (A.5): a pinned slot belongs to a pending re-raise and must
@@ -1238,53 +1225,4 @@ int errorhandler(lua_State *L) {
   lua_rawset(L, LUA_REGISTRYINDEX);
   lua_settop(L, top);
   return 1;
-}
-
-/*
- * Adapted from lapi.c.
-*/
-#define titan_ispseudo(i) ((i) <= LUA_REGISTRYINDEX)
-
-static TValue *index2value (lua_State *L, int idx) {
-  CallInfo *ci = L->ci;
-  if (idx > 0) {
-    StkId o = ci->func.p + idx;
-    api_check(L, idx <= ci->top.p - (ci->func.p + 1), "unacceptable index");
-    if (o >= L->top.p) return &G(L)->nilvalue;
-    else return s2v(o);
-  }
-  else if (!titan_ispseudo(idx)) {  /* negative index */
-    api_check(L, idx != 0 && -idx <= L->top.p - (ci->func.p + 1),
-                 "invalid index");
-    return s2v(L->top.p + idx);
-  }
-  else if (idx == LUA_REGISTRYINDEX)
-    return &G(L)->l_registry;
-  else {  /* upvalues */
-    idx = LUA_REGISTRYINDEX - idx;
-    api_check(L, idx <= MAXUPVAL + 1, "upvalue index too large");
-    if (ttisCclosure(s2v(ci->func.p))) {  /* C closure? */
-      CClosure *func = clCvalue(s2v(ci->func.p));
-      return (idx <= func->nupvalues) ? &func->upvalue[idx-1]
-                                      : &G(L)->nilvalue;
-    }
-    else {  /* light C function or Lua function (through a hook)?) */
-      api_check(L, ttislcf(s2v(ci->func.p)), "caller not a C function");
-      return &G(L)->nilvalue;  /* no upvalues */
-    }
-  }
-}
-
-TValue lua_totvalue(lua_State *L, int idx) {
-  return *index2value(L, idx);
-}
-
-void lua_pushtvalue(lua_State *L, TValue v) {
-  setobj2s(L, L->top.p, &v);
-  L->top.p++;
-}
-
-void *lua_togco(lua_State *L, int idx) {
-  TValue *o = index2value(L, idx);
-  return gcvalue(o);
 }

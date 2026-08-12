@@ -38,6 +38,24 @@ local record uv_process_t
   local root_index: integer
 end
 
+foreign function uv_process_exit_cb(process: *libuv.uv_process_t,
+                                    exit_status: libuv.int64_t,
+                                    term_signal: ffi.titan_ffi_int)
+  local handle = process as *libuv.uv_handle_t
+  local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local loop = libuv.uv_handle_get_loop(handle)
+  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvTwoIntegerCallbackEntry
+  local top = lua.lua_gettop(L)
+  entry(L, module, callback, owner,
+        exit_status as lua.lua_Integer,
+        term_signal as lua.lua_Integer)
+  lua.lua_settop(L, top)
+end
+
 local record MergedSpawnSlot
   local child: uv_stdio_t
   local parent: uv_stdio_t
@@ -255,8 +273,8 @@ end
 
 local function start_stream_read(stdio: uv_stdio_t): integer
   local status = libuv.uv_read_start(
-      stream_native(stdio), shim.titan_uvshim_alloc_cb,
-      shim.titan_uvshim_read_cb)
+      stream_native(stdio), uv_alloc_cb,
+      uv_read_cb)
   if status == libuv.UV_EALREADY then return 0 end
   return status
 end
@@ -385,7 +403,7 @@ local function ProcessSpawnFailureCall:dispatch(task: Task): Immediate?
 end
 
 local function new_pipe_stdio(runtime: Runtime): (integer, uv_stdio_t?)
-  local native = libuv.uv_pipe_t.new()
+  local native: owned *libuv.uv_pipe_t = libuv.uv_pipe_t.new()
   local stdio = new_stdio(StdioNative.pipe(native), runtime)
   stdio.root_index = root_handle(runtime, stdio)
   local status = libuv.uv_pipe_init(runtime.loop, native, 0)
@@ -472,7 +490,7 @@ local function initialize_parent_stdio(runtime: Runtime,
   local keep = false
   defer if not keep then discard_unpublished_stdio(stdio) end
   if guessed == libuv.UV_TTY then
-    local native = libuv.uv_tty_t.new()
+    local native: owned *libuv.uv_tty_t = libuv.uv_tty_t.new()
     local owner = new_stdio(StdioNative.tty(native), runtime)
     owner.root_index = root_handle(runtime, owner)
     local status = libuv.uv_tty_init(
@@ -488,7 +506,7 @@ local function initialize_parent_stdio(runtime: Runtime,
                              owner as ffi.titan_ffi_void_ptr)
     stdio = owner
 
-    local actual: libuv.uv_os_fd_t[1]
+    local actual = libuv.uv_os_fd_t.new_array(1)
     status = libuv.uv_fileno(native_pointer as *libuv.uv_handle_t, actual)
     check_status(status, "stdio.parent.fileno")
     if (actual[0] as integer) ~= (duplicate as integer) then
@@ -611,7 +629,7 @@ local function config_merged_output(state: uv_spawn_config):
     discard_unpublished_stdio(child_stream)
   end
 
-  local descriptors: libuv.uv_file[2]
+  local descriptors = libuv.uv_file.new_array(2)
   descriptors[0] = -1 as libuv.uv_file
   descriptors[1] = -1 as libuv.uv_file
   defer do
@@ -639,9 +657,11 @@ end
 local function os_spawn_config_new(): uv_spawn_config
   local task = running_task()
   accepting_work(task.runtime, "configure a Process")
-  local options = libuv.uv_process_options_t.new()
-  local stdio = libuv.uv_stdio_container_t.new_array(3)
-  options.exit_cb = shim.titan_uvshim_process_exit_cb
+  local options: owned *libuv.uv_process_options_t =
+      libuv.uv_process_options_t.new()
+  local stdio: owned libuv.uv_stdio_container_t[] =
+      libuv.uv_stdio_container_t.new_array(3)
+  options.exit_cb = uv_process_exit_cb
   options.stdio_count = 3 as ffi.titan_ffi_int
   options.stdio = stdio
   return uv_spawn_config.new {
@@ -713,7 +733,7 @@ local function os_spawn_config_error(config: uv_spawn_config, status: integer)
 end
 
 local function new_process(runtime: Runtime): uv_process_t
-  local native = libuv.uv_process_t.new()
+  local native: owned *libuv.uv_process_t = libuv.uv_process_t.new()
   return uv_process_t.new {
     handle = native,
     exit_callback = process_exit_callback,
@@ -760,7 +780,7 @@ local function os_process_spawn_with_config(file: string, args: {string},
   local process = new_process(state.runtime)
   local process_handle: *libuv.uv_process_t = process.handle
   local argument_count = #args + 1
-  local argv = shim.titan_uvshim_char_ptr.new_array(argument_count + 1)
+  local argv = ffi.titan_ffi_char_ptr.new_array(argument_count + 1)
   argv[0] = file
   index = 1
   while index <= #args do

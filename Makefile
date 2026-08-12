@@ -151,12 +151,6 @@ LLHTTP_ARCHIVE_CONFIG := $(LLHTTP_BUILD_DIR)/.titan-llhttp-archive-config
 LLHTTP_CPPFLAGS      := -I$(abspath $(LLHTTP_SRC_DIR)/include)
 LLHTTP_CFLAGS        := -std=c99 -fPIC -fvisibility=hidden
 LLHTTP_BUILD_CFLAGS  ?=
-TITAN_HTTPSHIM_SOURCE := titan/http/native/titan_httpshim.c
-TITAN_HTTPSHIM_HEADER := titan/http/native/titan_httpshim.h
-TITAN_HTTPSHIM_O      := $(LLHTTP_BUILD_DIR)/titan_httpshim.o
-TITAN_HTTPSHIM_CPPFLAGS := -I$(abspath titan/http/native)
-TITAN_HTTPSHIM_RUNTIME_CPPFLAGS := -I$(abspath titan-runtime) \
-	-I$(abspath $(TITAN_RUNTIME_LUA_SOURCE_PATH))
 
 # The bundled OpenSSL release is the reproducible default.  System mode uses
 # pkg-config only for compilation/final linking and deliberately carries no
@@ -275,10 +269,12 @@ ifndef LUA_PLATFORM
   endif
 endif
 
-# Kept in sync with titan-compiler/driver.lua (driver.CC / driver.CFLAGS).
-CC        ?= cc
-AR        ?= ar
-RANLIB    ?= ranlib
+# Kept in sync with titan-compiler/driver.lua (driver.CC, driver.CLANG_FORMAT,
+# and driver.CFLAGS).
+CC           ?= cc
+AR           ?= ar
+RANLIB       ?= ranlib
+CLANG_FORMAT ?= clang-format
 LUA_CC    ?= $(CC)
 LUA_AR    ?= $(AR) rcu
 LUA_RANLIB ?= $(RANLIB)
@@ -291,22 +287,19 @@ TITAN_EXTRA_CPPFLAGS ?=
 TITAN_EXTRA_CFLAGS   ?=
 TITAN_EXTRA_LDFLAGS  ?=
 TITAN_NO_LINE_DIRECTIVES ?=
-export TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_CFLAGS TITAN_EXTRA_LDFLAGS \
-	TITAN_NO_LINE_DIRECTIVES
+export CLANG_FORMAT TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_CFLAGS \
+	TITAN_EXTRA_LDFLAGS TITAN_NO_LINE_DIRECTIVES
 # Quote one complete environment value for the recipe shell.  This preserves
 # embedded quotes in user flag strings so Titan's own argv parser sees them.
 make_shell_quote = '$(subst ','"'"',$(1))'
 make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 RUNTIME_O := titan-runtime/titan.o
-CORO_O    := titan-runtime/titan_coro.o
-UV_O      := titan-runtime/titan_uv.o
-TITANLIB_O := titan-runtime/titanlib.o
-TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(CORO_O) $(UV_O)
+MINICORO_O := titan-runtime/minicoro.o
+LTITANLIB_O := titan-runtime/ltitanlib.o
+TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(MINICORO_O)
 TITAN_RUNTIME_LIB := titan-runtime/libtitan.a
-TITAN_SDK_ROOT_HEADERS := titan-runtime/minicoro.h titan-runtime/titan.h \
-	titan-runtime/titan_longjmp.h
-TITAN_SDK_NAMESPACED_HEADERS := titan-runtime/titan/ffi.h \
-	titan-runtime/titan/coro.h titan-runtime/titan/uv.h
+TITAN_SDK_ROOT_HEADERS := titan-runtime/minicoro.h titan-runtime/titan.h
+TITAN_SDK_NAMESPACED_HEADERS := titan-runtime/titan/ffi.h
 
 # Titan's public PEG module embeds one audited LPegLabel engine instead of
 # depending on the compiler-owned lpeglabel.so at run time. Keep this native
@@ -343,7 +336,6 @@ UV_TITAN_SOURCES := \
 STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan \
 	titan/http/server.titan
-UV_CONFIG_STAMP := titan-runtime/.titan-uv-build-config
 STDLIB_MODULES := coroutine uv async timer io fs net ssl url http os peg string \
 	math lua iter gc test
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
@@ -365,6 +357,8 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/string/regex_parser.titan \
 	titan/math.titan titan/lua.titan titan/iter.titan titan/gc.titan \
 	titan/test.titan
+STDLIB_GENERATED_FOREIGN_HEADERS := titan/coroutine.titan.h \
+	titan/uv/uv.titan.h titan/http/http.titan.h
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
 	titan/url.lua titan/http.lua titan/os.lua \
@@ -373,13 +367,12 @@ STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 STDLIB_CONTAINER := titan.so
 STDLIB_STATIC_ARCHIVE := titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
-STDLIB_EXTRA_OBJECTS := $(TITANLIB_O) $(LPEGLABEL_ARCHIVE) \
-	$(LIBUV_EXTRA_OBJECTS) $(TITAN_HTTPSHIM_O) $(LLHTTP_ARCHIVE) \
-	$(OPENSSL_EXTRA_OBJECTS)
+STDLIB_EXTRA_OBJECTS := $(LTITANLIB_O) $(LPEGLABEL_ARCHIVE) \
+	$(LIBUV_EXTRA_OBJECTS) $(LLHTTP_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS)
 STDLIB_NATIVE_IDENTITY_PREREQS := $(LPEGLABEL_ARCHIVE) \
-	$(TITAN_HTTPSHIM_O) $(LLHTTP_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS)
+	$(LLHTTP_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS)
 STDLIB_LPEGLABEL_CPPFLAGS := $(LPEGLABEL_CPPFLAGS)
-STDLIB_HTTP_CPPFLAGS := $(TITAN_HTTPSHIM_CPPFLAGS) $(LLHTTP_CPPFLAGS)
+STDLIB_HTTP_CPPFLAGS := $(LLHTTP_CPPFLAGS)
 STDLIB_OPENSSL_CPPFLAGS := $(OPENSSL_CPPFLAGS)
 STDLIB_OPENSSL_LDFLAGS := $(OPENSSL_PROVIDER_LDFLAGS)
 STDLIB_LICENSES := LICENSES/libuv-LICENSE \
@@ -422,7 +415,7 @@ STDLIB_INSTALL_STAGE       ?= $(CURDIR)
 # pairs for failure-only sanitizer symbolization before later tests can replace
 # those outputs. Ordinary builds leave this empty and pay no snapshot cost.
 TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT ?=
-TITAN_ABI_VERSION          := 0.22
+TITAN_ABI_VERSION          := 0.23
 TITAN_STDLIB_ABI_DIR       ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)
 TITAN_CANONICAL_SUPPORT_SO ?= $(TITAN_STDLIB_ABI_DIR)/titan.so
 TITAN_CANONICAL_STATIC_ARCHIVE ?= $(TITAN_STDLIB_ABI_DIR)/titan.a
@@ -442,7 +435,7 @@ LIBBT_CLONE_STAMP := $(LIBBT_DIR)/.titan-cloned
 LIBBT_BUILD_CONFIG := $(LIBBT_DIR)/.titan-build-config
 RUNTIME_BUILD_CONFIG := titan-runtime/.titan-runtime-build-config
 RUNTIME_ARCHIVE_CONFIG := titan-runtime/.titan-runtime-archive-build-config
-TITANLIB_BUILD_CONFIG := titan-runtime/.titan-titanlib-build-config
+LTITANLIB_BUILD_CONFIG := titan-runtime/.titan-ltitanlib-build-config
 STDLIB_CONFIG_STAMP := titan-runtime/.titan-stdlib-build-config
 STDLIB_COMPLETION_STAMP := titan-runtime/.titan-stdlib-complete
 
@@ -471,14 +464,16 @@ help: ## Show this help
 	@echo "$(OPENSSL_VERSION), and llhttp $(LLHTTP_VERSION) by default. Use"
 	@echo "LIBUV_MODE=system and/or OPENSSL_MODE=system to select pkg-config"
 	@echo "libraries (libuv >= $(LIBUV_MIN_VERSION), OpenSSL >= $(OPENSSL_MIN_VERSION))."
-	@echo "Bundled prerequisites: a C compiler, CMake, Perl, git, tar, curl/wget,"
-	@echo "and sha256sum/shasum (macOS: xcode-select --install; brew install cmake)."
+	@echo "All builds require a C compiler and clang-format. Bundled dependencies"
+	@echo "also need CMake, Perl, git, tar, curl/wget, and sha256sum/shasum"
+	@echo "(macOS: xcode-select --install; brew install clang-format cmake)."
 	@echo "A usable system Readline is preferred; otherwise make lua builds pinned"
 	@echo "GNU Readline $(READLINE_RELEASE) into PREFIX automatically; that fallback also"
 	@echo "needs a linkable curses, tinfo, or termcap provider. Optional system packages:"
-	@echo "Ubuntu/Debian libreadline-dev libuv1-dev libssl-dev pkg-config; Fedora"
-	@echo "readline-devel libuv-devel openssl-devel pkgconf-pkg-config; macOS"
-	@echo "brew install libuv openssl@3 pkgconf. llhttp is always bundled."
+	@echo "Ubuntu/Debian clang-format libreadline-dev libuv1-dev libssl-dev pkg-config;"
+	@echo "Fedora clang-tools-extra readline-devel libuv-devel openssl-devel"
+	@echo "pkgconf-pkg-config; macOS brew install clang-format libuv openssl@3 pkgconf."
+	@echo "llhttp is always bundled."
 	@echo "For a standalone installation, choose one writable PREFIX and run:"
 	@echo "  make lua PREFIX=/path && make luarocks PREFIX=/path && make libuv"
 	@echo "  PATH=/path/bin:\$$PATH /path/bin/luarocks make"
@@ -1253,7 +1248,7 @@ libuv-config: libuv ## Print the effective libuv compiler and linker inputs
 	@echo "LIBUV_LDFLAGS=$(LIBUV_LDFLAGS)"
 	@echo "LIBUV_PROVIDER_LDFLAGS=$(LIBUV_PROVIDER_LDFLAGS)"
 
-llhttp: $(TITAN_HTTPSHIM_O) $(LLHTTP_ARCHIVE) ## Build/validate private llhttp support
+llhttp: $(LLHTTP_ARCHIVE) ## Build/validate private llhttp support
 
 check-llhttp-tools:
 	@missing=0; \
@@ -1313,8 +1308,7 @@ $(LLHTTP_SOURCES) $(LLHTTP_HEADER): $(LLHTTP_EXTRACTED)
 	@test -f "$@" || { echo "ERROR: extracted llhttp omitted $@" >&2; exit 1; }
 
 $(LLHTTP_BUILD_CONFIG): FORCE $(LLHTTP_EXTRACTED) $(LLHTTP_SOURCES) \
-		$(LLHTTP_HEADER) $(TITAN_HTTPSHIM_SOURCE) $(TITAN_HTTPSHIM_HEADER) \
-		$(TITAN_RUNTIME_LUA_LIB)
+		$(LLHTTP_HEADER)
 	@mkdir -p "$(@D)"
 	@tmp="$@.tmp"; \
 	{ printf '%s\n' \
@@ -1329,16 +1323,10 @@ $(LLHTTP_BUILD_CONFIG): FORCE $(LLHTTP_EXTRACTED) $(LLHTTP_SOURCES) \
 		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
 		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
 		$(call make_shell_quote,LLHTTP_CPPFLAGS=$(LLHTTP_CPPFLAGS)) \
-		$(call make_shell_quote,TITAN_HTTPSHIM_CPPFLAGS=$(TITAN_HTTPSHIM_CPPFLAGS)) \
-		$(call make_shell_quote,TITAN_HTTPSHIM_RUNTIME_CPPFLAGS=$(TITAN_HTTPSHIM_RUNTIME_CPPFLAGS)) \
-		$(call make_shell_quote,TITAN_RUNTIME_LUA_SOURCE_PATH=$(TITAN_RUNTIME_LUA_SOURCE_PATH)) \
 		$(call make_shell_quote,LLHTTP_CFLAGS=$(LLHTTP_CFLAGS)) \
 		$(call make_shell_quote,LLHTTP_BUILD_CFLAGS=$(LLHTTP_BUILD_CFLAGS)) \
 		$(call make_shell_quote,SOURCES=$(LLHTTP_SOURCES)); \
-	  for input in $(LLHTTP_SOURCES) $(LLHTTP_HEADER) \
-			$(TITAN_HTTPSHIM_SOURCE) $(TITAN_HTTPSHIM_HEADER) \
-			$(TITAN_RUNTIME_LUA_LIB) \
-			"$(TITAN_RUNTIME_LUA_SOURCE_PATH)"/*.h; do \
+	  for input in $(LLHTTP_SOURCES) $(LLHTTP_HEADER); do \
 	    cksum "$$input"; \
 	  done; } > "$$tmp"; \
 	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
@@ -1352,15 +1340,6 @@ $(LLHTTP_BUILD_DIR)/%.o: $(LLHTTP_SRC_DIR)/src/%.c \
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(LLHTTP_CPPFLAGS) $(ROCK_CFLAGS) \
 		$(LLHTTP_CFLAGS) $(TITAN_EXTRA_CFLAGS) $(LLHTTP_BUILD_CFLAGS) \
 		-c "$<" -o "$@"
-
-$(TITAN_HTTPSHIM_O): $(TITAN_HTTPSHIM_SOURCE) $(TITAN_HTTPSHIM_HEADER) \
-		titan-runtime/titan.h $(LLHTTP_HEADER) $(LLHTTP_BUILD_CONFIG) | \
-		$(TITAN_RUNTIME_LUA_LIB)
-	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(LLHTTP_CPPFLAGS) \
-		$(TITAN_HTTPSHIM_CPPFLAGS) $(TITAN_HTTPSHIM_RUNTIME_CPPFLAGS) \
-		$(ROCK_CFLAGS) $(LLHTTP_CFLAGS) \
-		$(TITAN_EXTRA_CFLAGS) $(LLHTTP_BUILD_CFLAGS) \
-		-c "$(TITAN_HTTPSHIM_SOURCE)" -o "$@"
 
 $(LLHTTP_ARCHIVE_CONFIG): FORCE $(firstword $(LLHTTP_OBJECTS))
 	@mkdir -p "$(@D)"
@@ -1690,12 +1669,12 @@ $(LPEGLABEL_ARCHIVE): FORCE $(LPEGLABEL_OBJECTS) \
 	  mv -f "$$tmp" "$@"; \
 	fi
 
-runtime: libuv $(TITAN_RUNTIME_LIB) ## Build the Titan C runtime archive used by every compiler mode
+runtime: $(TITAN_RUNTIME_LIB) ## Build the Titan C runtime archive used by every compiler mode
 
-# titan.o and titan_coro.o share one compile configuration.  As with the libuv
-# stamp below, recompute its contents without changing mtime on a warm build so
-# switching compilers, include roots, or sanitizer flags cannot reuse stale
-# native objects or the archive made from them.
+# titan.o and minicoro.o share one compile configuration. Recompute its
+# contents without changing mtime on a warm build so switching compilers,
+# include roots, or sanitizer flags cannot reuse stale native objects or the
+# archive made from them.
 $(RUNTIME_BUILD_CONFIG): FORCE
 	@tmp="$@.tmp"; \
 	{ printf '%s\n' \
@@ -1720,10 +1699,10 @@ $(RUNTIME_BUILD_CONFIG): FORCE
 		mv -f "$$tmp" "$@"; \
 	fi
 
-# titanlib.o has a distinct public-Lua compile and shared-module link surface.
+# ltitanlib.o has a distinct public-Lua compile and shared-module link surface.
 # Keep link inputs in the same stamp: a changed sanitizer LDFLAG must relink
 # titan.so even when its small C source and compile flags are otherwise stable.
-$(TITANLIB_BUILD_CONFIG): FORCE
+$(LTITANLIB_BUILD_CONFIG): FORCE
 	@tmp="$@.tmp"; \
 	{ printf '%s\n' \
 		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
@@ -1743,59 +1722,20 @@ $(TITANLIB_BUILD_CONFIG): FORCE
 		mv -f "$$tmp" "$@"; \
 	fi
 
-# Make does not otherwise notice command-line variable changes.  Recompute a
-# small stamp on every invocation, but update its mtime only when an effective
-# uv compile/link input changes. Switching bundled/system mode, compiler, or
-# flags rebuilds titan_uv.o and consequently relinks the combined
-# titan.so/titan.a provider pair without asking the user to clean first.
-$(UV_CONFIG_STAMP): FORCE
-	@mkdir -p "$(@D)"
-	@tmp="$@.tmp"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
-		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
-		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,CFLAGS=$(CFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_LDFLAGS=$(TITAN_EXTRA_LDFLAGS)) \
-		$(call make_shell_quote,LIBUV_MODE=$(LIBUV_MODE)) \
-		$(call make_shell_quote,LIBUV_VERSION=$(LIBUV_VERSION)) \
-		$(call make_shell_quote,LIBUV_CPPFLAGS=$(LIBUV_CPPFLAGS)) \
-		$(call make_shell_quote,LIBUV_CFLAGS=$(LIBUV_CFLAGS)) \
-		$(call make_shell_quote,LIBUV_EXTRA_OBJECTS=$(LIBUV_EXTRA_OBJECTS)) \
-		$(call make_shell_quote,LIBUV_LDFLAGS=$(LIBUV_LDFLAGS)) \
-		$(call make_shell_quote,LIBUV_PROVIDER_LDFLAGS=$(LIBUV_PROVIDER_LDFLAGS)); } > "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-		rm -f "$$tmp"; \
-	else \
-		mv -f "$$tmp" "$@"; \
-	fi
-
 $(RUNTIME_O): titan-runtime/titan.c titan-runtime/titan.h \
-		titan-runtime/titan_longjmp.h \
 		$(RUNTIME_BUILD_CONFIG) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-c titan-runtime/titan.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-I $(LIBBT_DIR) -o $@
 
-$(CORO_O): titan-runtime/titan_coro.c titan-runtime/titan/coro.h \
+$(MINICORO_O): titan-runtime/minicoro.c \
 		titan-runtime/minicoro.h titan-runtime/titan/ffi.h \
 		$(RUNTIME_BUILD_CONFIG) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(CFLAGS) $(TITAN_EXTRA_CFLAGS) \
-		-c titan-runtime/titan_coro.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
+		-c titan-runtime/minicoro.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-I $(LIBBT_DIR) -o $@
 
-$(UV_O): titan-runtime/titan_uv.c titan-runtime/titan/uv.h \
-		titan-runtime/titan.h titan-runtime/titan_longjmp.h \
-		$(UV_CONFIG_STAMP) $(RUNTIME_BUILD_CONFIG) | \
-		$(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB) libuv
-	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(LIBUV_CPPFLAGS) $(CFLAGS) \
-		$(TITAN_EXTRA_CFLAGS) $(LIBUV_CFLAGS) -c titan-runtime/titan_uv.c \
-		-I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
-		-I $(LIBBT_DIR) -o $@
-
-$(RUNTIME_ARCHIVE_CONFIG):
+$(RUNTIME_ARCHIVE_CONFIG): FORCE
 	@tmp="$@.tmp"; \
 	{ printf '%s\n' \
 		$(call make_shell_quote,AR=$(AR)) \
@@ -1813,11 +1753,11 @@ $(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS) $(RUNTIME_ARCHIVE_CONFIG)
 	$(AR) rcs "$@" $(TITAN_RUNTIME_OBJECTS)
 	$(RANLIB) "$@"
 
-$(TITANLIB_O): titan-runtime/titanlib.c $(TITANLIB_BUILD_CONFIG)
+$(LTITANLIB_O): titan-runtime/ltitanlib.c $(LTITANLIB_BUILD_CONFIG)
 	$(CC) $(ROCK_CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-I"$(ROCK_LUA_INCDIR)" -c "$<" -o "$@"
 
-$(TITAN_BOOTSTRAP_SO): $(TITANLIB_O)
+$(TITAN_BOOTSTRAP_SO): $(LTITANLIB_O)
 	@mkdir -p "$(@D)"
 	@set -e; tmp="$@.tmp"; rm -f "$$tmp"; \
 	if $(ROCK_LD) $(ROCK_LIBFLAG) -o "$$tmp" "$<" \
@@ -1889,6 +1829,7 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(LUA_LIB) \
 	mkdir -p "$(ROCKS_TREE)"; \
 	rocks_tree=$$(CDPATH= cd "$(ROCKS_TREE)" && pwd -P); \
 	echo "==> Installing Titan SDK into $$rocks_tree"; \
+	rm -f "$$rocks_tree/include/titan_longjmp.h"; \
 	mkdir -p "$$rocks_tree/src/$(LUA_DIR)" \
 		"$$rocks_tree/include/titan" "$$rocks_tree/lib"; \
 	install -m 0644 $(LUA_DIR)/src/*.c $(LUA_DIR)/src/*.h \
@@ -1914,7 +1855,7 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(LUA_LIB) \
 # consumes the installed Titan runtime archive rather than smuggling source-tree
 # runtime objects into standard modules. System libuv remains an ordered final
 # link input; bundled mode gets headers from the staged SDK and gives the private
-# archive to titanc through the same -X payload as titanlib.o and the private
+# archive to titanc through the same -X payload as ltitanlib.o and the private
 # LPegLabel archive.
 ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
   STDLIB_PLATFORM_PREREQS :=
@@ -1970,6 +1911,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,TITAN_ABI_VERSION=$(TITAN_ABI_VERSION)) \
 		$(call make_shell_quote,CC=$(CC)) \
+		$(call make_shell_quote,CLANG_FORMAT=$(CLANG_FORMAT)) \
 		$(call make_shell_quote,AR=$(AR)) \
 		$(call make_shell_quote,RANLIB=$(RANLIB)) \
 		$(call make_shell_quote,TITANC=$(TITANC)) \
@@ -2016,8 +1958,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 			$(LPEGLABEL_BUILD_CONFIG) \
 			$(LPEGLABEL_ARCHIVE_CONFIG) $(LPEGLABEL_ARCHIVE) \
 			$(LLHTTP_BUILD_CONFIG) $(LLHTTP_ARCHIVE_CONFIG) \
-			$(TITAN_HTTPSHIM_O) $(LLHTTP_ARCHIVE) \
-			$(OPENSSL_EXTRA_OBJECTS); do \
+			$(LLHTTP_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS); do \
 	    cksum "$$input"; \
 	  done; } \
 		> "$$tmp"; \
@@ -2069,7 +2010,7 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
 	  CC=$(call make_shell_quote,$(CC)) \
 	    AR=$(call make_shell_quote,$(AR)) \
 	    RANLIB=$(call make_shell_quote,$(RANLIB)) \
-	    TITAN_PATH_0_22=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+	    TITAN_PATH_0_23=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 	    TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)) \
 	    TITAN_RUNTIME_PREBUILT=1 \
 	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
@@ -2110,7 +2051,7 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 	  export CC=$(call make_shell_quote,$(CC)); \
 	  export AR=$(call make_shell_quote,$(AR)); \
 	  export RANLIB=$(call make_shell_quote,$(RANLIB)); \
-	  export TITAN_PATH_0_22=$(call make_shell_quote,$(CURDIR)); \
+	  export TITAN_PATH_0_23=$(call make_shell_quote,$(CURDIR)); \
 	  export TITAN_PATH=; \
 	  export TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)); \
 	  export TITAN_RUNTIME_PREBUILT=1; \
@@ -2121,8 +2062,8 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 	    "$$stage" "$$root" )
 
 # The post-install compiler runs in a private destination-filesystem directory,
-# so every -X input is absolute. Both modes carry titanlib.o, private LPegLabel,
-# the HTTP callback adapter, and private llhttp. Bundled mode additionally
+# so every -X input is absolute. Both modes carry ltitanlib.o, private LPegLabel,
+# and private llhttp. Bundled mode additionally
 # carries the pinned libuv and OpenSSL archives; system dependencies remain
 # final-link inputs instead.
 STDLIB_STAGED_EXTRA_OBJECTS = $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(abspath $(object)))
@@ -2160,7 +2101,7 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	  mkdir -p titan; \
 	  install -m 0644 "$(CURDIR)/titan/test.titan" titan/test.titan; \
 	  export TITAN_ROCKS_ROOT="$$rocks_tree"; \
-	  export TITAN_PATH_0_22="$$abi_dir"; \
+	  export TITAN_PATH_0_23="$$abi_dir"; \
 	  export TITAN_PATH=; \
 	  export TITAN_RUNTIME_PREBUILT=1; \
 	  export CC=$(call make_shell_quote,$(CC)); \
@@ -2302,7 +2243,8 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rmdir "$(LPEGLABEL_BUILD_DIR)" 2>/dev/null || true
 	rm -rf "$(LLHTTP_BUILD_DIR)"
 	rm -f $(RUNTIME_BUILD_CONFIG) $(RUNTIME_ARCHIVE_CONFIG) \
-		$(TITANLIB_BUILD_CONFIG) $(UV_CONFIG_STAMP) \
+		$(LTITANLIB_BUILD_CONFIG) \
+		titan-runtime/.titan-titanlib-build-config \
 		$(STDLIB_CONFIG_STAMP) $(STDLIB_COMPLETION_STAMP)
 	rm -f $(TITAN_BOOTSTRAP_SO)
 	rm -rf $(TITAN_BOOTSTRAP_SO).dSYM
@@ -2312,6 +2254,7 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -f titan/http/http.c titan/http/http.o
 	rm -f titan/peg/peg.c titan/peg/peg.o
 	rm -f titan/string/string.c titan/string/string.o
+	rm -f $(STDLIB_GENERATED_FOREIGN_HEADERS)
 	rm -f $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_QUALIFIED_SOS) $(STDLIB_SOS)
 	rm -f $(STDLIB_SHIMS)
 	rm -rf $(STDLIB_CONTAINER).dSYM

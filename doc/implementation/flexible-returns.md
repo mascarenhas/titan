@@ -22,7 +22,7 @@ of native ABI truth.
 
 This chapter describes the completed implementation, including the generic
 open-consumer and pending-`finally` lifetime paths. Flexible returns introduced
-compiled-module ABI 0.14; current installed-module paths use ABI 0.22.
+compiled-module ABI 0.14; current installed-module paths use ABI 0.23.
 
 ## Representation in the AST and type graph
 
@@ -50,7 +50,7 @@ Type.StaticMethod(fqtn, name, params, rettypes,
                   varargtype, flexrettype, paramnames)
 ```
 
-The third `Type.Function` position is a required ABI-0.22 reserved-false
+The third `Type.Function` position is a required ABI-0.23 reserved-false
 sentinel. `varargtype` is Titan's typed input tail, while `flexrettype` is
 Titan's typed output tail; the two may coexist. Direct C declarations instead
 use `Type.CFunction(params, ret, vararg, abi)`: C `...` belongs only to its

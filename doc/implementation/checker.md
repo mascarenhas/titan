@@ -946,7 +946,7 @@ Two real loaders exist in `driver.lua`:
   deterministically ordered map, so aliases rehydrate without becoming runtime
   members. Exported `ModuleMember`, `Method`, and `StaticMethod` descriptors
   likewise serialize callable tail shape and formal `paramnames`; names remain
-  absent from structural `Type.Function` values. In ABI 0.22 the five-position
+  absent from structural `Type.Function` values. In ABI 0.23 the five-position
   `Function(params, rettypes, false, varargtype, flexrettype)` constructor keeps
   its third position as a required reserved-false sentinel; C variadicity never
   occupies it. The constructor schema includes `flexrettype`; ABI 0.14 gates

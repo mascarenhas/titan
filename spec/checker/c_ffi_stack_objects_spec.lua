@@ -72,136 +72,139 @@ describe("automatic C objects and fixed arrays", function()
         static ffi_vector ffi_global_vector;
     ]]
 
-    it("marks exactly the admitted zero-initialized object declarations",
+    it("selects automatic, owned, and borrowed allocation storage from the local sink",
     function()
         with_header(objects, function(header)
             local ok, err, ast = check_with_header(header, [[
-                local function accepted()
-                    local point: c.ffi_point
-                    local cell: c.ffi_cell
-                    local tag_point: c.ffi_tag_point
-                    local tag_cell: c.ffi_tag_cell
-                    local integers: c.ffi_int[3]
-                    local pointers: c.ffi_opaque_pointer[2]
-                    local matrix: c.ffi_row[4]
-                    local vector: c.ffi_vector
+                local function allocations(count: integer)
+                    local inferred = c.ffi_point.new()
+                    local exact: c.ffi_point = c.ffi_point.new()
+                    local cell = c.ffi_cell.new()
+                    local owner: owned *c.ffi_point = c.ffi_point.new()
+                    local borrowed: *c.ffi_point = c.ffi_point.new()
 
-                    point.x = 1
-                    cell.count = 2
-                    tag_point.number = 3
-                    tag_cell.integer_value = 4
-                    integers[0] = 5
-                    pointers[0] = nil
-                    local matrix_length = #matrix
-                    vector[0] = 7
+                    local literal = c.ffi_point.new_array(3)
+                    local dynamic = c.ffi_point.new_array(count)
+                    local fixed: c.ffi_point[3] =
+                        c.ffi_point.new_array(3)
+                    local array_owner: owned c.ffi_point[] =
+                        c.ffi_point.new_array(3)
+                    local literal_view: c.ffi_point[] =
+                        c.ffi_point.new_array(3)
+                    local dynamic_view: c.ffi_point[] =
+                        c.ffi_point.new_array(count)
+                    local zero = c.ffi_point.new_array(0)
                 end
             ]])
             assert.truthy(ok, err)
 
             local stats = ast[2].block.stats
-            for i = 1, 8 do
-                assert.is_true(stats[i]._c_zero_init)
-                assert.is_true(stats[i].decls[1]._c_zero_init)
-                assert.is_true(stats[i].decls[1]._c_automatic_object)
+            local function decl(index)
+                return stats[index].decls[1]
             end
+            local function plan(index)
+                return decl(index)._c_allocation_plan
+                    or stats[index].exps[1]._c_allocation_plan
+            end
+
+            assert.equal("automatic_object", plan(1).storage)
             assert.equal("Type.CStruct",
-                types.resolve_c_typedef(
-                    stats[1].decls[1]._type)._tag)
+                types.resolve_c_typedef(decl(1)._type)._tag)
+            assert.equal("automatic_object", plan(2).storage)
+            assert.equal("automatic_object", plan(3).storage)
             assert.equal("Type.CUnion",
-                types.resolve_c_typedef(
-                    stats[2].decls[1]._type)._tag)
-            assert.equal("Type.CArray",
-                stats[5].decls[1]._type._tag)
-            assert.equal(3, stats[5].decls[1]._type.len)
-            assert.equal("Type.CTypedef",
-                stats[7].decls[1]._type.elem._tag)
-            assert.equal("Type.CArray",
-                stats[8].decls[1]._type.target._tag)
+                types.resolve_c_typedef(decl(3)._type)._tag)
+
+            assert.equal("owned", plan(4).storage)
+            assert.equal("Type.COwned", decl(4)._type._tag)
+            assert.is_false(decl(4)._type.count)
+            assert.equal("owned_borrow", plan(5).storage)
+            assert.equal("Type.CPointer", decl(5)._type._tag)
+
+            assert.equal("automatic_array", plan(6).storage)
+            assert.equal("Type.CArray", decl(6)._type._tag)
+            assert.equal(3, decl(6)._type.len)
+            assert.equal(3, plan(6).array_count_literal)
+
+            assert.equal("owned", plan(7).storage)
+            assert.equal("Type.COwned", decl(7)._type._tag)
+            assert.is_true(decl(7)._type.count)
+            assert.equal("automatic_array", plan(8).storage)
+            assert.equal(3, decl(8)._type.len)
+            assert.equal("owned", plan(9).storage)
+            assert.equal("automatic_array_borrow", plan(10).storage)
+            assert.equal("Type.CPointer", decl(10)._type._tag)
+            assert.equal("owned_borrow", plan(11).storage)
+            assert.equal("Type.CPointer", decl(11)._type._tag)
+
+            -- A zero count is not a positive C fixed-array extent, so inferred
+            -- allocation retains the counted owner representation.
+            assert.equal("owned", plan(12).storage)
+            assert.equal("Type.COwned", decl(12)._type._tag)
+            assert.is_true(decl(12)._type.count)
         end)
     end)
 
-    for _, rejected in ipairs({
-        {
-            name = "standalone scalar",
-            declaration = "local object: c.ffi_int",
-            diagnostic = "complete C struct, union, or fixed array",
-        },
-        {
-            name = "standalone pointer",
-            declaration = "local object: c.ffi_int_pointer",
-            diagnostic = "complete C struct, union, or fixed array",
-        },
-        {
-            name = "void",
-            declaration = "local object: c.ffi_void",
-            diagnostic = "complete C struct, union, or fixed array",
-        },
-        {
-            name = "incomplete struct",
-            declaration = "local object: c.ffi_opaque",
-            diagnostic = "incomplete or not yet visible",
-        },
-        {
-            name = "flexible-array-member struct",
-            declaration = "local object: c.ffi_flexible",
-            diagnostic = "flexible array member",
-        },
-        {
-            name = "unsized imported array",
-            declaration = "local object: c.ffi_unsized",
-            diagnostic = "positive compile%-time integer literal extent",
-        },
-        {
-            name = "zero source extent",
-            declaration = "local object: c.ffi_int[0]",
-            diagnostic = "positive compile%-time integer literal extent",
-        },
-        {
-            name = "negative source extent",
-            declaration = "local object: c.ffi_int[-2]",
-            diagnostic = "positive compile%-time integer literal extent",
-        },
-        {
-            name = "array of incomplete objects",
-            declaration = "local object: c.ffi_opaque[2]",
-            diagnostic = "incomplete or not yet visible",
-        },
-    }) do
-        it("rejects " .. rejected.name, function()
-            with_header(objects, function(header)
-                local ok, err = check_with_header(header,
-                    "local function bad()\n"
-                    .. rejected.declaration .. "\nend")
+    it("diagnoses invalid automatic-allocation targets and counts", function()
+        with_header(objects, function(header)
+            local rejected = {
+                {
+                    [[local function bad()
+                          local object = c.ffi_opaque.new()
+                      end]],
+                    "cannot allocate incomplete C struct type",
+                },
+                {
+                    [[local function bad()
+                          local object = c.ffi_row.new()
+                      end]],
+                    "cannot allocate C array typedefs",
+                },
+                {
+                    [[local function bad(count: integer)
+                          local objects = c.ffi_row.new_array(count)
+                      end]],
+                    "cannot allocate C array typedefs as owned storage",
+                },
+                {
+                    [[local function bad(count: integer)
+                          local objects: c.ffi_point[3] =
+                              c.ffi_point.new_array(count)
+                      end]],
+                    "requires a compile%-time integer literal allocation count",
+                },
+                {
+                    [[local function bad()
+                          local objects: c.ffi_point[3] =
+                              c.ffi_point.new_array(2)
+                      end]],
+                    "has extent 3 but '.new_array' allocates 2 element",
+                },
+                {
+                    [[local function bad()
+                          local objects: c.ffi_point[0] =
+                              c.ffi_point.new_array(0)
+                      end]],
+                    "requires a positive extent",
+                },
+                {
+                    [[local function bad()
+                          local object: c.ffi_int = c.ffi_int.new()
+                      end]],
+                    "types in declaration",
+                },
+            }
+            for _, case in ipairs(rejected) do
+                local ok, err = check_with_header(header, case[1])
                 assert.falsy(ok)
-                assert.match(rejected.diagnostic, err)
-            end)
+                assert.match(case[2], err)
+            end
         end)
-    end
-
-    it("rejects a Titan object in the no-RHS form", function()
-        local ok, err = h.run_checker_modules({
-            provider = [[
-                record Item
-                    number: integer
-                end
-            ]],
-            consumer = [[
-                local provider = import "provider"
-                local function bad()
-                    local item: provider.Item
-                end
-            ]],
-        }, "consumer")
-        assert.falsy(ok)
-        assert.match("complete C struct, union, or fixed array", err)
     end)
 
-    it("rejects transitively GC-bearing C aggregate storage", function()
+    it("rejects transitively GC-bearing automatic allocation storage", function()
         with_header([[
-            typedef struct TValue {
-                unsigned long bits;
-            } TValue;
-            typedef struct Udata Udata;
+            #include "lobject.h"
 
             typedef struct ffi_value_holder {
                 TValue value;
@@ -210,15 +213,14 @@ describe("automatic C objects and fixed arrays", function()
             typedef struct ffi_owner_holder {
                 Udata *owner;
             } ffi_owner_holder;
-
-            typedef TValue ffi_values[2];
         ]], function(header)
             for _, declaration in ipairs({
-                "local object: c.TValue",
-                "local object: c.ffi_value_holder",
-                "local object: c.ffi_owner_holder",
-                "local object: c.ffi_values",
-                "local object: c.TValue[2]",
+                "local object = c.ffi_value_holder.new()",
+                "local object: c.ffi_value_holder = c.ffi_value_holder.new()",
+                "local object = c.ffi_owner_holder.new()",
+                "local objects = c.ffi_value_holder.new_array(2)",
+                "local objects: c.ffi_value_holder[2] = "
+                    .. "c.ffi_value_holder.new_array(2)",
             }) do
                 local ok, err = check_with_header(header,
                     "local function bad()\n"
@@ -235,20 +237,20 @@ describe("automatic C objects and fixed arrays", function()
             for _, body in ipairs({
                 [[
                     local function bad()
-                        local source: c.ffi_vector
-                        local copy: c.ffi_vector = source
+                        local source = c.ffi_int.new_array(3)
+                        local copy: c.ffi_int[3] = source
                     end
                 ]],
                 [[
                     local function bad()
-                        local source: c.ffi_vector
+                        local source = c.ffi_int.new_array(3)
                         local copy = source
                     end
                 ]],
                 [[
                     local function bad()
-                        local source: c.ffi_vector
-                        local target: c.ffi_vector
+                        local source = c.ffi_int.new_array(3)
+                        local target = c.ffi_int.new_array(3)
                         target = source
                     end
                 ]],
@@ -274,7 +276,7 @@ describe("automatic C objects and fixed arrays", function()
         ]], function(header)
             local ok, err = check_with_header(header, [[
                 local function bad(): integer
-                    local point: c.ffi_point
+                    local point = c.ffi_point.new()
                     local read = function(): integer
                         return point.x as integer
                     end
@@ -298,17 +300,42 @@ describe("automatic C objects and fixed arrays", function()
         end)
     end)
 
-    it("keeps owned allocation constructors unchanged", function()
+    it("treats T[] constructor targets as uncounted borrowed views", function()
         with_header(objects, function(header)
-            local ok, err = check_with_header(header, [[
-                local function accepted()
-                    local point = c.ffi_point.new()
-                    local points = c.ffi_point.new_array(3)
-                    point.x = 1
-                    points[0].x = 2
+            local ok, err, ast = check_with_header(header, [[
+                local function accepted(count: integer)
+                    local literal: c.ffi_point[] =
+                        c.ffi_point.new_array(3)
+                    local dynamic: c.ffi_point[] =
+                        c.ffi_point.new_array(count)
+                    literal[0].x = 1
+                    dynamic[0].x = 2
                 end
             ]])
             assert.truthy(ok, err)
+
+            local literal = ast[2].block.stats[1].decls[1]
+            local dynamic = ast[2].block.stats[2].decls[1]
+            assert.equal("Type.CPointer", literal._type._tag)
+            assert.equal("automatic_array_borrow",
+                literal._c_allocation_plan.storage)
+            assert.equal("Type.CPointer", dynamic._type._tag)
+            assert.equal("owned_borrow",
+                dynamic._c_allocation_plan.storage)
+
+            for _, allocation in ipairs({
+                "c.ffi_point.new_array(3)",
+                "c.ffi_point.new_array(count)",
+            }) do
+                ok, err = check_with_header(header, [[
+                    local function bad(count: integer)
+                        local view: c.ffi_point[] = ]] .. allocation .. [[
+                        local length = #view
+                    end
+                ]])
+                assert.falsy(ok)
+                assert.match("trying to take the length", err)
+            end
         end)
     end)
 
@@ -334,8 +361,8 @@ describe("automatic C objects and fixed arrays", function()
         ]], function(header)
             local ok, err, ast = check_with_header(header, [[
                 local function calls()
-                    local point: c.ffi_point
-                    local vector: c.ffi_vector
+                    local point = c.ffi_point.new()
+                    local vector = c.ffi_int.new_array(3)
                     local pointer: *c.ffi_point = point
                     c.ffi_fill_point(point)
                     c.ffi_fill_vector(vector)
@@ -381,8 +408,8 @@ describe("automatic C objects and fixed arrays", function()
         ]], function(header)
             local ok, err, ast = check_with_header(header, [[
                 local function calls()
-                    local direct: c.ffi_point
-                    local indirect: c.ffi_point
+                    local direct = c.ffi_point.new()
+                    local indirect = c.ffi_point.new()
                     c.ffi_variadic_fill(
                         1, direct as *c.ffi_point)
                     local fill = c.ffi_get_variadic_fill()

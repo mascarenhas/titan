@@ -425,7 +425,7 @@ The driver's closed validator requires:
 value-facing positions in recovered metadata. The value graph is closed:
 error-recovery/no-value markers, nested modules, C FFI descriptors, legacy
 wrappers, and unknown tags are rejected as well. A recovered Titan function
-type must carry the ABI-0.22 reserved `vararg=false` sentinel; typed variadics
+type must carry the ABI-0.23 reserved `vararg=false` sentinel; typed variadics
 use `varargtype`, while C variadicity exists only on unexportable
 `Type.CFunction`. An Option cannot contain another Option or `value`, matching
 source canonicalization.
@@ -447,7 +447,9 @@ concrete method symbols.
 
 Static-provider and library preflight inventories the three exported bound
 method symbols from recovered Interface type members, in addition to ordinary
-module and nominal symbols. Pair arrays and adjustment entries are private to
+module and nominal symbols. Interface artifacts follow the same ABI-0.23
+`<module>_\u2133_<owner>_\u2131_<member><role>` hierarchy as record and
+union callables. Pair arrays and adjustment entries are private to
 the translation unit that needs a concrete/Interface conversion and do not
 add serialized metadata or public symbols.
 
@@ -465,7 +467,9 @@ covers:
 
 ABI 0.20 also introduced the two-user-value Array proxy and strict generic
 function entry. ABI 0.21 retained those layouts while advancing the matched
-Lua runtime to 5.5.1, and ABI 0.22 retains them. The generalized callable
+Lua runtime to 5.5.1. ABI 0.22 retains those layouts; ABI 0.23 also retains
+them while renaming the native bound and metatable entry families. The
+generalized callable
 action graph, `nil_fill_result`, and first-class closure wrappers add no
 Interface schema/payload slot or provider symbol. Target wrapper adapters and
 strict relays are consumer-private and use existing signatures, so there is no

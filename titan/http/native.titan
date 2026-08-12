@@ -1,7 +1,13 @@
 local cstring = foreign import "string.h"
 local llhttp = foreign import "llhttp.h"
 local lua = foreign import "lua.h"
-local httpshim = foreign import "titan_httpshim.h"
+
+local type LlhttpDataCallbackEntry =
+  foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
+           const *ffi.titan_ffi_char, llhttp.size_t) -> ffi.titan_ffi_int
+local type LlhttpCallbackEntry =
+  foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata)
+    -> ffi.titan_ffi_int
 
 local EVENT_URL = 1
 local EVENT_STATUS = 2
@@ -23,9 +29,9 @@ local record Event
   local upgrade: boolean
 end
 
--- The first eleven fields are a native callback ABI. The C trampolines use
--- these exact zero-based slots for the active Lua state and the eight exact
--- llhttp callback closures, mirroring titan.uv's native-owner protocol.
+-- The first eleven fields are a native callback ABI. The llhttp foreign
+-- callbacks use these exact zero-based slots for the active Lua state and the
+-- eight exact Titan closures, mirroring titan.uv's native-owner protocol.
 local record Parser
   local native: owned *llhttp.llhttp_t
   local settings: owned *llhttp.llhttp_settings_t
@@ -69,6 +75,128 @@ local record Parser
   local input_seen: boolean
   local paused: boolean
   local closed: boolean
+end
+
+-- These callbacks mirror the first eleven Parser fields as zero-based raw
+-- Udata slots: state at 2 and the exact llhttp closures at 3 through 10. The
+-- Parser owner remains traced throughout each synchronous Titan entry call;
+-- each callback restores the pre-callback Lua stack before returning its exact
+-- C result.
+foreign function llhttp_url_cb(
+    parser: *llhttp.llhttp_t, data: const *ffi.titan_ffi_char,
+    length: llhttp.size_t): ffi.titan_ffi_int
+  local owner = parser.data as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[3].uv)
+  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry =
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
+  local top = lua.lua_gettop(L)
+  local result = entry(L, module, callback, owner, data, length)
+  lua.lua_settop(L, top)
+  return result
+end
+
+foreign function llhttp_status_cb(
+    parser: *llhttp.llhttp_t, data: const *ffi.titan_ffi_char,
+    length: llhttp.size_t): ffi.titan_ffi_int
+  local owner = parser.data as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[4].uv)
+  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry =
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
+  local top = lua.lua_gettop(L)
+  local result = entry(L, module, callback, owner, data, length)
+  lua.lua_settop(L, top)
+  return result
+end
+
+foreign function llhttp_header_field_cb(
+    parser: *llhttp.llhttp_t, data: const *ffi.titan_ffi_char,
+    length: llhttp.size_t): ffi.titan_ffi_int
+  local owner = parser.data as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[5].uv)
+  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry =
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
+  local top = lua.lua_gettop(L)
+  local result = entry(L, module, callback, owner, data, length)
+  lua.lua_settop(L, top)
+  return result
+end
+
+foreign function llhttp_header_value_cb(
+    parser: *llhttp.llhttp_t, data: const *ffi.titan_ffi_char,
+    length: llhttp.size_t): ffi.titan_ffi_int
+  local owner = parser.data as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[6].uv)
+  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry =
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
+  local top = lua.lua_gettop(L)
+  local result = entry(L, module, callback, owner, data, length)
+  lua.lua_settop(L, top)
+  return result
+end
+
+foreign function llhttp_header_value_complete_cb(
+    parser: *llhttp.llhttp_t): ffi.titan_ffi_int
+  local owner = parser.data as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[7].uv)
+  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry =
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpCallbackEntry
+  local top = lua.lua_gettop(L)
+  local result = entry(L, module, callback, owner)
+  lua.lua_settop(L, top)
+  return result
+end
+
+foreign function llhttp_headers_complete_cb(
+    parser: *llhttp.llhttp_t): ffi.titan_ffi_int
+  local owner = parser.data as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[8].uv)
+  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry =
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpCallbackEntry
+  local top = lua.lua_gettop(L)
+  local result = entry(L, module, callback, owner)
+  lua.lua_settop(L, top)
+  return result
+end
+
+foreign function llhttp_body_cb(
+    parser: *llhttp.llhttp_t, data: const *ffi.titan_ffi_char,
+    length: llhttp.size_t): ffi.titan_ffi_int
+  local owner = parser.data as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[9].uv)
+  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry =
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
+  local top = lua.lua_gettop(L)
+  local result = entry(L, module, callback, owner, data, length)
+  lua.lua_settop(L, top)
+  return result
+end
+
+foreign function llhttp_message_complete_cb(
+    parser: *llhttp.llhttp_t): ffi.titan_ffi_int
+  local owner = parser.data as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[10].uv)
+  local L = ffi.lmacro_pvalue(owner.uv[2].uv) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry =
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpCallbackEntry
+  local top = lua.lua_gettop(L)
+  local result = entry(L, module, callback, owner)
+  lua.lua_settop(L, top)
+  return result
 end
 
 local function native_bytes(pointer: const *ffi.titan_ffi_char,
@@ -193,20 +321,17 @@ end
 local function new_parser(connection: io.ReaderWriterCloser,
                           parser_type: llhttp.llhttp_type_t,
                           response_to_head: boolean): Parser
-  local native = llhttp.llhttp_t.new()
-  local settings = llhttp.llhttp_settings_t.new()
+  local native: owned *llhttp.llhttp_t = llhttp.llhttp_t.new()
+  local settings: owned *llhttp.llhttp_settings_t = llhttp.llhttp_settings_t.new()
   llhttp.llhttp_settings_init(settings)
-  settings.on_url = httpshim.titan_httpshim_url_cb
-  settings.on_status = httpshim.titan_httpshim_status_cb
-  settings.on_header_field = httpshim.titan_httpshim_header_field_cb
-  settings.on_header_value = httpshim.titan_httpshim_header_value_cb
-  settings.on_header_value_complete =
-    httpshim.titan_httpshim_header_value_complete_cb
-  settings.on_headers_complete =
-    httpshim.titan_httpshim_headers_complete_cb
-  settings.on_body = httpshim.titan_httpshim_body_cb
-  settings.on_message_complete =
-    httpshim.titan_httpshim_message_complete_cb
+  settings.on_url = llhttp_url_cb
+  settings.on_status = llhttp_status_cb
+  settings.on_header_field = llhttp_header_field_cb
+  settings.on_header_value = llhttp_header_value_cb
+  settings.on_header_value_complete = llhttp_header_value_complete_cb
+  settings.on_headers_complete = llhttp_headers_complete_cb
+  settings.on_body = llhttp_body_cb
+  settings.on_message_complete = llhttp_message_complete_cb
   local parser = Parser.new {
     native = native,
     settings = settings,

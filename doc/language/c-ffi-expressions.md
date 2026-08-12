@@ -218,89 +218,103 @@ pointer; other by-value object expressions can supply only a compatible
 `const` pointer. When the pointed-to types need the unsafe conversion above,
 Titan first takes the permitted address and then emits the validated C cast.
 
-## Zero-initialized automatic C objects
+## Target-directed C allocation
 
-A local declaration with a C aggregate type may omit its right-hand side:
+Every local declaration has an initializer. This includes C structures,
+unions, and fixed arrays: the former initializer-less C-local form no longer
+exists. Use `.new()` or `.new_array(...)` to ask for zeroed storage explicitly.
 
-```lua
-local c = foreign import "geometry.h"
+The constructor's representation is selected at its direct local declaration
+sink. The checker records one allocation plan there; moving the call to a
+return, argument, later assignment, or nested expression retains the ordinary
+GC-owned result.
 
-local function origin(): integer
-    local point: c.Point
-    return (point.x as integer) + (point.y as integer)
-end
+For a complete non-GC-bearing C structure or union `T`, `.new()` selects:
+
+| Declaration | Local representation |
+| --- | --- |
+| `local x = T.new()` | automatic `T` |
+| `local x: T = T.new()` | automatic `T` |
+| `local x: owned *T = T.new()` | GC-owned object |
+| `local x: *T = T.new()` | pointer into a hidden rooted owner |
+| any non-direct-local use | `owned *T` |
+
+Automatic inference is deliberately limited to structures and unions; it does
+not make scalar, pointer, enum, function, incomplete, or C-array-typedef
+payloads into stack objects. An automatic aggregate must not transitively
+contain GC-bearing FFI storage.
+
+For `T.new_array(count)`, a positive source integer literal can select fixed
+automatic storage:
+
+```titan
+local inferred = c.Point.new_array(4)       -- c.Point[4]
+local exact: c.Point[4] = c.Point.new_array(4)
+local view: c.Point[] = c.Point.new_array(4) -- borrowed pointer
+local ptr: *c.Point = c.Point.new_array(4)   -- borrowed pointer
+local owner: owned c.Point[] = c.Point.new_array(count)
 ```
 
-This initializer-less production is deliberately narrow: its source grammar is
-exactly `local name: module.Type` or
-`local name: module.Type[positive_literal]`. A Titan alias that happens to
-resolve to a C type, a direct pointer spelling, an option marker, multiple
-declarations, or an inferred type does not enter this production. Initialized
-locals continue to use the ordinary, more general declaration grammar.
+An explicitly written fixed extent must be positive and equal the literal
+allocation count. A fixed C-array typedef imported from C may be an element only when a
+positive literal selects nested automatic backing; it cannot become an owned
+payload. A dynamic or zero count cannot create a C fixed array. An
+inferred dynamic/zero count remains `owned T[]`; an explicit borrowed pointer
+or `T[]` gets hidden owned backing instead. An explicit `owned T[]` always
+wins. `T[]` is an uncounted pointer view: `#view` is unavailable and indexing
+has raw-pointer semantics.
 
-This is not an uninitialized Titan local. It emits a C automatic object with a
-`{0}` initializer, so the complete object is zero-initialized according to C.
-The no-right-hand-side form is accepted only for:
+The source spellings `c.T[N]` and `c.T[]` are available only as the written
+target of an initialized direct allocation local. A fixed array is 0-based,
+`#array` is its fixed extent, and direct indexing is checked against that
+extent. It decays to an element pointer in pointer contexts. A whole C array is
+not an assignable/returnable value.
 
-* a complete C `struct`;
-* a complete C `union`;
-* a fixed-size C array whose complete element type is eligible recursively.
+Automatic storage has ordinary C block lifetime and no escape analysis. A
+pointer returned, stored, or captured beyond that lifetime can dangle. A
+hidden owned backing is rooted for the containing Titan function frame, but a
+borrowed pointer returned from that frame still loses ownership. Write an
+explicit owner when storage must escape.
 
-It is rejected for C scalars, pointers, `void`, incomplete aggregates,
-flexible-array-member structs, unsized or zero-length arrays, and aggregates
-that transitively contain Lua-GC-bearing FFI storage such as `TValue` or
-`Udata *`.
+A matching automatic aggregate can initialize `owned *T`, and a matching fixed
+array can initialize `owned T[]`. Titan allocates one userdata, copies the
+complete object representation, and publishes that owner. This is one direct
+checker-planned copy, not subtyping or a conversion lifted through containers.
 
-An initialized C local keeps the ordinary declaration syntax:
+## Flexible-array-member allocation
 
-```lua
-local point: c.Point = c.make_point()
+If a complete C structure `T` ends in `E field[]`, allocate one extended object
+with `T.new(count)`:
+
+```titan
+local packet = c.Packet.new(8)                 -- literal automatic extent
+local owner: owned *c.Packet = c.Packet.new(n) -- dynamic owned extent
+local pointer: *c.Packet = c.Packet.new(n)     -- hidden owner backing
 ```
 
-## Fixed C arrays
+`T.new()` has the wrong arity and `T.new_array(...)` is unavailable for a FAM
+structure. Titan never invents a stride for an array of variably extended
+objects.
 
-A positive literal extent after a C element type declares an automatic fixed
-array:
+A direct inferred/by-value local with a nonnegative integer literal gets
+aligned automatic byte backing. An explicit owner/pointer, dynamic count, or
+non-direct-local use gets one owner userdata. Both are zeroed through:
 
-```lua
-local ffi = foreign import "titan/ffi.h"
-local geometry = foreign import "geometry.h"
-
-local bytes: ffi.titan_ffi_unsigned_char[256]
-local points: geometry.Point[8]
-local matrix: geometry.Row[4] -- imported array typedefs may be nested
+```text
+max(sizeof(T), offsetof(T, field) + count * sizeof(E))
 ```
 
-The extent is a positive compile-time integer literal. Indexing is zero-based,
-because the generated expression is a C array access:
+The compiler checks an automatic literal against the configured target's exact
+`size_t` extent and rejects it if the addition or multiplication would overflow.
+Owned allocation evaluates the count once, rejects a negative count, and checks
+size overflow at run time. While the original owner or automatic local retains its count,
+`field[i]` is bounds-checked and `#field` returns that logical count. Converting
+the parent to raw `T *` erases the provenance; a FAM reached through that raw
+pointer has neither length nor count-aware indexing.
 
-```lua
-bytes[0] = 65 as ffi.titan_ffi_unsigned_char
-bytes[255] = 0 as ffi.titan_ffi_unsigned_char
-```
-
-`#array` is the fixed element count. Direct indexing of a statically sized C
-array is checked against that count; indexing through a decayed/raw C pointer
-is unchecked. In a pointer context the array decays to a pointer to its first
-element, retaining element qualification.
-
-C arrays are not assignable values. Titan rejects whole-array inference,
-copy-initialization, assignment, return, and capture. Element and field writes
-remain available, and a pointer obtained by decay may be captured like any
-other C pointer.
-
-Automatic aggregates and arrays have ordinary C block lifetime. Titan performs
-no escape analysis: returning, storing, or capturing a pointer to automatic
-storage can leave a dangling pointer after the block or function returns. The
-programmer owns that lifetime contract.
-
-The `T.new()` and `T.new_array(count)` forms allocate GC-owned C storage. Their
-result types can be written as `owned *T` and `owned T[]`, respectively. These
-owners differ from automatic objects: they may be stored in local aliases,
-record fields, options, local callables, Arrays, and Maps, and their storage
-lives as long as the owner remains reachable. They still cannot appear in a
-public module interface, because their C payload type belongs to the importing
-module.
+Automatic objects and arrays are spilled and reloaded across catchable Titan
+calls so mutation made before a caught error remains observable. FAM backing
+uses the same protocol for its full dynamic extent.
 
 ## A callback-options example
 
@@ -328,7 +342,7 @@ Titan can construct the options in automatic storage and pass its address:
 local host = foreign import "process_fixture.h"
 
 local function spawn(file: string): integer
-    local options: host.ProcessOptions
+    local options = host.ProcessOptions.new()
     options.file = file
     options.on_exit =
         host.host_report_exit as host.process_exit_callback
@@ -337,10 +351,10 @@ local function spawn(file: string): integer
 end
 ```
 
-The callback is a host-provided C function and the call remains an ordinary C
-ABI boundary. Titan does not adapt a Titan function or closure to a C callback
-ABI; only a compatible C function or C function-pointer value can fill this
-field.
+The callback in this example is host-provided and the call remains an ordinary
+C ABI boundary. A compatible restricted Titan `foreign function` can also fill
+this field; an ordinary Titan function or closure is never adapted implicitly.
+See [Foreign functions](foreign-functions.md).
 
 ## C operator mode
 

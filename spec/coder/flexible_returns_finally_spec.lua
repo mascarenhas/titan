@@ -63,7 +63,7 @@ describe("flexible returns through finally", function()
         assert.match("%(void%)_pa_flexcount_1;", csrc)
 
         local pending = position_after(csrc,
-            "void test_pending_titan(lua_State *L")
+            "void test_\\u2133_pending_titan(lua_State *L")
         local reset = position_after(csrc, "_pa_flexcount_1 = 0;", pending)
         local write = position_after(csrc,
             "_pa_flexargs_1[_pa_flexcount_1] =", reset)
@@ -82,7 +82,7 @@ describe("flexible returns through finally", function()
         assert.is_true(copy < nargs and nargs < top_reset)
 
         local nested = position_after(csrc,
-            "void test_nested_titan(lua_State *L")
+            "void test_\\u2133_nested_titan(lua_State *L")
         local frame_copy = position_after(csrc, "_pa_copy_count_2_1", nested)
         local count_publish = position_after(csrc,
             "_pa_flexcount_1 = _pa_copy_count_2_1;", frame_copy)

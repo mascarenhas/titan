@@ -10,6 +10,21 @@ local record uv_signal_t
   local root_index: integer
 end
 
+foreign function uv_signal_cb(signal: *libuv.uv_signal_t,
+                              signum: ffi.titan_ffi_int)
+  local handle = signal as *libuv.uv_handle_t
+  local owner = libuv.uv_handle_get_data(handle) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local loop = libuv.uv_handle_get_loop(handle)
+  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as UvIntegerCallbackEntry
+  local top = lua.lua_gettop(L)
+  entry(L, module, callback, owner, signum as lua.lua_Integer)
+  lua.lua_settop(L, top)
+end
+
 local function signal_number(name: string): ffi.titan_ffi_int
   if name == "hup" then return csignal.SIGHUP end
   if name == "int" then return csignal.SIGINT end
@@ -39,7 +54,7 @@ local function os_sized_buffer(
     operation: string): string?
   local actual_capacity = capacity
   while true do
-    local sizes: libuv.size_t[1]
+    local sizes = libuv.size_t.new_array(1)
     local bytes = ffi.titan_ffi_char.new_array(actual_capacity as integer)
     sizes[0] = actual_capacity
     local status = uv_buffer_func(bytes, sizes)
@@ -166,7 +181,7 @@ local function os_ppid(): integer
 end
 
 local function os_clock(): float
-  local usage: libuv.uv_rusage_t
+  local usage = libuv.uv_rusage_t.new()
   local status = libuv.uv_getrusage(usage)
   check_status(status, "os.clock")
   return ((usage.ru_utime.tv_sec as integer) as float) +
@@ -176,7 +191,7 @@ local function os_clock(): float
 end
 
 local function os_time(): integer
-  local current: libuv.uv_timeval64_t
+  local current = libuv.uv_timeval64_t.new()
   local status = libuv.uv_gettimeofday(current)
   check_status(status, "os.current_time")
   return current.tv_sec as integer
@@ -185,7 +200,7 @@ end
 local function SignalWaitCall:dispatch(task: Task): Immediate?
   local runtime = task.runtime
   accepting_work(runtime, "wait for a signal")
-  local native = libuv.uv_signal_t.new()
+  local native: owned *libuv.uv_signal_t = libuv.uv_signal_t.new()
   local callback = function (owner: uv_signal_t, result: integer)
     local signal_handle: *libuv.uv_signal_t = owner.handle
     close_handle(runtime,
@@ -215,7 +230,7 @@ local function SignalWaitCall:dispatch(task: Task): Immediate?
     owner.root_index = 0
   end
   status = libuv.uv_signal_start_oneshot(
-      native, shim.titan_uvshim_signal_cb,
+      native, uv_signal_cb,
       self.signum as ffi.titan_ffi_int)
   if status < 0 then
     close_handle(runtime, signal_handle as *libuv.uv_handle_t,

@@ -41,9 +41,9 @@ existing tests before inventing a new pattern.
 
 ### Declarations and modules
 
-- Every local variable declaration needs an initializer (except the documented
-  zero-initialized C aggregate case). Assignment to an undeclared name is an
-  error; Titan has no ambient Lua globals.
+- Every local variable declaration needs an initializer. Use the documented
+  `.new()` or `.new_array(...)` forms for zero-initialized C storage. Assignment
+  to an undeclared name is an error; Titan has no ambient Lua globals.
 - At module top level, `name = expression` is a module-variable declaration,
   not an assignment. No `local` means exported. Its initializer must be a
   permitted constant expression; use the single final root `do ... end` block

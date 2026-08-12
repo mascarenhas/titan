@@ -27,7 +27,8 @@ local engine = import "example.engine"
 `engine` can select declarations owned by `example.engine`, including local:
 
 * module variables, for both typed reads and writes;
-* functions;
+* ordinary functions;
+* source-defined `foreign function` declarations as exact C designators;
 * records and unions;
 * type aliases;
 * record fields and union variants;
@@ -45,7 +46,9 @@ source value returns the producer's canonical closure; each importer does not
 manufacture a new copy. If the consuming sink instead requires an admitted
 non-exact Function type, that later edge has the ordinary conditional
 [fresh-wrapper rule](closure-adjustment-wrappers.md); it does not change which
-source closure the import selected.
+source closure the import selected. A foreign declaration is different: it has
+no closure or module-state value and decays only to an exactly compatible
+[`foreign (...) -> ...` pointer](foreign-functions.md).
 
 Local Interfaces are not supported. A local concrete method that is visible
 through a direct source import may, however, satisfy an ordinary public
@@ -67,21 +70,31 @@ into the importing module's lexical scope.
 
 ## Foreign declarations
 
-A source-visible declaration may contain a C FFI type even though its consumer
-did not write the corresponding `foreign import`. Each generated C translation
-unit includes its own direct foreign-import headers plus the normalized origin
-headers of C types for which that unit actually emits declarations. An unused
-source dependency does not contribute a blanket or transitive header closure.
-Quoted origins use the same normalized spelling in producer and consumer, so
-path-sensitive declarations such as `sizeof(__FILE__)` agree.
+An ordinary source-visible declaration may contain a C FFI type even though its
+consumer did not write the corresponding `foreign import`. Each generated C
+translation unit includes its own direct foreign-import headers plus the
+normalized origin headers of C types for which that unit actually emits
+declarations. For those ordinary values the rule remains use-driven: an unused
+source dependency does not contribute a blanket header closure. Quoted origins
+use the same normalized spelling in producer and consumer, so path-sensitive
+declarations such as `sizeof(__FILE__)` agree.
 
-This does **not** expose the producer's `foreign import` alias or grant Titan
-visibility transitively. Source modules remain ordinary C translation units
-compiled with the same configured compiler and flags. Headers are expected to
-be self-contained and compatible under ordinary C rules; Titan does not compare
-macro environments, layouts, attributes, or preprocessing histories between
-translation units. Import an umbrella header directly when declarations depend
-on a particular include or macro order.
+A producer that defines `foreign function` declarations additionally generates
+one source-adjacent `*.titan.h`. Every direct source importer includes that
+companion, which contains the prototypes/eligible inline definitions and the C
+headers required to render them. The consumer checker processes the same
+companion before checking declarations and bodies, so its macros and C probes
+match final generated C. Temporary companions make this possible during
+recursive checking; the compiler rewrites them to final paths and removes them
+from the resolver context afterward.
+
+Neither mechanism exposes the producer's `foreign import` alias or grants Titan
+visibility transitively. A generated C header is declaration plumbing;
+`alias.member` still needs a written direct source capability, and a binary
+provider carries no companion permission. Source modules remain ordinary C
+translation units compiled with the same configured compiler and flags. Import
+an umbrella header directly when unrelated declarations depend on a particular
+include or macro order.
 
 ## Binary imports and Lua
 
@@ -108,4 +121,8 @@ layout changes: the standard-library dogfood pass deliberately made most of
 `titan.uv` local, changing that module's serialized public members and
 reconstructible public closure prefix, and every generated module now carries
 the fixed physical-provider identity slot used before source-private access.
-Older providers must be rebuilt; no migration is performed.
+ABI 0.23 retains those layout rules while adding source-defined foreign
+collaboration and separating module, nominal owner, and member in native
+callable names. A 0.22 binary remains
+public-only and is rejected by the 0.23 toolchain; older providers must be
+rebuilt and no migration is performed.
