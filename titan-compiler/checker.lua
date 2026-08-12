@@ -10,6 +10,7 @@ local cdriver = require("c-parser.cdriver")
 local cdefines = require("c-parser.cdefines")
 local cprobe = require "titan-compiler.cprobe"
 local csemantics = require "titan-compiler.csemantics"
+local cdeclarator = require "titan-compiler.cdeclarator"
 
 -- The compiler driver installs the exact C toolchain configuration used for
 -- generated code. Keeping this small hook in the checker makes every foreign
@@ -1783,6 +1784,45 @@ function checker._c_flexible_array_member(typ)
     error("C struct has_fam metadata lacks its flexible-array field")
 end
 
+function checker._validate_automatic_fam_extent(plan, st, loc, errors)
+    local field = assert(plan.fam_field)
+    local array = assert(c_resolve(field.type))
+    assert(array._tag == "Type.CArray")
+    local count = assert(plan.fam_count_literal)
+    local probe, probe_error = checker._probe_for_c_types(
+        st, { plan.payload_type, array.elem })
+    local qualified = types.tostring(plan.payload_type) .. "." .. field.name
+    if not probe then
+        checker.typeerror(errors, loc,
+            "cannot validate automatic C allocation extent for flexible-array "
+            .. "field '%s' against the configured target: %s",
+            qualified, tostring(probe_error))
+        return
+    end
+
+    local predicate = string.format(
+        "(%s <= ((((size_t)-1) - offsetof(%s, %s)) / sizeof(%s)))",
+        tostring(count), cdeclarator.render_type_name(plan.payload_type),
+        field.name, cdeclarator.render_type_name(array.elem))
+    local sentinel = types.CArray(array.elem, predicate .. " ? 1 : -1")
+    local result = probe:validate_declaration_compatibilities({ {
+        left_type = sentinel,
+        right_type = sentinel,
+    } })[1]
+    if not result or result.status == "infrastructure_failure" then
+        checker.typeerror(errors, loc,
+            "cannot validate automatic C allocation extent for flexible-array "
+            .. "field '%s' against the configured target: %s",
+            qualified, result and (result.message or result.summary
+                or result.status) or "the C probe returned no result")
+    elseif not result.accepted then
+        checker.typeerror(errors, loc,
+            "automatic C allocation extent for flexible-array field '%s' "
+            .. "with count %s exceeds SIZE_MAX on the configured target",
+            qualified, tostring(count))
+    end
+end
+
 function checker._allocation_integer_literal(exp)
     while exp and (exp._tag == "Ast.ExpCast"
                    or exp._tag == "Ast.ExpAdjust") do
@@ -1792,6 +1832,17 @@ function checker._allocation_integer_literal(exp)
        and math.type(exp.value) == "integer" then
         return exp.value
     end
+end
+
+function checker._numeric_literal_is_zero(exp)
+    if not exp then return false end
+    local tag = exp._tag
+    if tag == "Ast.ExpCast" or tag == "Ast.ExpAdjust"
+       or (tag == "Ast.ExpUnop" and exp.op == "-") then
+        return checker._numeric_literal_is_zero(exp.exp)
+    end
+    return (tag == "Ast.ExpInteger" or tag == "Ast.ExpFloat")
+        and exp.value == 0
 end
 
 function checker._automatic_allocation_error(typ, st, allow_fam)
@@ -1921,6 +1972,9 @@ function checker._plan_c_allocation(node, pseudo, demand, st, errors)
 
     if pseudo.fam then
         plan.fam_field = checker._c_flexible_array_member(payload)
+    end
+    if plan.storage == "automatic_fam" then
+        checker._validate_automatic_fam_extent(plan, st, node.loc, errors)
     end
     pseudo.rettypes = { plan.result_type }
     node._c_allocation_plan = plan
@@ -4731,8 +4785,7 @@ local function checkfor(node, st, errors)
         for _, bound in ipairs({ node.start, node.finish, node.inc }) do
             if bound._foreign_literal then bound._type = node.decl._type end
         end
-        local literal_step = checker._allocation_integer_literal(node.inc)
-        if literal_step == 0 then
+        if checker._numeric_literal_is_zero(node.inc) then
             checker.typeerror(errors, node.inc.loc,
                 "a numeric for loop inside a foreign function requires a nonzero step")
         end

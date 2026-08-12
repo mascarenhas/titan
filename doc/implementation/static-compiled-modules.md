@@ -56,7 +56,7 @@ with the object that defines the module's `_abi`, `_types`, `_init`, and
 metadata member to regenerate and no archive leaf name used as logical
 identity.
 
-The standalone entrypoint, runtime objects, `titanlib.o`, and ordinary native
+The standalone entrypoint, runtime objects, `ltitanlib.o`, and ordinary native
 payload do not carry logical metadata.
 
 ## Canonical payload

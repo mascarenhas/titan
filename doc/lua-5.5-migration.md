@@ -24,8 +24,9 @@ the control variable with a regular local:
   variable was renamed `input_line` and `line` became a local. This error
   previously made `c-parser/cpp.lua` fail to even *load*, taking down
   `checker.lua`, `driver.lua` and `titanc` transitively.
-* `titan-compiler/pretty.lua` (`reindent_c`): the gmatch control variable
-  `line` was reassigned with its trimmed value; same shadowing fix.
+* The former generated-C indentation pass reassigned its `gmatch` control
+  variable `line` with the trimmed value; it received the same shadowing fix.
+  That pass was later retired when generated source moved to `clang-format`.
 
 Everything else in `titan-compiler/`, `c-parser/`, `titanc`
 and `spec/` was audited against the official 5.3→5.4→5.5 incompatibility
@@ -70,7 +71,7 @@ codegen work started).
   pushes now happen before the buffer is started.
 * `loadlib`/`loadsym` (public API only) are unchanged.
 
-`titanlib.c` uses only the public API and needed no changes.
+`ltitanlib.c` uses only the public API and needed no changes.
 
 ## Code generator (`titan-compiler/coder.lua`)
 

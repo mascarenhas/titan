@@ -174,9 +174,13 @@ silently added.
 
 The driver refuses to overwrite a non-generated reserved path, replaces a
 banner-owned header, and removes a stale banner-owned header after the module
-loses its last foreign function. The header is a source build artifact only. It
-is absent from serialized types, `.titan.meta`, provider key sets, DSO/archive
-publication, Lua shims, the installed SDK, and standard-image transactions.
+loses its last foreign function. It formats each checking header and a sibling
+public-header stage with the required `clang-format` command and Titan's fixed
+LLVM-based four-space style before preprocessing or atomic publication. A
+formatter failure leaves an existing public header untouched. The header is a
+source build artifact only. It is absent from serialized types, `.titan.meta`,
+provider key sets, DSO/archive publication, Lua shims, the installed SDK, and
+standard-image transactions.
 
 ## Target-directed C allocation
 
@@ -294,7 +298,7 @@ The standard library now dogfoods the source feature rather than carrying C
 callback shims.
 
 * `titan.coroutine` defines `coro_entry_trampoline` as a foreign function and
-  stores it directly in `mco_desc.func`. `titan_coro.c` remains only as the one
+  stores it directly in `mco_desc.func`. `minicoro.c` remains only as the one
   `MINICORO_IMPL` translation unit and the translation-unit-local fixed Lua
   tag comparator. `titan_coro_entry` and `titan/coro.h` are gone.
 * The six `titan.uv` contributors define the thirteen exact libuv callbacks for
@@ -322,10 +326,10 @@ one-owner-argument protocol; its Titan continuation reads `uv_fs_get_result`.
 No event-kind dispatcher or callback registry is introduced.
 
 The installed runtime SDK archive now has exactly `titan.o` and
-`titan_coro.o`. Its namespaced installed header set is only `titan/ffi.h`
-(alongside the top-level `minicoro.h`, `titan.h`, and `titan_longjmp.h`; bundled
+`minicoro.o`. Its namespaced installed header set is only `titan/ffi.h`
+(alongside the top-level `minicoro.h` and `titan.h`; bundled
 mode separately installs libuv headers). The standard provider's native payload
-is `titanlib.o`, private LPegLabel, the selected libuv payload, private llhttp,
+is `ltitanlib.o`, private LPegLabel, the selected libuv payload, private llhttp,
 and the selected OpenSSL payload; there is no HTTP adapter object.
 
 ## ABI 0.23 boundary

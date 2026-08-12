@@ -3,8 +3,8 @@
 This chapter covers everything from resolving source/compiled modules through
 producing a `.so`/`.a` pair or executable: `titan-compiler/driver.lua` (module lookup, the
 import loader, C compilation and linking), the `titanc` command-line
-front end, the two small utility modules the whole compiler leans on
-(`pretty.lua` and `util.lua`), and the C runtime-support library in
+front end, the small utility module the whole compiler leans on
+(`util.lua`), and the C runtime-support library in
 `titan-runtime/`. A reference table of every environment variable,
 default path and flag closes the chapter.
 
@@ -97,8 +97,8 @@ The standard library consists of eighteen ordinary qualified logical modules:
 checkout sources are `titan/<name>.titan`; `titan.uv`, `titan.http`,
 `titan.peg`, and `titan.string` are folder
 ensembles. One `titanc` invocation links their independent objects and
-`titanlib.o` into the physical checkout provider pair `titan.so`/`titan.a`.
-The private namespaced LPegLabel archive follows `titanlib.o` as metadata-free
+`ltitanlib.o` into the physical checkout provider pair `titan.so`/`titan.a`.
+The private namespaced LPegLabel archive follows `ltitanlib.o` as metadata-free
 payload; selected libuv, private llhttp, and selected OpenSSL payloads follow
 it. Installation publishes both forms below `<root>/lib/titan/0.23/`
 and eighteen generated logical-module shims below
@@ -371,27 +371,29 @@ invocation-wide source-header plan when the CLI owns the compilation:
 
    Both modes link `libtitan.a`; the driver never substitutes a direct
    `titan.o` link. The checkout freshness check covers `titan.c`, the reduced
-   `titan_coro.c`, and their runtime headers. Source callback edits rebuild
+   `minicoro.c`, and their runtime headers. Source callback edits rebuild
    their generated module objects instead.
 2. **Prepare the source-foreign companion.** `titanc` plans every logical
    source module after checking, rewrites temporary dependency-header edges to
-   their final absolute paths, validates all owned/unowned destinations before
-   writing any, and writes every required `*.titan.h` before compiling the
-   first object. `driver.compile` consumes that supplied plan; a direct
-   programmatic caller gets a one-module planning/writing fallback. A folder
-   module's companion is beside its canonical main and contributors never own
-   one. See [Foreign-function implementation](foreign-functions.md#generated-titanh-planning).
+   their final absolute paths, and validates all owned/unowned destinations
+   before writing any. It writes each required `*.titan.h` to a sibling stage,
+   runs the configured `clang-format` on that stage, and only then renames the
+   formatted header into place before compiling the first object.
+   `driver.compile` consumes that supplied plan; a direct programmatic caller
+   gets a one-module planning/writing fallback. A folder module's companion is
+   beside its canonical main and contributors never own one. See
+   [Foreign-function implementation](foreign-functions.md#generated-titanh-planning).
 3. `coder.generate(modname, ast, static_deps, abi,
-   emit_line_directives)` produces one C translation unit as a string plus its
-   direct-native-reference set; `pretty.reindent_c` reformats the string. The
-   qualified `modname`
-   controls the native prefix, registry identity, `_init`, `_abi`, `_types`,
-   and `luaopen_*` symbols consistently.
-4. The `.c` file is written **next to the flat source or folder main**:
-   `sourcef:gsub("[.]titan$", "") .. ".c"` (if `sourcef` is not given it
-   defaults to the dots-to-slashes path). Any previous `.c`/`.o` for the
-   module is `os.remove`d first. Contributors never receive generated C or
-   object files.
+   emit_line_directives)` produces one raw C translation unit as a string plus
+   its direct-native-reference set. The qualified `modname` controls the native
+   prefix, registry identity, `_init`, `_abi`, `_types`, and `luaopen_*`
+   symbols consistently.
+4. The raw translation unit is written **next to the flat source or folder
+   main** as `sourcef:gsub("[.]titan$", "") .. ".c"` (if `sourcef` is not
+   given it defaults to the dots-to-slashes path), then formatted in place.
+   Formatting failure aborts before its object is compiled but retains the raw
+   or partially formatted `.c` as a diagnostic artifact. Contributors never
+   receive generated C or object files.
 5. The object is compiled with the parsed `driver.CC`, then
    `TITAN_EXTRA_CPPFLAGS`, Titan's fixed `driver.CFLAGS`, and
    `TITAN_EXTRA_CFLAGS`, in that order:
@@ -407,15 +409,14 @@ invocation-wide source-header plan when the CLI owns the compilation:
    stack so libbacktrace can unwind them; `-I libbacktrace` finds
    `backtrace.h`.
 
-Toolchain strings are parsed once into dense argument arrays with a
-small shell-word grammar supporting whitespace, single/double quotes,
-and backslash escapes. The compiler/linker command builder quotes every
-resulting word before its final `os.execute`, so spaces and shell
-metacharacters remain part of one argument rather than being
-reinterpreted. Unterminated quotes, trailing escapes, NUL bytes, an empty
-`CC`, and non-dense programmatic argument arrays produce configuration
-errors. `-v` prints the same safely quoted toolchain command that is
-executed.
+`CLANG_FORMAT` and the native-tool strings are parsed into dense argument
+arrays with a small shell-word grammar supporting whitespace, single/double
+quotes, and backslash escapes. Each command builder quotes every resulting word
+before its final `os.execute`, so spaces and shell metacharacters remain part of
+one argument rather than being reinterpreted. Unterminated quotes, trailing
+escapes, NUL bytes, an empty configured command, and non-dense programmatic
+argument arrays produce configuration errors. `-v` prints the same safely
+quoted formatter, compiler, and linker commands that are executed.
 
 `driver.compile_module(modname, mod, static_deps, verbose, options)` is the thin
 wrapper `titanc` uses: it skips modules whose cache entry says `compiled` (the binary
@@ -657,8 +658,8 @@ normal module-init protocol.
 or more dot-separated module names. `--tree` overrides
 `driver.TITAN_SOURCE_PATH`. In source-checkout mode, `--lua` overrides
 `driver.LUA_SOURCE_PATH`; installed mode rejects it so the installed headers,
-`liblua.a`, and `libtitan.a` remain a matched SDK. `-v` prints every `cc`
-command line, `--print-ast` dumps each module's
+`liblua.a`, and `libtitan.a` remain a matched SDK. `-v` prints every
+`clang-format` and native-tool command line, `--print-ast` dumps each module's
 AST after checking, `--static` swaps the compiled-provider passes to prefer
 self-describing archives before DSOs, `--test` selects the native test pipeline
 described in [Native test runner](test-runner.md), and `--no-uv-bootstrap`
@@ -685,7 +686,7 @@ the paired `.a`, while mixed payload retains CLI order in both forms.
 Executable mode keeps the broader established final-link behavior. Runtime and
 callback-shim objects are not normally passed this way: both checkout and
 installed builds select them from `libtitan.a`. The standard provider's
-`titanlib.o` is the deliberate support payload. Bundled libuv joins it in
+`ltitanlib.o` is the deliberate support payload. Bundled libuv joins it in
 `-X`; system libuv remains a final-link setting.
 
 Every CLI module name is placed in one `requested_roots` set and passed to the
@@ -722,7 +723,7 @@ titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.
   titan.ssl titan.url titan.http titan.os \
   titan.peg titan.string \
   titan.math titan.lua titan.iter titan.gc titan.test \
-  -X titan-runtime/titanlib.o lpeglabel-build/libtitan-lpeglabel.a \
+  -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
      openssl-build/libssl.a openssl-build/libcrypto.a  # bundled modes
 ```
@@ -730,11 +731,11 @@ titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.
 The provider prefix is `titan`, so checkout output is `titan.so`, `titan.a`,
 and eighteen generated `titan/*.lua` shims. Each logical module retains its own
 `luaopen_titan_*`, `_init`, `_abi`, `_types`, registry module state, and
-initializer; `titanlib.o` supplies the nineteenth entry, `luaopen_titan`, and the
+initializer; `ltitanlib.o` supplies the nineteenth entry, `luaopen_titan`, and the
 support table without adding an archive metadata key. The `titan.uv` folder
 still generates only `titan/uv/uv.c`/`.o`, and no contributor shim. The
 five-member LPegLabel archive is force-carried into both providers after
-`titanlib.o` but contributes no logical metadata. Bundled mode puts the private
+`ltitanlib.o` but contributes no logical metadata. Bundled mode puts the private
 libuv archive after it in the shared `-X` payload, followed by the private
 llhttp archive and then the bundled OpenSSL archives used directly by
 `titan.ssl`.
@@ -836,29 +837,38 @@ Its flow:
    and make `titanc` exit with status 1; caught publication failures restore
    the prior owned bundle.
 
-## `pretty.lua`: the C style contract and the reindenter
+## `clang-format`: generated-source formatting
 
-The coder builds C by pasting strings, with no C AST, so it cannot
-track indentation; `pretty.reindent_c` re-indents the finished
-translation unit instead. The algorithm is deliberately dumb: strip
-each line; if the line *starts* with `}` or `)`, dedent first (clamped
-at zero, so one mismatch ruins at most one function's indentation); if
-the line *ends* with `{` or `(`, indent after it; 4-space units; runs
-of blank lines collapse (a blank line survives only at indent 0).
+The coder still builds C by pasting strings, with no C AST or in-process
+pretty-printer. The driver instead invokes the parsed `CLANG_FORMAT` command
+(default `clang-format`) in place on every emitted `.c` and every `.titan.h`
+stage.
+It supplies an explicit LLVM-based, four-space style and disables include
+sorting rather than discovering an ambient project `.clang-format`. Include
+order is intentional in generated module preambles and source-foreign headers,
+where direct, supplemental, and generated companion headers have distinct
+roles.
 
-Because the heuristic looks only at line-edge braces and parentheses,
-generated C must follow the style contract spelled out in `pretty.lua`'s
-header comment, and any code added to `coder.lua` templates must too:
+The lifecycle is raw write, format, then native compile. Generated headers are
+formatted as sibling stages and renamed into place only after success, so a
+formatter error cannot replace a usable owned header. Temporary checking
+headers are also formatted after their raw write and before any compiler probe
+consumes them. Generated `.c` files are kept at their diagnostic output paths
+when formatting fails, but no native compile begins. This boundary covers
+module translation units, source-foreign companions, generated standalone and
+test entrypoints, and the compiler's generated native-validation translation
+units. The C FFI's semantic and rejection probes are not emitted codegen
+artifacts and continue to go directly to the configured C compiler.
 
-* prefer `/* */` comments over `//`; never place a comment after a `{`
-  on the same line; comments must not span lines, contain C code, or
-  contain user-controlled text (a stray `{` inside a comment would
-  desynchronize the indenter);
-* K&R brace placement; multi-line statements must use braces.
-
-The reindenter never changes tokens, only leading whitespace, so a
-violation produces ugly-but-correct C; the contract exists to keep
-generated code readable for the humans debugging it.
+Templates must produce valid C, but clang-format owns their presentation.
+Generated multiline comments use conventional ` *` continuation lines rather
+than Lua's `**` spelling; this keeps the result at a fixed point after the one
+formatter pass. Code generation removes every template-introduced blank physical
+line immediately after `#line` before formatting. The formatted-file boundary
+then enforces that invariant again before compilation, so the directive's named
+Titan line applies to the following generated statement. With `-v`, Titan prints
+the safely quoted formatter invocation before executing it, just as it does for
+native compiler and linker commands.
 
 ## `util.lua`: templates and helpers
 
@@ -897,16 +907,16 @@ Every installed-mode compiled module and standalone program links
 `<root>/lib/libtitan.a`; checkout mode links
 `titan-runtime/libtitan.a`. Neither mode links `titan.o` directly. Each archive
 contains exactly the dynamic loader/error runtime `titan.o` and reduced
-minicoro implementation/tag support `titan_coro.o`. Source foreign callbacks
+minicoro implementation/tag support `minicoro.o`. Source foreign callbacks
 live in generated standard-module objects instead. Static-archive selection
 pulls in only referenced objects. Vendored `libbacktrace.a` is a separate link
-input. `titanlib.o` is also separate: it is the only input to the private
+input. `ltitanlib.o` is also separate: it is the only input to the private
 support bootstrap and is passed once as shared native payload when the eighteen
 standard logical modules are published in the full `titan.so`/`titan.a` pair.
 The private five-member LPegLabel archive follows it only in the standard
 provider payload and is not part of the runtime SDK.
 The staged non-Lua SDK headers under `<root>/include` are `minicoro.h`,
-`titan.h`, `titan_longjmp.h`, and `titan/ffi.h`. Checkout developer
+`titan.h` and `titan/ffi.h`. Checkout developer
 mode selects the corresponding local archive and headers so runtime edits can
 be tested before reinstalling.
 
@@ -1028,10 +1038,10 @@ It also declares the dynamic-loading and error functions exported by
   (`TITAN_NO_LIBBACKTRACE`) it falls back to raw Lua traceback lines plus
   raw `execinfo` C frames.
 
-### `titanlib.c`: the `titan` Lua module
+### `ltitanlib.c`: the `titan` Lua module
 
 This companion is built separately from `libtitan.a`: Make compiles
-`titanlib.c` into `titanlib.o`, links only that object into the private
+`ltitanlib.c` into `ltitanlib.o`, links only that object into the private
 bootstrap `titan-runtime/bootstrap/titan.so`, and passes it once as native
 payload when building the full standard `titan.so`/`titan.a` provider pair.
 It is *not* part of the runtime SDK's `libtitan.a` or ordinary generated
@@ -1090,13 +1100,14 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Semicolon-separated roots searched for folder `P/B.titan` before flat `P.titan`, including contributor privacy checks. |
 | `TITAN_NO_LINE_DIRECTIVES` / `driver.EMIT_LINE_DIRECTIVES` | environment / `driver.lua` | unset / true | Exact environment value `1`, or `titanc --no-line-directives`, disables generated Titan `#line` directives for physical generated-C diagnostics; this can omit ordinary native Titan frames from logical tracebacks. |
 | `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from flat/folder source while all dependencies remain binary-first; selected source descriptors also provide `program_output`. |
-| `titan._loadlib` | `titanlib.c` / `driver.lua` | internal `RTLD_LAZY` + `RTLD_LOCAL` loader | Maps DSO candidates lazily for callable ABI/type interface recovery without initializing them or globalizing their symbols; archive candidates are parsed in-process instead. |
-| `titan._loadlibglobal` | `titanlib.c` / generated shims | internal canonical-path `RTLD_LAZY` + `RTLD_GLOBAL` loader | Maps or promotes a Lua-selected provider in a separate per-state cache and returns the requested logical `luaopen_*` entry. |
+| `titan._loadlib` | `ltitanlib.c` / `driver.lua` | internal `RTLD_LAZY` + `RTLD_LOCAL` loader | Maps DSO candidates lazily for callable ABI/type interface recovery without initializing them or globalizing their symbols; archive candidates are parsed in-process instead. |
+| `titan._loadlibglobal` | `ltitanlib.c` / generated shims | internal canonical-path `RTLD_LAZY` + `RTLD_GLOBAL` loader | Maps or promotes a Lua-selected provider in a separate per-state cache and returns the requested logical `luaopen_*` entry. |
 | `Type.Module.file` | `types.lua`, `driver.lua`, `coder.lua` | exact logical `.so` path for a DSO claim, overwritten after dynamic lookup | Transient selected relative DSO used by generated handle imports; deliberately omitted from serialized interfaces and never populated with an archive path. |
 | `driver.LUA_SOURCE_PATH` | `driver.lua` | `<root>/src/lua-5.5.1` installed; `lua-5.5.1/src` in checkout mode; checkout-only override by `titanc --lua` | Lua internal source/header tree used at compile time. Installed mode rejects the override because `INSTALL_PATHS` supplies its matching `liblua.a` and `libtitan.a`. |
-| `driver.INCLUDE_PATH` | `driver.lua` | `<root>/include` in installed mode | Titan SDK and bundled-libuv headers used by generated C and foreign imports; the non-Lua Titan set is `minicoro.h`, `titan.h`, `titan_longjmp.h`, and `titan/ffi.h`. Generated source-foreign companions are source-build intermediates, not installed SDK headers. |
+| `driver.INCLUDE_PATH` | `driver.lua` | `<root>/include` in installed mode | Titan SDK and bundled-libuv headers used by generated C and foreign imports; the non-Lua Titan set is `minicoro.h`, `titan.h` and `titan/ffi.h`. Generated source-foreign companions are source-build intermediates, not installed SDK headers. |
 | `driver.TITAN_RUNTIME_PATH` / `driver.LIBBACKTRACE_PATH` | `driver.lua` | `titan-runtime/` / `libbacktrace` | Checkout-only runtime source/archive/header and separate libbacktrace locations. |
 | `CC` / `driver.CC` | environment / `driver.lua` | `"cc"` | C compiler command, parsed as shell words and shared with foreign-import probing. |
+| `CLANG_FORMAT` / `driver.CLANG_FORMAT` | environment / `driver.lua` | `"clang-format"` | Formatter command, parsed as shell words. The driver appends its in-place operation, fixed explicit style with include sorting disabled, and generated-source path; Make exports the configured value to every recipe-owned `titanc`. |
 | `driver.CFLAGS` | `driver.lua` | `"--std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls"` | Flags for every compile and link step. |
 | `TITAN_EXTRA_CPPFLAGS` / `driver.EXTRA_CPPFLAGS` | environment / `driver.lua` | empty | Parsed `-I`/`-D` and other preprocessing inputs; used by foreign-import compiler probes and prepended to every Titan/runtime/entrypoint compilation. |
 | `TITAN_EXTRA_CFLAGS` / `driver.EXTRA_CFLAGS` | environment / `driver.lua` | empty | Parsed compilation-only flags, after fixed defaults; never used by final links. |

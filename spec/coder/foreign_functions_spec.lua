@@ -1,5 +1,6 @@
 local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
+local driver = require "titan-compiler.driver"
 local types = require "titan-compiler.types"
 
 local GENERATED_HEADER_BANNER =
@@ -22,6 +23,13 @@ local function read_file(path)
     local contents = assert(file:read("*a"))
     assert(file:close())
     return contents
+end
+
+local function assert_clang_format_fixed_point(path)
+    local before = read_file(path)
+    local ok, err = driver.format_generated_file(path, false)
+    assert.truthy(ok, err)
+    assert.equal(before, read_file(path))
 end
 
 local function cleanup()
@@ -74,6 +82,11 @@ describe("source-defined foreign functions", function()
                 end
 
                 local function hidden(input: integer): integer
+                    do
+                        if input < 0 then raise "negative" end
+                    catch
+                        return 0
+                    end
                     return input + 2
                 end
 
@@ -86,6 +99,8 @@ describe("source-defined foreign functions", function()
             local generated = read_file("test.titan.h")
             assert.equal(GENERATED_HEADER_BANNER,
                 generated:sub(1, #GENERATED_HEADER_BANNER))
+            assert_clang_format_fixed_point("test.c")
+            assert_clang_format_fixed_point("test.titan.h")
             local add = coder._foreign_func_name("test", "add_one")
             local accumulate = coder._foreign_func_name("test", "accumulate")
             assert.truthy(add:find("\\u2133", 1, true))
@@ -147,6 +162,25 @@ describe("source-defined foreign functions", function()
                 holder->index = 1; return 7;
             }
             typedef int (*ffi_callback)(int, int);
+            typedef int (*ffi_unary_callback)(int);
+            typedef void *ffi_void_pointer;
+            static int ffi_old_callback(int value) { return 100 + value; }
+            static int ffi_new_callback(int value) { return 200 + value; }
+            static ffi_unary_callback ffi_get_callback(void) {
+                return ffi_old_callback;
+            }
+            typedef struct ffi_callback_holder {
+                ffi_unary_callback callback;
+            } ffi_callback_holder;
+            static ffi_callback_holder ffi_callback_holder_new(void) {
+                ffi_callback_holder holder;
+                holder.callback = ffi_old_callback;
+                return holder;
+            }
+            static int ffi_retarget_callback(ffi_callback_holder *holder) {
+                holder->callback = ffi_new_callback;
+                return 7;
+            }
             static int ffi_literals(_Bool flag, double number,
                                     const char *text) {
                 return flag && number == 2.5 && text[0] == 'x';
@@ -192,6 +226,18 @@ describe("source-defined foreign functions", function()
                     return c.ffi_slot(0) * 10 + c.ffi_slot(1)
                 end
 
+                foreign function prepared_indirect_callee(): c.ffi_int
+                    local holder = c.ffi_callback_holder_new()
+                    return holder.callback(c.ffi_retarget_callback(holder))
+                end
+
+                foreign function roundtrip_pointer(
+                    pointer: c.ffi_void_pointer
+                ): c.ffi_int
+                    local callback = pointer as c.ffi_unary_callback
+                    return callback(1)
+                end
+
                 foreign function named(
                     left: c.ffi_int,
                     right: c.ffi_int
@@ -228,11 +274,50 @@ describe("source-defined foreign functions", function()
                 function forms(): integer
                     return raw_forms(named) as integer
                 end
+
+                function indirect_callee(): integer
+                    return prepared_indirect_callee() as integer
+                end
+
+                function roundtrip(): integer
+                    local pointer =
+                        c.ffi_get_callback() as c.ffi_void_pointer
+                    return roundtrip_pointer(pointer) as integer
+                end
             ]], [[
                 assert(test.exercise() == 31)
                 assert(test.sequencing() == 123463)
                 assert(test.prepared_targets() == 970)
                 assert(test.forms() == 34)
+                assert(test.indirect_callee() == 107)
+                assert(test.roundtrip() == 101)
+            ]])
+        end)
+    end)
+
+    it("runs foreign floating numeric loops in both directions", function()
+        with_header([[
+            typedef double ffi_double;
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                foreign function float_loops(): c.ffi_double
+                    local total: c.ffi_double = 0.0
+                    for up = 0.0, 1.0, 0.25 do
+                        total = total + up
+                    end
+                    for down = 1.0, 0.0, -0.25 do
+                        total = total + down
+                    end
+                    return total
+                end
+
+                function result(): float
+                    return float_loops() as float
+                end
+            ]], [[
+                assert(test.result() == 5.0)
             ]])
         end)
     end)

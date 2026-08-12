@@ -248,6 +248,11 @@ main rule as generated C and object files. Contributors never own headers.
 6. all foreign prototypes in declaration order; and
 7. all eligible inline bodies, also in declaration order.
 
+Before any generated companion is consumed or published, the driver runs the
+configured `clang-format` with Titan's explicit style and include sorting
+disabled. The formatter therefore preserves the intentional direct,
+supplemental, and generated-source include sequence above.
+
 Putting every prototype before every inline body supports calls among the
 module's foreign declarations. Include lines are normalized and deduplicated.
 A generated module C file includes its own companion as the complete checked
@@ -268,10 +273,10 @@ manufacture a canonical out-of-line identity.
 Recursive source checking happens before the final physical output graph is
 planned. When a checked dependency contains foreign declarations,
 `defaultloader` therefore renders a sibling temporary header such as the final
-path plus `.check.tmp.<unique>`. It returns that path in the trusted source
-loader result. A consumer can immediately process it in the exact header/probe
-context described above, even when final object compilation will sort the
-consumer before the producer.
+path plus `.check.tmp.<unique>`, formats it in place, and only then returns
+that path in the trusted source loader result. A consumer can immediately
+process the formatted header in the exact header/probe context described above,
+even when final object compilation will sort the consumer before the producer.
 
 These files belong to the resolver context. `close_resolver_context` removes
 every recorded temporary and closes the shared C-probe service on ordinary,
@@ -293,9 +298,11 @@ A required path may be replaced only when its first bytes are
 `driver.FOREIGN_HEADER_MARKER`; a user file, symlink, directory, or other
 unowned object is refused. For a source module with no remaining foreign
 declaration, a banner-owned old companion is removed and an unowned same path is
-left alone. All final companions are written before any source object is
-compiled, and `driver.compile` retains a single-module fallback for direct
-programmatic callers.
+left alone. Each final companion is written to a sibling stage, formatted, and
+renamed over its owned destination only after formatting succeeds. All final
+companions are published before any source object is compiled, and
+`driver.compile` retains a single-module fallback for direct programmatic
+callers.
 
 The companion is a source-build intermediate. Provider publication validates
 and commits the DSO, archive, shims, dSYM, and standard test-support source—not
@@ -385,9 +392,13 @@ extent
 max(sizeof(T), offsetof(T, field) + count * sizeof(E))
 ```
 
-and zero the entire extent. The automatic form uses a union containing `T` for
-alignment and an unsigned-byte member for the complete constant extent. The
-owned form evaluates the count once, rejects a negative value, checks
+and zero the entire extent. Before recording `automatic_fam`, the checker asks
+the configured C probe context to prove
+`count <= (((size_t)-1 - offsetof(T, field)) / sizeof(E))`; this keeps the
+literal bounds provenance and generated backing extent identical without host
+layout guesses. The automatic form uses a union containing `T` for alignment
+and an unsigned-byte member for the complete constant extent. The owned form
+evaluates the count once, rejects a negative value, checks
 addition/multiplication overflow, allocates exactly that many payload bytes,
 and stores the logical count in one private integer user value. `Udata.len`
 remains the byte extent; padding is never mistaken for a logical element count.
@@ -434,7 +445,7 @@ callback boundaries:
 
 * `titan.coroutine` defines `coro_entry_trampoline` in
   `titan/coroutine.titan` and assigns it directly to `mco_desc.func`.
-  `titan-runtime/titan_coro.c` now owns only the one `MINICORO_IMPL`
+  `titan-runtime/minicoro.c` now owns only the one `MINICORO_IMPL`
   translation unit and the fixed raw-Lua tag comparator.
 * Six `titan.uv` contributors (`file`, `os`, `process`, `runtime`, `task`, and
   `tcp`) define thirteen exact callbacks: filesystem, signal, process exit,
@@ -459,10 +470,10 @@ filesystem path deliberately passes only its owner; its Titan handler reads the
 result through `uv_fs_get_result`. No event-kind dispatcher, registry callback
 table, or compatibility shim replaces the deleted C files.
 
-The runtime SDK archive consequently has exactly `titan.o` and `titan_coro.o`.
+The runtime SDK archive consequently has exactly `titan.o` and `minicoro.o`.
 Its installed namespaced header set is only `titan/ffi.h`, alongside top-level
-`minicoro.h`, `titan.h`, and `titan_longjmp.h` (and the separately governed
-bundled libuv headers). The standard provider payload is `titanlib.o`, private
+`minicoro.h` and `titan.h` (and the separately governed
+bundled libuv headers). The standard provider payload is `ltitanlib.o`, private
 LPegLabel, the selected libuv payload, private llhttp, and the selected OpenSSL
 payload; it has no `titan_uv.o`, `titan/coro.h`, `titan/uv.h`, or
 `titan_httpshim.o`.

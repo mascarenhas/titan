@@ -123,10 +123,10 @@ end
 -- Emit a standalone C `#line` directive pointing at `node`'s .titan source
 -- location, so DWARF and libbacktrace symbolization attribute the *following*
 -- generated C to the original .titan file and line rather than the generated
--- .c. Returned as its own line with a
--- trailing newline so it never fuses with adjacent code; the `#` may be
--- indented (reindent_c re-indents it) since leading whitespace before a
--- directive is legal C. Nodes without a `loc` (synthesized AST) emit nothing.
+-- .c. Returned as its own line with a trailing newline so it never fuses
+-- with adjacent code; clang-format normalizes directive indentation before the
+-- driver invokes the C compiler. Nodes without a `loc` (synthesized AST) emit
+-- nothing.
 local function emitline(node)
     if not coder._emit_line_directives then return "" end
     local loc = node and node.loc
@@ -3041,7 +3041,7 @@ local function unreachable_return(rettype, block)
     -- bare `return`, so zero a temp first and return it.
     return render([[
         /* unreachable: no Titan path above falls through; this satisfies the C
-        ** control-flow check */
+         * control-flow check */
         {
             $DECL = $INIT;
             L->top.p = _base;
@@ -5477,9 +5477,9 @@ function coder._emit_interface_adapter(
     if ctx.nslots > 0 then
         root_preamble = render([[
             /*
-            ** Rooted scratch occupies NSLOTS entries. Identity setup later
-            ** uses transient API slots, so reserve them without adding them
-            ** to the GC-visible rooted range.
+             * Rooted scratch occupies NSLOTS entries. Identity setup later
+             * uses transient API slots, so reserve them without adding them
+             * to the GC-visible rooted range.
             */
             titan_ensure_stack(L, $NRESERVE);
             StkId _base = L->top.p;
@@ -11288,27 +11288,27 @@ local function boundary_recover_open(ctx, tag, d_err, d_tb)
         L->nCcalls = _oldnC_$T;
         if (_lj_$T.status != LUA_OK) {
             /* raised; errorhandler already filled the trace slot. Mirror
-            ** luaD_pcall's recovery: restore ci/allowhook, close any to-be-
-            ** closed vars from called Lua, materialize the error object. */
+             * luaD_pcall's recovery: restore ci/allowhook, close any to-be-
+             * closed vars from called Lua, materialize the error object. */
             L->ci = _oldci_$T;
             L->allowhook = _oldah_$T;
             /* A longjmp can skip an inner Titan Lua-entry wrapper before that
-            ** wrapper restores L->errfunc. Put the boundary-entry message
-            ** handler back before closing Lua frames, so any __close error is
-            ** handled by a valid Titan errorhandler instead of a stale stack
-            ** slot from the skipped inner entry. */
+             * wrapper restores L->errfunc. Put the boundary-entry message
+             * handler back before closing Lua frames, so any __close error is
+             * handled by a valid Titan errorhandler instead of a stale stack
+             * slot from the skipped inner entry. */
             L->errfunc = _olderrfunc_$T;
             _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _lj_$T.status);
             luaD_seterrorobj(L, _lj_$T.status, restorestack(L, _oldtop_$T));
             if (TITAN_UNLIKELY(!lua_checkstack(L, 4)))
                 luaD_throw(L, LUA_ERRMEM);
             /* a value-call or another stack-growing operation inside the protected
-            ** region may have reallocated the stack; recompute _base before
-            ** touching any reserved slot */
+             * region may have reallocated the stack; recompute _base before
+             * touching any reserved slot */
             _base = restorestack(L, _base_off);
             /* save the error object into its anchored slot, then drop it from the
-            ** top; the registry snapshot/clear below pushes within the
-            ** lua_checkstack(4) margin established above. */
+             * top; the registry snapshot/clear below pushes within the
+             * lua_checkstack(4) margin established above. */
             setobj2s(L, $ERRSTACK, s2v(L->top.p - 1));
             L->top.p = restorestack(L, _oldtop_$T);
             /* snapshot registry[TITAN_BACKTRACE_KEY] into the traceback slot */
@@ -11321,7 +11321,7 @@ local function boundary_recover_open(ctx, tag, d_err, d_tb)
             setobj2s(L, $TBSTACK, s2v(L->top.p - 1));
             L->top.p--;
             /* clear slot + pin so a fresh error raised later is captured anew
-            ** (a bare re-raise re-pins the saved trace) */
+             * (a bare re-raise re-pins the saved trace) */
             lua_pushliteral(L, TITAN_BACKTRACE_KEY);
             lua_pushnil(L);
             lua_rawset(L, LUA_REGISTRYINDEX);
@@ -11329,9 +11329,9 @@ local function boundary_recover_open(ctx, tag, d_err, d_tb)
             lua_pushnil(L);
             lua_rawset(L, LUA_REGISTRYINDEX);
             /* re-establish the function's steady-state reserved top
-            ** (`_base + nslots`) so any reserved slots used in the recovery sit
-            ** below L->top.p and are GC-scanned. The literal nslots is patched in
-            ** by codefuncdec/codelambdadec once the high-water mark is known. */
+             * (`_base + nslots`) so any reserved slots used in the recovery sit
+             * below L->top.p and are GC-scanned. The literal nslots is patched in
+             * by codefuncdec/codelambdadec once the high-water mark is known. */
             L->top.p = _base + TITAN_RESERVED_NSLOTS;
             $SPILLRELOAD
     ]], {
@@ -11552,7 +11552,7 @@ local function codetry(ctx, node)
             $FINLABEL
             $CFINALLY
             /* dispatch the pending action (if-chain — never a C switch, which
-            ** would capture the PA_BREAK arm's `break`) */
+             * would capture the PA_BREAK arm's `break`) */
             $DISPATCH
         ]]
     else
@@ -11570,7 +11570,7 @@ local function codetry(ctx, node)
                 $FINLABEL
                 $CFINALLY
                 /* dispatch the pending action (if-chain — never a C switch, which
-                ** would capture the PA_BREAK arm's `break`) */
+                 * would capture the PA_BREAK arm's `break`) */
                 $DISPATCH
             }
         ]]
@@ -12649,9 +12649,9 @@ local function codearray(ctx, node, target)
                 $INITARRAY
                 $PREFIX_STORES
                 /* zero-init: a boolean store sets only the tag (booleans carry
-                ** no payload), but obj2arr copies value_ too — leaving it
-                ** undefined would warn under -Wmaybe-uninitialized / break
-                ** -Werror. */
+                 * no payload), but obj2arr copies value_ too — leaving it
+                 * undefined would warn under -Wmaybe-uninitialized / break
+                 * -Werror. */
                 TValue $VSLOT = {0};
                 for (int _vj = 0; _vj < _vacount; _vj++) {
                     $SETWRAPPED
@@ -15518,7 +15518,8 @@ function coder._foreign_raw_call(ctx, node)
         callee = coder._foreign_reference_name(node._direct_foreign_reference)
     elseif node._c_pointer_call then
         signature = node._c_pointer_call
-        callee_stats, callee = coder._foreign_raw_exp(ctx, node.exp)
+        callee_stats, callee = coder._foreign_freeze(
+            ctx, node.exp, nil, "callee")
     else
         error("foreign function body reached a non-C call")
     end
@@ -18458,8 +18459,18 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     local foreign_header = coder.generate_foreign_header(
         modname, ast, tlcontext)
     coder._ffi_include_collector = nil
-    return preamble .. "\n\n" .. table.concat(code, "\n\n"),
-        direct_native_modules, foreign_header
+    local source = preamble .. "\n\n" .. table.concat(code, "\n\n")
+    -- A `#line` directive applies its number to the immediately following
+    -- physical source line. Template substitutions can contribute blank
+    -- lines after a standalone directive; remove every such semantic line
+    -- before clang-format so native frames retain the exact Titan location. The
+    -- formatter preserves this spelling, so one pass remains a fixed point.
+    local removed
+    repeat
+        source, removed = source:gsub(
+            "([ \t]*#line[^\n]*\n)[ \t]*\n", "%1")
+    until removed == 0
+    return source, direct_native_modules, foreign_header
 end
 
 return coder

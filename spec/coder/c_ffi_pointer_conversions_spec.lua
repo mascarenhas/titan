@@ -335,15 +335,16 @@ describe("unsafe C object-pointer conversion code generation", function()
                 end
             ]]
             local csrc = h.compile_and_read_c(source)
+            local normalized_c = csrc:gsub("%s+", " ")
             assert.matches(
-                "ffi_write_unsafe_gc_value%(L,.-"
-                    .. "ffi_unrelated_value %*.-"
+                "ffi_write_unsafe_gc_value%(%s*L,%s*.-"
+                    .. "ffi_unrelated_value%s*%*.-"
                     .. "_local_raw_%d+",
-                csrc)
+                normalized_c)
             assert.matches(
                 "TValue _titan_v = _local_raw_%d+; "
                     .. "setobj2t",
-                csrc)
+                normalized_c)
 
             local ok, err = h.call("test", [[
                 assert(test.survives_unsafe_gc_write() == 1)

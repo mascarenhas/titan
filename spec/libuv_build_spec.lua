@@ -793,7 +793,7 @@ describe("libuv Makefile configuration", function()
             }) do
                 assert.falsy(makefile:find(retired, 1, true), retired)
             end
-            assert.same({ "$(RUNTIME_O)", "$(CORO_O)" },
+            assert.same({ "$(RUNTIME_O)", "$(MINICORO_O)" },
                 makefile_words("TITAN_RUNTIME_OBJECTS"))
 
             local logical_object = "titan/uv/uv.o"
@@ -865,7 +865,7 @@ describe("libuv Makefile configuration", function()
             assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
             assert.same(STDLIB_SHIMS, makefile_words("STDLIB_SHIMS"))
             assert.same({
-                "$(TITANLIB_O)", "$(LPEGLABEL_ARCHIVE)",
+                "$(LTITANLIB_O)", "$(LPEGLABEL_ARCHIVE)",
                 "$(LIBUV_EXTRA_OBJECTS)", "$(LLHTTP_ARCHIVE)",
                 "$(OPENSSL_EXTRA_OBJECTS)",
             }, makefile_words("STDLIB_EXTRA_OBJECTS"))
@@ -1515,7 +1515,7 @@ describe("libuv Makefile configuration", function()
             local makefile = file:read("*a")
             file:close()
             local first = assert(makefile:find(
-                "$(TITAN_BOOTSTRAP_SO): $(TITANLIB_O)", 1, true))
+                "$(TITAN_BOOTSTRAP_SO): $(LTITANLIB_O)", 1, true))
             local last = assert(makefile:find(
                 "\n\n# The active ABI path", first, true))
             local rule = makefile:sub(first, last - 1)
@@ -1524,7 +1524,7 @@ describe("libuv Makefile configuration", function()
                 1, true), rule)
             for _, forbidden in ipairs({
                 "$(TITAN_RUNTIME_LIB)", "$(LIBBT_LIB)", "$(RUNTIME_O)",
-                "$(CORO_O)", "$(UV_O)", "$(LPEGLABEL_ARCHIVE)",
+                "$(MINICORO_O)", "$(UV_O)", "$(LPEGLABEL_ARCHIVE)",
             }) do
                 assert.falsy(rule:find(forbidden, 1, true),
                     forbidden .. " in:\n" .. rule)
@@ -1543,9 +1543,9 @@ describe("libuv Makefile configuration", function()
             local normalized = output:gsub("%s+", " ")
             assert.truthy(normalized:find(
                 '-bundle -undefined dynamic_lookup -o ' ..
-                '"$tmp" "titan-runtime/titanlib.o"', 1, true), normalized)
+                '"$tmp" "titan-runtime/ltitanlib.o"', 1, true), normalized)
             assert.falsy(normalized:find(
-                '-shared -o "$tmp" "titan-runtime/titanlib.o"',
+                '-shared -o "$tmp" "titan-runtime/ltitanlib.o"',
                 1, true), normalized)
         end)
 
@@ -1558,14 +1558,14 @@ describe("libuv Makefile configuration", function()
             local build_log = root .. "/archive-builds"
             local objects = {
                 root .. "/titan.o",
-                root .. "/titan_coro.o",
+                root .. "/minicoro.o",
             }
             for _, object in ipairs(objects) do
                 write_file(object, "isolated fake-archive fixture\n")
             end
             write_file(fake_ar, string.format([[#!/bin/sh
 if test "$1" = t; then
-  printf '%%s\n' '__.SYMDEF SORTED' titan.o titan_coro.o
+  printf '%%s\n' '__.SYMDEF SORTED' titan.o minicoro.o
   exit 0
 fi
 if test "$1" = rcs; then
@@ -1742,7 +1742,7 @@ exit 64
                     "./titanc " .. table.concat(STDLIB_ROOTS, " "), 1, true),
                 command)
             assert.equal(1, count_plain(command,
-                "-X titan-runtime/titanlib.o " ..
+                "-X titan-runtime/ltitanlib.o " ..
                 "lpeglabel-build/libtitan-lpeglabel.a " ..
                 "libuv-build/libuv.a " .. HTTP_SSL_BUNDLED_PAYLOAD), command)
             assert.falsy(command:find("titan_uv.o", 1, true), command)
@@ -1772,7 +1772,7 @@ exit 64
                     "./titanc " .. table.concat(STDLIB_ROOTS, " "), 1, true),
                 command)
             assert.equal(1, count_plain(command,
-                "-X titan-runtime/titanlib.o " ..
+                "-X titan-runtime/ltitanlib.o " ..
                 "lpeglabel-build/libtitan-lpeglabel.a " ..
                 HTTP_SSL_BUNDLED_PAYLOAD), command)
             assert.falsy(command:find("titan_uv.o", 1, true), command)
@@ -1793,7 +1793,7 @@ exit 64
                 tostring(code) .. ")")
             command = stdlib_command(output)
             assert.equal(1, count_plain(command,
-                    "-X titan-runtime/titanlib.o " ..
+                    "-X titan-runtime/ltitanlib.o " ..
                     "lpeglabel-build/libtitan-lpeglabel.a " ..
                     "libuv-build/libuv.a " .. HTTP_SSL_BUNDLED_PAYLOAD),
                 command)
@@ -1827,7 +1827,7 @@ esac
                 tostring(code) .. ")")
             local command = stdlib_command(output)
             assert.equal(1, count_plain(command,
-                "-X titan-runtime/titanlib.o " ..
+                "-X titan-runtime/ltitanlib.o " ..
                 "lpeglabel-build/libtitan-lpeglabel.a " ..
                 "libuv-build/libuv.a " .. HTTP_SSL_SYSTEM_PAYLOAD), command)
             assert.falsy(command:find("openssl-build/libssl.a", 1, true),
@@ -1882,7 +1882,7 @@ esac
                 assert.equal(1, count_plain(command,
                     "./titanc " .. table.concat(STDLIB_ROOTS, " ")), command)
                 assert.truthy(command:find(
-                    "-X titan-runtime/titanlib.o " ..
+                    "-X titan-runtime/ltitanlib.o " ..
                     "lpeglabel-build/libtitan-lpeglabel.a " ..
                     "libuv-build/libuv.a " .. HTTP_SSL_BUNDLED_PAYLOAD,
                     1, true), command)
@@ -2204,7 +2204,7 @@ exit 73
                 "STDLIB_STATIC_ARCHIVE := " .. STDLIB_STATIC_ARCHIVE,
                 "STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) " ..
                 "$(STDLIB_STATIC_ARCHIVE)",
-                "STDLIB_EXTRA_OBJECTS := $(TITANLIB_O) " ..
+                "STDLIB_EXTRA_OBJECTS := $(LTITANLIB_O) " ..
                 "$(LPEGLABEL_ARCHIVE)",
                 "STDLIB_NATIVE_IDENTITY_PREREQS := $(LPEGLABEL_ARCHIVE)",
                 "TITAN_COMPILER_LUA := " ..
@@ -2219,9 +2219,11 @@ exit 73
                 "$(STDLIB_EMBEDDED_FORMAT_INPUTS)",
                 "AR=$(call make_shell_quote,$(AR))",
                 "RANLIB=$(call make_shell_quote,$(RANLIB))",
+                "CLANG_FORMAT ?= clang-format",
                 "TITAN_NO_LINE_DIRECTIVES ?=",
-                "export TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_CFLAGS " ..
-                "TITAN_EXTRA_LDFLAGS \\\n\tTITAN_NO_LINE_DIRECTIVES",
+                "export CLANG_FORMAT TITAN_EXTRA_CPPFLAGS " ..
+                "TITAN_EXTRA_CFLAGS \\\n\t" ..
+                "TITAN_EXTRA_LDFLAGS TITAN_NO_LINE_DIRECTIVES",
                 "TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)",
                 "for output in $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS)",
                 "STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)",
@@ -2265,9 +2267,13 @@ exit 73
                 stdlib_config_start, true))
             local stdlib_config = makefile:sub(
                 stdlib_config_start, stdlib_config_end - 1)
-            assert.truthy(stdlib_config:find(
+            for _, contract in ipairs({
+                "CLANG_FORMAT=$(CLANG_FORMAT)",
                 "TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)",
-                1, true), stdlib_config)
+            }) do
+                assert.truthy(stdlib_config:find(contract, 1, true),
+                    stdlib_config)
+            end
             local rock_post_install_start = assert(makefile:find(
                 "rock-post-install:", 1, true))
             local rock_post_install_end = assert(makefile:find(
@@ -2738,12 +2744,13 @@ exit 73
                 "Canary source-rock installation with system libuv and OpenSSL",
                 "LIBUV_MODE=system OPENSSL_MODE=system",
                 "OPENSSL_MODE=system",
-                "brew install cmake libuv openssl@3 pkgconf",
+                "brew install clang-format cmake libuv openssl@3 pkgconf",
                 "test_ssl_http_fresh_process_sanitizer_composition$",
                 "libssl-dev", "perl",
             }) do
                 assert.truthy(workflow:find(contract, 1, true), contract)
             end
+            assert.equal(4, count_literal(workflow, "clang-format"), workflow)
             assert.equal(2, select(2, workflow:gsub(
                 'TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE=' ..
                 '"%$GITHUB_WORKSPACE/libuv%-build/libuv[.]a"', "")))

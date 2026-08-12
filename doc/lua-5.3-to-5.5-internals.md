@@ -193,8 +193,8 @@ The raw access API changed calling convention entirely:
 The compiler itself is written in Lua and now runs on a Lua 5.5 host:
 
 * **For-loop control variables are read-only** (`<const>`) in 5.5.
-  Assigning to one is a compile error. Two places in the compiler did
-  this (`c-parser/cpp.lua`, `titan-compiler/pretty.lua`).
+  Assigning to one is a compile error. This affected `c-parser/cpp.lua` and the
+  former generated-C indentation pass, now replaced by `clang-format`.
 * `global` is a reserved word in 5.5 (checked: no identifier in the
   compiler or in serialized module types uses it in a breaking position;
   `types.serialize` emits constructor calls with quoted strings, not

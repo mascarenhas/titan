@@ -208,7 +208,7 @@ There is no coroutine shim header. `titan/coroutine.titan` imports
 `minicoro.h` directly, reads the `mco_coro` fields it needs, constructs the
 owner userdata and typed handle, calls the storage/control APIs directly, and
 defines the exact `foreign function coro_entry_trampoline` assigned to
-`mco_desc.func`. The reduced `titan_coro.c` only compiles `MINICORO_IMPL` and a
+`mco_desc.func`. The reduced `minicoro.c` only compiles `MINICORO_IMPL` and a
 translation-unit-local fixed tag comparator. The owner-userdata slot count
 remains a private Titan module variable.
 
@@ -595,7 +595,7 @@ The minicoro extension should remain unaware of Lua and Titan values. The
 Titan C shim supplies a comparator equivalent to:
 
 ```c
-static int titan_coro_tag_equal(void *t1, void *t2) {
+static int minicoro_tag_equal(void *t1, void *t2) {
   return luaV_equalobj(NULL, (const TValue *)t1, (const TValue *)t2);
 }
 ```
@@ -638,7 +638,7 @@ The rockspec and Makefile make `luarocks make` and `make test` build all eightee
 logical standard modules in paired `titan.so`/`titan.a` providers plus
 generated shims, together with the shared runtime archive containing the
 coroutine helper C object and vendored minicoro implementation. A final native
-link extracts `titan_coro.o` from the runtime archive because
+link extracts `minicoro.o` from the runtime archive because
 `titan.coroutine` references it.
 
 Avoid semantic mutable process-global state in runtime or generated code. The

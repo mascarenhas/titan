@@ -46,6 +46,11 @@ local declarations = [[
         unsigned char bytes[];
     } ffi_flexible;
 
+    typedef struct ffi_wide_flexible {
+        int tag;
+        int items[];
+    } ffi_wide_flexible;
+
     static int ffi_read(const ffi_item *item) {
         return item->number;
     }
@@ -513,6 +518,27 @@ describe("source-written owned C types", function()
             assert.same(automatic,
                 automatic_length._c_fam_access.root)
             assert.equal("owned", owner_length._c_fam_access.kind)
+        end)
+    end)
+
+    it("rejects overflowing automatic flexible-array extents", function()
+        with_header(declarations, function(header)
+            local ok, err = check_with_header(header, [[
+                local function bad()
+                    local item = c.ffi_wide_flexible.new(4611686018427387904)
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("flexible%-array field 'ffi_wide_flexible%.items'", err)
+            assert.match("count 4611686018427387904 exceeds SIZE_MAX", err)
+
+            ok, err = check_with_header(header, [[
+                local function keep_owned()
+                    local item: owned *c.ffi_flexible =
+                        c.ffi_flexible.new(4611686018427387904)
+                end
+            ]])
+            assert.truthy(ok, err)
         end)
     end)
 

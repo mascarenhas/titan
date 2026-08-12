@@ -110,7 +110,8 @@ local function compiler_argv(workspace, source_root, ...)
         "TITAN_PATH=",
     }
     if PREFIX then
-        table.insert(argv, "PATH=" .. PREFIX .. "/bin:/usr/bin:/bin")
+        table.insert(argv, "PATH=" .. PREFIX .. "/bin:" ..
+            (os.getenv("PATH") or "/usr/bin:/bin"))
     end
 
     -- The opt-in is only for testing an in-progress checkout before the
@@ -2357,7 +2358,7 @@ int luaopen_probe_registry(lua_State *L) {
 
         local ok, output, why, code = compile(
             workspace, source_root, "titan.one", "titan.two",
-            "-X", REPO .. "/titan-runtime/titanlib.o",
+            "-X", REPO .. "/titan-runtime/ltitanlib.o",
             workspace .. "/registry-probe.o")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")

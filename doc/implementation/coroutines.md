@@ -6,7 +6,7 @@ The `coroutine` standard module is split deliberately:
   strings, result-code checks, `resume` versus `error`, the
   success/error payload convention, Lua-thread/userdata setup, traceback
   handoff, and the transfer choreography around minicoro.
-* `titan-runtime/titan_coro.c` owns only the pieces that still need C:
+* `titan-runtime/minicoro.c` owns only the pieces that still need C:
   compiling the single-file minicoro implementation and the Lua raw-equality
   tag comparator. The exact `void (*)(mco_coro *)` entry is now the
   source-defined `foreign function coro_entry_trampoline` in
@@ -283,7 +283,7 @@ The callback ABI itself no longer requires hand-written C:
 `coro_entry_trampoline` uses the restricted
 [`foreign function`](foreign-functions.md) body and an exact
 `foreign (*mco.mco_coro) -> ()`-compatible signature. The two pieces that remain
-in `titan_coro.c` are the ones that genuinely require a single implementation
+in `minicoro.c` are the ones that genuinely require a single implementation
 translation unit or a raw Lua-internal operation:
 
 * defining `MINICORO_IMPL` exactly once while forcing Titan's minicoro
@@ -312,7 +312,7 @@ int mco_is_yieldable(mco_coro *co, void *tag);
 
 All resumes and yields are tagged. Generic minicoro builds retain the
 implementation-level `mco_set_tag_comparator` setting. Titan instead compiles
-its image with `MCO_TAG_COMPARATOR=titan_coro_tag_equal`, making the comparator
+its image with `MCO_TAG_COMPARATOR=minicoro_tag_equal`, making the comparator
 a fixed implementation constant rather than mutable global state or a
 per-call argument. Minicoro stores tags as opaque `void *`; it knows nothing
 about Lua. Titan passes pointers to in-flight `TValue`s, and the C comparator

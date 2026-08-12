@@ -1,5 +1,6 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
+local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
 
 local REPO = lfs.currentdir()
@@ -94,7 +95,8 @@ local function compiler_argv(workspace, source_root, ...)
     table.insert(argv, "TITAN_PATH_0_23=" .. workspace)
     table.insert(argv, "TITAN_PATH=")
     if PREFIX then
-        table.insert(argv, "PATH=" .. PREFIX .. "/bin:/usr/bin:/bin")
+        table.insert(argv, "PATH=" .. PREFIX .. "/bin:" ..
+            (os.getenv("PATH") or "/usr/bin:/bin"))
     end
 
     if installed then
@@ -313,8 +315,13 @@ end
 
         assert.equal("file", lfs.attributes(workspace .. "/application",
             "mode"))
-        assert.equal("file", lfs.attributes(
-            workspace .. "/application__entrypoint.c", "mode"))
+        local entrypoint = workspace .. "/application__entrypoint.c"
+        assert.equal("file", lfs.attributes(entrypoint, "mode"))
+        local before_format = read_file(entrypoint)
+        local formatted, format_err =
+            driver.format_generated_file(entrypoint, false)
+        assert.truthy(formatted, format_err)
+        assert.equal(before_format, read_file(entrypoint))
         assert.same({}, collect_files(workspace, ".so"))
         assert.same({}, collect_files(workspace, ".lua"))
 

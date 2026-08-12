@@ -78,7 +78,8 @@ local function compiler_argv(workspace, source_root, ...)
         "TITAN_PATH=",
     }
     if PREFIX then
-        table.insert(argv, "PATH=" .. PREFIX .. "/bin:/usr/bin:/bin")
+        table.insert(argv, "PATH=" .. PREFIX .. "/bin:" ..
+            (os.getenv("PATH") or "/usr/bin:/bin"))
     end
 
     local installed = not USE_CHECKOUT_COMPILER and
@@ -175,8 +176,8 @@ end
         assert.truthy(facade_c:find(
             'loadlib(L, "dynamic/owner.so")', 1, true), facade_c)
         assert.truthy(facade_c:find(
-            'loadsym(L, dynamic_owner_handle, "dynamic_owner_Box_make_titanstatic")',
-            1, true), facade_c)
+            'loadsym%s*%(%s*L%s*,%s*dynamic_owner_handle%s*,%s*' ..
+                '"dynamic_owner_Box_make_titanstatic"%s*%)'), facade_c)
         local facade_archive = workspace .. "/dynamic/facade.a"
         local facade, facade_err =
             staticmetadata.scan_archive(facade_archive, metadata_options())

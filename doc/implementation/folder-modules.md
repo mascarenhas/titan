@@ -322,7 +322,7 @@ titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.
   titan.ssl titan.url titan.http titan.os \
   titan.peg titan.string \
   titan.math titan.lua titan.iter titan.gc titan.test \
-  -X titan-runtime/titanlib.o lpeglabel-build/libtitan-lpeglabel.a \
+  -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
      openssl-build/libssl.a openssl-build/libcrypto.a  # bundled modes
 ```

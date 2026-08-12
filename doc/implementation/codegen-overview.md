@@ -24,9 +24,9 @@ checker may visit declarations in dependency stages, but it never rearranges
 this list. The coder therefore still observes the logical source order that
 defines interface members, module slots, module-variable initialization, and
 emission; it has no source-unit node or contributor context. The driver
-(`driver.compile`) runs the result through `pretty.reindent_c`, writes the
-`.c` file next to the canonical flat source or folder main, and invokes the
-system C compiler
+(`driver.compile`) writes the result next to the canonical flat source or
+folder main, invokes the configured `clang-format` in place, and then invokes
+the system C compiler
 ([driver and toolchain](driver.md)). One consequence of the checker's
 rewriting matters constantly here: every representation-changing implicit
 conversion is an annotated `Ast.ExpCast`, same-representation and open
@@ -47,7 +47,7 @@ single [multi-module provider](multi-module-libraries.md). The coder still runs
 once per logical module; it never sees a provider AST or emits aggregate
 metadata.
 
-## No C AST: templates, `util.render`, and `pretty.lua`
+## No C AST: templates, `util.render`, and `clang-format`
 
 The coder builds no intermediate representation of the C program. Each
 code-generation function returns C source as a Lua string, produced by
@@ -61,18 +61,17 @@ passed. The coder passes it in exactly one place, `codethrow`, whose
 `luaL_error` templates deliberately leave placeholders such as `$FILE`,
 `$LINE` and `$COL` for an enclosing render to fill.
 
-Because there is no C AST, there is also no real C pretty-printer.
-`pretty.reindent_c` (`pretty.lua`) is a purely *heuristic* reindenter: it
-strips each line, dedents before a line that starts with `}` or `)`,
-indents after a line that ends with `{` or `(` (four spaces per level,
-indent clamped at zero so damage stays local to one function), and
-collapses runs of blank lines. For those heuristics to work, every
-template must follow the style contract in `pretty.lua`'s header comment:
-K&R indentation; multi-line statements must use braces; prefer `/**/`
-comments over `//`; never an inline comment right after a `{`; comments
-must not span lines, contain user-generated text, or contain C code.
-Violations only hurt readability of the generated `.c` — but readable
-generated code is a deliberate feature, so treat the contract as binding.
+Because there is no C AST, template output is raw but must already be valid C.
+The driver runs the configured `CLANG_FORMAT` command (default `clang-format`)
+on each generated `.c` and staged `.titan.h` before native compilation,
+consumer probing, or header publication. It passes an explicit LLVM-based
+four-space style with include sorting disabled; it never inherits an arbitrary
+project's `.clang-format`.
+Disabling sorting is semantic preservation rather than aesthetics, because the
+generator deliberately orders direct, supplemental, and source-foreign
+includes. A formatter failure is a compiler error; a public header remains
+untouched, while a generated `.c` remains available as a diagnostic artifact.
+See [Driver and toolchain](driver.md#clang-format-generated-source-formatting).
 
 ## Anatomy of a generated translation unit
 

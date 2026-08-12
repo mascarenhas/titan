@@ -20,7 +20,16 @@ distinct ownership even in the current single-directory layout:
 
 The supported developer install and CI configure LuaRocks' sole system tree so
 `ROCKS_TREE == PREFIX`. That equality is the current deployment policy, not an
-inherent requirement of what either name owns. For example:
+inherent requirement of what either name owns.
+
+Supported Linux and macOS builds require `clang-format` on `PATH`; install the
+`clang-format` package on Debian/Ubuntu, `clang-tools-extra` on Fedora, or run
+`brew install clang-format` on macOS. Titan runs it on every compiler-generated
+`.c` and `.titan.h` file before native compilation or publication. Set
+`CLANG_FORMAT` to select a different compatible command; the Makefile exports
+that setting to every `titanc` invocation.
+
+For example:
 
 ```sh
 export PREFIX="$HOME/.local/titan/my-project"
@@ -100,9 +109,9 @@ The installed files used to compile Titan code include:
 | --- | --- |
 | `$PREFIX/src/lua-5.5.1/`, `$PREFIX/include/{lua,lauxlib,lualib,luaconf}.h`, `$PREFIX/lib/liblua.a` | The prefix-configured Lua sources, public configuration/headers, and static library owned by the Lua installation |
 | `$ROCKS_TREE/src/lua-5.5.1/`, `$ROCKS_TREE/lib/liblua.a` | Matching Lua source and archive copies staged as part of the Titan compiler SDK |
-| `$ROCKS_TREE/lib/libtitan.a` | Exactly `titan.o` and `titan_coro.o`: generated-code loader/error support plus minicoro implementation/tag support; source foreign functions own the standard-library callbacks |
+| `$ROCKS_TREE/lib/libtitan.a` | Exactly `titan.o` and `minicoro.o`: generated-code loader/error support plus minicoro implementation/tag support; source foreign functions own the standard-library callbacks |
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
-| `$ROCKS_TREE/include/minicoro.h`, `titan.h`, `titan_longjmp.h` | Non-Lua top-level SDK headers |
+| `$ROCKS_TREE/include/minicoro.h`, `titan.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/ffi.h` | Namespaced portable FFI and audited Lua-internal bridge header |
 | `$ROCKS_TREE/lib/titan/0.23/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus eighteen independent logical modules from `titan.coroutine` through `titan.test` |
 | `$ROCKS_TREE/lib/titan/0.23/titan.a` | The self-describing static form of the same eighteen logical standard modules, plus native support, private LPegLabel/llhttp payload, and bundled libuv/OpenSSL payload when those modes are selected |
@@ -336,7 +345,7 @@ its native support table; a repeated install preserves an already valid full
 image. After LuaRocks deploys the compiler, the source-only `post_install` hook
 invokes that `titanc` once for all eighteen current standard roots, with private
 LPegLabel, selected libuv, HTTP/llhttp, and TLS/OpenSSL payload after
-`titanlib.o`. It stages the paired providers, generated loaders, and exact `titan.test`
+`ltitanlib.o`. It stages the paired providers, generated loaders, and exact `titan.test`
 compiler source privately, validates them, and publishes them with rollback, committing
 `titan.a` before `titan.so` and using the DSO rename as the final commit point.
 Publication recognizes the bootstrap, immediately preceding canonical
@@ -780,7 +789,7 @@ when it is no longer needed.
         --print-ast                       Print the AST.
         --test                            Build a native Titan test executable.
         --no-uv-bootstrap                 Call standalone main directly even if titan.uv installs its bootstrap hook.
-        -v, --verbose                     Print safely quoted effective compiler commands.
+        -v, --verbose                     Print safely quoted formatter and C toolchain commands.
         --static                          Prefer static Titan archive providers.
         --no-line-directives              Omit Titan source #line directives from generated C.
         --lua <path>                      Path to a Lua source/build tree (source checkouts only).
@@ -794,7 +803,9 @@ when it is no longer needed.
 ordinary dependencies; it does not request a system-linker static build and
 still permits DSO/source fallback. In library mode, `-X` object/archive
 payload enters both the shared and static output; in executable mode it keeps
-its established final-link role. `CC` selects the compiler.
+its established final-link role. `CC` selects the compiler. `CLANG_FORMAT`
+selects the formatter command; Titan appends its fixed in-place style arguments
+and does not consult an ambient project configuration.
 `--no-line-directives` leaves generated C attributed to its physical `.c`
 file and line numbers, which is useful when investigating native diagnostics
 such as sanitizer reports. The default keeps Titan source attribution.

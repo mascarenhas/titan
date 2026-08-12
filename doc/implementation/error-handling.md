@@ -214,7 +214,7 @@ follows it; that is the case where an error raised by the catch must still
 run the finally. A finally installs no boundary of its own.
 
 The inline boundary is based on Lua 5.5's `lua_longjmp` layout and
-longjmp macro choices, vendored into `titan-runtime/titan_longjmp.h` and
+longjmp macro choices, vendored directly into `titan-runtime/titan.h` and
 included by `titan.h`. It mirrors the parts of `luaD_rawrunprotected` and
 `luaD_pcall` that matter for generated code:
 

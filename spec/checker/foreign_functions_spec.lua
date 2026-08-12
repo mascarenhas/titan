@@ -515,6 +515,24 @@ describe("foreign functions (checker)", function()
             ]], "requires a nonzero step")
 
             assert_rejected(header, [[
+                foreign function bad(limit: c.ffi_double): ()
+                    for i: c.ffi_double = 0.0, limit, 0.0 do end
+                end
+            ]], "requires a nonzero step")
+
+            assert_rejected(header, [[
+                foreign function bad(): ()
+                    for i = 0.0, 1.0, -0.0 do end
+                end
+            ]], "requires a nonzero step")
+
+            assert_rejected(header, [[
+                foreign function bad(): ()
+                    for i = 0, 1, -0 do end
+                end
+            ]], "requires a nonzero step")
+
+            assert_rejected(header, [[
                 foreign function bad(item: *c.ffi_item): ()
                     for current: *c.ffi_item = item, item do end
                 end

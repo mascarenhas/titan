@@ -304,8 +304,10 @@ non-direct-local use gets one owner userdata. Both are zeroed through:
 max(sizeof(T), offsetof(T, field) + count * sizeof(E))
 ```
 
+The compiler checks an automatic literal against the configured target's exact
+`size_t` extent and rejects it if the addition or multiplication would overflow.
 Owned allocation evaluates the count once, rejects a negative count, and checks
-size overflow. While the original owner or automatic local retains its count,
+size overflow at run time. While the original owner or automatic local retains its count,
 `field[i]` is bounds-checked and `#field` returns that logical count. Converting
 the parent to raw `T *` erases the provenance; a FAM reached through that raw
 pointer has neither length nor count-aware indexing.

@@ -559,9 +559,13 @@ describe(".so-only cross-module imports", function()
         local f = assert(io.open("tbar.c", "r"))
         local generated = f:read("*a")
         f:close()
-        assert.match('loadlib%(L, "tbaz%.so"%)', generated)
-        assert.not_match('loadlib%(L, "tfoo%.so"%)', generated)
-        assert.match('loadglobalsym%(L, "tfoo_Point_move_titanmethod"%)',
+        assert.match(
+            'loadlib%s*%(%s*L,%s*"tbaz%.so"%s*%)', generated)
+        assert.not_match(
+            'loadlib%s*%(%s*L,%s*"tfoo%.so"%s*%)', generated)
+        assert.match(
+            'loadglobalsym%s*%(%s*L,%s*'
+                .. '"tfoo_Point_move_titanmethod"%s*%)',
             generated)
         local rok, out = call("tbar",
             "local x,y = tbar.bar(); assert(x == 4.0 and y == 6.0)")
@@ -633,31 +637,40 @@ describe(".so-only cross-module imports", function()
         local bf = assert(io.open("alias_facade.c", "r"))
         local facade_c = bf:read("*a")
         bf:close()
-        assert.match('loadlib%(L, "alias_provider%.so"%)', facade_c)
         assert.match(
-            'loadsym%(L, alias_provider_handle, "alias_provider_Foo_new_titanstatic"%)',
+            'loadlib%s*%(%s*L,%s*"alias_provider%.so"%s*%)', facade_c)
+        assert.match(
+            'loadsym%s*%(%s*L,%s*alias_provider_handle,%s*'
+                .. '"alias_provider_Foo_new_titanstatic"%s*%)',
             facade_c)
 
         local cf = assert(io.open("alias_consumer.c", "r"))
         local consumer_c = cf:read("*a")
         cf:close()
-        assert.match('loadlib%(L, "alias_facade%.so"%)', consumer_c)
-        assert.not_match('loadlib%(L, "alias_provider%.so"%)', consumer_c)
+        assert.match(
+            'loadlib%s*%(%s*L,%s*"alias_facade%.so"%s*%)', consumer_c)
+        assert.not_match(
+            'loadlib%s*%(%s*L,%s*"alias_provider%.so"%s*%)', consumer_c)
         assert.not_match("alias_provider_handle", consumer_c)
         assert.match(
-            'loadglobalsym%(L, "alias_provider_Foo_plus_titanmethod"%)',
+            'loadglobalsym%s*%(%s*L,%s*'
+                .. '"alias_provider_Foo_plus_titanmethod"%s*%)',
             consumer_c)
         assert.match(
-            'loadglobalsym%(L, "alias_provider_Foo_plus_boundmethod"%)',
+            'loadglobalsym%s*%(%s*L,%s*'
+                .. '"alias_provider_Foo_plus_boundmethod"%s*%)',
             consumer_c)
         assert.match(
-            'loadglobalsym%(L, "alias_provider_Foo_plus_titanentry_boundlua"%)',
+            'loadglobalsym%s*%(%s*L,%s*'
+                .. '"alias_provider_Foo_plus_titanentry_boundlua"%s*%)',
             consumer_c)
         assert.match(
-            'loadglobalsym%(L, "alias_provider_Foo_make_titanstatic"%)',
+            'loadglobalsym%s*%(%s*L,%s*'
+                .. '"alias_provider_Foo_make_titanstatic"%s*%)',
             consumer_c)
         assert.match(
-            'lua_getfield%(L, LUA_REGISTRYINDEX, "Titan module alias_provider"%)',
+            'lua_getfield%s*%(%s*L,%s*LUA_REGISTRYINDEX,%s*'
+                .. '"Titan module alias_provider"%s*%)',
             consumer_c)
 
         local rok, out = call("alias_consumer",

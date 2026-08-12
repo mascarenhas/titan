@@ -251,7 +251,7 @@ root explicitly.
 
 Stock Lua's `package.loadlib(path, "*")` is eager/global and shares Lua's own
 pathname cache, so it cannot provide the required lazy promotion contract.
-`titanlib.c` therefore exposes a separate internal
+`ltitanlib.c` therefore exposes a separate internal
 `titan._loadlibglobal(path, symbol)`:
 
 * it canonicalizes an existing pathname with `realpath` and keys its own
@@ -279,14 +279,14 @@ module or installs the async program bootstrap.
 The bare logical module name `titan` is reserved in library mode because it
 belongs to the Lua support API and every shim requires it. A **physical**
 provider named `titan` is valid only when its final image also contains
-`titanlib.o`'s genuine `luaopen_titan`. The driver checks that entry in a fresh
+`ltitanlib.o`'s genuine `luaopen_titan`. The driver checks that entry in a fresh
 Lua process and requires exactly one support table exposing `_loadlib` and
 `_loadlibglobal`; compiler-side `package.loaded` state cannot satisfy the
 proof.
 
 The production standard library is the canonical example. One compiler
 invocation names all eighteen logical roots and publishes root `titan.so` and
-`titan.a`. Internal standard imports are direct. `titanlib.o` is shared `-X`
+`titan.a`. Internal standard imports are direct. `ltitanlib.o` is shared `-X`
 payload and supplies bare `luaopen_titan` without adding a logical metadata
 key. The private namespaced five-member LPegLabel archive follows it as
 metadata-free payload. The selected libuv payload follows it, then the private
@@ -307,7 +307,7 @@ standard objects compile but never become provider members, publication-stage
 artifacts, or installed headers.
 
 `make titan` builds a distinct private bootstrap at
-`titan-runtime/bootstrap/titan.so`, linked only from `titanlib.o`. During a
+`titan-runtime/bootstrap/titan.so`, linked only from `ltitanlib.o`. During a
 source-rock install it is staged at `<root>/lib/titan/0.23/titan.so` only when
 that pathname is absent. A usable existing bootstrap or full image is
 preserved, so a repeated build never replaces a full library with the smaller

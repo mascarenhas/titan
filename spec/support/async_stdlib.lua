@@ -413,9 +413,9 @@ function M.prepare_async_core(workspace, layout, facades)
     end
 
     local cppflags, ldflags, archive = host_libuv_config()
-    local support = workspace .. "/titan-runtime/titanlib.o"
+    local support = workspace .. "/titan-runtime/ltitanlib.o"
     assert.truthy(exists(support),
-        "exact grouped stdlib build requires prepared titanlib.o")
+        "exact grouped stdlib build requires prepared ltitanlib.o")
     M.compile_bundle(workspace, roots, {
         layout = layout,
         cppflags = cppflags,

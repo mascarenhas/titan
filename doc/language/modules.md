@@ -428,13 +428,19 @@ titanc [--print-ast] [-v] [--static] [--test] [--no-uv-bootstrap] \
   traceback validation.
 * `-X/--extra-object` adds native object/archive payload. Library mode carries
   it into both provider forms; executable mode uses it at final link.
-* `-v/--verbose` prints the C compiler command lines; `--print-ast`
-  dumps the parsed AST.
+* `-v/--verbose` prints the formatter and C tool command lines;
+  `--print-ast` dumps the parsed AST.
 
 `titanc` first typechecks every requested module and every transitive
 dependency, reports *all* errors, and exits with status 1 before
 generating any code if any module failed. Only when everything checks
 does it compile and link.
+
+Supported Linux and macOS builds require `clang-format` on `PATH`;
+`CLANG_FORMAT` selects a different compatible command. Titan formats every
+generated `.c` in place before invoking the C compiler and every generated
+`.titan.h` before a compiler check consumes or publishes it. A formatter
+failure aborts native compilation and provider publication.
 
 Compilation goes through C: each logical module becomes one C translation
 unit, written beside its canonical source, and the system C compiler (`cc`,
@@ -475,10 +481,10 @@ unchanged.
 
 An installed compiler links `<root>/lib/libtitan.a`; compiler development
 directly from the repository lazily rebuilds and links
-`titan-runtime/libtitan.a`. Both archives contain exactly `titan.o` and `titan_coro.o`; source-defined
+`titan-runtime/libtitan.a`. Both archives contain exactly `titan.o` and `minicoro.o`; source-defined
 foreign callbacks live in their generated module objects, and neither driver
 mode links `titan.o` directly. Vendored `libbacktrace.a` and the matching `liblua.a` remain separate
-link inputs. The native Lua support entry is compiled from `titanlib.c`: a
+link inputs. The native Lua support entry is compiled from `ltitanlib.c`: a
 private support-only bootstrap enables installation, while the canonical
 installed provider pair carries that entry together with the standard logical
 modules. Generated Lua loaders use its DSO form.

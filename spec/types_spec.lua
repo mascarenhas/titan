@@ -2462,6 +2462,11 @@ describe("Titan types", function()
                     function_pointer, void_pointer)).conversion.op)
             assert.falsy(types.coercion(
                 function_pointer, void_pointer))
+            assert.equal("c_void_to_function_pointer",
+                assert(types.written_cast(
+                    void_pointer, function_pointer)).conversion.op)
+            assert.falsy(types.coercion(
+                void_pointer, function_pointer))
             assert.equal("legacy_pointer_to_c_void",
                 assert(types.written_cast(
                     legacy_pointer, void_pointer)).conversion.op)

@@ -561,6 +561,13 @@ describe("source-written owned C type code generation", function()
                         callback as c.ffi_void_pointer
                     return c.ffi_present_after(pointer, 1)
                 end
+
+                function roundtrip_c_function_pointer(): integer
+                    local pointer =
+                        c.ffi_get_callback() as c.ffi_void_pointer
+                    local callback = pointer as c.ffi_callback_pointer
+                    return callback(41) as integer
+                end
             ]])
 
             assert.not_match("lua_togco", csrc, 1, true)
@@ -569,7 +576,7 @@ describe("source-written owned C type code generation", function()
             assert.match("gcvalue%(&_tmp_%d+%)", csrc)
             assert.match("iscollectable%(&_tmp_%d+%)", csrc)
             assert.match(
-                "titan_cast_func%(ffi_void_pointer, [_%w]+%)",
+                "titan_cast_func%s*%(%s*ffi_void_pointer,%s*[_%w]+%s*%)",
                 csrc)
 
             local ok, err = h.call("test", [[
@@ -577,6 +584,7 @@ describe("source-written owned C type code generation", function()
                 assert(test.temporary_once() == 132)
                 assert(test.predicates())
                 assert(test.c_function_pointer() == 1)
+                assert(test.roundtrip_c_function_pointer() == 42)
 
                 local cast_ok, cast_error =
                     pcall(test.malformed_function_cast)

@@ -217,7 +217,7 @@ describe("flexible return code generation", function()
         local csrc = h.compile_and_read_c(source)
         assert.match("luaD_callnoyield%(L, restorestack%(L, _vc_func%), 250%);",
             csrc)
-        assert.match("luaD_callnoyield%(L, restorestack%(L, _vc_func%), LUA_MULTRET%);%s+if %(L%->ci%->top%.p < L%->top%.p%) L%->ci%->top%.p = L%->top%.p;",
+        assert.match("luaD_callnoyield%(L, restorestack%(L, _vc_func%), LUA_MULTRET%);%s+if %(L%->ci%->top%.p < L%->top%.p%)%s+L%->ci%->top%.p = L%->top%.p;",
             csrc)
 
         -- The ordinary function-value call uses the largest encodable finite
@@ -492,7 +492,7 @@ describe("flexible return code generation", function()
                 return f()
             end
         ]])
-        assert.match("luaD_callnoyield%(L, restorestack%(L, _vc_func%), LUA_MULTRET%);%s+if %(L%->ci%->top%.p < L%->top%.p%) L%->ci%->top%.p = L%->top%.p;",
+        assert.match("luaD_callnoyield%(L, restorestack%(L, _vc_func%), LUA_MULTRET%);%s+if %(L%->ci%->top%.p < L%->top%.p%)%s+L%->ci%->top%.p = L%->top%.p;",
             csrc)
 
         run_coder([[

@@ -75,7 +75,8 @@ local function compiler_argv(output_root, source_root, titan_path, ...)
         "TITAN_PATH=",
     }
     if PREFIX then
-        table.insert(argv, "PATH=" .. PREFIX .. "/bin:/usr/bin:/bin")
+        table.insert(argv, "PATH=" .. PREFIX .. "/bin:" ..
+            (os.getenv("PATH") or "/usr/bin:/bin"))
     end
 
     local installed = PREFIX and exists(PREFIX .. "/bin/titanc")
@@ -531,7 +532,7 @@ end
         assert.truthy(generated:find(
             "extern Udata *prefix_messages_init", 1, true), generated)
         assert.truthy(generated:find(
-            "case 2: goto _case_", 1, true), generated)
+            "case%s+2:%s+goto%s+_case_"), generated)
 
         local ok, output = run_lua(
             consumer_root, root_one, consumer_root, { consumer_root }, [[

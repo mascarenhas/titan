@@ -30,10 +30,10 @@ describe("first-class function values (end-to-end)", function()
                 return f(text)
             end
         ]])
-        local declaration = assert(csrc:find(
-            "TString* test_\\u2133_invoke_titan(", 1, true))
-        local first = assert(csrc:find(
-            "TString* test_\\u2133_invoke_titan(", declaration + 1, true))
+        local signature =
+            "TString%s*%*%s*test_\\u2133_invoke_titan%s*%("
+        local declaration = assert(csrc:find(signature))
+        local first = assert(csrc:find(signature, declaration + 1))
         local last = assert(csrc:find(
             "static int test_\\u2133_invoke_titanentry_lua", first, true))
         local body = csrc:sub(first, last - 1)
@@ -42,7 +42,9 @@ describe("first-class function values (end-to-end)", function()
         local before = body:sub(1, dispatch - 1)
         assert.matches("TValue _tmp_%d+ = .-;%s*_tmp_%d+ = _param_f;",
             before)
-        assert.matches("TString%* _tmp_%d+ = 0;%s*_tmp_%d+ = _param_text;",
+        assert.matches(
+            "TString%s*%*%s*_tmp_%d+%s*=%s*0;%s*"
+                .. "_tmp_%d+%s*=%s*_param_text;",
             before)
         assert.falsy(before:find("setobj2s(L", 1, true), before)
         assert.falsy(before:find("setsvalue(L", 1, true), before)

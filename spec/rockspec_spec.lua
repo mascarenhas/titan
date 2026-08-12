@@ -219,11 +219,11 @@ describe("standalone-prefix source installation", function()
             assert_file(PREFIX .. "/src/lua-5.5.1/" .. source)
         end
         for _, header in ipairs({
-            "lua.h", "luaconf.h", "titan.h", "titan_longjmp.h",
-            "minicoro.h", "titan/ffi.h",
+            "lua.h", "luaconf.h", "titan.h", "minicoro.h", "titan/ffi.h",
         }) do
             assert_file(PREFIX .. "/include/" .. header)
         end
+        assert_absent(PREFIX .. "/include/titan_longjmp.h")
         for _, archive in ipairs({
             "liblua.a", "libtitan.a", "libbacktrace.a",
         }) do
@@ -243,6 +243,8 @@ describe("standalone-prefix source installation", function()
             read_file(TEST_SUPPORT_SOURCE))
         assert_file(PREFIX ..
             "/share/lua/5.5/titan-compiler/staticmetadata.lua")
+        assert_absent(PREFIX ..
+            "/share/lua/5.5/titan-compiler/pretty.lua")
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
             "csemantics.lua", "test_runner.lua",
@@ -349,7 +351,7 @@ describe("standalone-prefix source installation", function()
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         local members = archive_object_members(output)
-        assert.same({ "titan.o", "titan_coro.o" }, members)
+        assert.same({ "minicoro.o", "titan.o" }, members)
 
         ok, output, why, code = run({
             "cmp", "-s", PREFIX .. "/lib/libbacktrace.a",
@@ -378,6 +380,7 @@ describe("standalone-prefix source installation", function()
         assert.falsy(manifest:find("stdlib_installer.lua", 1, true), manifest)
         assert.falsy(manifest:find("vendor/lpeglabel", 1, true), manifest)
         assert.falsy(manifest:find("libtitan-lpeglabel", 1, true), manifest)
+        assert.falsy(manifest:find('["pretty.lua"]', 1, true), manifest)
         assert.truthy(manifest:find(
             '["staticmetadata.lua"]', 1, true), manifest)
         for _, module in ipairs({

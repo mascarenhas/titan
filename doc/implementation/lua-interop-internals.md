@@ -637,8 +637,8 @@ inventory:
 | `TITAN_TRACE_APPEND_KEY` (`"4f895b66-bae0-4e97-afb3-83a31f2f9e96"`) | temporary coroutine trace handoff slot used before appending resume/error propagation frames |
 | `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | the native-symbol display-name table used by unified trace formatting |
 | `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for bare re-raise |
-| `TITAN_LAZY_LIBS_KEY` (private to `titanlib.c`) | compiler `_loadlib`'s per-state lazy/local handle cache |
-| `TITAN_LAZY_GLOBAL_LIBS_KEY` (private to `titanlib.c`) | generated-shim `_loadlibglobal`'s per-state canonical-path lazy/global handle cache |
+| `TITAN_LAZY_LIBS_KEY` (private to `ltitanlib.c`) | compiler `_loadlib`'s per-state lazy/local handle cache |
+| `TITAN_LAZY_GLOBAL_LIBS_KEY` (private to `ltitanlib.c`) | generated-shim `_loadlibglobal`'s per-state canonical-path lazy/global handle cache |
 | `"Titan function type <serialized type> tag"` | a shared light-userdata identity tag for each first-class function type |
 
 The UUID-string constants are defined in `titan-runtime/titan.h`.
@@ -791,7 +791,7 @@ unavailable (`TITAN_NO_LIBBACKTRACE`, e.g. musl/Alpine) it falls back to
 raw Lua traceback lines plus raw `execinfo` C frames.
 
 The retrieval side is the bare `titan` Lua support entry: Make compiles
-`titan-runtime/titanlib.c` into `titanlib.o`, links that object alone into the
+`titan-runtime/ltitanlib.c` into `ltitanlib.o`, links that object alone into the
 private bootstrap, and carries it once into each form of the full standard
 `titan.so`/`titan.a` provider pair.
 `titan.backtrace()` rawgets that

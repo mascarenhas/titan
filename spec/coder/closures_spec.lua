@@ -790,7 +790,8 @@ describe("closures (end-to-end)", function()
             "titan_ensure_stack(L, 6);", 1, true))
         local before = body:sub(1, ensure - 1)
         assert.matches(
-            "Udata%* _tmp_%d+ = 0;%s*_tmp_%d+ = _param_value_;",
+            "Udata%s*%*%s*_tmp_%d+%s*=%s*0;%s*"
+                .. "_tmp_%d+%s*=%s*_param_value_;",
             before)
         assert.falsy(before:find("setuvalue(L", 1, true), before)
         local upvalue = assert(body:find(

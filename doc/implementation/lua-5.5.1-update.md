@@ -157,7 +157,7 @@ transactional or retryable.
 
 ### Lua longjmp boundary
 
-`titan-runtime/titan_longjmp.h` vendors the `lua_longjmp` definition and the
+`titan-runtime/titan.h` vendors the `lua_longjmp` definition and the
 setjmp-selection contract from `ldo.c`. The audited source range, 5.5.1
 `ldo.c` lines 61-109, is unchanged from 5.5.0. Only the provenance annotation
 needed to advance to 5.5.1; the vendored definition and selector did not

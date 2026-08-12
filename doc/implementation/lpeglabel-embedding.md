@@ -411,7 +411,7 @@ providers, then rescans actual membership.
 The standard provider's metadata-free `-X` payload has this order:
 
 ```text
-titanlib.o
+ltitanlib.o
 libtitan-lpeglabel.a
 [bundled libuv.a]
 libtitan-llhttp.a

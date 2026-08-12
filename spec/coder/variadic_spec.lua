@@ -316,8 +316,8 @@ describe("collectable variadic parameters (code generator)", function()
 
         local fixed = native_body("static_list")
         assert.truthy(fixed:find(
-            "TString* _vargargs_1[2] = { _param_a, _param_b };",
-            1, true), fixed)
+            "TString%s*%*%s*_vargargs_1%[2%]%s*=%s*" ..
+                "{%s*_param_a%s*,%s*_param_b%s*};"), fixed)
         assert.falsy(fixed:find("setsvalue(L", 1, true), fixed)
 
         local open = native_body("forward")
@@ -326,10 +326,10 @@ describe("collectable variadic parameters (code generator)", function()
         local prefix = assert(open:find(
             "_open_vargs_2[0] = _tmp_1;", freeze, true))
         local borrow = assert(open:find(
-            "= _varargs->args[", prefix, true))
+            "=%s*_varargs%-%>args%[", prefix))
         local call = assert(open:find(
-            "_titan(L, _mod, NULL, &_open_vargdesc_2, 0);",
-            borrow, true))
+            "_titan%s*%(%s*L%s*,%s*_mod%s*,%s*NULL%s*,%s*" ..
+                "&_open_vargdesc_2%s*,%s*0%s*%);", borrow))
         assert.falsy(open:sub(freeze, call):find(
             "setsvalue(L", 1, true), open)
         assert.is_true(freeze < prefix and prefix < borrow and borrow < call)
@@ -1506,7 +1506,7 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
     -- A side-effecting `...[i]` index expression: the index `counter()` bumps a
     -- module counter. The index must be evaluated EXACTLY ONCE (operands are not
     -- auto-hoisted, so a template splicing the index more than once would call
-    -- `counter()` repeatedly -- see the pretty.lua multiply-evaluation gotcha).
+    -- `counter()` repeatedly -- see the generated-template multiply-evaluation gotcha).
     it("a side-effecting ...[counter()] index is evaluated exactly once", function()
         run_coder([[
             calls: integer = 0

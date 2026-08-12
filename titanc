@@ -389,7 +389,7 @@ local libnames = {}
 local used_native_names = {}
 
 local headers_ok, headers_err =
-    driver.write_foreign_header_plans(header_plans)
+    driver.write_foreign_header_plans(header_plans, args.verbose)
 if not headers_ok then exit(headers_err) end
 
 for _, name in ipairs(linked_names) do

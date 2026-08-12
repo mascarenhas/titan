@@ -704,13 +704,15 @@ describe("unions (end-to-end)", function()
             end
         ]])
 
-        assert.match("sethvalue%(L, &_tmp_%d+%->uv%[1%]%.uv, ", csrc)
-        assert.match("hvalue%(&_tmp_%d+%->uv%[1%]%.uv%)", csrc)
-        assert.match("luaS_newudata%(L, 0, 1%)", csrc)
-        assert.match("luaS_newudata%(L, 0, 2%)", csrc)
+        assert.match(
+            "sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[1%]%.uv,%s*", csrc)
+        assert.match(
+            "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
+        assert.match("luaS_newudata%s*%(%s*L,%s*0,%s*1%s*%)", csrc)
+        assert.match("luaS_newudata%s*%(%s*L,%s*0,%s*2%s*%)", csrc)
         assert.not_match("titan_array_require_proxy", csrc)
-        assert.match("switch %(_case_%d+_tag%)", csrc)
-        assert.match("case 2: goto _case_%d+_arm_%d+;", csrc)
+        assert.match("switch%s*%(%s*_case_%d+_tag%s*%)", csrc)
+        assert.match("case%s+2:%s*goto%s+_case_%d+_arm_%d+;", csrc)
 
         local rok, err = h.call("test", [[
             assert(test.total(test.sample()) == 42)
@@ -1004,13 +1006,13 @@ describe("unions (end-to-end)", function()
         -- Option(Array) values likewise carry that backing in their TValue;
         -- neither construction nor case binding may introduce a proxy.
         assert.match(
-            "sethvalue%(L, &_tmp_%d+%->uv%[1%]%.uv, ", csrc)
+            "sethvalue%s*%(%s*L,%s*&_tmp_%d+%->uv%[1%]%.uv,%s*", csrc)
         assert.match(
-            "hvalue%(&_tmp_%d+%->uv%[1%]%.uv%)", csrc)
+            "hvalue%s*%(%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)", csrc)
         assert.not_match("titan_array_require_proxy", csrc)
         assert.match(
-            "luaC_barrierback%(L, obj2gco%(_tmp_%d+%), "
-                .. "&_tmp_%d+%->uv%[1%]%.uv%)",
+            "luaC_barrierback%s*%(%s*L,%s*obj2gco%s*%(%s*_tmp_%d+%s*%)"
+                .. ",%s*&_tmp_%d+%->uv%[1%]%.uv%s*%)",
             csrc)
 
         local rok, err = h.call("test", [[
