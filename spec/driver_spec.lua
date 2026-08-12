@@ -2,6 +2,7 @@ local lfs = require "lfs"
 local assert = require "luassert"
 
 local driver = require "titan-compiler.driver"
+local coder = require "titan-compiler.coder"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
@@ -426,6 +427,36 @@ describe("loader resolver ownership", function()
         assert.truthy(ran, failure)
     end)
 
+    it("removes source-header temporaries with or without a probe service",
+    function()
+        local first = os.tmpname()
+        local second = os.tmpname()
+        write_file(first, "first")
+        write_file(second, "second")
+        local context = {
+            source_foreign_header_temporaries = { first, second },
+            probe_service = {
+                close = function()
+                    return nil, "injected probe close failure"
+                end,
+            },
+        }
+        local ok, err = driver.close_resolver_context(context)
+        assert.is_nil(ok)
+        assert.equal("injected probe close failure", err)
+        assert.is_nil(context.source_foreign_header_temporaries)
+        assert.is_nil(context.probe_service)
+        assert.is_nil(lfs.symlinkattributes(first))
+        assert.is_nil(lfs.symlinkattributes(second))
+
+        local third = os.tmpname()
+        write_file(third, "third")
+        assert.is_true(driver.close_resolver_context({
+            source_foreign_header_temporaries = { third },
+        }))
+        assert.is_nil(lfs.symlinkattributes(third))
+    end)
+
     it("reports an owned resolver close failure after a successful body",
     function()
         local original_close = driver.close_resolver_context
@@ -441,6 +472,103 @@ describe("loader resolver ownership", function()
         assert.matches("failed to close loader resolver context", err)
         assert.matches("injected resolver close failure", err)
         assert.is_true(driver.close_loader(loader))
+    end)
+end)
+
+describe("source foreign-header planning", function()
+    it("plans dependency headers, writes owned outputs, and removes stale ones",
+    function()
+        local root = os.tmpname()
+        assert(os.remove(root))
+        assert(lfs.mkdir(root))
+        local producer_source = root .. "/producer.titan"
+        local consumer_source = root .. "/consumer.titan"
+        local producer_import = {
+            _tag = "Ast.TopLevelForeignFunc",
+            name = "callback",
+        }
+        local import = {
+            _tag = "Ast.TopLevelImport",
+            modname = "producer",
+            _source_import = true,
+        }
+        local producer_ast = { producer_import }
+        local consumer_ast = { import, {
+            _tag = "Ast.TopLevelForeignFunc",
+            name = "wrapper",
+        } }
+        local imported = {
+            producer = {
+                ast = producer_ast,
+                filename = producer_source,
+                native_output = producer_source,
+            },
+            consumer = {
+                ast = consumer_ast,
+                filename = consumer_source,
+                native_output = consumer_source,
+            },
+        }
+
+        local original = coder.generate_foreign_header
+        coder.generate_foreign_header = function(name, ast)
+            local dependency = ast[1] and ast[1]._foreign_header
+            return driver.FOREIGN_HEADER_MARKER .. "\n/* " .. name .. " "
+                .. tostring(dependency) .. " */\n"
+        end
+        local ok, plans_or_err = pcall(
+            driver.plan_foreign_headers,
+            { "producer", "consumer" }, imported)
+        coder.generate_foreign_header = original
+        assert.truthy(ok, plans_or_err)
+        local plans = plans_or_err
+        assert.equal(2, #plans)
+        assert.equal(root .. "/producer.titan.h", import._foreign_header)
+        assert.truthy(plans[2].contents:find(import._foreign_header, 1, true))
+        assert.is_true(driver.write_foreign_header_plans(plans))
+        assert.equal("file", lfs.attributes(root .. "/producer.titan.h", "mode"))
+        assert.equal("file", lfs.attributes(root .. "/consumer.titan.h", "mode"))
+
+        producer_ast[1]._ignore = true
+        consumer_ast[2]._ignore = true
+        local stale = assert(driver.plan_foreign_headers(
+            { "producer", "consumer" }, imported))
+        assert.is_true(driver.write_foreign_header_plans(stale))
+        assert.is_nil(lfs.symlinkattributes(root .. "/producer.titan.h"))
+        assert.is_nil(lfs.symlinkattributes(root .. "/consumer.titan.h"))
+        remove_tree(root)
+    end)
+
+    it("rejects shared and user-owned planned header paths", function()
+        local root = os.tmpname()
+        assert(os.remove(root))
+        assert(lfs.mkdir(root))
+        local shared = root .. "/shared.titan"
+        local ast = { { _tag = "Ast.TopLevelForeignFunc", name = "f" } }
+        local original = coder.generate_foreign_header
+        coder.generate_foreign_header = function()
+            return driver.FOREIGN_HEADER_MARKER .. "\n"
+        end
+        local plans, err = driver.plan_foreign_headers({ "left", "right" }, {
+            left = { ast = ast, filename = shared, native_output = shared },
+            right = { ast = ast, filename = shared, native_output = shared },
+        })
+        coder.generate_foreign_header = original
+        assert.is_nil(plans)
+        assert.matches("is shared by source modules", err, 1, true)
+
+        local reserved = root .. "/reserved.titan"
+        write_file(root .. "/reserved.titan.h", "/* user-owned */\n")
+        coder.generate_foreign_header = function()
+            return driver.FOREIGN_HEADER_MARKER .. "\n"
+        end
+        local plan = driver.plan_foreign_header("reserved", ast, reserved)
+        coder.generate_foreign_header = original
+        local ok
+        ok, err = driver.validate_foreign_header_plan(plan)
+        assert.is_nil(ok)
+        assert.matches("refusing to overwrite user-owned", err, 1, true)
+        remove_tree(root)
     end)
 end)
 

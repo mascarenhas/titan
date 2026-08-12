@@ -1,5 +1,7 @@
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
+local checker = require "titan-compiler.checker"
+local driver = require "titan-compiler.driver"
 
 local probe_session
 
@@ -223,6 +225,48 @@ describe("foreign functions (checker)", function()
             assert.is_true(integer_for.inc._foreign_literal)
             assert.is_true(floating_for.start._foreign_literal)
             assert.is_true(floating_for.inc._foreign_literal)
+        end)
+    end)
+
+    it("replays a direct source foreign header before consumer checking",
+    function()
+        with_header([[
+            #define FFI_REPLAY_VALUE 9
+            typedef int ffi_replay_int;
+        ]], function(header)
+            local cfunc = types.CFunction({},
+                types.CInteger("int", true, 3, 32), false, false)
+            local member = types.ModuleMember(
+                "provider", "callback", cfunc, {})
+            member._foreign_source = true
+            member.islocal = true
+            local provider = types.Module("provider", {})
+            provider._source = true
+            provider.source_members = { member }
+            provider.source_members.callback = member
+            provider.source_type_members = {}
+
+            local code = [[
+                local provider = import "provider"
+                local c = foreign import "]] .. header .. [["
+                function observed(): integer return c.FFI_REPLAY_VALUE end
+            ]]
+            local ast = assert(h.parse(code))
+            local loader = function(name)
+                assert.equal("provider", name)
+                return true, provider, {}, {
+                    kind = "source",
+                    foreign_header = header,
+                    foreign_header_for_check = true,
+                }
+            end
+            types.registry = {}
+            driver.imported = {}
+            local _, errors = checker.check(
+                "consumer", ast, code, "consumer.titan", loader)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            assert.equal("Type.Integer", ast[3].block.stats[1].exps[1]._type._tag)
+            assert.is_true(ast[1]._foreign_header_for_check)
         end)
     end)
 
