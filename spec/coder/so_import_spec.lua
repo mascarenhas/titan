@@ -565,7 +565,7 @@ describe(".so-only cross-module imports", function()
             'loadlib%s*%(%s*L,%s*"tfoo%.so"%s*%)', generated)
         assert.match(
             'loadglobalsym%s*%(%s*L,%s*'
-                .. '"tfoo_Point_move_titanmethod"%s*%)',
+                .. '"tfoo_\\u2133_Point_\\u2131_move_titanmethod"%s*%)',
             generated)
         local rok, out = call("tbar",
             "local x,y = tbar.bar(); assert(x == 4.0 and y == 6.0)")
@@ -641,7 +641,7 @@ describe(".so-only cross-module imports", function()
             'loadlib%s*%(%s*L,%s*"alias_provider%.so"%s*%)', facade_c)
         assert.match(
             'loadsym%s*%(%s*L,%s*alias_provider_handle,%s*'
-                .. '"alias_provider_Foo_new_titanstatic"%s*%)',
+                .. '"alias_provider_\\u2133_Foo_\\u2131_new_titanstatic"%s*%)',
             facade_c)
 
         local cf = assert(io.open("alias_consumer.c", "r"))
@@ -654,19 +654,25 @@ describe(".so-only cross-module imports", function()
         assert.not_match("alias_provider_handle", consumer_c)
         assert.match(
             'loadglobalsym%s*%(%s*L,%s*'
-                .. '"alias_provider_Foo_plus_titanmethod"%s*%)',
+                .. '"alias_provider_\\u2133_Foo_\\u2131_plus_titanmethod"%s*%)',
             consumer_c)
         assert.match(
             'loadglobalsym%s*%(%s*L,%s*'
-                .. '"alias_provider_Foo_plus_boundmethod"%s*%)',
+                .. '"alias_provider_\\u2133_Foo_\\u2131_plus_boundmethod"%s*%)',
             consumer_c)
+        local merged_consumer_c = consumer_c:gsub('"%s*"', '')
+        for _, role in ipairs({
+            "boundlua", "boundstrict",
+        }) do
+            assert.match(
+                'loadglobalsym%s*%(%s*L,%s*"alias_provider_' ..
+                    '\\u2133_Foo_\\u2131_plus_titanentry_' ..
+                    role .. '"%s*%)',
+                merged_consumer_c)
+        end
         assert.match(
             'loadglobalsym%s*%(%s*L,%s*'
-                .. '"alias_provider_Foo_plus_titanentry_boundlua"%s*%)',
-            consumer_c)
-        assert.match(
-            'loadglobalsym%s*%(%s*L,%s*'
-                .. '"alias_provider_Foo_make_titanstatic"%s*%)',
+                .. '"alias_provider_\\u2133_Foo_\\u2131_make_titanstatic"%s*%)',
             consumer_c)
         assert.match(
             'lua_getfield%s*%(%s*L,%s*LUA_REGISTRYINDEX,%s*'

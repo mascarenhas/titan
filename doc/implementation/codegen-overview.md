@@ -104,8 +104,8 @@ semantic effect may still use `pairs`. The pieces appear in this order:
 4. **Forward signatures** (`$SIGS`): the native-convention prototype of
    every function in this module, plus
    `extern Udata *<dep>_init(lua_State *L);` per static import.
-5. **Record support**: per record (from `coderecorddec`), the
-   `__index_<rec>`/`__newindex_<rec>` metamethods serving field access
+5. **Record support**: per record (from `coderecorddec`), the separated
+   nominal `meta_index`/`meta_newindex` metamethod entries serving field access
    from Lua ([Lua interop internals](lua-interop-internals.md)). A
    record's type identity is its metatable (cached per-Lua-state in a
    `_mod` user value), so there is no per-record C tag static to declare
@@ -117,7 +117,8 @@ semantic effect may still use `pairs`. The pieces appear in this order:
    ordinary function needs the two stack entries only when it becomes a
    first-class value.
 7. **Module-global metamethods**: if the module exports anything, one
-   `__index`/`__newindex` pair serving all members — variables, functions
+   `meta_index`/`meta_newindex` pair in the separated module callable family
+   serves all members — variables, functions
    and public record namespaces — through the metatable installed on the module
    `Udata`.
 8. **`<prefix>_abi`**, **`<prefix>_types`**, **`<prefix>_init`**, **`luaopen_<prefix>`**: the
@@ -210,27 +211,33 @@ and `-` with `_`. The driver has already restricted every logical component to
 bytes. Module `foo.bar` yields `foo_bar_init`, `foo_bar_abi`, `foo_bar_types`,
 and `luaopen_foo_bar`.
 
-ABI 0.23's `_function_prefix` separates that flattened module prefix from a
-top-level member with the C99 UCN `_\u2133_`. A function `f`
-therefore becomes `foo_bar_\u2133_f_titan` /
-`foo_bar_\u2133_f_titanentry_lua` /
-`foo_bar_\u2133_f_titanentry_strict`; a source `foreign function f` owns
-only the first spelling. U+2133 cannot occur in Titan's identifier alphabet,
-so the boundary is injective even when module components themselves contain
-underscores or hyphens. Generated C retains the UCN spelling, while
-`_linkage_symbol_name` converts it to U+2133's UTF-8 bytes for comparisons with
-object-file, DWARF, libbacktrace, and native-tool names.
+ABI 0.23 gives callable names two structural boundaries. `_function_prefix`
+separates the flattened module prefix from the remaining callable with the C99
+UCN `_\u2133_` (U+2133 SCRIPT CAPITAL M). A top-level function `f` therefore
+becomes `foo_bar_\u2133_f_titan` / `..._titanentry_lua` /
+`..._titanentry_strict`; a source `foreign function f` owns only the first
+spelling. `_nominal_function_prefix` then separates a record, union, or
+Interface owner from its member with `_\u2131_` (U+2131 SCRIPT CAPITAL F):
+`foo_bar_\u2133_Point_\u2131_move_titanmethod`. Statics, synthesized record
+`new` and union variants, ordinary methods, bound native/Lua/strict entries,
+and Interface bound entries all use that hierarchy. The nominal metamethods
+are synthetic `meta_index` and `meta_newindex` members in the same family;
+module userdata metamethods use only the module boundary.
 
-An unbound method uses `<mangled-fqtn>_<name>_titanmethod` /
-`_titanentry_luamethod`; its first-class bound value adds `_boundmethod`,
-`_titanentry_boundlua`, and `_titanentry_boundstrict`. A record static uses
+Neither U+2133 nor U+2131 can occur in Titan's ASCII identifier alphabet, so
+the tuple boundaries remain injective even when source names contain
+underscores. Generated C retains both UCN spellings. `_linkage_symbol_name`
+converts them to UTF-8 `ℳ` and `ℱ` for object-file, DWARF, libbacktrace, and
+native-tool comparisons. An unbound method appends `_titanmethod` /
+`_titanentry_luamethod`; its first-class bound value appends `_boundmethod`,
+`_titanentry_boundlua`, and `_titanentry_boundstrict`. A static appends
 `_titanstatic`, `_titanentry_luastatic`, and `_titanentry_strictstatic`.
 
 `coder.external_symbols` inventories the non-file-local subset of these names
 plus each module protocol. Library-mode orchestration compares that exact set
-before code generation, including collisions that cross a flattened
-module/member boundary; it does not wait for the linker to diagnose duplicate
-definitions.
+before code generation, retaining flattened module-prefix and cross-family
+protocol collision checks; it does not wait for the linker to diagnose
+duplicate definitions.
 
 ### Failure-only ASan generated-C mapping
 
@@ -388,7 +395,7 @@ following the declared parameters. Real signatures from a generated
 module:
 
 ```c
-TString*    packtest_Point_getname_titanmethod(lua_State *L, Udata *_mod, CClosure *_fn, Udata* __self__);
+TString*    packtest_\u2133_Point_\u2131_getname_titanmethod(lua_State *L, Udata *_mod, CClosure *_fn, Udata* __self__);
 lua_Integer packtest_\u2133_two_titan(lua_State *L, Udata *_mod, CClosure *_fn, TString* *_outparam_2);
 void        packtest_\u2133_strings_titan(lua_State *L, Udata *_mod, CClosure *_fn,
                           TitanVargString *_flexout, int _flexwant);
@@ -845,7 +852,8 @@ and the other value/native-call layouts from 0.21. Every generated module also
 added one fixed compiler-private, ABI-visible physical-provider identity slot so
 a direct source importer can reject canonical state installed by another
 provider. ABI 0.23 retains those layouts while source foreign callbacks and the
-injective top-level native-entry separator change the native symbol contract.
+injective module/nominal/member native-entry hierarchy change the native symbol
+contract.
 The active marker is `_0_23`, the search variable is `TITAN_PATH_0_23`, and the
 provider namespace is `lib/titan/0.23`; older providers are rejected before
 interface rehydration. Existing 0.22 artifacts remain separately versioned and

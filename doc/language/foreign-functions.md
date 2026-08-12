@@ -235,17 +235,23 @@ two translation units may yield different addresses.
 
 ## Native C names and ABI
 
-ABI 0.23 uses the C99 universal-character-name spelling `_\u2133_` to separate
-a flattened logical module name from a top-level function name. For example:
+ABI 0.23 uses C99 universal-character-name separators in generated callable
+names. `_\u2133_` separates a flattened logical module from the remaining
+signature, while `_\u2131_` separates a record, union, or Interface owner from
+its static, constructor, variant, method, bound, or metamethod role. For
+example:
 
 ```text
-foo.bar + compare -> foo_bar_\u2133_compare_titan
+foo.bar + compare        -> foo_bar_\u2133_compare_titan
+foo.bar + Point.move     -> foo_bar_\u2133_Point_\u2131_move_titanstatic
+foo.bar + Point:move     -> foo_bar_\u2133_Point_\u2131_move_titanmethod
 ```
 
-Foreign functions share this native-entry family with ordinary top-level
+Foreign functions share the top-level native-entry family with ordinary
 functions. There is no universal `titan_` prefix and no separate hexadecimal
 source-private scheme. A foreign function has only the native C entry; it has
-no Lua or strict entry and no module-state closure slot.
+no Lua or strict entry and no module-state closure slot. Generated C retains
+the UCN spellings; object and tool names contain UTF-8 `ℳ` and `ℱ`.
 
 The naming change and the removal of the old standard-library callback symbols
 are part of the ABI-0.23 clean boundary. ABI-0.22 providers and objects must be

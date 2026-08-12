@@ -34,7 +34,7 @@ describe("unions (end-to-end)", function()
         assert.truthy(ok, err)
 
         local expected = {
-            symbol = "test_Message_some_titanstatic",
+            symbol = "test_\\u2133_Message_\\u2131_some_titanstatic",
             owner = "union function 'test.Message.some'",
         }
         local source_symbols = coder.external_symbols("test", ast)

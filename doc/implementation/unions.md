@@ -410,8 +410,9 @@ source-private access. `TITAN_VER` is now `0.23`, its suffix is `_0_23`, the
 versioned search variable
 is `TITAN_PATH_0_23`, the installed provider namespace is
 `lib/titan/0.23`, and the generated standard-library support namespace is
-`stdlib_0_23`. ABI 0.23 retains that schema while changing the native callback and entry-name
-contract. A 0.22 interface is rejected before type rehydration or native
+`stdlib_0_23`. ABI 0.23 retains that schema while changing the native callback
+contract and separating module, nominal owner, and member in every union
+constructor/static/method entry name. A 0.22 interface is rejected before type rehydration or native
 linking.
 
 ABI 0.23 is the current versioned prototype boundary, not a migration layer.

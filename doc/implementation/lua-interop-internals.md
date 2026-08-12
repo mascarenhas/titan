@@ -63,7 +63,9 @@ stack-convention entries for every non-`local` top-level function
 UCN separator becoming UTF-8 at linkage) and every static (`…_titanentry_luastatic` and `…_strictstatic`).
 A method has its ordinary `…_titanentry_luamethod`; each method's
 self-removed first-class bound value has separate `…_boundlua` and
-`…_boundstrict` trampolines. A local declaration that is never used as a value
+`…_boundstrict` trampolines. Static, method, bound, and Interface entries use
+`<module>_\u2133_<owner>_\u2131_<member><role>`; their object linkage names
+contain UTF-8 `ℳ` and `ℱ`. A local declaration that is never used as a value
 needs neither stack entry; a first-class local value needs both even though it
 is not exported to Lua. For methods, the parameter list is prefixed with
 the record's nominal type, so `self` is checked like any record-typed
@@ -350,11 +352,12 @@ lua_rawset(L, -3);
 lua_pushliteral(L, "move");
 /* Module is upvalue of Lua entry point of method */
 titan_pushmodule(L, _mod);
-lua_pushcclosure(L, interop_Point_move_titanentry_luamethod, 1);
+lua_pushcclosure(L, interop_\u2133_Point_\u2131_move_titanentry_luamethod, 1);
 lua_rawset(L, -3);
 lua_pushliteral(L, "__index");
-lua_pushvalue(L, -2);
-lua_pushcclosure(L, __index_interop_Point, 1);
+lua_pushvalue(L, -2);            /* fieldmap */
+titan_pushmodule(L, _mod);       /* module */
+lua_pushcclosure(L, interop_\u2133_Point_\u2131_meta_index, 2);
 lua_rawset(L, -4);
 /* ... __newindex wired the same way ... */
 ```
@@ -364,9 +367,9 @@ lua_rawset(L, -4);
 `setmetatable` on a record raises, as it does on any userdata
 (`debug.getmetatable` still sees the real table; the cross-module
 identity spec compares metatables that way). The **fieldmap** table is
-the single upvalue shared by
-`__index_<rec>` and `__newindex_<rec>`: it maps each field name to its
-integer user-value index (`uv[0..n-1]` in declaration order) and each public
+the first upvalue shared by the
+`<module>_\u2133_<rec>_\u2131_meta_index` and `..._meta_newindex` closures;
+the second is the module. The fieldmap maps each field name to its integer user-value index (`uv[0..n-1]` in declaration order) and each public
 method name to the method's Lua-entry C closure, itself closed over the module.
 Local fields and local methods are not entered in this table, but public fields
 keep their original indices even when a local field came before them.
@@ -374,7 +377,7 @@ keep their original indices even when a local field came before them.
 ### `__index`: fields and methods
 
 ```c
-static int __index_interop_Point(lua_State *L) {
+static int interop_\u2133_Point_\u2131_meta_index(lua_State *L) {
     TValue *_recslot = s2v(L->ci->func.p + 1);
     Udata *_rec = NULL;
     /* ... full nominal checkandget of the receiver: tag compare,
@@ -415,7 +418,7 @@ declaration.
 
 ### `__newindex`: checked writes
 
-`__newindex_<rec>` does the same receiver re-validation and fieldmap
+`<module>_\u2133_<rec>_\u2131_meta_newindex` does the same receiver re-validation and fieldmap
 lookup, but additionally requires the hit to be an **integer** — so
 assigning to a method name (`p.move = 2`) raises the same "not found"
 error; methods are not assignable. The write consumes the field's

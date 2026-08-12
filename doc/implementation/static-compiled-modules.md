@@ -383,8 +383,9 @@ neither a 0.19 archive can be misinterpreted as a two-user-value Array or a
 strict-entry-bearing function closure, a 0.20 archive linked against the Lua
 5.5.1 runtime, nor a 0.21 archive with the old `titan.uv` schema can cross the
 boundary. ABI 0.23 still uses the same metadata container and retains the 0.22
-public schema/layout, but changes generated top-level native names and moves the
-standard callback definitions out of retired runtime/adapter objects. A 0.22
+public schema/layout, but separates module, nominal owner, and member in generated
+callable names and moves the standard callback definitions out of retired
+runtime/adapter objects. A 0.22
 archive is rejected before those incompatible symbols can reach the link.
 
 Bundled libuv enters as shared `-X` provider payload and is present in both

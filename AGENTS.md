@@ -699,8 +699,11 @@ surface/private-provider boundary, its serialized public schema and
 reconstructible module-userdata prefix, and added every module's fixed
 source-provider identity slot while retaining Lua 5.5.1. The current
 compiled-module ABI version is `0.23`: source-defined foreign callbacks replace
-the retired runtime/HTTP callback shims, and top-level ordinary, local, and
-foreign entry families use the injective `_\u2133_` member separator.
+the retired runtime/HTTP callback shims. Callable entry families use
+`_\u2133_` between module and remainder and `_\u2131_` between a
+record/union/Interface owner and its static, constructor, variant, method,
+bound, or metamethod role; generated C uses UCNs while linkage tools expose
+UTF-8 `ℳ`/`ℱ`.
 `TITAN_VER`, `_0_23`, `TITAN_PATH_0_23`, `lib/titan/0.23`, and `stdlib_0_23`
 advance together; a 0.22 provider is rejected before its type metadata is
 decoded. There is no 0.22-to-0.23 migration or cleanup path; any separately
@@ -1007,8 +1010,9 @@ substitution, recursive; error on missing keys). Key facts:
   reconstructible module-userdata prefix change, and every module gains the
   fixed source-provider identity slot used before a co-generated importer may
   read source-private state. ABI 0.23 moves the standard callback definitions
-  into source foreign functions and adopts the injective `_\u2133_` top-level
-  entry separator; its serialized layouts and Lua contract remain unchanged.
+  into source foreign functions and adopts the injective `_\u2133_` module
+  and `_\u2131_` nominal-member entry separators; its serialized layouts and
+  Lua contract remain unchanged.
 - Each generated logical module object contains the canonical serialized
   interface twice: callable `<mangled>_types`/`_abi` entries and one
   relocation-free, byte-aligned metadata section rendered by

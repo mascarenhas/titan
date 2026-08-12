@@ -314,6 +314,8 @@ describe("libbacktrace unified stack trace", function()
             assert(bt:find("in test.run", 1, true), "missing caller frame\n"..bt)
             assert(not bt:find("titanentry", 1, true), "leaked trampoline frame\n"..bt)
             assert(not bt:find("_titan", 1, true), "leaked mangled symbol\n"..bt)
+            assert(not bt:find("ℳ", 1, true), "leaked module separator\n"..bt)
+            assert(not bt:find("ℱ", 1, true), "leaked nominal separator\n"..bt)
             -- one frame per logical call: exactly one method line
             local _, nbad = bt:gsub("in test%.Point:bad", "")
             assert(nbad == 1, "expected 1 method frame, got "..nbad.."\n"..bt)

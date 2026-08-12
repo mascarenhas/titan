@@ -150,9 +150,10 @@ typedef struct lua_longjmp {
    is a private-provider boundary; Lua 5.5.1 and the other 0.21 layouts remain
    unchanged.
    0.22 -> 0.23: source-defined foreign callback entries replace the runtime
-   and standard-provider callback shim objects. The runtime archive and the
-   generated standard modules therefore expose and consume a different native
-   symbol contract; 0.22 and 0.23 objects must not be mixed. */
+   and standard-provider callback shim objects. Generated callable names also
+   use injective module/nominal/member separators. The runtime archive and
+   generated modules therefore expose and consume a different native symbol
+   contract; 0.22 and 0.23 objects must not be mixed. */
 #define TITAN_VER "0.23"
 #define TITAN_VER_SUFFIX "_0_23"
 #define TITAN_PATH_VAR "TITAN_PATH"

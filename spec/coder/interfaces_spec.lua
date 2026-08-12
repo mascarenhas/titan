@@ -106,7 +106,7 @@ describe("interfaces (end-to-end)", function()
         local start = assert(csrc:find(
             signature, declaration + 1, true))
         local stop = assert(csrc:find(
-            "test_Impl_swap_titanmethod(", start, true))
+            "test_\\u2133_Impl_\\u2131_swap_titanmethod(", start, true))
         local body = csrc:sub(start, stop - 1)
         local poll = assert(body:find("luaC_checkGC(L);", 1, true))
         local reserve = assert(body:find("titan_ensure_stack", poll, true))
@@ -132,9 +132,9 @@ describe("interfaces (end-to-end)", function()
         local recovered_symbols =
             coder.interface_external_symbols("test", modtype)
         local expected = {
-            "test_Reader_read_interface_boundmethod",
-            "test_Reader_read_titanentry_interface_boundlua",
-            "test_Reader_read_titanentry_interface_boundstrict",
+            "test_\\u2133_Reader_\\u2131_read_interface_boundmethod",
+            "test_\\u2133_Reader_\\u2131_read_titanentry_interface_boundlua",
+            "test_\\u2133_Reader_\\u2131_read_titanentry_interface_boundstrict",
         }
         for _, symbol in ipairs(expected) do
             local source_found, recovered_found = false, false
@@ -828,7 +828,7 @@ describe("interfaces (end-to-end)", function()
         local negative_guard = assert(
             csrc:find("_flexwant<0", demand_guard, true))
         local concrete_call = assert(csrc:find(
-            "test_Concrete_produce_titanmethod(",
+            "test_\\u2133_Concrete_\\u2131_produce_titanmethod(",
             negative_guard, true))
         assert.is_true(definition < demand_guard
             and demand_guard < negative_guard
@@ -1002,7 +1002,7 @@ describe("interfaces (end-to-end)", function()
             "static TITAN_NOINLINE TValue " .. adapter,
             declaration + 1, true))
         local stop = assert(csrc:find(
-            "test_ProtectorImpl_protect_titanmethod(",
+            "test_\\u2133_ProtectorImpl_\\u2131_protect_titanmethod(",
             start, true))
         local body = csrc:sub(start, stop)
         local reserve = assert(csrc:find(
@@ -1100,13 +1100,13 @@ describe("interfaces (end-to-end)", function()
         assert.is_true(alpha_decl < zed_decl)
         assert.matches(alpha .. "%[0%]%s*=%s*titan_cast_func%(%s*"
             .. "TitanInterfaceMethod,%s*"
-            .. "test_AlphaRecord_exact_titanmethod%)", csrc)
+            .. "test_\\u2133_AlphaRecord_\\u2131_exact_titanmethod%)", csrc)
         assert.matches(alpha .. "%[1%]%s*=%s*titan_cast_func%(%s*"
             .. "TitanInterfaceMethod,%s*"
             .. alpha .. "_adapter_1%)", csrc)
         assert.matches(zed .. "%[0%]%s*=%s*titan_cast_func%(%s*"
             .. "TitanInterfaceMethod,%s*"
-            .. "test_ZedRecord_exact_titanmethod%)", csrc)
+            .. "test_\\u2133_ZedRecord_\\u2131_exact_titanmethod%)", csrc)
         assert.matches(zed .. "%[1%]%s*=%s*titan_cast_func%(%s*"
             .. "TitanInterfaceMethod,%s*"
             .. zed .. "_adapter_1%)", csrc)

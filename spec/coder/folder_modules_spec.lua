@@ -274,7 +274,7 @@ end
         assert.truthy(generated:find("foldercase_init", 1, true))
         assert.truthy(generated:find("Titan module foldercase", 1, true))
         assert.truthy(generated:find(
-            "foldercase_Reader_read_interface_boundmethod", 1, true))
+            "foldercase_\\u2133_Reader_\\u2131_read_interface_boundmethod", 1, true))
         assert.falsy(generated:find("foldercase_a_", 1, true))
         assert.falsy(generated:find("foldercase_trace_", 1, true))
         assert.falsy(generated:find("must_not_exist", 1, true))

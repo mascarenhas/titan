@@ -416,7 +416,8 @@ trampolines. ABI 0.21 retained this machinery while advancing the matched Lua
 internal-header/runtime contract to 5.5.1. ABI 0.22 retained it while changing
 the source-local `titan.uv` schema/module prefix and adding the fixed physical-
 provider identity slot. ABI 0.23 retains all of this error machinery again;
-its boundary is the source-defined callback and top-level native-name contract. Errors raised by an Interface adapter,
+its boundary is the source-defined callback and separated
+module/nominal/member native-name contract. Errors raised by an Interface adapter,
 strict guard, dynamic conversion, or failed exact downcast still use the same
 Titan error handler; all wrapper and adapter roots are ordinary Lua-traced
 values, so unwinding requires no resource-specific cleanup path.

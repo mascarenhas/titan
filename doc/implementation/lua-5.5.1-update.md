@@ -8,8 +8,9 @@ than only a public-API compatibility check. This chapter records the complete
 > ABI 0.22 retained this Lua 5.5.1 contract and the other ABI-0.21
 > value/native-call layouts while changing the source-local `titan.uv` schema,
 > reconstructible module prefix, and physical-provider identity slot. ABI 0.23
-> retains the same Lua 5.5.1 contract again; its boundary is native callback and
-> top-level entry-symbol ownership.
+> retains the same Lua 5.5.1 contract again; its boundary moves native callbacks
+> into source and separates module, nominal owner, and member in callable
+> symbols.
 
 ## Scope and evidence
 

@@ -79,11 +79,12 @@ They are linked into the selected provider and receive their own Lua loaders,
 but making an unrelated dependency independently discoverable as a compiled
 Titan module requires naming it as a root in a compatible invocation.
 
-All linked modules must also have distinct generated C symbols. The compiler
-checks this before generating C and reports both declarations when flattened
-module/member names collide—for example, function `b_c` in module `a` and
-function `c` in module `a.b`. Rename one of the modules or declarations to
-build them into the same provider.
+All linked modules must also have distinct generated C symbols. Callable names
+encode the module/member and nominal/member boundaries, so function `b_c` in
+module `a` and function `c` in module `a.b` remain distinct. The compiler still
+preflights genuinely colliding flattened module protocol prefixes (including
+`.`/`-` aliases) and cross-family protocol names, and reports both owners before
+generating C.
 
 ## Sharing an image does not merge modules
 
@@ -230,8 +231,8 @@ value/native-call layouts remain unchanged. Every generated module also gains
 a fixed physical-provider identity slot so direct source collaborators reject
 canonical private state installed by another provider. ABI 0.23 retains those
 value/module layouts but moves standard callback definitions from retired
-runtime/adapter objects into generated Titan modules and gives top-level
-function entries an injective native separator. The current marker,
+runtime/adapter objects into generated Titan modules and gives callable
+entries injective module/nominal/member native separators. The current marker,
 `TITAN_PATH_0_23`, and `lib/titan/0.23` namespace advance together. Conditional
 [closure adjustment wrappers](closure-adjustment-wrappers.md) reuse this fixed
 0.23 closure header and native signature: target adapters and strict relays are

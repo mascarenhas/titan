@@ -485,19 +485,26 @@ payload; it has no `titan_uv.o`, `titan/coro.h`, `titan/uv.h`, or
 
 ## Native names and ABI 0.23
 
-`coder._function_prefix` now separates a flattened logical module name from a
-top-level member with the C99 universal-character-name spelling
-`_\u2133_` (U+2133 SCRIPT CAPITAL M):
+`coder._function_prefix` separates a flattened logical module name from the
+remaining callable with `_\u2133_` (U+2133 SCRIPT CAPITAL M):
 
 ```text
 foo.bar + baz -> foo_bar_\u2133_baz
 ```
 
-That character cannot occur in Titan's identifier alphabet, so the boundary is
-injective without a universal `titan_` prefix or a separate hexadecimal
-source-private scheme. C source retains the UCN spelling; object symbols,
-DWARF, libbacktrace, and native tools see the corresponding UTF-8 character,
-which `_linkage_symbol_name` computes when native-reference sets are compared.
+`coder._nominal_function_prefix` adds `_\u2131_` (U+2131 SCRIPT CAPITAL F)
+between a record, union, or Interface owner and its member or synthetic
+metamethod role:
+
+```text
+foo.bar + Point:move -> foo_bar_\u2133_Point_\u2131_move_titanmethod
+```
+
+Neither character can occur in Titan's identifier alphabet, so both tuple
+boundaries are injective without a universal `titan_` prefix or a separate
+hexadecimal source-private scheme. C source retains the UCN spellings; object
+symbols, DWARF, libbacktrace, and native tools see UTF-8 `ℳ` and `ℱ`, which
+`_linkage_symbol_name` computes for native trace keys.
 
 Ordinary public and local top-level entries share the family:
 
@@ -515,8 +522,8 @@ before the linker runs.
 
 The complete change advances the compiled-module ABI to 0.23 for two native
 reasons: generated standard objects now define their callbacks while the former
-runtime/HTTP symbols and `titan_uv.o` are absent, and top-level function entry
-families use the new separator. ABI-0.22 objects cannot be paired with the
+runtime/HTTP symbols and `titan_uv.o` are absent, and callable entry families
+use the separated module/nominal/member hierarchy. ABI-0.22 objects cannot be paired with the
 0.23 runtime or generated objects even when their serialized public types happen
 to match.
 

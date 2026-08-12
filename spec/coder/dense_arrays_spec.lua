@@ -140,7 +140,7 @@ describe("dense Array code generation and boundaries", function()
         local mutate = generated_function(
             csrc, "test_\\u2133_mutate_value_titan(lua_State *L")
         local holder_new = generated_function(
-            csrc, "test_Holder_new_titanstatic(lua_State *L")
+            csrc, "test_\\u2133_Holder_\\u2131_new_titanstatic(lua_State *L")
         local as_value = generated_function(
             csrc, "test_\\u2133_as_value_titan(lua_State *L")
         local map_value = generated_function(

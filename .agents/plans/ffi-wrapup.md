@@ -114,15 +114,18 @@ C API contract. Titan installs no `setjmp`, roots, cleanup, or recovery frame.
 
 ### C names and entry families
 
-ABI 0.23 gives every top-level function family one readable module/member
-boundary. The separator is the C99 universal-character-name spelling
-`_\u2133_` (SCRIPT CAPITAL M), which cannot occur in a Titan identifier:
+ABI 0.23 gives every callable family explicit structural boundaries. The
+C99 UCN `_\u2133_` (SCRIPT CAPITAL M) separates a flattened module from the
+remaining signature, and `_\u2131_` (SCRIPT CAPITAL F) separates a record,
+union, or Interface owner from its member or synthetic metamethod role. Neither
+can occur in a Titan identifier:
 
 ```text
-module foo.bar, function baz -> foo_bar_\u2133_baz_titan
+module foo.bar, function baz     -> foo_bar_\u2133_baz_titan
+module foo.bar, method Box:read  -> foo_bar_\u2133_Box_\u2131_read_titanmethod
 ```
 
-Ordinary public and local top-level functions use that prefix for the native,
+Ordinary public and local top-level functions use the module prefix for the native,
 Lua-stack, and strict entries, for example:
 
 ```text
@@ -342,8 +345,9 @@ change:
 
 1. generated standard objects now define their source foreign callbacks while
    the former runtime/HTTP callback symbols and `titan_uv.o` are absent; and
-2. top-level ordinary/local/foreign function entry families use the
-   `_\u2133_` member separator rather than the old ambiguous/private split.
+2. callable entry families use `_\u2133_` between the module and remaining
+   signature and `_\u2131_` between a nominal owner and its static,
+   constructor, variant, method, bound, or metamethod role.
 
 An ABI-0.22 object or provider must therefore not be paired with the ABI-0.23
 runtime or generated objects. `TITAN_VER`, `_0_23`, `TITAN_PATH_0_23`,

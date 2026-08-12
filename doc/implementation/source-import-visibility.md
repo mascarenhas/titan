@@ -119,8 +119,9 @@ closure slot, preserving identity across importers and Lua GC cycles.
 
 Native entries needed across source translation units have hidden visibility.
 Ordinary local/public top-level functions and source foreign declarations all
-use ABI 0.23's injective module/member UCN separator; visibility, not an
-alternate spelling, keeps private entries out of the DSO's dynamic API. They
+use ABI 0.23's injective module/member UCN separator. Local nominal statics and
+methods use the same module/owner/member hierarchy as public ones; visibility,
+not an alternate spelling, keeps private entries out of the DSO's dynamic API. They
 remain linkable within one source/static composition. The coder rejects a module-state slot count larger than
 Lua's `unsigned short` user-value carrier before emitting an undersized Udata.
 
@@ -137,6 +138,6 @@ from its public schema and public closure prefix, and because every module's
 userdata gains the fixed physical-provider identity slot used to authenticate
 source-private state. ABI 0.21 providers are rejected before metadata decoding.
 ABI 0.23 retains that overlay/layout but adds source foreign collaboration and
-changes the top-level native symbol family; 0.22 providers are rejected before
+changes the separated callable symbol families; 0.22 providers are rejected before
 metadata decoding or native linking. Earlier trees are neither migrated nor
 deleted.

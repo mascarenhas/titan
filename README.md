@@ -536,8 +536,10 @@ ABI 0.21 retained the ABI-0.20 Array, function-closure, and Interface
 contracts while advancing the embedded Lua contract from 5.5.0 to 5.5.1.
 ABI 0.22 made the source-local `titan.uv` surface/private-provider boundary.
 The active compiled-module ABI is 0.23: generated source foreign callbacks
-replace the runtime and standard-provider callback shims, changing the native
-symbol contract while retaining Lua 5.5.1 and the ABI-0.22 serialized layouts.
+replace the runtime and standard-provider callback shims, and callable symbols
+use injective module/nominal/member separators (`_\u2133_` and `_\u2131_`).
+These native-contract changes retain Lua 5.5.1 and the ABI-0.22 serialized
+layouts.
 Current lookup and publication use `TITAN_PATH_0_23` and `lib/titan/0.23`;
 0.22 metadata is rejected before decoding. There is no 0.22-to-0.23 migration
 or cleanup path: separately versioned 0.17 through 0.22 trees remain untouched.

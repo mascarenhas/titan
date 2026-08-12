@@ -1187,9 +1187,10 @@ end
             generated)
         assert.falsy(generated:find(
             'loadlib(L, "shape/facade.so")', 1, true), generated)
-        assert.truthy(generated:find(
-            'loadglobalsym(L, "shape_provider_Foo_plus_titanmethod")',
-            1, true), generated)
+        assert.match(
+            'loadglobalsym%s*%(%s*L,%s*"shape_provider_' ..
+                '\\u2133_Foo_\\u2131_plus_titanmethod"%s*%)',
+            generated)
         assert.falsy(generated:find(
             "shape_api_init", 1, true), generated)
         assert.falsy(generated:find(
@@ -2181,14 +2182,24 @@ end
         assert.truthy(ran, result)
     end)
 
-    it("preflights record-function and bound-method symbols", function()
+    it("keeps module/nominal boundary symbols injective", function()
         write_file(source_root .. "/record_boundary/root.titan", [[
 record child_Thing
     n: integer
 end
 
+function child_Thing.make(n: integer): child_Thing
+    return child_Thing.new(n)
+end
+
 function child_Thing:run(): integer
-    return self.n
+    return self.n + 1
+end
+
+function exercise(): integer
+    local item = child_Thing.make(10)
+    local bound = item:run
+    return item:run() + bound()
 end
 ]])
         write_file(source_root .. "/record_boundary/root/child.titan", [[
@@ -2196,35 +2207,53 @@ record Thing
     n: integer
 end
 
+function Thing.make(n: integer): Thing
+    return Thing.new(n)
+end
+
 function Thing:run(): integer
-    return self.n
+    return self.n + 2
+end
+
+function exercise(): integer
+    local item = Thing.make(20)
+    local bound = item:run
+    return item:run() + bound()
 end
 ]])
 
         local ok, output = compile(workspace, source_root,
             "record_boundary.root", "record_boundary.root.child")
-        assert.falsy(ok)
-        for _, symbol in ipairs({
-            "record_boundary_root_child_Thing_new_titanstatic",
-            "record_boundary_root_child_Thing_run_titanmethod",
-            "record_boundary_root_child_Thing_run_boundmethod",
-            "record_boundary_root_child_Thing_run_titanentry_boundlua",
+        assert.truthy(ok, output)
+        local root_c = read_file(source_root .. "/record_boundary/root.c")
+        local child_c =
+            read_file(source_root .. "/record_boundary/root/child.c")
+        for source, owner in pairs({
+            [root_c] = "child_Thing",
+            [child_c] = "Thing",
         }) do
-            assert.truthy(output:find(
-                "cannot link C symbol '" .. symbol .. "'", 1, true), output)
+            local stem = "record_boundary_root"
+            if owner == "Thing" then stem = stem .. "_child" end
+            stem = stem .. "_\\u2133_" .. owner .. "_\\u2131_"
+            for _, suffix in ipairs({
+                "new_titanstatic", "make_titanstatic", "run_titanmethod",
+                "run_boundmethod", "run_titanentry_boundlua",
+                "run_titanentry_boundstrict",
+            }) do
+                assert.truthy(source:find(stem .. suffix, 1, true), suffix)
+            end
         end
-        assert.is_nil(lfs.attributes(
-            source_root .. "/record_boundary/root.c", "mode"))
-        assert.is_nil(lfs.attributes(
-            source_root .. "/record_boundary/root/child.c", "mode"))
-        assert.is_nil(lfs.attributes(
-            workspace .. "/record_boundary/root.so", "mode"))
-        assert.is_nil(lfs.attributes(
-            workspace .. "/record_boundary/root.a", "mode"))
+        local ran, result = run_lua(workspace, [[
+local root = require "record_boundary.root"
+local child = require "record_boundary.root.child"
+io.write(root.exercise(), " ", child.exercise(), " ",
+    root.child_Thing.make(30):run(), " ", child.Thing.make(40):run())
+]])
+        assert.truthy(ran, result)
+        assert.equal("22 44 31 42", result)
     end)
 
-    it("preflights all three exported Interface bound-method symbols",
-       function()
+    it("keeps Interface nominal boundary symbols injective", function()
         write_file(source_root .. "/interface_boundary/root.titan", [[
 interface child_Stream
     function read(): integer
@@ -2238,25 +2267,21 @@ end
 
         local ok, output = compile(workspace, source_root,
             "interface_boundary.root", "interface_boundary.root.child")
-        assert.falsy(ok)
-        for _, symbol in ipairs({
-            "interface_boundary_root_child_Stream_read_interface_boundmethod",
-            "interface_boundary_root_child_Stream_read_titanentry_" ..
-                "interface_boundlua",
-            "interface_boundary_root_child_Stream_read_titanentry_" ..
-                "interface_boundstrict",
+        assert.truthy(ok, output)
+        local root_c = read_file(source_root .. "/interface_boundary/root.c")
+        local child_c =
+            read_file(source_root .. "/interface_boundary/root/child.c")
+        for source, stem in pairs({
+            [root_c] = "interface_boundary_root_\\u2133_child_Stream_\\u2131_read_",
+            [child_c] = "interface_boundary_root_child_\\u2133_Stream_\\u2131_read_",
         }) do
-            assert.truthy(output:find(
-                "cannot link C symbol '" .. symbol .. "'", 1, true), output)
+            for _, role in ipairs({
+                "interface_boundmethod", "titanentry_interface_boundlua",
+                "titanentry_interface_boundstrict",
+            }) do
+                assert.truthy(source:find(stem .. role, 1, true), role)
+            end
         end
-        assert.is_nil(lfs.attributes(
-            source_root .. "/interface_boundary/root.c", "mode"))
-        assert.is_nil(lfs.attributes(
-            source_root .. "/interface_boundary/root/child.c", "mode"))
-        assert.is_nil(lfs.attributes(
-            workspace .. "/interface_boundary/root.so", "mode"))
-        assert.is_nil(lfs.attributes(
-            workspace .. "/interface_boundary/root.a", "mode"))
     end)
 
     it("preflights cross-family protocol symbols from source dependencies",

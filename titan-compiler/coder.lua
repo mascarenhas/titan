@@ -220,9 +220,9 @@ end
 local TITAN_ENTRY_TAG = "titanentry"
 
 function coder._source_private_prefix(owner, name)
-    -- Source-private entries use the same readable native-entry stem as every
-    -- other top-level declaration. Actual symbol collisions are compilation
-    -- errors; private visibility does not require a second naming scheme.
+    -- Keep the generated-header guard ASCII-only. Callable entries use the
+    -- separated naming helpers below; private visibility never changes their
+    -- spelling.
     return mangle_qn(owner) .. "_" .. name
 end
 
@@ -230,11 +230,16 @@ function coder._source_module_identity_name(modname)
     return mangle_qn(modname) .. "_module_identity"
 end
 
+function coder._nominal_function_prefix(fqtn, name)
+    local modname, owner = fqtn:match("^(.*)[.]([^.]+)$")
+    assert(modname and owner,
+        "nominal callable owner must be a module-qualified name")
+    return coder._function_prefix(modname, owner)
+        .. "_\\u2131_" .. name
+end
+
 local function fname_prefix(typ)
-    if typ.islocal then
-        return coder._source_private_prefix(typ.fqtn, typ.name)
-    end
-    return mangle_qn(typ.fqtn) .. "_" .. typ.name
+    return coder._nominal_function_prefix(typ.fqtn, typ.name)
 end
 
 local function static_name(typ)
@@ -302,10 +307,24 @@ function coder._function_prefix(modname, name)
     return modprefix(modname) .. "\\u2133_" .. name
 end
 
+function coder._nominal_metamethod_name(fqtn, role)
+    assert(role == "index" or role == "newindex",
+        "unknown nominal metamethod role")
+    return coder._nominal_function_prefix(fqtn, "meta_" .. role)
+end
+
+function coder._module_metamethod_name(modname, role)
+    assert(role == "index" or role == "newindex",
+        "unknown module metamethod role")
+    return coder._function_prefix(modname, "meta_" .. role)
+end
+
 function coder._linkage_symbol_name(c_spelling)
     -- C source spells the separator as a UCN. Object files, DWARF, libbacktrace,
     -- and native symbol tools expose the corresponding UTF-8 linkage name.
-    return (c_spelling:gsub("\\u2133", "\226\132\179"))
+    return (c_spelling
+        :gsub("\\u2133", "\226\132\179")
+        :gsub("\\u2131", "\226\132\177"))
 end
 
 local function func_name(modname, name, _)
@@ -17012,7 +17031,7 @@ local function coderecorddec(ctx, code, initrecs, node)
     end
     if #node._type.fields > 0 then
         table.insert(code, render([[
-            static int __index_$RECNAME(lua_State *L) {
+            static int $INDEXNAME(lua_State *L) {
                 TValue *_recslot = s2v(L->ci->func.p + 1);
                 CClosure *_func = clCvalue(s2v(L->ci->func.p));
                 Udata *_mod = uvalue(&_func->upvalue[1]);
@@ -17038,7 +17057,7 @@ local function coderecorddec(ctx, code, initrecs, node)
                     return luaL_error(L, "%s:%d:%d: field '%s' not found in record '%s'", $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
                 }
             }
-            static int __newindex_$RECNAME(lua_State *L) {
+            static int $NEWINDEXNAME(lua_State *L) {
                 TValue *_recslot = s2v(L->ci->func.p + 1);
                 CClosure *_func = clCvalue(s2v(L->ci->func.p));
                 Udata *_mod = uvalue(&_func->upvalue[1]);
@@ -17062,7 +17081,10 @@ local function coderecorddec(ctx, code, initrecs, node)
                 }
             }
         ]], {
-            RECNAME = mangle_qn(node._type.name),
+            INDEXNAME = coder._nominal_metamethod_name(
+                node._type.name, "index"),
+            NEWINDEXNAME = coder._nominal_metamethod_name(
+                node._type.name, "newindex"),
             CHECKANDGET = coder._dynamiccheckandget(
                 ctx, node._dynamic_receiver_plan,
                 types.Nominal(node._type.name), "_rec", "_recslot",
@@ -17076,14 +17098,17 @@ local function coderecorddec(ctx, code, initrecs, node)
         }))
     else
         table.insert(code, render([[
-            static int __index_$RECNAME(lua_State *L) {
+            static int $INDEXNAME(lua_State *L) {
                 return luaL_error(L, "%s:%d:%d: field %s not found in record %s", $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
             }
-            static int __newindex_$RECNAME(lua_State *L) {
+            static int $NEWINDEXNAME(lua_State *L) {
                 return luaL_error(L, "%s:%d:%d: field %s not found in record %s", $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
             }
         ]], {
-            RECNAME = mangle_qn(node._type.name),
+            INDEXNAME = coder._nominal_metamethod_name(
+                node._type.name, "index"),
+            NEWINDEXNAME = coder._nominal_metamethod_name(
+                node._type.name, "newindex"),
             FQTN = c_string_literal(node._type.name),
             FILE = c_string_literal(node.loc.filename),
             LINE = c_integer_literal(node.loc.line),
@@ -17105,12 +17130,12 @@ local function coderecorddec(ctx, code, initrecs, node)
         lua_pushliteral(L, "__index");
         lua_pushvalue(L, -2);            /* fieldmap */
         titan_pushmodule(L, _mod);       /* _mod as upvalue[1] */
-        lua_pushcclosure(L, __index_$RECNAME, 2);
+        lua_pushcclosure(L, $INDEXNAME, 2);
         lua_rawset(L, -4);
         lua_pushliteral(L, "__newindex");
         lua_pushvalue(L, -2);            /* fieldmap */
         titan_pushmodule(L, _mod);       /* _mod as upvalue[1] */
-        lua_pushcclosure(L, __newindex_$RECNAME, 2);
+        lua_pushcclosure(L, $NEWINDEXNAME, 2);
         lua_rawset(L, -4);
         lua_pop(L, 2); /* pop fieldmap and metatable */
         /* Index from metatable pointer to typename for error messages */
@@ -17118,7 +17143,10 @@ local function coderecorddec(ctx, code, initrecs, node)
         lua_rawsetp(L, LUA_REGISTRYINDEX, _mtp);
         }
     ]], {
-        RECNAME = mangle_qn(node._type.name),
+        INDEXNAME = coder._nominal_metamethod_name(
+            node._type.name, "index"),
+        NEWINDEXNAME = coder._nominal_metamethod_name(
+            node._type.name, "newindex"),
         TYPE = node._type.name,
         FIELDMAP = table.concat(fieldmap, "\n")
     }))
@@ -17149,7 +17177,7 @@ function coder._codeuniondec(ctx, code, initnominals, node)
     end
 
     table.insert(code, render([[
-        static int __index_$UNIONNAME(lua_State *L) {
+        static int $INDEXNAME(lua_State *L) {
             TValue *_unionslot = s2v(L->ci->func.p + 1);
             CClosure *_func = clCvalue(s2v(L->ci->func.p));
             Udata *_mod = uvalue(&_func->upvalue[1]);
@@ -17171,13 +17199,16 @@ function coder._codeuniondec(ctx, code, initnominals, node)
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
 
-        static int __newindex_$UNIONNAME(lua_State *L) {
+        static int $NEWINDEXNAME(lua_State *L) {
             return luaL_error(L,
                 "%s:%d:%d: cannot assign member '%s' in union '%s'",
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
     ]], {
-        UNIONNAME = mangle_qn(node._type.name),
+        INDEXNAME = coder._nominal_metamethod_name(
+            node._type.name, "index"),
+        NEWINDEXNAME = coder._nominal_metamethod_name(
+            node._type.name, "newindex"),
         CHECKANDGET = coder._dynamiccheckandget(
             ctx, node._dynamic_receiver_plan,
             types.Nominal(node._type.name),
@@ -17200,17 +17231,20 @@ function coder._codeuniondec(ctx, code, initnominals, node)
             lua_pushliteral(L, "__index");
             lua_pushvalue(L, -2);
             titan_pushmodule(L, _mod);
-            lua_pushcclosure(L, __index_$UNIONNAME, 2);
+            lua_pushcclosure(L, $INDEXNAME, 2);
             lua_rawset(L, -4);
             lua_pushliteral(L, "__newindex");
-            lua_pushcfunction(L, __newindex_$UNIONNAME);
+            lua_pushcfunction(L, $NEWINDEXNAME);
             lua_rawset(L, -4);
             lua_pop(L, 2);
             lua_pushstring(L, "$TYPE");
             lua_rawsetp(L, LUA_REGISTRYINDEX, _mtp);
         }
     ]], {
-        UNIONNAME = mangle_qn(node._type.name),
+        INDEXNAME = coder._nominal_metamethod_name(
+            node._type.name, "index"),
+        NEWINDEXNAME = coder._nominal_metamethod_name(
+            node._type.name, "newindex"),
         TYPE = node._type.name,
         METHODMAP = table.concat(methodmap, "\n"),
     }))
@@ -17406,12 +17440,11 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
         }))
     end
 
-    local cname = mangle_qn(interface.name)
     local receiver_plan =
         assert(node.methods[1]._lua_dynamic_plans[1],
             "Interface receiver lacks its Lua boundary plan")
     table.insert(code, render([[
-        static int __index_interface_$CNAME(lua_State *L) {
+        static int $INDEXNAME(lua_State *L) {
             TValue *_interfaceslot = s2v(L->ci->func.p + 1);
             CClosure *_func = clCvalue(s2v(L->ci->func.p));
             Udata *_mod = uvalue(&_func->upvalue[1]);
@@ -17433,13 +17466,16 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
 
-        static int __newindex_interface_$CNAME(lua_State *L) {
+        static int $NEWINDEXNAME(lua_State *L) {
             return luaL_error(L,
                 "%s:%d:%d: cannot assign member '%s' in interface '%s'",
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
     ]], {
-        CNAME = cname,
+        INDEXNAME = coder._nominal_metamethod_name(
+            interface.name, "index"),
+        NEWINDEXNAME = coder._nominal_metamethod_name(
+            interface.name, "newindex"),
         CHECK_RECEIVER = coder._dynamiccheckandget(
             ctx, receiver_plan, types.Nominal(interface.name),
             "_interface", "_interfaceslot", node.loc,
@@ -17462,10 +17498,10 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
             lua_pushliteral(L, "__index");
             lua_pushvalue(L, -2);
             titan_pushmodule(L, _mod);
-            lua_pushcclosure(L, __index_interface_$CNAME, 2);
+            lua_pushcclosure(L, $INDEXNAME, 2);
             lua_rawset(L, -4);
             lua_pushliteral(L, "__newindex");
-            lua_pushcfunction(L, __newindex_interface_$CNAME);
+            lua_pushcfunction(L, $NEWINDEXNAME);
             lua_rawset(L, -4);
             lua_pop(L, 2);
             lua_pushstring(L, "$TYPE");
@@ -17473,7 +17509,10 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
         }
     ]], {
         TYPE = interface.name,
-        CNAME = cname,
+        INDEXNAME = coder._nominal_metamethod_name(
+            interface.name, "index"),
+        NEWINDEXNAME = coder._nominal_metamethod_name(
+            interface.name, "newindex"),
         METHODMAP = table.concat(methodmap, "\n"),
     }))
 end
@@ -18139,7 +18178,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
 
     if #switch_get > 0 then
         table.insert(code, render([[
-            static int __index(lua_State *L) {
+            static int $INDEXNAME(lua_State *L) {
                 CClosure *_me = clCvalue(s2v(L->ci->func.p));
                 Udata *_mod = uvalue(&_me->upvalue[0]);
                 TValue _indexv;
@@ -18155,7 +18194,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                 return 1;
             }
 
-            static int __newindex(lua_State *L) {
+            static int $NEWINDEXNAME(lua_State *L) {
                 CClosure *_me = clCvalue(s2v(L->ci->func.p));
                 Udata *_mod = uvalue(&_me->upvalue[0]);
                 TValue *_value = s2v(L->ci->func.p + 3);
@@ -18176,6 +18215,9 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                 return 1;
             }
          ]], {
+             INDEXNAME = coder._module_metamethod_name(modname, "index"),
+             NEWINDEXNAME = coder._module_metamethod_name(
+                 modname, "newindex"),
              MODSTR = c_string_literal(modname),
              SWITCH_GET = table.concat(switch_get, "\n"),
              SWITCH_SET = table.concat(switch_set, "\n"),
@@ -18192,12 +18234,12 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
             /* Store __index in metatable */
             titan_pushmodule(L, _mod);
             lua_pushvalue(L, -2);
-            lua_pushcclosure(L, __index, 2);
+            lua_pushcclosure(L, $INDEXNAME, 2);
             lua_setfield(L, -3, "__index");
             /* Store __newindex in metatable */
             titan_pushmodule(L, _mod);
             lua_pushvalue(L, -2);
-            lua_pushcclosure(L, __newindex, 2);
+            lua_pushcclosure(L, $NEWINDEXNAME, 2);
             lua_setfield(L, -3, "__newindex");
             /* Set metatable on the module udata */
             titan_pushmodule(L, _mod);
@@ -18206,6 +18248,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
             /* Pop module, varmap, and metatable */
             lua_pop(L, 3);
         ]], {
+            INDEXNAME = coder._module_metamethod_name(modname, "index"),
+            NEWINDEXNAME = coder._module_metamethod_name(modname, "newindex"),
             MODMETA = c_string_literal("Titan module ".. modname .. " metatable"),
             MODNAME = c_string_literal("Titan module ".. modname),
             GVARMAP = table.concat(gvar_map, "\n")

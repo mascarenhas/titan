@@ -227,7 +227,8 @@ schema and reconstructible module-userdata prefix change while Lua 5.5.1 and
 the other value/native-call layouts remain unchanged. Every generated module
 also gains the fixed physical-provider identity slot used to authenticate
 canonical source-private state. ABI 0.23 retains those layouts while changing
-the native callback/entry-symbol contract. The current marker,
+the native callback contract and separating module, nominal owner, and member
+in callable symbols. The current marker,
 `TITAN_PATH_0_23`, and `lib/titan/0.23` namespace advance together. A 0.22
 candidate is rejected before type metadata is decoded or native linking begins.
 

@@ -166,15 +166,15 @@ linker flags are final-link inputs and are not copied into the produced
 archive.
 
 The compiler preflights the coder's complete externally visible symbol set.
-Distinct logical names that both map to one coder prefix (for example through
-dot/dash replacement) are rejected by name. It also catches a boundary that a
-prefix-only check would miss: module `a` function `b_c` and module `a.b`
-function `c` both produce `a_b_c_titan`. The same inventory covers public
-methods, their bound trampolines, record/union functions and constructors,
-the three exported bound trampolines for every public Interface method, and
-each module protocol,
-so every collision is reported before code generation instead of as an opaque
-duplicate-symbol linker error.
+Distinct logical module names that map to one flattened protocol prefix (for
+example through dot/dash replacement) are rejected by name. Callable names use
+`_\u2133_` and `_\u2131_`, so module `a` function `b_c` and module `a.b`
+function `c` produce distinct `a_\u2133_b_c_titan` and
+`a_b_\u2133_c_titan` entries. The same inventory covers public methods, their
+bound trampolines, record/union functions and constructors, the three exported
+bound trampolines for every public Interface method, each module protocol, and
+cross-family protocol collisions, so every real collision is reported before
+code generation instead of as an opaque duplicate-symbol linker error.
 
 Both native provider forms contain independent copies of every logical
 protocol:
@@ -412,8 +412,8 @@ source-private state. Its marker rejects 0.21 before schema decoding or native
 linking. ABI 0.23 retains that public schema and module-state layout but changes
 the native contract: generated standard objects now own the coroutine, libuv,
 and llhttp callback entries formerly supplied by runtime/adapter objects, and
-top-level entry families use the injective UCN separator. Its marker rejects
-0.22 before metadata decoding or native linking. The 0.23 publisher does not
+callable entry families use injective module/nominal/member UCN separators. Its
+marker rejects 0.22 before metadata decoding or native linking. The 0.23 publisher does not
 migrate, clean up, or otherwise consume the preserved 0.22 tree, and there is
 no retained historical cutover canary.
 
