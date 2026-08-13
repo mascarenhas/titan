@@ -2618,6 +2618,20 @@ describe("Titan types", function()
             assert.is_true(types.is_erased(types.erase(first)))
         end)
 
+        it("keeps applied owners invariant while allowing shallow value consistency",
+        function()
+            local precise = types.Nominal("sample.Cell", {types.Integer()})
+            local erased = types.Nominal("sample.Cell", {types.Value()})
+            local wrong = types.Nominal("sample.Cell", {types.String()})
+
+            assert.is_false(types.equals(precise, erased))
+            assert.is_true(types.consistent(precise, erased))
+            assert.is_true(types.consistent(erased, precise))
+            assert.is_false(types.consistent(precise, wrong))
+            assert.is_false(types.assignment_adjustment(precise, wrong))
+            assert.is_truthy(types.assignment_adjustment(precise, erased))
+        end)
+
         it("smart-substitutes owner and callable scopes independently",
         function()
             local owner_scope = scope(

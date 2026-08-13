@@ -2329,8 +2329,13 @@ local function relation_identity(left, right)
        or right._tag == "Type.Interface" then
         return false
     elseif is_relation_nominal(left) or is_relation_nominal(right) then
-        return left._tag == right._tag
-            and nominal_name(left) == nominal_name(right)
+        if left._tag ~= right._tag
+           or nominal_name(left) ~= nominal_name(right) then
+            return false
+        elseif left._tag == "Type.Nominal" then
+            return types.equals(left, right)
+        end
+        return true
     end
     return types.equals(left, right)
 end
@@ -2997,6 +3002,18 @@ consistent_impl = function(left, right, context)
         local other = left._tag == "Type.Value" and right or left
         result = sound_guardable(other, {})
             and types.has_tvalue_representation(other)
+    elseif left._tag == "Type.Nominal"
+       and right._tag == "Type.Nominal"
+       and left.fqtn == right.fqtn
+       and #(left.args or {}) == #(right.args or {}) then
+        result = true
+        for index = 1, #(left.args or {}) do
+            if not consistent_impl(
+                    left.args[index], right.args[index], context) then
+                result = false
+                break
+            end
+        end
     elseif left._tag == "Type.Array"
        and right._tag == "Type.Array" then
         result = consistent_impl(left.elem, right.elem, context)
