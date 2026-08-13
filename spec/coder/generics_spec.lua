@@ -98,6 +98,86 @@ describe("generic erased core", function()
         assert.truthy(ok, err)
     end)
 
+    it("runs calls finalized by an outer ambient inference context", function()
+        h.run_coder([[
+            interface I
+                function marker(): integer
+            end
+
+            record Witness
+                number: integer
+            end
+            function Witness:marker(): integer return self.number end
+
+            function id<T>(item: T): T return item end
+            function constrained<T: I>(item: T): T return item end
+            function take<U: I>(left: (U) -> U, right: (U) -> U):
+                    (U) -> U
+                return left
+            end
+
+            record Box<T>
+                item: T
+            end
+            function Box:integer_identity(item: T): T return item end
+            function pair<U>(left: (U) -> U, right: (U) -> U): (U) -> U
+                return right
+            end
+
+            union Maybe<T>
+                none
+                some: T
+            end
+            function consume<T>(left: T, right: T): T return left end
+            function make<T>(): T return (40 as value) as T end
+            function pass<T>(item: T): T return item end
+
+            function constrained_orders(): integer
+                local witness = Witness.new(7)
+                local left = take(id, constrained)
+                local right = take(constrained, id)
+                local named_left = take { left = id, right = constrained }
+                local named_right = take { right = constrained, left = id }
+                return left(witness):marker() + right(witness):marker()
+                    + named_left(witness):marker()
+                    + named_right(witness):marker()
+            end
+
+            function bound_orders(): integer
+                local box = Box.new(0)
+                local left = pair(id, box:integer_identity)
+                local right = pair(box:integer_identity, id)
+                return left(20) + right(22)
+            end
+
+            function nested_maybe(): integer
+                local first = consume(Maybe.none(), Maybe.some(42))
+                local second = consume(Maybe.some(42), Maybe.none())
+                local total = 0
+                case first
+                when none then total = total + 1
+                else total = -100
+                end
+                case second
+                when some: item then total = total + item
+                else total = -100
+                end
+                return total
+            end
+
+            function nested_calls(): integer
+                local direct = consume(make(), 42)
+                local deep = consume(pass(make()), 42)
+                return direct + deep
+            end
+        ]], [[
+            assert(test.constrained_orders() == 28)
+            assert(test.bound_orders() == 42)
+            assert(test.nested_maybe() == 43)
+            assert(test.nested_calls() == 80)
+        ]])
+    end)
+
     it("lowers generic owner fields, constructors, methods, and union cases", function()
         h.run_coder([[
             record Box<T>

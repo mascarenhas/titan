@@ -307,27 +307,51 @@ capability; binary recovery and transitive importers remain public-only.
 
 ## Local instantiation and inference
 
-Every generic call, constructor, method, nominal-function use, or contextual
-first-class use allocates fresh checker-only inference cells. An explicit list
-binds the complete unresolved sequence. Otherwise the checker:
+An inferred outer generic AST use owns one checker-only inference context. Its
+fresh cells use occurrence scopes distinct from the declaration scopes and from
+every other application of the same declaration. While that owner's receiver,
+result, and argument subtree is being checked, a nested generic call,
+constructor, method, bound method, or contextual first-class use inherits the
+ambient context instead of closing a private one. It registers its own fresh
+scope entries and a child use record; direct cell-to-cell unification records an
+equation, so a nested cell can remain equal to an outer cell until later sibling
+evidence resolves either side. A generic use creates and owns a context only
+when there is no ambient owner. A complete explicit type-argument list remains
+closed locally and contributes its resulting ordinary type as evidence.
+
+The owning AST use closes the context only after the complete relevant subtree
+has contributed evidence. The checker then:
 
 1. gathers receiver and expected-result evidence, looking through one ordinary
    outer Option wrap or force around a structured result while preserving a
    direct `T` binding to the Option itself;
 2. gathers positional/named argument evidence and prepares contextual lambda
-   parameter and result types;
-3. invariantly unifies structural evidence;
-4. after evidence is exhausted, closes each free cell to its declared erased
-   carrier (`value` or its fully substituted Interface application);
-5. validates constraints and `types.transient_roundtrip` for every binding;
-6. smart-substitutes the closed application through the signature; and
-7. checks each contextual lambda body exactly once.
+   parameter and result types, registering nested applications without
+   finalizing them;
+3. invariantly unifies structural evidence and cross-use cell equations;
+4. propagates declared constraint evidence across the equation classes;
+5. after evidence is exhausted, closes each equivalence class to its declared
+   erased carrier, preferring any resolvable constrained Interface application
+   before the unconstrained `value` default;
+6. validates every declaration-local constraint and
+   `types.transient_roundtrip` against the closed class binding; and
+7. finalizes the registered use tree in postorder: deepest children before their
+   parent, left-to-right among siblings. Finalization smart-substitutes each
+   closed application, freezes argument/result annotations and adjustments, and
+   checks each deferred contextual lambda body exactly once.
+
+The context is owned by the AST, while its temporary ambient pointer lives only
+in the current checker symbol-table state during recursive expression checking.
+It is neither process-global nor run-time state. Postorder finalization does not
+reevaluate or recheck written argument expressions; their original lexical
+checking and evaluation order remains authoritative.
 
 Result evidence remains authoritative for empty union variants, phantom
 parameters, and result-only parameters such as the async Task cancellation
-type. The final carrier step is fixed by the declaration and happens only after
-that evidence; there is no wildcard, partial explicit list, source-declared
-default, or inference cell in metadata/codegen.
+type. The final carrier step is fixed by the declarations participating in the
+equation class and happens only after all evidence; there is no wildcard,
+partial explicit list, source-declared default, heuristic candidate scoring, or
+inference cell in metadata/codegen.
 
 Unification descends through Option, Array, Map, Function, and same-owner
 applications. It matches fixed, variadic, and flexible callable components but

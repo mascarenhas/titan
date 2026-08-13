@@ -1238,6 +1238,58 @@ describe("generic declarations and explicit calls", function()
             end
         ]])
     end)
+
+    it("shares one AST-owned inference context across nested generic uses",
+    function()
+        assert_check([[
+            interface I
+                function marker(): integer
+            end
+
+            function id<T>(item: T): T return item end
+            function constrained<T: I>(item: T): T return item end
+            function take<U: I>(left: (U) -> U, right: (U) -> U): value
+                return nil
+            end
+
+            record Box<T>
+                item: T
+            end
+            function Box:integer_identity(item: T): T return item end
+            function pair<U>(left: (U) -> U, right: (U) -> U): value
+                return nil
+            end
+
+            union Maybe<T>
+                none
+                some: T
+            end
+            function consume<T>(left: T, right: T): value return nil end
+            function make<T>(): T return (nil as value) as T end
+            function pass<T>(item: T): T return item end
+
+            function use(box: Box<integer>)
+                local positional_left: value = take(id, constrained)
+                local positional_right: value = take(constrained, id)
+                local named_left: value =
+                    take { left = id, right = constrained }
+                local named_right: value =
+                    take { right = constrained, left = id }
+                local bound_left: value =
+                    pair(id, box:integer_identity)
+                local bound_right: value =
+                    pair(box:integer_identity, id)
+
+                consume(Maybe.none(), Maybe.some(42))
+                consume(Maybe.some(42), Maybe.none())
+                consume(make(), 42)
+                consume(42, make())
+                consume(pass(make()), 42)
+                consume(42, pass(make()))
+            end
+        ]])
+    end)
+
     it("does not erase a cached source interface through imported annotations",
     function()
         local previous_registry = types.registry
