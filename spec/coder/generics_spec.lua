@@ -196,18 +196,36 @@ describe("generic erased core", function()
         ]])
     end)
 
-    it("runs dependent container and record constructors in both orders", function()
+    it("runs dependent constructors once in left-to-right order", function()
         h.run_coder([[
             record Plain<T>
                 item: T
             end
+            record Pair<T>
+                first: T
+                second: T
+            end
+            record Nested<T>
+                inner: Plain<T>
+                item: T
+            end
 
             produced: integer = 0
-            function make<T>(): T
+            order_okay: boolean = true
+            local function mark(expected: integer)
                 produced = produced + 1
+                if produced ~= expected then order_okay = false end
+            end
+            function make<T>(expected: integer): T
+                mark(expected)
                 return (40 as value) as T
             end
+            function key(expected: integer, spelling: string): string
+                mark(expected)
+                return spelling
+            end
             function produced_count(): integer return produced end
+            function order_preserved(): boolean return order_okay end
 
             function take_array_left<T>(left: {T}, right: T): (T, T)
                 return left[1], right
@@ -236,79 +254,120 @@ describe("generic erased core", function()
             function take_plain_pair<T>(left: Plain<T>, right: Plain<T>): (T, T)
                 return left.item, right.item
             end
+            function take_pair<T>(box: Pair<T>, item: T): (T, T, T)
+                return box.first, box.second, item
+            end
+            function take_nested<T>(box: Nested<T>, item: T): (T, T, T)
+                return box.inner.item, box.item, item
+            end
 
             function array_left(): integer
-                local left, right = take_array_left({make()}, 2)
+                local left, right = take_array_left({make(1)}, 2)
                 return left + right
             end
             function array_right(): integer
-                local left, right = take_array_right(2, {make()})
+                local left, right = take_array_right(2, {make(2)})
                 return left + right
             end
             function array_internal_left(): integer
-                local left, right = take_array({make(), 2})
+                local left, right = take_array({make(3), 2})
                 return left + right
             end
             function array_internal_right(): integer
-                local left, right = take_array({2, make()})
+                local left, right = take_array({2, make(4)})
                 return left + right
             end
             function map_left(): integer
-                local left, right = take_map_left({["item"] = make()}, 2)
+                local left, right = take_map_left(
+                    {[key(5, "item")] = make(6)}, 2)
                 return left + right
             end
             function map_right(): integer
-                local left, right = take_map_right(2, {["item"] = make()})
+                local left, right = take_map_right(
+                    2, {[key(7, "item")] = make(8)})
                 return left + right
             end
             function map_internal_left(): integer
-                local left, right =
-                    take_map({["left"] = make(), ["right"] = 2})
+                local left, right = take_map({
+                    [key(9, "left")] = make(10), ["right"] = 2,
+                })
                 return left + right
             end
             function map_internal_right(): integer
-                local left, right =
-                    take_map({["left"] = 2, ["right"] = make()})
+                local left, right = take_map({
+                    ["left"] = 2, [key(11, "right")] = make(12),
+                })
                 return left + right
             end
             function named_left(): integer
-                local left, right = take_plain_left({item = make()}, 2)
+                local left, right = take_plain_left({item = make(13)}, 2)
                 return left + right
             end
             function named_right(): integer
-                local left, right = take_plain_right(2, {item = make()})
+                local left, right = take_plain_right(2, {item = make(14)})
                 return left + right
             end
             function named_pair(): integer
                 local left, right =
-                    take_plain_pair({item = make()}, {item = 2})
+                    take_plain_pair({item = make(15)}, {item = 2})
                 return left + right
+            end
+            function named_fields_left(): integer
+                local first, second, item = take_pair(
+                    {first = make(16), second = make(17)}, 2)
+                return first + second + item
+            end
+            function named_fields_right(): integer
+                local first, second, item = take_pair(
+                    {second = make(18), first = make(19)}, 2)
+                return first + second + item
+            end
+            function named_nested_left(): integer
+                local inner, outer, item = take_nested(
+                    {inner = {item = make(20)}, item = make(21)}, 2)
+                return inner + outer + item
+            end
+            function named_nested_right(): integer
+                local inner, outer, item = take_nested(
+                    {item = make(22), inner = {item = make(23)}}, 2)
+                return inner + outer + item
             end
             function positional_left(): integer
                 local left, right =
-                    take_plain_left(Plain.new(make()), 2)
+                    take_plain_left(Plain.new(make(24)), 2)
                 return left + right
             end
             function positional_right(): integer
                 local left, right =
-                    take_plain_right(2, Plain.new(make()))
+                    take_plain_right(2, Plain.new(make(25)))
                 return left + right
             end
         ]], [[
-            local names = {
-                "array_left", "array_right",
-                "array_internal_left", "array_internal_right",
-                "map_left", "map_right",
-                "map_internal_left", "map_internal_right",
-                "named_left", "named_right", "named_pair",
-                "positional_left", "positional_right",
+            local cases = {
+                { "array_left", 42 }, { "array_right", 42 },
+                { "array_internal_left", 42 },
+                { "array_internal_right", 42 },
+                { "map_left", 42 }, { "map_right", 42 },
+                { "map_internal_left", 42 },
+                { "map_internal_right", 42 },
+                { "named_left", 42 }, { "named_right", 42 },
+                { "named_pair", 42 },
+                { "named_fields_left", 82 },
+                { "named_fields_right", 82 },
+                { "named_nested_left", 82 },
+                { "named_nested_right", 82 },
+                { "positional_left", 42 },
+                { "positional_right", 42 },
             }
-            for _, name in ipairs(names) do
-                assert(test[name]() == 42, name)
+            for _, case in ipairs(cases) do
+                local name = case[1]
+                assert(test[name]() == case[2], name)
             end
-            assert(test.produced_count() == #names)
+            assert(test.produced_count() == 25)
+            assert(test.order_preserved())
         ]])
     end)
+
 
     it("runs nested fixed and open generic result projections", function()
         h.run_coder([[

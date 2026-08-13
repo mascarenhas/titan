@@ -1292,12 +1292,21 @@ describe("generic declarations and explicit calls", function()
 
     it("finalizes dependent container and record constructors in source order",
     function()
-        assert_check([[
+        local checked = assert_check([[
             record Plain<T>
+                item: T
+            end
+            record Pair<T>
+                first: T
+                second: T
+            end
+            record Nested<T>
+                inner: Plain<T>
                 item: T
             end
 
             function make<T>(): T return (nil as value) as T end
+            function key<T>(): T return (nil as value) as T end
             function array_left<T>(items: {T}, item: T): integer return 0 end
             function array_right<T>(item: T, items: {T}): integer return 0 end
             function array_only<T>(items: {T}): integer return 0 end
@@ -1309,6 +1318,8 @@ describe("generic declarations and explicit calls", function()
             function plain_pair<T>(left: Plain<T>, right: Plain<T>): integer
                 return 0
             end
+            function pair_only<T>(box: Pair<T>): integer return 0 end
+            function nested_only<T>(box: Nested<T>): integer return 0 end
 
             function use_array_left(): integer
                 return array_left({make()}, 42)
@@ -1323,16 +1334,16 @@ describe("generic declarations and explicit calls", function()
                 return array_only({42, make()})
             end
             function use_map_left(): integer
-                return map_left({["item"] = make()}, 42)
+                return map_left({[key()] = make()}, 42)
             end
             function use_map_right(): integer
-                return map_right(42, {["item"] = make()})
+                return map_right(42, {[key()] = make()})
             end
             function use_map_internal_left(): integer
-                return map_only({["left"] = make(), ["right"] = 42})
+                return map_only({[key()] = make(), ["right"] = 42})
             end
             function use_map_internal_right(): integer
-                return map_only({["left"] = 42, ["right"] = make()})
+                return map_only({["left"] = 42, [key()] = make()})
             end
             function use_named_left(): integer
                 return plain_left({item = make()}, 42)
@@ -1343,6 +1354,18 @@ describe("generic declarations and explicit calls", function()
             function use_named_pair(): integer
                 return plain_pair({item = make()}, {item = 42})
             end
+            function use_named_fields_left(): integer
+                return pair_only({first = make(), second = 42})
+            end
+            function use_named_fields_right(): integer
+                return pair_only({second = 42, first = make()})
+            end
+            function use_named_nested_left(): integer
+                return nested_only({inner = {item = make()}, item = 42})
+            end
+            function use_named_nested_right(): integer
+                return nested_only({item = 42, inner = {item = make()}})
+            end
             function use_positional_left(): integer
                 return plain_left(Plain.new(make()), 42)
             end
@@ -1350,7 +1373,45 @@ describe("generic declarations and explicit calls", function()
                 return plain_right(42, Plain.new(make()))
             end
         ]])
+
+        -- Runtime-facing annotations must contain only closed applications.
+        -- Original declaration/scheme backreferences legitimately retain their
+        -- rigid declaration parameters, so do not follow those source links.
+        local source_backreference = {
+            _decl = true,
+            _generic_scheme = true,
+            _generic_declaration = true,
+            _generic_owner = true,
+        }
+        local function find_parameter(value, path, seen)
+            if type(value) ~= "table" or seen[value] then return nil end
+            seen[value] = true
+            if value._tag == "Type.Parameter" then return path end
+            for key, child in pairs(value) do
+                if not source_backreference[key] then
+                    local found = find_parameter(
+                        child, path .. "." .. tostring(key), seen)
+                    if found then return found end
+                end
+            end
+            return nil
+        end
+        for _, name in ipairs({
+            "use_array_left", "use_array_right",
+            "use_array_internal_left", "use_array_internal_right",
+            "use_map_left", "use_map_right",
+            "use_map_internal_left", "use_map_internal_right",
+            "use_named_left", "use_named_right", "use_named_pair",
+            "use_named_fields_left", "use_named_fields_right",
+            "use_named_nested_left", "use_named_nested_right",
+            "use_positional_left", "use_positional_right",
+        }) do
+            local func = toplevel(checked, "Ast.TopLevelFunc", name)
+            local leak = find_parameter(func.block, name, {})
+            assert.falsy(leak, "inference parameter leaked through " .. tostring(leak))
+        end
     end)
+
 
     it("finalizes ordinary calls through inferred generic function results",
     function()

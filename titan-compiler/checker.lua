@@ -5705,12 +5705,6 @@ local function check_computed_map_constructor(
     end
 end
 
-function checker._generic.visible_record_field(fields, name)
-    for _, field in ipairs(fields) do
-        if field.name == name then return field end
-    end
-end
-
 function checker._generic.finish_named_record_constructor(
         node, st, errors, context, written_fields, operation)
     local closed_context = checker._generic.substitute_constructor_type(
@@ -5718,11 +5712,15 @@ function checker._generic.finish_named_record_constructor(
     local record = checker._generic.applied_owner_view(
         closed_context, errors, node.loc)
     local visible_fields = visible_record_fields(record, st)
+    local visible_by_name = {}
+    for _, field in ipairs(visible_fields) do
+        visible_by_name[field.name] = field
+    end
     local supplied = {}
 
     for _, cfield in ipairs(written_fields) do
         if cfield._field then
-            local found = checker._generic.visible_record_field(visible_fields, cfield.name)
+            local found = visible_by_name[cfield.name]
             if found then
                 cfield.exp = coerce_and_check(
                     cfield.exp, found.type, "field " .. cfield.name,
@@ -5819,10 +5817,14 @@ function checker._generic.check_named_record_constructor(
         return
     end
 
+    local visible_by_name = {}
+    for _, field in ipairs(visible_fields) do
+        visible_by_name[field.name] = field
+    end
     local written_fields = { table.unpack(node.fields) }
     local supplied = {}
     for _, cfield in ipairs(written_fields) do
-        local found = checker._generic.visible_record_field(visible_fields, cfield.name)
+        local found = visible_by_name[cfield.name]
         if not found then
             if cfield.name then
                 checker.typeerror(errors, cfield.loc,
