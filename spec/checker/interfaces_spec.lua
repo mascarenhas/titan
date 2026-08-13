@@ -53,7 +53,7 @@ describe("interfaces (typechecker)", function()
         assert.is_true(modtype.type_members.Stream ==
             declaration._declared_type)
         assert.not_equal(declaration._declared_type, interface)
-        assert.is_true(types.registry["test.Stream"] == interface)
+        assert.is_true(ast._erased_registry["test.Stream"] == interface)
         assert.is_nil(modtype.members.Stream)
     end)
 

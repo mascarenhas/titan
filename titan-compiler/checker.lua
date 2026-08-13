@@ -14044,6 +14044,7 @@ function checker._generic.lower_erased_core(modname, tree, st, errors)
     end
 
     tree._type = makemoduletype(modname, tree, st)
+    tree._erased_registry = erased_registry
     checker._generic.refresh_erased_annotations(tree)
     types.assert_erased(tree._type)
     for _, owner in pairs(erased_registry) do types.assert_erased(owner) end
@@ -14137,11 +14138,11 @@ function checker.check(modname, ast, subject, filename, loader, options)
                 "cannot clean the C probe service: " .. tostring(close_err))
         end
     end
-    -- A nested source check returns its frozen declared interface to the
-    -- importer, which still has surface declarations left to check.  Restore
-    -- that outer surface registry now; the outermost successful check installs
-    -- the complete erased registry for all later coder invocations.
-    if st._surface_registry and (previous_check_state or not checked) then
+    -- Every source check returns its frozen declared interface to a resolver
+    -- that may still have independent roots left to check. Keep that shared
+    -- declaration registry active between checks; each erased AST carries the
+    -- detached ordinary registry that its coder invocation will install.
+    if st._surface_registry then
         types.registry = st._surface_registry
     end
     active_check_state = previous_check_state

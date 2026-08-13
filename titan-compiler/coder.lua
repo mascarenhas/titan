@@ -17853,6 +17853,9 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     local staticmetadata = require "titan-compiler.staticmetadata"
     assert(staticmetadata.valid_module_name(modname),
         "coder.generate requires a valid logical module name")
+    if ast._erased_registry then
+        types.registry = ast._erased_registry
+    end
     coder._assert_erased_boundary(ast)
     local tlcontext = {
         module = modname,

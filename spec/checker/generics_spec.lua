@@ -87,7 +87,7 @@ describe("generic declarations and explicit calls", function()
         assert.equal(2, declared_pair.fields[2].type.index)
         assert.is_true(types.same_generic_scope(
             declared_pair.scope, declared_pair.fields[1].type.scope))
-        assert.not_equal(declared_pair, types.registry["test.Pair"])
+        assert.not_equal(declared_pair, ast._erased_registry["test.Pair"])
         assert.is_false(pair._type.scope)
         assert.equal("value", types.tostring(pair._type.fields[1].type))
 
@@ -139,7 +139,7 @@ describe("generic declarations and explicit calls", function()
             end
         end
         types.assert_erased(ast._type)
-        types.assert_erased(types.registry["test.Pair"])
+        types.assert_erased(ast._erased_registry["test.Pair"])
         local decoded, decode_error = driver.decode_module_interface(
             types.serialize(ast._declared_type), "test",
             "erased-core-declared-metadata")
