@@ -706,23 +706,49 @@ access remains direct-only, while serialized interfaces remain public-only.
 
 ### Inference and surface checking
 
-Each generic call, method, constructor, nominal function, or first-class use
-allocates fresh checker-only inference cells. Bind complete explicit lists when
-present; otherwise collect result context and argument evidence, prepare
-contextual lambda parameter/result types, then close each still-free cell to its
-declared erased carrier (`value` or its fully substituted Interface
-application). Check all constraints and `transient_roundtrip`, then check each
-lambda body once. There is no partial list, source-declared default argument, HM
-generalization, or cell in metadata/codegen.
+Every inferred generic AST use allocates fresh checker-only inference cells,
+with occurrence scopes distinct from its declaration and from every other
+application of the same declaration. The outermost inferred use owns one
+AST-scoped ambient inference context. While its receiver, result, and argument
+subtree is checked, nested generic calls, constructors, methods, bound methods,
+and contextual first-class uses inherit that context, register child use
+records, and equate their distinct cells with outer cells where structural
+evidence connects them. An ordinary derived call or constructor registers a
+zero-binder operation use before descending whenever it may freeze annotations
+computed from an unresolved child type. A complete explicit type-argument list
+remains closed locally and contributes its ordinary result as evidence.
 
+Bind complete explicit lists when present. Otherwise gather receiver and
+expected-result evidence, then positional or named argument and declared
+constraint evidence, including contextual lambda parameter/result types.
 Unification is invariant structural evidence over Option, Array, Map, Function,
 and same-owner applications. It does not choose numeric conversions, Interface
-implementations, or common supertypes. After closing, smart substitution uses
-Titan's canonical constructors: collapse `Option(value)` and nested Options,
-de-optionize Array/Map value positions, reject invalid optional/nil Map keys,
-and revalidate nominal arity/constraints, varargs, flexible results, and type-
-argument eligibility. Apply this equally to explicit, inferred, bare, imported,
-and recovered applications.
+implementations, or common supertypes. Recursive equations are rejected before
+the union/find forest is mutated, so inference remains finite.
+
+Only the owning outer use closes the context. Constraint evidence propagates
+across cell-equivalence classes before each still-free class closes to its
+declared erased carrier (`value` or its fully substituted Interface
+application). Evidence always wins over this fallback. The checker then checks
+all constraints and `transient_roundtrip` and finalizes registered uses in
+postorder: deepest children before parents and left-to-right among siblings.
+Each written expression and contextual lambda body is checked exactly once;
+finalization substitutes closed types into already-checked results and refreshes
+checker-owned dependent annotations such as ordinary call/method signatures,
+Interface receiver plans, constructor field/container types, synthesized fixed
+extras, and open-result projections. It never reevaluates or rechecks the
+written expression. Parentheses and named-field order therefore cannot change
+inference.
+
+Smart substitution uses Titan's canonical constructors: collapse
+`Option(value)` and nested Options, de-optionize Array/Map value positions,
+reject invalid optional/nil Map keys, and revalidate nominal arity/constraints,
+varargs, flexible results, and type-argument eligibility. Apply this equally to
+explicit, inferred, bare, imported, and recovered applications. No temporary
+occurrence `Parameter` may survive surface closure or reach erasure, metadata,
+or code generation. There is no partial list, source-declared default argument,
+HM generalization, wildcard, heuristic candidate order, or inference cell in
+metadata/codegen.
 
 Rigid body checking exposes only the capabilities in the source contract:
 identical-parameter transport/storage, Option operations, same-parameter
