@@ -1061,11 +1061,17 @@ local function validate_callable_descriptor(callable, owner, kind, seen, context
         local ok, err = validate_interface_type(
             callable.varargtype, nested, seen)
         if not ok then return nil, err end
+        if not types.valid_varg_element(callable.varargtype) then
+            return nil, "variadic parameter has a noncanonical element type"
+        end
     end
     if callable.flexrettype ~= false then
         local ok, err = validate_interface_type(
             callable.flexrettype, nested, seen)
         if not ok then return nil, err end
+        if not types.valid_varg_element(callable.flexrettype) then
+            return nil, "flexible return has a noncanonical element type"
+        end
     end
     for _, param in ipairs(callable.params) do
         local ok, err = validate_interface_type(param, nested, seen)
@@ -1459,6 +1465,79 @@ local function validate_local_alias_projection(
     return true
 end
 
+function driver._metadata_generic_constraint_satisfied(
+        argument, constraint, validation)
+    if argument._tag == "Type.Parameter" then
+        return argument.erased_constraint ~= false
+            and types.equals(argument.erased_constraint, constraint)
+    elseif argument._tag ~= "Type.Nominal" then
+        return false
+    elseif types.equals(argument, constraint) then
+        return true
+    end
+
+    local concrete = validation.owners[argument.fqtn]
+    local interface = validation.owners[constraint.fqtn]
+    if not concrete or not interface then
+        return nil -- an external canonical owner is recovered by the checker
+    elseif (concrete._tag ~= "Type.Record"
+            and concrete._tag ~= "Type.Union")
+       or interface._tag ~= "Type.Interface" then
+        return false
+    end
+
+    local concrete_ok, concrete_view = true, concrete
+    if concrete.scope ~= false then
+        concrete_ok, concrete_view = pcall(
+            types.substitute, concrete, concrete.scope, argument.args or {})
+    end
+    local interface_ok, interface_view = true, interface
+    if interface.scope ~= false then
+        interface_ok, interface_view = pcall(
+            types.substitute, interface, interface.scope,
+            constraint.args or {})
+    end
+    if not concrete_ok or not interface_ok then return false end
+    local implementation = types.generic_interface_implementation(
+        concrete_view, interface_view, {
+            visibility = validation.modname,
+        })
+    return implementation ~= false
+end
+
+function driver._validate_metadata_generic_application(
+        application, validation)
+    local nominal, owner = application.nominal, application.owner
+    local reconstructed, reconstruction_error = pcall(
+        types.substitute, owner, owner.scope, nominal.args or {})
+    if not reconstructed then
+        return nil, "generic application '" .. types.tostring(nominal) ..
+            "' is not canonical: " .. tostring(reconstruction_error)
+    end
+
+    for index, typeparam in ipairs(owner.typeparams or {}) do
+        if typeparam.constraint ~= false then
+            local closed, constraint = pcall(
+                types.substitute, typeparam.constraint,
+                owner.scope, nominal.args or {})
+            if not closed then
+                return nil, "generic constraint " .. index ..
+                    " could not be reconstructed: " .. tostring(constraint)
+            end
+            local satisfied =
+                driver._metadata_generic_constraint_satisfied(
+                    nominal.args[index], constraint, validation)
+            if satisfied == false then
+                return nil, "type argument " .. index .. " ('" ..
+                    types.tostring(nominal.args[index]) ..
+                    "') does not satisfy constraint '" ..
+                    types.tostring(constraint) .. "'"
+            end
+        end
+    end
+    return true
+end
+
 validate_interface_type = function(typ, context, seen)
     if type(typ) ~= "table" or type(typ._tag) ~= "string" then
         return nil, "type graph contains an invalid descriptor"
@@ -1526,16 +1605,31 @@ validate_interface_type = function(typ, context, seen)
                 return nil, "nominal type has the wrong generic arity"
             end
         end
-        for _, argument in ipairs(typ.args) do
+        for index, argument in ipairs(typ.args) do
             local ok, err = validate_interface_type(
                 argument, value_context(context), seen)
             if not ok then return nil, err end
+            if not types.transient_roundtrip(argument) then
+                return nil, "nominal type argument " .. index ..
+                    " has no sound transient round trip"
+            end
+        end
+        if owner and argument_count > 0 then
+            validation.applications[#validation.applications + 1] = {
+                nominal = typ,
+                owner = owner,
+            }
         end
         return true
     elseif tag == "Type.Array" then
         return validate_interface_type(
             typ.elem, value_context(context), seen)
     elseif tag == "Type.Map" then
+        if type(typ.keys) ~= "table" or type(typ.values) ~= "table"
+           or typ.keys._tag == "Type.Nil"
+           or typ.keys._tag == "Type.Option" then
+            return nil, "map type has a noncanonical key shape"
+        end
         local ok, err = validate_interface_type(
             typ.keys, value_context(context), seen)
         if not ok then return nil, err end
@@ -1569,10 +1663,17 @@ validate_interface_type = function(typ, context, seen)
             local ok, err = validate_interface_type(
                 typ.varargtype, nested, seen)
             if not ok then return nil, err end
+            if not types.valid_varg_element(typ.varargtype) then
+                return nil, "function variadic parameter has a noncanonical element type"
+            end
         end
         if typ.flexrettype ~= false then
-            return validate_interface_type(
+            local ok, err = validate_interface_type(
                 typ.flexrettype, nested, seen)
+            if not ok then return nil, err end
+            if not types.valid_varg_element(typ.flexrettype) then
+                return nil, "function flexible return has a noncanonical element type"
+            end
         end
         return true
     elseif tag == "Type.FunctionScheme" then
@@ -1650,6 +1751,7 @@ function driver.validate_module_interface(modtype, modname)
         modname = modname,
         owners = {},
         aliases = {},
+        applications = {},
     }
     for index = 1, maximum_index do
         local member = modtype.members[index]
@@ -1770,6 +1872,12 @@ function driver.validate_module_interface(modtype, modname)
         local ok, alias_error = validate_local_alias_projection(
             alias, validation, resolving, validated)
         if not ok then return nil, alias_error end
+    end
+    for _, application in ipairs(validation.applications) do
+        local ok, application_error =
+            driver._validate_metadata_generic_application(
+                application, validation)
+        if not ok then return nil, application_error end
     end
 
     -- This is also the canonical recursive schema walk for all serializable

@@ -479,6 +479,184 @@ describe("generic declarations and explicit calls", function()
         assert.truthy(ok, err)
     end)
 
+    it("applies forwarding and concrete aliases through decoded modules",
+    function()
+        local ast, modtype = assert_check([[
+            interface Show
+                function render(): string
+            end
+            record Rendered
+            end
+            function Rendered:render(): string return "ok" end
+
+            record Pair<T, U>
+                first: T
+                second: U
+            end
+            record Box<T: Show>
+                item: T
+            end
+
+            type Either = Pair
+            local type Hidden = Either
+            type Public = Hidden
+            type IntPair = Pair<integer, integer>
+            type Crate = Box
+
+            function bare(pair: Either): value return pair.first end
+            function make(): IntPair return IntPair.new(1, 2) end
+            function pack(item: Rendered): Crate<Rendered>
+                return Crate.new<Rendered>(item)
+            end
+        ]])
+
+        local bare = toplevel(ast, "Ast.TopLevelFunc", "bare")
+        assert_nominal(bare._type.params[1],
+            "test.Pair", {"value", "value"})
+        local make = toplevel(ast, "Ast.TopLevelFunc", "make")
+        assert_nominal(make.block.stats[1].exps[1]._type,
+            "test.Pair", {"integer", "integer"})
+        local public = toplevel(
+            ast, "Ast.TopLevelTypeAlias", "Public")
+        assert.equal("Type.GenericAlias", public._type._tag)
+        assert.is_false(public._type.target_alias_fqtn)
+
+        local decoded, decode_error = driver.decode_module_interface(
+            types.serialize(modtype), "test", "generic-alias-source")
+        assert.truthy(decoded, decode_error)
+        assert.equal("Type.GenericAlias",
+            decoded.type_members.Public._tag)
+
+        local modules = {
+            library = [[
+                interface Show
+                    function render(): string
+                end
+                record Rendered
+                end
+                function Rendered:render(): string return "ok" end
+                record Pair<T, U>
+                    first: T
+                    second: U
+                end
+                record Box<T: Show>
+                    item: T
+                end
+                type Either = Pair
+                type Chain = Either
+                type IntPair = Pair<integer, integer>
+                type Crate = Box
+            ]],
+            consumer = [[
+                local l = import "library"
+                function use(item: l.Rendered):
+                        (l.Chain<string, integer>, l.IntPair,
+                         l.Crate<l.Rendered>)
+                    return l.Chain.new<string, integer>("ok", 1),
+                        l.IntPair.new(1, 2),
+                        l.Crate.new<l.Rendered>(item)
+                end
+            ]],
+        }
+        local ok, err = run_checker_modules(
+            modules, "consumer", { interface = "compiled" })
+        assert.truthy(ok, err)
+
+        modules.consumer = [[
+            local l = import "library"
+            function bad(x: l.IntPair<string, integer>) end
+        ]]
+        ok, err = run_checker_modules(
+            modules, "consumer", { interface = "compiled" })
+        assert.falsy(ok)
+        assert.match("not a generic type constructor", err)
+
+        modules.consumer = [[
+            local l = import "library"
+            function bad(x: l.Crate<string>) end
+        ]]
+        ok, err = run_checker_modules(
+            modules, "consumer", { interface = "compiled" })
+        assert.falsy(ok)
+        assert.match("does not satisfy constraint 'library.Show'", err)
+    end)
+
+    it("defers structural constraints until every method signature exists",
+    function()
+        assert_check([[
+            interface Show
+                function render(): string
+            end
+            record R
+            end
+            record Box<T: Show>
+                item: T
+            end
+            record Holder
+                early: Box<R>
+            end
+            function consume(item: Box<R>): string
+                return item.item:render()
+            end
+            function R.wrap(item: Box<R>): Box<R> return item end
+            function R:copy(item: Box<R>): Box<R> return item end
+            function R:render(): string return "r" end
+        ]])
+
+        assert_error("does not satisfy constraint 'test.Show'", [[
+            interface Show
+                function render(): string
+            end
+            record Missing
+            end
+            record Box<T: Show>
+                item: T
+            end
+            function consume(item: Box<Missing>) end
+        ]])
+
+        assert_error("public module interface is not recoverable", [[
+            interface Show
+                function render(): string
+            end
+            record PrivateOnly
+            end
+            local function PrivateOnly:render(): string return "hidden" end
+            record Box<T: Show>
+                item: T
+            end
+            function exported(item: Box<PrivateOnly>) end
+        ]])
+    end)
+
+    it("smart-reconstructs every explicit owner and callable application",
+    function()
+        assert_error("type of map key cannot be nil", [[
+            record Dictionary<K>
+                entries: {K: string}
+            end
+            function bad(value: Dictionary<nil>) end
+        ]])
+
+        assert_error("type of map key cannot be option type", [[
+            record Dictionary<K>
+                entries: {K: string}
+            end
+            type Dict = Dictionary
+            function bad(value: Dict<integer?>) end
+        ]])
+
+        assert_error("variadic parameter cannot have type nil", [[
+            function consume<T>(...: T) end
+            function bad() consume<nil>() end
+        ]])
+
+        assert_error("flexible return cannot have type nil", [[
+            function produce<T>(): (...: T) end
+            function bad() produce<nil>() end
+        ]])
+    end)
+
     it("diagnoses omitted type arguments until local inference lands",
     function()
         assert_error("requires an explicit complete type argument list", [[
