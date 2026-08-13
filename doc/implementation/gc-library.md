@@ -38,20 +38,33 @@ at initialization. Neither module duplicates Lua stack or metatable code.
 
 ## Finalizer stack ledger
 
-`finalizable` is the matching audited boundary for attaching a Lua finalizer
-to an existing table or full userdata:
+`finalizable<T>(v: T, f: (T) -> ())` is the matching audited boundary for
+attaching a Lua finalizer to an existing table or full userdata. The declared
+scheme ties the candidate and callback together at the source boundary. Its one
+code-facing body erases unconstrained `T` to `value` and `(T) -> ()` to
+`(value) -> ()`; there is no reified type argument or specialized finalizer
+body:
 
 | Operation | Stack effect and obligation |
 | --- | --- |
 | `lua_gettop` | Save the exact entry height. |
 | `lua_checkstack(L, 4)` | Reserve the value, metatable, key, and callback temporaries. |
-| `ffi.lua_pushtvalue(v)` | Push and root the exact candidate. |
-| `lua_type` | Accept only `LUA_TTABLE` or `LUA_TUSERDATA`; light userdata has its own tag and is rejected. |
+| `ffi.lua_pushtvalue(v)` | Use the ordinary erased whole-slot `value` to `TValue` adjustment, then push and root the exact candidate. |
+| `lua_type` | Accept only `LUA_TTABLE` or `LUA_TUSERDATA`; light userdata has its own tag and is rejected. This remains a run-time check even for a scalar application. |
 | `lua_getmetatable` | Push the exact existing metatable when present. |
-| no-metatable branch | Construct a traced Titan Map containing `__gc = f` and push it. |
-| existing-metatable branch | Raw-set `__gc = f`, preserving the metatable identity and every other field. |
+| no-metatable branch | Construct a traced Titan Map containing the erased Lua-callable `__gc = f` and push it. |
+| existing-metatable branch | Raw-set the erased Lua-callable `__gc = f`, preserving the metatable identity and every other field. |
 | `lua_setmetatable` | Install the new metatable or reinstall the exact old one, causing Lua to run its finalizer-marking path for this existing value. |
 | deferred `lua_settop` | Restore the exact entry height on success or error. |
+
+Erasure changes neither the four-slot reservation nor any operation in this
+ledger. A concrete `Owner` or `{string: integer}` application uses the generic
+call boundary's ordinary traced callable adjustment to present its exact
+callback as the erased `(value) -> ()` formal. The same existing whole-slot
+adjustment supplies `ffi.lua_pushtvalue`; `titan.gc` has no generic-specific
+Lua API whitelist or alternate stack path. Conversely, an `integer`
+application boxes its candidate normally, reaches `lua_type`, raises there,
+and still executes the deferred `lua_settop` before the error escapes.
 
 Simply adding `__gc` to a metatable already attached to a table or userdata is
 not sufficient: Lua marks a collectable object as finalizable while assigning
@@ -68,13 +81,23 @@ later raw replacement of `__gc`. Reinstalling the metatable repeatedly does
 not add duplicate finalizer-list entries.
 
 No C trampoline is involved. A Titan function value is already a Lua-callable
-closure whose upvalues retain its module and native entry point. Storing that
-closure as `__gc` lets Lua invoke the ordinary generated Lua entry with the
-finalized table or userdata as its sole argument. This also keeps the owning
-standard-provider module reachable for as long as the finalizer can run.
-Lua invokes that entry through its non-yielding protected finalizer call with
-collector steps internally stopped. A callback error is converted to a Lua
-warning rather than propagated.
+closure whose upvalues retain its module and native entry point. For a concrete
+record or Map callback, the normal generic-call adjustment closure strictly
+projects Lua's erased argument to that exact static parameter before calling
+the concrete body; the callback therefore needs no source `value as Record`
+cast. Storing the erased closure as `__gc` lets Lua invoke its ordinary
+generated Lua entry with the finalized table or userdata as the sole argument.
+This also keeps the owning standard-provider module reachable for as long as
+the finalizer can run. Lua invokes that entry through its non-yielding
+protected finalizer call with collector steps internally stopped. A callback
+boundary or body error is converted to a Lua warning rather than propagated.
+
+The metatable remains the only callback slot. Generic applications share the
+one erased implementation, and values sharing a metatable still observe its
+latest raw `__gc`; neither `T` nor the adjustment closure gives Lua per-value
+callback dispatch. Native tests therefore exercise exact record and Map
+callbacks through Lua, callback replacement on a shared metatable, and scalar
+rejection with a zero stack delta.
 
 ## Direct collector control
 

@@ -4391,12 +4391,28 @@ function checker._generic.resolve_generic_constraints(node, st, errors)
         end
         node._generic_typeparams[index] =
             types.TypeParameter(syntax.name, constraint)
-        node._generic_parameters[index].erased_constraint =
-            constraint == false and false
-                or types.erase_constraint(constraint)
+    end
+    checker._generic.reject_constraint_cycles(node, errors)
+    -- Every same-scope binder is reserved before constraints resolve, so a
+    -- forward acyclic constraint may depend on a later binder's carrier.
+    -- Iterate the finite dependency DAG after cycle recovery until every
+    -- recursively erased Interface application is stable.
+    for _ = 1, math.max(1, #(node.typeparams or {})) do
+        local changed = false
+        for index, typeparam in ipairs(node._generic_typeparams) do
+            local carrier = typeparam.constraint == false and false
+                or types.erase_constraint(typeparam.constraint)
+            local previous = node._generic_parameters[index].erased_constraint
+            if (previous == false) ~= (carrier == false)
+               or (carrier ~= false
+                   and not types.equals(previous, carrier)) then
+                node._generic_parameters[index].erased_constraint = carrier
+                changed = true
+            end
+        end
+        if not changed then break end
     end
     st:pop_generic_type_scope()
-    checker._generic.reject_constraint_cycles(node, errors)
 end
 
 function checker._generic.prepare_generic_binders(node, st, errors, owner)
@@ -5772,7 +5788,75 @@ local function make_forin_call(loc, iter_decl, args, ftype, nresults, cfunc,
     return call
 end
 
+function checker._generic.infer_forin_scheme(
+        exp, scheme, node, st, errors)
+    local subject = "generic for iterator"
+    local context = checker._generic.new_inference_context(subject, {
+        checker._generic.inference_scope_entry(
+            scheme.scope, scheme.typeparams),
+    }, st, errors, exp.loc)
+    local signature = scheme.signature
+
+    for index, parameter in ipairs(signature.params) do
+        local actual = node.exps[index + 1]
+        if actual and actual._type then
+            checker._generic.unify_inference(context, parameter,
+                actual._type, "generic for hidden argument " .. index,
+                actual.loc)
+        end
+    end
+    for index, decl in ipairs(node.decls) do
+        if decl.type then
+            decl._type = decl._type or typefromnode(decl.type, st, errors)
+            local expected = index == 1
+                and optionize(decl._type) or decl._type
+            local pattern = signature.rettypes[index]
+            if not pattern and signature.flexrettype then
+                pattern = optionize(signature.flexrettype)
+            end
+            if pattern then
+                checker._generic.unify_inference(context, pattern,
+                    expected, "generic for variable " .. decl.name,
+                    decl.loc)
+            end
+        end
+    end
+
+    checker._generic.close_inference_context(context)
+    local closed = checker._generic.substitute_inference(
+        context, signature, true)
+    exp._generic_scheme = scheme
+    exp._generic_type_arguments =
+        checker._generic.inference_type_arguments(context)
+    exp._type = closed
+    return closed
+end
+
 local function checkforin(node, st, errors)
+    local generic_prechecked = {}
+    local iterator = node.exps[1]
+    if iterator
+       and checker._generic.is_generic_first_class_expression(
+            iterator, st, errors)
+       and iterator._type._tag == "Type.FunctionScheme" then
+        -- Hidden iterator arguments are ordinary inference evidence. Check the
+        -- direct state/control expressions first, then close the iterator once
+        -- from those inputs and any annotated loop-result slots.
+        for index = 2, math.min(#node.exps, 3) do
+            local exp = node.exps[index]
+            if exp._tag ~= "Ast.ExpDots" then
+                checkexp(exp, st, errors, nil,
+                    result_demand({ UNKNOWN_SLOT }, false, {
+                        term = "generic for inference argument",
+                    }))
+                generic_prechecked[exp] = true
+            end
+        end
+        checker._generic.infer_forin_scheme(
+            iterator, iterator._type, node, st, errors)
+        generic_prechecked[iterator] = true
+    end
+
     local tuple_fixed = {
         UNKNOWN_SLOT, UNKNOWN_SLOT, UNKNOWN_SLOT, UNKNOWN_SLOT,
     }
@@ -5794,7 +5878,23 @@ local function checkforin(node, st, errors)
             end,
             check_expression = function(exp, est, eerrors, context, demand,
                                         sink_index)
-                if sink_index == 1 or sink_index == 4 then
+                if generic_prechecked[exp] then return end
+                if sink_index == 4
+                   and checker._generic.is_generic_first_class_expression(
+                        exp, est, eerrors) then
+                    local params = {}
+                    local state = node.exps[2]
+                    if state and state._type
+                       and state._type._tag ~= "Type.Nil" then
+                        params[1] = state._type
+                    end
+                    local expected = types.Function(
+                        params, {}, false, false, false)
+                    checkexp(exp, est, eerrors, expected,
+                        result_demand({ expected }, false, {
+                            term = "generic for close function",
+                        }))
+                elseif sink_index == 1 or sink_index == 4 then
                     check_forin_callable_exp(exp, est, eerrors, context,
                         demand)
                 else
@@ -7385,7 +7485,8 @@ local function named_function_metadata(node)
         return decl.paramnames, "titan", false
     elseif decl._tag == "Type.ModuleMember" and decl.type then
         local foreign = checker._foreign_function_reference(var) ~= nil
-        if decl.type._tag == "Type.Function" then
+        if decl.type._tag == "Type.Function"
+           or decl.type._tag == "Type.FunctionScheme" then
             return decl.paramnames, "titan", false
         elseif foreign and decl.type._tag == "Type.CFunction" then
             return decl.paramnames, "foreign", true
@@ -7905,6 +8006,837 @@ function checker._generic.callable_function_type(callable)
         callable.varargtype or false, callable.flexrettype or false)
 end
 
+
+function checker._generic.inference_scope_entry(scope, typeparams, parameters)
+    local entry = {
+        scope = scope,
+        typeparams = typeparams or {},
+        parameters = parameters or {},
+        cells = {},
+    }
+    for index, typeparam in ipairs(entry.typeparams) do
+        local parameter = entry.parameters[index]
+        if not parameter then
+            parameter = types.Parameter(scope, index, typeparam.name,
+                typeparam.constraint == false and false
+                    or types.erase_constraint(typeparam.constraint))
+        end
+        entry.parameters[index] = parameter
+        entry.cells[index] = {
+            name = typeparam.name,
+            parameter = parameter,
+            binding = false,
+            evidence = false,
+            invalid = false,
+            conflicts = {},
+        }
+    end
+    return entry
+end
+
+function checker._generic.new_inference_context(subject, scopes, st, errors, loc)
+    return {
+        subject = subject,
+        scopes = scopes,
+        st = st,
+        errors = errors,
+        loc = loc,
+        closed = false,
+    }
+end
+
+function checker._generic.inference_cell(context, parameter)
+    if not parameter or parameter._tag ~= "Type.Parameter" then return nil end
+    for _, entry in ipairs(context.scopes) do
+        if types.same_generic_scope(entry.scope, parameter.scope) then
+            return entry.cells[parameter.index]
+        end
+    end
+    return nil
+end
+
+function checker._generic.inference_evidence_name(evidence)
+    return evidence or "type context"
+end
+
+function checker._generic.bind_inference_cell(context, cell, candidate,
+                                               evidence, loc)
+    candidate = types.normalize(candidate) or candidate
+    if not candidate or candidate._tag == "Type.Invalid" then return false end
+    if not cell.binding then
+        cell.binding = candidate
+        cell.evidence = checker._generic.inference_evidence_name(evidence)
+        cell.loc = loc
+        return true
+    end
+    if types.equals(cell.binding, candidate) then return true end
+
+    local key = types.tostring(candidate)
+    if not cell.conflicts[key] then
+        cell.conflicts[key] = true
+        checker.typeerror(context.errors, loc or context.loc,
+            "conflicting type evidence for type parameter '%s' in %s: "
+            .. "inferred '%s' from %s but found '%s' from %s",
+            cell.name, context.subject, types.tostring(cell.binding),
+            cell.evidence, key, checker._generic.inference_evidence_name(evidence))
+    end
+    cell.invalid = true
+    return false
+end
+
+-- Inference is deliberately invariant. It decomposes only the structural
+-- shapes promised by generics v1 and never asks the ordinary coercion or
+-- consistency relations to choose a binding.
+function checker._generic.unify_inference(context, pattern, evidence,
+                                          term, loc, seen)
+    if not pattern or not evidence then return false end
+    pattern, evidence = types.normalize(pattern), types.normalize(evidence)
+    if not pattern or not evidence
+       or pattern._tag == "Type.Invalid"
+       or evidence._tag == "Type.Invalid" then
+        return false
+    end
+
+    local cell = checker._generic.inference_cell(context, pattern)
+    if cell then
+        return checker._generic.bind_inference_cell(
+            context, cell, evidence, term, loc)
+    end
+    if types.equals(pattern, evidence) then return true end
+
+    seen = seen or {}
+    local pair_key = pattern
+    local evidence_seen = seen[pair_key]
+    if evidence_seen and evidence_seen[evidence] then return true end
+    evidence_seen = evidence_seen or {}
+    seen[pair_key] = evidence_seen
+    evidence_seen[evidence] = true
+
+    local ptag, etag = pattern._tag, evidence._tag
+    if ptag == "Type.Option" and etag == "Type.Option" then
+        return checker._generic.unify_inference(context,
+            pattern.base, evidence.base, term, loc, seen)
+    elseif ptag == "Type.Option" and etag == "Type.Value" then
+        -- Option(value) canonicalizes to value. This is reconstruction of the
+        -- same invariant application, not a lifted gradual conversion.
+        return checker._generic.unify_inference(context,
+            pattern.base, evidence, term, loc, seen)
+    elseif ptag == "Type.Array" and etag == "Type.Array" then
+        return checker._generic.unify_inference(context,
+            pattern.elem, evidence.elem, term, loc, seen)
+    elseif ptag == "Type.Map" and etag == "Type.Map" then
+        local keys = checker._generic.unify_inference(context,
+            pattern.keys, evidence.keys, term, loc, seen)
+        local values = checker._generic.unify_inference(context,
+            pattern.values, evidence.values, term, loc, seen)
+        return keys and values
+    elseif ptag == "Type.Nominal" and etag == "Type.Nominal"
+       and pattern.fqtn == evidence.fqtn
+       and #(pattern.args or {}) == #(evidence.args or {}) then
+        local ok = true
+        for index, argument in ipairs(pattern.args or {}) do
+            ok = checker._generic.unify_inference(context, argument,
+                evidence.args[index], term, loc, seen) and ok
+        end
+        return ok
+    elseif ptag == "Type.Function" and etag == "Type.Function"
+       and #pattern.params == #evidence.params
+       and #pattern.rettypes == #evidence.rettypes
+       and (pattern.varargtype == false) == (evidence.varargtype == false)
+       and (pattern.flexrettype == false) == (evidence.flexrettype == false) then
+        local ok = true
+        for index, parameter in ipairs(pattern.params) do
+            ok = checker._generic.unify_inference(context, parameter,
+                evidence.params[index], term, loc, seen) and ok
+        end
+        for index, result in ipairs(pattern.rettypes) do
+            ok = checker._generic.unify_inference(context, result,
+                evidence.rettypes[index], term, loc, seen) and ok
+        end
+        if pattern.varargtype ~= false then
+            ok = checker._generic.unify_inference(context,
+                pattern.varargtype, evidence.varargtype,
+                term, loc, seen) and ok
+        end
+        if pattern.flexrettype ~= false then
+            ok = checker._generic.unify_inference(context,
+                pattern.flexrettype, evidence.flexrettype,
+                term, loc, seen) and ok
+        end
+        return ok
+    end
+    return false
+end
+
+function checker._generic.inference_arguments(entry, recover)
+    local arguments = {}
+    for index, cell in ipairs(entry.cells) do
+        arguments[index] = cell.binding
+            or (recover and types.Value())
+            or entry.parameters[index]
+    end
+    return arguments
+end
+
+function checker._generic.substitute_inference(context, typ, recover)
+    local out = typ
+    for _, entry in ipairs(context.scopes) do
+        out = checker._generic.generic_substitute(out, entry.scope,
+            checker._generic.inference_arguments(entry, recover), context.errors,
+            context.loc, "cannot close " .. context.subject) or out
+    end
+    return out
+end
+
+function checker._generic.inference_type_has_unresolved(context, typ, seen)
+    if typ == false or typ == nil or type(typ) ~= "table" then return false end
+    seen = seen or {}
+    if seen[typ] then return false end
+    seen[typ] = true
+
+    if typ._tag == "Type.Parameter" then
+        local cell = checker._generic.inference_cell(context, typ)
+        return cell ~= nil and not cell.binding
+    end
+    for key, value in pairs(typ) do
+        if key ~= "scope" and type(value) == "table" then
+            if value._tag then
+                if checker._generic.inference_type_has_unresolved(context, value, seen) then
+                    return true
+                end
+            else
+                for _, item in pairs(value) do
+                    if checker._generic.inference_type_has_unresolved(context, item, seen) then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+function checker._generic.closed_inference_pattern(context, typ)
+    local substituted = checker._generic.substitute_inference(
+        context, typ, false)
+    if checker._generic.inference_type_has_unresolved(context, substituted) then return nil end
+    return substituted
+end
+
+function checker._generic.inference_type_arguments(context)
+    local arguments = {}
+    for _, entry in ipairs(context.scopes) do
+        for _, cell in ipairs(entry.cells) do
+            arguments[#arguments + 1] = cell.binding or types.Value()
+        end
+    end
+    return arguments
+end
+
+function checker._generic.close_inference_context(context)
+    if context.closed then return context.valid end
+    context.closed = true
+    local valid = true
+
+    for _, entry in ipairs(context.scopes) do
+        for _, cell in ipairs(entry.cells) do
+            if not cell.binding then
+                checker.typeerror(context.errors, context.loc,
+                    "cannot infer type argument '%s' for %s; provide a complete explicit type argument list",
+                    cell.name, context.subject)
+                cell.binding = types.Value()
+                cell.invalid = true
+                valid = false
+            elseif not types.transient_roundtrip(cell.binding) then
+                checker.typeerror(context.errors, cell.loc or context.loc,
+                    "%s inferred type argument '%s' for '%s', which has no sound transient round trip",
+                    context.subject, types.tostring(cell.binding), cell.name)
+                cell.binding = types.Value()
+                cell.invalid = true
+                valid = false
+            elseif cell.invalid then
+                valid = false
+            end
+        end
+    end
+
+    -- Constraints may mention owner and callable-local binders. Substitute the
+    -- complete fresh application through every scope before checking each one.
+    for _, entry in ipairs(context.scopes) do
+        for index, typeparam in ipairs(entry.typeparams) do
+            local cell = entry.cells[index]
+            if not cell.invalid and typeparam.constraint ~= false then
+                local constraint = checker._generic.substitute_inference(
+                    context, typeparam.constraint, true)
+                local satisfied = checker._generic.generic_constraint_satisfied(
+                    cell.binding, constraint, context.st)
+                if not satisfied then
+                    checker.typeerror(context.errors, cell.loc or context.loc,
+                        "type argument %d ('%s') for %s does not satisfy constraint '%s'",
+                        index, types.tostring(cell.binding), context.subject,
+                        types.tostring(constraint))
+                    valid = false
+                end
+            end
+        end
+    end
+    context.valid = valid
+    return valid
+end
+
+function checker._generic.infer_result_evidence(context, signature, demand)
+    for index, target in ipairs(demand.fixed or {}) do
+        target = expected_type(target)
+        if target then
+            local pattern = signature.rettypes[index]
+            if not pattern and signature.flexrettype then
+                pattern = optionize(signature.flexrettype)
+            end
+            if pattern then
+                checker._generic.unify_inference(context, pattern, target,
+                    "expected result " .. index, demand.loc or context.loc)
+            end
+        end
+    end
+    local tail = expected_type(demand.tail)
+    if tail then
+        for index = #(demand.fixed or {}) + 1, #signature.rettypes do
+            checker._generic.unify_inference(context,
+                signature.rettypes[index], tail,
+                "expected open result", demand.loc or context.loc)
+        end
+        if signature.flexrettype then
+            checker._generic.unify_inference(context,
+                signature.flexrettype, tail,
+                "expected open result", demand.loc or context.loc)
+        end
+    end
+end
+
+function checker._generic.generic_lambda_full_explicit_type(node)
+    local nparams = #node.params
+    local vararg = node.params[nparams]
+    local has_vararg = vararg and vararg.name == false
+    local nfixed = has_vararg and nparams - 1 or nparams
+    local params = {}
+    for index = 1, nfixed do
+        local typ = node.params[index]._generic_inference_type
+        if not typ then return nil end
+        params[index] = typ
+    end
+    local varargtype = false
+    if has_vararg then
+        varargtype = vararg._generic_inference_type
+        if not varargtype then return nil end
+    end
+    if type(node.rettypes) ~= "table"
+       or node._generic_inference_rettypes == nil then
+        return nil
+    end
+    return types.Function(params, node._generic_inference_rettypes,
+        false, varargtype, node._generic_inference_flexrettype)
+end
+
+function checker._generic.prepare_lambda_inference(node, pattern,
+                                                   context, st, errors)
+    local nparams = #node.params
+    local vararg = node.params[nparams]
+    local has_vararg = vararg and vararg.name == false
+    local nfixed = has_vararg and nparams - 1 or nparams
+    for index = 1, nfixed do
+        local parameter = node.params[index]
+        if parameter.type and not parameter._generic_inference_type then
+            parameter._generic_inference_type =
+                typefromnode(parameter.type, st, errors)
+        end
+    end
+    if has_vararg and vararg.type and not vararg._generic_inference_type then
+        vararg._generic_inference_type = check_varg_elem(
+            typefromnode(vararg.type, st, errors), vararg.loc,
+            errors, "parameter")
+    end
+    if type(node.rettypes) == "table"
+       and node._generic_inference_rettypes == nil then
+        node._generic_inference_rettypes = {}
+        for index, typenode in ipairs(node.rettypes) do
+            node._generic_inference_rettypes[index] =
+                typefromnode(typenode, st, errors)
+        end
+        node._generic_inference_flexrettype = node.flexrettype
+            and check_varg_elem(typefromnode(node.flexrettype, st, errors),
+                node.flexrettype.loc or node.loc, errors, "return")
+            or false
+    end
+
+    local current = checker._generic.substitute_inference(
+        context, pattern, false)
+    local cell = current._tag == "Type.Parameter"
+        and checker._generic.inference_cell(context, current) or nil
+    if cell then
+        local explicit = checker._generic.generic_lambda_full_explicit_type(node)
+        if explicit then
+            checker._generic.bind_inference_cell(context, cell, explicit,
+                "explicit lambda signature", node.loc)
+        end
+        return
+    end
+    if current._tag ~= "Type.Function" or #current.params ~= nfixed then
+        return
+    end
+
+    for index = 1, nfixed do
+        local actual = node.params[index]._generic_inference_type
+        if actual then
+            checker._generic.unify_inference(context,
+                current.params[index], actual,
+                "lambda parameter " .. index, node.params[index].loc)
+        end
+    end
+    if has_vararg and vararg._generic_inference_type
+       and current.varargtype ~= false then
+        checker._generic.unify_inference(context,
+            current.varargtype, vararg._generic_inference_type,
+            "lambda variadic parameter", vararg.loc)
+    end
+    if node._generic_inference_rettypes
+       and #node._generic_inference_rettypes == #current.rettypes then
+        for index, actual in ipairs(node._generic_inference_rettypes) do
+            checker._generic.unify_inference(context,
+                current.rettypes[index], actual,
+                "lambda result " .. index, node.loc)
+        end
+        if node._generic_inference_flexrettype ~= false
+           and current.flexrettype ~= false then
+            checker._generic.unify_inference(context,
+                current.flexrettype, node._generic_inference_flexrettype,
+                "lambda flexible result", node.loc)
+        end
+    end
+end
+
+function checker._generic.generic_formal_pattern(signature, index)
+    return signature.params[index] or signature.varargtype or nil
+end
+
+function checker._generic.generic_expression_result_types(exp)
+    if exp._tag == "Ast.ExpCall" then
+        return exp._visible_types or exp._types or {},
+            exp._open_results and exp._open_results.source_type or false
+    end
+    return { exp._type }, false
+end
+
+function checker._generic.generic_unify_expression_results(context, signature, exp,
+                                                first, term)
+    local results, open = checker._generic.generic_expression_result_types(exp)
+    local index = first
+    for _, actual in ipairs(results) do
+        local pattern = checker._generic.generic_formal_pattern(signature, index)
+        if pattern then
+            checker._generic.unify_inference(context, pattern, actual,
+                term .. " " .. index, exp.loc)
+        end
+        index = index + 1
+    end
+    if open and signature.varargtype then
+        checker._generic.unify_inference(context,
+            signature.varargtype, open, term .. " open tail", exp.loc)
+    end
+end
+
+function checker._generic.generic_discovery_demand(context, signature, first, original)
+    local fixed = {}
+    for offset = 1, #(original.fixed or {}) do
+        local pattern = checker._generic.generic_formal_pattern(signature, first + offset - 1)
+        fixed[offset] = pattern
+            and checker._generic.closed_inference_pattern(context, pattern)
+            or UNKNOWN_SLOT
+    end
+    local tail = false
+    if original.tail then
+        tail = signature.varargtype
+            and checker._generic.closed_inference_pattern(
+                context, signature.varargtype)
+            or INFER_OPEN
+    end
+    return result_demand(fixed, tail, {
+        term = original.term,
+        loc = original.loc,
+        suppress_flex_cap = original.suppress_flex_cap,
+    })
+end
+
+function checker._generic.finish_generic_open_arguments(adjusted, target, st, errors,
+                                             term)
+    if not adjusted.open_source then return end
+    adjusted.open_target = target
+    local allow = adjusted.open_source._tag ~= "Ast.ExpDots"
+    local adjustment, interface_conversion, interface_failure =
+        checker_assignment_adjustment(adjusted.open_type, target, st, {
+            allow_coercion = allow,
+        })
+    adjusted.open_adjustment = adjustment or false
+    adjusted.open_callable_adapter = adjustment
+        and adjustment.kind == "callable"
+        and checker.freeze_callable_adapter(adjustment,
+            adjusted.open_type, target, adjusted.open_source.loc)
+        or false
+    adjusted.open_interface_conversion = interface_conversion or false
+    local open = adjusted.open_source._tag == "Ast.ExpDots"
+        and adjusted.open_source._open_dots
+        or adjusted.open_source._open_results
+    if open then
+        open.target_type = target
+        open.adjustment = adjusted.open_adjustment
+        open.callable_adapter = adjusted.open_callable_adapter
+    end
+    if not adjustment
+       and adjusted.open_type._tag ~= "Type.Invalid"
+       and target._tag ~= "Type.Invalid" then
+        if not report_interface_failure(
+                errors, adjusted.open_source.loc, interface_failure) then
+            checker.typeerror(errors, adjusted.open_source.loc,
+                "open argument element type %s is not compatible with %s element type %s",
+                types.tostring(adjusted.open_type), term,
+                types.tostring(target))
+        end
+    end
+end
+
+function checker._generic.close_generic_adjusted_arguments(adjusted, args, signature,
+                                                st, errors, term)
+    for index, exp in pairs(adjusted.fixed) do
+        local target = signature.params[index]
+        if target then
+            local replacement = coerce_and_check(exp, target,
+                "argument " .. index .. " of " .. term,
+                errors, exp.loc)
+            replace_adjusted_value(adjusted, exp, replacement)
+        end
+    end
+    if signature.varargtype then
+        for _, exp in ipairs({ table.unpack(adjusted.tail_scalars) }) do
+            local replacement = coerce_and_check(exp, signature.varargtype,
+                "variadic argument of " .. term, errors, exp.loc)
+            replace_adjusted_value(adjusted, exp, replacement)
+        end
+        checker._generic.finish_generic_open_arguments(adjusted, signature.varargtype,
+            st, errors, term)
+    end
+    for index = #args, 1, -1 do args[index] = nil end
+    for _, exp in ipairs(adjusted.exps) do args[#args + 1] = exp end
+end
+
+function checker._generic.is_generic_first_class_expression(
+        exp, st, errors)
+    if exp._tag ~= "Ast.ExpVar" then return false end
+    if exp.var._tag == "Ast.VarName" then
+        local declaration = st:find_symbol(exp.var.name)
+        local declared = declaration and declaration._type
+        if not declared or declared._tag ~= "Type.FunctionScheme" then
+            return false
+        end
+    end
+    checkvar(exp.var, st, errors)
+    if exp.var._decl then exp.var._decl._used = true end
+    exp._type = exp.var._type
+    local generic = exp._type._tag == "Type.FunctionScheme"
+        or (exp._type._tag == "Type.Function"
+            and exp.var._generic_declaration ~= nil)
+    exp._generic_var_prechecked = generic and true or nil
+    return generic
+end
+
+function checker._generic.infer_positional_call(context, signature, args,
+                                                st, errors, term)
+    local deferred, deferred_by_exp = {}, {}
+    for index, exp in ipairs(args) do
+        local pattern = checker._generic.generic_formal_pattern(
+            signature, index)
+        if pattern and (exp._tag == "Ast.ExpFunction"
+                or checker._generic.is_generic_first_class_expression(
+                    exp, st, errors)) then
+            if exp._tag == "Ast.ExpFunction" then
+                checker._generic.prepare_lambda_inference(
+                    exp, pattern, context, st, errors)
+            end
+            local item = { exp = exp, pattern = pattern }
+            deferred[#deferred + 1] = item
+            deferred_by_exp[exp] = item
+        end
+    end
+
+    local fixed = {}
+    for index = 1, #signature.params do fixed[index] = UNKNOWN_SLOT end
+    local adjusted = adjust_explist(args,
+        result_demand(fixed,
+            signature.varargtype and INFER_OPEN or false, {
+            term = term,
+            open_term = term,
+            loc = context.loc,
+            missing = "nil",
+            explicit_surplus = "discard",
+            defer_open_check = true,
+            check_expression = function(exp, est, eerrors, _, subdemand,
+                                        sink_index)
+                local pattern = checker._generic.generic_formal_pattern(
+                    signature, sink_index)
+                if deferred_by_exp[exp] then
+                    exp._type = checker._generic.closed_inference_pattern(
+                        context, pattern) or types.Invalid()
+                    return
+                end
+                local demand = checker._generic.generic_discovery_demand(
+                    context, signature, sink_index, subdemand)
+                local expected = pattern and
+                    checker._generic.closed_inference_pattern(
+                        context, pattern) or nil
+                checkexp(exp, est, eerrors, expected, demand)
+                checker._generic.generic_unify_expression_results(
+                    context, signature, exp, sink_index, "argument")
+            end,
+        }), st, errors)
+
+    for index, exp in pairs(adjusted.fixed) do
+        local pattern = checker._generic.generic_formal_pattern(
+            signature, index)
+        if pattern and not deferred_by_exp[exp] then
+            checker._generic.unify_inference(context, pattern,
+                exp._type, "argument " .. index, exp.loc)
+        end
+    end
+    for _, exp in ipairs(adjusted.tail_scalars) do
+        if signature.varargtype and not deferred_by_exp[exp] then
+            checker._generic.unify_inference(context,
+                signature.varargtype, exp._type,
+                "variadic argument", exp.loc)
+        end
+    end
+    if adjusted.open_source and signature.varargtype then
+        checker._generic.unify_inference(context,
+            signature.varargtype, adjusted.open_type,
+            "open variadic argument", adjusted.open_source.loc)
+    end
+
+    checker._generic.close_inference_context(context)
+    local closed = checker._generic.substitute_inference(
+        context, signature, true)
+    for _, item in ipairs(deferred) do
+        local expected = checker._generic.substitute_inference(
+            context, item.pattern, true)
+        checkexp(item.exp, st, errors, expected,
+            result_demand({ expected }, false, {
+                term = "contextual generic argument",
+            }))
+    end
+    checker._generic.close_generic_adjusted_arguments(
+        adjusted, args, closed, st, errors, term)
+    return closed, adjusted
+end
+
+function checker._generic.generic_decl_paramnames(node)
+    local variable = node.exp._tag == "Ast.ExpVar" and node.exp.var or nil
+    local declaration = variable and variable._decl or nil
+    if not declaration then return nil end
+    if declaration._tag == "Ast.TopLevelFunc" then
+        return declaration._paramnames
+    elseif declaration._tag == "Type.StaticMethod"
+        or declaration._tag == "Type.Method" then
+        return declaration.paramnames
+    elseif declaration._tag == "Type.ModuleMember" then
+        return declaration.paramnames
+    end
+end
+
+function checker._generic.infer_named_call(context, signature, fields,
+                                           paramnames, st, errors, term)
+    if type(paramnames) ~= "table" then
+        for _, field in ipairs(fields) do checkexp(field.exp, st, errors) end
+        checker._generic.close_inference_context(context)
+        return checker._generic.substitute_inference(
+            context, signature, true), nil, nil
+    end
+    local byname = {}
+    for index, name in ipairs(paramnames) do byname[name] = index end
+    local deferred, supplied, checked = {}, {}, {}
+
+    for _, field in ipairs(fields) do
+        local index = byname[field.name]
+        if not index then
+            checker.typeerror(errors, field.loc,
+                "%s has no parameter named '%s'%s", term, field.name,
+                #paramnames > 0 and
+                    ("; available parameters are " .. table.concat(paramnames, ", "))
+                    or "")
+            checkexp(field.exp, st, errors)
+        else
+            local pattern = signature.params[index]
+            if field.exp._tag == "Ast.ExpFunction"
+               or checker._generic.is_generic_first_class_expression(
+                    field.exp, st, errors) then
+                if field.exp._tag == "Ast.ExpFunction" then
+                    checker._generic.prepare_lambda_inference(
+                        field.exp, pattern, context, st, errors)
+                end
+                deferred[#deferred + 1] = {
+                    exp = field.exp,
+                    pattern = pattern,
+                }
+            else
+                local expected = checker._generic.closed_inference_pattern(
+                    context, pattern)
+                checkexp(field.exp, st, errors, expected,
+                    result_demand({ expected or UNKNOWN_SLOT }, false, {
+                        term = "named generic argument",
+                    }))
+                checker._generic.unify_inference(context, pattern,
+                    field.exp._type, "named argument '" .. field.name .. "'",
+                    field.loc)
+            end
+            checked[field] = index
+            if supplied[index] then
+                checker.typeerror(errors, field.loc,
+                    "named argument '%s' is supplied more than once", field.name)
+            else
+                supplied[index] = field
+            end
+        end
+    end
+    for index, name in ipairs(paramnames) do
+        if not supplied[index] then
+            checker._generic.unify_inference(context,
+                signature.params[index], types.Nil(),
+                "omitted named argument '" .. name .. "'", context.loc)
+        end
+    end
+
+    checker._generic.close_inference_context(context)
+    local closed = checker._generic.substitute_inference(
+        context, signature, true)
+    for _, item in ipairs(deferred) do
+        local expected = checker._generic.substitute_inference(
+            context, item.pattern, true)
+        checkexp(item.exp, st, errors, expected,
+            result_demand({ expected }, false, {
+                term = "contextual generic argument",
+            }))
+    end
+
+    local dense, order = {}, {}
+    for _, field in ipairs(fields) do
+        local index = checked[field]
+        if index then
+            local replacement = coerce_and_check(field.exp,
+                closed.params[index],
+                "named argument '" .. field.name .. "' of " .. term,
+                errors, field.loc)
+            if supplied[index] == field then
+                dense[index] = replacement
+                order[#order + 1] = index
+            end
+        end
+    end
+    for index, name in ipairs(paramnames) do
+        if not dense[index] then
+            local exp = ast.ExpNil(context.loc)
+            exp._type = types.Nil()
+            exp._missing_value = true
+            exp = coerce_and_check(exp, closed.params[index],
+                "omitted named argument '" .. name .. "' of " .. term,
+                errors, context.loc)
+            exp._named_omitted = true
+            dense[index] = exp
+        end
+    end
+    return closed, dense, order
+end
+
+function checker._generic.infer_call_application(context, signature, node,
+                                                  demand, st, errors, term,
+                                                  paramnames)
+    checker._generic.infer_result_evidence(context, signature, demand)
+    local closed, adjusted, dense, order
+    local named = node.args._tag == "Ast.ArgsNamedFunc"
+        or node.args._tag == "Ast.ArgsNamedMethod"
+    if named then
+        closed, dense, order = checker._generic.infer_named_call(
+            context, signature, node.args.fields,
+            paramnames or checker._generic.generic_decl_paramnames(node),
+            st, errors, term)
+        node._generic_named_dense = dense
+        node._generic_named_order = order
+    else
+        closed, adjusted = checker._generic.infer_positional_call(
+            context, signature, node.args.args, st, errors, term)
+        node._generic_arg_adjustment = adjusted
+    end
+    return closed
+end
+
+function checker._generic.infer_first_class_application(
+        subject, scopes, signature, expected, st, errors, loc)
+    local context = checker._generic.new_inference_context(
+        subject, scopes, st, errors, loc)
+    checker._generic.unify_inference(context, signature, expected,
+        "expected first-class function type", loc)
+    checker._generic.close_inference_context(context)
+    return checker._generic.substitute_inference(
+        context, signature, true),
+        checker._generic.inference_type_arguments(context), context
+end
+
+
+function checker._generic.instantiate_first_class_variable(
+        node, variable, declared, expected, st, errors)
+    if expected and expected._tag == "Type.Option"
+       and expected.base._tag == "Type.Function" then
+        expected = expected.base
+    end
+    if not expected or expected._tag ~= "Type.Function" then return nil end
+
+    local subject = "generic declaration '" .. variable.name .. "'"
+    local scopes, signature, declaration = {}, nil, nil
+    if declared._tag == "Type.FunctionScheme" then
+        scopes[1] = checker._generic.inference_scope_entry(
+            declared.scope, declared.typeparams)
+        signature = declared.signature
+    elseif declared._tag == "Type.Function" then
+        declaration = variable._generic_declaration or variable._decl
+        if not declaration or declaration._tag ~= "Type.StaticMethod" then
+            return nil
+        end
+        local owner = variable._generic_owner
+            or types.registry[declaration.fqtn]
+        if owner and #(owner.typeparams or {}) > 0 then
+            scopes[#scopes + 1] = checker._generic.inference_scope_entry(
+                owner.scope, owner.typeparams, owner._generic_parameters)
+        end
+        if #(declaration.typeparams or {}) > 0 then
+            scopes[#scopes + 1] = checker._generic.inference_scope_entry(
+                declaration.scope, declaration.typeparams)
+        end
+        if #scopes == 0 then return nil end
+        signature = checker._generic.callable_function_type(declaration)
+    else
+        return nil
+    end
+
+    local closed, arguments, context =
+        checker._generic.infer_first_class_application(
+            subject, scopes, signature, expected,
+            st, errors, node.loc)
+    node._generic_type_arguments = arguments
+    if declared._tag == "Type.FunctionScheme" then
+        node._generic_scheme = declared
+    else
+        node._generic_declaration = declaration
+        node._closed_generic_declaration =
+            checker._generic.substitute_inference(
+                context, declaration, true)
+    end
+    return closed
+end
+
 function checker._generic.instantiate_function_scheme(
         scheme, typearg_nodes, st, errors, loc, subject)
     local count = #(scheme.typeparams or {})
@@ -7965,11 +8897,22 @@ function checker._generic.instantiate_static_declaration(
     return checker._generic.callable_function_type(closed), arguments, closed
 end
 
-function checker._generic.instantiate_direct_call(node, ftype, st, errors)
+function checker._generic.instantiate_direct_call(
+        node, ftype, st, errors, demand)
     local subject = "call to '" .. expname(node.exp) .. "'"
     if ftype._tag == "Type.FunctionScheme" then
-        local closed, arguments = checker._generic.instantiate_function_scheme(
-            ftype, node.typeargs, st, errors, node.loc, subject)
+        local closed, arguments
+        if #(node.typeargs or {}) > 0 then
+            closed, arguments = checker._generic.instantiate_function_scheme(
+                ftype, node.typeargs, st, errors, node.loc, subject)
+        else
+            local context = checker._generic.new_inference_context(subject, {
+                checker._generic.inference_scope_entry(ftype.scope, ftype.typeparams),
+            }, st, errors, node.loc)
+            closed = checker._generic.infer_call_application(
+                context, ftype.signature, node, demand, st, errors, subject)
+            arguments = checker._generic.inference_type_arguments(context)
+        end
         node._generic_scheme = ftype
         node._generic_type_arguments = arguments
         node.exp._type = closed
@@ -7981,12 +8924,38 @@ function checker._generic.instantiate_direct_call(node, ftype, st, errors)
     if declaration and declaration._tag == "Type.StaticMethod" then
         local owner = variable._generic_owner
             or types.registry[declaration.fqtn]
-        local count = (owner and #(owner.typeparams or {}) or 0)
-            + #(declaration.typeparams or {})
+        local owner_count = owner and #(owner.typeparams or {}) or 0
+        local local_count = #(declaration.typeparams or {})
+        local count = owner_count + local_count
         if count > 0 then
-            local closed, arguments, closed_declaration =
-                checker._generic.instantiate_static_declaration(declaration, owner,
-                    node.typeargs, st, errors, node.loc, subject)
+            local closed, arguments, closed_declaration
+            if #(node.typeargs or {}) > 0 then
+                closed, arguments, closed_declaration =
+                    checker._generic.instantiate_static_declaration(
+                        declaration, owner, node.typeargs, st, errors,
+                        node.loc, subject)
+            else
+                local scopes = {}
+                if owner_count > 0 then
+                    scopes[#scopes + 1] = checker._generic.inference_scope_entry(
+                        owner.scope, owner.typeparams,
+                        owner._generic_parameters)
+                end
+                if local_count > 0 then
+                    scopes[#scopes + 1] = checker._generic.inference_scope_entry(
+                        declaration.scope, declaration.typeparams)
+                end
+                local context = checker._generic.new_inference_context(
+                    subject, scopes, st, errors, node.loc)
+                local signature = checker._generic.callable_function_type(
+                    declaration)
+                closed = checker._generic.infer_call_application(
+                    context, signature, node, demand, st, errors, subject,
+                    declaration.paramnames)
+                arguments = checker._generic.inference_type_arguments(context)
+                closed_declaration = checker._generic.substitute_inference(
+                    context, declaration, true)
+            end
             node._generic_declaration = declaration
             node._generic_type_arguments = arguments
             node._closed_generic_declaration = closed_declaration
@@ -8003,7 +8972,7 @@ function checker._generic.instantiate_direct_call(node, ftype, st, errors)
 end
 
 function checker._generic.instantiate_method_declaration(
-        node, method, st, errors, owner_name)
+        node, method, st, errors, owner_name, demand)
     local count = #(method.typeparams or {})
     local subject = "call to method '" .. owner_name .. ":"
         .. node.args.method .. "'"
@@ -8014,16 +8983,32 @@ function checker._generic.instantiate_method_declaration(
         end
         return method
     end
-    local arguments, valid =
-        checker._generic.recover_complete_type_arguments(
-            node.typeargs, count, st, errors, node.loc, subject)
-    if valid then
-        checker._generic.validate_binder_arguments(method.scope,
-            method.typeparams, arguments,
-            st, errors, node.loc, subject, false)
+
+    local closed, arguments
+    if #(node.typeargs or {}) > 0 then
+        local valid
+        arguments, valid =
+            checker._generic.recover_complete_type_arguments(
+                node.typeargs, count, st, errors, node.loc, subject)
+        if valid then
+            checker._generic.validate_binder_arguments(method.scope,
+                method.typeparams, arguments,
+                st, errors, node.loc, subject, false)
+        end
+        closed = checker._generic.generic_substitute(
+            method, method.scope, arguments, errors, node.loc,
+            "cannot instantiate " .. subject) or method
+    else
+        local context = checker._generic.new_inference_context(subject, {
+            checker._generic.inference_scope_entry(method.scope, method.typeparams),
+        }, st, errors, node.loc)
+        checker._generic.infer_call_application(context,
+            checker._generic.callable_function_type(method), node,
+            demand, st, errors, subject, method.paramnames)
+        arguments = checker._generic.inference_type_arguments(context)
+        closed = checker._generic.substitute_inference(
+            context, method, true)
     end
-    local closed = checker._generic.generic_substitute(method, method.scope, arguments,
-        errors, node.loc, "cannot instantiate " .. subject) or method
     node._generic_declaration = method
     node._generic_type_arguments = arguments
     return closed
@@ -8332,7 +9317,9 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpVar"] = function(node, st, errors, context)
-        checkvar(node.var, st, errors, context)
+        if not node._generic_var_prechecked then
+            checkvar(node.var, st, errors, context)
+        end
         if node.var._decl then node.var._decl._used = true end
         local texp = node.var._type
         if texp._tag == "Type.Module" or texp._tag == "Type.CModule" then
@@ -8358,14 +9345,22 @@ checkexp = util.make_visitor({
                 node._type = invalid(errors, node.loc,
                     "a foreign (C) function cannot be used as a first-class value")
             end
-        elseif texp._tag == "Type.FunctionScheme" then
-            node._type = invalid(errors, node.loc,
-                "generic declaration '%s' cannot be used as a polymorphic first-class value; call it with a complete type argument list",
-                node.var.name)
-        elseif texp._tag == "Type.Function" and node.var._generic_declaration then
-            node._type = invalid(errors, node.loc,
-                "generic declaration '%s' cannot be used as a polymorphic first-class value; call it with a complete type argument list",
-                node.var.name)
+        elseif texp._tag == "Type.FunctionScheme"
+           or (texp._tag == "Type.Function"
+               and node.var._generic_declaration) then
+            local closed = checker._generic.instantiate_first_class_variable(
+                node, node.var, texp, context, st, errors)
+            if closed then
+                node._type = closed
+                local decl = node.var._decl
+                if decl and decl._tag == "Ast.TopLevelFunc" then
+                    decl._valref = true
+                end
+            else
+                node._type = invalid(errors, node.loc,
+                    "generic declaration '%s' requires a monomorphic expected function type when used as a first-class value",
+                    node.var.name)
+            end
         elseif texp._tag == "Type.Function" then
             -- Every Type.Function is a first-class Titan/Lua callable value.
             node._type = texp
@@ -8739,7 +9734,7 @@ checkexp = util.make_visitor({
 
         if not method then
             local ftype = checker._generic.instantiate_direct_call(
-                node, node.exp._type, st, errors)
+                node, node.exp._type, st, errors, demand)
             local fname = expname(node.exp)
             local pseudo_new = node.exp._tag == "Ast.ExpVar"
                 and node.exp.var._decl
@@ -8951,9 +9946,15 @@ checkexp = util.make_visitor({
                     check_call_argument_expressions(node.args, st, errors)
                     return
                 end
-                local dense, order = check_named_args(ftype, paramnames,
-                    node.args.fields, node.loc, "function '" .. fname .. "'",
-                    st, errors)
+                local dense, order
+                if node._generic_named_dense then
+                    dense, order = node._generic_named_dense,
+                        node._generic_named_order
+                else
+                    dense, order = check_named_args(ftype, paramnames,
+                        node.args.fields, node.loc,
+                        "function '" .. fname .. "'", st, errors)
+                end
                 if dense then
                     node.args = ast.ArgsFunc(node.args.loc, dense)
                     node._named_arg_order = order
@@ -8962,6 +9963,9 @@ checkexp = util.make_visitor({
             else
                 if contextual_args then
                     annotate_call_arguments(node, contextual_args)
+                elseif node._generic_arg_adjustment then
+                    annotate_call_arguments(node,
+                        node._generic_arg_adjustment)
                 else
                     annotate_call_arguments(node,
                         checkargs(ftype, node.args.args, node.loc,
@@ -9027,7 +10031,7 @@ checkexp = util.make_visitor({
                     return
                 end
                 ftype = checker._generic.instantiate_method_declaration(
-                    node, ftype, st, errors, class.name)
+                    node, ftype, st, errors, class.name, demand)
                 if named then
                     if ftype.varargtype then
                         node._type = invalid(errors, node.loc,
@@ -9042,18 +10046,30 @@ checkexp = util.make_visitor({
                         return
                     end
                     local desc = "method '" .. class.name .. ":" .. method_name_text .. "'"
-                    local dense, order = check_named_args(ftype, ftype.paramnames,
-                        node.args.fields, node.loc, desc, st, errors)
+                    local dense, order
+                    if node._generic_named_dense then
+                        dense, order = node._generic_named_dense,
+                            node._generic_named_order
+                    else
+                        dense, order = check_named_args(
+                            ftype, ftype.paramnames, node.args.fields,
+                            node.loc, desc, st, errors)
+                    end
                     if dense then
                         node.args = ast.ArgsMethod(node.args.loc, method_name_text, dense)
                         node._named_arg_order = order
                         node._named_call_kind = "titan"
                     end
                 else
-                    annotate_call_arguments(node,
-                        checkargs(ftype, node.args.args, node.loc,
-                            "method '" .. class.name .. ":" .. method_name_text .. "'",
-                            st, errors))
+                    if node._generic_arg_adjustment then
+                        annotate_call_arguments(node,
+                            node._generic_arg_adjustment)
+                    else
+                        annotate_call_arguments(node,
+                            checkargs(ftype, node.args.args, node.loc,
+                                "method '" .. class.name .. ":" .. method_name_text .. "'",
+                                st, errors))
+                    end
                 end
                 node._method = ftype
                 if class._tag == "Type.Interface" then
@@ -9148,8 +10164,8 @@ checkexp = util.make_visitor({
         -- error — mirroring an uninferable untyped lambda parameter.
         if has_vararg then
             if varargdecl.type then
-                varargdecl._type =
-                    typefromnode(varargdecl.type, st, errors)
+                varargdecl._type = varargdecl._generic_inference_type
+                    or typefromnode(varargdecl.type, st, errors)
             elseif expected and expected.varargtype then
                 varargdecl._type = expected.varargtype
             elseif expected then
@@ -9170,7 +10186,8 @@ checkexp = util.make_visitor({
         for i = 1, nfixed do
             local param = node.params[i]
             if param.type then
-                param._type = typefromnode(param.type, st, errors)
+                param._type = param._generic_inference_type
+                    or typefromnode(param.type, st, errors)
             elseif expected then
                 param._type = expected.params[i]
             else
@@ -9186,13 +10203,18 @@ checkexp = util.make_visitor({
         -- from the body's `return`s.
         local rettypes
         local flexrettype
-        if node.rettypes then
+        if type(node.rettypes) == "table" then
             -- Explicit annotation, including `: ()` (an empty list).
-            rettypes = {}
-            for _, rt in ipairs(node.rettypes) do
-                table.insert(rettypes, typefromnode(rt, st, errors))
+            if node._generic_inference_rettypes ~= nil then
+                rettypes = node._generic_inference_rettypes
+                flexrettype = node._generic_inference_flexrettype
+            else
+                rettypes = {}
+                for _, rt in ipairs(node.rettypes) do
+                    table.insert(rettypes, typefromnode(rt, st, errors))
+                end
+                flexrettype = flexible_return_type(node, st, errors)
             end
-            flexrettype = flexible_return_type(node, st, errors)
         elseif expected then
             -- Checking mode: take both fixed and flexible results from the
             -- context. This is deliberately distinct from an explicit `: ()`,
@@ -9236,7 +10258,7 @@ checkexp = util.make_visitor({
     -- Bound method reference `obj:m` (no call): yields a function value, the
     -- method's type with the implicit `self` removed and the receiver captured.
     -- Mirrors the method-resolution of the ArgsMethod arm of ExpCall.
-    ["Ast.ExpMethodRef"] = function(node, st, errors, _)
+    ["Ast.ExpMethodRef"] = function(node, st, errors, context)
         checkexp(node.exp, st, errors)
         local otype = node.exp._type
         -- auto-unwrap an option receiver, like a method call does, so `p:m` on a
@@ -9278,9 +10300,39 @@ checkexp = util.make_visitor({
                     "method '%s:%s' is local to module '%s'",
                     class.name, node.name, nominal_module(class.name))
             elseif mtype.scope ~= false then
-                node._type = invalid(errors, node.loc,
-                    "generic method '%s:%s' cannot be used as a polymorphic first-class value",
-                    class.name, node.name)
+                local expected = context
+                if expected and expected._tag == "Type.Option"
+                   and expected.base._tag == "Type.Function" then
+                    expected = expected.base
+                end
+                if not expected or expected._tag ~= "Type.Function" then
+                    node._type = invalid(errors, node.loc,
+                        "generic method '%s:%s' requires a monomorphic expected function type when used as a bound value",
+                        class.name, node.name)
+                else
+                    local subject = "generic bound method '" .. class.name
+                        .. ":" .. node.name .. "'"
+                    local closed, arguments, inference =
+                        checker._generic.infer_first_class_application(
+                            subject, { checker._generic.inference_scope_entry(
+                                mtype.scope, mtype.typeparams) },
+                            types.method_function_type(mtype), expected,
+                            st, errors, node.loc)
+                    local closed_method =
+                        checker._generic.substitute_inference(
+                            inference, mtype, true)
+                    node._generic_declaration = mtype
+                    node._generic_type_arguments = arguments
+                    node._method = closed_method
+                    node._type = closed
+                    if class._tag == "Type.Interface" then
+                        node._interface = class
+                        node._interface_method = closed_method
+                        node._interface_method_index =
+                            assert(interface_method_index(class, node.name))
+                        node._interface_bound = true
+                    end
+                end
             else
                 node._method = mtype
                 node._type = types.method_function_type(mtype)
@@ -11024,20 +12076,22 @@ local function register_referenced_nominals(
     if type(t) ~= "table" or not t._tag then return true end
     local tag = t._tag
     local alias_key
+    local context_key = "\0generic-visit:" .. tostring(t) .. ":" ..
+        tostring(position or "value")
     if tag == "Type.GenericAlias" then
         alias_key = t.module .. "." .. t.name
         local resolving_key = "\0generic-alias-resolving:" .. alias_key
         if seen[resolving_key] then
             return nil, "recovered GenericAlias chain is cyclic at '" ..
                 alias_key .. "'"
-        elseif seen[t] then
+        elseif seen[context_key] then
             return true
         end
         seen[resolving_key] = true
-    elseif seen[t] then
+    elseif seen[context_key] then
         return true
     end
-    seen[t] = true
+    seen[context_key] = true
 
     local function visit(child, child_position)
         return register_referenced_nominals(

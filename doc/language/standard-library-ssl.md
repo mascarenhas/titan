@@ -90,8 +90,9 @@ The optional trust argument selects one of two modes:
 
 - without `ca_file`, connections share the module's default client context,
   initialized once from OpenSSL's compiled default verify paths and the
-  environment overrides OpenSSL recognizes; its native context is released by
-  a finalizer during Lua-state shutdown; or
+  environment overrides OpenSSL recognizes; its native context is held by a
+  private owner record and released during Lua-state shutdown by a finalizer
+  whose parameter is that exact owner type, not a dynamically cast `value`; or
 - `ca_file` selects an explicit PEM certificate bundle for that connection.
 
 An explicit file replaces the default roots; it is not added after them. Titan

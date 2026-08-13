@@ -489,13 +489,13 @@ functions:
 ```titan
 local gc = import "titan.gc"
 
-local function finish_owner(_owner: value): ()
+local function finish_owner(_owner: {value: value}): ()
   -- Clear and release reachability-owned state here.
 end
 
 function configure_cache(cache: {value: value})
   gc.weak(cache)
-  gc.finalizable(cache, finish_owner)
+  gc.finalizable<{value: value}>(cache, finish_owner)
 
   gc.pause()             -- maps to collectgarbage("stop")
   if not gc.paused() then raise "collector did not pause" end
@@ -509,10 +509,11 @@ end
 `pause_percent` is the incremental collector's tuning accessor; `pause()` has
 side effects, while `paused()` only reports whether the collector is stopped.
 Weak and ephemeron configuration preserves an existing Map metatable and
-changes only its raw `__mode` field. `finalizable` likewise preserves that
-exact metatable while replacing raw `__gc`; its callback receives the
-finalized value. Cleanup should clear owned state before releasing it so the
-callback remains safe if cleanup is retried or partially completed.
+changes only its raw `__mode` field. Generic `finalizable<T>` likewise
+preserves that exact metatable while replacing raw `__gc`; its callback
+receives the finalized value at the same exact `T` selected by the caller.
+Cleanup should clear owned state before releasing it so the callback remains
+safe if cleanup is retried or partially completed.
 
 Finally, `titan.lua` is the audited dynamic boundary for compiling Lua chunks,
 executing Lua files, and loading modules. Flexible arguments and results,

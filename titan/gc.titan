@@ -40,7 +40,7 @@ function ephemeron(map: {value: value})
   set_weak_mode(map, "k")
 end
 
-function finalizable(v: value, f: (value) -> ()): ()
+function finalizable<T>(v: T, f: (T) -> ()): ()
   local top = lua.lua_gettop(L)
   defer lua.lua_settop(L, top)
   if lua.lua_checkstack(L, 4) == 0 then
