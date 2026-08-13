@@ -731,6 +731,24 @@ describe("generic declarations and explicit calls", function()
                 return inner<T>(item)
             end
         ]])
+
+        -- The local function and public alias deliberately share the same
+        -- resolved Box<PrivateRenderable> type graph. A permissive source-view
+        -- visit must not memoize constraint success for the public view.
+        assert_error("public module interface is not recoverable", [[
+            interface Renderable
+                function render(): string
+            end
+            record PrivateRenderable
+                marker: integer
+            end
+            local function PrivateRenderable:render(): string return "ok" end
+            record RenderedBox<T: Renderable>
+                item: T
+            end
+            local function private_use(item: PublicBox) end
+            type PublicBox = RenderedBox<PrivateRenderable>
+        ]])
     end)
 
     it("smart-reconstructs every explicit owner and callable application",

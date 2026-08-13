@@ -12167,22 +12167,42 @@ local function register_referenced_nominals(
         return true
     end
     local alias_key
-    local context_key = "\0generic-visit:" .. tostring(t) .. ":" ..
-        tostring(position or "value")
+    -- Constraint satisfaction depends on the visibility policy. In particular,
+    -- a trusted source-private view may admit local methods that the public
+    -- serialized view must reject. Keep graph-cycle/module recovery memoization
+    -- shared, but never let a permissive type visit satisfy a stricter policy.
+    -- Hold the policy and type objects as real keys rather than stringifying
+    -- their addresses, so GC address reuse cannot alias two later visits.
+    local policy_visits = seen["\0generic-visit-policies"]
+    if not policy_visits then
+        policy_visits = {}
+        seen["\0generic-visit-policies"] = policy_visits
+    end
+    local type_visits = policy_visits[constraint_policy]
+    if not type_visits then
+        type_visits = {}
+        policy_visits[constraint_policy] = type_visits
+    end
+    local position_visits = type_visits[t]
+    if not position_visits then
+        position_visits = {}
+        type_visits[t] = position_visits
+    end
+    local visit_position = position or "value"
     if tag == "Type.GenericAlias" then
         alias_key = t.module .. "." .. t.name
         local resolving_key = "\0generic-alias-resolving:" .. alias_key
         if seen[resolving_key] then
             return nil, "recovered GenericAlias chain is cyclic at '" ..
                 alias_key .. "'"
-        elseif seen[context_key] then
+        elseif position_visits[visit_position] then
             return true
         end
         seen[resolving_key] = true
-    elseif seen[context_key] then
+    elseif position_visits[visit_position] then
         return true
     end
-    seen[context_key] = true
+    position_visits[visit_position] = true
 
     local function visit(child, child_position)
         return register_referenced_nominals(
