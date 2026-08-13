@@ -5847,6 +5847,7 @@ function checker._generic.finish_named_record_constructor(
         visible_by_name[field.name] = field
     end
     local supplied = {}
+    local finalized_fields = {}
 
     for _, cfield in ipairs(written_fields) do
         if cfield._field then
@@ -5857,6 +5858,7 @@ function checker._generic.finish_named_record_constructor(
                     errors, cfield.loc)
                 cfield._field = found
                 supplied[found.name] = true
+                table.insert(finalized_fields, cfield)
             end
         end
     end
@@ -5874,7 +5876,7 @@ function checker._generic.finish_named_record_constructor(
                 exp._named_omitted = true
                 local cfield = ast.Field(node.loc, rfield.name, exp)
                 cfield._field = rfield
-                table.insert(node.fields, cfield)
+                table.insert(finalized_fields, cfield)
             else
                 checker.typeerror(errors, node.loc,
                     "field '%s' of record '%s' cannot be omitted because its type %s does not accept nil",
@@ -5883,6 +5885,10 @@ function checker._generic.finish_named_record_constructor(
             end
         end
     end
+    -- A rejected written field was already checked and diagnosed during the
+    -- discovery mapping. Do not redispatch it, but do keep the runtime-facing
+    -- recovery constructor limited to fields with resolved descriptors.
+    node.fields = finalized_fields
     node._type = closed_context
 end
 
@@ -5905,13 +5911,11 @@ function checker._generic.check_named_record_constructor(
         end
         node._type = context
 
-        local plan = { complete = false, valid = false }
+        local plan = { complete = false, owner_valid = false }
         local function map_fields(candidate, visible_by_name, contribute)
-            local valid = true
             for _, cfield in ipairs(written_fields) do
                 local found = visible_by_name[cfield.name]
                 if not found then
-                    valid = false
                     if cfield.name then
                         checker.typeerror(errors, cfield.loc,
                             "field '%s' not found in record type '%s'",
@@ -5930,7 +5934,6 @@ function checker._generic.check_named_record_constructor(
                     end
                 end
             end
-            return valid
         end
 
         checker._generic.add_inference_discovery(operation, function()
@@ -5947,7 +5950,8 @@ function checker._generic.check_named_record_constructor(
                     node, st, errors, candidate)
             plan.complete = true
             if visible_by_name then
-                plan.valid = map_fields(candidate, visible_by_name, true)
+                plan.owner_valid = true
+                map_fields(candidate, visible_by_name, true)
             end
             return true
         end)
@@ -5962,22 +5966,23 @@ function checker._generic.check_named_record_constructor(
                         node, st, errors, candidate)
                 plan.complete = true
                 if visible_by_name then
+                    plan.owner_valid = true
                     -- Carrier defaults have already run. This recovery mapping
                     -- may freeze diagnostics and annotations but never adds late
                     -- equations to the closed owner.
-                    plan.valid = map_fields(
-                        candidate, visible_by_name, false)
+                    map_fields(candidate, visible_by_name, false)
                 end
             end
-            if plan.valid then
+            if plan.owner_valid then
+                -- Even a failed written-field mapping owns the ordinary omission
+                -- pass. It consumes only the descriptors discovered above, so
+                -- every written expression remains checked exactly once while
+                -- every missing required field is still diagnosed.
                 checker._generic.finish_named_record_constructor(
                     node, st, errors, context, written_fields, operation)
             else
-                -- The owner/field diagnostic above is authoritative.  When the
-                -- owner itself closed successfully, retain that closed nominal
-                -- as recovery so the parent sink does not add a redundant type
-                -- mismatch; otherwise use Invalid.  Never leave the original
-                -- fresh Parameter on the runtime-facing constructor node.
+                -- The invalid owner was already diagnosed. Never leave the
+                -- original fresh Parameter on the runtime-facing constructor.
                 node._type = candidate
                     and candidate._tag == "Type.Nominal"
                     and candidate or types.Invalid()
@@ -9974,6 +9979,42 @@ function checker._generic.generic_expression_result_types(exp)
     return { exp._type }, false
 end
 
+function checker._generic.contextual_record_constructor_evidence(
+        context, pattern, exp, evidence)
+    -- A record initializer has no independent nominal owner: its expected type
+    -- selects the record, and the initializer itself builds that non-Option
+    -- record. If the surrounding generic pattern has already closed to exactly
+    -- one ordinary Option away, keep that outer pattern as the invariant
+    -- evidence and let the final argument edge own the wrap/force adjustment.
+    -- Arrays and Maps remain ordinary structural evidence, as do every
+    -- nonconstructor expression and every difference beyond one outer Option.
+    if not pattern or not exp or exp._tag ~= "Ast.ExpInitList"
+       or not evidence then
+        return evidence
+    end
+    evidence = types.normalize(evidence)
+    if not evidence then return evidence end
+    local nominal = evidence._tag == "Type.Option"
+        and evidence.base or evidence
+    if nominal._tag ~= "Type.Nominal" then return evidence end
+    local owner = types.registry[nominal.fqtn]
+    if not owner or owner._tag ~= "Type.Record" then return evidence end
+
+    local expected = types.normalize(
+        checker._generic.substitute_inference(context, pattern, false))
+    if not expected then return evidence end
+    local one_option_apart =
+        (expected._tag == "Type.Option"
+            and types.equals(expected.base, evidence))
+        or (evidence._tag == "Type.Option"
+            and types.equals(evidence.base, expected))
+    if not one_option_apart
+       or not types.assignment_adjustment(evidence, expected) then
+        return evidence
+    end
+    return expected
+end
+
 function checker._generic.generic_unify_expression_results(context, signature, exp,
                                                 first, term)
     local results, open = checker._generic.generic_expression_result_types(exp)
@@ -9981,6 +10022,8 @@ function checker._generic.generic_unify_expression_results(context, signature, e
     for _, actual in ipairs(results) do
         local pattern = checker._generic.generic_formal_pattern(signature, index)
         if pattern then
+            actual = checker._generic.contextual_record_constructor_evidence(
+                context, pattern, exp, actual)
             checker._generic.unify_inference(context, pattern, actual,
                 term .. " " .. index, exp.loc)
         end
@@ -10273,14 +10316,20 @@ function checker._generic.infer_positional_call(context, signature, args,
         local pattern = checker._generic.generic_formal_pattern(
             signature, index)
         if pattern and not deferred_by_exp[exp] then
+            local evidence =
+                checker._generic.contextual_record_constructor_evidence(
+                    context, pattern, exp, exp._type)
             checker._generic.unify_inference(context, pattern,
-                exp._type, "argument " .. index, exp.loc)
+                evidence, "argument " .. index, exp.loc)
         end
     end
     for _, exp in ipairs(adjusted.tail_scalars) do
         if signature.varargtype and not deferred_by_exp[exp] then
+            local evidence =
+                checker._generic.contextual_record_constructor_evidence(
+                    context, signature.varargtype, exp, exp._type)
             checker._generic.unify_inference(context,
-                signature.varargtype, exp._type,
+                signature.varargtype, evidence,
                 "variadic argument", exp.loc)
         end
     end
@@ -10354,8 +10403,11 @@ function checker._generic.infer_named_call(context, signature, fields,
                         term = "named generic argument",
                         inference_fixed = { provisional },
                     }))
+                local evidence =
+                    checker._generic.contextual_record_constructor_evidence(
+                        context, pattern, field.exp, field.exp._type)
                 checker._generic.unify_inference(context, pattern,
-                    field.exp._type, "named argument '" .. field.name .. "'",
+                    evidence, "named argument '" .. field.name .. "'",
                     field.loc)
             end
             checked[field] = index

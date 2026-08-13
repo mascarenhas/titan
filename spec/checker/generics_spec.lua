@@ -1711,30 +1711,157 @@ describe("generic declarations and explicit calls", function()
         end
     end)
 
-    it("recovers an unknown deferred record field once with a closed AST",
+    it("keeps option-backed contextual record evidence order-independent",
     function()
-        local ok, err, ast = run_checker([[
+        local ast = assert_check([[
             record Plain
                 item: integer
             end
+            function maybe(): Plain? return Plain.new(42) end
             function agree<T>(left: T, right: T): T return left end
-            function bad()
-                local got = agree({wrong = 42}, Plain.new(42))
+
+            function inferred_left(): integer
+                local got = agree({item = 42}, maybe())
+                return got.item
+            end
+            function inferred_right(): integer
+                local got = agree(maybe(), {item = 42})
+                return got.item
+            end
+            function result_left(): Plain?
+                return agree({item = 42}, maybe())
+            end
+            function result_right(): Plain?
+                return agree(maybe(), {item = 42})
             end
         ]])
-        assert.falsy(ok)
-        local _, diagnostics = err:gsub("type error:", "")
-        assert.equal(1, diagnostics)
-        assert.match("field 'wrong' not found in record type 'test.Plain'", err)
-        local bad = toplevel(ast, "Ast.TopLevelFunc", "bad")
-        local outer = bad.block.stats[1]._result_adjustment.fixed[1]
-        while outer._tag == "Ast.ExpCast" do outer = outer.exp end
-        local constructor = outer.args.args[1]
-        while constructor._tag == "Ast.ExpCast" do
-            constructor = constructor.exp
+
+        local function find_wrapped_constructor(value, seen)
+            if type(value) ~= "table" or seen[value] then return nil end
+            seen[value] = true
+            if value._tag == "Ast.ExpCast" and value.exp
+               and value.exp._tag == "Ast.ExpInitList" then
+                return value.exp, value
+            end
+            for key, child in pairs(value) do
+                if key ~= "_decl" and key ~= "_declared_type"
+                   and key ~= "_generic_scheme"
+                   and key ~= "_generic_declaration"
+                   and key ~= "_generic_owner" then
+                    local constructor, wrapper =
+                        find_wrapped_constructor(child, seen)
+                    if constructor then return constructor, wrapper end
+                end
+            end
         end
-        assert.equal("Ast.ExpInitList", constructor._tag)
+
+        for _, name in ipairs({
+            "inferred_left", "inferred_right",
+            "result_left", "result_right",
+        }) do
+            local block = toplevel(ast, "Ast.TopLevelFunc", name).block
+            local constructor, wrapper =
+                find_wrapped_constructor(block, {})
+            assert.truthy(constructor, name)
+            assert_nominal(constructor._type, "test.Plain", {})
+            assert.equal("Type.Option", wrapper._type._tag)
+            assert_nominal(wrapper._type.base, "test.Plain", {})
+            assert.equal("option_wrap", wrapper._adjustment.coercion.op)
+            assert_runtime_ast_erased(block)
+        end
+    end)
+
+    it("keeps independent record and container evidence invariant",
+    function()
+        local errs = h.check_errs([[
+            record Plain item: integer end
+            function maybe_record(): Plain? return Plain.new(42) end
+            function maybe_array(): {integer}? return {42} end
+            function maybe_map(): {string: integer}?
+                return {["item"] = 42}
+            end
+            function agree<T>(left: T, right: T): T return left end
+            function bad()
+                local record_value = agree(maybe_record(), Plain.new(42))
+                local array = agree(maybe_array(), {42})
+                local map = agree(maybe_map(), {["item"] = 42})
+            end
+        ]])
+        assert.same(3, #errs)
+        assert.match("inferred 'test.Plain%?'.-found 'test.Plain'", errs[1])
+        assert.match("inferred '{ integer }%?'.-found '{ integer }'", errs[2])
+        assert.match("inferred '{ string : integer }%?'.-found '{ string : integer }'",
+            errs[3])
+    end)
+
+    it("reports complete record diagnostics in deferred and closed paths",
+    function()
+        local prelude = table.concat({
+            "record Plain",
+            "    item: integer",
+            "end",
+            "function maybe(): Plain? return Plain.new(42) end",
+            "function agree<T>(left: T, right: T): T return left end",
+            "function accept(item: Plain): Plain return item end",
+        }, "\n")
+        local function source(expression)
+            return prelude .. "\nfunction bad()\n    local got = "
+                .. expression .. "\nend"
+        end
+        local cases = {
+            {
+                name = "deferred left",
+                expression = "agree({missing = 42}, maybe())",
+                errors = {
+                    "(spec):8:24: type error: field 'missing' not found in record type 'test.Plain'",
+                    "(spec):8:23: type error: field 'item' of record 'test.Plain' cannot be omitted because its type integer does not accept nil",
+                },
+            },
+            {
+                name = "preclosed right",
+                expression = "agree(maybe(), {missing = 42})",
+                errors = {
+                    "(spec):8:33: type error: field 'missing' not found in record type 'test.Plain'",
+                    "(spec):8:32: type error: field 'item' of record 'test.Plain' cannot be omitted because its type integer does not accept nil",
+                },
+            },
+            {
+                name = "ordinary",
+                expression = "accept({missing = 42})",
+                errors = {
+                    "(spec):8:25: type error: field 'missing' not found in record type 'test.Plain'",
+                    "(spec):8:24: type error: field 'item' of record 'test.Plain' cannot be omitted because its type integer does not accept nil",
+                },
+            },
+        }
+        for _, case in ipairs(cases) do
+            local errors = h.check_errs(source(case.expression))
+            assert.same(#case.errors, #errors, case.name)
+            for index, expected in ipairs(case.errors) do
+                assert.equal(expected, errors[index], case.name)
+            end
+        end
+
+        local ok, _, ast = run_checker(source(cases[1].expression))
+        assert.falsy(ok)
+        local bad = toplevel(ast, "Ast.TopLevelFunc", "bad")
+        local function find_constructor(value, seen)
+            if type(value) ~= "table" or seen[value] then return nil end
+            seen[value] = true
+            if value._tag == "Ast.ExpInitList" then return value end
+            for key, child in pairs(value) do
+                if key ~= "_decl" and key ~= "_declared_type"
+                   and key ~= "_generic_scheme"
+                   and key ~= "_generic_declaration"
+                   and key ~= "_generic_owner" then
+                    local found = find_constructor(child, seen)
+                    if found then return found end
+                end
+            end
+        end
+        local constructor = assert(find_constructor(bad.block, {}))
         assert_nominal(constructor._type, "test.Plain", {})
+        assert.same(0, #constructor.fields)
         assert.is_nil(constructor._generic_inference_context)
         assert.is_nil(constructor._generic_inference_use)
         assert.is_nil(constructor._generic_inference_operation_use)

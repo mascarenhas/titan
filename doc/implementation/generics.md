@@ -345,12 +345,22 @@ inference cell cannot resolve its field descriptors immediately. It checks each
 written field expression exactly once in lexical order, registers its nested
 uses, and queues a one-shot discovery callback. Before carrier defaults, the
 owner repeatedly runs discovery and constraint propagation to a bounded fixed
-point. Once sibling evidence identifies the record owner, discovery and finish
-both look through the same one outer Option, map the already checked expressions
-to the closed field patterns, and contribute their equations. An invalid field
-mapping reports once and leaves the constructor on its closed nominal recovery
-(or `Invalid` when no owner closed), never on the fresh Parameter. It never
-redispatches a field expression.
+point. Once sibling or direct-result evidence identifies the record owner,
+discovery and finish both look through the same one outer Option and map the
+already checked expressions to the closed field patterns. If that contextual
+base differs from the preserved outer generic pattern by exactly one ordinary
+Option wrap or force, argument discovery retains the outer pattern as evidence;
+the postorder argument finalizer classifies the ordinary adjustment. This narrow
+rule applies to context-only record initializers, not independently typed record
+calls, Array/Map constructors, or other expressions, so invariant inference is
+unchanged.
+
+An invalid written-field mapping reports the unknown field and still runs the
+ordinary omission pass, which can also report every required field that was not
+supplied. The recovery constructor retains only fields with resolved descriptors
+and closes to its nominal owner (or `Invalid` when no owner closed), never to the
+fresh Parameter. Neither discovery nor omission redispatches a written field
+expression.
 
 After child uses close, reusable postorder annotation finalizers smart-substitute
 or rebuild the operation's `_type`, field/index guard, method/Interface,

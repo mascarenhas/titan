@@ -282,6 +282,14 @@ Here `42` closes `T` to `integer`, so `callback()` is checked as an integer
 result just as it is in `agree(42, callback())`. The source order still controls
 evaluation order; inference does not recheck or reevaluate either expression.
 
+A context-only record initializer does not provide a second, contradictory owner
+for the context that made it meaningful. For example, if an expected result or
+another argument closes a direct `T` to `Plain?`, `{item = 42}` constructs a
+`Plain` and then takes the ordinary `Plain`-to-`Plain?` adjustment. This is the
+same in either argument order. An explicitly typed expression such as
+`Plain.new(42)` still contributes its own invariant type evidence; the rule is
+not an Option-wide common-type search.
+
 Inference is local and invariant. It unifies corresponding parts of Options,
 Arrays, Maps, function shapes, and applications of the same owner. It does not:
 

@@ -537,6 +537,63 @@ describe("generic erased core", function()
         ]])
     end)
 
+    it("runs option-backed contextual records once in either order",
+    function()
+        h.run_coder([[
+            record Plain
+                item: integer
+            end
+
+            local steps: integer = 0
+            local order_okay: boolean = true
+            local function reset_trace()
+                steps = 0
+                order_okay = true
+            end
+            local function mark(expected: integer): integer
+                steps = steps + 1
+                if steps ~= expected then order_okay = false end
+                return 42
+            end
+            function count(): integer return steps end
+            function ordered(): boolean return order_okay end
+
+            function maybe(expected: integer): Plain?
+                return Plain.new(mark(expected))
+            end
+            function agree<T>(left: T, right: T): T return left end
+
+            function inferred_left(): Plain?
+                reset_trace()
+                local got = agree({item = mark(1)}, maybe(2))
+                return got
+            end
+            function inferred_right(): Plain?
+                reset_trace()
+                local got = agree(maybe(1), {item = mark(2)})
+                return got
+            end
+            function result_left(): Plain?
+                reset_trace()
+                return agree({item = mark(1)}, maybe(2))
+            end
+            function result_right(): Plain?
+                reset_trace()
+                return agree(maybe(1), {item = mark(2)})
+            end
+        ]], [[
+            for _, name in ipairs({
+                "inferred_left", "inferred_right",
+                "result_left", "result_right",
+            }) do
+                local got = test[name]()
+                assert(got.item == 42, name)
+                assert(test.count() == 2, name .. " count")
+                assert(test.ordered(), name .. " order")
+            end
+        ]])
+    end)
+
     it("runs nested fixed and open generic result projections", function()
         h.run_coder([[
             function make<T>(): T return (42 as value) as T end
