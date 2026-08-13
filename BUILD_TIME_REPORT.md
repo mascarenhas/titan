@@ -9,7 +9,7 @@ Two repeated costs were confirmed rather than inferred:
 1. Every generated C/header boundary synchronously ran `clang-format`, including very large generated translation units. The 22-root native test build crossed 42 such boundaries.
 2. Source-foreign companion headers were rendered before final source-header identities were wired, rendered again after wiring, and then rendered a third time by `coder.generate` even though the driver had already published the final header. Modules with no source-foreign function still took a redundant `generate_foreign_header` walk at the end of code generation.
 
-The implementation makes formatting explicitly opt-in with `titanc --pretty-print`, retains mandatory `#line` blank-line normalization in every mode, and makes invocation-wide foreign-header planning/rendering single-pass after identities are final. It deliberately does not attempt a speculative parser, checker, or C-code-size rewrite. It does **not** change any CI timeout.
+The driver implementation makes formatting explicitly opt-in with `titanc --pretty-print`, retains mandatory `#line` blank-line normalization in every mode, and makes invocation-wide foreign-header planning/rendering single-pass after identities are final. The generics branch additionally applies the separately profiled, semantics-preserving expression-suffix parser refactor described below; it does not attempt the riskier checker graph-clone or C-code-size changes. No change increases a CI timeout.
 
 The controlled native multi-root build improved from **141.84 s** with the old default formatter path to **111.30 s** with the new default, a single-host observation of **30.54 s / 21.5%**. This is a controlled before/after observation, not a statistical benchmark and not a claim that the full historical multi-minute regression is eliminated.
 
@@ -127,6 +127,29 @@ Representative one-file formatter samples from baseline-generated output further
 Raw evidence is retained under `/tmp/titan-ci-logs/`, including `baseline-native-stdlib.log`, `baseline-native-true-formatter.log`, `after-native-stdlib2.log`, `after-native-stdlib-pretty.log`, `instrument-native2.log`, `after-native-stdlib.log`, and `formatter-per-file.csv`.
 
 A warm post-change `luarocks make --force` completed successfully in 225.88 s (`after-install-warm.log`). It is validation only: the available 424.63 s earlier observation was cold and is not presented as a controlled delta.
+
+## Generics parser integration
+
+A separate controlled profile of `generics-v1` found that the remaining
+branch-specific native-suite compiler delta was concentrated in expression
+parsing: 72 aggregate sources took 83.27 CPU-s in instrumented full builds
+versus 67.01 CPU-s on the matching master tree. The original suffix grammar
+replayed generic/ordinary and positional/named alternatives, and parsed a
+method's `: Name` prefix up to four times. Even 49 byte-identical sources were
+16.3% slower.
+
+The integrated parser change left-factors that grammar. One bounded generic
+lookahead proves a complete list followed by a call delimiter or nominal-member
+dot, after which one branch selects positional/named call arguments or the
+owner member. Methods consume `: Name` once before selecting a generic call or
+bound-method reference. The public grammar, AST, diagnostics, comparison
+fallback, owner-attached syntax, and checker contract are unchanged; successful
+lists retain the conservative lookahead-plus-capture scan. The measured proof
+of concept reduced the direct 72-source parser benchmark from 60.36 to 50.40
+CPU-s (-16.5%). The final integrated tree, measured against its unmodified
+parent on the same 72 files and host, reduced 61.006 to 49.379 CPU-s (-19.1%)
+and preserved all 839 top-level nodes. Parser/lexer validation passed 203/203,
+and the generic checker suite passed 27/27.
 
 ## Tests and review
 

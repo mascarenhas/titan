@@ -589,9 +589,13 @@ Factor one named-type production shared by ordinary and owned-C syntactic
 positions. In the scannerless PEG, generic-list productions consume a literal
 `>` plus `SKIP*` in their own context; this naturally parses adjacent nested
 closers without changing the ordinary expression patterns for `GT`, `GE`, or
-`SHR`. A generic call lookahead must prove the complete list and following call
-argument delimiter before committing, so ordinary `<` comparisons do not emit
-misleading generic-list errors.
+`SHR`. Left-factor expression suffixes so one generic-list lookahead proves the
+complete list and a following call delimiter or nominal-member dot before
+committing, then selects positional/named arguments or the owner member without
+replaying full alternatives. Parse a method's `: Name` prefix once before its
+optional generic call tail or bound-method-reference tail. Thus ordinary calls
+do not repeatedly enter recursive generic productions and ordinary `<`
+comparisons do not emit misleading generic-list errors.
 
 Add dedicated labels for missing binder name, missing constraint, binder-list
 close, generic foreign function, generic lambda, and generic alias. Missing type-

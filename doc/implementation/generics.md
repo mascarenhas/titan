@@ -140,15 +140,22 @@ literal `>` plus `SKIP*`. It does not change the exported `GT`, `GE`, or `SHR`
 lexer patterns. Consequently `Outer<Inner<T>>` closes two lists while an
 expression still parses `x >> y` as a shift.
 
-A callable suffix claims `<...>` only after lookahead proves both a complete
-type-argument list and a following ordinary call delimiter (`(`, a string
-literal, or `{`). A nominal namespace suffix instead proves a complete list
-followed by `.`, producing `Pair<T>.member`; the checker permits it only on a
-record, union, or constructor-preserving alias and only in a direct call.
-Generic suffix productions precede comparison suffixes, so `f < T > (x)` is a
-call but `a < b > c` remains comparison. This bounded commitment is why
-incomplete ambiguous text can fall back to an ordinary expression diagnostic
-instead of promising a generic-list error.
+One left-factored expression-suffix production probes `<...>` once, and claims
+it only after lookahead proves both a complete type-argument list and either an
+ordinary call delimiter (`(`, a string literal, or `{`) or the `.` of a nominal
+namespace selection. It then selects positional versus named arguments, or
+consumes the namespace member, without replaying separate generic/ordinary and
+positional/named call alternatives. Method syntax likewise consumes `: Name`
+once before selecting an optional generic call tail or a bound-method
+reference. This keeps the parser cost of generics out of ordinary calls while
+preserving the existing AST tags.
+
+The nominal branch produces `Pair<T>.member`; the checker permits it only on a
+record, union, or constructor-preserving alias and only in a direct call. The
+bounded generic branch takes priority when complete, so `f < T > (x)` is a call
+but `a < b > c` remains comparison. Incomplete ambiguous text can still fall
+back to an ordinary expression diagnostic instead of promising a generic-list
+error.
 
 Dedicated syntax labels cover:
 
