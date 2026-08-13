@@ -209,13 +209,13 @@ end
 local function installed_stdlib_container()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.23/" .. STDLIB_CONTAINER
+    return prefix .. "/lib/titan/0.24/" .. STDLIB_CONTAINER
 end
 
 local function installed_stdlib_archive()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.23/" .. STDLIB_STATIC_ARCHIVE
+    return prefix .. "/lib/titan/0.24/" .. STDLIB_STATIC_ARCHIVE
 end
 
 local function quote(word)
@@ -1940,7 +1940,7 @@ esac
             local build_log = root .. "/build.log"
 
             local payload = assert(staticmetadata.render(
-                "fixture.module", "0.23", "{}"))
+                "fixture.module", "0.24", "{}"))
             local initializer = assert(staticmetadata.c_initializer(payload))
             write_file(source, string.format([[
 #if defined(__APPLE__)
@@ -2056,7 +2056,7 @@ printf 'build\n' >> %s
                     tostring(code) .. ")")
                 assert.equal("build\nbuild\nbuild\n", read_file(build_log))
                 assert.truthy(staticmetadata.scan_archive(static_archive, {
-                    expected_abi = "0.23",
+                    expected_abi = "0.24",
                 }))
 
                 assert.truthy(os.remove(provider))
@@ -2371,7 +2371,7 @@ exit 73
                 '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
                 '"$shim_dir/math.lua" "$shim_dir/lua.lua"',
                 '"$shim_dir/iter.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"',
-                'test_source=$prefix_rel/share/titan/0.23/src/titan/test.titan',
+                'test_source=$prefix_rel/share/titan/0.24/src/titan/test.titan',
                 '"$test_source"',
                 'rm -f "$test_source"',
                 '"$shim_dir/io.lua"',
@@ -2795,7 +2795,7 @@ exit 73
                 "http os peg string math lua iter gc test; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
-                "share/titan/0.23/src/titan/test.titan", 1, true), workflow)
+                "share/titan/0.24/src/titan/test.titan", 1, true), workflow)
 
             local groups = read_file("spec/support/ci_test_groups.sh")
             for _, retained in ipairs({

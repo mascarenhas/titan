@@ -153,9 +153,14 @@ typedef struct lua_longjmp {
    and standard-provider callback shim objects. Generated callable names also
    use injective module/nominal/member separators. The runtime archive and
    generated modules therefore expose and consume a different native symbol
-   contract; 0.22 and 0.23 objects must not be mixed. */
-#define TITAN_VER "0.23"
-#define TITAN_VER_SUFFIX "_0_23"
+   contract; 0.22 and 0.23 objects must not be mixed.
+   0.23 -> 0.24: serialized module interfaces gain generic binder scopes,
+   parameter references, applied nominal arguments, declaration schemes,
+   generic owners and methods, and constructor-preserving aliases. Older
+   compilers cannot decode the extended metadata, so 0.23 and 0.24 providers
+   must not be mixed. */
+#define TITAN_VER "0.24"
+#define TITAN_VER_SUFFIX "_0_24"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"

@@ -255,7 +255,10 @@ the UCN spellings; object and tool names contain UTF-8 `ℳ` and `ℱ`.
 
 The naming change and the removal of the old standard-library callback symbols
 are part of the ABI-0.23 clean boundary. ABI-0.22 providers and objects must be
-rebuilt rather than mixed with an ABI-0.23 compiler/runtime.
+rebuilt rather than mixed with an ABI-0.23 compiler/runtime. ABI 0.24 retains
+these native names but extends serialized interfaces for generics, so ABI-0.23
+providers likewise remain preserved prior-version state and cannot be mixed
+with the active compiler/runtime.
 
 ## Related chapters
 

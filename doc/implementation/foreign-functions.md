@@ -530,7 +530,11 @@ to match.
 `TITAN_VER`, `_0_23`, `TITAN_PATH_0_23`, `lib/titan/0.23`,
 `share/titan/0.23`, and `stdlib_0_23` advance together. A separately versioned
 0.22 installation is preserved as prior state; there is no migration,
-active-layout predecessor, compatibility object, or cleanup path.
+active-layout predecessor, compatibility object, or cleanup path. ABI 0.24
+retains these native names and callback locations while extending serialized
+interfaces for generics; its marker, `_0_24`, `TITAN_PATH_0_24`,
+`lib/titan/0.24`, `share/titan/0.24`, and `stdlib_0_24` reject and preserve the
+0.23 provider without migration or cleanup.
 
 Foreign declarations, allocation plans, and generated headers remain
 compiler-local. They add no public type descriptor or module-state slot, so the

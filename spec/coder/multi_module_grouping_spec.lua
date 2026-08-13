@@ -92,7 +92,7 @@ local function compiler_argv(workspace, source_root, ...)
         table.insert(argv, "LUA_CPATH")
     end
     table.insert(argv, "CCACHE_DISABLE=1")
-    table.insert(argv, "TITAN_PATH_0_23=" .. workspace)
+    table.insert(argv, "TITAN_PATH_0_24=" .. workspace)
     table.insert(argv, "TITAN_PATH=")
     if PREFIX then
         table.insert(argv, "PATH=" .. PREFIX .. "/bin:" ..

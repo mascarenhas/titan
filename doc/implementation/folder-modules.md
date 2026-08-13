@@ -298,6 +298,8 @@ one logical module. Their prototypes and eligible inline bodies enter the
 canonical main's single generated `*.titan.h`; out-of-line bodies enter its
 single C/object pair. The callback-symbol and UCN top-level-entry changes are
 native ABI reasons for 0.23, not contributor identities or new folder metadata.
+ABI 0.24 likewise leaves folder composition unchanged; its boundary is the
+extended generic declaration metadata, not contributor identity.
 
 ## `titan.uv` dogfooding
 

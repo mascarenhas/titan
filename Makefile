@@ -415,7 +415,7 @@ STDLIB_INSTALL_STAGE       ?= $(CURDIR)
 # pairs for failure-only sanitizer symbolization before later tests can replace
 # those outputs. Ordinary builds leave this empty and pay no snapshot cost.
 TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT ?=
-TITAN_ABI_VERSION          := 0.23
+TITAN_ABI_VERSION          := 0.24
 TITAN_STDLIB_ABI_DIR       ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)
 TITAN_CANONICAL_SUPPORT_SO ?= $(TITAN_STDLIB_ABI_DIR)/titan.so
 TITAN_CANONICAL_STATIC_ARCHIVE ?= $(TITAN_STDLIB_ABI_DIR)/titan.a
@@ -2010,7 +2010,7 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
 	  CC=$(call make_shell_quote,$(CC)) \
 	    AR=$(call make_shell_quote,$(AR)) \
 	    RANLIB=$(call make_shell_quote,$(RANLIB)) \
-	    TITAN_PATH_0_23=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+	    TITAN_PATH_0_24=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 	    TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)) \
 	    TITAN_RUNTIME_PREBUILT=1 \
 	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
@@ -2051,7 +2051,7 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 	  export CC=$(call make_shell_quote,$(CC)); \
 	  export AR=$(call make_shell_quote,$(AR)); \
 	  export RANLIB=$(call make_shell_quote,$(RANLIB)); \
-	  export TITAN_PATH_0_23=$(call make_shell_quote,$(CURDIR)); \
+	  export TITAN_PATH_0_24=$(call make_shell_quote,$(CURDIR)); \
 	  export TITAN_PATH=; \
 	  export TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)); \
 	  export TITAN_RUNTIME_PREBUILT=1; \
@@ -2101,7 +2101,7 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	  mkdir -p titan; \
 	  install -m 0644 "$(CURDIR)/titan/test.titan" titan/test.titan; \
 	  export TITAN_ROCKS_ROOT="$$rocks_tree"; \
-	  export TITAN_PATH_0_23="$$abi_dir"; \
+	  export TITAN_PATH_0_24="$$abi_dir"; \
 	  export TITAN_PATH=; \
 	  export TITAN_RUNTIME_PREBUILT=1; \
 	  export CC=$(call make_shell_quote,$(CC)); \

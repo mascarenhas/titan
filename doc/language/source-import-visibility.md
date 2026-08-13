@@ -123,6 +123,7 @@ reconstructible public closure prefix, and every generated module now carries
 the fixed physical-provider identity slot used before source-private access.
 ABI 0.23 retains those layout rules while adding source-defined foreign
 collaboration and separating module, nominal owner, and member in native
-callable names. A 0.22 binary remains
-public-only and is rejected by the 0.23 toolchain; older providers must be
-rebuilt and no migration is performed.
+callable names. ABI 0.24 retains those visibility and native-layout rules while
+extending generic declaration metadata. A 0.23 binary remains public-only and
+is rejected by the 0.24 toolchain; older providers must be rebuilt and no
+migration is performed.

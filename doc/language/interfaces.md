@@ -694,9 +694,11 @@ Interface method order is ABI-significant and is preserved in compiled module
 metadata. Interfaces entered the compiled-module contract in ABI 0.20 together
 with the two-user-value Array proxy and strict generic function-entry protocol.
 ABI 0.21 retained that model while advancing the matched Lua runtime to
-5.5.1, and ABI 0.23 retains the metadata and value layouts while renaming
+5.5.1; ABI 0.23 retains the metadata and value layouts while renaming
 Interface bound and metatable entries into the separated nominal callable
-family. Prior-ABI providers are rejected rather than adapted in place.
+family. ABI 0.24 retains that representation while extending generic declaration
+metadata, including applied Interface constraints. Prior-ABI providers are
+rejected rather than adapted in place.
 
 ## Version-one boundaries
 
