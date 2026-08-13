@@ -12886,7 +12886,9 @@ end
 -- lowering here, after every body and exported-surface validation has
 -- completed, so it cannot participate in inference or silently become a
 -- second type checker.
-function checker._generic.erased_module_view(module)
+-- Build the ordinary import descriptor carried only by the code-facing AST.
+-- The declared Type.Module remains detached on `_declared_type` for metadata.
+function checker._generic.lower_import_descriptor(module)
     local erased = types.erase(module)
     if module._source then
         erased._source = true
@@ -12971,7 +12973,7 @@ function checker._generic.erased_descriptor(typ, state)
         end
         erased = erased or types.erase(typ)
     elseif tag == "Type.Module" then
-        erased = checker._generic.erased_module_view(typ)
+        erased = checker._generic.lower_import_descriptor(typ)
     else
         erased = types.erase(typ)
     end
@@ -13893,44 +13895,49 @@ function checker._generic.lower_node(node, state)
     end
 end
 
-function checker._generic.sanitize_erased_graph(root, state)
-    local seen = {}
-    local function visit(value, is_root)
-        if type(value) ~= "table" or seen[value] then return value end
+function checker._generic.lower_erased_annotations(root, state)
+    -- AST annotations may borrow list and plan tables from the declared type
+    -- graph.  Detach those containers while replacing their Type leaves so
+    -- lowering cannot rewrite a cached source interface through an alias.
+    local memo = {}
+    local function visit(value)
+        if type(value) ~= "table" then return value end
+        local cached = memo[value]
+        if cached then return cached end
         if type(value._tag) == "string"
            and value._tag:match("^Type%.") then
-            return checker._generic.erased_descriptor(value, state)
+            local erased = checker._generic.erased_descriptor(value, state)
+            memo[value] = erased
+            return erased
         end
-        seen[value] = true
-        if type(value._tag) == "string" and value._tag:match("^Ast%.") then
+
+        local is_ast = type(value._tag) == "string"
+            and value._tag:match("^Ast%.") ~= nil
+        local is_list = value[1] ~= nil
+        local result = (is_ast or not is_list) and value or {}
+        memo[value] = result
+        if is_ast then
             if value.typeparams ~= nil then value.typeparams = {} end
             if value.typeargs ~= nil then value.typeargs = {} end
         end
-        local changes = {}
+
         for key, child in pairs(value) do
             if key ~= "_declared_type" then
                 if type(key) == "string"
                    and (key:match("^_generic")
                         or key == "_closed_generic_declaration"
                         or key == "_rigid_receiver_type") then
-                    changes[#changes + 1] = { key = key, remove = true }
-                elseif type(child) == "table" then
-                    local replacement = visit(child, false)
-                    if replacement ~= child then
-                        changes[#changes + 1] = {
-                            key = key, value = replacement,
-                        }
-                    end
+                    result[key] = nil
+                else
+                    result[key] = visit(child)
                 end
+            elseif result ~= value then
+                result[key] = child
             end
         end
-        for _, change in ipairs(changes) do
-            if change.remove then value[change.key] = nil
-            else value[change.key] = change.value end
-        end
-        return value
+        return result
     end
-    return visit(root, true)
+    return visit(root)
 end
 
 function checker._generic.refresh_erased_annotations(node)
@@ -14021,7 +14028,7 @@ function checker._generic.lower_erased_core(modname, tree, st, errors)
     types.registry = erased_registry
 
     for _, node in ipairs(tree) do checker._generic.lower_node(node, state) end
-    checker._generic.sanitize_erased_graph(tree, state)
+    checker._generic.lower_erased_annotations(tree, state)
 
     -- Rebind every top-level declaration to the canonical erased owner member
     -- when it has one.  This keeps module-slot enumeration, nominal methods,

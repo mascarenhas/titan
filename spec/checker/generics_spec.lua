@@ -1,6 +1,7 @@
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 local driver = require "titan-compiler.driver"
+local checker = require "titan-compiler.checker"
 
 local run_checker = h.run_checker
 local run_checker_modules = h.run_checker_modules
@@ -1111,4 +1112,51 @@ describe("generic declarations and explicit calls", function()
             end
         ]])
     end)
+    it("does not erase a cached source interface through imported annotations",
+    function()
+        local previous_registry = types.registry
+        local previous_imported = driver.imported
+        local ok, failure = pcall(function()
+            types.registry = {}
+            driver.imported = {}
+            local imported = {}
+            local modules = {
+                provider = [[
+                    record Box<T>
+                        item: T
+                    end
+                    local function boxed(): Box<string>
+                        return Box.new<string>("ok")
+                    end
+                ]],
+                first = [[
+                    local provider = import "provider"
+                    function use(): provider.Box<string>
+                        return provider.boxed()
+                    end
+                ]],
+                second = [[
+                    local provider = import "provider"
+                    function use(): integer return 42 end
+                ]],
+            }
+            local loader = driver.tableloader(
+                modules, imported, nil, { interface = "source" })
+            driver.with_loader(loader, function(active_loader)
+                for _, name in ipairs({ "provider", "first", "second" }) do
+                    local module, errors =
+                        checker.checkimport(name, active_loader)
+                    assert.truthy(module, errors)
+                    assert.equal(0, #errors)
+                end
+            end)
+            local result = imported.provider.source_type
+                .source_members.boxed.type.rettypes[1]
+            assert_nominal(result, "provider.Box", { "string" })
+        end)
+        types.registry = previous_registry
+        driver.imported = previous_imported
+        assert.truthy(ok, failure)
+    end)
+
 end)
