@@ -702,14 +702,17 @@ describe("generic declarations and explicit calls", function()
                 first: A
                 second: B
             end
-            function inner<V: J, W: I<V>>(item: W): W return item end
-            function outer<U: J, T: I<U>>(first: U, item: T): T
-                local pair: G<U, T> = G.new<U, T>(first, item)
-                if pair.first is value then end
-                return inner<U, T>(item)
+            record R<A: J>
+                marker: A
             end
-            function inferred<U: J, T: I<U>>(item: T): T
-                return inner(item)
+            function R:m<B: I<A>>(item: B): B return item end
+            function inner<V: J, W: I<V>>(item: W): W return item end
+            function outer<U: J, T: I<U>>(first: U, item: T): (T, T, T)
+                local pair: G<U, T> = G.new<U, T>(first, item)
+                return pair.second, inner<U, T>(item), inner(item)
+            end
+            function nested<X: J, T: I<X>>(receiver: R<X>, item: T): (T, T)
+                return receiver:m<T>(item), receiver:m(item)
             end
         ]])
         local decoded, decode_error = driver.decode_module_interface(
