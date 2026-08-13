@@ -2431,8 +2431,10 @@ local function complete_owned_payload(owned)
        or payload._tag == "Type.COwned"
        or payload._tag == "Type.CModule" then
         return false
-    elseif payload._tag == "Type.CStruct"
-        or payload._tag == "Type.CUnion" then
+    elseif payload._tag == "Type.CStruct" then
+        return (payload.complete == true and payload.has_fam ~= true)
+            or types.is_c_tvalue(payload)
+    elseif payload._tag == "Type.CUnion" then
         return payload.complete == true or types.is_c_tvalue(payload)
     end
     return true
@@ -2495,13 +2497,25 @@ function types.transient_roundtrip(typ)
                 end
             end
         elseif tag == "Type.Option" then
-            ok, offender = visit(value.base)
+            if value.base._tag == "Type.Option"
+               or value.base._tag == "Type.Value" then
+                ok, offender = false, value.base
+            else
+                ok, offender = visit(value.base)
+            end
         elseif tag == "Type.Array" then
-            ok, offender = visit(value.elem)
+            if value.elem._tag == "Type.Option" then
+                ok, offender = false, value.elem
+            else
+                ok, offender = visit(value.elem)
+            end
         elseif tag == "Type.Map" then
             if value.keys._tag == "Type.Nil"
-               or value.keys._tag == "Type.Option" then
-                ok, offender = false, value.keys
+               or value.keys._tag == "Type.Option"
+               or value.values._tag == "Type.Option" then
+                ok, offender = false,
+                    value.keys._tag == "Type.Option"
+                        and value.keys or value.values
             else
                 ok, offender = visit(value.keys)
                 if ok then ok, offender = visit(value.values) end

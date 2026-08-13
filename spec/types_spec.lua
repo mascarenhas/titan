@@ -2806,6 +2806,8 @@ describe("Titan types", function()
                 "point", "point", false, {}, true, false)
             local incomplete = types.CStruct(
                 "opaque", "opaque", false, {}, false, false)
+            local flexible = types.CStruct(
+                "flexible", "flexible", false, {}, true, true)
             local tvalue = types.CStruct(
                 "TValue", "TValue", false, {}, false, false)
             local rigid_scope = scope("rigid")
@@ -2837,6 +2839,8 @@ describe("Titan types", function()
                 types.CArray(cinteger, 2), cfunction,
                 types.CPointer(cfunction, {}), point,
                 types.COwned(incomplete, false),
+                types.COwned(flexible, false),
+                types.COwned(flexible, true),
                 types.CInteger("enum pending", true, 3, false),
                 types.CModule("ffi", {}, {}),
                 types.Option(pointer), types.Array(pointer),
@@ -2845,6 +2849,10 @@ describe("Titan types", function()
                     false, false, false),
                 types.Nominal("sample.Phantom", {pointer}),
                 types.Map(types.Option(types.Integer()), types.String()),
+                types.Option(types.Value()),
+                types.Option(types.Option(types.Integer())),
+                types.Array(types.Option(types.Integer())),
+                types.Map(types.String(), types.Option(types.Integer())),
             }
             for _, typ in ipairs(negative) do
                 assert.is_false(types.transient_roundtrip(typ),
