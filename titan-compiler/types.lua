@@ -1353,6 +1353,11 @@ end
 function types.is_truthy(typ)
     typ = resolved_c(typ)
     local tag = typ._tag
+    if tag == "Type.Parameter" then
+        if typ.erased_constraint == false then return false end
+        return types.is_truthy(types.erase_constraint(
+            typ.erased_constraint))
+    end
     return tag ~= "Type.Nil" and tag ~= "Type.Value" and tag ~= "Type.Option"
         and tag ~= "Type.Pointer" and tag ~= "Type.Boolean"
         and tag ~= "Type.CPointer"
@@ -1866,11 +1871,83 @@ function types.equals(t1, t2)
     return type_equals(t1, t2)
 end
 
--- Generic binder names are diagnostic, so exact semantic equality already is
--- alpha-equivalence. Keep the named entry point for callers that are comparing
--- declaration schemes rather than ordinary value types.
+-- Alpha-equivalence pairs declaration binders by structural position, not by
+-- the owner/callable spelling embedded in their serialized GenericScope. Exact
+-- equality deliberately retains those spellings for ordinary descriptor
+-- identity; Interface implementation matching uses this separate relation.
 function types.alpha_equals(t1, t2)
-    return type_equals(t1, t2)
+    local scope_map, paired = {}, {}
+
+    local function pair(left, right)
+        if type(left) ~= "table" or type(right) ~= "table" then return end
+        local seen_right = paired[left]
+        if seen_right and seen_right[right] then return end
+        if not seen_right then
+            seen_right = {}
+            paired[left] = seen_right
+        end
+        seen_right[right] = true
+        if left._tag ~= right._tag then return end
+
+        local tag = left._tag
+        if tag == "Type.FunctionScheme" or tag == "Type.Record"
+           or tag == "Type.Union" or tag == "Type.Interface"
+           or tag == "Type.Method" or tag == "Type.StaticMethod" then
+            if left.scope ~= false and right.scope ~= false then
+                scope_map[right.scope] = left.scope
+            end
+        elseif tag == "Type.GenericAlias" then
+            if left.target_scope ~= false and right.target_scope ~= false then
+                scope_map[right.target_scope] = left.target_scope
+            end
+        end
+
+        for key, child in pairs(left) do
+            if key ~= "_tag" then
+                local other = right[key]
+                if type(child) == "table" and type(other) == "table" then
+                    pair(child, other)
+                end
+            end
+        end
+    end
+    pair(t1, t2)
+
+    local clone = types.clone_graph(t2)
+    local seen = {}
+    local function rebind(value)
+        if type(value) ~= "table" then return value end
+        if scope_map[value] then return scope_map[value] end
+        if seen[value] then return value end
+        seen[value] = true
+        for key, child in pairs(value) do
+            local replacement = scope_map[child]
+            if replacement then
+                value[key] = replacement
+            elseif type(child) == "table" then
+                rebind(child)
+            end
+        end
+        return value
+    end
+    -- clone_graph preserves sharing but not the original table keys used by
+    -- scope_map. Pair the cloned scopes by their structural spellings.
+    local clone_scope_map = {}
+    local original_seen = {}
+    local function align(original, copied)
+        if type(original) ~= "table" or type(copied) ~= "table"
+           or original_seen[original] then return end
+        original_seen[original] = true
+        if scope_map[original] then clone_scope_map[copied] = scope_map[original] end
+        for key, child in pairs(original) do
+            if type(child) == "table" and type(copied[key]) == "table" then
+                align(child, copied[key])
+            end
+        end
+    end
+    align(t2, clone)
+    scope_map = clone_scope_map
+    return type_equals(t1, rebind(clone))
 end
 
 -- The relations below deliberately separate gradual consistency from the
@@ -2129,6 +2206,11 @@ local function rewrite_type(root, policy)
             out = types.Module(typ.name,
                 rewrite_list(typ.members, rewrite),
                 rewrite_map(typ.type_members, rewrite))
+            -- These transient provider-selection fields are deliberately not
+            -- serialized, but rewriting a recovered module must not silently
+            -- select a different physical DSO.
+            out.file = typ.file
+            out.prefix = typ.prefix
         elseif tag == "Type.Typedef" then
             out = types.clone_graph(typ)
             out._type = rewrite(typ._type)
@@ -2440,6 +2522,36 @@ local function complete_owned_payload(owned)
     return true
 end
 
+local function generic_tail_eligible(typ, seen)
+    seen = seen or {}
+    if seen[typ] ~= nil then return seen[typ] end
+    seen[typ] = false
+    if typ._tag == "Type.Parameter" then
+        return generic_tail_eligible(
+            typ.erased_constraint == false and types.Value()
+                or types.erase_constraint(typ.erased_constraint), seen)
+    elseif typ._tag == "Type.Typedef" then
+        return generic_tail_eligible(typ._type, seen)
+    elseif typ._tag == "Type.Option" then
+        local ok = typ.base._tag ~= "Type.Option"
+            and typ.base._tag ~= "Type.Value"
+            and types.has_tvalue_representation(typ.base)
+        seen[typ] = ok
+        return ok
+    elseif types.is_c_tvalue(typ) then
+        seen[typ] = true
+        return true
+    end
+    local tag = typ._tag
+    local ok = tag == "Type.Integer" or tag == "Type.Float"
+        or tag == "Type.Boolean" or tag == "Type.String"
+        or tag == "Type.Array" or tag == "Type.Map"
+        or tag == "Type.Value" or tag == "Type.Nominal"
+        or tag == "Type.Function" or tag == "Type.COwned"
+    seen[typ] = ok
+    return ok
+end
+
 -- Prove that generic erasure has a canonical traced carrier and that the
 -- existing strict projection can recover the closed value. This is an
 -- eligibility predicate only; it never authorizes a coercion or checks an
@@ -2524,6 +2636,10 @@ function types.transient_roundtrip(typ)
             local pcount, rcount = dense_list_length(value.params),
                 dense_list_length(value.rettypes)
             ok = value.vararg == false and pcount ~= nil and rcount ~= nil
+                and (value.varargtype == false
+                    or generic_tail_eligible(value.varargtype))
+                and (value.flexrettype == false
+                    or generic_tail_eligible(value.flexrettype))
             if ok then
                 for index = 1, pcount do
                     ok, offender = visit(value.params[index])
@@ -2613,11 +2729,22 @@ end
 
 local relation_consistent
 local callable_adjustment_impl
+local rigid_erased_carrier
+
+local function generic_carrier_endpoint(typ)
+    if typ and typ._tag == "Type.Parameter" then
+        return rigid_erased_carrier(typ)
+    end
+    return typ
+end
 
 local function gradual_view_plan(source, target)
     source, target = normalized_pair(source, target)
-    if not source or not target then
-        return false
+    if not source or not target then return false end
+    source, target = generic_carrier_endpoint(source),
+        generic_carrier_endpoint(target)
+    if relation_identity(source, target) then
+        return plan("identity", { source = source, target = target })
     elseif source._tag == "Type.Value" then
         local guard = guard_plan(target, {})
         if not guard then return false end
@@ -2992,7 +3119,7 @@ local function callable_shape_consistent(source, target, context)
     return true
 end
 
-local function rigid_erased_carrier(parameter)
+rigid_erased_carrier = function(parameter)
     if parameter.erased_constraint == false then
         return types.Value()
     end
@@ -3567,6 +3694,18 @@ function types.written_cast(source, target, policy)
        or source._tag == "Type.Variant"
        or target._tag == "Type.Variant" then
         return false
+    elseif (source._tag == "Type.Parameter"
+            or target._tag == "Type.Parameter")
+       and relation_consistent(source, target) then
+        local view = gradual_view_plan(source, target)
+        if not view then return false end
+        return plan("written_cast", {
+            op = view.kind == "identity" and "identity" or "gradual",
+            source = view.source,
+            target = view.target,
+            guard = view.guard,
+            view = view,
+        })
     elseif relation_identity(source, target) then
         return plan("written_cast", {
             op = "identity",
@@ -3670,14 +3809,27 @@ function types.comparable(left, right)
         -- the gradual `value` hole. Record that injection as part of the
         -- ComparisonPlan instead of asking the checker to discover a
         -- directional assignment after comparability has been established.
-        if left._tag == "Type.Value"
-           and right._tag ~= "Type.Value" then
+        local left_carrier = generic_carrier_endpoint(left)
+        local right_carrier = generic_carrier_endpoint(right)
+        if left_carrier._tag == "Type.Value"
+           and right_carrier._tag ~= "Type.Value" then
             result.right_adjustment =
                 gradual_view_plan(right, left)
-        elseif right._tag == "Type.Value"
-           and left._tag ~= "Type.Value" then
+        elseif right_carrier._tag == "Type.Value"
+           and left_carrier._tag ~= "Type.Value" then
             result.left_adjustment =
                 gradual_view_plan(left, right)
+        elseif left._tag == "Type.Parameter"
+           or right._tag == "Type.Parameter" then
+            -- Equality of a rigid value is implemented entirely at its erased
+            -- carrier. Record even identity carrier transport explicitly so
+            -- the lowering pass never asks coder to compare a Parameter.
+            result.left_adjustment = plan("identity", {
+                source = left_carrier, target = left_carrier,
+            })
+            result.right_adjustment = plan("identity", {
+                source = right_carrier, target = right_carrier,
+            })
         end
         return plan("comparison", result)
     elseif (left._tag == "Type.Integer" and right._tag == "Type.Float")
@@ -3703,6 +3855,23 @@ function types.comparable(left, right)
     return false
 end
 
+function types.generic_owner_view(source, target)
+    source, target = normalized_pair(source, target)
+    if not source or not target
+       or source._tag ~= "Type.Nominal"
+       or target._tag ~= "Type.Nominal"
+       or source.fqtn ~= target.fqtn
+       or not relation_consistent(source, target) then
+        return false
+    end
+    return plan("generic_owner_view", {
+        source = source,
+        target = target,
+        erased_source = types.erase(source),
+        erased_target = types.erase(target),
+    })
+end
+
 function types.assignment_adjustment(source, target, policy)
     policy = policy or {}
     source, target = normalized_pair(source, target)
@@ -3712,6 +3881,14 @@ function types.assignment_adjustment(source, target, policy)
         return false
     elseif relation_identity(source, target) then
         return plan("identity", { source = source, target = target })
+    elseif source._tag == "Type.Nominal"
+       and target._tag == "Type.Nominal"
+       and source.fqtn == target.fqtn then
+        -- Applied owners are invariant for ordinary static assignment. The
+        -- generic lowering pass uses generic_owner_view only at a frozen
+        -- closed/erased boundary where both applications denote the same
+        -- runtime owner.
+        return false
     end
 
     -- Symmetric function consistency is useful during structural descent, but

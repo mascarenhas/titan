@@ -2600,6 +2600,31 @@ describe("Titan types", function()
                 types.Parameter(scope("other"), 1, "T", false)))
         end)
 
+        it("alpha-compares corresponding binders from different declaration scopes",
+        function()
+            local left_scope = types.GenericScope(
+                "sample", "sample.I", "map", "method", "interface")
+            local right_scope = types.GenericScope(
+                "sample", "sample.R", "map", "method", "record")
+            local left = types.Method("sample.I", "map", {
+                types.Parameter(left_scope, 1, "T", false),
+            }, {
+                types.Parameter(left_scope, 1, "T", false),
+            }, false, false, {"x"}, left_scope, {
+                types.TypeParameter("T", false),
+            })
+            local right = types.Method("sample.I", "map", {
+                types.Parameter(right_scope, 1, "U", false),
+            }, {
+                types.Parameter(right_scope, 1, "U", false),
+            }, false, false, {"x"}, right_scope, {
+                types.TypeParameter("U", false),
+            })
+
+            assert.is_false(types.equals(left, right))
+            assert.is_true(types.alpha_equals(left, right))
+        end)
+
         it("keeps applied nominals invariant and erases only arguments",
         function()
             local first = types.Nominal("sample.Pair",
@@ -2629,7 +2654,8 @@ describe("Titan types", function()
             assert.is_true(types.consistent(erased, precise))
             assert.is_false(types.consistent(precise, wrong))
             assert.is_false(types.assignment_adjustment(precise, wrong))
-            assert.is_truthy(types.assignment_adjustment(precise, erased))
+            assert.is_false(types.assignment_adjustment(precise, erased))
+            assert.is_truthy(types.generic_owner_view(precise, erased))
         end)
 
         it("relates each rigid parameter only to its erased constraint carrier",
@@ -2650,6 +2676,8 @@ describe("Titan types", function()
             assert.is_true(types.consistent(
                 types.Value(), unconstrained))
             assert.is_false(types.consistent(unconstrained, another))
+            assert.is_false(types.is_truthy(unconstrained))
+            assert.is_true(types.is_truthy(constrained))
             assert.is_true(types.consistent(constrained,
                 types.Nominal("sample.Show", {types.Value()})))
             assert.is_false(types.consistent(constrained, types.Value()))
@@ -2664,6 +2692,23 @@ describe("Titan types", function()
                     false, false, false),
                 types.Function({types.Value()}, {types.Value()},
                     false, false, false)))
+            local inject = types.assignment_adjustment(
+                unconstrained, types.Value())
+            local project = types.assignment_adjustment(
+                types.Value(), unconstrained)
+            assert.equal("identity", inject.kind)
+            assert.equal("identity", project.kind)
+            assert.equal("identity", types.assignment_adjustment(
+                constrained,
+                types.Nominal("sample.Show", {types.Value()})).kind)
+            assert.is_truthy(types.written_cast(
+                unconstrained, types.Value()))
+            assert.is_truthy(types.written_cast(
+                types.Value(), unconstrained))
+            local comparison = types.comparable(
+                unconstrained, types.Value())
+            assert.is_truthy(comparison.left_adjustment)
+            assert.is_truthy(comparison.right_adjustment)
         end)
 
         it("smart-substitutes owner and callable scopes independently",
@@ -2847,6 +2892,10 @@ describe("Titan types", function()
                 types.Map(types.String(), pointer),
                 types.Function({types.Integer()}, {pointer},
                     false, false, false),
+                types.Function({}, {}, false,
+                    types.Nil(), false),
+                types.Function({}, {}, false,
+                    false, cinteger),
                 types.Nominal("sample.Phantom", {pointer}),
                 types.Map(types.Option(types.Integer()), types.String()),
                 types.Option(types.Value()),
@@ -2863,6 +2912,30 @@ describe("Titan types", function()
             local second = types.CTypedef("second", first)
             first.target = second
             assert.is_false(types.transient_roundtrip(first))
+        end)
+
+        it("preserves selected module provenance during generic rewrites",
+        function()
+            local generic_scope = scope("id")
+            local parameter = types.Parameter(
+                generic_scope, 1, "T", false)
+            local module = types.Module("sample.child", {
+                types.ModuleMember("sample.child", "id",
+                    types.FunctionScheme(generic_scope, {
+                        types.TypeParameter("T", false),
+                    }, types.Function({parameter}, {parameter},
+                        false, false, false)), {"x"}),
+            }, {})
+            module.file = "/selected/provider.so"
+            module.prefix = "selected_prefix_"
+
+            local applied = types.substitute(
+                module, generic_scope, {types.Integer()})
+            assert.equal("/selected/provider.so", applied.file)
+            assert.equal("selected_prefix_", applied.prefix)
+            local erased = types.erase(module)
+            assert.equal("/selected/provider.so", erased.file)
+            assert.equal("selected_prefix_", erased.prefix)
         end)
 
         it("serializes generic metadata deterministically and round-trips it",
