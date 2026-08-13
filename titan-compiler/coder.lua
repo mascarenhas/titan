@@ -17754,6 +17754,93 @@ function coder.generate_foreign_header(modname, ast, tlcontext)
     }, "\n")
 end
 
+-- Code generation consumes only the ordinary erased checker product. The
+-- declared generic module graph is deliberately attached at one root field and
+-- is used only for metadata below; following the checked AST recursively is not
+-- safe because declaration and type annotations contain cycles. Keep this walk
+-- iterative, identity-aware, and bounded so the entry assertion itself cannot
+-- overflow the Lua stack or chase an accidentally unbounded graph.
+function coder._assert_erased_boundary(ast)
+    local max_tables = 1000000
+
+    local function nonempty(value)
+        if value == nil or value == false then return false end
+        return type(value) ~= "table" or next(value) ~= nil
+    end
+
+    local function generic_reason(value)
+        local tag = rawget(value, "_tag")
+        if tag == "Type.GenericScope"
+           or tag == "Type.TypeParameter"
+           or tag == "Type.Parameter"
+           or tag == "Type.FunctionScheme"
+           or tag == "Type.GenericAlias" then
+            return "generic type form " .. tag
+        elseif tag == "Type.Nominal" and nonempty(rawget(value, "args")) then
+            return "generic type form " .. tag
+        elseif (tag == "Type.Record" or tag == "Type.Union"
+                or tag == "Type.Interface" or tag == "Type.Method"
+                or tag == "Type.StaticMethod")
+           and (nonempty(rawget(value, "scope"))
+                or nonempty(rawget(value, "typeparams"))) then
+            return "generic type form " .. tag
+        elseif tag == "Type.Inference" or tag == "Type.InferenceCell"
+            or tag == "Inference" or tag == "Inference.Cell" then
+            return "generic inference form " .. tag
+        elseif tag == "Ast.TypeParam" then
+            return "generic AST form " .. tag
+        elseif type(tag) == "string" and tag:sub(1, 4) == "Ast." then
+            for _, field in ipairs({ "typeparams", "typeargs" }) do
+                if nonempty(rawget(value, field)) then
+                    return "generic AST field '" .. field .. "' on " .. tag
+                end
+            end
+        elseif type(tag) == "string"
+           and (tag:find("Inference", 1, true)
+                or tag:find("TypeVariable", 1, true)) then
+            return "generic inference form " .. tag
+        end
+        return nil
+    end
+
+    local function walk(root_value, label, skip_declared_type)
+        local pending = {}
+        local seen = {}
+        local scheduled = 0
+
+        local function enqueue(value)
+            if type(value) ~= "table" or seen[value] then return end
+            seen[value] = true
+            scheduled = scheduled + 1
+            if scheduled > max_tables then
+                error("coder erased-boundary " .. label
+                    .. " exceeds its bounded graph budget", 3)
+            end
+            pending[#pending + 1] = value
+        end
+
+        enqueue(root_value)
+        while #pending > 0 do
+            local value = pending[#pending]
+            pending[#pending] = nil
+            local reason = generic_reason(value)
+            if reason then
+                error(reason .. " reached coder through " .. label, 3)
+            end
+            for key, child in next, value do
+                if not (skip_declared_type and value == ast
+                        and key == "_declared_type") then
+                    enqueue(key)
+                    enqueue(child)
+                end
+            end
+        end
+    end
+
+    walk(ast, "code-facing AST", true)
+    walk(types.registry, "active type registry", false)
+end
+
 function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     -- Omission preserves the historical default. Reset this before any
     -- validation that may fail so a previous invocation's policy never leaks
@@ -17764,6 +17851,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     local staticmetadata = require "titan-compiler.staticmetadata"
     assert(staticmetadata.valid_module_name(modname),
         "coder.generate requires a valid logical module name")
+    coder._assert_erased_boundary(ast)
     local tlcontext = {
         module = modname,
         prefix = mangle_qn(modname) .. "_",
@@ -18281,7 +18369,12 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         table.insert(initvars, "L->top.p = _base;")
     end
 
-    local serialized_type = types.serialize(ast._type)
+    -- The generic-aware checker freezes a detached declared graph before it
+    -- replaces every code-facing annotation and the active registry with their
+    -- erased forms. Preserve ordinary callers which have no separate graph.
+    local metadata_type = rawget(ast, "_declared_type")
+    if metadata_type == nil then metadata_type = ast._type end
+    local serialized_type = types.serialize(metadata_type)
     local metadata, metadata_err =
         staticmetadata.render(modname, abi, serialized_type)
     assert(metadata, metadata_err)
