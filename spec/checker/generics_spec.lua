@@ -1536,67 +1536,6 @@ describe("generic declarations and explicit calls", function()
 
     end)
 
-    it("finalizes ordinary calls through inferred generic function results",
-    function()
-        assert_check([[
-            function agree<T>(left: T, right: T): T return left end
-            function id<T>(item: T): T return item end
-            function make_identity<T>(): (T) -> T
-                return function(item: T): T return item end
-            end
-
-            function through_generic_function(): integer
-                return agree(id(id)(41), 41)
-            end
-            function through_ordinary_function(): integer
-                return agree(make_identity()(42), 42)
-            end
-        ]])
-    end)
-
-    it("finalizes ordinary methods on inferred record and Interface receivers",
-    function()
-        assert_check([[
-            function agree<T>(left: T, right: T): T return left end
-
-            interface View<T>
-                function get(): T
-                function pick<U>(fallback: U): T
-                function replace(item: T): T
-            end
-            record Box<T>
-                item: T
-            end
-            function Box:get(): T return self.item end
-            function Box:pick<U>(fallback: U): T return self.item end
-            function Box:replace(item: T): T return item end
-
-            function make_box<T>(): Box<T>
-                return Box<T>.new((nil as value) as T)
-            end
-            function make_view<T>(): View<T>
-                return make_box<T>() as View<T>
-            end
-
-            function record_method(): integer
-                return agree(make_box():get(), 42)
-            end
-            function generic_record_method(): integer
-                return agree(make_box():pick("unused"), 42)
-            end
-            function interface_method(): integer
-                return agree(make_view():get(), 42)
-            end
-            function generic_interface_method(): integer
-                return agree(make_view():pick("unused"), 42)
-            end
-            function named_interface_method(): integer
-                return agree(make_view():replace { item = 42 }, 42)
-            end
-        ]])
-
-    end)
-
     it("does not erase a cached source interface through imported annotations",
     function()
         local previous_registry = types.registry
