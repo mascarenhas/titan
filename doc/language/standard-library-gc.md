@@ -36,14 +36,49 @@ used as weak keys are not made collectable by this setting.
 ## Finalizers
 
 ```titan
-function finalizable(v: value, f: (value) -> ()): ()
+function finalizable<T>(v: T, f: (T) -> ()): ()
 ```
 
-`finalizable` arranges for Lua to call `f(v)` when `v` is finalized. The value
-must be a table or full userdata; passing nil, a scalar, a function, a thread,
-or light userdata raises. The callback's results are discarded. Finalization
-follows Lua's ordinary garbage-collection rules: it is not prompt or
-deterministic, and a callback may resurrect its value.
+`finalizable` statically pairs the candidate with a callback over its exact
+type. A record finalizer can therefore read its record fields directly, and a
+Map finalizer retains its exact key and value types instead of receiving
+`value` and casting it back:
+
+```titan
+local record Owner
+  released: boolean
+end
+
+local function finish_owner(owner: Owner): ()
+  owner.released = true
+end
+
+local function finish_cache(cache: {string: integer}): ()
+  cache["closed"] = 1
+end
+
+local function configure(owner: Owner, cache: {string: integer})
+  gc.finalizable<Owner>(owner, finish_owner)
+  gc.finalizable<{string: integer}>(cache, finish_cache)
+end
+```
+
+The callback is checked against the selected `T` by Titan's ordinary callable
+rules; for example, a `(DifferentOwner) -> ()` callback is rejected for
+`finalizable<Owner>`. `T` is not a static collectability constraint, however.
+An application such as `finalizable<integer>(17, integer_callback)` typechecks
+and then raises the established run-time error. The value must still be a table
+or full userdata; passing nil, a scalar, a function, a thread, or light
+userdata raises. The Lua stack is restored on that error as well as on success.
+
+At run time `T` is erased. The installed `__gc` value is the ordinary
+Lua-callable erased callback (including Titan's normal callable adjustment
+when an exact record or Map callback requires one), and Lua supplies the
+finalized object as its sole argument. The concrete callback consequently sees
+its exact static parameter type without a source `value as T` cast. Callback
+results are discarded. Finalization follows Lua's ordinary garbage-collection
+rules: it is not prompt or deterministic, and a callback may resurrect its
+value.
 
 When `v` has no metatable, `finalizable` creates and installs one. When a
 metatable already exists, the exact table and all fields other than raw
@@ -52,19 +87,23 @@ the same metatable so Lua marks the existing value for finalization. This
 bypasses both `__metatable` protection and a metatable-of-metatable
 `__newindex` callback.
 
-A shared metatable also shares its current raw `__gc` callback. Merely adding
-that field does not mark values which already had the metatable; reinstalling
-it is why the value passed to `finalizable` becomes marked. A later value which
-is assigned the now-finalizing metatable is marked automatically. Every marked
-value looks up the metatable's current `__gc` when finalization runs, so
-replacing the callback also affects marked peers and a repeated `finalizable`
-call on one value does not install an independent callback.
+A shared metatable also shares its current raw `__gc` callback. Generic typing
+does not record `T` on the value or create a per-application metatable. Merely
+adding the field does not mark values which already had the metatable;
+reinstalling it is why the value passed to `finalizable` becomes marked. A
+later value which is assigned the now-finalizing metatable is marked
+automatically. Every marked value looks up the metatable's current erased
+callback when finalization runs, so replacing the callback also affects marked
+peers and a repeated `finalizable` call on one value does not install an
+independent callback.
 
-The metatable owns the callback, not a separate per-value slot. Use one
-callback for values which share a metatable, and keep per-value native state
-in the userdata or table passed to it. A finalizer should be idempotent: clear
-its owned pointer or state before releasing the underlying resource so a
-partially completed cleanup cannot free it twice.
+The metatable owns that callback, not a separate per-value slot. Use one exact
+callback type for values which share a metatable, and keep per-value native
+state in the userdata or table passed to it. Deliberately sharing one metatable
+across incompatible values also shares the latest callable adjustment; an
+ordinary boundary check may then reject a peer during finalization. A finalizer
+should be idempotent: clear its owned pointer or state before releasing the
+underlying resource so a partially completed cleanup cannot free it twice.
 
 Lua finalizers cannot yield or run the garbage collector. An error from the
 callback produces a Lua warning and is not propagated to the code which

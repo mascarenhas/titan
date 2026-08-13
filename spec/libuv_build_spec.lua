@@ -1081,8 +1081,14 @@ describe("libuv Makefile configuration", function()
             "local default_client_context_owner: " ..
                 "DefaultClientContextOwner?", 1, true), ssl)
         assert.truthy(ssl:find(
-            "gc.finalizable(owner, finalize_default_client_context)",
+            "local function finalize_default_client_context(" ..
+                "\n    owner: DefaultClientContextOwner)", 1, true), ssl)
+        assert.truthy(ssl:find(
+            "gc.finalizable<DefaultClientContextOwner>(" ..
+                "\n      owner, finalize_default_client_context)",
             1, true), ssl)
+        assert.falsy(ssl:find(
+            "as DefaultClientContextOwner", 1, true), ssl)
         assert.truthy(ssl:find(
             "openssl.SSL_CTX_set_default_verify_paths(context)", 1, true),
             ssl)

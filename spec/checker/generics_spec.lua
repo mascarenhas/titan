@@ -340,6 +340,44 @@ describe("generic declarations and explicit calls", function()
         ]])
     end)
 
+    it("pairs exact record and Map finalizer callbacks", function()
+        assert_check([[
+            function finalizable<T>(v: T, f: (T) -> ()): () end
+
+            record Owner
+                marker: integer
+            end
+
+            local function finish_owner(owner: Owner): () end
+            local function finish_map(map: {string: integer}): () end
+
+            function install(owner: Owner, map: {string: integer})
+                finalizable<Owner> { v = owner, f = finish_owner }
+                finalizable<{string: integer}>(map, finish_map)
+            end
+        ]])
+
+        assert_error(
+            "expected %(test.Owner%) %-> %(%) but found " ..
+                "%(test.Other%) %-> %(%)", [[
+                function finalizable<T>(v: T, f: (T) -> ()): () end
+
+                record Owner
+                    marker: integer
+                end
+
+                record Other
+                    marker: integer
+                end
+
+                local function finish_other(other: Other): () end
+
+                function install(owner: Owner)
+                    finalizable<Owner>(owner, finish_other)
+                end
+            ]])
+    end)
+
     it("rejects duplicate binders, owner shadowing, and incomplete lists",
     function()
         assert_error("duplicate type parameter 'T'", [[
