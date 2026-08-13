@@ -312,19 +312,20 @@ fresh cells use occurrence scopes distinct from the declaration scopes and from
 every other application of the same declaration. While that owner's receiver,
 result, and argument subtree is being checked, a nested generic call,
 constructor, method, bound method, or contextual first-class use inherits the
-ambient context instead of closing a private one. It registers its own fresh
-scope entries and a child use record; direct cell-to-cell unification records an
-equation, so a nested cell can remain equal to an outer cell until later sibling
-evidence resolves either side. An ordinary call also registers a zero-binder
-operation use before descending when an ambient context exists. If its computed
-callee or receiver produces a callable signature containing an unresolved cell,
-that ordinary signature gathers argument and result evidence and freezes its
-stored call, method, and Interface annotations only after its child uses close.
-Named computed-function calls remain unavailable by the ordinary direct-
-declaration rule; named methods use the same dependent operation plan. A generic
-use creates and owns a context only when there is no ambient owner. A complete
-explicit type-argument list remains closed locally and contributes its resulting
-ordinary type as evidence.
+ambient context instead of closing a private one. A generic occurrence registers
+its own fresh scope entries and a child use record; direct cell-to-cell
+unification records an equation, so a nested cell can remain equal to an outer
+cell until later sibling evidence resolves either side. An ordinary call or an
+enclosing Array, Map, or context-only record constructor registers a zero-binder
+operation use before descending. A dependent callable signature gathers argument
+and result evidence, while constructor fields contribute key/value equations,
+without freezing adjustments against open cells. After child uses close, the
+operation freezes its call, method, Interface, container, record-field, writer,
+and adjustment annotations. Named computed-function calls remain unavailable by
+the ordinary direct-declaration rule; named methods use the same operation plan.
+A generic use creates and owns a context only when there is no ambient owner. A
+complete explicit type-argument list remains closed locally and contributes its
+resulting ordinary type as evidence.
 
 The owning AST use closes the context only after the complete relevant subtree
 has contributed evidence. The checker then:
@@ -344,8 +345,9 @@ has contributed evidence. The checker then:
    `types.transient_roundtrip` against the closed class binding; and
 7. finalizes the registered use tree in postorder: deepest children before their
    parent, left-to-right among siblings. Finalization smart-substitutes each
-   closed application, freezes argument/result annotations and adjustments, and
-   checks each deferred contextual lambda body exactly once.
+   closed application, refreshes provisional container/record annotations before
+   its parent adjustment, freezes argument/result adjustments, and checks each
+   deferred contextual lambda body exactly once.
 
 The context is owned by the AST, while its temporary ambient pointer lives only
 in the current checker symbol-table state during recursive expression checking.

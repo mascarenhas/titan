@@ -5425,24 +5425,51 @@ end
 -- expression-list consumer. The checker elaboration is intentionally
 -- representation-neutral; code generation decides whether the sink is a
 -- private Array backing or an ordinary Map Table.
-local function check_positional_constructor(node, st, errors, container_tag,
-                                              keytype, elem_context)
-    local exps = {}
-    for _, field in ipairs(node.fields) do
-        assert(constructor_field_kind(field) == "positional")
-        table.insert(exps, field.exp)
+function checker._generic.constructor_context_for_expression(operation, pattern, exp)
+    if not pattern then return nil end
+    if not operation then return pattern end
+    local context = operation.context
+    local closed = checker._generic.closed_inference_pattern(context, pattern)
+    if closed then return closed end
+    -- Only another constructor can consume an unresolved structural owner
+    -- without freezing an ordinary adjustment. Generic calls and scalar
+    -- expressions contribute their provisional types through explicit
+    -- constructor evidence below.
+    if exp._tag == "Ast.ExpInitList" then
+        return checker._generic.substitute_inference(context, pattern, false)
     end
+    return nil
+end
 
-    local term = positional_initializer_term(container_tag)
-    local adjusted = adjust_explist(exps,
-        result_demand({}, elem_context or INFER_OPEN, {
-            term = term,
-            loc = node.loc,
-            missing = "error",
-            explicit_surplus = "discard",
-            open_coerce = true,
-            defer_open_check = true,
-        }), st, errors)
+function checker._generic.constructor_result_demand(pattern, demand)
+    if not pattern then return demand end
+    local fixed = {}
+    for index in ipairs(demand.fixed or {}) do fixed[index] = pattern end
+    local tail = demand.tail and pattern or false
+    return result_demand(fixed, tail, {
+        term = demand.term,
+        loc = demand.loc,
+        missing = demand.missing,
+        explicit_surplus = demand.explicit_surplus,
+        open_coerce = demand.open_coerce,
+        defer_open_check = demand.defer_open_check,
+    })
+end
+
+function checker._generic.constructor_unify(operation, pattern, evidence, term, loc)
+    if not operation or not pattern or not evidence then return end
+    checker._generic.unify_inference(
+        operation.context, pattern, evidence, term, loc)
+end
+
+function checker._generic.substitute_constructor_type(operation, typ, recover)
+    if not operation or not typ then return typ end
+    return checker._generic.substitute_inference(
+        operation.context, typ, recover)
+end
+
+function checker._generic.positional_constructor_element_type(
+        adjusted, elem_context, operation, recover)
     local etype = elem_context
         or (adjusted.open_type
             and adjusted.open_type._tag ~= "Type.Invalid"
@@ -5450,19 +5477,33 @@ local function check_positional_constructor(node, st, errors, container_tag,
         or (adjusted.tail_scalars[1]
             and deoptionize(adjusted.tail_scalars[1]._type))
         or types.Integer()
+    return checker._generic.substitute_constructor_type(operation, etype, recover)
+end
+
+function checker._generic.finish_positional_constructor(node, st, errors, container_tag,
+                                               keytype, elem_context, adjusted,
+                                               operation)
+    if operation then
+        checker._generic.refresh_finalized_argument_projections(adjusted)
+    end
+    local etype = checker._generic.positional_constructor_element_type(
+        adjusted, elem_context, operation, true)
+    local closed_keytype = checker._generic.substitute_constructor_type(
+        operation, keytype, true)
 
     if container_tag == "Type.Array" then
         node._type = types.Array(etype)
         annotate_array_writer(node, etype, errors)
     else
-        node._type = types.Map(assert(keytype), etype)
+        node._type = types.Map(assert(closed_keytype), etype)
     end
 
-    -- A contextual sink was already coerced and checked by adjust_explist.
-    -- Inference has no target during that pass, so apply its newly selected
-    -- element type here exactly once.
-    if not elem_context then
-        for i, exp in ipairs(adjusted.tail_scalars) do
+    -- An AST-owned inference operation deliberately checked its written
+    -- expressions without committing provisional adjustments. Freeze each
+    -- scalar now, after child uses and all sibling evidence have closed.
+    if operation or not elem_context then
+        local term = positional_initializer_term(container_tag)
+        for i, exp in ipairs({ table.unpack(adjusted.tail_scalars) }) do
             local old = exp
             exp = coerce_and_check(exp, etype,
                 term .. " at position " .. i, errors, exp.loc)
@@ -5471,7 +5512,9 @@ local function check_positional_constructor(node, st, errors, container_tag,
     end
 
     if adjusted.open_source then
-        local source = adjusted.open_type
+        local source = checker._generic.substitute_constructor_type(
+            operation, adjusted.open_type, true)
+        adjusted.open_type = source
         local container_name = container_tag == "Type.Array"
             and "array" or "positional map"
         local open_adjustment, open_interface_conversion,
@@ -5529,37 +5572,318 @@ local function check_positional_constructor(node, st, errors, container_tag,
     node._positional_adjustment = adjusted
 end
 
-local function check_computed_map_constructor(node, st, errors, context)
+local function check_positional_constructor(node, st, errors, container_tag,
+                                              keytype, elem_context, operation)
+    local exps = {}
+    for _, field in ipairs(node.fields) do
+        assert(constructor_field_kind(field) == "positional")
+        table.insert(exps, field.exp)
+    end
+
+    local term = positional_initializer_term(container_tag)
+    local demand_elem = operation and INFER_OPEN
+        or elem_context or INFER_OPEN
+    local adjusted = adjust_explist(exps,
+        result_demand({}, demand_elem, {
+            term = term,
+            loc = node.loc,
+            missing = "error",
+            explicit_surplus = "discard",
+            open_coerce = true,
+            defer_open_check = true,
+            check_expression = operation and function(
+                    exp, est, eerrors, _, demand)
+                local expected = checker._generic.constructor_context_for_expression(
+                    operation, elem_context, exp)
+                checkexp(exp, est, eerrors, expected,
+                    checker._generic.constructor_result_demand(expected, demand))
+            end or nil,
+        }), st, errors)
+
+    local etype = checker._generic.positional_constructor_element_type(
+        adjusted, elem_context, operation, false)
+    if operation then
+        local evidence_pattern = elem_context or etype
+        for i, exp in ipairs(adjusted.tail_scalars) do
+            checker._generic.constructor_unify(operation, evidence_pattern,
+                deoptionize(exp._type), term .. " at position " .. i, exp.loc)
+        end
+        if adjusted.open_source then
+            checker._generic.constructor_unify(operation, evidence_pattern,
+                deoptionize(adjusted.open_type),
+                term .. " open result", adjusted.open_source.loc)
+        end
+        etype = checker._generic.substitute_constructor_type(operation, etype, false)
+        local provisional_key = checker._generic.substitute_constructor_type(
+            operation, keytype, false)
+        node._type = container_tag == "Type.Array"
+            and types.Array(etype)
+            or types.Map(assert(provisional_key), etype)
+        node._positional_adjustment = adjusted
+        checker._generic.add_inference_finalizer(operation, function()
+            checker._generic.finish_positional_constructor(node, st, errors, container_tag,
+                keytype, elem_context, adjusted, operation)
+        end)
+    else
+        checker._generic.finish_positional_constructor(node, st, errors, container_tag,
+            keytype, elem_context, adjusted, false)
+    end
+end
+
+function checker._generic.computed_map_constructor_types(
+        context, ktypes, vtypes, operation, recover)
+    local ktype = context and context.keys
+        or (ktypes[1] and deoptionize(ktypes[1]))
+        or types.Integer()
+    local vtype = context and context.values
+        or (vtypes[1] and deoptionize(vtypes[1]))
+        or types.Integer()
+    return checker._generic.substitute_constructor_type(operation, ktype, recover),
+        checker._generic.substitute_constructor_type(operation, vtype, recover)
+end
+
+function checker._generic.finish_computed_map_constructor(
+        node, errors, context, ktypes, vtypes, operation)
+    local ktype, vtype = checker._generic.computed_map_constructor_types(
+        context, ktypes, vtypes, operation, true)
+    node._type = types.Map(ktype, vtype)
+    for i, field in ipairs(node.fields) do
+        field.name = coerce_and_check(field.name, ktype,
+            "map key initializer at position " .. i,
+            errors, field.name.loc)
+        field.exp = coerce_and_check(field.exp, vtype,
+            "map value initializer at position " .. i,
+            errors, field.exp.loc)
+    end
+end
+
+local function check_computed_map_constructor(
+        node, st, errors, context, operation)
     local kcontext = context and context.keys
     local vcontext = context and context.values
     local ktypes, vtypes = {}, {}
 
     for _, field in ipairs(node.fields) do
         assert(constructor_field_kind(field) == "computed")
-        checkexp(field.name, st, errors, kcontext)
+        local key_expected = checker._generic.constructor_context_for_expression(
+            operation, kcontext, field.name)
+        checkexp(field.name, st, errors, key_expected)
         table.insert(ktypes, field.name._type)
-        checkexp(field.exp, st, errors, vcontext)
+        local value_expected = checker._generic.constructor_context_for_expression(
+            operation, vcontext, field.exp)
+        checkexp(field.exp, st, errors, value_expected)
         table.insert(vtypes, field.exp._type)
     end
 
     -- Empty constructors reach this helper only with a Map context; a
     -- no-context empty constructor is the default empty Array.
-    local ktype = kcontext
-        or (ktypes[1] and deoptionize(ktypes[1]))
-        or types.Integer()
-    local vtype = vcontext
-        or (vtypes[1] and deoptionize(vtypes[1]))
-        or types.Integer()
-    node._type = types.Map(ktype, vtype)
+    local ktype, vtype = checker._generic.computed_map_constructor_types(
+        context, ktypes, vtypes, operation, false)
+    if operation then
+        local key_pattern = kcontext or ktype
+        local value_pattern = vcontext or vtype
+        for i, typ in ipairs(ktypes) do
+            checker._generic.constructor_unify(operation, key_pattern, deoptionize(typ),
+                "map key initializer at position " .. i,
+                node.fields[i].name.loc)
+        end
+        for i, typ in ipairs(vtypes) do
+            checker._generic.constructor_unify(operation, value_pattern, deoptionize(typ),
+                "map value initializer at position " .. i,
+                node.fields[i].exp.loc)
+        end
+        ktype = checker._generic.substitute_constructor_type(operation, ktype, false)
+        vtype = checker._generic.substitute_constructor_type(operation, vtype, false)
+        node._type = types.Map(ktype, vtype)
+        checker._generic.add_inference_finalizer(operation, function()
+            checker._generic.finish_computed_map_constructor(
+                node, errors, context, ktypes, vtypes, operation)
+        end)
+    else
+        checker._generic.finish_computed_map_constructor(
+            node, errors, context, ktypes, vtypes, false)
+    end
+end
 
-    for i, field in ipairs(node.fields) do
-        field.name = coerce_and_check(field.name, ktype,
-            "map key initializer at position " .. i,
-            errors, field.name.loc)
+function checker._generic.visible_record_field(fields, name)
+    for _, field in ipairs(fields) do
+        if field.name == name then return field end
+    end
+end
 
-        field.exp = coerce_and_check(field.exp, vtype,
-            "map value initializer at position " .. i,
-            errors, field.exp.loc)
+function checker._generic.finish_named_record_constructor(
+        node, st, errors, context, written_fields, operation)
+    local closed_context = checker._generic.substitute_constructor_type(
+        operation, context, true)
+    local record = checker._generic.applied_owner_view(
+        closed_context, errors, node.loc)
+    local visible_fields = visible_record_fields(record, st)
+    local supplied = {}
+
+    for _, cfield in ipairs(written_fields) do
+        if cfield._field then
+            local found = checker._generic.visible_record_field(visible_fields, cfield.name)
+            if found then
+                cfield.exp = coerce_and_check(
+                    cfield.exp, found.type, "field " .. cfield.name,
+                    errors, cfield.loc)
+                cfield._field = found
+                supplied[found.name] = true
+            end
+        end
+    end
+    for _, rfield in ipairs(visible_fields) do
+        if not supplied[rfield.name] then
+            local exp = ast.ExpNil(node.loc)
+            exp._type = types.Nil()
+            local adjustment = types.assignment_adjustment(
+                exp._type, rfield.type)
+            if adjustment then
+                exp = coerce_and_check(
+                    exp, rfield.type,
+                    "omitted field " .. rfield.name,
+                    errors, node.loc, adjustment)
+                exp._named_omitted = true
+                local cfield = ast.Field(node.loc, rfield.name, exp)
+                cfield._field = rfield
+                table.insert(node.fields, cfield)
+            else
+                checker.typeerror(errors, node.loc,
+                    "field '%s' of record '%s' cannot be omitted because its type %s does not accept nil",
+                    rfield.name, types.tostring(closed_context),
+                    types.tostring(rfield.type))
+            end
+        end
+    end
+    node._type = closed_context
+end
+
+function checker._generic.check_named_record_constructor(
+        node, st, errors, context, operation)
+    if not context then
+        node._type = invalid(errors, node.loc,
+            "no context to provide type for record constructor")
+        for _, field in ipairs(node.fields) do
+            checkexp(field.exp, st, errors)
+        end
+        return
+    elseif not types.registry[context.fqtn] then
+        node._type = invalid(errors, node.loc,
+            "record type '%s' in context of record constructor does not exist",
+            types.tostring(context))
+        for _, field in ipairs(node.fields) do
+            checkexp(field.exp, st, errors)
+        end
+        return
+    end
+
+    local record = checker._generic.applied_owner_view(
+        context, errors, node.loc)
+    if record._tag == "Type.Union" then
+        node._type = invalid(errors, node.loc,
+            "union type '%s' cannot be constructed with a record "
+            .. "initializer; call one of its variant constructors",
+            context.fqtn)
+        for _, field in ipairs(node.fields) do
+            checkexp(field.exp, st, errors)
+        end
+        return
+    elseif record._tag ~= "Type.Record" then
+        node._type = invalid(errors, node.loc,
+            "nominal type '%s' is not a record type",
+            context.fqtn)
+        for _, field in ipairs(node.fields) do
+            checkexp(field.exp, st, errors)
+        end
+        return
+    end
+    if record.islocal
+       and not is_nominal_visible_from(st, context.fqtn) then
+        node._type = invalid(errors, node.loc,
+            "record type '%s' is local to module '%s'",
+            context.fqtn, nominal_module(context.fqtn))
+        for _, field in ipairs(node.fields) do
+            checkexp(field.exp, st, errors)
+        end
+        return
+    end
+
+    local visible_fields = visible_record_fields(record, st)
+    if (record.nfields or #record.fields) > #visible_fields then
+        node._type = invalid(errors, node.loc,
+            "cannot construct record type '%s' outside module '%s' because it has local fields",
+            context.fqtn, nominal_module(context.fqtn))
+        for _, field in ipairs(node.fields) do
+            checkexp(field.exp, st, errors)
+        end
+        return
+    end
+
+    local written_fields = { table.unpack(node.fields) }
+    local supplied = {}
+    for _, cfield in ipairs(written_fields) do
+        local found = checker._generic.visible_record_field(visible_fields, cfield.name)
+        if not found then
+            if cfield.name then
+                checker.typeerror(errors, cfield.loc,
+                    "field '%s' not found in record type '%s'",
+                    cfield.name, types.tostring(context))
+            else
+                checker.typeerror(errors, cfield.loc,
+                    "missing field in initializer for record type '%s'",
+                    types.tostring(context))
+            end
+            checkexp(cfield.exp, st, errors)
+        else
+            local expected = checker._generic.constructor_context_for_expression(
+                operation, found.type, cfield.exp)
+            checkexp(cfield.exp, st, errors, expected)
+            cfield._field = found
+            supplied[found.name] = true
+            if operation then
+                checker._generic.constructor_unify(operation, found.type, cfield.exp._type,
+                    "field " .. cfield.name, cfield.loc)
+            else
+                cfield.exp = coerce_and_check(
+                    cfield.exp, found.type, "field " .. cfield.name,
+                    errors, cfield.loc)
+            end
+        end
+    end
+
+    if operation then
+        node._type = checker._generic.substitute_constructor_type(
+            operation, context, false)
+        checker._generic.add_inference_finalizer(operation, function()
+            checker._generic.finish_named_record_constructor(
+                node, st, errors, context, written_fields, operation)
+        end)
+    else
+        -- Preserve the established omission behavior on the nondependent path.
+        for _, rfield in ipairs(visible_fields) do
+            if not supplied[rfield.name] then
+                local exp = ast.ExpNil(node.loc)
+                exp._type = types.Nil()
+                local adjustment = types.assignment_adjustment(
+                    exp._type, rfield.type)
+                if adjustment then
+                    exp = coerce_and_check(
+                        exp, rfield.type,
+                        "omitted field " .. rfield.name,
+                        errors, node.loc, adjustment)
+                    exp._named_omitted = true
+                    local cfield = ast.Field(node.loc, rfield.name, exp)
+                    cfield._field = rfield
+                    table.insert(node.fields, cfield)
+                else
+                    checker.typeerror(errors, node.loc,
+                        "field '%s' of record '%s' cannot be omitted because its type %s does not accept nil",
+                        rfield.name, types.tostring(context),
+                        types.tostring(rfield.type))
+                end
+            end
+        end
+        node._type = context
     end
 end
 
@@ -8348,18 +8672,17 @@ function checker._generic.with_inference_use(context, use, st, action)
     return table.unpack(result, 2, result.n)
 end
 
-function checker._generic.with_inference_operation(node, st, action)
+function checker._generic.with_inference_operation(node, st, action, subject)
     local context = st and st.generic_inference_context or nil
     if not context or context.closed or not context.active_use then
         return action(false)
     end
 
-    -- An ordinary operation can enclose the generic use which produced its
-    -- callee or receiver. Give that AST node its own use-tree position before
-    -- descending, so every generic use in its callee, receiver, and arguments
-    -- finalizes before the operation freezes its dependent annotations.
+    -- A dependent operation needs its own use-tree position before descending,
+    -- so nested generic uses and operations finalize before it freezes the
+    -- annotations derived from their provisional types.
     local use = checker._generic.register_inference_use(
-        context, node, "ordinary call", node.loc, {}, false)
+        context, node, subject or "dependent operation", node.loc, {}, false)
     node._generic_inference_operation_use = use
     return checker._generic.with_inference_use(context, use, st, function()
         return action(use)
@@ -9168,6 +9491,21 @@ function checker._generic.generic_unify_expression_results(context, signature, e
     end
 end
 
+function checker._generic.inference_expression_context(context, pattern, exp)
+    local expected = pattern
+        and checker._generic.closed_inference_pattern(context, pattern)
+        or nil
+    -- Brace constructors can preserve an unresolved structural owner without
+    -- committing any ordinary adjustment. Their AST-owned operation finalizer
+    -- substitutes that provisional context after every sibling has contributed
+    -- evidence. Other expressions continue to receive only closed contexts.
+    if not expected and pattern and exp._tag == "Ast.ExpInitList" then
+        expected = checker._generic.substitute_inference(
+            context, pattern, false)
+    end
+    return expected
+end
+
 function checker._generic.generic_discovery_demand(context, signature, first, original)
     local fixed = {}
     for offset = 1, #(original.fixed or {}) do
@@ -9366,8 +9704,8 @@ function checker._generic.infer_positional_call(context, signature, args,
                 local demand = checker._generic.generic_discovery_demand(
                     context, signature, sink_index, subdemand)
                 local expected = pattern and
-                    checker._generic.closed_inference_pattern(
-                        context, pattern) or nil
+                    checker._generic.inference_expression_context(
+                        context, pattern, exp) or nil
                 checkexp(exp, est, eerrors, expected, demand)
                 checker._generic.generic_unify_expression_results(
                     context, signature, exp, sink_index, "argument")
@@ -9449,8 +9787,8 @@ function checker._generic.infer_named_call(context, signature, fields,
                     pattern = pattern,
                 }
             else
-                local expected = checker._generic.closed_inference_pattern(
-                    context, pattern)
+                local expected = checker._generic.inference_expression_context(
+                    context, pattern, field.exp)
                 checkexp(field.exp, st, errors, expected,
                     result_demand({ expected or UNKNOWN_SLOT }, false, {
                         term = "named generic argument",
@@ -10148,6 +10486,8 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpInitList"] = function(node, st, errors, context)
+        return checker._generic.with_inference_operation(
+            node, st, function(operation)
         context = context and deoptionize(context)
         local shape, kinds, dots_field, invalid_dots =
             classify_constructor_fields(node, errors)
@@ -10190,7 +10530,7 @@ checkexp = util.make_visitor({
         if expected == "Type.Array" then
             if shape == "empty" or shape == "positional" then
                 check_positional_constructor(node, st, errors, expected, nil,
-                    context and context.elem)
+                    context and context.elem, operation)
             else
                 for _, field in ipairs(node.fields) do
                     if shape == "named" then
@@ -10207,20 +10547,23 @@ checkexp = util.make_visitor({
             end
         elseif expected == "Type.Map" then
             if shape == "computed" then
-                check_computed_map_constructor(node, st, errors, context)
+                check_computed_map_constructor(
+                    node, st, errors, context, operation)
             elseif shape == "empty" then
                 assert(context)
-                check_computed_map_constructor(node, st, errors, context)
+                check_computed_map_constructor(
+                    node, st, errors, context, operation)
             elseif shape == "positional" then
                 assert(context)
                 if types.equals(context.keys, types.Integer()) then
                     check_positional_constructor(node, st, errors, expected,
-                        context.keys, context.values)
+                        context.keys, context.values, operation)
                 else
                     checker.typeerror(errors, node.loc,
                         "positional fields require an integer-keyed map, but found key type %s",
                         types.tostring(context.keys))
-                    check_rejected_constructor_fields(node, st, errors, context)
+                    check_rejected_constructor_fields(
+                        node, st, errors, context)
                     node._type = context
                 end
             else
@@ -10233,114 +10576,10 @@ checkexp = util.make_visitor({
                 node._type = context
             end
         elseif expected == "Type.Nominal" then
-            if not context then
-                node._type = invalid(errors, node.loc,
-                    "no context to provide type for record constructor")
-                for _, field in ipairs(node.fields) do
-                    checkexp(field.exp, st, errors)
-                end
-            elseif not types.registry[context.fqtn] then
-                node._type = invalid(errors, node.loc,
-                    "record type '%s' in context of record constructor does not exist",
-                    types.tostring(context))
-                for _, field in ipairs(node.fields) do
-                    checkexp(field.exp, st, errors)
-                end
-            else
-                local record = checker._generic.applied_owner_view(context, errors, node.loc)
-                if record._tag == "Type.Union" then
-                    node._type = invalid(errors, node.loc,
-                        "union type '%s' cannot be constructed with a record "
-                        .. "initializer; call one of its variant constructors",
-                        context.fqtn)
-                    for _, field in ipairs(node.fields) do
-                        checkexp(field.exp, st, errors)
-                    end
-                    return
-                elseif record._tag ~= "Type.Record" then
-                    node._type = invalid(errors, node.loc,
-                        "nominal type '%s' is not a record type",
-                        context.fqtn)
-                    for _, field in ipairs(node.fields) do
-                        checkexp(field.exp, st, errors)
-                    end
-                    return
-                end
-                if record.islocal
-                   and not is_nominal_visible_from(st, context.fqtn) then
-                    node._type = invalid(errors, node.loc,
-                        "record type '%s' is local to module '%s'",
-                        context.fqtn, nominal_module(context.fqtn))
-                    for _, field in ipairs(node.fields) do
-                        checkexp(field.exp, st, errors)
-                    end
-                    return
-                end
-                local visible_fields = visible_record_fields(record, st)
-                if (record.nfields or #record.fields) > #visible_fields then
-                    node._type = invalid(errors, node.loc,
-                        "cannot construct record type '%s' outside module '%s' because it has local fields",
-                        context.fqtn, nominal_module(context.fqtn))
-                    for _, field in ipairs(node.fields) do
-                        checkexp(field.exp, st, errors)
-                    end
-                    return
-                end
-                local supplied = {}
-                for _, cfield in ipairs(node.fields) do
-                    local found
-                    for _, rfield in ipairs(visible_fields) do
-                        if rfield.name == cfield.name then
-                            found = rfield
-                        end
-                    end
-                    if not found then
-                        if cfield.name then
-                            checker.typeerror(errors, cfield.loc,
-                                "field '%s' not found in record type '%s'",
-                                cfield.name, types.tostring(context))
-                        else
-                            checker.typeerror(errors, cfield.loc,
-                                "missing field in initializer for record type '%s'",
-                                types.tostring(context))
-                        end
-                        checkexp(cfield.exp, st, errors)
-                    else
-                        checkexp(cfield.exp, st, errors, found.type)
-                        cfield.exp = coerce_and_check(
-                            cfield.exp, found.type,
-                            "field " .. cfield.name,
-                            errors, cfield.loc)
-                        cfield._field = found
-                        supplied[found.name] = true
-                    end
-                end
-                for _, rfield in ipairs(visible_fields) do
-                    if not supplied[rfield.name] then
-                        local exp = ast.ExpNil(node.loc)
-                        exp._type = types.Nil()
-                        local adjustment = types.assignment_adjustment(
-                            exp._type, rfield.type)
-                        if adjustment then
-                            exp = coerce_and_check(
-                                exp, rfield.type,
-                                "omitted field " .. rfield.name,
-                                errors, node.loc, adjustment)
-                            exp._named_omitted = true
-                            local cfield = ast.Field(node.loc, rfield.name, exp)
-                            cfield._field = rfield
-                            table.insert(node.fields, cfield)
-                        else
-                            checker.typeerror(errors, node.loc,
-                                "field '%s' of record '%s' cannot be omitted because its type %s does not accept nil",
-                                rfield.name, types.tostring(context),
-                                types.tostring(rfield.type))
-                        end
-                    end
-                end
-                node._type = context
-            end
+            checker._generic.check_named_record_constructor(
+                node, st, errors, context, operation)
         end
+        end, "constructor")
     end,
 
     ["Ast.ExpVar"] = function(node, st, errors, context)

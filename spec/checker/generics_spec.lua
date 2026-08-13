@@ -1290,6 +1290,128 @@ describe("generic declarations and explicit calls", function()
         ]])
     end)
 
+    it("finalizes dependent container and record constructors in source order",
+    function()
+        assert_check([[
+            record Plain<T>
+                item: T
+            end
+
+            function make<T>(): T return (nil as value) as T end
+            function array_left<T>(items: {T}, item: T): integer return 0 end
+            function array_right<T>(item: T, items: {T}): integer return 0 end
+            function array_only<T>(items: {T}): integer return 0 end
+            function map_left<T>(items: {string: T}, item: T): integer return 0 end
+            function map_right<T>(item: T, items: {string: T}): integer return 0 end
+            function map_only<T>(items: {string: T}): integer return 0 end
+            function plain_left<T>(box: Plain<T>, item: T): integer return 0 end
+            function plain_right<T>(item: T, box: Plain<T>): integer return 0 end
+            function plain_pair<T>(left: Plain<T>, right: Plain<T>): integer
+                return 0
+            end
+
+            function use_array_left(): integer
+                return array_left({make()}, 42)
+            end
+            function use_array_right(): integer
+                return array_right(42, {make()})
+            end
+            function use_array_internal_left(): integer
+                return array_only({make(), 42})
+            end
+            function use_array_internal_right(): integer
+                return array_only({42, make()})
+            end
+            function use_map_left(): integer
+                return map_left({["item"] = make()}, 42)
+            end
+            function use_map_right(): integer
+                return map_right(42, {["item"] = make()})
+            end
+            function use_map_internal_left(): integer
+                return map_only({["left"] = make(), ["right"] = 42})
+            end
+            function use_map_internal_right(): integer
+                return map_only({["left"] = 42, ["right"] = make()})
+            end
+            function use_named_left(): integer
+                return plain_left({item = make()}, 42)
+            end
+            function use_named_right(): integer
+                return plain_right(42, {item = make()})
+            end
+            function use_named_pair(): integer
+                return plain_pair({item = make()}, {item = 42})
+            end
+            function use_positional_left(): integer
+                return plain_left(Plain.new(make()), 42)
+            end
+            function use_positional_right(): integer
+                return plain_right(42, Plain.new(make()))
+            end
+        ]])
+    end)
+
+    it("finalizes ordinary calls through inferred generic function results",
+    function()
+        assert_check([[
+            function agree<T>(left: T, right: T): T return left end
+            function id<T>(item: T): T return item end
+            function make_identity<T>(): (T) -> T
+                return function(item: T): T return item end
+            end
+
+            function through_generic_function(): integer
+                return agree(id(id)(41), 41)
+            end
+            function through_ordinary_function(): integer
+                return agree(make_identity()(42), 42)
+            end
+        ]])
+    end)
+
+    it("finalizes ordinary methods on inferred record and Interface receivers",
+    function()
+        assert_check([[
+            function agree<T>(left: T, right: T): T return left end
+
+            interface View<T>
+                function get(): T
+                function pick<U>(fallback: U): T
+                function replace(item: T): T
+            end
+            record Box<T>
+                item: T
+            end
+            function Box:get(): T return self.item end
+            function Box:pick<U>(fallback: U): T return self.item end
+            function Box:replace(item: T): T return item end
+
+            function make_box<T>(): Box<T>
+                return Box<T>.new((nil as value) as T)
+            end
+            function make_view<T>(): View<T>
+                return make_box<T>() as View<T>
+            end
+
+            function record_method(): integer
+                return agree(make_box():get(), 42)
+            end
+            function generic_record_method(): integer
+                return agree(make_box():pick("unused"), 42)
+            end
+            function interface_method(): integer
+                return agree(make_view():get(), 42)
+            end
+            function generic_interface_method(): integer
+                return agree(make_view():pick("unused"), 42)
+            end
+            function named_interface_method(): integer
+                return agree(make_view():replace { item = 42 }, 42)
+            end
+        ]])
+    end)
+
     it("refreshes finalized child projections before closing parent arguments",
     function()
         local ast = assert_check([[
