@@ -315,9 +315,16 @@ constructor, method, bound method, or contextual first-class use inherits the
 ambient context instead of closing a private one. It registers its own fresh
 scope entries and a child use record; direct cell-to-cell unification records an
 equation, so a nested cell can remain equal to an outer cell until later sibling
-evidence resolves either side. A generic use creates and owns a context only
-when there is no ambient owner. A complete explicit type-argument list remains
-closed locally and contributes its resulting ordinary type as evidence.
+evidence resolves either side. An ordinary call also registers a zero-binder
+operation use before descending when an ambient context exists. If its computed
+callee or receiver produces a callable signature containing an unresolved cell,
+that ordinary signature gathers argument and result evidence and freezes its
+stored call, method, and Interface annotations only after its child uses close.
+Named computed-function calls remain unavailable by the ordinary direct-
+declaration rule; named methods use the same dependent operation plan. A generic
+use creates and owns a context only when there is no ambient owner. A complete
+explicit type-argument list remains closed locally and contributes its resulting
+ordinary type as evidence.
 
 The owning AST use closes the context only after the complete relevant subtree
 has contributed evidence. The checker then:

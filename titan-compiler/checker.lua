@@ -8283,6 +8283,27 @@ function checker._generic.freshen_inference_entries(
     end
 end
 
+function checker._generic.register_inference_use(
+        context, node, subject, loc, scopes, owns_context)
+    local use = {
+        node = node,
+        subject = subject,
+        loc = loc,
+        scopes = scopes or {},
+        children = {},
+        finalizers = {},
+        context = context,
+        parent = context.active_use or false,
+        owns_context = owns_context and true or false,
+    }
+    if use.parent then
+        use.parent.children[#use.parent.children + 1] = use
+    else
+        context.roots[#context.roots + 1] = use
+    end
+    return use
+end
+
 function checker._generic.acquire_inference_context(
         node, subject, scopes, st, errors, loc)
     local context = st and st.generic_inference_context or nil
@@ -8297,22 +8318,8 @@ function checker._generic.acquire_inference_context(
     scopes = scopes or {}
     checker._generic.freshen_inference_entries(
         context, scopes, subject, loc)
-    local use = {
-        node = node,
-        subject = subject,
-        loc = loc,
-        scopes = scopes,
-        children = {},
-        finalizers = {},
-        context = context,
-        parent = context.active_use or false,
-        owns_context = owns,
-    }
-    if use.parent then
-        use.parent.children[#use.parent.children + 1] = use
-    else
-        context.roots[#context.roots + 1] = use
-    end
+    local use = checker._generic.register_inference_use(
+        context, node, subject, loc, scopes, owns)
     for _, entry in ipairs(use.scopes) do
         entry.subject = subject
         entry.loc = loc
@@ -8341,6 +8348,24 @@ function checker._generic.with_inference_use(context, use, st, action)
     return table.unpack(result, 2, result.n)
 end
 
+function checker._generic.with_inference_operation(node, st, action)
+    local context = st and st.generic_inference_context or nil
+    if not context or context.closed or not context.active_use then
+        return action(false)
+    end
+
+    -- An ordinary operation can enclose the generic use which produced its
+    -- callee or receiver. Give that AST node its own use-tree position before
+    -- descending, so every generic use in its callee, receiver, and arguments
+    -- finalizes before the operation freezes its dependent annotations.
+    local use = checker._generic.register_inference_use(
+        context, node, "ordinary call", node.loc, {}, false)
+    node._generic_inference_operation_use = use
+    return checker._generic.with_inference_use(context, use, st, function()
+        return action(use)
+    end)
+end
+
 function checker._generic.add_inference_finalizer(use, finalizer)
     use.finalizers[#use.finalizers + 1] = finalizer
 end
@@ -8354,8 +8379,13 @@ function checker._generic.finalize_inference_use(use)
     end
     for _, finalizer in ipairs(use.finalizers) do finalizer() end
     if use.node then
-        use.node._generic_inference_context = nil
-        use.node._generic_inference_use = nil
+        if use.node._generic_inference_use == use then
+            use.node._generic_inference_context = nil
+            use.node._generic_inference_use = nil
+        end
+        if use.node._generic_inference_operation_use == use then
+            use.node._generic_inference_operation_use = nil
+        end
     end
 end
 
@@ -9567,6 +9597,30 @@ function checker._generic.infer_call_application(context, use, signature, node,
     return provisional
 end
 
+function checker._generic.infer_dependent_call_application(
+        operation, signature, node, demand, st, errors, term, paramnames,
+        finalize)
+    if not operation or node._generic_inference_use
+       or not checker._generic.inference_type_has_unresolved(
+           operation.context, signature) then
+        return signature, false
+    end
+
+    assert(operation.node == node)
+    assert(not operation.signature,
+        "ordinary inference operation registered more than one call plan")
+    local provisional = checker._generic.infer_call_application(
+        operation.context, operation, signature, node, demand,
+        st, errors, term, paramnames)
+    operation.dependent = true
+    if finalize then
+        checker._generic.add_inference_finalizer(operation, function()
+            finalize(operation.closed)
+        end)
+    end
+    return provisional, true
+end
+
 function checker._generic.close_inference_declaration(
         context, use, declaration, recover)
     local fresh = checker._generic.freshen_inference_type(
@@ -9596,12 +9650,29 @@ function checker._generic.infer_call_use(
     return use.closed or provisional, use.arguments, context, use
 end
 
+function checker._generic.defer_inherited_interface_finalization(
+        node, class, method_name, operation)
+    local use = operation or node._generic_inference_use
+    if class._tag ~= "Type.Interface" or not use
+       or use.owns_context or use.context.closed then
+        return
+    end
+    checker._generic.add_inference_finalizer(use, function()
+        local closed_class = checker._generic.substitute_inference(
+            use.context, class, true)
+        node._interface = closed_class
+        node._interface_method = node._method
+        node._interface_method_index = assert(interface_method_index(
+            closed_class, method_name))
+    end)
+end
+
 function checker._generic.defer_inherited_call_result_finalization(
-        node, demand)
-    local use = node._generic_inference_use
+        node, demand, operation)
+    local use = operation or node._generic_inference_use
     if not use or use.owns_context or use.context.closed then return end
     checker._generic.add_inference_finalizer(use, function()
-        local callable = node._method or node.exp._type or use.closed
+        local callable = use.closed or node._method or node.exp._type
         annotate_call_results(node, callable, demand, {})
     end)
 end
@@ -10672,6 +10743,8 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpCall"] = function(node, st, errors, context, demand)
+        return checker._generic.with_inference_operation(node, st,
+        function(inference_operation)
         demand = demand or default_call_result_demand(node, context)
         if node.exp._tag == "Ast.ExpVar" then
             local var = node.exp.var
@@ -10883,6 +10956,18 @@ checkexp = util.make_visitor({
                 return
             end
 
+            local dependent_call = false
+            -- Named function syntax requires a direct declaration, so a
+            -- computed generic result cannot be its callee. Positional calls
+            -- through such a result contribute ordinary argument/result
+            -- evidence to the ambient inference context instead.
+            if not named and not contextual_args then
+                ftype, dependent_call =
+                    checker._generic.infer_dependent_call_application(
+                        inference_operation, ftype, node, demand, st, errors,
+                        "function '" .. fname .. "'")
+            end
+
             if named then
                 local paramnames, lowering, recognized_ffi =
                     named_function_metadata(node)
@@ -10933,7 +11018,7 @@ checkexp = util.make_visitor({
             end
             annotate_call_results(node, ftype, demand, errors)
             checker._generic.defer_inherited_call_result_finalization(
-                node, demand)
+                node, demand, dependent_call and inference_operation or nil)
             check_generic_result_limit(node, errors)
             if node._type._tag == "Type.Void" and not node._voidok
                and not demand.tail then
@@ -10993,6 +11078,20 @@ checkexp = util.make_visitor({
                 end
                 ftype = checker._generic.instantiate_method_declaration(
                     node, ftype, st, errors, class.name, demand)
+                local dependent_call = false
+                if not named or (not ftype.varargtype
+                        and type(ftype.paramnames) == "table") then
+                    ftype, dependent_call =
+                        checker._generic.infer_dependent_call_application(
+                            inference_operation, ftype, node, demand,
+                            st, errors,
+                            "method '" .. class.name .. ":"
+                                .. method_name_text .. "'",
+                            ftype.paramnames,
+                            function(closed)
+                                node._method = closed
+                            end)
+                end
                 if named then
                     if ftype.varargtype then
                         node._type = invalid(errors, node.loc,
@@ -11040,9 +11139,13 @@ checkexp = util.make_visitor({
                         assert(interface_method_index(
                             class, method_name_text))
                 end
+                checker._generic.defer_inherited_interface_finalization(
+                    node, class, method_name_text,
+                    dependent_call and inference_operation or nil)
                 annotate_call_results(node, ftype, demand, errors)
                 checker._generic.defer_inherited_call_result_finalization(
-                    node, demand)
+                    node, demand,
+                    dependent_call and inference_operation or nil)
                 if node._type._tag == "Type.Void" and not node._voidok
                    and not demand.tail then
                     node._type = invalid(errors, node.loc,
@@ -11066,6 +11169,7 @@ checkexp = util.make_visitor({
                 node._type = invalid(errors, node.loc, "expected a record type")
             end
         end
+        end)
     end,
 
     ["Ast.ExpCast"] = function(node, st, errors, _)

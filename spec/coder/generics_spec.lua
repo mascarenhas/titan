@@ -110,15 +110,22 @@ describe("generic erased core", function()
             function Witness:marker(): integer return self.number end
 
             function id<T>(item: T): T return item end
+            function make_identity<T>(): (T) -> T
+                return function(item: T): T return item end
+            end
             function constrained<T: I>(item: T): T return item end
             function take<U: I>(left: (U) -> U, right: (U) -> U):
                     (U) -> U
                 return left
             end
 
+            interface View<T>
+                function get(): T
+            end
             record Box<T>
                 item: T
             end
+            function Box:get(): T return self.item end
             function Box:integer_identity(item: T): T return item end
             function pair<U>(left: (U) -> U, right: (U) -> U): (U) -> U
                 return right
@@ -131,6 +138,9 @@ describe("generic erased core", function()
             function consume<T>(left: T, right: T): T return left end
             function make<T>(): T return (40 as value) as T end
             function pass<T>(item: T): T return item end
+            function make_view<T>(): View<T>
+                return Box<T>.new((40 as value) as T) as View<T>
+            end
 
             function constrained_orders(): integer
                 local witness = Witness.new(7)
@@ -170,11 +180,19 @@ describe("generic erased core", function()
                 local deep = consume(pass(make()), 42)
                 return direct + deep
             end
+
+            function dependent_ordinary_calls(): integer
+                local generic_callee = consume(id(id)(41), 41)
+                local ordinary_callee = consume(make_identity()(42), 42)
+                local interface_receiver = consume(make_view():get(), 40)
+                return generic_callee + ordinary_callee + interface_receiver
+            end
         ]], [[
             assert(test.constrained_orders() == 28)
             assert(test.bound_orders() == 42)
             assert(test.nested_maybe() == 43)
             assert(test.nested_calls() == 80)
+            assert(test.dependent_ordinary_calls() == 123)
         ]])
     end)
 
