@@ -618,7 +618,7 @@ describe("libuv Makefile configuration", function()
         local async = read_file("titan/async.titan")
         for _, contract in ipairs({
             "function run<A, B>(func: () -> A): Task<A, B>",
-            "function running(): Task",
+            "function running(): Task<value, value>",
             "union AnyTwoResult<A1, A2>",
             "union AnyFiveResult<A1, A2, A3, A4, A5>",
             "union RaceTwoResult<A1, B1, A2, B2>",

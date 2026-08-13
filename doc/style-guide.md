@@ -272,8 +272,9 @@ next yielded operation, and returns; no callback or Task may re-enter `uv_run`.
 
 Use Task terminal listeners for bounded Task composition. Inspect initial
 statuses first, register a distinct listener directly on each still-relevant
-named Task, defer removal of every registration, then call `async.suspend()`
-once. A deciding listener calls `Task:resume()`, which synchronously installs a
+named Task, call every returned idempotent remover in `defer`, then call
+`async.suspend()` once. A deciding listener calls `Task:resume()`, which
+synchronously installs a
 coalesced target-owned zero timer and never resumes the target inline. That
 timer starts close from `timer_cb` and resumes only from `close_cb`; external
 cancellation of the suspended Task uses the same wake. Do not collect
