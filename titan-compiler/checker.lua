@@ -3649,8 +3649,16 @@ end
 function checker._generic.generic_constraint_satisfied(
         argument, constraint, st, policy)
     if argument._tag == "Type.Parameter" then
-        return argument.erased_constraint ~= false
-            and types.equals(argument.erased_constraint, constraint)
+        local binders = st and st.generic_scope_bindings
+            and st.generic_scope_bindings[argument.scope]
+        local declared = binders and binders[argument.index]
+        if not declared and policy then
+            local binding = checker._generic.recovered_scope_binding(
+                policy, argument.scope)
+            declared = binding and binding.typeparams[argument.index]
+        end
+        return declared and declared.constraint ~= false
+            and types.alpha_equals(declared.constraint, constraint)
     elseif argument._tag ~= "Type.Nominal" then
         return false
     elseif types.equals(argument, constraint) then
@@ -4254,6 +4262,7 @@ function checker._generic.reserve_generic_binders(node, scope, st, errors)
         node._generic_typeparams[index] = types.TypeParameter(name, false)
         typeparam._type = parameter
     end
+    st.generic_scope_bindings[scope] = node._generic_typeparams
 end
 
 function checker._generic.collect_local_constraint_parameters(
@@ -12027,6 +12036,14 @@ function checker._recover_referenced_owner(
     return owner, memo.error
 end
 
+function checker._generic.recovered_scope_binding(policy, scope)
+    for _, binding in ipairs(policy and policy.generic_scope_bindings or {}) do
+        if types.same_generic_scope(binding.scope, scope) then
+            return binding
+        end
+    end
+end
+
 function checker._generic.validate_recovered_application(
         nominal, owner, policy)
     local arguments = nominal.args or {}
@@ -12075,6 +12092,23 @@ local function register_referenced_nominals(
         constraint_policy)
     if type(t) ~= "table" or not t._tag then return true end
     local tag = t._tag
+    constraint_policy = constraint_policy or {
+        visibility = exposing_module and tostring(exposing_module)
+            or "<recovered-interface>",
+        method_visible = function(method) return not method.islocal end,
+        generic_scope_bindings = {},
+    }
+    constraint_policy.generic_scope_bindings =
+        constraint_policy.generic_scope_bindings or {}
+    local function register_scope(scope, typeparams)
+        if scope ~= false and #(typeparams or {}) > 0 then
+            constraint_policy.generic_scope_bindings[
+                #constraint_policy.generic_scope_bindings + 1] = {
+                    scope = scope,
+                    typeparams = typeparams,
+                }
+        end
+    end
     local alias_key
     local context_key = "\0generic-visit:" .. tostring(t) .. ":" ..
         tostring(position or "value")
@@ -12139,13 +12173,7 @@ local function register_referenced_nominals(
         if ok then ok, err = visit_list(t.args) end
         if ok and owner then
             ok, err = checker._generic.validate_recovered_application(
-                t, owner, constraint_policy or {
-                    visibility = exposing_module and tostring(exposing_module)
-                        or "<recovered-interface>",
-                    method_visible = function(method)
-                        return not method.islocal
-                    end,
-                })
+                t, owner, constraint_policy)
         end
     elseif tag == "Type.GenericAlias" then
         local owner, owner_error = checker._recover_referenced_owner(
@@ -12196,6 +12224,7 @@ local function register_referenced_nominals(
             ok, err = visit(t.constraint, "constraint")
         end
     elseif tag == "Type.FunctionScheme" then
+        register_scope(t.scope, t.typeparams)
         ok, err = visit_binders(t.typeparams)
         if ok then ok, err = visit(t.signature) end
     elseif tag == "Type.Array" then
@@ -12209,12 +12238,14 @@ local function register_referenced_nominals(
         ok, err = visit(t.type)
     elseif tag == "Type.Function" or tag == "Type.Method"
            or tag == "Type.StaticMethod" then
+        register_scope(t.scope, t.typeparams)
         ok, err = visit_binders(t.typeparams)
         if ok then ok, err = visit_list(t.params) end
         if ok then ok, err = visit_list(t.rettypes) end
         if ok and t.varargtype then ok, err = visit(t.varargtype) end
         if ok and t.flexrettype then ok, err = visit(t.flexrettype) end
     elseif tag == "Type.Record" then
+        register_scope(t.scope, t.typeparams)
         ok, err = visit_binders(t.typeparams)
         if ok then
             for _, field in ipairs(t.fields or {}) do
@@ -12241,6 +12272,7 @@ local function register_referenced_nominals(
             end
         end
     elseif tag == "Type.Union" then
+        register_scope(t.scope, t.typeparams)
         ok, err = visit_binders(t.typeparams)
         if ok then
             for _, variant in ipairs(t.variants or {}) do
@@ -12267,6 +12299,7 @@ local function register_referenced_nominals(
             end
         end
     elseif tag == "Type.Interface" then
+        register_scope(t.scope, t.typeparams)
         ok, err = visit_binders(t.typeparams)
         if ok then ok, err = visit_list(t.methods) end
     end

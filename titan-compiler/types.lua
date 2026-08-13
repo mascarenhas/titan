@@ -1654,6 +1654,37 @@ function types.same_generic_scope(left, right)
     return generic_scope_equals(left, right)
 end
 
+-- Resolve a rigid Parameter back to the declaration binder that owns its
+-- surface constraint. Parameter.erased_constraint is lowering metadata and
+-- must never serve as evidence that one generic constraint entails another.
+-- Callers keep binder lists indexed by canonical GenericScope spelling because
+-- decoded and reconstructed descriptors need not share scope table identity.
+function types.parameter_surface_constraint(parameter, scope_bindings)
+    if type(parameter) ~= "table"
+       or parameter._tag ~= "Type.Parameter"
+       or type(scope_bindings) ~= "table" then
+        return nil
+    end
+    local ok, key = pcall(types.generic_scope_key, parameter.scope)
+    if not ok then return nil end
+    local typeparams = scope_bindings[key]
+    if type(typeparams) ~= "table"
+       or type(parameter.index) ~= "number"
+       or math.type(parameter.index) ~= "integer"
+       or parameter.index < 1 then
+        return nil
+    end
+    local typeparam = typeparams[parameter.index]
+    if type(typeparam) ~= "table"
+       or typeparam._tag ~= "Type.TypeParameter"
+       or (typeparam.constraint ~= false
+           and (type(typeparam.constraint) ~= "table"
+                or not typeparam.constraint._tag)) then
+        return nil
+    end
+    return typeparam.constraint
+end
+
 -- Compare the Titan/Lua callable ABI shape shared by ordinary function values
 -- and declaration descriptors for methods/record functions. C declarations use
 -- Type.CFunction and its separate C compatibility relation. Declaration-only

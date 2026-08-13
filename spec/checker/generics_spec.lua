@@ -689,21 +689,63 @@ describe("generic declarations and explicit calls", function()
         ]])
     end)
 
+    it("uses declared dependent rigid constraints rather than erased carriers",
+    function()
+        local _, modtype = assert_check([[
+            interface J
+                function j(): integer
+            end
+            interface I<A>
+                function i(item: A): integer
+            end
+            record G<A, B: I<A>>
+                first: A
+                second: B
+            end
+            function inner<V: J, W: I<V>>(item: W): W return item end
+            function outer<U: J, T: I<U>>(first: U, item: T): T
+                local pair: G<U, T> = G.new<U, T>(first, item)
+                if pair.first is value then end
+                return inner<U, T>(item)
+            end
+        ]])
+        local decoded, decode_error = driver.decode_module_interface(
+            types.serialize(modtype), "test", "dependent-constraint-test")
+        assert.truthy(decoded, decode_error)
+
+        assert_error("does not satisfy constraint 'test.I<test.J>'", [[
+            interface J
+                function j(): integer
+            end
+            interface I<A>
+                function i(item: A): integer
+            end
+            function inner<W: I<J>>(item: W): W return item end
+            function bad<X: J, T: I<X>>(item: T): T
+                return inner<T>(item)
+            end
+        ]])
+    end)
+
     it("smart-reconstructs every explicit owner and callable application",
     function()
         assert_error("type of map key cannot be nil", [[
             record Dictionary<K>
                 entries: {K: string}
+                count: integer
             end
-            function bad(value: Dictionary<nil>) end
+            type Nil = nil
+            function bad(item: Dictionary<Nil>) end
         ]])
 
         assert_error("type of map key cannot be option type", [[
             record Dictionary<K>
                 entries: {K: string}
+                count: integer
             end
             type Dict = Dictionary
-            function bad(value: Dict<integer?>) end
+            type MaybeInteger = integer?
+            function bad(item: Dict<MaybeInteger>) end
         ]])
 
         assert_error("variadic parameter cannot have type nil", [[

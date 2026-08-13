@@ -970,6 +970,10 @@ local function validate_generic_binders(
         names[typeparam.name] = true
     end
     scopes[key] = { scope = scope, typeparams = typeparams }
+    local validation = context and context.validation
+    if validation then
+        validation.scope_bindings[key] = scopes[key]
+    end
 
     for index = 1, count do
         local constraint = typeparams[index].constraint
@@ -1468,8 +1472,11 @@ end
 function driver._metadata_generic_constraint_satisfied(
         argument, constraint, validation)
     if argument._tag == "Type.Parameter" then
-        return argument.erased_constraint ~= false
-            and types.equals(argument.erased_constraint, constraint)
+        local key = generic_scope_key(argument.scope)
+        local binding = key and validation.scope_bindings[key]
+        local declared = binding and binding.typeparams[argument.index]
+        return declared and declared.constraint ~= false
+            and types.alpha_equals(declared.constraint, constraint)
     elseif argument._tag ~= "Type.Nominal" then
         return false
     elseif types.equals(argument, constraint) then
@@ -1752,6 +1759,7 @@ function driver.validate_module_interface(modtype, modname)
         owners = {},
         aliases = {},
         applications = {},
+        scope_bindings = {},
     }
     for index = 1, maximum_index do
         local member = modtype.members[index]
