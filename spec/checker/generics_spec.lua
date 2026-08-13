@@ -1290,6 +1290,49 @@ describe("generic declarations and explicit calls", function()
         ]])
     end)
 
+    it("refreshes finalized child projections before closing parent arguments",
+    function()
+        local ast = assert_check([[
+            function make<T>(): T return (42 as value) as T end
+
+            function duo<T>(): (integer, {T})
+                return 1, {make()}
+            end
+
+            function spread<T>(): (integer, ...: {T})
+                return 1, {make()}, {make()}
+            end
+
+            function consume_fixed<T>(first: T, second: {T}): integer
+                return #second
+            end
+
+            function consume_open<T>(first: T, ...: {T}): integer
+                local left: {T} = ...[1]
+                local right: {T} = ...[2]
+                return #left + #right
+            end
+
+            function fixed_projection(): integer
+                return consume_fixed(duo())
+            end
+
+            function open_projection(): integer
+                return consume_open(spread())
+            end
+        ]])
+
+        local fixed = toplevel(ast, "Ast.TopLevelFunc", "fixed_projection")
+            .block.stats[1].exps[1]
+        assert.equal("Ast.ExpExtra", fixed.args.args[2]._tag)
+        types.assert_erased(fixed.args.args[2]._type)
+
+        local open = toplevel(ast, "Ast.TopLevelFunc", "open_projection")
+            .block.stats[1].exps[1]
+        assert.truthy(open._arg_adjustment.open_source)
+        types.assert_erased(open._arg_adjustment.open_type)
+    end)
+
     it("does not erase a cached source interface through imported annotations",
     function()
         local previous_registry = types.registry

@@ -9075,6 +9075,35 @@ function checker._generic.generic_discovery_demand(context, signature, first, or
     })
 end
 
+function checker._generic.refresh_finalized_argument_projections(adjusted)
+    -- A trailing child call is checked once while its generic occurrence is
+    -- still open. `adjust_explist` consequently snapshots its finite extras and
+    -- open element type before postorder finalization closes that child. Refresh
+    -- only those checker-synthesized projections from the finalized call; the
+    -- written call and its argument subtree remain checked exactly once.
+    for _, exp in ipairs(adjusted.exps) do
+        if exp._tag == "Ast.ExpExtra"
+           and exp.exp._tag == "Ast.ExpCall" then
+            local producer = exp.exp
+            local typ = producer._visible_types
+                and producer._visible_types[exp.index]
+            if typ then
+                exp._type = typ
+                local source = producer._result_sources
+                    and producer._result_sources[exp.index]
+                exp._result_source = source
+                exp._from_flex = source and source.kind == "flex" or nil
+                exp._possibly_absent = source and source.may_absent or nil
+            end
+        end
+    end
+
+    local source = adjusted.open_source
+    if source and source._tag == "Ast.ExpCall" and source._open_results then
+        adjusted.open_type = source._open_results.source_type
+    end
+end
+
 function checker._generic.finish_generic_open_arguments(adjusted, target, st, errors,
                                              term)
     if not adjusted.open_source then return end
@@ -9114,6 +9143,7 @@ end
 
 function checker._generic.close_generic_adjusted_arguments(adjusted, args, signature,
                                                 st, errors, term)
+    checker._generic.refresh_finalized_argument_projections(adjusted)
     for index, exp in pairs(adjusted.fixed) do
         local target = signature.params[index]
         if target then

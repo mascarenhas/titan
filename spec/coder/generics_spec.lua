@@ -178,6 +178,41 @@ describe("generic erased core", function()
         ]])
     end)
 
+    it("runs nested fixed and open generic result projections", function()
+        h.run_coder([[
+            function make<T>(): T return (42 as value) as T end
+
+            function duo<T>(): (integer, {T})
+                return 1, {make()}
+            end
+
+            function spread<T>(): (integer, ...: {T})
+                return 1, {make()}, {make()}
+            end
+
+            function consume_fixed<T>(first: T, second: {T}): integer
+                return #second
+            end
+
+            function consume_open<T>(first: T, ...: {T}): integer
+                local left: {T} = ...[1]
+                local right: {T} = ...[2]
+                return #left + #right
+            end
+
+            function fixed_projection(): integer
+                return consume_fixed(duo())
+            end
+
+            function open_projection(): integer
+                return consume_open(spread())
+            end
+        ]], [[
+            assert(test.fixed_projection() == 1)
+            assert(test.open_projection() == 2)
+        ]])
+    end)
+
     it("lowers generic owner fields, constructors, methods, and union cases", function()
         h.run_coder([[
             record Box<T>
