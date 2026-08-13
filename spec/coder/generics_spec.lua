@@ -102,6 +102,10 @@ describe("generic erased core", function()
                 return Box.new<U>(item)
             end
 
+            function same_box<A>(left: Box<value>, right: Box<A>): boolean
+                return left == right
+            end
+
             union Maybe<T>
                 present: T
                 absent
@@ -126,9 +130,16 @@ describe("generic erased core", function()
             function text(): string
                 return Box.map<value, string>("ok"):get()
             end
+
+            function distinct_owners(): boolean
+                local loose = Box.new<value>("same contents")
+                local precise = Box.new<string>("same contents")
+                return same_box<string>(loose, precise)
+            end
         ]], [[
             assert(test.number() == 42)
             assert(test.text() == "ok")
+            assert(not test.distinct_owners())
         ]])
     end)
 

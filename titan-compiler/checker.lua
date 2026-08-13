@@ -13641,6 +13641,32 @@ function checker._generic.reclassify_written_expression(
     return node
 end
 
+function checker._generic.reclassify_comparison(node, state)
+    node.lhs._type = checker._generic.erased_descriptor(
+        node.lhs._type, state)
+    node.rhs._type = checker._generic.erased_descriptor(
+        node.rhs._type, state)
+    local comparison = types.comparable(node.lhs._type, node.rhs._type)
+    if not comparison then
+        error(string.format(
+            "generic equality has no ordinary comparison between %s and %s",
+            types.tostring(node.lhs._type),
+            types.tostring(node.rhs._type)), 0)
+    end
+    local function apply(exp, adjustment, side)
+        if not adjustment then return exp end
+        local adjusted, consumed = trycoerce(
+            exp, adjustment.target, state.errors,
+            "erased generic equality " .. side .. " operand", adjustment)
+        assert(consumed == adjustment,
+            "erased generic equality lost its ComparisonPlan adjustment")
+        return adjusted
+    end
+    node.lhs = apply(node.lhs, comparison.left_adjustment, "left")
+    node.rhs = apply(node.rhs, comparison.right_adjustment, "right")
+    node._comparison = comparison
+end
+
 function checker._generic.lower_expression(node, state)
     if type(node) ~= "table" or type(node._tag) ~= "string" then return node end
     local tag = node._tag
@@ -13729,6 +13755,16 @@ function checker._generic.lower_expression(node, state)
            and node.target._tag and node.target._tag:match("^Type%.") then
             node.target = checker._generic.erased_descriptor(
                 node.target, state)
+        end
+    elseif tag == "Ast.ExpBinop" then
+        local generic_comparison = (node.op == "==" or node.op == "~=")
+            and (types.contains_generic(node.lhs._type)
+                 or types.contains_generic(node.rhs._type)
+                 or types.contains_generic(node._comparison))
+        node.lhs = checker._generic.lower_expression(node.lhs, state)
+        node.rhs = checker._generic.lower_expression(node.rhs, state)
+        if generic_comparison then
+            checker._generic.reclassify_comparison(node, state)
         end
     elseif tag == "Ast.ExpMethodRef" then
         return checker._generic.lower_method_reference(node, state)
