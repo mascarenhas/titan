@@ -515,8 +515,7 @@ describe("generic declarations and explicit calls", function()
         assert.truthy(decoded, decode_error)
     end)
 
-    it("round-trips source and compiled module schemes for explicit calls",
-    function()
+    it("round-trips inferred source and compiled module schemes", function()
         local modules = {
             library = [[
                 record Box<T>
@@ -527,8 +526,11 @@ describe("generic declarations and explicit calls", function()
             consumer = [[
                 local library = import "library"
                 function use(): library.Box<integer>
-                    local number: integer = library.id<integer>(1)
-                    return library.Box.new<integer>(number)
+                    local number: integer = library.id(1)
+                    local text_id: (string) -> string = library.id
+                    local text: string = text_id("ok")
+                    if text == "" then number = 0 end
+                    return library.Box.new(number)
                 end
             ]],
         }
@@ -537,14 +539,307 @@ describe("generic declarations and explicit calls", function()
         assert.truthy(ok, err)
     end)
 
-    it("diagnoses omitted type arguments until local inference lands",
+    it("infers invariant structural evidence through every Titan shape",
     function()
-        assert_error("requires an explicit complete type argument list", [[
+        local ast = assert_check([[
+            record Box<T>
+                item: T
+            end
+
+            function unwrap<T>(box: Box<T>): T
+                return box.item
+            end
+
+            function structural<A, B, C, D>(maybe: A?, items: {B},
+                    values: {string: C}, callback: (D) -> D, item: D):
+                    (A?, B, C, D)
+                return maybe, items[1], values["item"], callback(item)
+            end
+
+            function use(maybe: integer?, items: {string},
+                    values: {string: boolean}):
+                    (integer?, string, boolean, float, integer)
+                local number = unwrap(Box.new(1))
+                local a, b, c, d = structural(maybe, items, values,
+                    function(x) return x end, 1.5)
+                return a, b, c, d, number
+            end
+        ]])
+
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        local unwrap = use.block.stats[1].exps[1]
+        assert.same({"integer"}, {
+            types.tostring(unwrap._generic_type_arguments[1]),
+        })
+        local call = use.block.stats[2].exps[1].exp
+        assert.same({"integer", "string", "boolean", "float"}, {
+            types.tostring(call._generic_type_arguments[1]),
+            types.tostring(call._generic_type_arguments[2]),
+            types.tostring(call._generic_type_arguments[3]),
+            types.tostring(call._generic_type_arguments[4]),
+        })
+        local lambda = call.args.args[4]
+        assert.equal("Ast.ExpFunction", lambda._tag)
+        assert.equal("float", types.tostring(lambda.params[1]._type))
+        assert.equal("float", types.tostring(lambda._type.rettypes[1]))
+    end)
+
+    it("uses fixed, flexible, and open expected-result evidence", function()
+        local ast = assert_check([[
+            union Maybe<T>
+                present: T
+                absent
+            end
+
+            function make<T>(): T
+                return nil as T
+            end
+
+            function emit<T>(): (...: T)
+            end
+
+            function use(): (string, Maybe<boolean>, ...: integer)
+                return make(), Maybe.absent(), emit()
+            end
+        ]])
+
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        local exps = use.block.stats[1].exps
+        assert.equal("string",
+            types.tostring(exps[1]._generic_type_arguments[1]))
+        assert.equal("boolean",
+            types.tostring(exps[2]._generic_type_arguments[1]))
+        assert.equal("integer",
+            types.tostring(exps[3]._generic_type_arguments[1]))
+        assert.is_truthy(exps[3]._open_results)
+    end)
+
+    it("closes later argument evidence before checking a contextual lambda",
+    function()
+        local ast = assert_check([[
+            function fold<T, U>(items: {T}, callback: (T, U) -> U,
+                    initial: U): U
+                return initial
+            end
+
+            function apply<T, U>(callback: (T) -> U, item: T): U
+                return callback(item)
+            end
+
             function id<T>(item: T): T return item end
-            function use(): integer return id(1) end
+
+            function rigid<T>(): (T) -> T
+                return id
+            end
+
+            function use(items: {integer}): (string, integer)
+                local text = fold(items,
+                    function(item, accumulator) return accumulator end, "")
+                local number: integer = apply(id, 1)
+                return text, number
+            end
+        ]])
+
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        local fold = use.block.stats[1].exps[1]
+        local lambda = fold.args.args[2]
+        assert.equal("integer", types.tostring(lambda.params[1]._type))
+        assert.equal("string", types.tostring(lambda.params[2]._type))
+        assert.equal("string", types.tostring(lambda._type.rettypes[1]))
+        local apply = use.block.stats[2].exps[1]
+        assert.same({"integer", "integer"}, {
+            types.tostring(apply._generic_type_arguments[1]),
+            types.tostring(apply._generic_type_arguments[2]),
+        })
+        assert.equal("integer", types.tostring(
+            apply.args.args[1]._generic_type_arguments[1]))
+    end)
+
+    it("infers constructors, nominal functions, methods, and bound values",
+    function()
+        local ast = assert_check([[
+            record Pair<T, U>
+                first: T
+                second: U
+            end
+
+            function Pair.pick<V>(left: T, right: U, item: V): V
+                return item
+            end
+
+            function Pair:map<V>(callback: (T) -> V): V
+                return callback(self.first)
+            end
+
+            function Pair:replace<V>(item: V): V
+                return item
+            end
+
+            function use(): (boolean, string)
+                local pair = Pair.new(1, "one")
+                local picked = Pair.pick(1, "one", true)
+                local mapped: string =
+                    pair:map(function(item) return "ok" end)
+                local constructor:
+                    (integer, string) -> Pair<integer, string> = Pair.new
+                local bound: (string) -> string = pair:replace
+                local static: (integer, string, boolean) -> boolean = Pair.pick
+                local made = constructor(2, "two")
+                if made.first == 0 or bound("") == "never" or
+                        static(1, "", false) then
+                    return false, ""
+                end
+                return picked, mapped
+            end
+        ]])
+
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        assert_nominal(use.block.stats[1].exps[1]._type,
+            "test.Pair", {"integer", "string"})
+        assert.same({"integer", "string", "boolean"}, {
+            types.tostring(use.block.stats[2].exps[1]
+                ._generic_type_arguments[1]),
+            types.tostring(use.block.stats[2].exps[1]
+                ._generic_type_arguments[2]),
+            types.tostring(use.block.stats[2].exps[1]
+                ._generic_type_arguments[3]),
+        })
+        assert.equal("string", types.tostring(
+            use.block.stats[3].exps[1]._generic_type_arguments[1]))
+        assert.equal("integer", types.tostring(
+            use.block.stats[4].exps[1]._generic_type_arguments[1]))
+        assert.equal("string", types.tostring(
+            use.block.stats[5].exps[1]._generic_type_arguments[1]))
+        assert.same({"integer", "string", "boolean"}, {
+            types.tostring(use.block.stats[6].exps[1]
+                ._generic_type_arguments[1]),
+            types.tostring(use.block.stats[6].exps[1]
+                ._generic_type_arguments[2]),
+            types.tostring(use.block.stats[6].exps[1]
+                ._generic_type_arguments[3]),
+        })
+    end)
+
+    it("infers named, variadic, flexible, and runtime-open call evidence",
+    function()
+        local ast = assert_check([[
+            function named<T>(left: T, right: T): T return left end
+
+            function first<T>(...: T): T return ...[1] end
+
+            function supply(): (integer, ...: integer)
+                return 1, 2, 3
+            end
+
+            function consume<T>(...: T): T return ...[1] end
+
+            function many<T>(item: T): (T, ...: T)
+                return item, item
+            end
+
+            function use(): (string, integer, integer, ...: integer)
+                local text = named { right = "b", left = "a" }
+                local one = first(1, 2, 3)
+                local open = consume(supply())
+                return text, one, open, many(4)
+            end
+        ]])
+
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        for index = 1, 3 do
+            assert.equal(index == 1 and "string" or "integer",
+                types.tostring(use.block.stats[index].exps[1]
+                    ._generic_type_arguments[1]))
+        end
+        local many = use.block.stats[4].exps[4]
+        assert.equal("integer",
+            types.tostring(many._generic_type_arguments[1]))
+        assert.is_truthy(many._open_results)
+    end)
+
+    it("uses hidden generic-for input, result, and close evidence", function()
+        local ast = assert_check([[
+            function step<T>(state: {T}, control: integer):
+                    (integer?, T?)
+                return nil, nil
+            end
+
+            function close<T>(state: T)
+            end
+
+            function use(items: {string})
+                for index: integer, item: string? in
+                        step, items, 0, close do
+                end
+            end
+        ]])
+
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        local loop = use.block.stats[1]
+        assert.equal("string", types.tostring(
+            loop.exps[1]._generic_type_arguments[1]))
+        assert.equal("{ string }", types.tostring(
+            loop.exps[4]._generic_type_arguments[1]))
+        assert.equal("string", types.tostring(
+            loop._result_decls[2]._type.base))
+        assert.is_truthy(loop._init_call)
+        assert.is_truthy(loop._next_call)
+        assert.is_truthy(loop._close_call)
+    end)
+
+    it("validates inferred constraints and transient eligibility", function()
+        assert_check([[
+            interface Show
+                function show(): string
+            end
+            record Renderable
+            end
+            function Renderable:show(): string return "ok" end
+            function render<T: Show>(item: T): string return item:show() end
+            function use(item: Renderable): string return render(item) end
+        ]])
+
+        assert_error("does not satisfy constraint 'test.Show'", [[
+            interface Show
+                function show(): string
+            end
+            function render<T: Show>(item: T): string return item:show() end
+            function bad(): string return render("no") end
+        ]])
+
+        assert_error("inferred type argument 'intptr_t %*'.-has no sound transient round trip", [[
+            local c = foreign import "stdint.h"
+            local function id<T>(item: T): T return item end
+            local function bad(pointer: *c.intptr_t)
+                local copy = id(pointer)
+            end
         ]])
     end)
 
-    pending("infers omitted call arguments from arguments and result context")
-    pending("instantiates a generic declaration from first-class context")
+    it("keeps inference fresh and diagnoses conflicts and unresolved cells",
+    function()
+        assert_check([[
+            function id<T>(item: T): T return item end
+            function use(): (integer, string)
+                return id(1), id("one")
+            end
+        ]])
+
+        assert_error("conflicting type evidence for type parameter 'T'", [[
+            function same<T>(left: T, right: T): T return left end
+            function bad(): integer return same(1, "one") end
+        ]])
+
+        assert_error("cannot infer type argument 'T'.-phantom", [[
+            function phantom<T>(item: integer): integer return item end
+            function bad(): integer return phantom(1) end
+        ]])
+
+        assert_error("requires a monomorphic expected function type", [[
+            function id<T>(item: T): T return item end
+            function bad()
+                local polymorphic = id
+            end
+        ]])
+    end)
 end)
