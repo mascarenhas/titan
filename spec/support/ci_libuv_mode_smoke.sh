@@ -611,7 +611,7 @@ function main(args: {string}): integer
 
     local server, port = listen_available()
     local peer_result = "not-run"
-    local peer = async.run(function (): value
+    local peer = async.run<value, value>(function (): value
       local connection = server:accept()
       check(connection:read_until("\n") == "ping\n",
             "static net peer received the wrong payload")

@@ -54,7 +54,7 @@ function test_timer_ticker_pending_close_and_invalid_period(
     local ticker = timer.ticker(10000)
     defer ticker:close()
     local ticked = true
-    local waiter = async.run(function (): value
+    local waiter = async.run<value, value>(function (): value
       ticked = ticker:tick()
       return nil
     end)

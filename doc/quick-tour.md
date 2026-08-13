@@ -271,11 +271,11 @@ local timer = import "timer"
 
 function main(args: {string}): integer
   local results: {string: string} = {}
-  async.run(function ()
+  async.run<value, value>(function ()
     timer.sleep(5)
     results["left"] = "ready"
   end)
-  async.run(function ()
+  async.run<value, value>(function ()
     async.yield()
     results["right"] = "ready"
   end)

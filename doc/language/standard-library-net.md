@@ -160,7 +160,7 @@ function client(): value
 end
 
 function main(args: {string}): integer
-  async.run(client)
+  async.run<value, value>(client)
   return 0
 end
 ```

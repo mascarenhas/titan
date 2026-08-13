@@ -3,7 +3,7 @@ local function start_keep_alive_eof(first_port: integer,
                                     suffix: string, result: string,
                                     test_immediate: boolean): async.Task
   support.outcome = "running"
-  return async.run(function (): value
+  return async.run<value, value>(function (): value
     local handled = 0
     local handler: http.Handler = function (request: http.Request,
                                             response: http.Response)
@@ -14,7 +14,7 @@ local function start_keep_alive_eof(first_port: integer,
     end
     local server, port = support.http_listen(first_port, handler)
     defer server:close()
-    local serving = async.run(function (): value
+    local serving = async.run<value, value>(function (): value
       server:serve()
       return nil
     end)
@@ -26,7 +26,7 @@ local function start_keep_alive_eof(first_port: integer,
       end
     end
     local timed_out = false
-    local watchdog = async.run(function (): value
+    local watchdog = async.run<value, value>(function (): value
       timer.sleep(5000)
       timed_out = true
       support.outcome = "keep-alive-eof-timeout-after-" .. support.outcome
@@ -72,7 +72,7 @@ local function start_keep_alive_eof(first_port: integer,
     current = nil
 
     server:close()
-    watchdog:cancel(async.CancellationReason.simple(
+    watchdog:cancel(async.CancellationReason.simple<value>(
       "keep-alive EOF completed"))
     async.join(watchdog)
     test.assert(not timed_out, "HTTP keep-alive EOF matrix timed out")

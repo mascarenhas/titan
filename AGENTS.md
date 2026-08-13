@@ -507,12 +507,14 @@ uncaught errors, and final Runtime cleanup. Do not recreate the retired
 `uv_states`/`uv_late_callbacks` source variants, delayed-callback transformers,
 generation fencing, scheduler-owned joiner lists, Titan-side operation queues,
 or reentrant loop scenarios. Public `async.join*` coverage belongs here: those
-functions scan their fixed named operands, install per-operand Task terminal
-listeners, suspend once, and remove every registration in `defer`; they do not
-add a scheduler join protocol or collect operands into a Task Array. Terminal
-publication stores the final `TaskStatus`, detaches the listener Array as a
-stable snapshot, installs an empty live list, then invokes the snapshot
-sequentially on the main thread with per-listener empty catches. A
+functions are generic over an independent success/cancellation pair for every
+fixed named operand, install per-operand Task terminal registrations, suspend
+once, and call every returned idempotent remover in `defer`; they do not add a
+scheduler join protocol or collect operands into a Task Array. Terminal
+publication stores the final `TaskStatus`, detaches the registration Array as a
+stable snapshot, installs an empty live list, clears snapshot ownership, then
+invokes every snapshot listener sequentially on the main thread with
+per-listener empty catches. A
 deciding listener calls `Task:resume()`, which synchronously installs one
 coalesced target-owned zero timer. Its `timer_cb` submits `uv_close`, and only
 `close_cb` resumes the target. The same wake must handle external cancellation
@@ -1508,14 +1510,18 @@ terminal `CancellationReason` payloads. `Task:cancel` stores its first reason
 privately until terminal `cancelled` and invokes the current cancellation
 action without a public `cancelling` state.
 
-Task terminal publication first stores the final status, detaches the listener
-Array as a stable snapshot, and installs an empty live list. It then runs that
-snapshot sequentially in registration order on the main thread and ignores
-each listener error independently; removal during delivery cannot mutate the
-snapshot or skip a later callback. Fixed-arity async
-combinators scan their named operands directly, install a separate listener for
-each still-relevant operand, suspend once, and defer removal of every
-registration. The deciding listener calls the suspended Task's synchronous,
+`Task<A,B>`, `TaskStatus<A,B>`, and `CancellationReason<B>` are the public
+owners, while Runtime roots, waiters, callbacks, and `running()` deliberately
+use the bare all-`value` Task application. Task terminal publication first
+stores the final status, detaches the registration Array as a stable snapshot,
+installs an empty live list, and clears every snapshot registration's live
+ownership. It then runs every snapshot listener sequentially in registration
+order on the main thread and ignores each listener error independently; a
+remover called during delivery cannot mutate the snapshot or skip a later
+callback. Fixed-arity async combinators preserve the independent generic type
+pair of every named operand, install a separate listener for each still-relevant
+operand, suspend once, and call every idempotent remover in `defer`. The deciding
+listener calls the suspended Task's synchronous,
 coalescing `resume()`, which installs its target-owned close-before-resume zero
 timer and returns. There is no public Waiter, `uv_check_t`, Runtime `uv_idle_t`,
 polling loop, phase bridge, taskless timer, scheduler queue, join protocol, or

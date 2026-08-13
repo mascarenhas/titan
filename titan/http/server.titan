@@ -293,22 +293,23 @@ local function read_request_with_idle_timeout(
   local timeout = server.idle_timeout_ms
   if timeout == 0 then return read_request(parser, encrypted) end
 
-  local reader = async.run(function (): Request?
+  local reader = async.run<Request?, value>(function (): Request?
     return read_request(parser, encrypted)
   end)
-  local deadline = async.run(function (): ()
+  local deadline = async.run<nil, value>(function (): nil
     timer.sleep(timeout)
+    return nil
   end)
   local raced = async.race_two(reader, deadline)
   case raced
   when first: status then
-    deadline:cancel(async.CancellationReason.simple(
+    deadline:cancel(async.CancellationReason.simple<value>(
       "HTTP request headers arrived before idle timeout"))
-    local succeeded, request_value? = status:has_succeeded()
-    if succeeded then return request_value as Request? end
+    local succeeded, request? = status:has_succeeded()
+    if succeeded then return request end
     return nil
   when second: status then
-    reader:cancel(async.CancellationReason.simple(
+    reader:cancel(async.CancellationReason.simple<value>(
       "HTTP idle timeout expired"))
     async.join(reader)
     -- A successful deadline is the ordinary idle-timeout path. A failed or
@@ -405,7 +406,7 @@ function Server:serve()
     end
     local connection = accepted as io.ReaderWriterCloser
     local server = self
-    async.run(function (): ()
+    async.run<value, value>(function (): ()
       serve_connection(connection, server)
     end)
   end
