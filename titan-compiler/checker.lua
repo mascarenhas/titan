@@ -4249,14 +4249,16 @@ function checker._generic.generic_scope_for_node(node, st, owner)
     elseif tag == "Ast.TopLevelMethod" then
         role, kind = "method", "method"
     elseif tag == "Ast.TopLevelStatic" then
-        role, kind = "nominal-function", "static"
+        role, kind = "static", "static"
     elseif tag == "Ast.InterfaceMethod" then
-        role, kind = "method", "interface-method"
+        role, kind = "method", "method"
     else
         role, kind, owner_fqtn = "function", "function", false
     end
+    local callable_name = false
+    if role ~= "owner" then callable_name = node.name end
     return types.GenericScope(st.modname, owner_fqtn,
-        role == "owner" and false or node.name, role, kind)
+        callable_name, role, kind)
 end
 
 function checker._generic.reserve_generic_binders(node, scope, st, errors)
@@ -4426,7 +4428,9 @@ function checker._generic.resolve_generic_constraints(node, st, errors)
         end
         node._generic_typeparams[index] =
             types.TypeParameter(syntax.name, constraint)
-        node._generic_parameters[index].erased_constraint = constraint
+        node._generic_parameters[index].erased_constraint =
+            constraint == false and false
+                or types.erase_constraint(constraint)
     end
     st:pop_generic_type_scope()
     checker._generic.reject_constraint_cycles(node, errors)
@@ -11030,8 +11034,7 @@ local function register_referenced_nominals(
         local owner, recovery_error = checker._recover_referenced_owner(
             t.fqtn, loader, seen, exposing_module, interface_seen)
         if owner then
-            local expected = position == "erased-constraint"
-                and 0 or #(owner.typeparams or {})
+            local expected = #(owner.typeparams or {})
             if #(t.args or {}) ~= expected then
                 ok, err = nil, "recovered nominal '" .. t.fqtn ..
                     "' expects " .. expected .. " type arguments but found " ..

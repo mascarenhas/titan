@@ -74,18 +74,21 @@ local function canonical_generic_module()
 
     local box_scope = types.GenericScope(
         "sample", "sample.Box", false, "owner", "record")
-    local erased_show = types.Nominal("sample.Show")
+    local erased_show = types.Nominal(
+        "sample.Show", {types.String()})
     local box_parameter = types.Parameter(
         box_scope, 1, "T", erased_show)
     local box_constraint = types.Nominal(
-        "sample.Show", {box_parameter})
+        "sample.Show", {types.String()})
     local box_nominal = types.Nominal(
         "sample.Box", {box_parameter})
 
     local method_scope = types.GenericScope(
         "sample", "sample.Box", "convert", "method", "method")
     local method_parameter = types.Parameter(
-        method_scope, 1, "U", types.Nominal("sample.Show"))
+        method_scope, 1, "U", types.Nominal("sample.Show", {
+            erased_show,
+        }))
     local method = types.Method("sample.Box", "convert",
         {method_parameter}, {box_nominal}, false, false, {"value"},
         method_scope, {
@@ -965,9 +968,9 @@ describe("generic compiled module metadata", function()
     it("rejects malformed constraints and applied nominal arity", function()
         local module, parts = canonical_generic_module()
         parts.box.typeparams[1].constraint = types.Nominal(
-            "sample.Box", {parts.box_parameter})
+            "sample.Box", {types.String()})
         parts.box_parameter.erased_constraint =
-            types.Nominal("sample.Box")
+            types.Nominal("sample.Box", {types.String()})
         local ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
         assert.match("constraint does not name an Interface", err)

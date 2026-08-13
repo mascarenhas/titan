@@ -1,5 +1,6 @@
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
+local driver = require "titan-compiler.driver"
 
 local run_checker = h.run_checker
 local run_checker_modules = h.run_checker_modules
@@ -100,7 +101,7 @@ describe("generic declarations and explicit calls", function()
             "test.Pair", {"V", "U"})
 
         local from = toplevel(ast, "Ast.TopLevelStatic", "from")
-        assert.equal("nominal-function", from._type.scope.role)
+        assert.equal("static", from._type.scope.role)
         assert.equal(1, #from._type.typeparams)
         assert.equal("Type.Parameter", from._type.params[2]._tag)
         assert_nominal(from._type.rettypes[1],
@@ -428,6 +429,32 @@ describe("generic declarations and explicit calls", function()
         assert_nominal(read._type.params[1], "test.Cell", {"value"})
         assert.equal("value", types.tostring(
             read.block.stats[1].exps[1]._type))
+    end)
+
+    it("serializes canonical generic owner and callable scopes", function()
+        local _, modtype = assert_check([[
+            interface Show<A>
+                function map<T>(item: T): T
+            end
+            union Result<T>
+                ok: T
+                none
+            end
+            record Box<T>
+                item: T
+            end
+            function Box.make<U>(item: U): U return item end
+            function Box:get<V>(fallback: V): T return self.item end
+            function identity<T: Show<integer>>(item: T): T return item end
+            function ordinary(): integer return 1 end
+        ]])
+        local serialized = types.serialize(modtype)
+        local decoded, decode_error = driver.decode_module_interface(
+            serialized, "test", "generic-scope-test")
+        assert.truthy(decoded, decode_error)
+        local layout = types.public_module_prefix_layout(decoded)
+        assert.equal("function:identity", layout[1].key)
+        assert.equal("function:ordinary", layout[2].key)
     end)
 
     it("round-trips source and compiled module schemes for explicit calls",

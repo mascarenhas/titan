@@ -664,7 +664,8 @@ function types.public_module_prefix_layout(modtype)
     end
     for _, member in ipairs(modtype.members or {}) do
         if member._tag == "Type.ModuleMember"
-           and member.type._tag == "Type.Function" then
+           and (member.type._tag == "Type.Function"
+                or member.type._tag == "Type.FunctionScheme") then
             layout[#layout + 1] = {
                 kind = "function",
                 value = member,
@@ -720,7 +721,8 @@ function types.source_module_prefix_layout(modtype)
 
     for _, member in ipairs(modtype.source_members or {}) do
         if member._tag == "Type.ModuleMember"
-           and member.type._tag == "Type.Function" then
+           and (member.type._tag == "Type.Function"
+                or member.type._tag == "Type.FunctionScheme") then
             layout[#layout + 1] = {
                 kind = "function",
                 value = member,

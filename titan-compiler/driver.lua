@@ -1017,11 +1017,12 @@ local function validate_parameter_descriptor(parameter, context, seen)
         return true
     elseif type(parameter.erased_constraint) ~= "table"
        or parameter.erased_constraint._tag ~= "Type.Nominal"
-       or dense_plain_list_length(parameter.erased_constraint.args) ~= 0 then
+       or dense_plain_list_length(parameter.erased_constraint.args) == nil then
         return nil, "generic Parameter has a noncanonical erased constraint"
     end
 
-    local erased_ok, expected = pcall(types.erase, typeparam.constraint)
+    local erased_ok, expected = pcall(
+        types.erase_constraint, typeparam.constraint)
     if not erased_ok or not types.alpha_equals(parameter.erased_constraint, expected) then
         return nil, "generic Parameter has a noncanonical erased constraint"
     end
@@ -1520,9 +1521,7 @@ validate_interface_type = function(typ, context, seen)
         local owner = validation and validation.owners[typ.fqtn]
         if owner then
             local parameter_count = dense_plain_list_length(owner.typeparams)
-            local expected_arguments = context
-                and context.kind == "erased-constraint" and 0
-                or parameter_count
+            local expected_arguments = parameter_count
             if not parameter_count or argument_count ~= expected_arguments then
                 return nil, "nominal type has the wrong generic arity"
             end
