@@ -4979,7 +4979,7 @@ end
 local function make_forin_call(loc, iter_decl, args, ftype, nresults, cfunc,
                                errors, report_result_limit)
     local call = ast.ExpCall(loc, hidden_exp(loc, iter_decl),
-        ast.ArgsFunc(loc, args))
+        ast.ArgsFunc(loc, args), {})
     call._c_pointer_call = cfunc
     local fixed = {}
     for i = 1, nresults do fixed[i] = UNKNOWN_SLOT end
@@ -8514,7 +8514,7 @@ end
 --   errors: list of compile-time errors
 local function checkmethod(node, st, errors)
     local self = ast.Decl(node.loc, "self",
-        ast.TypeName(node.loc, node._nominal_owner.name), false)
+        ast.TypeName(node.loc, node._nominal_owner.name, {}), false)
     node._self = self
     self._type = typefromnode(self.type, st, errors)
     -- `self` is declared into this method's own frame (inside checkfuncbody), so
