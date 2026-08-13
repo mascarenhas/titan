@@ -2,37 +2,62 @@ local test = import "test"
 local iteration = import "titan.iteration"
 local support = import "support.common"
 
+-- A literal value crosses an unconstrained generic boundary as its erased
+-- carrier. These helpers deliberately leave a bad value in otherwise precise
+-- storage so the iterator result's closed projection can be tested.
+local function pollute_map<K, V>(map: {K: V}, key: K, item: value)
+  local generic_item: V = item
+  map[key] = generic_item
+end
+
+local function pollute_array<T>(array: {T}, index: integer, item: value)
+  local generic_item: T = item
+  array[index] = generic_item
+end
+
 function test_iteration_tuple_and_next(context: test.Context)
   test.assert(context:name() == "iteration.tests.test_iteration_tuple_and_next")
 
-  local empty: {value: value} = {}
-  local empty_key, empty_item = iteration.next(empty, nil)
+  local empty: {string: integer} = {}
+  local empty_key: string?, empty_item: integer? =
+    iteration.next<string, integer>(empty, nil)
   test.assert(empty_key == nil and empty_item == nil)
 
-  local map: {value: value} = { ["answer"] = 42 }
-  local next_function, state, initial, close = iteration.pairs(map)
+  local map: {string: integer} = { ["answer"] = 42 }
+  local next_function, state, initial, close =
+    iteration.pairs<string, integer>(map)
   test.assert(state == map)
   test.assert(initial == nil and close == nil)
-  local key, item = next_function(state, initial)
+  local key: string?, item: integer? = next_function(state, initial)
   test.assert(key == "answer" and item == 42)
-  local exhausted_key, exhausted_item = next_function(state, key)
+  local exhausted_key: string?, exhausted_item: integer? =
+    next_function(state, key)
   test.assert(exhausted_key == nil and exhausted_item == nil)
 
   local object_key: {value: value} = {}
   local object_value: {value: value} = {}
-  local arbitrary: {value: value} = {
+  local arbitrary: {{value: value}: {value: value}} = {
     [object_key] = object_value,
   }
-  local actual_key, actual_value = iteration.next(arbitrary, nil)
+  local actual_key: {value: value}?, actual_value: {value: value}? =
+    iteration.next<{value: value}, {value: value}>(arbitrary, nil)
   test.assert(actual_key == object_key and actual_value == object_value)
 end
 
-function test_iteration_typed_maps_and_false_key(_context: test.Context)
+function test_iteration_infers_typed_maps_and_preserves_false(
+    _context: test.Context)
   local map: {string: integer} = {
     ["a"] = 10,
     ["b"] = 20,
     ["c"] = 12,
   }
+
+  -- Generic-inference coverage: the Map argument closes K and V, while the
+  -- declarations consume the precise option results without value casts.
+  local inferred_key: string?, inferred_item: integer? =
+    iteration.next(map, nil)
+  test.assert(inferred_key ~= nil and inferred_item ~= nil)
+
   local count = 0
   local sum = 0
   for _key: string, item: integer in iteration.pairs(map) do
@@ -41,49 +66,91 @@ function test_iteration_typed_maps_and_false_key(_context: test.Context)
   end
   test.assert(count == 3 and sum == 42)
 
-  local dynamic: {value: value} = {
+  local flags: {boolean: integer} = {
     [false] = 17,
-    ["other"] = 25,
+    [true] = 25,
   }
   local saw_false = false
   count = 0
-  for candidate, _item in iteration.pairs(dynamic) do
+  for candidate: boolean, _item: integer in
+      iteration.pairs<boolean, integer>(flags) do
     count = count + 1
-    if candidate is boolean and not (candidate as boolean) then
-      saw_false = true
-    end
+    if not candidate then saw_false = true end
   end
   test.assert(saw_false and count == 2)
 end
 
 function test_iteration_arrays_include_holes(_context: test.Context)
-  local array: {value} = { "first", nil, "third" }
+  local array: {string} = { "first", "middle", "third" }
+  array[2] = nil
+
+  local step, state, initial, close = iteration.ipairs<string>(array)
+  test.assert(state == array and initial == 0 and close == nil)
+  local first_index: integer?, first_item: string? = step(state, initial)
+  test.assert(first_index == 1 and first_item == "first")
+
   local count = 0
   local middle_is_nil = false
-  local last = ""
-  for index, item in iteration.ipairs(array) do
+  local saw_last = false
+  -- Generic-inference coverage: the Array argument closes T. The optional item
+  -- remains visible because a hole is an ordinary iteration result.
+  for index: integer, item: string? in iteration.ipairs(array) do
     count = count + 1
     if index == 2 then middle_is_nil = item == nil end
-    if index == 3 then last = item as string end
+    if index == 3 then saw_last = item == "third" end
   end
   test.assert(count == 3)
   test.assert(middle_is_nil)
-  test.assert(last == "third")
+  test.assert(saw_last)
 
-  local trailing: {value} = { "first", "second", "third" }
+  local trailing: {string} = { "first", "second", "third" }
   trailing[3] = nil
   count = 0
-  for _index, _item in iteration.ipairs(trailing) do
+  for _index: integer, _item: string? in iteration.ipairs(trailing) do
     count = count + 1
   end
   test.assert(#trailing == 2 and count == 2)
 end
 
-function test_iteration_invalid_control_key(_context: test.Context)
-  local map: {value: value} = { ["answer"] = 42 }
+function test_iteration_contextually_instantiates_next(_context: test.Context)
+  -- Generic-inference coverage: a complete monomorphic function context
+  -- instantiates the generic declaration without a written specialization.
+  local concrete_next:
+      ({string: integer}, string?) -> (string?, integer?) = iteration.next
+  local map: {string: integer} = { ["answer"] = 42 }
+  local key: string?, item: integer? = concrete_next(map, nil)
+  test.assert(key == "answer" and item == 42)
+end
+
+function test_iteration_polluted_container_projection_errors(
+    _context: test.Context)
+  local map: {string: integer} = {}
+  pollute_map<string, integer>(map, "bad", "not an integer")
   support.assert_raises_contains(function()
-    iteration.next(map, {})
+    local _key: string?, item: integer? =
+      iteration.next<string, integer>(map, nil)
+    local number: integer = item
+    test.assert(number == 0)
+  end, "expected integer")
+
+  local array: {integer} = {}
+  pollute_array<integer>(array, 1, "not an integer")
+  support.assert_raises_contains(function()
+    local polluted_step, polluted_state, polluted_initial, _close =
+      iteration.ipairs<integer>(array)
+    local _index: integer?, item: integer? =
+      polluted_step(polluted_state, polluted_initial)
+    local number: integer = item
+    test.assert(number == 0)
+  end, "expected integer")
+end
+
+function test_iteration_invalid_control_key(_context: test.Context)
+  local map: {value: integer} = { ["answer"] = 42 }
+  support.assert_raises_contains(function()
+    iteration.next<value, integer>(map, {})
   end, "invalid key to 'next'")
-  local key, item = iteration.next(map, nil)
+  local key: value, item: integer? =
+    iteration.next<value, integer>(map, nil)
   test.assert(key == "answer" and item == 42)
 end
