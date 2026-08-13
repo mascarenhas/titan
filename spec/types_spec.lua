@@ -2645,17 +2645,48 @@ describe("Titan types", function()
 
         it("keeps applied owners invariant while allowing shallow value consistency",
         function()
+            local cell_scope = types.GenericScope(
+                "sample", "sample.Cell", false, "owner", "record")
+            types.registry["sample.Cell"] = types.Record(
+                "sample.Cell", {}, {}, {}, 0, cell_scope, {
+                    types.TypeParameter("T", false),
+                })
             local precise = types.Nominal("sample.Cell", {types.Integer()})
             local erased = types.Nominal("sample.Cell", {types.Value()})
             local wrong = types.Nominal("sample.Cell", {types.String()})
+            local nested = types.Nominal("sample.Cell", {
+                types.Array(types.Integer()),
+            })
+            local nested_view = types.Nominal("sample.Cell", {
+                types.Array(types.Value()),
+            })
 
             assert.is_false(types.equals(precise, erased))
             assert.is_true(types.consistent(precise, erased))
             assert.is_true(types.consistent(erased, precise))
             assert.is_false(types.consistent(precise, wrong))
+            assert.is_false(types.consistent(nested, nested_view))
+            assert.is_true(types.consistent(nested, erased))
             assert.is_false(types.assignment_adjustment(precise, wrong))
             assert.is_false(types.assignment_adjustment(precise, erased))
             assert.is_truthy(types.generic_owner_view(precise, erased))
+
+            local box_scope = types.GenericScope(
+                "sample", "sample.Box", false, "owner", "record")
+            types.registry["sample.Box"] = types.Record(
+                "sample.Box", {}, {}, {}, 0, box_scope, {
+                    types.TypeParameter("T", types.Nominal("sample.Show")),
+                })
+            local implementation = types.Nominal("sample.Shown")
+            local constrained = types.Nominal(
+                "sample.Box", {implementation})
+            local carrier = types.Nominal("sample.Box", {
+                types.Nominal("sample.Show"),
+            })
+            local invalid = types.Nominal(
+                "sample.Box", {types.Value()})
+            assert.is_true(types.consistent(constrained, carrier))
+            assert.is_false(types.consistent(constrained, invalid))
         end)
 
         it("relates each rigid parameter only to its erased constraint carrier",
@@ -2692,23 +2723,6 @@ describe("Titan types", function()
                     false, false, false),
                 types.Function({types.Value()}, {types.Value()},
                     false, false, false)))
-            local inject = types.assignment_adjustment(
-                unconstrained, types.Value())
-            local project = types.assignment_adjustment(
-                types.Value(), unconstrained)
-            assert.equal("identity", inject.kind)
-            assert.equal("identity", project.kind)
-            assert.equal("identity", types.assignment_adjustment(
-                constrained,
-                types.Nominal("sample.Show", {types.Value()})).kind)
-            assert.is_truthy(types.written_cast(
-                unconstrained, types.Value()))
-            assert.is_truthy(types.written_cast(
-                types.Value(), unconstrained))
-            local comparison = types.comparable(
-                unconstrained, types.Value())
-            assert.is_truthy(comparison.left_adjustment)
-            assert.is_truthy(comparison.right_adjustment)
         end)
 
         it("smart-substitutes owner and callable scopes independently",

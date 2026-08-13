@@ -2731,20 +2731,10 @@ local relation_consistent
 local callable_adjustment_impl
 local rigid_erased_carrier
 
-local function generic_carrier_endpoint(typ)
-    if typ and typ._tag == "Type.Parameter" then
-        return rigid_erased_carrier(typ)
-    end
-    return typ
-end
-
 local function gradual_view_plan(source, target)
     source, target = normalized_pair(source, target)
-    if not source or not target then return false end
-    source, target = generic_carrier_endpoint(source),
-        generic_carrier_endpoint(target)
-    if relation_identity(source, target) then
-        return plan("identity", { source = source, target = target })
+    if not source or not target then
+        return false
     elseif source._tag == "Type.Value" then
         local guard = guard_plan(target, {})
         if not guard then return false end
@@ -3126,6 +3116,20 @@ rigid_erased_carrier = function(parameter)
     return types.erase_constraint(parameter.erased_constraint)
 end
 
+local function owner_argument_carrier(owner, index, arguments)
+    if not owner or owner.scope == false
+       or type(owner.typeparams) ~= "table"
+       or not owner.typeparams[index] then
+        return false
+    end
+    local binder = owner.typeparams[index]
+    if binder.constraint == false then return types.Value() end
+    local ok, substituted = pcall(
+        types.substitute, binder.constraint, owner.scope, arguments)
+    if not ok then return false end
+    return types.erase_constraint(substituted)
+end
+
 consistent_impl = function(left, right, context)
     left, right = normalized_pair(left, right)
     if not left or not right
@@ -3200,9 +3204,21 @@ consistent_impl = function(left, right, context)
        and left.fqtn == right.fqtn
        and #(left.args or {}) == #(right.args or {}) then
         result = true
+        local owner = types.registry[left.fqtn]
         for index = 1, #(left.args or {}) do
-            if not consistent_impl(
-                    left.args[index], right.args[index], context) then
+            local larr, rarr = left.args[index], right.args[index]
+            local component = types.equals(larr, rarr)
+            if not component and owner then
+                local left_carrier = owner_argument_carrier(
+                    owner, index, left.args)
+                local right_carrier = owner_argument_carrier(
+                    owner, index, right.args)
+                component = (left_carrier
+                        and types.equals(rarr, left_carrier))
+                    or (right_carrier
+                        and types.equals(larr, right_carrier))
+            end
+            if not component then
                 result = false
                 break
             end
@@ -3694,18 +3710,6 @@ function types.written_cast(source, target, policy)
        or source._tag == "Type.Variant"
        or target._tag == "Type.Variant" then
         return false
-    elseif (source._tag == "Type.Parameter"
-            or target._tag == "Type.Parameter")
-       and relation_consistent(source, target) then
-        local view = gradual_view_plan(source, target)
-        if not view then return false end
-        return plan("written_cast", {
-            op = view.kind == "identity" and "identity" or "gradual",
-            source = view.source,
-            target = view.target,
-            guard = view.guard,
-            view = view,
-        })
     elseif relation_identity(source, target) then
         return plan("written_cast", {
             op = "identity",
@@ -3809,27 +3813,14 @@ function types.comparable(left, right)
         -- the gradual `value` hole. Record that injection as part of the
         -- ComparisonPlan instead of asking the checker to discover a
         -- directional assignment after comparability has been established.
-        local left_carrier = generic_carrier_endpoint(left)
-        local right_carrier = generic_carrier_endpoint(right)
-        if left_carrier._tag == "Type.Value"
-           and right_carrier._tag ~= "Type.Value" then
+        if left._tag == "Type.Value"
+           and right._tag ~= "Type.Value" then
             result.right_adjustment =
                 gradual_view_plan(right, left)
-        elseif right_carrier._tag == "Type.Value"
-           and left_carrier._tag ~= "Type.Value" then
+        elseif right._tag == "Type.Value"
+           and left._tag ~= "Type.Value" then
             result.left_adjustment =
                 gradual_view_plan(left, right)
-        elseif left._tag == "Type.Parameter"
-           or right._tag == "Type.Parameter" then
-            -- Equality of a rigid value is implemented entirely at its erased
-            -- carrier. Record even identity carrier transport explicitly so
-            -- the lowering pass never asks coder to compare a Parameter.
-            result.left_adjustment = plan("identity", {
-                source = left_carrier, target = left_carrier,
-            })
-            result.right_adjustment = plan("identity", {
-                source = right_carrier, target = right_carrier,
-            })
         end
         return plan("comparison", result)
     elseif (left._tag == "Type.Integer" and right._tag == "Type.Float")
