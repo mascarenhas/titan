@@ -495,6 +495,26 @@ describe("generic declarations and explicit calls", function()
         assert.equal("function:ordinary", layout[2].key)
     end)
 
+    it("computes forward constraint carriers after every binder resolves", function()
+        local _, modtype = assert_check([[
+            interface J
+                function render(): string
+            end
+            interface I<A>
+                function use(item: A): string
+            end
+            function forward<T: I<U>, U: J>(left: T, right: U): T
+                return left
+            end
+        ]])
+        local member = modtype.members.forward.type
+        assert.equal("test.I<test.J>", types.tostring(
+            member.signature.params[1].erased_constraint))
+        local decoded, decode_error = driver.decode_module_interface(
+            types.serialize(modtype), "test", "forward-constraint-test")
+        assert.truthy(decoded, decode_error)
+    end)
+
     it("round-trips source and compiled module schemes for explicit calls",
     function()
         local modules = {

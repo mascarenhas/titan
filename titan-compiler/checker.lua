@@ -4428,12 +4428,28 @@ function checker._generic.resolve_generic_constraints(node, st, errors)
         end
         node._generic_typeparams[index] =
             types.TypeParameter(syntax.name, constraint)
-        node._generic_parameters[index].erased_constraint =
-            constraint == false and false
-                or types.erase_constraint(constraint)
+    end
+    checker._generic.reject_constraint_cycles(node, errors)
+    -- Every same-scope binder is reserved before constraints resolve, so a
+    -- forward acyclic constraint may depend on a later binder's carrier.
+    -- Iterate the finite dependency DAG after cycle recovery until every
+    -- recursively erased Interface application is stable.
+    for _ = 1, math.max(1, #(node.typeparams or {})) do
+        local changed = false
+        for index, typeparam in ipairs(node._generic_typeparams) do
+            local carrier = typeparam.constraint == false and false
+                or types.erase_constraint(typeparam.constraint)
+            local previous = node._generic_parameters[index].erased_constraint
+            if (previous == false) ~= (carrier == false)
+               or (carrier ~= false
+                   and not types.equals(previous, carrier)) then
+                node._generic_parameters[index].erased_constraint = carrier
+                changed = true
+            end
+        end
+        if not changed then break end
     end
     st:pop_generic_type_scope()
-    checker._generic.reject_constraint_cycles(node, errors)
 end
 
 function checker._generic.prepare_generic_binders(node, st, errors, owner)
