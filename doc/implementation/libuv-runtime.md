@@ -412,7 +412,9 @@ failures nested there retain their separate
 Cancellation stores `CancellationReason<value>` privately until the terminal
 `cancelled` variant. Its `simple` arm contains a string and its `complex` arm
 retains an arbitrary Titan value; an omitted reason becomes
-`CancellationReason.simple<value>("cancelled")`. Exact `A` and `B` checks occur
+`CancellationReason.simple("cancelled")`. Constructor inference uses the
+expected optional reason type when available and otherwise closes the result-only
+binder to its declared carrier. Exact `A` and `B` checks occur
 only when a typed public view projects a success or complex-cancellation
 payload.
 

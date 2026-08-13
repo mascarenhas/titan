@@ -153,7 +153,7 @@ function test_channel_cancellation_clears_waiters(context: test.Context)
     task_support.cleanup_task(cancelled_receiver, "cancelled receiver cleanup")
     support.wait_until_waiting(cancelled_receiver)
     cancelled_receiver:cancel(
-      async.CancellationReason.simple<value>("receiver cancelled"))
+      async.CancellationReason.simple("receiver cancelled"))
     test.assert(support.cancelled_with(async.join(cancelled_receiver),
                          "receiver cancelled"),
           "blocked receiver cancellation changed")
@@ -179,7 +179,7 @@ function test_channel_cancellation_clears_waiters(context: test.Context)
     task_support.cleanup_task(cancelled_sender, "cancelled sender cleanup")
     support.wait_until_waiting(cancelled_sender)
     cancelled_sender:cancel(
-      async.CancellationReason.simple<value>("sender cancelled"))
+      async.CancellationReason.simple("sender cancelled"))
     test.assert(support.cancelled_with(async.join(cancelled_sender), "sender cancelled"),
           "blocked sender cancellation changed")
 
@@ -317,7 +317,7 @@ function test_channel_close_is_idempotent_and_wakes_waiters(
     task_support.cleanup_task(racing, "racing receiver cleanup")
     support.wait_until_waiting(racing)
     race_close()
-    racing:cancel(async.CancellationReason.simple<value>("racing cancellation"))
+    racing:cancel(async.CancellationReason.simple("racing cancellation"))
     test.assert(support.cancelled_with(async.join(racing), "racing cancellation"),
           "channel close displaced a competing Task cancellation")
   end)
@@ -443,7 +443,7 @@ function test_reader_writer_channel_adapters(context: test.Context)
     task_support.cleanup_task(cancelled, "adapter cancelled reader cleanup")
     support.wait_until_waiting(cancelled)
     cancelled:cancel(
-      async.CancellationReason.simple<value>("adapter cancellation"))
+      async.CancellationReason.simple("adapter cancellation"))
     test.assert(support.cancelled_with(async.join(cancelled), "adapter cancellation"),
           "ChannelReader changed blocked Task cancellation")
     local replacement = async.run<value, value>(function (): value

@@ -24,9 +24,9 @@ function test_caught_cancellation_remains_authoritative(
           replaced:status():as_string() == "ready" do
       timer.yield()
     end
-    returned:cancel(async.CancellationReason.simple<value>(
+    returned:cancel(async.CancellationReason.simple(
       "return path cancellation"))
-    replaced:cancel(async.CancellationReason.simple<value>(
+    replaced:cancel(async.CancellationReason.simple(
       "raise path cancellation"))
     support.wait_finished(returned)
     support.wait_finished(replaced)
@@ -67,7 +67,7 @@ function test_cancellation_shields_file_cleanup_calls(
       end
 
       (task as async.Task):cancel(
-        async.CancellationReason.simple<value>("cleanup cancellation"))
+        async.CancellationReason.simple("cleanup cancellation"))
       -- This cancellation-sensitive Call must not be submitted. Unwinding still
       -- dispatches both cancellation-insensitive closes above.
       first:write("cancelled write was submitted")
@@ -108,7 +108,7 @@ function test_cancellation_crosses_close_callback(
     task_support.cleanup_task(target, "close target cleanup")
     local canceller = async.run<value, value>(function (): value
       while not close_started do timer.yield() end
-      target:cancel(async.CancellationReason.simple<value>(
+      target:cancel(async.CancellationReason.simple(
         "close callback cancellation"))
       return nil
     end)

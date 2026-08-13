@@ -52,7 +52,7 @@ function test_signal_watcher_validation_delivery_cancellation_and_replacement(
     task_support.cleanup_task(cancelled, "cancelled signal waiter cleanup")
     process_support.wait_until_waiting(cancelled, "cancelled signal Task")
     cancelled:cancel(
-      async.CancellationReason.simple<value>("discard signal wait"))
+      async.CancellationReason.simple("discard signal wait"))
     test.assert(cancelled:status():as_string() == "waiting" and
                 not cancelled_resumed,
                 "signal cancellation resumed before its close callback")

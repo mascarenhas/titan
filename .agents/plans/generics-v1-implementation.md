@@ -422,16 +422,18 @@ A caller may instead provide the **complete** unresolved list:
 
 ```titan
 foldl<integer, string>(xs, f, "")
-Pair.new<integer, string>(1, "one")
+Pair<integer, string>.new(1, "one")
 stack:push<MyStack>(value)
 ```
 
 There is no partial explicit list. For a receiver method, owner arguments are
 already fixed by the receiver and the explicit list names only method-local
-binders. For a nominal constructor or nominal function, the list is owner
-binders first and callable-local binders second. For a top-level function it is
-its callable list. Empty variants and other result-only schemes require result
-context or an explicit complete list.
+binders. For a nominal constructor or function, attach the complete owner list
+to the namespace (`Pair<T,U>.new`) and keep a complete callable-local list after
+the member (`Pair<T,U>.from<V>`). If both scopes are open, provide both lists or
+neither. For a top-level function the suffix is its callable list. Empty
+variants and other result-only schemes use evidence first, then the fixed final
+carrier rule.
 
 A generic declaration cannot remain a polymorphic first-class value. Expected
 monomorphic function context instantiates it:
@@ -441,12 +443,15 @@ local int_id: (integer) -> integer = id
 local ctor: (integer, string) -> Pair<integer, string> = Pair.new
 ```
 
-`local f = id` is an error. V1 has no explicit no-call specialization syntax.
+Without context, `local f = id` closes to the ordinary carrier signature. V1
+has no explicit no-call specialization syntax: `Pair<integer>.new` is rejected.
 
 The scannerless PEG grammar gives a complete `typeargs + call-arguments`
-suffix priority over comparison parsing. Thus `f<T>(x)` and
-whitespace-equivalent `f < T > (x)` are the same generic call. `a < b > c`
-remains comparisons; parentheses force a comparison when needed. There is no
+suffix priority over comparison parsing and recognizes owner `typeargs` only
+when followed by a dot selector. Thus `f<T>(x)` and whitespace-equivalent
+`f < T > (x)` are the same generic call, while `Pair<T>.new(x)` decorates the
+namespace before selecting `new`. `a < b > c` remains comparisons; parentheses
+force a comparison when needed. There is no
 pre-parsing tokenization ambiguity for nested closers: a generic-list rule
 consumes literal `>` delimiters contextually, so `Outer<Inner<T>>` closes twice,
 while an expression rule continues to recognize ordinary `>>` as `SHR`. Do not
@@ -697,13 +702,14 @@ access remains direct-only, while serialized interfaces remain public-only.
 
 ### Inference and surface checking
 
-Each generic call, method, constructor, nominal function, or contextual first-
-class use allocates fresh checker-only inference cells. Bind a complete explicit
-list when present; otherwise collect result context and argument evidence,
-prepare contextual lambda parameter/result types, close every cell, check all
-constraints and `transient_roundtrip`, then check each lambda body once. Every
-cell, including a phantom/result-only one, must close. There is no partial list,
-default call argument, HM generalization, or cell in metadata/codegen.
+Each generic call, method, constructor, nominal function, or first-class use
+allocates fresh checker-only inference cells. Bind complete explicit lists when
+present; otherwise collect result context and argument evidence, prepare
+contextual lambda parameter/result types, then close each still-free cell to its
+declared erased carrier (`value` or its fully substituted Interface
+application). Check all constraints and `transient_roundtrip`, then check each
+lambda body once. There is no partial list, source-declared default argument, HM
+generalization, or cell in metadata/codegen.
 
 Unification is invariant structural evidence over Option, Array, Map, Function,
 and same-owner applications. It does not choose numeric conversions, Interface
@@ -973,14 +979,16 @@ The Runtime remains concretely all-value: `task_roots: {Task}` is
 `{Task<value,value>}`, `current_task: Task?` is its option, every libuv waiter/
 request/callback owner uses bare Task, and `running_task()` truthfully returns
 that type. Public `Task<A,B>` is a shallow same-userdata view. Runtime creation
-uses explicit `Task.new<value,value>` where context would otherwise be
-ambiguous. No existential, wildcard, private TaskCore, variance, or ambient
+uses explicit `Task<value,value>.new` to state this storage invariant, although
+the final carrier rule would select the same application without evidence. No
+existential, wildcard, private TaskCore, variance, or ambient
 application recovery is needed.
 
-`B` in `run<A,B>` is result-only. Result context may bind it; otherwise every
-call supplies the complete list, e.g. `run<Request?,value>(func)`. Do not add
-partial lists or implicit defaults. A zero-result callback supplies no evidence
-for `A`; callers explicitly select an `A` accepting nil or return one nil value.
+`B` in `run<A,B>` is result-only. Result context binds it when available;
+otherwise the final carrier rule closes it to `value`. A complete explicit list,
+e.g. `run<Request?,value>(func)`, remains valid, but partial lists do not. A
+zero-result callback supplies no evidence for `A`, so it likewise closes to its
+carrier unless context or a complete list selects another application.
 `running()` is deliberately monomorphic, not `running<A,B>`.
 
 Keep source-private `uv.run_internal` monomorphic:
@@ -1017,9 +1025,10 @@ function all_two<A1,B1,A2,B2>(first: T_1, second: T_2): (A1,A2)
 Extend the same pattern through arity five. `AnyNResult` has only the `A_i`
 parameters and one payload arm per operand plus `none`. `RaceNResult` and
 `AllNError` have interleaved `(A_i,B_i)` and one `TaskStatus<A_i,B_i>` arm per
-operand. A payload-free/result-incomplete constructor needs result context or a
-complete explicit list; bare `raise AllNError.first(...)` uses a typed local or
-complete list because `raise` expects only value. Keep the named, expanded,
+operand. Result context or complete explicit lists preserve a precise
+payload-free/result-incomplete application; without evidence, a bare
+`raise AllNError.first(...)` carrier-closes its remaining binders because
+`raise` expects only `value`. Keep the named, expanded,
 listener-based algorithms and never collect operands into `{Task}`.
 
 All success and complex-cancellation payloads are erased Runtime carriers.
@@ -1091,7 +1100,8 @@ returns, `for/in`, aliases, and recovered-interface specs. Cover:
 - generic records/unions/Interfaces, recursive headers, fields/payloads/cases,
   constructors, statics, methods, and exact `self`;
 - top-level calls, explicit full lists, result-context inference, nested calls,
-  conflicts, unresolved/phantom params, constraints, and repeat-use isolation;
+  conflicts, carrier-closed phantom/result-only parameters, constraints, and
+  repeat-use isolation;
 - the draft `Stack` and `foldl` examples;
 - contextual lambdas checked once, first-class declarations, bound methods,
   and no let/lambda polymorphism;
@@ -1198,8 +1208,8 @@ Runtime, and
 remover-returning listener contract.
 Update iteration and GC user/implementation chapters and all renamed examples.
 Update async-io, libuv-runtime, and the libuv extension guide with the exact
-Task/status/reason/combinator schemes, concrete all-value Runtime, complete-list
-`run` rule, shallow Task views, delayed payload guards, and remover-returning
+Task/status/reason/combinator schemes, concrete all-value Runtime,
+complete-list/final-carrier `run` rule, shallow Task views, delayed payload guards, and remover-returning
 listener registration. Explain that adjusted function wrappers have fresh
 identity and generics do not promise identity-preserving casts.
 Remove future-generic-Task wording. Do not document the deferred iterator

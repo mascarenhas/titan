@@ -1947,15 +1947,44 @@ end
                 typeargs = { { _tag = "Ast.TypeString" } },
                 args = { _tag = "Ast.ArgsNamedMethod", method = "map" },
             })
-            assert_expression_ast("Pair.new<integer, string>(1, 'one')", {
+            assert_expression_ast("Pair<integer, string>.new(1, 'one')", {
                 _tag = "Ast.ExpCall",
-                exp = { var = { _tag = "Ast.VarDot", name = "new" } },
-                typeargs = {
-                    { _tag = "Ast.TypeInteger" },
-                    { _tag = "Ast.TypeString" },
-                },
+                exp = { var = {
+                    _tag = "Ast.VarDot",
+                    name = "new",
+                    exp = {
+                        _nominal_typeargs = {
+                            { _tag = "Ast.TypeInteger" },
+                            { _tag = "Ast.TypeString" },
+                        },
+                    },
+                } },
+                typeargs = {},
                 args = { _tag = "Ast.ArgsFunc" },
             })
+            assert_expression_ast("library.Pair<T>.from<U>{item = x}", {
+                _tag = "Ast.ExpCall",
+                exp = { var = {
+                    _tag = "Ast.VarDot",
+                    name = "from",
+                    exp = {
+                        _nominal_typeargs = {
+                            { _tag = "Ast.TypeName", name = "T" },
+                        },
+                    },
+                } },
+                typeargs = {
+                    { _tag = "Ast.TypeName", name = "U" },
+                },
+                args = { _tag = "Ast.ArgsNamedFunc" },
+            })
+        end)
+
+        it("does not treat callable arguments as a bound-method specialization",
+        function()
+            local parsed = parser.parse(
+                "(parser_spec)", "local f = object:map<integer>")
+            assert.is_false(parsed)
         end)
 
         it("gives a complete generic call suffix priority over comparisons",

@@ -466,6 +466,12 @@ local function Point.checked(x: float, y: float): Point
 end
 ```
 
+For a generic record, explicit owner arguments attach to the record namespace:
+`Box<integer>.new(1)`. A record function with its own parameters keeps those
+after the member name, as in `Box<integer>.convert<string>(text)`. If both owner
+and callable-local scopes are open, write both complete lists or neither; see
+[Generics](generics.md#explicit-type-arguments).
+
 Methods and record functions may declare input-variadic parameters and
 flexible result tails exactly like module functions. A bound method reference
 preserves both tails after binding `self`; the synthesized `new` constructor

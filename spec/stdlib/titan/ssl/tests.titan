@@ -162,7 +162,7 @@ function test_ssl_distinguishes_truncated_transport_from_clean_eof(
     local client = ssl.connect("127.0.0.1", port, support.TRUST_ROOT)
     support.cleanup_connection(context, client)
     while not handshake_done do timer.yield() end
-    peer:cancel(async.CancellationReason.simple<value>(
+    peer:cancel(async.CancellationReason.simple(
       "intentional abrupt TLS peer"))
     -- Keep one application record in flight while the cancelled peer closes.
     -- Kernels may present FIN or RST; the TLS layer must normalize both to the

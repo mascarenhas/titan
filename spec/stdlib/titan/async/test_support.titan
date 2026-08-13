@@ -37,7 +37,7 @@ end
 
 local function cancelled(reason: string): async.Task
   local task = sleeping(60000, "unexpected cancellation return")
-  task:cancel(async.CancellationReason.simple<value>(reason))
+  task:cancel(async.CancellationReason.simple(reason))
   return task
 end
 

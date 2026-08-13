@@ -184,7 +184,7 @@ local function start_expect_continue(first_port: integer): async.Task
 
     test.assert(handled == 1,
           "HTTP server dispatched a rejected expectation to the handler")
-    watchdog:cancel(async.CancellationReason.simple<value>(
+    watchdog:cancel(async.CancellationReason.simple(
       "Expect matrix completed"))
     async.join(watchdog)
     test.assert(not timed_out, "HTTP Expect matrix timed out")
@@ -234,7 +234,7 @@ local function start_buffered_next_requests(first_port: integer): async.Task
     local all = str.writer()
     for chunk in client:read do all:write(chunk) end
     server:close()
-    watchdog:cancel(async.CancellationReason.simple<value>(
+    watchdog:cancel(async.CancellationReason.simple(
       "buffered requests completed"))
     async.join(watchdog)
     test.assert(not watchdog_fired,
@@ -309,7 +309,7 @@ local function start_unread_request_drain(first_port: integer): async.Task
     for chunk in client:read do all:write(chunk) end
     client:close()
     server:close()
-    watchdog:cancel(async.CancellationReason.simple<value>(
+    watchdog:cancel(async.CancellationReason.simple(
       "request drain completed"))
     async.join(watchdog)
     test.assert(not timed_out, "HTTP unread-body drain matrix timed out")
@@ -459,7 +459,7 @@ local function start_server_failure_isolation(first_port: integer): async.Task
           "HTTP 205 response emitted body bytes")
 
     server:close()
-    watchdog:cancel(async.CancellationReason.simple<value>(
+    watchdog:cancel(async.CancellationReason.simple(
       "server failure matrix completed"))
     async.join(watchdog)
     test.assert(not timed_out, "HTTP server failure matrix timed out")
@@ -492,7 +492,7 @@ local function start_cancelled_server_close(first_port: integer): async.Task
     local closer: async.Task? = nil
     local close_returned = false
     closer = async.run<value, value>(function (): value
-      (closer as async.Task):cancel(async.CancellationReason.simple<value>(
+      (closer as async.Task):cancel(async.CancellationReason.simple(
         "cancel before HTTP listener transport close"))
       server:close()
       close_returned = true
@@ -509,13 +509,13 @@ local function start_cancelled_server_close(first_port: integer): async.Task
     local watchdog = async.run<value, value>(function (): value
       timer.sleep(5000)
       timed_out = true
-      serving:cancel(async.CancellationReason.simple<value>(
+      serving:cancel(async.CancellationReason.simple(
         "cancelled HTTP Server close timed out"))
       return nil
     end)
     defer task_support.cancel_and_join_task(watchdog, "nested HTTP watchdog cleanup")
     while task_support.active(serving) do timer.yield() end
-    watchdog:cancel(async.CancellationReason.simple<value>(
+    watchdog:cancel(async.CancellationReason.simple(
       "cancelled HTTP Server close completed"))
     async.join(watchdog)
     test.assert(not timed_out, "cancelled HTTP Server close left accept stranded")
@@ -568,7 +568,7 @@ local function start_cancelled_client_close(first_port: integer): async.Task
     local closer: async.Task? = nil
     local close_returned = false
     closer = async.run<value, value>(function (): value
-      (closer as async.Task):cancel(async.CancellationReason.simple<value>(
+      (closer as async.Task):cancel(async.CancellationReason.simple(
         "cancel before HTTP client transport close"))
       response:close()
       close_returned = true
@@ -587,13 +587,13 @@ local function start_cancelled_client_close(first_port: integer): async.Task
     local watchdog = async.run<value, value>(function (): value
       timer.sleep(5000)
       timed_out = true
-      peer:cancel(async.CancellationReason.simple<value>(
+      peer:cancel(async.CancellationReason.simple(
         "cancelled HTTP response close timed out"))
       return nil
     end)
     defer task_support.cancel_and_join_task(watchdog, "nested HTTP watchdog cleanup")
     while task_support.active(peer) do timer.yield() end
-    watchdog:cancel(async.CancellationReason.simple<value>(
+    watchdog:cancel(async.CancellationReason.simple(
       "cancelled HTTP response close completed"))
     async.join(watchdog)
     test.assert(not timed_out,

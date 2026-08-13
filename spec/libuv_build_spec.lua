@@ -609,7 +609,7 @@ describe("libuv Makefile configuration", function()
             "listener: (TaskStatus<A, B>) -> ()): () -> ()",
             "local function run_internal(func: () -> value): " ..
                 "Task<value, value>",
-            "Task.new<value, value>(",
+            "Task<value, value>.new(",
         }) do
             assert.truthy(task:find(contract, 1, true), contract)
         end

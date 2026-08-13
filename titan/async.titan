@@ -314,7 +314,7 @@ function any_two<A1, B1, A2, B2>(
 
   local terminal_count = 0
   case first:status()
-  when succeeded: result then return AnyTwoResult.first<A1, A2>(result)
+  when succeeded: result then return AnyTwoResult<A1, A2>.first(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
@@ -322,14 +322,14 @@ function any_two<A1, B1, A2, B2>(
   end
 
   case second:status()
-  when succeeded: result then return AnyTwoResult.second<A1, A2>(result)
+  when succeeded: result then return AnyTwoResult<A1, A2>.second(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
     terminal_count = terminal_count + 1
   end
 
-  if terminal_count == 2 then return AnyTwoResult.none<A1, A2>() end
+  if terminal_count == 2 then return AnyTwoResult<A1, A2>.none() end
 
   local waiting: Task<value, value>? = current
   defer waiting = nil
@@ -385,9 +385,9 @@ function any_two<A1, B1, A2, B2>(
   defer remove_second_listener()
 
   suspend()
-  if winner == 1 then return AnyTwoResult.first<A1, A2>(result) end
-  if winner == 2 then return AnyTwoResult.second<A1, A2>(result) end
-  return AnyTwoResult.none<A1, A2>()
+  if winner == 1 then return AnyTwoResult<A1, A2>.first(result) end
+  if winner == 2 then return AnyTwoResult<A1, A2>.second(result) end
+  return AnyTwoResult<A1, A2>.none()
 end
 
 function any_three<A1, B1, A2, B2, A3, B3>(
@@ -401,7 +401,7 @@ function any_three<A1, B1, A2, B2, A3, B3>(
 
   local terminal_count = 0
   case first:status()
-  when succeeded: result then return AnyThreeResult.first<A1, A2, A3>(result)
+  when succeeded: result then return AnyThreeResult<A1, A2, A3>.first(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
@@ -409,7 +409,7 @@ function any_three<A1, B1, A2, B2, A3, B3>(
   end
 
   case second:status()
-  when succeeded: result then return AnyThreeResult.second<A1, A2, A3>(result)
+  when succeeded: result then return AnyThreeResult<A1, A2, A3>.second(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
@@ -417,14 +417,14 @@ function any_three<A1, B1, A2, B2, A3, B3>(
   end
 
   case third:status()
-  when succeeded: result then return AnyThreeResult.third<A1, A2, A3>(result)
+  when succeeded: result then return AnyThreeResult<A1, A2, A3>.third(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
     terminal_count = terminal_count + 1
   end
 
-  if terminal_count == 3 then return AnyThreeResult.none<A1, A2, A3>() end
+  if terminal_count == 3 then return AnyThreeResult<A1, A2, A3>.none() end
 
   local waiting: Task<value, value>? = current
   defer waiting = nil
@@ -504,10 +504,10 @@ function any_three<A1, B1, A2, B2, A3, B3>(
   defer remove_third_listener()
 
   suspend()
-  if winner == 1 then return AnyThreeResult.first<A1, A2, A3>(result) end
-  if winner == 2 then return AnyThreeResult.second<A1, A2, A3>(result) end
-  if winner == 3 then return AnyThreeResult.third<A1, A2, A3>(result) end
-  return AnyThreeResult.none<A1, A2, A3>()
+  if winner == 1 then return AnyThreeResult<A1, A2, A3>.first(result) end
+  if winner == 2 then return AnyThreeResult<A1, A2, A3>.second(result) end
+  if winner == 3 then return AnyThreeResult<A1, A2, A3>.third(result) end
+  return AnyThreeResult<A1, A2, A3>.none()
 end
 
 function any_four<A1, B1, A2, B2, A3, B3, A4, B4>(
@@ -522,7 +522,7 @@ function any_four<A1, B1, A2, B2, A3, B3, A4, B4>(
 
   local terminal_count = 0
   case first:status()
-  when succeeded: result then return AnyFourResult.first<A1, A2, A3, A4>(result)
+  when succeeded: result then return AnyFourResult<A1, A2, A3, A4>.first(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
@@ -530,7 +530,7 @@ function any_four<A1, B1, A2, B2, A3, B3, A4, B4>(
   end
 
   case second:status()
-  when succeeded: result then return AnyFourResult.second<A1, A2, A3, A4>(result)
+  when succeeded: result then return AnyFourResult<A1, A2, A3, A4>.second(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
@@ -538,7 +538,7 @@ function any_four<A1, B1, A2, B2, A3, B3, A4, B4>(
   end
 
   case third:status()
-  when succeeded: result then return AnyFourResult.third<A1, A2, A3, A4>(result)
+  when succeeded: result then return AnyFourResult<A1, A2, A3, A4>.third(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
@@ -546,14 +546,14 @@ function any_four<A1, B1, A2, B2, A3, B3, A4, B4>(
   end
 
   case fourth:status()
-  when succeeded: result then return AnyFourResult.fourth<A1, A2, A3, A4>(result)
+  when succeeded: result then return AnyFourResult<A1, A2, A3, A4>.fourth(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
     terminal_count = terminal_count + 1
   end
 
-  if terminal_count == 4 then return AnyFourResult.none<A1, A2, A3, A4>() end
+  if terminal_count == 4 then return AnyFourResult<A1, A2, A3, A4>.none() end
 
   local waiting: Task<value, value>? = current
   defer waiting = nil
@@ -657,11 +657,11 @@ function any_four<A1, B1, A2, B2, A3, B3, A4, B4>(
   defer remove_fourth_listener()
 
   suspend()
-  if winner == 1 then return AnyFourResult.first<A1, A2, A3, A4>(result) end
-  if winner == 2 then return AnyFourResult.second<A1, A2, A3, A4>(result) end
-  if winner == 3 then return AnyFourResult.third<A1, A2, A3, A4>(result) end
-  if winner == 4 then return AnyFourResult.fourth<A1, A2, A3, A4>(result) end
-  return AnyFourResult.none<A1, A2, A3, A4>()
+  if winner == 1 then return AnyFourResult<A1, A2, A3, A4>.first(result) end
+  if winner == 2 then return AnyFourResult<A1, A2, A3, A4>.second(result) end
+  if winner == 3 then return AnyFourResult<A1, A2, A3, A4>.third(result) end
+  if winner == 4 then return AnyFourResult<A1, A2, A3, A4>.fourth(result) end
+  return AnyFourResult<A1, A2, A3, A4>.none()
 end
 
 function any_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
@@ -678,7 +678,7 @@ function any_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
 
   local terminal_count = 0
   case first:status()
-  when succeeded: result then return AnyFiveResult.first<A1, A2, A3, A4, A5>(result)
+  when succeeded: result then return AnyFiveResult<A1, A2, A3, A4, A5>.first(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
@@ -686,7 +686,7 @@ function any_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   end
 
   case second:status()
-  when succeeded: result then return AnyFiveResult.second<A1, A2, A3, A4, A5>(result)
+  when succeeded: result then return AnyFiveResult<A1, A2, A3, A4, A5>.second(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
@@ -694,7 +694,7 @@ function any_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   end
 
   case third:status()
-  when succeeded: result then return AnyFiveResult.third<A1, A2, A3, A4, A5>(result)
+  when succeeded: result then return AnyFiveResult<A1, A2, A3, A4, A5>.third(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
@@ -702,7 +702,7 @@ function any_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   end
 
   case fourth:status()
-  when succeeded: result then return AnyFiveResult.fourth<A1, A2, A3, A4, A5>(result)
+  when succeeded: result then return AnyFiveResult<A1, A2, A3, A4, A5>.fourth(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
@@ -710,14 +710,14 @@ function any_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   end
 
   case fifth:status()
-  when succeeded: result then return AnyFiveResult.fifth<A1, A2, A3, A4, A5>(result)
+  when succeeded: result then return AnyFiveResult<A1, A2, A3, A4, A5>.fifth(result)
   when failed then
     terminal_count = terminal_count + 1
   when cancelled then
     terminal_count = terminal_count + 1
   end
 
-  if terminal_count == 5 then return AnyFiveResult.none<A1, A2, A3, A4, A5>() end
+  if terminal_count == 5 then return AnyFiveResult<A1, A2, A3, A4, A5>.none() end
 
   local waiting: Task<value, value>? = current
   defer waiting = nil
@@ -845,12 +845,12 @@ function any_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   defer remove_fifth_listener()
 
   suspend()
-  if winner == 1 then return AnyFiveResult.first<A1, A2, A3, A4, A5>(result) end
-  if winner == 2 then return AnyFiveResult.second<A1, A2, A3, A4, A5>(result) end
-  if winner == 3 then return AnyFiveResult.third<A1, A2, A3, A4, A5>(result) end
-  if winner == 4 then return AnyFiveResult.fourth<A1, A2, A3, A4, A5>(result) end
-  if winner == 5 then return AnyFiveResult.fifth<A1, A2, A3, A4, A5>(result) end
-  return AnyFiveResult.none<A1, A2, A3, A4, A5>()
+  if winner == 1 then return AnyFiveResult<A1, A2, A3, A4, A5>.first(result) end
+  if winner == 2 then return AnyFiveResult<A1, A2, A3, A4, A5>.second(result) end
+  if winner == 3 then return AnyFiveResult<A1, A2, A3, A4, A5>.third(result) end
+  if winner == 4 then return AnyFiveResult<A1, A2, A3, A4, A5>.fourth(result) end
+  if winner == 5 then return AnyFiveResult<A1, A2, A3, A4, A5>.fifth(result) end
+  return AnyFiveResult<A1, A2, A3, A4, A5>.none()
 end
 
 function race_two<A1, B1, A2, B2>(
@@ -862,17 +862,17 @@ function race_two<A1, B1, A2, B2>(
 
   local first_status = first:status()
   if first_status:has_finished() then
-    return RaceTwoResult.first<A1, B1, A2, B2>(first_status)
+    return RaceTwoResult<A1, B1, A2, B2>.first(first_status)
   end
   local second_status = second:status()
   if second_status:has_finished() then
-    return RaceTwoResult.second<A1, B1, A2, B2>(second_status)
+    return RaceTwoResult<A1, B1, A2, B2>.second(second_status)
   end
 
   local waiting: Task<value, value>? = current
   defer waiting = nil
   local winner = 0
-  local result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or winner ~= 0 then return end
@@ -894,9 +894,9 @@ function race_two<A1, B1, A2, B2>(
 
   suspend()
   if winner == 1 then
-    return RaceTwoResult.first<A1, B1, A2, B2>(result as TaskStatus<A1, B1>)
+    return RaceTwoResult<A1, B1, A2, B2>.first(result as TaskStatus<A1, B1>)
   end
-  return RaceTwoResult.second<A1, B1, A2, B2>(result as TaskStatus<A2, B2>)
+  return RaceTwoResult<A1, B1, A2, B2>.second(result as TaskStatus<A2, B2>)
 end
 
 function race_three<A1, B1, A2, B2, A3, B3>(
@@ -910,21 +910,21 @@ function race_three<A1, B1, A2, B2, A3, B3>(
 
   local first_status = first:status()
   if first_status:has_finished() then
-    return RaceThreeResult.first<A1, B1, A2, B2, A3, B3>(first_status)
+    return RaceThreeResult<A1, B1, A2, B2, A3, B3>.first(first_status)
   end
   local second_status = second:status()
   if second_status:has_finished() then
-    return RaceThreeResult.second<A1, B1, A2, B2, A3, B3>(second_status)
+    return RaceThreeResult<A1, B1, A2, B2, A3, B3>.second(second_status)
   end
   local third_status = third:status()
   if third_status:has_finished() then
-    return RaceThreeResult.third<A1, B1, A2, B2, A3, B3>(third_status)
+    return RaceThreeResult<A1, B1, A2, B2, A3, B3>.third(third_status)
   end
 
   local waiting: Task<value, value>? = current
   defer waiting = nil
   local winner = 0
-  local result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or winner ~= 0 then return end
@@ -955,12 +955,12 @@ function race_three<A1, B1, A2, B2, A3, B3>(
 
   suspend()
   if winner == 1 then
-    return RaceThreeResult.first<A1, B1, A2, B2, A3, B3>(result as TaskStatus<A1, B1>)
+    return RaceThreeResult<A1, B1, A2, B2, A3, B3>.first(result as TaskStatus<A1, B1>)
   end
   if winner == 2 then
-    return RaceThreeResult.second<A1, B1, A2, B2, A3, B3>(result as TaskStatus<A2, B2>)
+    return RaceThreeResult<A1, B1, A2, B2, A3, B3>.second(result as TaskStatus<A2, B2>)
   end
-  return RaceThreeResult.third<A1, B1, A2, B2, A3, B3>(result as TaskStatus<A3, B3>)
+  return RaceThreeResult<A1, B1, A2, B2, A3, B3>.third(result as TaskStatus<A3, B3>)
 end
 
 function race_four<A1, B1, A2, B2, A3, B3, A4, B4>(
@@ -975,25 +975,25 @@ function race_four<A1, B1, A2, B2, A3, B3, A4, B4>(
 
   local first_status = first:status()
   if first_status:has_finished() then
-    return RaceFourResult.first<A1, B1, A2, B2, A3, B3, A4, B4>(first_status)
+    return RaceFourResult<A1, B1, A2, B2, A3, B3, A4, B4>.first(first_status)
   end
   local second_status = second:status()
   if second_status:has_finished() then
-    return RaceFourResult.second<A1, B1, A2, B2, A3, B3, A4, B4>(second_status)
+    return RaceFourResult<A1, B1, A2, B2, A3, B3, A4, B4>.second(second_status)
   end
   local third_status = third:status()
   if third_status:has_finished() then
-    return RaceFourResult.third<A1, B1, A2, B2, A3, B3, A4, B4>(third_status)
+    return RaceFourResult<A1, B1, A2, B2, A3, B3, A4, B4>.third(third_status)
   end
   local fourth_status = fourth:status()
   if fourth_status:has_finished() then
-    return RaceFourResult.fourth<A1, B1, A2, B2, A3, B3, A4, B4>(fourth_status)
+    return RaceFourResult<A1, B1, A2, B2, A3, B3, A4, B4>.fourth(fourth_status)
   end
 
   local waiting: Task<value, value>? = current
   defer waiting = nil
   local winner = 0
-  local result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or winner ~= 0 then return end
@@ -1033,15 +1033,15 @@ function race_four<A1, B1, A2, B2, A3, B3, A4, B4>(
 
   suspend()
   if winner == 1 then
-    return RaceFourResult.first<A1, B1, A2, B2, A3, B3, A4, B4>(result as TaskStatus<A1, B1>)
+    return RaceFourResult<A1, B1, A2, B2, A3, B3, A4, B4>.first(result as TaskStatus<A1, B1>)
   end
   if winner == 2 then
-    return RaceFourResult.second<A1, B1, A2, B2, A3, B3, A4, B4>(result as TaskStatus<A2, B2>)
+    return RaceFourResult<A1, B1, A2, B2, A3, B3, A4, B4>.second(result as TaskStatus<A2, B2>)
   end
   if winner == 3 then
-    return RaceFourResult.third<A1, B1, A2, B2, A3, B3, A4, B4>(result as TaskStatus<A3, B3>)
+    return RaceFourResult<A1, B1, A2, B2, A3, B3, A4, B4>.third(result as TaskStatus<A3, B3>)
   end
-  return RaceFourResult.fourth<A1, B1, A2, B2, A3, B3, A4, B4>(result as TaskStatus<A4, B4>)
+  return RaceFourResult<A1, B1, A2, B2, A3, B3, A4, B4>.fourth(result as TaskStatus<A4, B4>)
 end
 
 function race_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
@@ -1058,29 +1058,29 @@ function race_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
 
   local first_status = first:status()
   if first_status:has_finished() then
-    return RaceFiveResult.first<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(first_status)
+    return RaceFiveResult<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.first(first_status)
   end
   local second_status = second:status()
   if second_status:has_finished() then
-    return RaceFiveResult.second<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(second_status)
+    return RaceFiveResult<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.second(second_status)
   end
   local third_status = third:status()
   if third_status:has_finished() then
-    return RaceFiveResult.third<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(third_status)
+    return RaceFiveResult<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.third(third_status)
   end
   local fourth_status = fourth:status()
   if fourth_status:has_finished() then
-    return RaceFiveResult.fourth<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(fourth_status)
+    return RaceFiveResult<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.fourth(fourth_status)
   end
   local fifth_status = fifth:status()
   if fifth_status:has_finished() then
-    return RaceFiveResult.fifth<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(fifth_status)
+    return RaceFiveResult<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.fifth(fifth_status)
   end
 
   local waiting: Task<value, value>? = current
   defer waiting = nil
   local winner = 0
-  local result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or winner ~= 0 then return end
@@ -1129,18 +1129,18 @@ function race_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
 
   suspend()
   if winner == 1 then
-    return RaceFiveResult.first<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(result as TaskStatus<A1, B1>)
+    return RaceFiveResult<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.first(result as TaskStatus<A1, B1>)
   end
   if winner == 2 then
-    return RaceFiveResult.second<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(result as TaskStatus<A2, B2>)
+    return RaceFiveResult<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.second(result as TaskStatus<A2, B2>)
   end
   if winner == 3 then
-    return RaceFiveResult.third<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(result as TaskStatus<A3, B3>)
+    return RaceFiveResult<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.third(result as TaskStatus<A3, B3>)
   end
   if winner == 4 then
-    return RaceFiveResult.fourth<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(result as TaskStatus<A4, B4>)
+    return RaceFiveResult<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.fourth(result as TaskStatus<A4, B4>)
   end
-  return RaceFiveResult.fifth<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(result as TaskStatus<A5, B5>)
+  return RaceFiveResult<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.fifth(result as TaskStatus<A5, B5>)
 end
 
 function all_two<A1, B1, A2, B2>(
@@ -1156,8 +1156,8 @@ function all_two<A1, B1, A2, B2>(
   when succeeded: result then
     first_result = result
     completed = completed + 1
-  when failed then raise AllTwoError.first<A1, B1, A2, B2>(first_status)
-  when cancelled then raise AllTwoError.first<A1, B1, A2, B2>(first_status)
+  when failed then raise AllTwoError<A1, B1, A2, B2>.first(first_status)
+  when cancelled then raise AllTwoError<A1, B1, A2, B2>.first(first_status)
   end
 
   local second_result: value = nil
@@ -1166,8 +1166,8 @@ function all_two<A1, B1, A2, B2>(
   when succeeded: result then
     second_result = result
     completed = completed + 1
-  when failed then raise AllTwoError.second<A1, B1, A2, B2>(second_status)
-  when cancelled then raise AllTwoError.second<A1, B1, A2, B2>(second_status)
+  when failed then raise AllTwoError<A1, B1, A2, B2>.second(second_status)
+  when cancelled then raise AllTwoError<A1, B1, A2, B2>.second(second_status)
   end
 
   if completed == 2 then
@@ -1177,7 +1177,7 @@ function all_two<A1, B1, A2, B2>(
   local waiting: Task<value, value>? = current
   defer waiting = nil
   local rejected = 0
-  local rejection: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local rejection: TaskStatus<value, value> = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or rejected ~= 0 then return end
@@ -1221,10 +1221,10 @@ function all_two<A1, B1, A2, B2>(
 
   suspend()
   if rejected == 1 then
-    raise AllTwoError.first<A1, B1, A2, B2>(rejection as TaskStatus<A1, B1>)
+    raise AllTwoError<A1, B1, A2, B2>.first(rejection as TaskStatus<A1, B1>)
   end
   if rejected == 2 then
-    raise AllTwoError.second<A1, B1, A2, B2>(rejection as TaskStatus<A2, B2>)
+    raise AllTwoError<A1, B1, A2, B2>.second(rejection as TaskStatus<A2, B2>)
   end
   return first_result as A1, second_result as A2
 end
@@ -1245,8 +1245,8 @@ function all_three<A1, B1, A2, B2, A3, B3>(
   when succeeded: result then
     first_result = result
     completed = completed + 1
-  when failed then raise AllThreeError.first<A1, B1, A2, B2, A3, B3>(first_status)
-  when cancelled then raise AllThreeError.first<A1, B1, A2, B2, A3, B3>(first_status)
+  when failed then raise AllThreeError<A1, B1, A2, B2, A3, B3>.first(first_status)
+  when cancelled then raise AllThreeError<A1, B1, A2, B2, A3, B3>.first(first_status)
   end
 
   local second_result: value = nil
@@ -1255,8 +1255,8 @@ function all_three<A1, B1, A2, B2, A3, B3>(
   when succeeded: result then
     second_result = result
     completed = completed + 1
-  when failed then raise AllThreeError.second<A1, B1, A2, B2, A3, B3>(second_status)
-  when cancelled then raise AllThreeError.second<A1, B1, A2, B2, A3, B3>(second_status)
+  when failed then raise AllThreeError<A1, B1, A2, B2, A3, B3>.second(second_status)
+  when cancelled then raise AllThreeError<A1, B1, A2, B2, A3, B3>.second(second_status)
   end
 
   local third_result: value = nil
@@ -1265,8 +1265,8 @@ function all_three<A1, B1, A2, B2, A3, B3>(
   when succeeded: result then
     third_result = result
     completed = completed + 1
-  when failed then raise AllThreeError.third<A1, B1, A2, B2, A3, B3>(third_status)
-  when cancelled then raise AllThreeError.third<A1, B1, A2, B2, A3, B3>(third_status)
+  when failed then raise AllThreeError<A1, B1, A2, B2, A3, B3>.third(third_status)
+  when cancelled then raise AllThreeError<A1, B1, A2, B2, A3, B3>.third(third_status)
   end
 
   if completed == 3 then
@@ -1277,7 +1277,7 @@ function all_three<A1, B1, A2, B2, A3, B3>(
   local waiting: Task<value, value>? = current
   defer waiting = nil
   local rejected = 0
-  local rejection: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local rejection: TaskStatus<value, value> = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or rejected ~= 0 then return end
@@ -1341,13 +1341,13 @@ function all_three<A1, B1, A2, B2, A3, B3>(
 
   suspend()
   if rejected == 1 then
-    raise AllThreeError.first<A1, B1, A2, B2, A3, B3>(rejection as TaskStatus<A1, B1>)
+    raise AllThreeError<A1, B1, A2, B2, A3, B3>.first(rejection as TaskStatus<A1, B1>)
   end
   if rejected == 2 then
-    raise AllThreeError.second<A1, B1, A2, B2, A3, B3>(rejection as TaskStatus<A2, B2>)
+    raise AllThreeError<A1, B1, A2, B2, A3, B3>.second(rejection as TaskStatus<A2, B2>)
   end
   if rejected == 3 then
-    raise AllThreeError.third<A1, B1, A2, B2, A3, B3>(rejection as TaskStatus<A3, B3>)
+    raise AllThreeError<A1, B1, A2, B2, A3, B3>.third(rejection as TaskStatus<A3, B3>)
   end
   return first_result as A1, second_result as A2,
          third_result as A3
@@ -1370,8 +1370,8 @@ function all_four<A1, B1, A2, B2, A3, B3, A4, B4>(
   when succeeded: result then
     first_result = result
     completed = completed + 1
-  when failed then raise AllFourError.first<A1, B1, A2, B2, A3, B3, A4, B4>(first_status)
-  when cancelled then raise AllFourError.first<A1, B1, A2, B2, A3, B3, A4, B4>(first_status)
+  when failed then raise AllFourError<A1, B1, A2, B2, A3, B3, A4, B4>.first(first_status)
+  when cancelled then raise AllFourError<A1, B1, A2, B2, A3, B3, A4, B4>.first(first_status)
   end
 
   local second_result: value = nil
@@ -1380,8 +1380,8 @@ function all_four<A1, B1, A2, B2, A3, B3, A4, B4>(
   when succeeded: result then
     second_result = result
     completed = completed + 1
-  when failed then raise AllFourError.second<A1, B1, A2, B2, A3, B3, A4, B4>(second_status)
-  when cancelled then raise AllFourError.second<A1, B1, A2, B2, A3, B3, A4, B4>(second_status)
+  when failed then raise AllFourError<A1, B1, A2, B2, A3, B3, A4, B4>.second(second_status)
+  when cancelled then raise AllFourError<A1, B1, A2, B2, A3, B3, A4, B4>.second(second_status)
   end
 
   local third_result: value = nil
@@ -1390,8 +1390,8 @@ function all_four<A1, B1, A2, B2, A3, B3, A4, B4>(
   when succeeded: result then
     third_result = result
     completed = completed + 1
-  when failed then raise AllFourError.third<A1, B1, A2, B2, A3, B3, A4, B4>(third_status)
-  when cancelled then raise AllFourError.third<A1, B1, A2, B2, A3, B3, A4, B4>(third_status)
+  when failed then raise AllFourError<A1, B1, A2, B2, A3, B3, A4, B4>.third(third_status)
+  when cancelled then raise AllFourError<A1, B1, A2, B2, A3, B3, A4, B4>.third(third_status)
   end
 
   local fourth_result: value = nil
@@ -1400,8 +1400,8 @@ function all_four<A1, B1, A2, B2, A3, B3, A4, B4>(
   when succeeded: result then
     fourth_result = result
     completed = completed + 1
-  when failed then raise AllFourError.fourth<A1, B1, A2, B2, A3, B3, A4, B4>(fourth_status)
-  when cancelled then raise AllFourError.fourth<A1, B1, A2, B2, A3, B3, A4, B4>(fourth_status)
+  when failed then raise AllFourError<A1, B1, A2, B2, A3, B3, A4, B4>.fourth(fourth_status)
+  when cancelled then raise AllFourError<A1, B1, A2, B2, A3, B3, A4, B4>.fourth(fourth_status)
   end
 
   if completed == 4 then
@@ -1412,7 +1412,7 @@ function all_four<A1, B1, A2, B2, A3, B3, A4, B4>(
   local waiting: Task<value, value>? = current
   defer waiting = nil
   local rejected = 0
-  local rejection: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local rejection: TaskStatus<value, value> = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or rejected ~= 0 then return end
@@ -1496,16 +1496,16 @@ function all_four<A1, B1, A2, B2, A3, B3, A4, B4>(
 
   suspend()
   if rejected == 1 then
-    raise AllFourError.first<A1, B1, A2, B2, A3, B3, A4, B4>(rejection as TaskStatus<A1, B1>)
+    raise AllFourError<A1, B1, A2, B2, A3, B3, A4, B4>.first(rejection as TaskStatus<A1, B1>)
   end
   if rejected == 2 then
-    raise AllFourError.second<A1, B1, A2, B2, A3, B3, A4, B4>(rejection as TaskStatus<A2, B2>)
+    raise AllFourError<A1, B1, A2, B2, A3, B3, A4, B4>.second(rejection as TaskStatus<A2, B2>)
   end
   if rejected == 3 then
-    raise AllFourError.third<A1, B1, A2, B2, A3, B3, A4, B4>(rejection as TaskStatus<A3, B3>)
+    raise AllFourError<A1, B1, A2, B2, A3, B3, A4, B4>.third(rejection as TaskStatus<A3, B3>)
   end
   if rejected == 4 then
-    raise AllFourError.fourth<A1, B1, A2, B2, A3, B3, A4, B4>(rejection as TaskStatus<A4, B4>)
+    raise AllFourError<A1, B1, A2, B2, A3, B3, A4, B4>.fourth(rejection as TaskStatus<A4, B4>)
   end
   return first_result as A1, second_result as A2,
          third_result as A3, fourth_result as A4
@@ -1530,8 +1530,8 @@ function all_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   when succeeded: result then
     first_result = result
     completed = completed + 1
-  when failed then raise AllFiveError.first<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(first_status)
-  when cancelled then raise AllFiveError.first<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(first_status)
+  when failed then raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.first(first_status)
+  when cancelled then raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.first(first_status)
   end
 
   local second_result: value = nil
@@ -1540,8 +1540,8 @@ function all_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   when succeeded: result then
     second_result = result
     completed = completed + 1
-  when failed then raise AllFiveError.second<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(second_status)
-  when cancelled then raise AllFiveError.second<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(second_status)
+  when failed then raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.second(second_status)
+  when cancelled then raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.second(second_status)
   end
 
   local third_result: value = nil
@@ -1550,8 +1550,8 @@ function all_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   when succeeded: result then
     third_result = result
     completed = completed + 1
-  when failed then raise AllFiveError.third<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(third_status)
-  when cancelled then raise AllFiveError.third<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(third_status)
+  when failed then raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.third(third_status)
+  when cancelled then raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.third(third_status)
   end
 
   local fourth_result: value = nil
@@ -1560,8 +1560,8 @@ function all_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   when succeeded: result then
     fourth_result = result
     completed = completed + 1
-  when failed then raise AllFiveError.fourth<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(fourth_status)
-  when cancelled then raise AllFiveError.fourth<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(fourth_status)
+  when failed then raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.fourth(fourth_status)
+  when cancelled then raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.fourth(fourth_status)
   end
 
   local fifth_result: value = nil
@@ -1570,8 +1570,8 @@ function all_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   when succeeded: result then
     fifth_result = result
     completed = completed + 1
-  when failed then raise AllFiveError.fifth<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(fifth_status)
-  when cancelled then raise AllFiveError.fifth<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(fifth_status)
+  when failed then raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.fifth(fifth_status)
+  when cancelled then raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.fifth(fifth_status)
   end
 
   if completed == 5 then
@@ -1583,7 +1583,7 @@ function all_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   local waiting: Task<value, value>? = current
   defer waiting = nil
   local rejected = 0
-  local rejection: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local rejection: TaskStatus<value, value> = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or rejected ~= 0 then return end
@@ -1687,19 +1687,19 @@ function all_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
 
   suspend()
   if rejected == 1 then
-    raise AllFiveError.first<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(rejection as TaskStatus<A1, B1>)
+    raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.first(rejection as TaskStatus<A1, B1>)
   end
   if rejected == 2 then
-    raise AllFiveError.second<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(rejection as TaskStatus<A2, B2>)
+    raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.second(rejection as TaskStatus<A2, B2>)
   end
   if rejected == 3 then
-    raise AllFiveError.third<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(rejection as TaskStatus<A3, B3>)
+    raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.third(rejection as TaskStatus<A3, B3>)
   end
   if rejected == 4 then
-    raise AllFiveError.fourth<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(rejection as TaskStatus<A4, B4>)
+    raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.fourth(rejection as TaskStatus<A4, B4>)
   end
   if rejected == 5 then
-    raise AllFiveError.fifth<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(rejection as TaskStatus<A5, B5>)
+    raise AllFiveError<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.fifth(rejection as TaskStatus<A5, B5>)
   end
   return first_result as A1, second_result as A2,
          third_result as A3, fourth_result as A4,
@@ -1714,7 +1714,7 @@ function join<A, B>(task: Task<A, B>): TaskStatus<A, B>
 
   local waiting: Task<value, value>? = current
   defer waiting = nil
-  local result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local listener = function (terminal_status: TaskStatus<A, B>)
     if waiting == nil then return end
     result = terminal_status
@@ -1735,13 +1735,13 @@ function join_two<A1, B1, A2, B2>(
   reject_running(current, second)
 
   local completed = 0
-  local first_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local first_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local first_status = first:status()
   if first_status:has_finished() then
     first_result = first_status
     completed = completed + 1
   end
-  local second_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local second_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local second_status = second:status()
   if second_status:has_finished() then
     second_result = second_status
@@ -1785,19 +1785,19 @@ function join_three<A1, B1, A2, B2, A3, B3>(
   reject_running(current, third)
 
   local completed = 0
-  local first_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local first_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local first_status = first:status()
   if first_status:has_finished() then
     first_result = first_status
     completed = completed + 1
   end
-  local second_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local second_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local second_status = second:status()
   if second_status:has_finished() then
     second_result = second_status
     completed = completed + 1
   end
-  local third_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local third_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local third_status = third:status()
   if third_status:has_finished() then
     third_result = third_status
@@ -1854,25 +1854,25 @@ function join_four<A1, B1, A2, B2, A3, B3, A4, B4>(
   reject_running(current, fourth)
 
   local completed = 0
-  local first_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local first_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local first_status = first:status()
   if first_status:has_finished() then
     first_result = first_status
     completed = completed + 1
   end
-  local second_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local second_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local second_status = second:status()
   if second_status:has_finished() then
     second_result = second_status
     completed = completed + 1
   end
-  local third_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local third_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local third_status = third:status()
   if third_status:has_finished() then
     third_result = third_status
     completed = completed + 1
   end
-  local fourth_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local fourth_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local fourth_status = fourth:status()
   if fourth_status:has_finished() then
     fourth_result = fourth_status
@@ -1940,31 +1940,31 @@ function join_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   reject_running(current, fifth)
 
   local completed = 0
-  local first_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local first_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local first_status = first:status()
   if first_status:has_finished() then
     first_result = first_status
     completed = completed + 1
   end
-  local second_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local second_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local second_status = second:status()
   if second_status:has_finished() then
     second_result = second_status
     completed = completed + 1
   end
-  local third_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local third_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local third_status = third:status()
   if third_status:has_finished() then
     third_result = third_status
     completed = completed + 1
   end
-  local fourth_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local fourth_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local fourth_status = fourth:status()
   if fourth_status:has_finished() then
     fourth_result = fourth_status
     completed = completed + 1
   end
-  local fifth_result: TaskStatus<value, value> = TaskStatus.ready<value, value>()
+  local fifth_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
   local fifth_status = fifth:status()
   if fifth_status:has_finished() then
     fifth_result = fifth_status

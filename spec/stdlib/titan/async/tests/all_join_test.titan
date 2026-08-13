@@ -211,7 +211,7 @@ function test_all_combinators_values_and_error_positions(context: test.Context)
     test.assert(not live_all_peer:status():has_finished(),
           "live all_five cancelled an unfinished peer")
     live_all_peer:cancel(
-      async.CancellationReason.simple<value>("all live peer cleanup"))
+      async.CancellationReason.simple("all live peer cleanup"))
     async.join(live_all_peer)
 
     local pending = support.sleeping(60000, "late")
@@ -224,7 +224,7 @@ function test_all_combinators_values_and_error_positions(context: test.Context)
     end
     test.assert(not pending:status():has_finished(),
           "all cancelled an unfinished peer after rejection")
-    pending:cancel(async.CancellationReason.simple<value>("all cleanup"))
+    pending:cancel(async.CancellationReason.simple("all cleanup"))
     async.join(pending)
 
     local failed_task = support.failing("all-logged-failure")
@@ -287,7 +287,7 @@ function test_join_arities_and_complete_status_payloads(context: test.Context)
     local marker: value = {}
     local complex_cancelled = support.sleeping(60000, "complex cancellation returned")
     task_support.cleanup_task(complex_cancelled, "complex cancellation cleanup")
-    complex_cancelled:cancel(async.CancellationReason.complex<value>(marker))
+    complex_cancelled:cancel(async.CancellationReason<value>.complex(marker))
     local complex_status = async.join(complex_cancelled)
     local has_complex, complex_reason? = complex_status:has_cancelled()
     test.assert(has_complex and complex_reason ~= nil,

@@ -88,7 +88,8 @@ function TaskStatus:has_cancelled(): (boolean, CancellationReason<B>?)
 `Task<A, B>` uses `A` for a successful return and `B` for the payload of a
 complex cancellation reason. A bare `Task`, `TaskStatus`, or
 `CancellationReason` is the ordinary all-`value` application. `B` is
-result-only in `run<A, B>`, so a call without a result context must supply the
+result-only in `run<A, B>`: result context selects it when available, and the
+final carrier rule otherwise closes it to `value`. A caller may state the
 complete pair, for example `async.run<string, value>(func)`; there is no partial
 type-argument list. `running()` deliberately returns the bare all-value Task,
 not an inferred application.
@@ -383,10 +384,10 @@ end)
 local result = async.any_two(reading, deadline)
 case result
 when first: data then
-  deadline:cancel(async.CancellationReason.simple<value>("read completed"))
+  deadline:cancel(async.CancellationReason.simple("read completed"))
   consume(data)
 when second then
-  reading:cancel(async.CancellationReason.simple<value>("read timed out"))
+  reading:cancel(async.CancellationReason.simple("read timed out"))
   async.join(reading)
 when none then
   -- Both Tasks failed or were cancelled; inspect their final statuses.
@@ -472,7 +473,10 @@ ordinary shutdown begins only after no active Tasks remain.
 
 `cancel(reason)` is sticky and preserves the first `CancellationReason<B>`
 directly in the Task. Nil selects
-`CancellationReason.simple<B>("cancelled")`. The `simple` arm covers ordinary
+`CancellationReason.simple("cancelled")`. The expected
+`CancellationReason<B>?` parameter supplies `B` through the ordinary option
+wrap; without such context the generic final carrier rule chooses `value`. The
+`simple` arm covers ordinary
 text reasons; `complex` retains a payload of `B` for protocols that need a
 structured reason. The reason remains private while the public snapshot stays
 in its current nonterminal state. The stored union value is injected at

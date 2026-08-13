@@ -112,7 +112,7 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
       prompt_watchdog, "nested HTTP prompt watchdog cleanup")
     test.assert(prompt:read() == nil,
           "positive idle timeout left an initial request open")
-    prompt_watchdog:cancel(async.CancellationReason.simple<value>(
+    prompt_watchdog:cancel(async.CancellationReason.simple(
       "HTTP idle timeout completed promptly"))
     async.join(prompt_watchdog)
     test.assert(not prompt_watchdog_fired,
@@ -164,7 +164,7 @@ local function start_idle_timeout_plain(first_port: integer): async.Task
       partial_watchdog, "nested HTTP partial watchdog cleanup")
     test.assert(partial:read() == nil,
           "idle timeout reset or ignored a partial header deadline")
-    partial_watchdog:cancel(async.CancellationReason.simple<value>(
+    partial_watchdog:cancel(async.CancellationReason.simple(
       "absolute HTTP header deadline completed"))
     async.join_two(partial_feeder, partial_watchdog)
     test.assert(not partial_late,
@@ -349,13 +349,13 @@ local function start_idle_timeout_tls(first_port: integer): async.Task
       local watchdog = async.run<value, value>(function (): value
         timer.sleep(1000)
         watchdog_fired = true
-        reader:cancel(async.CancellationReason.simple<value>(
+        reader:cancel(async.CancellationReason.simple(
           label .. " watchdog expired"))
         return nil
       end)
       defer task_support.cancel_and_join_task(watchdog, "nested HTTP watchdog cleanup")
       local reader_status = async.join(reader)
-      watchdog:cancel(async.CancellationReason.simple<value>(
+      watchdog:cancel(async.CancellationReason.simple(
         label .. " completed promptly"))
       async.join(watchdog)
       test.assert(not watchdog_fired,
@@ -497,14 +497,14 @@ local function start_https(first_port: integer): async.Task
     local watchdog = async.run<value, value>(function (): value
       timer.sleep(5000)
       timed_out = true
-      requesting:cancel(async.CancellationReason.simple<value>(
+      requesting:cancel(async.CancellationReason.simple(
         "HTTPS public test timed out"))
       do exact_server:close() catch end
       return nil
     end)
     defer task_support.cancel_and_join_task(watchdog, "nested HTTP watchdog cleanup")
     while task_support.active(requesting) do timer.yield() end
-    watchdog:cancel(async.CancellationReason.simple<value>(
+    watchdog:cancel(async.CancellationReason.simple(
       "HTTPS request completed"))
     async.join(watchdog)
     test.assert(not timed_out, "HTTPS public API case timed out")

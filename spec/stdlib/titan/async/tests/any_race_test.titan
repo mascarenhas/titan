@@ -318,7 +318,7 @@ function test_race_combinators_all_arities_ties_and_statuses(context: test.Conte
                                       pending)) == "1:failed",
           "race did not return failure")
 
-    pending:cancel(async.CancellationReason.simple<value>("race cleanup"))
+    pending:cancel(async.CancellationReason.simple("race cleanup"))
     async.join(pending)
     context:log("END expected uncaught async Task diagnostics")
   end)

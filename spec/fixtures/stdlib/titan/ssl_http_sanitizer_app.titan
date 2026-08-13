@@ -89,12 +89,12 @@ local function exercise(certificate: string, private_key: string)
   local watchdog = async.run<value, value>(function (): value
     timer.sleep(5000)
     watchdog_fired = true
-    idle_reader:cancel(async.CancellationReason.simple<value>(
+    idle_reader:cancel(async.CancellationReason.simple(
       "sanitizer HTTPS idle timeout stalled"))
     return nil
   end)
   local idle_status = async.join(idle_reader)
-  watchdog:cancel(async.CancellationReason.simple<value>(
+  watchdog:cancel(async.CancellationReason.simple(
     "sanitizer HTTPS idle timeout completed"))
   async.join(watchdog)
   if watchdog_fired then

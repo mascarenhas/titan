@@ -111,7 +111,7 @@ function test_lua_reader_cancellation_stays_pending_after_translation(
     test.assert(reader.phase == "waiting" and
                 loading:status():as_string() == "waiting",
                 "reader did not consume its first chunk before waiting")
-    loading:cancel(async.CancellationReason.simple<value>("reader cancellation"))
+    loading:cancel(async.CancellationReason.simple("reader cancellation"))
     test.assert(loading:status():as_string() == "waiting",
                 "reader cancellation abandoned an accepted wait")
     local status = async.join(loading)
@@ -145,7 +145,7 @@ function test_lua_source_open_cancellation_is_retryable(
     end)
     runtime_test.cleanup(function ()
       if not loading:status():has_finished() then
-        loading:cancel(async.CancellationReason.simple<value>(
+        loading:cancel(async.CancellationReason.simple(
           "cancelled source open cleanup"))
       end
     end)
@@ -159,14 +159,14 @@ function test_lua_source_open_cancellation_is_retryable(
                 "source require did not wait on its accepted FIFO open")
     runtime_test.cleanup(function ()
       if not loading:status():has_finished() then
-        loading:cancel(async.CancellationReason.simple<value>(
+        loading:cancel(async.CancellationReason.simple(
           "cancelled source open cleanup"))
         local release = fs.open(fifo, "w")
         release:close()
       end
       async.join(loading)
     end)
-    loading:cancel(async.CancellationReason.simple<value>("source open cancellation"))
+    loading:cancel(async.CancellationReason.simple("source open cancellation"))
     test.assert(loading:status():as_string() == "waiting",
                 "source-open cancellation abandoned its accepted request")
 

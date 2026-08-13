@@ -72,7 +72,7 @@ local function start_keep_alive_eof(first_port: integer,
     current = nil
 
     server:close()
-    watchdog:cancel(async.CancellationReason.simple<value>(
+    watchdog:cancel(async.CancellationReason.simple(
       "keep-alive EOF completed"))
     async.join(watchdog)
     test.assert(not timed_out, "HTTP keep-alive EOF matrix timed out")

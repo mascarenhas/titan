@@ -101,12 +101,19 @@ Ast.TopLevelStatic(loc, class, name, params, rettypes, flexrettype,
 Ast.InterfaceMethod(loc, name, params, rettypes, flexrettype, typeparams)
 ```
 
-Every absent `typeparams` or `typeargs` list is `{}`. The only false sentinel is
-an absent `TypeParam.constraint`; no downstream visitor distinguishes nil from
-an empty list. `TypeParam` is syntax, not a value `Decl`. An `ExpCall` has one
-independent `typeargs` list regardless of whether its ordinary argument carrier
-is `ArgsFunc`, `ArgsNamedFunc`, `ArgsMethod`, or `ArgsNamedMethod`; generics do
-not add another `Args` tag.
+Every absent `typeparams` or public `ExpCall.typeargs` list is `{}`. The only
+false sentinel is an absent `TypeParam.constraint`; no downstream visitor
+distinguishes nil from an empty list. `TypeParam` is syntax, not a value `Decl`.
+An `ExpCall` has one callable-local `typeargs` list regardless of whether its
+ordinary argument carrier is `ArgsFunc`, `ArgsNamedFunc`, `ArgsMethod`, or
+`ArgsNamedMethod`; generics do not add another `Args` tag. Explicit owner
+arguments in `Pair<T>.member(...)` are a parser decoration on the namespace
+`ExpVar`, `_nominal_typeargs`, with its source location. The checker consumes
+that decoration before member selection, retaining the canonical owner and
+closed owner application separately; erased lowering removes the decoration.
+When owner and callable-local scopes are both open, the checker accepts both
+complete written lists or infers both; one written scope never requests partial
+inference of the other.
 
 Owner nodes contain owner binders. A method, nominal function, or Interface
 method contains only its callable-local binders; a top-level function contains
@@ -133,12 +140,15 @@ literal `>` plus `SKIP*`. It does not change the exported `GT`, `GE`, or `SHR`
 lexer patterns. Consequently `Outer<Inner<T>>` closes two lists while an
 expression still parses `x >> y` as a shift.
 
-An expression suffix claims `<...>` only after lookahead proves both a complete
+A callable suffix claims `<...>` only after lookahead proves both a complete
 type-argument list and a following ordinary call delimiter (`(`, a string
-literal, or `{`). Generic suffix productions precede comparison suffixes, so
-`f < T > (x)` is a call but `a < b > c` remains comparison. This bounded
-commitment is why incomplete ambiguous text can fall back to an ordinary
-expression diagnostic instead of promising a generic-list error.
+literal, or `{`). A nominal namespace suffix instead proves a complete list
+followed by `.`, producing `Pair<T>.member`; the checker permits it only on a
+record, union, or constructor-preserving alias and only in a direct call.
+Generic suffix productions precede comparison suffixes, so `f < T > (x)` is a
+call but `a < b > c` remains comparison. This bounded commitment is why
+incomplete ambiguous text can fall back to an ordinary expression diagnostic
+instead of promising a generic-list error.
 
 Dedicated syntax labels cover:
 
@@ -294,19 +304,23 @@ Every generic call, constructor, method, nominal-function use, or contextual
 first-class use allocates fresh checker-only inference cells. An explicit list
 binds the complete unresolved sequence. Otherwise the checker:
 
-1. gathers receiver and expected-result evidence;
+1. gathers receiver and expected-result evidence, looking through one ordinary
+   outer Option wrap or force around a structured result while preserving a
+   direct `T` binding to the Option itself;
 2. gathers positional/named argument evidence and prepares contextual lambda
    parameter and result types;
 3. invariantly unifies structural evidence;
-4. closes every cell and performs occurs checks;
+4. after evidence is exhausted, closes each free cell to its declared erased
+   carrier (`value` or its fully substituted Interface application);
 5. validates constraints and `types.transient_roundtrip` for every binding;
 6. smart-substitutes the closed application through the signature; and
 7. checks each contextual lambda body exactly once.
 
-Result evidence is essential for empty union variants, phantom parameters, and
-result-only parameters such as the async Task cancellation type. Every cell must
-close; there is no wildcard, partial explicit list, default call argument, or
-cell in metadata/codegen.
+Result evidence remains authoritative for empty union variants, phantom
+parameters, and result-only parameters such as the async Task cancellation
+type. The final carrier step is fixed by the declaration and happens only after
+that evidence; there is no wildcard, partial explicit list, source-declared
+default, or inference cell in metadata/codegen.
 
 Unification descends through Option, Array, Map, Function, and same-owner
 applications. It matches fixed, variadic, and flexible callable components but
@@ -478,8 +492,11 @@ arguments to `lua_Integer` and `TString *`; it calls the concrete native body;
 and it boxes the string result into `TValue` without another tag check. The
 caller then strictly projects the erased `foldl` result to string.
 
-The inverse contextual first-class use, such as assigning generic `id` to
-`(integer) -> integer`, realizes a concrete outward wrapper. That wrapper boxes
+The inverse first-class use assigns a generic declaration either to an expected
+monomorphic type or, without context, to its declared carrier signature. For
+example, assigning `id` to `(integer) -> integer` realizes a concrete outward
+wrapper, while bare `local f = id` yields `(value) -> value`. The concrete
+wrapper boxes
 its concrete argument for the canonical erased entry and strictly projects the
 erased result. The concrete function tag and native relay belong to the wrapper;
 the canonical erased native pointer is never exposed under a concrete tag.
@@ -710,8 +727,9 @@ libuv owners   : Task<value,value>
 running_task() : Task<value,value>
 ```
 
-Runtime creation uses `Task.new<value,value>` when result context cannot infer
-an empty constructor. There is no existential Task, wildcard, private
+Runtime creation spells `Task<value,value>.new` explicitly to state its
+all-value storage invariant; the final carrier rule would choose the same
+application without evidence. There is no existential Task, wildcard, private
 application descriptor, or ambient recovery of `A`/`B`. A public `Task<A,B>` is
 a shallow view of the same userdata.
 
@@ -781,7 +799,8 @@ Focused tests and reviews therefore establish:
 - the concrete all-value Runtime plus precise public async projections and
   registration-remover ownership.
 
-The invariant is fail-closed: a free inference cell, malformed recovered scheme,
-ineligible nested FFI argument, missing boundary direction, or generic form at
-coder entry is a compiler/metadata error. It is never permission for codegen to
-guess a representation or semantic relation.
+The invariant is fail-closed: after the explicit final carrier-closing pass, a
+free inference cell, malformed recovered scheme, ineligible nested FFI argument,
+missing boundary direction, or generic form at coder entry is a compiler or
+metadata error. It is never permission for code generation to guess a
+representation or semantic relation.

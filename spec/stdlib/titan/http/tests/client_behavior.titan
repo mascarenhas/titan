@@ -493,7 +493,7 @@ local function start_client_framing(first_port: integer): async.Task
           "HTTP client accepted EOF after only an informational response")
 
     while task_support.active(peer) do timer.yield() end
-    watchdog:cancel(async.CancellationReason.simple<value>(
+    watchdog:cancel(async.CancellationReason.simple(
       "client framing completed"))
     async.join(watchdog)
     test.assert(not timed_out, "HTTP client framing matrix timed out")

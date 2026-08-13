@@ -389,6 +389,19 @@ function defs.suffix_genericnamedmethodcall(pos, name, typeargs, fields)
     return named_method_call_suffix(pos, name, typeargs, fields)
 end
 
+-- An explicit nominal application belongs to the aggregate namespace rather
+-- than to one selected constructor or nominal function. Keep it as a parser
+-- decoration on the existing namespace expression; checking resolves and
+-- closes it before the following dot selector, and erased lowering removes it
+-- before code generation.
+function defs.suffix_nominaltypeargs(pos, typeargs)
+    return function(exp)
+        exp._nominal_typeargs = typeargs
+        exp._nominal_typeargs_loc = pos
+        return exp
+    end
+end
+
 -- `obj:m` with no argument list is a bound-method reference: it evaluates to a
 -- function value (the method with `self` captured), not a call. Tried after the
 -- method-call form, so a real call (`obj:m(args)`) still parses as a call.
@@ -1164,7 +1177,12 @@ local grammar = re.compile([[
                          (LPAREN / STRINGLIT / LCURLY))
                        typearglist
 
-    expsuffix       <- (P  genericcalltypeargs funcargs)         -> suffix_genericfunccall
+    -- Aggregate applications are expression suffixes only when a member
+    -- selector follows, keeping comparison parsing unchanged.
+    nominaltypeargs <- &(genericcalltypeargprobe DOT) typearglist
+
+    expsuffix       <- (P  nominaltypeargs)                      -> suffix_nominaltypeargs
+                     / (P  genericcalltypeargs funcargs)         -> suffix_genericfunccall
                      / (P  genericcalltypeargs namedargs)        -> suffix_genericnamedfunccall
                      / (P  funcargs)                             -> suffix_funccall
                      / (P  namedargs)                            -> suffix_namedfunccall

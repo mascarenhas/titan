@@ -44,7 +44,7 @@ function test_task_operation_routing_status_and_cancellation(
     local self_cancelled_task: async.Task? = nil
     self_cancelled_task = async.run<value, value>(function (): value
       (self_cancelled_task as async.Task):cancel(
-        async.CancellationReason.simple<value>("self cancellation"))
+        async.CancellationReason.simple("self cancellation"))
       -- Pending cancellation is injected here without submitting the long timer.
       timer.sleep(60000)
       self_cancelled_body_finished = true
@@ -59,9 +59,9 @@ function test_task_operation_routing_status_and_cancellation(
       end
       waiting_observed = cancelled_task:status():as_string() == "waiting"
       cancelled_task:cancel(
-        async.CancellationReason.simple<value>("first reason"))
+        async.CancellationReason.simple("first reason"))
       cancelled_task:cancel(
-        async.CancellationReason.simple<value>("ignored second reason"))
+        async.CancellationReason.simple("ignored second reason"))
       cancellation_kept_waiting_status =
         cancelled_task:status():as_string() == "waiting" and
         not cancelled_task:status():has_finished()

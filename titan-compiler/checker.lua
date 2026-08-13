@@ -3870,6 +3870,77 @@ function checker._generic.apply_generic_alias(
     return types.Nominal(owner.name, arguments)
 end
 
+-- Record how a type-only alias reaches its canonical runtime namespace.  A
+-- forwarding alias leaves the owner's binders open; a concrete alias fixes
+-- them once and cannot be applied again.
+function checker._generic.annotate_alias_namespace(node, alias_type, namespace)
+    node._alias_namespace = true
+    local owner, arguments, fixed
+    if alias_type and alias_type._tag == "Type.GenericAlias" then
+        owner = types.registry[alias_type.target_owner_fqtn]
+        arguments = false
+        fixed = false
+    elseif alias_type and alias_type._tag == "Type.Nominal" then
+        owner = types.registry[alias_type.fqtn]
+        arguments = alias_type.args or {}
+        fixed = owner ~= nil and #(owner.typeparams or {}) > 0
+    end
+    if not owner and namespace and (namespace._tag == "Type.Record"
+            or namespace._tag == "Type.Union") then
+        owner = namespace.scope ~= false and namespace
+            or types.registry[namespace.name]
+    end
+    if owner then
+        node._generic_namespace_owner = owner
+        node._generic_namespace_arguments = arguments
+        node._generic_namespace_fixed = fixed and true or false
+    end
+end
+
+-- Close the explicit application attached to a record/union namespace before
+-- selecting its constructor or nominal function.  The selected expression
+-- retains the canonical owner separately so the later code-facing lowering
+-- still sees the shared generic declaration.
+function checker._generic.apply_namespace_typeargs(exp, st, errors)
+    local nodes = exp._nominal_typeargs
+    if nodes == nil then return exp._type end
+    local variable = exp._tag == "Ast.ExpVar" and exp.var or nil
+    local owner = variable and variable._generic_namespace_owner or nil
+    local typ = exp._type
+    if not owner and typ and (typ._tag == "Type.Record"
+            or typ._tag == "Type.Union") then
+        owner = typ.scope ~= false and typ or types.registry[typ.name]
+    end
+
+    if not variable or not owner
+       or (owner._tag ~= "Type.Record" and owner._tag ~= "Type.Union") then
+        checker.typeerror(errors, exp._nominal_typeargs_loc or exp.loc,
+            "type arguments can only be attached to a record or union namespace")
+        return typ
+    elseif variable._generic_namespace_fixed then
+        checker.typeerror(errors, exp._nominal_typeargs_loc or exp.loc,
+            "concrete type alias namespace '%s' cannot receive type arguments",
+            variable.name)
+        variable._written_nominal_typeargs = true
+        return typ
+    end
+
+    local subject = "nominal namespace '" .. (variable.name or owner.name) .. "'"
+    local nominal = checker._generic.apply_named_owner(
+        owner, nodes, st, errors,
+        exp._nominal_typeargs_loc or exp.loc, subject)
+    local closed = checker._generic.applied_owner_view(
+        nominal, errors, exp._nominal_typeargs_loc or exp.loc) or owner
+    variable._generic_namespace_owner = owner
+    variable._generic_namespace_arguments = nominal.args or {}
+    variable._generic_namespace_fixed = true
+    variable._generic_namespace_explicit = true
+    variable._written_nominal_typeargs = true
+    variable._type = closed
+    exp._type = closed
+    return closed
+end
+
 function checker._generic.resolve_local_owner(name, st)
     local declaration = st:find_symbol(name)
     if declaration and (declaration._tag == "Ast.TopLevelRecord"
@@ -6721,7 +6792,8 @@ checkvar = util.make_visitor({
             local interface = st.interface_declarations
                 and st.interface_declarations[node.name]
             if namespace then
-                node._alias_namespace = true
+                checker._generic.annotate_alias_namespace(
+                    node, resolved_alias, namespace)
                 node._alias_decl = alias
                 node._type = namespace
             elseif resolved_alias and types.is_direct_c(resolved_alias) then
@@ -6739,6 +6811,13 @@ checkvar = util.make_visitor({
         else
             node._decl = decl
             node._type = decl._type
+            if node._type and (node._type._tag == "Type.Record"
+                    or node._type._tag == "Type.Union") then
+                node._generic_namespace_owner = node._type.scope ~= false
+                    and node._type or types.registry[node._type.name]
+                node._generic_namespace_arguments = false
+                node._generic_namespace_fixed = false
+            end
             if checker._foreign_function_depth > 0 then
                 local tag = decl._tag
                 local allowed = tag == "Ast.Decl"
@@ -6794,6 +6873,9 @@ checkvar = util.make_visitor({
         else
             checkexp(node.exp, st, errors)
         end
+        if node.exp._nominal_typeargs ~= nil then
+            checker._generic.apply_namespace_typeargs(node.exp, st, errors)
+        end
         node.exp = tryforce(node.exp)
         local ltype = node.exp._type
         if node._contextual_c_name
@@ -6818,6 +6900,14 @@ checkvar = util.make_visitor({
             if module_member then
                 node._decl = module_member
                 node._type = node._decl.type
+                if ltype._tag == "Type.Module"
+                   and (node._type._tag == "Type.Record"
+                        or node._type._tag == "Type.Union") then
+                    node._generic_namespace_owner = node._type.scope ~= false
+                        and node._type or types.registry[node._type.name]
+                    node._generic_namespace_arguments = false
+                    node._generic_namespace_fixed = false
+                end
                 if ltype._tag == "Type.CModule" and mod.type_members
                    and mod.type_members[node.name] then
                     node._c_type_collision = mod.type_members[node.name]
@@ -6838,7 +6928,8 @@ checkvar = util.make_visitor({
                     mod, node.name, include_source)
                 local namespace = alias_namespace_type(member, st)
                 if namespace then
-                    node._alias_namespace = true
+                    checker._generic.annotate_alias_namespace(
+                        node, member, namespace)
                     node._alias_type = member
                     node._type = namespace
                 elseif member._tag == "Type.Interface" then
@@ -6857,7 +6948,13 @@ checkvar = util.make_visitor({
             end
         elseif ltype._tag == "Type.Record"
            or ltype._tag == "Type.Union" then
+            local namespace = node.exp._tag == "Ast.ExpVar"
+                and node.exp.var or nil
+            local owner = namespace and namespace._generic_namespace_owner
+                or types.registry[ltype.name] or ltype
             local decl = ltype.functions[node.name]
+            local canonical = owner.functions and owner.functions[node.name]
+                or decl
             if decl then
                 if not is_nominal_member_visible_from(st, decl) then
                     local kind = ltype._tag == "Type.Record"
@@ -6867,16 +6964,19 @@ checkvar = util.make_visitor({
                         kind, ltype.name, node.name,
                         nominal_module(ltype.name))
                 else
-                    node._decl = decl
+                    node._decl = canonical
+                    node._closed_generic_declaration = decl
                     node._type = types.Function(decl.params, decl.rettypes, false,
                         decl.varargtype, decl.flexrettype)
-                    -- The selected namespace is authoritative even when a
-                    -- concrete alias has already closed every owner binder.
-                    -- Falling back to the registry would reopen the raw owner
-                    -- scheme and demand or accept a contradictory application.
-                    node._generic_owner = ltype
-                    if decl._owner_scope or decl.scope or ltype.scope then
-                        node._generic_declaration = decl
+                    node._generic_owner = owner
+                    node._generic_owner_arguments = namespace
+                        and namespace._generic_namespace_arguments or false
+                    node._generic_owner_fixed = namespace
+                        and namespace._generic_namespace_fixed or false
+                    node._generic_owner_explicit = namespace
+                        and namespace._generic_namespace_explicit or false
+                    if canonical._owner_scope or canonical.scope or owner.scope then
+                        node._generic_declaration = canonical
                     end
                     -- Preserve the physical imported-module userdata that owns
                     -- a qualified namespace (`m.Rec.static` / `m.U.variant`).
@@ -8223,7 +8323,8 @@ function checker._generic.inference_arguments(entry, recover)
     local arguments = {}
     for index, cell in ipairs(entry.cells) do
         arguments[index] = cell.binding
-            or (recover and types.Value())
+            or (recover and checker._generic.rigid_parameter_carrier(
+                entry.parameters[index]))
             or entry.parameters[index]
     end
     return arguments
@@ -8277,8 +8378,10 @@ end
 function checker._generic.inference_type_arguments(context)
     local arguments = {}
     for _, entry in ipairs(context.scopes) do
-        for _, cell in ipairs(entry.cells) do
-            arguments[#arguments + 1] = cell.binding or types.Value()
+        for index, cell in ipairs(entry.cells) do
+            arguments[#arguments + 1] = cell.binding
+                or checker._generic.rigid_parameter_carrier(
+                    entry.parameters[index])
         end
     end
     return arguments
@@ -8289,7 +8392,7 @@ end
 -- declared surface constraint is I<U>, a callee constraint W: I<V> provides
 -- the invariant equation I<V> = I<U> and can therefore bind V to U. Iterate a
 -- bounded number of times so chains of dependent constraints settle before
--- unresolved inference cells are diagnosed.
+-- free inference cells close to their declared carriers.
 function checker._generic.infer_constraint_evidence(context)
     local cell_count = 0
     for _, entry in ipairs(context.scopes) do
@@ -8346,17 +8449,65 @@ function checker._generic.infer_constraint_evidence(context)
     end
 end
 
+function checker._generic.default_inference_cells(context)
+    -- Evidence collection is complete before this pass. Close only genuinely
+    -- free binders, using the same carrier declared for rigid occurrences.
+    -- Unconstrained binders become `value`; constrained binders become their
+    -- fully substituted Interface application.
+    local remaining = 0
+    for _, entry in ipairs(context.scopes) do
+        for index, cell in ipairs(entry.cells) do
+            if not cell.binding then
+                local typeparam = entry.typeparams[index]
+                if typeparam.constraint == false then
+                    cell.binding = types.Value()
+                    cell.evidence = "declared erased carrier"
+                else
+                    remaining = remaining + 1
+                end
+            end
+        end
+    end
+
+    local limit = math.max(1, remaining)
+    for _ = 1, limit do
+        local changed = false
+        for _, entry in ipairs(context.scopes) do
+            for index, cell in ipairs(entry.cells) do
+                local typeparam = entry.typeparams[index]
+                if not cell.binding and typeparam.constraint ~= false then
+                    local constraint = checker._generic.substitute_inference(
+                        context, typeparam.constraint, false)
+                    if not checker._generic.inference_type_has_unresolved(
+                            context, constraint) then
+                        -- This is a surface binding. Preserve rigid
+                        -- parameters owned by an enclosing declaration; the
+                        -- later code-facing pass erases them recursively.
+                        cell.binding = constraint
+                        cell.evidence = "declared erased carrier"
+                        changed = true
+                        remaining = remaining - 1
+                    end
+                end
+            end
+        end
+        if remaining == 0 or not changed then break end
+    end
+    return remaining
+end
+
 function checker._generic.close_inference_context(context)
     if context.closed then return context.valid end
     context.closed = true
     checker._generic.infer_constraint_evidence(context)
-    local valid = true
+    local unresolved = checker._generic.default_inference_cells(context)
+    local valid = unresolved == 0
 
     for _, entry in ipairs(context.scopes) do
         for _, cell in ipairs(entry.cells) do
             if not cell.binding then
                 checker.typeerror(context.errors, context.loc,
-                    "cannot infer type argument '%s' for %s; provide a complete explicit type argument list",
+                    "cannot close type argument '%s' for %s to its declared erased carrier",
                     cell.name, context.subject)
                 cell.binding = types.Value()
                 cell.invalid = true
@@ -8398,6 +8549,30 @@ function checker._generic.close_inference_context(context)
     return valid
 end
 
+function checker._generic.unify_result_inference(
+        context, pattern, target, term, loc)
+    -- Ordinary sinks may add or remove one outer option around a structured
+    -- result.  Use the option's element as contextual evidence, while keeping
+    -- a direct binder authoritative (`T` itself still binds to `X?`).  The
+    -- eventual ordinary assignment check remains responsible for admitting
+    -- the actual option conversion.
+    local direct = checker._generic.inference_cell(context, pattern)
+    if not direct and pattern and target then
+        if pattern._tag ~= "Type.Option"
+           and target._tag == "Type.Option" then
+            return checker._generic.unify_inference(
+                context, pattern, target.base, term, loc)
+        elseif pattern._tag == "Type.Option"
+           and target._tag ~= "Type.Option"
+           and target._tag ~= "Type.Nil" then
+            return checker._generic.unify_inference(
+                context, pattern.base, target, term, loc)
+        end
+    end
+    return checker._generic.unify_inference(
+        context, pattern, target, term, loc)
+end
+
 function checker._generic.infer_result_evidence(context, signature, demand)
     for index, target in ipairs(demand.fixed or {}) do
         target = expected_type(target)
@@ -8407,7 +8582,7 @@ function checker._generic.infer_result_evidence(context, signature, demand)
                 pattern = optionize(signature.flexrettype)
             end
             if pattern then
-                checker._generic.unify_inference(context, pattern, target,
+                checker._generic.unify_result_inference(context, pattern, target,
                     "expected result " .. index, demand.loc or context.loc)
             end
         end
@@ -8415,12 +8590,12 @@ function checker._generic.infer_result_evidence(context, signature, demand)
     local tail = expected_type(demand.tail)
     if tail then
         for index = #(demand.fixed or {}) + 1, #signature.rettypes do
-            checker._generic.unify_inference(context,
+            checker._generic.unify_result_inference(context,
                 signature.rettypes[index], tail,
                 "expected open result", demand.loc or context.loc)
         end
         if signature.flexrettype then
-            checker._generic.unify_inference(context,
+            checker._generic.unify_result_inference(context,
                 signature.flexrettype, tail,
                 "expected open result", demand.loc or context.loc)
         end
@@ -8661,6 +8836,28 @@ function checker._generic.is_generic_first_class_expression(
     return generic
 end
 
+function checker._generic.resolve_deferred_generic_arguments(
+        context, deferred, st, errors, label)
+    -- A generic declaration is itself argument evidence once it has closed to
+    -- an ordinary function. Prefer a complete function pattern supplied by
+    -- other evidence; otherwise close the inner declaration to its own
+    -- carriers before closing the outer call. Lambdas remain deferred because
+    -- v1 never infers their missing annotations from the body.
+    for _, item in ipairs(deferred) do
+        if item.exp._tag ~= "Ast.ExpFunction" then
+            local expected = checker._generic.closed_inference_pattern(
+                context, item.pattern)
+            checkexp(item.exp, st, errors, expected,
+                result_demand({ expected or UNKNOWN_SLOT }, false, {
+                    term = label,
+                }))
+            checker._generic.unify_inference(context, item.pattern,
+                item.exp._type, label, item.exp.loc)
+            item.checked = true
+        end
+    end
+end
+
 function checker._generic.infer_positional_call(context, signature, args,
                                                 st, errors, term)
     local deferred, deferred_by_exp = {}, {}
@@ -8668,6 +8865,7 @@ function checker._generic.infer_positional_call(context, signature, args,
         local pattern = checker._generic.generic_formal_pattern(
             signature, index)
         if pattern and (exp._tag == "Ast.ExpFunction"
+                or exp._tag == "Ast.ExpMethodRef"
                 or checker._generic.is_generic_first_class_expression(
                     exp, st, errors)) then
             if exp._tag == "Ast.ExpFunction" then
@@ -8732,16 +8930,21 @@ function checker._generic.infer_positional_call(context, signature, args,
             "open variadic argument", adjusted.open_source.loc)
     end
 
+    checker._generic.infer_constraint_evidence(context)
+    checker._generic.resolve_deferred_generic_arguments(
+        context, deferred, st, errors, "generic function argument")
     checker._generic.close_inference_context(context)
     local closed = checker._generic.substitute_inference(
         context, signature, true)
     for _, item in ipairs(deferred) do
-        local expected = checker._generic.substitute_inference(
-            context, item.pattern, true)
-        checkexp(item.exp, st, errors, expected,
-            result_demand({ expected }, false, {
-                term = "contextual generic argument",
-            }))
+        if not item.checked then
+            local expected = checker._generic.substitute_inference(
+                context, item.pattern, true)
+            checkexp(item.exp, st, errors, expected,
+                result_demand({ expected }, false, {
+                    term = "contextual generic argument",
+                }))
+        end
     end
     checker._generic.close_generic_adjusted_arguments(
         adjusted, args, closed, st, errors, term)
@@ -8786,6 +8989,7 @@ function checker._generic.infer_named_call(context, signature, fields,
         else
             local pattern = signature.params[index]
             if field.exp._tag == "Ast.ExpFunction"
+               or field.exp._tag == "Ast.ExpMethodRef"
                or checker._generic.is_generic_first_class_expression(
                     field.exp, st, errors) then
                 if field.exp._tag == "Ast.ExpFunction" then
@@ -8824,16 +9028,21 @@ function checker._generic.infer_named_call(context, signature, fields,
         end
     end
 
+    checker._generic.infer_constraint_evidence(context)
+    checker._generic.resolve_deferred_generic_arguments(
+        context, deferred, st, errors, "named generic function argument")
     checker._generic.close_inference_context(context)
     local closed = checker._generic.substitute_inference(
         context, signature, true)
     for _, item in ipairs(deferred) do
-        local expected = checker._generic.substitute_inference(
-            context, item.pattern, true)
-        checkexp(item.exp, st, errors, expected,
-            result_demand({ expected }, false, {
-                term = "contextual generic argument",
-            }))
+        if not item.checked then
+            local expected = checker._generic.substitute_inference(
+                context, item.pattern, true)
+            checkexp(item.exp, st, errors, expected,
+                result_demand({ expected }, false, {
+                    term = "contextual generic argument",
+                }))
+        end
     end
 
     local dense, order = {}, {}
@@ -8891,8 +9100,10 @@ function checker._generic.infer_first_class_application(
         subject, scopes, signature, expected, st, errors, loc)
     local context = checker._generic.new_inference_context(
         subject, scopes, st, errors, loc)
-    checker._generic.unify_inference(context, signature, expected,
-        "expected first-class function type", loc)
+    if expected then
+        checker._generic.unify_inference(context, signature, expected,
+            "expected first-class function type", loc)
+    end
     checker._generic.close_inference_context(context)
     return checker._generic.substitute_inference(
         context, signature, true),
@@ -8906,7 +9117,9 @@ function checker._generic.instantiate_first_class_variable(
        and expected.base._tag == "Type.Function" then
         expected = expected.base
     end
-    if not expected or expected._tag ~= "Type.Function" then return nil end
+    if expected and expected._tag ~= "Type.Function" then
+        expected = nil
+    end
 
     local subject = "generic declaration '" .. variable.name .. "'"
     local scopes, signature, declaration = {}, nil, nil
@@ -8921,16 +9134,19 @@ function checker._generic.instantiate_first_class_variable(
         end
         local owner = variable._generic_owner
             or types.registry[declaration.fqtn]
-        if owner and #(owner.typeparams or {}) > 0 then
+        local callable = declaration
+        if variable._generic_owner_fixed then
+            callable = variable._closed_generic_declaration or declaration
+        elseif owner and #(owner.typeparams or {}) > 0 then
             scopes[#scopes + 1] = checker._generic.inference_scope_entry(
                 owner.scope, owner.typeparams, owner._generic_parameters)
         end
-        if #(declaration.typeparams or {}) > 0 then
+        if #(callable.typeparams or {}) > 0 then
             scopes[#scopes + 1] = checker._generic.inference_scope_entry(
-                declaration.scope, declaration.typeparams)
+                callable.scope, callable.typeparams)
         end
-        if #scopes == 0 then return nil end
-        signature = checker._generic.callable_function_type(declaration)
+        if #scopes == 0 and not variable._generic_owner_fixed then return nil end
+        signature = checker._generic.callable_function_type(callable)
     else
         return nil
     end
@@ -9011,6 +9227,64 @@ function checker._generic.instantiate_static_declaration(
     return checker._generic.callable_function_type(closed), arguments, closed
 end
 
+function checker._generic.instantiate_owner_applied_static(
+        node, declaration, closed_owner_declaration, variable,
+        st, errors, demand, subject)
+    local local_count = #(closed_owner_declaration.typeparams or {})
+    local owner_was_written = variable._generic_owner_explicit == true
+    local local_was_written = #(node.typeargs or {}) > 0
+
+    if owner_was_written and local_count > 0 and not local_was_written then
+        checker.typeerror(errors, node.loc,
+            "%s must provide both the owner and callable type argument lists, or infer both",
+            subject)
+    end
+
+    local closed, local_arguments = closed_owner_declaration, {}
+    if local_count > 0 then
+        if local_was_written then
+            local valid
+            local_arguments, valid =
+                checker._generic.recover_complete_type_arguments(
+                    node.typeargs, local_count, st, errors, node.loc, subject)
+            if valid then
+                checker._generic.validate_binder_arguments(
+                    closed_owner_declaration.scope,
+                    closed_owner_declaration.typeparams, local_arguments,
+                    st, errors, node.loc, subject, false)
+            end
+            closed = checker._generic.generic_substitute(
+                closed_owner_declaration, closed_owner_declaration.scope,
+                local_arguments, errors, node.loc,
+                "cannot instantiate " .. subject) or closed_owner_declaration
+        elseif not owner_was_written then
+            local context = checker._generic.new_inference_context(subject, {
+                checker._generic.inference_scope_entry(
+                    closed_owner_declaration.scope,
+                    closed_owner_declaration.typeparams),
+            }, st, errors, node.loc)
+            checker._generic.infer_call_application(context,
+                checker._generic.callable_function_type(
+                    closed_owner_declaration), node, demand,
+                st, errors, subject, closed_owner_declaration.paramnames)
+            local_arguments = checker._generic.inference_type_arguments(context)
+            closed = checker._generic.substitute_inference(
+                context, closed_owner_declaration, true)
+        end
+    elseif local_was_written then
+        checker.typeerror(errors, node.loc,
+            "%s has no callable type parameters; attach owner arguments to the nominal namespace",
+            subject)
+    end
+
+    node._generic_declaration = declaration
+    node._generic_type_arguments = local_arguments
+    node._closed_generic_declaration = closed
+    local signature = checker._generic.callable_function_type(closed)
+    node.exp._type = signature
+    return signature
+end
+
 function checker._generic.instantiate_direct_call(
         node, ftype, st, errors, demand)
     local subject = "call to '" .. expname(node.exp) .. "'"
@@ -9038,12 +9312,24 @@ function checker._generic.instantiate_direct_call(
     if declaration and declaration._tag == "Type.StaticMethod" then
         local owner = variable._generic_owner
             or types.registry[declaration.fqtn]
+        if variable._generic_owner_fixed then
+            local closed_owner = variable._closed_generic_declaration
+                or node._closed_generic_declaration or declaration
+            return checker._generic.instantiate_owner_applied_static(
+                node, declaration, closed_owner, variable,
+                st, errors, demand, subject)
+        end
         local owner_count = owner and #(owner.typeparams or {}) or 0
         local local_count = #(declaration.typeparams or {})
         local count = owner_count + local_count
         if count > 0 then
             local closed, arguments, closed_declaration
             if #(node.typeargs or {}) > 0 then
+                if owner_count > 0 then
+                    checker.typeerror(errors, node.loc,
+                        "%s cannot receive owner type arguments after the member name; attach them to the nominal namespace",
+                        subject)
+                end
                 closed, arguments, closed_declaration =
                     checker._generic.instantiate_static_declaration(
                         declaration, owner, node.typeargs, st, errors,
@@ -9436,7 +9722,10 @@ checkexp = util.make_visitor({
         end
         if node.var._decl then node.var._decl._used = true end
         local texp = node.var._type
-        if texp._tag == "Type.Module" or texp._tag == "Type.CModule" then
+        if node.var._generic_owner_explicit then
+            node._type = invalid(errors, node.loc,
+                "an explicitly applied nominal function can only be used in a direct call")
+        elseif texp._tag == "Type.Module" or texp._tag == "Type.CModule" then
             node._type = invalid(errors, node.loc,
                 "trying to access module '%s' as a first-class value",
                 node.var.name)
@@ -10419,33 +10708,30 @@ checkexp = util.make_visitor({
                    and expected.base._tag == "Type.Function" then
                     expected = expected.base
                 end
-                if not expected or expected._tag ~= "Type.Function" then
-                    node._type = invalid(errors, node.loc,
-                        "generic method '%s:%s' requires a monomorphic expected function type when used as a bound value",
-                        class.name, node.name)
-                else
-                    local subject = "generic bound method '" .. class.name
-                        .. ":" .. node.name .. "'"
-                    local closed, arguments, inference =
-                        checker._generic.infer_first_class_application(
-                            subject, { checker._generic.inference_scope_entry(
-                                mtype.scope, mtype.typeparams) },
-                            types.method_function_type(mtype), expected,
-                            st, errors, node.loc)
-                    local closed_method =
-                        checker._generic.substitute_inference(
-                            inference, mtype, true)
-                    node._generic_declaration = mtype
-                    node._generic_type_arguments = arguments
-                    node._method = closed_method
-                    node._type = closed
-                    if class._tag == "Type.Interface" then
-                        node._interface = class
-                        node._interface_method = closed_method
-                        node._interface_method_index =
-                            assert(interface_method_index(class, node.name))
-                        node._interface_bound = true
-                    end
+                if expected and expected._tag ~= "Type.Function" then
+                    expected = nil
+                end
+                local subject = "generic bound method '" .. class.name
+                    .. ":" .. node.name .. "'"
+                local closed, arguments, inference =
+                    checker._generic.infer_first_class_application(
+                        subject, { checker._generic.inference_scope_entry(
+                            mtype.scope, mtype.typeparams) },
+                        types.method_function_type(mtype), expected,
+                        st, errors, node.loc)
+                local closed_method =
+                    checker._generic.substitute_inference(
+                        inference, mtype, true)
+                node._generic_declaration = mtype
+                node._generic_type_arguments = arguments
+                node._method = closed_method
+                node._type = closed
+                if class._tag == "Type.Interface" then
+                    node._interface = class
+                    node._interface_method = closed_method
+                    node._interface_method_index =
+                        assert(interface_method_index(class, node.name))
+                    node._interface_bound = true
                 end
             else
                 node._method = mtype
@@ -14009,6 +14295,9 @@ function checker._generic.lower_erased_annotations(root, state)
             if key ~= "_declared_type" then
                 if type(key) == "string"
                    and (key:match("^_generic")
+                        or key == "_nominal_typeargs"
+                        or key == "_nominal_typeargs_loc"
+                        or key == "_written_nominal_typeargs"
                         or key == "_closed_generic_declaration"
                         or key == "_rigid_receiver_type") then
                     result[key] = nil

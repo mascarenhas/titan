@@ -303,13 +303,13 @@ local function read_request_with_idle_timeout(
   local raced = async.race_two(reader, deadline)
   case raced
   when first: status then
-    deadline:cancel(async.CancellationReason.simple<value>(
+    deadline:cancel(async.CancellationReason.simple(
       "HTTP request headers arrived before idle timeout"))
     local succeeded, request? = status:has_succeeded()
     if succeeded then return request end
     return nil
   when second: status then
-    reader:cancel(async.CancellationReason.simple<value>(
+    reader:cancel(async.CancellationReason.simple(
       "HTTP idle timeout expired"))
     async.join(reader)
     -- A successful deadline is the ordinary idle-timeout path. A failed or

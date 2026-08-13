@@ -8,7 +8,7 @@ end
 
 local function cancel_and_join_task(task: async.Task, reason: string)
   if active(task) then
-    task:cancel(async.CancellationReason.simple<value>(reason))
+    task:cancel(async.CancellationReason.simple(reason))
   end
   async.join(task)
 end

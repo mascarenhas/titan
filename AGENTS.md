@@ -1019,6 +1019,14 @@ substitution, recursive; error on missing keys). Key facts:
   and `_\u2131_` nominal-member entry separators; its serialized layouts and
   Lua contract remain unchanged. ABI 0.24 extends serialized interfaces for
   generics while retaining the erased generated layouts and Lua contract.
+- Generic owner arguments attach to the nominal namespace (`Pair<T>.new`,
+  `Pair<T>.static<U>`), while callable-local arguments remain after the member;
+  never accept constructor owner arguments as `Pair.new<T>`. When both owner
+  and callable scopes are open, explicit lists are all-or-none. After all
+  receiver/result/argument/constraint evidence, a free binder closes to its
+  declared erased carrier (`value` or its recursively substituted Interface
+  application). Contextual constructor inference looks through an ordinary
+  outer Option wrap, as in `task:cancel(CancellationReason.simple("timeout"))`.
 - Each generated logical module object contains the canonical serialized
   interface twice: callable `<mangled>_types`/`_abi` entries and one
   relocation-free, byte-aligned metadata section rendered by

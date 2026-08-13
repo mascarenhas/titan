@@ -122,6 +122,13 @@ describe("erased coder boundary", function()
         }
         assert_rejected(tree,
             "generic AST field 'typeparams'.-code%-facing AST")
+
+        tree = checked()
+        tree[1].params[1]._nominal_typeargs = {
+            { _tag = "Ast.TypeInteger" },
+        }
+        assert_rejected(tree,
+            "generic AST field '_nominal_typeargs'.-code%-facing AST")
     end)
 
     it("rejects checker-only inference cells", function()

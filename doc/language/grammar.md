@@ -152,15 +152,20 @@ program  ::= {tldecl} [moduleinit]
 tldecl   ::= tlmethod | tlrecfunc | tlfunc | tlforeignfunc | tlvar
            | tlrecord | tlunion | tlinterface | tltype | tlimport
            | tlforeignimport
-tlmethod ::= [local] function Name ':' Name '(' [parlist] ')' [':' rettype] block end
-tlrecfunc ::= [local] function Name '.' Name '(' [parlist] ')' [':' rettype] block end
-tlfunc   ::= [local] function Name '(' [parlist] ')' [':' rettype] block end
+tlmethod ::= [local] function Name ':' Name [typeparams]
+             '(' [parlist] ')' [':' rettype] block end
+tlrecfunc ::= [local] function Name '.' Name [typeparams]
+             '(' [parlist] ')' [':' rettype] block end
+tlfunc   ::= [local] function Name [typeparams]
+             '(' [parlist] ')' [':' rettype] block end
 tlforeignfunc ::= foreign function Name '(' [parlist] ')' [':' rettype] block end
 tlvar    ::= [local] decl '=' exp
-tlrecord ::= [local] record Name {recordfield} end
-tlunion  ::= [local] union Name unionvariant {unionvariant} end
-tlinterface ::= interface Name interfacemethod {interfacemethod} end
-interfacemethod ::= function Name '(' [parlist] ')' [':' rettype]
+tlrecord ::= [local] record Name [typeparams] {recordfield} end
+tlunion  ::= [local] union Name [typeparams] unionvariant {unionvariant} end
+tlinterface ::= interface Name [typeparams]
+                interfacemethod {interfacemethod} end
+interfacemethod ::= function Name [typeparams]
+                    '(' [parlist] ')' [':' rettype]
 tltype   ::= [local] type Name '=' type
 recordfield     ::= [local] Name ['?'] ':' type [';']
 unionvariant    ::= [local] Name [':' type] [';']
@@ -172,6 +177,10 @@ parlist         ::= param {',' param} [',' varargparam]
                  |  varargparam
 param           ::= Name ':' type
 varargparam     ::= '...' ':' type
+typeparams      ::= '<' typeparam {',' typeparam} '>'
+typeparam       ::= Name [':' namedtype]
+typeargs        ::= '<' type {',' type} '>'
+namedtype       ::= Name [typeargs] | Name '.' Name [typeargs]
 ```
 
 ```lua
@@ -237,11 +246,11 @@ type       ::= simpletype
             |  simpletype '->' rettype
 simpletype ::= basictype ['?']
 basictype  ::= nil | boolean | integer | float | string | value
-            |  Name '.' Name
+            |  Name '.' Name [typeargs]
             |  '*' simpletype
             |  const '*' simpletype
             |  ownedtype
-            |  Name
+            |  Name [typeargs]
             |  '{' type ':' type '}'
             |  '{' type '}'
 ownedtype  ::= owned '*' cownedpayload
@@ -280,8 +289,13 @@ visible variable of a generic `for`
 write `p: T?`. Record fields admit the annotated shorthand `x?: T`, which is
 equivalent to `x: T?`.
 
-In types, `Name` may be a record, union, Interface, or transparent alias, and
-`mod.Name` may name an exported one from an imported module; `{T}` is an
+In types, `Name` may be a record, union, Interface, type parameter, or
+transparent alias, and `mod.Name` may name an exported type from an imported
+module. Generic owners and forwarding aliases to a bare generic owner take
+`typeargs`; a concrete alias is already closed. Declaration `typeparams` may constrain a parameter to a named Interface
+application. See [Generics](generics.md).
+
+`{T}` is an
 array, `{K: V}` a map, `T?` an option type, and `t -> t` a function type. A
 function type may end its argument list with
 `...: T` to describe a variadic function value, and a parenthesized result
@@ -445,12 +459,13 @@ lambdaparam ::= Name [':' type]
 lambdavarargparam ::= '...' [':' type]
 prefixexp   ::= Name | '(' exp ')'
 suffixedexp ::= prefixexp suffix {suffix}
-suffix      ::= callargs
-             |  ':' Name [callargs]
+suffix      ::= [typeargs] callargs
+             |  ':' Name
+             |  ':' Name [typeargs] callargs
              |  '[' exp ']'
-             |  '.' Name
-functioncall ::= prefixexp {suffix} callargs
-              |  prefixexp {suffix} ':' Name callargs
+             |  [typeargs] '.' Name
+functioncall ::= prefixexp {suffix} [typeargs] callargs
+              |  prefixexp {suffix} ':' Name [typeargs] callargs
 callargs    ::= funcargs | namedargs
 funcargs    ::= '(' [explist] ')'
              |  LiteralString
@@ -465,6 +480,13 @@ field       ::= exp
              |  '[' exp ']' '=' exp
 fieldsep    ::= ',' | ';'
 ```
+
+A call's `typeargs` after the callable name apply its callable-local binders:
+`f<T>(x)` and `object:map<U>(x)`. Explicit record/union owner arguments instead
+precede the selected dot member: `Pair<T,U>.new(x, y)` and
+`Pair<T,U>.from<V>(x)`. If both scopes are open, write both complete lists or
+neither. An owner-attached list without a direct call is rejected semantically.
+Angle-list recognition is contextual, so ordinary `<`, `>`, `>=`, and `>>` expressions remain available.
 
 Parentheses and bare strings are positional call syntax: `f(x)` and
 `f "literal"`, with corresponding method forms. Bare braces are always named

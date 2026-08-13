@@ -17793,7 +17793,8 @@ function coder._assert_erased_boundary(ast)
         elseif tag == "Ast.TypeParam" then
             return "generic AST form " .. tag
         elseif type(tag) == "string" and tag:sub(1, 4) == "Ast." then
-            for _, field in ipairs({ "typeparams", "typeargs" }) do
+            for _, field in ipairs({
+                    "typeparams", "typeargs", "_nominal_typeargs" }) do
                 if nonempty(rawget(value, field)) then
                     return "generic AST field '" .. field .. "' on " .. tag
                 end

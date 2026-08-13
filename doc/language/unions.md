@@ -94,6 +94,12 @@ local line = Message.write("hello")
 local moved = Message.move(Point.new(10.0, 20.0))
 ```
 
+For a generic union, explicit owner arguments attach to the union namespace:
+`Maybe<integer>.present(1)` and `Maybe<integer>.absent()`. The old spelling
+`Maybe.present<integer>(1)` is not an owner application. An inferred call may
+remain `Maybe.present(1)`, and a result-only binder with no evidence closes by
+the [generic final carrier rule](generics.md#instantiating-calls-and-constructors).
+
 Variant constructors are ordinary first-class function values:
 
 ```titan

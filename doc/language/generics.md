@@ -204,7 +204,7 @@ In an ordinary scalar type position, a generic owner without arguments means
 that every argument is literally `value`:
 
 ```titan
-local p: Pair = Pair.new<value, value>(1, "one")
+local p: Pair = Pair<value, value>.new(1, "one")
 -- Pair above means Pair<value, value>.
 ```
 
@@ -216,8 +216,8 @@ requires an explicit argument because `value` does not implement `Show`.
 This all-`value` rule applies to ordinary scalar uses, including fields,
 parameters, results, and the `Task` returned by `async.running()`. Constructor
 and nominal-static selection is a different *owner-scheme context*: `Pair.new`
-retains the owner parameters long enough for a call or expected function type
-to instantiate them.
+retains the owner parameters through call and expected-function evidence, then
+closes any remaining binders to their declared carriers.
 
 ### Constructor-preserving aliases
 
@@ -229,7 +229,7 @@ constraints, and nominal namespace:
 type Either = Pair
 local type IntPair = Pair<integer, integer>
 
-local e: Either<string, integer> = Either.new("ok", 200)
+local e: Either<string, integer> = Either<string, integer>.new("ok", 200)
 local p: IntPair = IntPair.new(1, 2)
 ```
 
@@ -276,8 +276,13 @@ Arrays, Maps, function shapes, and applications of the same owner. It does not:
 - generalize a local binding in Hindley–Milner style; or
 - leave a wildcard or unresolved parameter in the result.
 
-A conflicting or unresolved parameter is an error. This includes a phantom or
-result-only parameter for which the use provides no evidence.
+Conflicting evidence is an error. After receiver, result, argument, lambda, and
+constraint evidence is exhausted, a still-free parameter closes to its declared
+erased carrier: `value` for an unconstrained parameter, or the recursively
+closed Interface application for a constrained parameter. Evidence always wins
+over this final carrier rule. It lets empty variants, phantom parameters, and
+result-only parameters remain ordinary closed calls without introducing a
+wildcard or a run-time type argument.
 
 After every parameter closes, Titan reconstructs the application with its
 ordinary canonical type constructors. `value?` and nested Options collapse to
@@ -294,7 +299,7 @@ A call may instead supply the complete unresolved list:
 
 ```titan
 foldl<integer, string>(numbers, combine, "")
-Pair.new<integer, string>(1, "one")
+Pair<integer, string>.new(1, "one")
 stack:push<MyStack>(item)
 make<integer>{ item = 1 }       -- named-call syntax is also supported
 ```
@@ -304,12 +309,16 @@ There is no partial explicit list. The order is:
 - a top-level function's callable parameters;
 - for a receiver method, only its callable-local parameters (the receiver has
   already fixed the owner arguments); and
-- for a constructor or nominal function, owner parameters first, followed by
-  callable-local parameters.
+- for a constructor or nominal function, the complete owner list is attached to
+  the nominal namespace, while any complete callable-local list remains after
+  the member name: `Pair<T,U>.new(...)` and `Pair<T,U>.from<V>(...)`.
 
 Constructors synthesized for records and union variants have only the owner's
-parameters. An empty variant, a phantom owner parameter, or another result-only
-scheme therefore needs result context or a complete explicit list.
+parameters. The old member-attached spelling `Pair.new<T,U>(...)` is rejected.
+When a nominal function has both owner and callable-local binders, write both
+lists or neither; `Pair<T,U>.from(...)` and `Pair.from<V>(...)` do not request
+partial inference. A concrete alias such as `IntPair` has already fixed its
+owner arguments, so only a nominal function's callable-local list can remain.
 
 Generic-call suffixes use the same positional, named, and method-call argument
 forms as ordinary calls. Whitespace is insignificant, so `f<T>(x)` and
@@ -333,9 +342,12 @@ function use_function_values(): integer
 end
 ```
 
-`local f = id` is an error because no context closes `T`. Version one has no
-written specialization form that produces a value without a call. The
-instantiated value may be an ordinary adjustment wrapper, and wrappers are
+Without an expected function type, `local f = id` closes `T` to its declared
+erased carrier and therefore gives `f` the ordinary type `(value) -> value`.
+Version one has no written specialization form that produces a value without a
+call: `Pair<integer>.new` is rejected, while the bare `Pair.new` can still be
+instantiated by context or by the final carrier rule. The instantiated value may
+be an ordinary adjustment wrapper, and wrappers are
 fresh values: generic instantiation does not promise that function identity is
 preserved across adjusted views. See
 [closure adjustment wrappers](closure-adjustment-wrappers.md).
@@ -715,8 +727,9 @@ function running(): Task
 cancellation reason. `running()` is deliberately
 monomorphic: bare `Task` is exactly `Task<value,value>`.
 
-`B` is result-only in `run<A,B>`. An expected `Task<A,B>` may infer it;
-otherwise the call must give the complete list:
+`B` is result-only in `run<A,B>`. An expected `Task<A,B>` infers it;
+without that evidence it closes to `value`. A complete explicit list remains
+useful when the caller wants to state both arguments:
 
 ```titan
 function start(): async.Task<string, value>
@@ -726,9 +739,10 @@ function start(): async.Task<string, value>
 end
 ```
 
-There is no partial `async.run<string>` default. A zero-result callback gives no
-evidence for `A`; select an `A` that accepts the nil-filled result explicitly or
-return one `nil` value.
+There is no partial explicit `async.run<string>` list. A zero-result callback
+gives no evidence for `A`, so the final carrier rule chooses `value`; callers
+that need a different result application must provide context or the complete
+list.
 
 The fixed-arity combinators preserve each operand independently. Their
 one- and two-operand forms make the per-operand types explicit:
@@ -763,9 +777,9 @@ absent. `join_three` through `join_five` return the corresponding statuses.
 it does not need cancellation parameters. `RaceNResult<A1,B1,...,AN,BN>` and
 `AllNError<A1,B1,...,AN,BN>` have one `TaskStatus<A_i,B_i>` arm per operand.
 `all_*` returns every `A_i` on success and raises the corresponding `AllNError`
-on failure or cancellation. A payload-free or result-incomplete union
-constructor needs an expected type or a complete explicit argument list like
-any other result-only generic constructor.
+on failure or cancellation. Expected type information closes a payload-free or
+result-incomplete union constructor precisely; without it, remaining binders
+close to their declared carriers like any other result-only generic constructor.
 
 The scheduler and libuv ownership machinery intentionally store
 `Task<value,value>`. A public `Task<A,B>` is a shallow view of that same userdata:
@@ -796,14 +810,13 @@ Titan diagnoses a generic use before code generation when a binder, argument,
 or application is malformed or cannot close. Common categories include:
 
 - duplicate, cyclic, shadowing, or non-Interface binders and constraints;
-- wrong owner arity, a partial explicit call list, a constraint violation, or an
-  unresolved result-only/phantom parameter;
+- wrong owner arity, misplaced or partial explicit lists, or a constraint
+  violation;
 - a conflict between argument, receiver, result, or lambda evidence;
 - use of an operation not provided by a rigid parameter;
 - an ineligible type argument, including a forbidden FFI shape hidden inside a
   larger type; and
-- trying to use a generic declaration as a value without a complete expected
-  function type.
+- using an explicitly owner-applied nominal member without a direct call.
 
 The parser gives focused errors after a declaration or type-application angle
 list has committed. Because call syntax is intentionally ambiguous with
@@ -814,7 +827,8 @@ call suffix.
 Version one deliberately has:
 
 - no higher-kinded parameters, wildcard or partial applications, variance,
-  subtyping, or default call type arguments;
+  subtyping, or source-declared default type arguments (the fixed final carrier
+  rule is not a declaration-specific default);
 - no parameterized aliases (only constructor-preserving forwarding aliases);
 - no polymorphic lambdas, local let-polymorphism, generic function types, or
   first-class values that remain polymorphic;

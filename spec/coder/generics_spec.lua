@@ -57,6 +57,14 @@ describe("generic erased core", function()
                 return identity("ok")
             end
 
+            function defaulted(): integer
+                local generic = identity
+                local boxed: value = identity
+                local from_box = boxed as (value) -> value
+                return generic(40) as integer
+                    + (from_box(2) as integer)
+            end
+
             function same(): boolean
                 local token = Token.new()
                 return identity(token) == token and accepts(token)
@@ -82,6 +90,7 @@ describe("generic erased core", function()
         local ok, err = h.call("test", [[
             assert(test.number() == 42)
             assert(test.text() == "ok")
+            assert(test.defaulted() == 42)
             assert(test.same())
             local first, second = test.open()
             assert(first == 41 and second == 41)
@@ -103,8 +112,12 @@ describe("generic erased core", function()
                 self.item = item
             end
 
+            function Box:project<U>(item: U): U
+                return item
+            end
+
             function Box.map<U>(item: U): Box<U>
-                return Box.new<U>(item)
+                return Box<U>.new(item)
             end
 
             function same_box<A>(left: Box<value>, right: Box<A>): boolean
@@ -117,7 +130,7 @@ describe("generic erased core", function()
             end
 
             function make<T>(item: T): Maybe<T>
-                return Maybe.present<T>(item)
+                return Maybe<T>.present(item)
             end
 
             function number(): integer
@@ -132,18 +145,33 @@ describe("generic erased core", function()
                 end
             end
 
+            type IntBox = Box<integer>
+
             function text(): string
-                return Box.map<value, string>("ok"):get()
+                return Box<value>.map<string>("ok"):get()
+            end
+
+            function alias_number(): integer
+                local constructor = IntBox.new
+                return constructor(42):get()
+            end
+
+            function defaulted_bound(): string
+                local box = Box.new(1)
+                local project = box:project
+                return project("ok") as string
             end
 
             function distinct_owners(): boolean
-                local loose = Box.new<value>("same contents")
-                local precise = Box.new<string>("same contents")
+                local loose = Box<value>.new("same contents")
+                local precise = Box<string>.new("same contents")
                 return same_box<string>(loose, precise)
             end
         ]], [[
             assert(test.number() == 42)
             assert(test.text() == "ok")
+            assert(test.alias_number() == 42)
+            assert(test.defaulted_bound() == "ok")
             assert(not test.distinct_owners())
         ]])
     end)
@@ -218,8 +246,14 @@ describe("generic erased core", function()
             record IntegerShow
                 prefix: string
             end
+            record ValueShow
+                prefix: string
+            end
 
             function IntegerShow:render(item: integer): string
+                return self.prefix
+            end
+            function ValueShow:render(item: value): string
                 return self.prefix
             end
 
@@ -227,9 +261,18 @@ describe("generic erased core", function()
                 return subject:render(item)
             end
 
+            function identity<A, S: Show<A>>(subject: S): S
+                return subject
+            end
+
+            function take<A, S: Show<A>>(callback: (S) -> S): (S) -> S
+                return callback
+            end
+
             function use(): string
-                return display<integer, IntegerShow>(
-                    IntegerShow.new("ok"), 1)
+                local callback = take(identity)
+                local subject = callback(ValueShow.new("ok"))
+                return subject:render(1)
             end
         ]], [[assert(test.use() == "ok")]])
     end)
@@ -252,7 +295,7 @@ describe("generic erased core", function()
             end
 
             function use(): integer
-                local task = Task.new(TaskStatus.succeeded<integer, value>(42))
+                local task = Task.new(TaskStatus<integer, value>.succeeded(42))
                 local status = task:snapshot()
                 case status
                 when succeeded: item then
@@ -278,7 +321,7 @@ describe("generic erased core", function()
 
                     function make<T>(hidden: integer, first: T,
                                      second: T, third: T): Box<T>
-                        return Box.new<T>(hidden, first, second, third)
+                        return Box<T>.new(hidden, first, second, third)
                     end
 
                     function reveal<T>(box: Box<T>): integer
@@ -292,8 +335,14 @@ describe("generic erased core", function()
                         absent
                     end
 
+                    record PublicBox<T>
+                        item: T
+                    end
+                    type Crate = PublicBox
+                    type IntBox = PublicBox<integer>
+
                     function hidden<T>(n: integer): Maybe<T>
-                        return Maybe.hidden<T>(n)
+                        return Maybe<T>.hidden(n)
                     end
                 ]],
             },
@@ -303,6 +352,12 @@ describe("generic erased core", function()
                     local provider = import "generic_layout_provider"
 
                     function run(): boolean
+                        local crate = provider.Crate<integer>.new(41)
+                        local fixed = provider.IntBox.new(42)
+                        if crate.item ~= 41 or fixed.item ~= 42 then
+                            return false
+                        end
+
                         local box = provider.make<integer>(7, 10, 20, 30)
                         box.first = 11
                         box.second = 22
@@ -313,7 +368,7 @@ describe("generic erased core", function()
                             return false
                         end
 
-                        local maybe = provider.Maybe.second<integer>(42)
+                        local maybe = provider.Maybe<integer>.second(42)
                         case maybe
                         when first: item then
                             return false

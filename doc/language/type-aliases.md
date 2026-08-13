@@ -83,6 +83,11 @@ local make_point: (float, float) -> Point = Point.new
 local event: Event = Event.write("hello")
 ```
 
+A constructor-preserving alias to a bare generic owner is itself applicable:
+`type Crate = Box` permits `Crate<integer>.new(1)`. A concrete alias such as
+`type IntBox = Box<integer>` is already closed and uses `IntBox.new(1)`; it
+cannot receive another owner list.
+
 Record aliases expose the original record's visible record functions,
 including its synthesized `new` when that constructor is public. A record with
 one or more `local` fields has a local synthesized `new`, so an alias in another

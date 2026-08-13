@@ -8,7 +8,7 @@ local function cancel_join_with_finalizable(
   end)
   defer task_support.cancel_and_join_task(joining, "listener probe cleanup")
   support.wait_until_waiting(joining)
-  joining:cancel(async.CancellationReason.complex<value>(sentinel))
+  joining:cancel(async.CancellationReason<value>.complex(sentinel))
   local status = async.join(joining)
   test.assert(status:has_cancelled(),
         "listener-retention probe did not cancel its combinator")
@@ -192,7 +192,7 @@ function test_generic_task_payload_and_cancellation_views(context: test.Context)
     defer task_support.cancel_and_join_task(cancelled,
                  "generic cancelled Task cleanup")
     cancelled:cancel(
-      async.CancellationReason.complex<{string: integer}>(
+      async.CancellationReason<{string: integer}>.complex(
         cancellation_payload))
     async.join(cancelled)
     local was_cancelled, reason? = cancelled:status():has_cancelled()
@@ -233,7 +233,7 @@ function test_generic_task_payload_and_cancellation_views(context: test.Context)
     local integer_reason_view =
       raw_cancelled as async.Task<value, integer>
     raw_cancelled:cancel(
-      async.CancellationReason.complex<value>("polluted-reason"))
+      async.CancellationReason<value>.complex("polluted-reason"))
     async.join(raw_cancelled)
     local cancellation_projection_rejected = false
     do
@@ -267,14 +267,14 @@ function test_cancelled_combinator_removes_its_listener(context: test.Context)
     end)
     task_support.cleanup_task(joining, "cancelled combinator cleanup")
     support.wait_until_waiting(joining)
-    joining:cancel(async.CancellationReason.simple<value>("cancelled combinator"))
+    joining:cancel(async.CancellationReason.simple("cancelled combinator"))
     test.assert(joining:status():as_string() == "waiting" and
           not joining:status():has_finished(),
           "cancel published an intermediate TaskStatus")
     test.assert(support.cancelled_payload(async.join(joining)) == "cancelled combinator",
           "suspended combinator cancellation reason changed")
 
-    operand:cancel(async.CancellationReason.simple<value>("operand cleanup"))
+    operand:cancel(async.CancellationReason.simple("operand cleanup"))
     test.assert(support.cancelled_payload(async.join(operand)) == "operand cleanup",
           "late operand completion disturbed terminal combinator")
   end)
@@ -289,7 +289,7 @@ function test_self_cancelled_task_is_rejected_by_combinators(
     candidate = async.run<value, value>(function (): value
       timer.yield()
       local current = candidate as async.Task
-      current:cancel(async.CancellationReason.simple<value>("self-cancelled"))
+      current:cancel(async.CancellationReason.simple("self-cancelled"))
       test.assert(current:status():as_string() == "running",
             "self-cancellation published an intermediate TaskStatus")
       local rejected = false
@@ -325,7 +325,7 @@ function test_cancelled_combinator_listener_is_not_retained(context: test.Contex
     support.collect_garbage()
     test.assert(listener_cleanup_finalized,
           "cancelled combinator remained retained by its operand listener")
-    operand:cancel(async.CancellationReason.simple<value>("operand cleanup"))
+    operand:cancel(async.CancellationReason.simple("operand cleanup"))
     async.join(operand)
   end)
 end

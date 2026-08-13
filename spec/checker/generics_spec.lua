@@ -55,19 +55,19 @@ describe("generic declarations and explicit calls", function()
             end
 
             function Pair:replace<V>(item: V): Pair<V, U>
-                return Pair.new<V, U>(item, self.second)
+                return Pair<V, U>.new(item, self.second)
             end
 
             function Pair.from<V>(item: V, second: U): Pair<V, U>
-                return Pair.new<V, U>(item, second)
+                return Pair<V, U>.new(item, second)
             end
 
             function exercise(pair: Pair<integer, string>): Pair<boolean, string>
                 local copy: Pair<integer, string> =
-                    Pair.new<integer, string>(pair.first, pair.second)
+                    Pair<integer, string>.new(pair.first, pair.second)
                 local number: integer = id<integer>(copy.first)
                 local flags: Pair<boolean, string> =
-                    Pair.from<integer, string, boolean>(true, pair.second)
+                    Pair<integer, string>.from<boolean>(true, pair.second)
                 return pair:replace<boolean>(flags.first)
             end
         ]])
@@ -147,6 +147,42 @@ describe("generic declarations and explicit calls", function()
         assert.truthy(decoded, decode_error)
     end)
 
+    it("keeps owner applications on nominal namespaces",
+    function()
+        assert_error("attach them to the nominal namespace", [[
+            record Box<T> item: T end
+            function bad(): Box<integer> return Box.new<integer>(1) end
+        ]])
+        assert_error("expected integer but found string", [[
+            record Box<T> item: T end
+            function bad(): Box<integer>
+                return Box<integer>.new("wrong")
+            end
+        ]])
+        assert_error("concrete type alias namespace 'IntBox' cannot receive type arguments", [[
+            record Box<T> item: T end
+            type IntBox = Box<integer>
+            function bad(): IntBox
+                return IntBox<string>.new(1)
+            end
+        ]])
+        assert_error("must provide both the owner and callable type argument lists", [[
+            record Box<T> item: T end
+            function Box.make<U>(item: U): Box<T>
+                return Box.new(item as T)
+            end
+            function bad(): Box<integer>
+                return Box<integer>.make("mixed")
+            end
+        ]])
+        assert_error("can only be used in a direct call", [[
+            record Box<T> item: T end
+            function bad(): (integer) -> Box<integer>
+                return Box<integer>.new
+            end
+        ]])
+    end)
+
     it("substitutes generic record fields and union payloads at each use",
     function()
         local ast = assert_check([[
@@ -164,7 +200,7 @@ describe("generic declarations and explicit calls", function()
             end
 
             function make(): Maybe<integer>
-                return Maybe.present<integer>(1)
+                return Maybe<integer>.present(1)
             end
 
             function read(candidate: Maybe<string>): string
@@ -457,10 +493,10 @@ describe("generic declarations and explicit calls", function()
             type Either = Pair
             local type PrivateEither = Either
             function make(): Either<string, integer>
-                return Either.new<string, integer>("ok", 1)
+                return Either<string, integer>.new("ok", 1)
             end
             function make_private(): PrivateEither<boolean, string>
-                return PrivateEither.new<boolean, string>(true, "yes")
+                return PrivateEither<boolean, string>.new(true, "yes")
             end
         ]])
         local alias = toplevel(ast, "Ast.TopLevelTypeAlias", "Either")
@@ -586,7 +622,7 @@ describe("generic declarations and explicit calls", function()
             function bare(pair: Either): value return pair.first end
             function make(): IntPair return IntPair.new(1, 2) end
             function pack(item: Rendered): Crate<Rendered>
-                return Crate.new<Rendered>(item)
+                return Crate<Rendered>.new(item)
             end
         ]])
 
@@ -633,9 +669,9 @@ describe("generic declarations and explicit calls", function()
                 function use(item: l.Rendered):
                         (l.Chain<string, integer>, l.IntPair,
                          l.Crate<l.Rendered>)
-                    return l.Chain.new<string, integer>("ok", 1),
+                    return l.Chain<string, integer>.new("ok", 1),
                         l.IntPair.new(1, 2),
-                        l.Crate.new<l.Rendered>(item)
+                        l.Crate<l.Rendered>.new(item)
                 end
             ]],
         }
@@ -729,7 +765,7 @@ describe("generic declarations and explicit calls", function()
             function R:m<B: I<A>>(item: B): B return item end
             function inner<V: J, W: I<V>>(item: W): W return item end
             function outer<U: J, T: I<U>>(first: U, item: T): (T, T, T)
-                local pair: G<U, T> = G.new<U, T>(first, item)
+                local pair: G<U, T> = G<U, T>.new(first, item)
                 return pair.second, inner<U, T>(item), inner(item)
             end
             function nested<X: J, T: I<X>>(receiver: R<X>, item: T): (T, T)
@@ -976,6 +1012,56 @@ describe("generic declarations and explicit calls", function()
         end
     end)
 
+    it("uses an optional result context for nominal constructor inference",
+    function()
+        local ast = assert_check([[
+            union Reason<B>
+                simple: string
+                complex: B
+            end
+            record Task<T, E>
+            end
+            function Task:cancel(reason: Reason<E>?) end
+            function make_reason<B>(): Reason<B>? return nil end
+            function identity<B>(): B return (nil as value) as B end
+            function use(task: Task<string, integer>)
+                task:cancel(Reason.simple("timed out"))
+                local reason: Reason<integer> = make_reason()
+                local optional: Reason<integer>? = identity()
+            end
+        ]])
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        local call = use.block.stats[1].callexp
+        assert.equal("test.Reason?", types.tostring(call.args.args[1]._type))
+
+        local function inferred_result(pattern, target)
+            local scope = types.GenericScope(
+                "test", false, "make", "function", "function")
+            local parameter = types.Parameter(scope, 1, "B", false)
+            local entry = checker._generic.inference_scope_entry(scope, {
+                types.TypeParameter("B", false),
+            }, { parameter })
+            local inference = checker._generic.new_inference_context(
+                "option result", { entry }, false, {}, false)
+            checker._generic.infer_result_evidence(inference,
+                types.Function({}, { pattern(parameter) },
+                    false, false, false), { fixed = { target } })
+            return entry.cells[1].binding
+        end
+        local reason = function(parameter)
+            return types.Nominal("test.Reason", { parameter })
+        end
+        assert.equal("integer", types.tostring(inferred_result(
+            reason, types.Option(types.Nominal(
+                "test.Reason", { types.Integer() })))))
+        assert.equal("integer", types.tostring(inferred_result(
+            function(parameter) return types.Option(reason(parameter)) end,
+            types.Nominal("test.Reason", { types.Integer() }))))
+        assert.equal("integer?", types.tostring(inferred_result(
+            function(parameter) return parameter end,
+            types.Option(types.Integer()))))
+    end)
+
     it("infers named, variadic, flexible, and runtime-open call evidence",
     function()
         local ast = assert_check([[
@@ -1086,7 +1172,7 @@ describe("generic declarations and explicit calls", function()
         ]])
     end)
 
-    it("keeps inference fresh and diagnoses conflicts and unresolved cells",
+    it("keeps inference fresh, diagnoses conflicts, and closes free cells",
     function()
         assert_check([[
             function id<T>(item: T): T return item end
@@ -1100,15 +1186,55 @@ describe("generic declarations and explicit calls", function()
             function bad(): integer return same(1, "one") end
         ]])
 
-        assert_error("cannot infer type argument 'T'.-phantom", [[
-            function phantom<T>(item: integer): integer return item end
-            function bad(): integer return phantom(1) end
+        assert_check([[
+            interface Container<T>
+                function get(): T
+            end
+            function phantom<T, C: Container<T>>(item: integer): integer
+                return item
+            end
+            function use(): integer return phantom(1) end
         ]])
 
-        assert_error("requires a monomorphic expected function type", [[
+        assert_check([[
+            interface Container<T>
+                function get(): T
+            end
+            record Box<T> item: T end
+            function Box:project<U>(item: U): U return item end
             function id<T>(item: T): T return item end
-            function bad()
-                local polymorphic = id
+            function constrained<T, C: Container<T>>(item: C): C
+                return item
+            end
+            function take<U>(callback: (U) -> U): value return nil end
+            function take_named<U>(callback: (U) -> U): value return nil end
+            function relay<V, W: Container<V>>(item: V): integer return 1 end
+            function relay_outer<U>(item: U): integer return relay(item) end
+            function apply<T, U>(callback: (T) -> U, item: T): U
+                return callback(item)
+            end
+            function constrained_outer<U, C: Container<U>>(item: C): C
+                return take_pair(item, id)
+            end
+            function take_pair<V, W: Container<V>>(
+                item: W, callback: (V) -> V
+            ): W
+                return item
+            end
+            function contextual(box: Box<integer>): integer
+                return apply(box:project, 1)
+            end
+            function use()
+                local identity = id
+                local boxed_identity: value = id
+                local constrained_identity = constrained
+                local deferred: value = take(constrained)
+                local named_deferred: value = take_named { callback = constrained }
+                local constructor = Box.new
+                local box: Box = constructor("seed")
+                local bound = box:project
+                local same: value = identity("ok")
+                local projected: value = bound("ok")
             end
         ]])
     end)
@@ -1126,7 +1252,7 @@ describe("generic declarations and explicit calls", function()
                         item: T
                     end
                     local function boxed(): Box<string>
-                        return Box.new<string>("ok")
+                        return Box<string>.new("ok")
                     end
                 ]],
                 first = [[
