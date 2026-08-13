@@ -192,10 +192,11 @@ satisfy its constraint and the [erasure eligibility rule](#eligible-type-argumen
 Applying a parameter or another arbitrary type shape would require
 higher-kinded polymorphism and is rejected.
 
-Applied nominal types are invariant. `Pair<integer,string>` and
-`Pair<value,string>` are not equal or directly assignable merely because one
-argument is consistent with the other. Ordinary numeric conversions and
-Interface satisfaction likewise do not lift through an application.
+Applied nominal types are invariant: applications are equal only when all
+arguments are equal. Ordinary numeric conversions and Interface satisfaction do
+not lift through an application. The separate shallow gradual relation to a
+constraint-erased view is described under
+[shared run-time identity](#static-applications-and-shared-run-time-identity).
 
 ### Bare owners mean an all-`value` application
 
