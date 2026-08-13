@@ -25,6 +25,12 @@ local function toplevel(ast, tag, name)
     error(string.format("missing %s '%s'", tag, name))
 end
 
+local function declared_type(node)
+    assert.truthy(node._declared_type,
+        "declaration is missing its frozen surface type")
+    return node._declared_type
+end
+
 local function assert_nominal(typ, fqtn, arguments)
     assert.equal("Type.Nominal", typ._tag)
     assert.equal(fqtn, typ.fqtn)
@@ -66,72 +72,78 @@ describe("generic declarations and explicit calls", function()
         ]])
 
         local pair = toplevel(ast, "Ast.TopLevelRecord", "Pair")
-        assert.equal("Type.GenericScope", pair._type.scope._tag)
-        assert.equal("owner", pair._type.scope.role)
-        assert.equal("record", pair._type.scope.declaration_kind)
-        assert.equal(2, #pair._type.typeparams)
-        assert.equal("T", pair._type.typeparams[1].name)
-        assert.equal("U", pair._type.typeparams[2].name)
-        assert.equal("Type.Parameter", pair._type.fields[1].type._tag)
-        assert.equal(1, pair._type.fields[1].type.index)
-        assert.equal(2, pair._type.fields[2].type.index)
+        local declared_pair = declared_type(pair)
+        assert.is_true(ast._declared_type == modtype)
+        assert.equal(modtype.members.Pair.type.name, declared_pair.name)
+        assert.not_equal(ast._type, ast._declared_type)
+        assert.equal("Type.GenericScope", declared_pair.scope._tag)
+        assert.equal("owner", declared_pair.scope.role)
+        assert.equal("record", declared_pair.scope.declaration_kind)
+        assert.equal(2, #declared_pair.typeparams)
+        assert.equal("T", declared_pair.typeparams[1].name)
+        assert.equal("U", declared_pair.typeparams[2].name)
+        assert.equal("Type.Parameter", declared_pair.fields[1].type._tag)
+        assert.equal(1, declared_pair.fields[1].type.index)
+        assert.equal(2, declared_pair.fields[2].type.index)
         assert.is_true(types.same_generic_scope(
-            pair._type.scope, pair._type.fields[1].type.scope))
+            declared_pair.scope, declared_pair.fields[1].type.scope))
+        assert.not_equal(declared_pair, types.registry["test.Pair"])
+        assert.is_false(pair._type.scope)
+        assert.equal("value", types.tostring(pair._type.fields[1].type))
 
         local constructor = ast[2]
+        local declared_constructor = declared_type(constructor)
         assert.truthy(constructor._record_constructor)
-        assert.equal("Type.StaticMethod", constructor._type._tag)
-        assert.equal("Type.Parameter", constructor._type.params[1]._tag)
-        assert_nominal(constructor._type.rettypes[1], "test.Pair", {"T", "U"})
+        assert.equal("Type.StaticMethod", declared_constructor._tag)
+        assert.equal("Type.Parameter", declared_constructor.params[1]._tag)
+        assert_nominal(declared_constructor.rettypes[1],
+            "test.Pair", {"T", "U"})
 
         local id = toplevel(ast, "Ast.TopLevelFunc", "id")
-        assert.equal("Type.FunctionScheme", id._type._tag)
-        assert.equal("function", id._type.scope.role)
-        assert.equal("Type.Parameter", id._type.signature.params[1]._tag)
-        assert.is_true(types.equals(id._type.signature.params[1],
-            id._type.signature.rettypes[1]))
+        local declared_id = declared_type(id)
+        assert.equal("Type.FunctionScheme", declared_id._tag)
+        assert.equal("function", declared_id.scope.role)
+        assert.equal("Type.Parameter", declared_id.signature.params[1]._tag)
+        assert.is_true(types.equals(declared_id.signature.params[1],
+            declared_id.signature.rettypes[1]))
+        assert.is_true(types.same_generic_scope(declared_id.scope,
+            declared_type(id.params[1]).scope))
         assert.equal("Type.FunctionScheme", modtype.members.id.type._tag)
+        assert.equal("Type.Function", id._type._tag)
 
         local replace = toplevel(ast, "Ast.TopLevelMethod", "replace")
-        assert.equal("Type.Method", replace._type._tag)
-        assert.equal("method", replace._type.scope.role)
-        assert.equal(1, #replace._type.typeparams)
-        assert_nominal(replace._self._type, "test.Pair", {"T", "U"})
-        assert_nominal(replace._type.rettypes[1],
+        local declared_replace = declared_type(replace)
+        assert.equal("Type.Method", declared_replace._tag)
+        assert.equal("method", declared_replace.scope.role)
+        assert.equal(1, #declared_replace.typeparams)
+        local declared_self = declared_type(replace._self)
+        assert_nominal(declared_self, "test.Pair", {"T", "U"})
+        assert.is_true(types.same_generic_scope(declared_pair.scope,
+            declared_self.args[1].scope))
+        assert_nominal(declared_replace.rettypes[1],
             "test.Pair", {"V", "U"})
 
         local from = toplevel(ast, "Ast.TopLevelStatic", "from")
-        assert.equal("static", from._type.scope.role)
-        assert.equal(1, #from._type.typeparams)
-        assert.equal("Type.Parameter", from._type.params[2]._tag)
-        assert_nominal(from._type.rettypes[1],
+        local declared_from = declared_type(from)
+        assert.equal("static", declared_from.scope.role)
+        assert.equal(1, #declared_from.typeparams)
+        assert.equal("Type.Parameter", declared_from.params[2]._tag)
+        assert_nominal(declared_from.rettypes[1],
             "test.Pair", {"V", "U"})
 
         local exercise = toplevel(ast, "Ast.TopLevelFunc", "exercise")
-        local copy_call = exercise.block.stats[1].exps[1]
-        assert_nominal(copy_call._type,
-            "test.Pair", {"integer", "string"})
-        assert.same({"integer", "string"}, {
-            types.tostring(copy_call._generic_type_arguments[1]),
-            types.tostring(copy_call._generic_type_arguments[2]),
-        })
-        local id_call = exercise.block.stats[2].exps[1]
-        assert.equal("integer", types.tostring(id_call._type))
-        assert.equal("integer",
-            types.tostring(id_call._generic_type_arguments[1]))
-        local static_call = exercise.block.stats[3].exps[1]
-        assert_nominal(static_call._type,
-            "test.Pair", {"boolean", "string"})
-        assert.same({"integer", "string", "boolean"}, {
-            types.tostring(static_call._generic_type_arguments[1]),
-            types.tostring(static_call._generic_type_arguments[2]),
-            types.tostring(static_call._generic_type_arguments[3]),
-        })
-        local method_call = exercise.block.stats[4].exps[1]
-        assert_nominal(method_call._type,
-            "test.Pair", {"boolean", "string"})
-        assert.equal("boolean",
-            types.tostring(method_call._generic_type_arguments[1]))
+        for _, stat in ipairs(exercise.block.stats) do
+            for _, exp in ipairs(stat.exps or {}) do
+                if exp._type then types.assert_erased(exp._type) end
+                assert.is_nil(exp._generic_type_arguments)
+            end
+        end
+        types.assert_erased(ast._type)
+        types.assert_erased(types.registry["test.Pair"])
+        local decoded, decode_error = driver.decode_module_interface(
+            types.serialize(ast._declared_type), "test",
+            "erased-core-declared-metadata")
+        assert.truthy(decoded, decode_error)
     end)
 
     it("substitutes generic record fields and union payloads at each use",
@@ -169,11 +181,14 @@ describe("generic declarations and explicit calls", function()
             get.block.stats[1].exps[1]._type))
         local make = toplevel(ast, "Ast.TopLevelFunc", "make")
         assert_nominal(make.block.stats[1].exps[1]._type,
-            "test.Maybe", {"integer"})
+            "test.Maybe", {})
         local read = toplevel(ast, "Ast.TopLevelFunc", "read")
         local case = read.block.stats[1]
-        assert.equal("string", types.tostring(case.arms[1].binding._type))
-        assert.equal("string", types.tostring(
+        assert.equal("value", types.tostring(case.arms[1].binding._type))
+        local projection = case.arms[1].block.stats[1]
+        assert.equal("string", types.tostring(projection.decls[1]._type))
+        assert.equal("gradual_view", projection.exps[1]._adjustment.kind)
+        assert.equal("value", types.tostring(
             case._union.variants.present.payload))
 
         assert_error("expected test.Box<string> but found test.Box<integer>", [[
@@ -237,16 +252,18 @@ describe("generic declarations and explicit calls", function()
         ]])
 
         local display = toplevel(ast, "Ast.TopLevelFunc", "display")
-        local binder = display._type.typeparams[1]
+        local declared_display = declared_type(display)
+        local binder = declared_display.typeparams[1]
         assert.equal("test.Show<integer>",
             types.tostring(binder.constraint))
-        local rigid = display._type.signature.params[1]
+        local rigid = declared_display.signature.params[1]
         assert.equal("Type.Parameter", rigid._tag)
         assert.equal("test.Show<integer>",
             types.tostring(rigid.erased_constraint))
+        assert_nominal(display._type.params[1], "test.Show", {})
         local call = display.block.stats[1].exps[1]
-        assert.truthy(call._rigid_receiver_type)
         assert.equal("string", types.tostring(call._type))
+        assert.is_nil(call._rigid_receiver_type)
 
         assert_error("does not satisfy constraint 'test.Show<integer>'", [[
             interface Show<A>
@@ -446,12 +463,12 @@ describe("generic declarations and explicit calls", function()
             end
         ]])
         local alias = toplevel(ast, "Ast.TopLevelTypeAlias", "Either")
-        assert.equal("Type.GenericAlias", alias._type._tag)
-        assert.equal("test.Pair", alias._type.target_owner_fqtn)
+        assert.equal("Type.GenericAlias", declared_type(alias)._tag)
+        assert.equal("test.Pair", declared_type(alias).target_owner_fqtn)
         local private_alias = toplevel(
             ast, "Ast.TopLevelTypeAlias", "PrivateEither")
-        assert.equal("Type.GenericAlias", private_alias._type._tag)
-        assert.equal("test.Either", private_alias._type.target_alias_fqtn)
+        assert.equal("Type.GenericAlias", declared_type(private_alias)._tag)
+        assert.equal("test.Either", declared_type(private_alias).target_alias_fqtn)
     end)
 
     it("uses the all-value application for a bare generic owner", function()
@@ -464,7 +481,9 @@ describe("generic declarations and explicit calls", function()
             end
         ]])
         local read = toplevel(ast, "Ast.TopLevelFunc", "read")
-        assert_nominal(read._type.params[1], "test.Cell", {"value"})
+        assert_nominal(declared_type(read).params[1],
+            "test.Cell", {"value"})
+        assert_nominal(read._type.params[1], "test.Cell", {})
         assert.equal("value", types.tostring(
             read.block.stats[1].exps[1]._type))
     end)
@@ -571,15 +590,16 @@ describe("generic declarations and explicit calls", function()
         ]])
 
         local bare = toplevel(ast, "Ast.TopLevelFunc", "bare")
-        assert_nominal(bare._type.params[1],
+        assert_nominal(declared_type(bare).params[1],
             "test.Pair", {"value", "value"})
+        assert_nominal(bare._type.params[1], "test.Pair", {})
         local make = toplevel(ast, "Ast.TopLevelFunc", "make")
         assert_nominal(make.block.stats[1].exps[1]._type,
-            "test.Pair", {"integer", "integer"})
+            "test.Pair", {})
         local public = toplevel(
             ast, "Ast.TopLevelTypeAlias", "Public")
-        assert.equal("Type.GenericAlias", public._type._tag)
-        assert.is_false(public._type.target_alias_fqtn)
+        assert.equal("Type.GenericAlias", declared_type(public)._tag)
+        assert.is_false(declared_type(public).target_alias_fqtn)
 
         local decoded, decode_error = driver.decode_module_interface(
             types.serialize(modtype), "test", "generic-alias-source")
@@ -811,21 +831,19 @@ describe("generic declarations and explicit calls", function()
         ]])
 
         local use = toplevel(ast, "Ast.TopLevelFunc", "use")
-        local unwrap = use.block.stats[1].exps[1]
-        assert.same({"integer"}, {
-            types.tostring(unwrap._generic_type_arguments[1]),
-        })
-        local call = use.block.stats[2].exps[1].exp
+        assert.equal("integer", types.tostring(
+            declared_type(use.block.stats[1].decls[1])))
+        local declarations = use.block.stats[2].decls
         assert.same({"integer", "string", "boolean", "float"}, {
-            types.tostring(call._generic_type_arguments[1]),
-            types.tostring(call._generic_type_arguments[2]),
-            types.tostring(call._generic_type_arguments[3]),
-            types.tostring(call._generic_type_arguments[4]),
+            types.tostring(declared_type(declarations[1])),
+            types.tostring(declared_type(declarations[2])),
+            types.tostring(declared_type(declarations[3])),
+            types.tostring(declared_type(declarations[4])),
         })
-        local lambda = call.args.args[4]
-        assert.equal("Ast.ExpFunction", lambda._tag)
-        assert.equal("float", types.tostring(lambda.params[1]._type))
-        assert.equal("float", types.tostring(lambda._type.rettypes[1]))
+        for _, exp in ipairs(use.block.stats[2].exps) do
+            assert.is_nil(exp._generic_type_arguments)
+            types.assert_erased(exp._type)
+        end
     end)
 
     it("uses fixed, flexible, and open expected-result evidence", function()
@@ -849,13 +867,15 @@ describe("generic declarations and explicit calls", function()
 
         local use = toplevel(ast, "Ast.TopLevelFunc", "use")
         local exps = use.block.stats[1].exps
-        assert.equal("string",
-            types.tostring(exps[1]._generic_type_arguments[1]))
-        assert.equal("boolean",
-            types.tostring(exps[2]._generic_type_arguments[1]))
+        assert.equal("string", types.tostring(exps[1]._type))
+        assert_nominal(exps[2]._type, "test.Maybe", {})
         assert.equal("integer",
-            types.tostring(exps[3]._generic_type_arguments[1]))
+            types.tostring(declared_type(use).flexrettype))
         assert.is_truthy(exps[3]._open_results)
+        for _, exp in ipairs(exps) do
+            assert.is_nil(exp._generic_type_arguments)
+            types.assert_erased(exp._type)
+        end
     end)
 
     it("closes later argument evidence before checking a contextual lambda",
@@ -885,18 +905,15 @@ describe("generic declarations and explicit calls", function()
         ]])
 
         local use = toplevel(ast, "Ast.TopLevelFunc", "use")
-        local fold = use.block.stats[1].exps[1]
-        local lambda = fold.args.args[2]
-        assert.equal("integer", types.tostring(lambda.params[1]._type))
-        assert.equal("string", types.tostring(lambda.params[2]._type))
-        assert.equal("string", types.tostring(lambda._type.rettypes[1]))
-        local apply = use.block.stats[2].exps[1]
-        assert.same({"integer", "integer"}, {
-            types.tostring(apply._generic_type_arguments[1]),
-            types.tostring(apply._generic_type_arguments[2]),
-        })
+        assert.equal("string", types.tostring(
+            declared_type(use.block.stats[1].decls[1])))
         assert.equal("integer", types.tostring(
-            apply.args.args[1]._generic_type_arguments[1]))
+            declared_type(use.block.stats[2].decls[1])))
+        for index = 1, 2 do
+            local exp = use.block.stats[index].exps[1]
+            assert.is_nil(exp._generic_type_arguments)
+            types.assert_erased(exp._type)
+        end
     end)
 
     it("infers constructors, nominal functions, methods, and bound values",
@@ -938,30 +955,24 @@ describe("generic declarations and explicit calls", function()
         ]])
 
         local use = toplevel(ast, "Ast.TopLevelFunc", "use")
-        assert_nominal(use.block.stats[1].exps[1]._type,
+        assert_nominal(declared_type(use.block.stats[1].decls[1]),
             "test.Pair", {"integer", "string"})
-        assert.same({"integer", "string", "boolean"}, {
-            types.tostring(use.block.stats[2].exps[1]
-                ._generic_type_arguments[1]),
-            types.tostring(use.block.stats[2].exps[1]
-                ._generic_type_arguments[2]),
-            types.tostring(use.block.stats[2].exps[1]
-                ._generic_type_arguments[3]),
-        })
+        assert.equal("boolean", types.tostring(
+            declared_type(use.block.stats[2].decls[1])))
         assert.equal("string", types.tostring(
-            use.block.stats[3].exps[1]._generic_type_arguments[1]))
-        assert.equal("integer", types.tostring(
-            use.block.stats[4].exps[1]._generic_type_arguments[1]))
-        assert.equal("string", types.tostring(
-            use.block.stats[5].exps[1]._generic_type_arguments[1]))
-        assert.same({"integer", "string", "boolean"}, {
-            types.tostring(use.block.stats[6].exps[1]
-                ._generic_type_arguments[1]),
-            types.tostring(use.block.stats[6].exps[1]
-                ._generic_type_arguments[2]),
-            types.tostring(use.block.stats[6].exps[1]
-                ._generic_type_arguments[3]),
-        })
+            declared_type(use.block.stats[3].decls[1])))
+        assert.equal("(integer, string) -> test.Pair<integer, string>",
+            types.tostring(declared_type(use.block.stats[4].decls[1])))
+        assert.equal("(string) -> string", types.tostring(
+            declared_type(use.block.stats[5].decls[1])))
+        assert.equal("(integer, string, boolean) -> boolean",
+            types.tostring(declared_type(use.block.stats[6].decls[1])))
+        assert_nominal(declared_type(use.block.stats[7].decls[1]),
+            "test.Pair", {"integer", "string"})
+        for index = 1, 7 do
+            assert.is_nil(use.block.stats[index].exps[1]
+                ._generic_type_arguments)
+        end
     end)
 
     it("infers named, variadic, flexible, and runtime-open call evidence",
@@ -992,13 +1003,17 @@ describe("generic declarations and explicit calls", function()
         local use = toplevel(ast, "Ast.TopLevelFunc", "use")
         for index = 1, 3 do
             assert.equal(index == 1 and "string" or "integer",
-                types.tostring(use.block.stats[index].exps[1]
-                    ._generic_type_arguments[1]))
+                types.tostring(declared_type(
+                    use.block.stats[index].decls[1])))
+            assert.is_nil(use.block.stats[index].exps[1]
+                ._generic_type_arguments)
         end
         local many = use.block.stats[4].exps[4]
+        assert.is_nil(many._generic_type_arguments)
+        assert.is_truthy(many.exp._open_results)
         assert.equal("integer",
-            types.tostring(many._generic_type_arguments[1]))
-        assert.is_truthy(many._open_results)
+            types.tostring(declared_type(use).flexrettype))
+        types.assert_erased(many._type)
     end)
 
     it("uses hidden generic-for input, result, and close evidence", function()
@@ -1020,15 +1035,15 @@ describe("generic declarations and explicit calls", function()
 
         local use = toplevel(ast, "Ast.TopLevelFunc", "use")
         local loop = use.block.stats[1]
+        assert.is_nil(loop.exps[1]._generic_type_arguments)
+        assert.is_nil(loop.exps[4]._generic_type_arguments)
         assert.equal("string", types.tostring(
-            loop.exps[1]._generic_type_arguments[1]))
-        assert.equal("{ string }", types.tostring(
-            loop.exps[4]._generic_type_arguments[1]))
-        assert.equal("string", types.tostring(
-            loop._result_decls[2]._type.base))
+            declared_type(loop._result_decls[2]).base))
         assert.is_truthy(loop._init_call)
         assert.is_truthy(loop._next_call)
         assert.is_truthy(loop._close_call)
+        types.assert_erased(loop._init_call._type)
+        types.assert_erased(loop._next_call._type)
     end)
 
     it("validates inferred constraints and transient eligibility", function()
