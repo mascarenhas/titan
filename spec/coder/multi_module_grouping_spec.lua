@@ -1,6 +1,5 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
-local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
 
 local REPO = lfs.currentdir()
@@ -92,6 +91,9 @@ local function compiler_argv(workspace, source_root, ...)
         table.insert(argv, "LUA_CPATH")
     end
     table.insert(argv, "CCACHE_DISABLE=1")
+    -- Opt-in formatting coverage must not make the ordinary test/CI lane
+    -- depend on clang-format being installed.
+    table.insert(argv, "CLANG_FORMAT=true")
     table.insert(argv, "TITAN_PATH_0_24=" .. workspace)
     table.insert(argv, "TITAN_PATH=")
     if PREFIX then
@@ -309,7 +311,7 @@ end
 ]])
 
         local ok, output, why, code = compile(
-            workspace, source_root, "library", "application")
+            workspace, source_root, "--pretty-print", "library", "application")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
@@ -317,11 +319,6 @@ end
             "mode"))
         local entrypoint = workspace .. "/application__entrypoint.c"
         assert.equal("file", lfs.attributes(entrypoint, "mode"))
-        local before_format = read_file(entrypoint)
-        local formatted, format_err =
-            driver.format_generated_file(entrypoint, false)
-        assert.truthy(formatted, format_err)
-        assert.equal(before_format, read_file(entrypoint))
         assert.same({}, collect_files(workspace, ".so"))
         assert.same({}, collect_files(workspace, ".lua"))
 

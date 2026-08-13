@@ -1,6 +1,5 @@
 local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
-local driver = require "titan-compiler.driver"
 local types = require "titan-compiler.types"
 
 local GENERATED_HEADER_BANNER =
@@ -23,13 +22,6 @@ local function read_file(path)
     local contents = assert(file:read("*a"))
     assert(file:close())
     return contents
-end
-
-local function assert_clang_format_fixed_point(path)
-    local before = read_file(path)
-    local ok, err = driver.format_generated_file(path, false)
-    assert.truthy(ok, err)
-    assert.equal(before, read_file(path))
 end
 
 local function cleanup()
@@ -99,8 +91,6 @@ describe("source-defined foreign functions", function()
             local generated = read_file("test.titan.h")
             assert.equal(GENERATED_HEADER_BANNER,
                 generated:sub(1, #GENERATED_HEADER_BANNER))
-            assert_clang_format_fixed_point("test.c")
-            assert_clang_format_fixed_point("test.titan.h")
             local add = coder._foreign_func_name("test", "add_one")
             local accumulate = coder._foreign_func_name("test", "accumulate")
             assert.truthy(add:find("\\u2133", 1, true))

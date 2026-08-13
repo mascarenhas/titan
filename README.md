@@ -22,12 +22,12 @@ The supported developer install and CI configure LuaRocks' sole system tree so
 `ROCKS_TREE == PREFIX`. That equality is the current deployment policy, not an
 inherent requirement of what either name owns.
 
-Supported Linux and macOS builds require `clang-format` on `PATH`; install the
-`clang-format` package on Debian/Ubuntu, `clang-tools-extra` on Fedora, or run
-`brew install clang-format` on macOS. Titan runs it on every compiler-generated
-`.c` and `.titan.h` file before native compilation or publication. Set
-`CLANG_FORMAT` to select a different compatible command; the Makefile exports
-that setting to every `titanc` invocation.
+Generated C is compiled directly by default, so ordinary Linux and macOS builds
+do not require a formatter. Pass `titanc --pretty-print` to run `clang-format`
+on generated `.c` and `.titan.h` files before native compilation or
+publication; install the `clang-format` package on Debian/Ubuntu,
+`clang-tools-extra` on Fedora, or `brew install clang-format` on macOS for that
+opt-in mode. `CLANG_FORMAT` selects a different compatible command.
 
 For example:
 
@@ -791,9 +791,10 @@ when it is no longer needed.
 
 ```
         --print-ast                       Print the AST.
+        --pretty-print                    Format generated C and headers with clang-format.
         --test                            Build a native Titan test executable.
         --no-uv-bootstrap                 Call standalone main directly even if titan.uv installs its bootstrap hook.
-        -v, --verbose                     Print safely quoted formatter and C toolchain commands.
+        -v, --verbose                     Print safely quoted executed toolchain commands.
         --static                          Prefer static Titan archive providers.
         --no-line-directives              Omit Titan source #line directives from generated C.
         --lua <path>                      Path to a Lua source/build tree (source checkouts only).
@@ -807,9 +808,10 @@ when it is no longer needed.
 ordinary dependencies; it does not request a system-linker static build and
 still permits DSO/source fallback. In library mode, `-X` object/archive
 payload enters both the shared and static output; in executable mode it keeps
-its established final-link role. `CC` selects the compiler. `CLANG_FORMAT`
-selects the formatter command; Titan appends its fixed in-place style arguments
-and does not consult an ambient project configuration.
+its established final-link role. `CC` selects the compiler. `--pretty-print`
+selects the otherwise unused `CLANG_FORMAT` command; Titan appends its fixed
+in-place style arguments and does not consult an ambient project configuration.
+Without the option even a missing or malformed formatter command is inert.
 `--no-line-directives` leaves generated C attributed to its physical `.c`
 file and line numbers, which is useful when investigating native diagnostics
 such as sanitizer reports. The default keeps Titan source attribution.

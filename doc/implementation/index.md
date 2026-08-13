@@ -27,9 +27,10 @@ typed & elaborated ASTs        (decorated with _type/_decl… and checker-owned
    │  coder.generate           (coder.lua — C-source templates)
    ▼
 one C translation unit per logical module
-   │  clang-format             (fixed explicit style; include order preserved)
-   │  driver.compile           (driver.lua — writes/formats .c at the canonical
-   │                            output path, then invokes cc)
+   │  #line normalization      (always)
+   │  clang-format             (opt-in --pretty-print; fixed explicit style)
+   │  driver.compile           (driver.lua — writes .c at the canonical output
+   │                            path, then invokes cc)
    ▼
 object files ──► one common-prefix provider.so/provider.a + generated Lua shims
              └─► driver.compile_program → executable (when a main() exists)
@@ -99,7 +100,7 @@ Two facts shape everything downstream of the checker:
 | [C FFI declarations and expressions](c-ffi-expressions.md) | File/prototype tag identity, exact declarators, target arithmetic profiles, session-scoped C probes, contextual pointer conversions, target-directed automatic/owned allocation and full-extent spills, typed object-macro values, lazy macro-field projection, preprocessing, and C operator traits. |
 | [Trusted Lua C API FFI boundary](ffi-lua-api-followup.md) | The general public-FFI exclusion, the audited standard-library exception, its current operation allowlist and stack-effect ledger, and the remaining design work before arbitrary Titan code can use the Lua C API. |
 | [Native test runner](test-runner.md) | Source-first resolver mode, checked-AST discovery, the generated `titan.test.runner`, private `titan.test` protocol, recursive execution, trace helpers, object-local flags, and publication. |
-| [Driver and toolchain](driver.md) | `driver.lua`, `titanc`, generated-source `clang-format`, the runtime support library (`titan-runtime/`), `util.lua`, and every default path and flag. |
+| [Driver and toolchain](driver.md) | `driver.lua`, `titanc`, generated-source normalization and opt-in `clang-format`, the runtime support library (`titan-runtime/`), `util.lua`, and every default path and flag. |
 | [Folder modules](folder-modules.md) | Tagged flat/folder source resolution, independent parsing into one dense AST, shared checking/codegen identity, deterministic ordering, artifacts, and the `titan.uv` source ensemble. |
 | [Multi-module libraries](multi-module-libraries.md) | Prefix-container discovery, strict DSO ABI/types membership claims, transient `Type.Module.file`, one-object-per-module linking, generated Lua shims, the lazy/global support helper, and paired standard-library publication. |
 | [Static compiled modules](static-compiled-modules.md) | Canonical object-section metadata, bounded ar/ELF/Mach-O/fat parsing, static-provider resolution and native provenance, deterministic archive flattening, three-way protocol validation, and paired publication. |
@@ -129,7 +130,7 @@ in; follow the link for the full discussion.
 | [Lexer and parser](lexer-parser.md#non-reentrancy) | The parser is **not reentrant** (`THIS_FILENAME`) and runs `grammar:match` unprotected, so an error in a semantic action poisons later parses. `break` and generic `for ... in` are real syntax; reserved `goto`/`::` remain [recognized but unused](lexer-parser.md#one-grammar-no-token-stream). A [missing `syntax_errors` entry](lexer-parser.md#from-label-to-message) shows the user "nil". [Several preserved label quirks](lexer-parser.md#quirks-to-know-about) (`ExpAssign` defined twice, unreachable `AssignImport`). The [location weak-cache](lexer-parser.md#location-tracking) never actually releases entries. |
 | [The type checker](checker.md#the-relations-and-plans-in-typeslua) | Computed Map keys/values, record fields, named arguments, and parenthesized expressions are deliberately finite scalar consumers; they never become open-result sinks. [Dead code after a proven non-fallthrough statement](checker.md#non-fallthrough-analysis) is not analyzed, so a type error there goes unreported. [First-class Titan functions, closures and bound methods are supported](checker.md#per-construct-notes-for-contributors), while imported or source-defined [foreign functions](foreign-functions.md) remain direct C designators that decay only to exact C function pointers; record types and modules also remain non-values. Re-declaring a name in the same block silently shadows. [Process-global state](checker.md#process-global-state) must be reset by callers. |
 | [Union implementation](unions.md#case-checking-and-control-flow) | Case coverage is optional, but complete coverage of the statically known closed union proves non-fallthrough when every arm terminates; imported hidden variants remain in `nvariants`, so visible arms alone cannot falsely establish that proof. `Type.Variant` is validated union-owned interface metadata, never a source or value-facing type. |
-| [Code generator: overview](codegen-overview.md#no-c-ast-templates-utilrender-and-clang-format) | A missing template variable is a hard "Internal compiler error" abort; every generated `.c` and `.titan.h` must pass the configured `clang-format` with Titan's explicit style and include sorting disabled before compilation or publication. Each release is [pinned to one Lua version](codegen-overview.md#anatomy-of-a-generated-translation-unit) (5.5.1). The [`$LOADMODULES2` re-init branch](codegen-overview.md#prefix_init--idempotent-at-two-levels) is emitted only for more than one dynamic dependency. |
+| [Code generator: overview](codegen-overview.md#no-c-ast-templates-utilrender-and-clang-format) | A missing template variable is a hard "Internal compiler error" abort; generated `.c` and `.titan.h` always receive required `#line` normalization, while `--pretty-print` opts into `clang-format` with Titan's fixed style and include sorting disabled. Each release is [pinned to one Lua version](codegen-overview.md#anatomy-of-a-generated-translation-unit) (5.5.1). The [`$LOADMODULES2` re-init branch](codegen-overview.md#prefix_init--idempotent-at-two-levels) is emitted only for more than one dynamic dependency. |
 | [Variadic parameters](variadic-parameters.md#code-generator-the-seven-structs-and-the-native-abi) | `...` is non-first-class (cannot be captured/stored/escape, invisible to inner lambdas) though the declaring function is a normal value; the homogeneous count is capped at `TITAN_VARARG_MAX = 200` (`lu_byte n_args`, an *intentional* cap, runtime-enforced). `...[i]` is typed `t` and **raises** out of range — a deliberate divergence from array `a[i]` (`t?`). `return ...` is finite projection in a fixed-result function, but it preserves a runtime-sized remainder when the enclosing function declares a flexible output tail. Descriptor payloads are untraced, so collectable elements need independent traced provenance (semantic/VM/allocation/result homes, with explicit ranges for live native outputs), never roots supplied by the descriptor itself. |
 | [Code generator: constructs](codegen-constructs.md#operators-with-inlined-lua-semantics) | Numeric operators reproduce Lua 5.5 exactly: integer `+ - *`/unary `-` emit `intop(...)` for defined two's-complement wrap (no signed-overflow UB, `-fwrapv` irrelevant); mixed `integer`/`float` comparisons use the unboxed `titan_*_intfloat`/`titan_eq_intfloat` helpers and compare by mathematical value (**no promotion**). The remaining gap: the general binop fall-through evaluates its two operands in C's unspecified order, not Lua's strict left-to-right (observable only when both operands have side effects). |
 | [Values and the GC](values-and-gc.md#gc-discipline-the-invariants) | Under the generational collector a missing barrier or unanchored fresh object is a reliably reproducible use-after-free, not a rare race — the discipline the whole chapter exists to enforce. Private Array writer user values and function-entry trailers add traced edges that must follow the same rooting/barrier rules. |
@@ -158,10 +159,10 @@ cause.
 
 Development workflow, prerequisites and test commands are in the
 repository's [AGENTS.md](../../AGENTS.md) and [README](../../README.md);
-the short version is: install `clang-format`, choose an absolute local
-`PREFIX`, put its `bin` on `PATH`, run `make lua`, `make luarocks`, and `make
-libuv`, then install the rock with `$PREFIX/bin/luarocks make` and run Busted
-from the repository root.
+the short version is: choose an absolute local `PREFIX`, put its `bin` on
+`PATH`, run `make lua`, `make luarocks`, and `make libuv`, then install the rock
+with `$PREFIX/bin/luarocks make` and run Busted from the repository root.
+Install `clang-format` only if you use `titanc --pretty-print`.
 `PREFIX` owns Lua/LuaRocks; `ROCKS_TREE` owns the Titan rock, SDK, and stdlib.
 The supported workflow currently configures them to the same path, without
 making that equality an inherent invariant.

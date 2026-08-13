@@ -2352,13 +2352,11 @@ exit 73
                 stdlib_config_start, true))
             local stdlib_config = makefile:sub(
                 stdlib_config_start, stdlib_config_end - 1)
-            for _, contract in ipairs({
-                "CLANG_FORMAT=$(CLANG_FORMAT)",
+            assert.falsy(stdlib_config:find(
+                "CLANG_FORMAT=$(CLANG_FORMAT)", 1, true), stdlib_config)
+            assert.truthy(stdlib_config:find(
                 "TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)",
-            }) do
-                assert.truthy(stdlib_config:find(contract, 1, true),
-                    stdlib_config)
-            end
+                1, true), stdlib_config)
             local rock_post_install_start = assert(makefile:find(
                 "rock-post-install:", 1, true))
             local rock_post_install_end = assert(makefile:find(
@@ -2829,13 +2827,13 @@ exit 73
                 "Canary source-rock installation with system libuv and OpenSSL",
                 "LIBUV_MODE=system OPENSSL_MODE=system",
                 "OPENSSL_MODE=system",
-                "brew install clang-format cmake libuv openssl@3 pkgconf",
+                "brew install cmake libuv openssl@3 pkgconf",
                 "test_ssl_http_fresh_process_sanitizer_composition$",
                 "libssl-dev", "perl",
             }) do
                 assert.truthy(workflow:find(contract, 1, true), contract)
             end
-            assert.equal(4, count_literal(workflow, "clang-format"), workflow)
+            assert.equal(0, count_literal(workflow, "clang-format"), workflow)
             assert.equal(2, select(2, workflow:gsub(
                 'TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE=' ..
                 '"%$GITHUB_WORKSPACE/libuv%-build/libuv[.]a"', "")))

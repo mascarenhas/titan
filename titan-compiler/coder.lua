@@ -18601,15 +18601,18 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         end
     end
 
-    local foreign_header = coder.generate_foreign_header(
-        modname, ast, tlcontext)
+    local foreign_header = ast._foreign_header_contents
+    if not ast._foreign_header_prepared then
+        foreign_header = coder.generate_foreign_header(
+            modname, ast, tlcontext)
+    end
     coder._ffi_include_collector = nil
     local source = preamble .. "\n\n" .. table.concat(code, "\n\n")
     -- A `#line` directive applies its number to the immediately following
     -- physical source line. Template substitutions can contribute blank
     -- lines after a standalone directive; remove every such semantic line
-    -- before clang-format so native frames retain the exact Titan location. The
-    -- formatter preserves this spelling, so one pass remains a fixed point.
+    -- before the driver persists the translation unit so native frames retain
+    -- the exact Titan location. Optional formatting preserves this spelling.
     local removed
     repeat
         source, removed = source:gsub(

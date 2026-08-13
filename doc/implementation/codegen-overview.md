@@ -25,7 +25,8 @@ this list. The coder therefore still observes the logical source order that
 defines interface members, module slots, module-variable initialization, and
 emission; it has no source-unit node or contributor context. The driver
 (`driver.compile`) writes the result next to the canonical flat source or
-folder main, invokes the configured `clang-format` in place, and then invokes
+folder main, performs required `#line` normalization, optionally invokes the
+configured `clang-format` when `--pretty-print` is selected, and then invokes
 the system C compiler
 ([driver and toolchain](driver.md)). One consequence of the checker's
 rewriting matters constantly here: every representation-changing implicit
@@ -62,16 +63,18 @@ passed. The coder passes it in exactly one place, `codethrow`, whose
 `$LINE` and `$COL` for an enclosing render to fill.
 
 Because there is no C AST, template output is raw but must already be valid C.
-The driver runs the configured `CLANG_FORMAT` command (default `clang-format`)
-on each generated `.c` and staged `.titan.h` before native compilation,
-consumer probing, or header publication. It passes an explicit LLVM-based
-four-space style with include sorting disabled; it never inherits an arbitrary
-project's `.clang-format`.
+The default driver persists that output without a presentation pass; it still
+removes blank physical lines after `#line` directives before native
+compilation, consumer probing, or header publication. `titanc --pretty-print`
+additionally runs the configured `CLANG_FORMAT` command (default
+`clang-format`) on every generated `.c` and staged `.titan.h`. It passes an
+explicit LLVM-based four-space style with include sorting disabled and never
+inherits an arbitrary project's `.clang-format`.
 Disabling sorting is semantic preservation rather than aesthetics, because the
 generator deliberately orders direct, supplemental, and source-foreign
-includes. A formatter failure is a compiler error; a public header remains
-untouched, while a generated `.c` remains available as a diagnostic artifact.
-See [Driver and toolchain](driver.md#clang-format-generated-source-formatting).
+includes. An opted-in formatter failure is a compiler error; a public header
+remains untouched, while a generated `.c` remains available as a diagnostic
+artifact. See [Driver and toolchain](driver.md#optional-clang-format-generated-source-formatting).
 
 ## Anatomy of a generated translation unit
 

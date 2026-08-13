@@ -199,15 +199,8 @@ driver.EXTRA_CFLAGS, cflags_error =
     parse_extra_flags("TITAN_EXTRA_CFLAGS")
 driver.EXTRA_LDFLAGS, ldflags_error =
     parse_extra_flags("TITAN_EXTRA_LDFLAGS")
-local formatter_words, formatter_error =
-    cdriver.split_shell_words(driver.CLANG_FORMAT)
-if not formatter_words then
-    formatter_error = "invalid CLANG_FORMAT: " .. formatter_error
-elseif #formatter_words == 0 then
-    formatter_error = "CLANG_FORMAT command is empty"
-end
-driver.TOOLCHAIN_ERROR = driver.INSTALLATION_ERROR or formatter_error or
-    cppflags_error or cflags_error or ldflags_error
+driver.TOOLCHAIN_ERROR = driver.INSTALLATION_ERROR or cppflags_error or
+    cflags_error or ldflags_error
 driver.FOREIGN_C_CONFIGURATION_ID = 0
 
 function driver.foreign_include_dirs()
@@ -277,6 +270,7 @@ function driver.new_resolver_context(options)
         native_constraints = {},
         source_modules = {},
         probe_verbose = options.verbose == true,
+        pretty_print = options.pretty_print == true,
     }
 end
 
@@ -336,56 +330,62 @@ local function run_argv(argv, verbose)
     return os.execute(cmd)
 end
 
-function driver.format_generated_file(filename, verbose)
+function driver.format_generated_file(filename, verbose, pretty_print)
     local label = "generated file '" .. tostring(filename) .. "'"
-    local args, err = parsed_words(driver.CLANG_FORMAT, "CLANG_FORMAT")
-    if not args then
-        return nil, "failed to format " .. label .. ": " .. tostring(err)
-    end
-    if #args == 0 then
-        return nil, "failed to format " .. label ..
-            ": CLANG_FORMAT command is empty"
-    end
-    append_argv(args, {
-        "-i",
-        "--style={BasedOnStyle: LLVM, IndentWidth: 4, SortIncludes: false}",
-        "--",
-        filename,
-    })
-    local ok, term, code = run_argv(args, verbose)
-    if ok then
-        local contents, read_err = util.get_file_contents(filename)
-        if not contents then
-            return nil, "failed to normalize " .. label ..
-                " after clang-format: " .. tostring(read_err)
+    if pretty_print then
+        local args, err = parsed_words(driver.CLANG_FORMAT, "CLANG_FORMAT")
+        if not args then
+            return nil, "failed to format " .. label .. ": " .. tostring(err)
         end
-        -- clang-format owns all generated-C styling. Enforce only the
-        -- source-map invariant that its `#line` directive maps the immediately
-        -- following physical statement rather than a blank line.
-        local normalized = contents
-        local removed
-        repeat
-            normalized, removed = normalized:gsub(
-                "([ \t]*#line[^\n]*\n)[ \t]*\n", "%1")
-        until removed == 0
-        if normalized ~= contents then
-            local write_ok, write_err =
-                util.set_file_contents(filename, normalized)
-            if not write_ok then
-                return nil, "failed to normalize " .. label ..
-                    " after clang-format: " .. tostring(write_err)
+        if #args == 0 then
+            return nil, "failed to format " .. label ..
+                ": CLANG_FORMAT command is empty"
+        end
+        append_argv(args, {
+            "-i",
+            "--style={BasedOnStyle: LLVM, IndentWidth: 4, SortIncludes: false}",
+            "--",
+            filename,
+        })
+        local ok, term, code = run_argv(args, verbose)
+        if not ok then
+            local detail
+            if code ~= nil then
+                detail = " (" .. tostring(term) .. ", exit " ..
+                    tostring(code) .. ")"
+            else
+                detail = ": " .. tostring(term)
             end
+            return nil, "failed to format " .. label ..
+                " with clang-format" .. detail
         end
-        return true
     end
-    local detail
-    if code ~= nil then
-        detail = " (" .. tostring(term) .. ", exit " .. tostring(code) .. ")"
-    else
-        detail = ": " .. tostring(term)
+
+    local contents, read_err = util.get_file_contents(filename)
+    if not contents then
+        return nil, "failed to normalize " .. label ..
+            (pretty_print and " after clang-format" or "") ..
+            ": " .. tostring(read_err)
     end
-    return nil, "failed to format " .. label ..
-        " with clang-format" .. detail
+    -- Formatting is presentation-only. Always enforce the source-map
+    -- invariant that a `#line` directive maps the immediately following
+    -- physical statement rather than a blank line.
+    local normalized = contents
+    local removed
+    repeat
+        normalized, removed = normalized:gsub(
+            "([ \t]*#line[^\n]*\n)[ \t]*\n", "%1")
+    until removed == 0
+    if normalized ~= contents then
+        local write_ok, write_err =
+            util.set_file_contents(filename, normalized)
+        if not write_ok then
+            return nil, "failed to normalize " .. label ..
+                (pretty_print and " after clang-format" or "") ..
+                ": " .. tostring(write_err)
+        end
+    end
+    return true
 end
 
 local function compiler_argv(include_extra_compile_flags)
@@ -2341,7 +2341,8 @@ function driver.defaultloader(static_deps, options)
             local formatted, format_err
             if wrote then
                 formatted, format_err = driver.format_generated_file(
-                    checking_foreign_header, context.probe_verbose)
+                    checking_foreign_header, context.probe_verbose,
+                    context.pretty_print)
             end
             if not wrote or not formatted then
                 os.remove(checking_foreign_header)
@@ -3173,23 +3174,28 @@ function driver.ast_has_foreign_functions(ast)
     return false
 end
 
-function driver.plan_foreign_header(modname, ast, sourcef)
+function driver.plan_foreign_header(modname, ast, sourcef, defer_render)
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
     local headername = driver.foreign_header_filename(sourcef)
     local has_foreign = driver.ast_has_foreign_functions(ast)
+    if not has_foreign then ast._foreign_header_include_keys = nil end
     local absolute_header = headername
     if absolute_header:sub(1, 1) ~= "/" then
         absolute_header = normalize_absolute_path(
             lfs.currentdir() .. "/" .. absolute_header)
     end
     ast._foreign_header_output = has_foreign and absolute_header or nil
-    local contents = has_foreign and coder.generate_foreign_header(
-        modname, ast, { module = modname }) or nil
+    local contents
+    if has_foreign and not defer_render then
+        contents = coder.generate_foreign_header(
+            modname, ast, { module = modname })
+    end
     return {
         modname = modname,
         ast = ast,
         filename = headername,
         absolute = absolute_header,
+        has_foreign = has_foreign,
         contents = contents,
     }
 end
@@ -3209,7 +3215,7 @@ function driver.validate_foreign_header_plan(plan)
     return true
 end
 
-function driver.write_foreign_header_plan(plan, verbose)
+function driver.write_foreign_header_plan(plan, verbose, pretty_print)
     local ok, err = driver.validate_foreign_header_plan(plan)
     if not ok then return nil, err end
     local parent_ok, parent_err = ensure_output_parent(plan.filename)
@@ -3231,7 +3237,7 @@ function driver.write_foreign_header_plan(plan, verbose)
             return nil, write_err
         end
         local format_ok, format_err =
-            driver.format_generated_file(temporary, verbose)
+            driver.format_generated_file(temporary, verbose, pretty_print)
         if not format_ok then
             os.remove(temporary)
             return nil, format_err
@@ -3245,6 +3251,7 @@ function driver.write_foreign_header_plan(plan, verbose)
         local removed, remove_err = os.remove(plan.filename)
         if not removed then return nil, remove_err end
     end
+    plan.ast._foreign_header_contents = plan.contents
     plan.ast._foreign_header_prepared = true
     return true
 end
@@ -3257,7 +3264,7 @@ function driver.plan_foreign_headers(names, imported)
         local mod = assert(imported[name])
         if mod.ast and not mod.compiled then
             local plan = driver.plan_foreign_header(
-                name, mod.ast, mod.native_output or mod.filename)
+                name, mod.ast, mod.native_output or mod.filename, true)
             local previous = occupied[plan.absolute]
             if previous and previous ~= name then
                 return nil, "generated foreign-header path '" .. plan.filename
@@ -3278,13 +3285,13 @@ function driver.plan_foreign_headers(names, imported)
             if not node._ignore and node._tag == "Ast.TopLevelImport"
                and node._source_import then
                 local dependency = by_name[node.modname]
-                node._foreign_header = dependency and dependency.contents
+                node._foreign_header = dependency and dependency.has_foreign
                     and dependency.absolute or nil
             end
         end
     end
     for _, plan in ipairs(plans) do
-        if plan.contents then
+        if plan.has_foreign then
             plan.contents = coder.generate_foreign_header(
                 plan.modname, plan.ast, { module = plan.modname })
         end
@@ -3294,18 +3301,20 @@ function driver.plan_foreign_headers(names, imported)
     return plans
 end
 
-function driver.write_foreign_header_plans(plans, verbose)
+function driver.write_foreign_header_plans(plans, verbose, pretty_print)
     for _, plan in ipairs(plans or {}) do
-        local ok, err = driver.write_foreign_header_plan(plan, verbose)
+        local ok, err = driver.write_foreign_header_plan(
+            plan, verbose, pretty_print)
         if not ok then return nil, err end
     end
     return true
 end
 
-function driver.prepare_foreign_headers(names, imported, verbose)
+function driver.prepare_foreign_headers(
+        names, imported, verbose, pretty_print)
     local plans, err = driver.plan_foreign_headers(names, imported)
     if not plans then return nil, err end
-    return driver.write_foreign_header_plans(plans, verbose)
+    return driver.write_foreign_header_plans(plans, verbose, pretty_print)
 end
 
 function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
@@ -3321,8 +3330,8 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
     local libname = sourcef:gsub("[.]titan$", "") .. ".o"
     if not ast._foreign_header_prepared then
         local header_plan = driver.plan_foreign_header(modname, ast, sourcef)
-        local header_ok, header_err =
-            driver.write_foreign_header_plan(header_plan, verbose)
+        local header_ok, header_err = driver.write_foreign_header_plan(
+            header_plan, verbose, options and options.pretty_print)
         if not header_ok then return nil, header_err end
     end
     local code, native_references =
@@ -3334,8 +3343,8 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
     os.remove(libname)
     local ok, err = util.set_file_contents(filename, code)
     if not ok then return nil, err end
-    local format_ok, format_err =
-        driver.format_generated_file(filename, verbose)
+    local format_ok, format_err = driver.format_generated_file(
+        filename, verbose, options and options.pretty_print)
     if not format_ok then return nil, format_err end
     local args, flags_err = driver.generated_compile_prefix()
     if not args then return nil, flags_err end
@@ -3582,8 +3591,8 @@ local function write_entrypoint(modname, entrypoint_c, program_name,
     })
     local wrote, write_err = util.set_file_contents(entrypoint_c, contents)
     if not wrote then return nil, write_err end
-    local formatted, format_err =
-        driver.format_generated_file(entrypoint_c, verbose)
+    local formatted, format_err = driver.format_generated_file(
+        entrypoint_c, verbose, options.pretty_print)
     if not formatted then return nil, format_err end
     return entrypoint_c
 end
@@ -5478,7 +5487,8 @@ end
 -- executable archive extraction (not whole-archive force loading).
 function driver.run_standalone_archive_probe(
         entries, module_names, libnames, static_archives,
-        link, verbose, extra_objects, validate_titan_support)
+        link, verbose, extra_objects, validate_titan_support, options)
+    options = options or {}
     if #module_names == 0 and not validate_titan_support then return true end
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
@@ -5500,8 +5510,8 @@ function driver.run_standalone_archive_probe(
         cleanup()
         return nil, write_err
     end
-    local formatted, format_err =
-        driver.format_generated_file(source, verbose)
+    local formatted, format_err = driver.format_generated_file(
+        source, verbose, options.pretty_print)
     if not formatted then
         cleanup()
         return nil, format_err

@@ -391,8 +391,8 @@ The compiler driver is invoked with dot-separated *module names*, not
 file paths:
 
 ```sh
-titanc [--print-ast] [-v] [--static] [--test] [--no-uv-bootstrap] \
-  [--no-line-directives] [--lua <luasrc>] \
+titanc [--print-ast] [--pretty-print] [-v] [--static] [--test] \
+  [--no-uv-bootstrap] [--no-line-directives] [--lua <luasrc>] \
   [--tree <srcroot>] [-l lib1,lib2] [-X object...] <module>...
 ```
 
@@ -428,19 +428,23 @@ titanc [--print-ast] [-v] [--static] [--test] [--no-uv-bootstrap] \
   traceback validation.
 * `-X/--extra-object` adds native object/archive payload. Library mode carries
   it into both provider forms; executable mode uses it at final link.
-* `-v/--verbose` prints the formatter and C tool command lines;
-  `--print-ast` dumps the parsed AST.
+* `--pretty-print` runs `clang-format` on generated C and source-foreign
+  headers. Formatting is opt-in; without it Titan preserves the generator's raw
+  layout while still removing blank physical lines after `#line` directives.
+* `-v/--verbose` prints every C tool command line and, with `--pretty-print`,
+  the formatter command line; `--print-ast` dumps the parsed AST.
 
 `titanc` first typechecks every requested module and every transitive
 dependency, reports *all* errors, and exits with status 1 before
 generating any code if any module failed. Only when everything checks
 does it compile and link.
 
-Supported Linux and macOS builds require `clang-format` on `PATH`;
-`CLANG_FORMAT` selects a different compatible command. Titan formats every
-generated `.c` in place before invoking the C compiler and every generated
-`.titan.h` before a compiler check consumes or publishes it. A formatter
-failure aborts native compilation and provider publication.
+`clang-format` is needed only for `--pretty-print`; `CLANG_FORMAT` selects a
+different compatible command. In that mode Titan formats every generated `.c`
+in place before invoking the C compiler and every generated `.titan.h` before a
+compiler check consumes or publishes it. A formatter failure aborts native
+compilation and provider publication. Default builds do not discover or invoke
+a formatter.
 
 Compilation goes through C: each logical module becomes one C translation
 unit, written beside its canonical source, and the system C compiler (`cc`,

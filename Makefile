@@ -269,8 +269,8 @@ ifndef LUA_PLATFORM
   endif
 endif
 
-# Kept in sync with titan-compiler/driver.lua (driver.CC, driver.CLANG_FORMAT,
-# and driver.CFLAGS).
+# Kept in sync with titan-compiler/driver.lua (driver.CC, the opt-in
+# driver.CLANG_FORMAT, and driver.CFLAGS).
 CC           ?= cc
 AR           ?= ar
 RANLIB       ?= ranlib
@@ -464,15 +464,15 @@ help: ## Show this help
 	@echo "$(OPENSSL_VERSION), and llhttp $(LLHTTP_VERSION) by default. Use"
 	@echo "LIBUV_MODE=system and/or OPENSSL_MODE=system to select pkg-config"
 	@echo "libraries (libuv >= $(LIBUV_MIN_VERSION), OpenSSL >= $(OPENSSL_MIN_VERSION))."
-	@echo "All builds require a C compiler and clang-format. Bundled dependencies"
-	@echo "also need CMake, Perl, git, tar, curl/wget, and sha256sum/shasum"
-	@echo "(macOS: xcode-select --install; brew install clang-format cmake)."
+	@echo "All builds require a C compiler. titanc --pretty-print additionally needs"
+	@echo "clang-format. Bundled dependencies need CMake, Perl, git, tar, curl/wget,"
+	@echo "and sha256sum/shasum (macOS: xcode-select --install; brew install cmake)."
 	@echo "A usable system Readline is preferred; otherwise make lua builds pinned"
 	@echo "GNU Readline $(READLINE_RELEASE) into PREFIX automatically; that fallback also"
 	@echo "needs a linkable curses, tinfo, or termcap provider. Optional system packages:"
-	@echo "Ubuntu/Debian clang-format libreadline-dev libuv1-dev libssl-dev pkg-config;"
-	@echo "Fedora clang-tools-extra readline-devel libuv-devel openssl-devel"
-	@echo "pkgconf-pkg-config; macOS brew install clang-format libuv openssl@3 pkgconf."
+	@echo "Ubuntu/Debian libreadline-dev libuv1-dev libssl-dev pkg-config; Fedora"
+	@echo "readline-devel libuv-devel openssl-devel pkgconf-pkg-config; macOS brew"
+	@echo "install libuv openssl@3 pkgconf. Add clang-format only for --pretty-print."
 	@echo "llhttp is always bundled."
 	@echo "For a standalone installation, choose one writable PREFIX and run:"
 	@echo "  make lua PREFIX=/path && make luarocks PREFIX=/path && make libuv"
@@ -1911,7 +1911,6 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,TITAN_ABI_VERSION=$(TITAN_ABI_VERSION)) \
 		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,CLANG_FORMAT=$(CLANG_FORMAT)) \
 		$(call make_shell_quote,AR=$(AR)) \
 		$(call make_shell_quote,RANLIB=$(RANLIB)) \
 		$(call make_shell_quote,TITANC=$(TITANC)) \

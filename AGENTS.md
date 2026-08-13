@@ -257,14 +257,13 @@ not add epicycles around what may be a misunderstood simpler design.
   with `TERM` followed by `KILL`. The Make runner streams combined output
   through a pipe, not a regular-file redirection, so the stdio/parent-descriptor
   cases keep their supported boundary.
-- **clang-format.** Supported Linux and macOS builds require `clang-format` on
-  `PATH`. The `CLANG_FORMAT` command defaults to `clang-format`, is parsed into
-  argv, and is exported by the Makefile to its `titanc` invocations. The
-  compiler applies its fixed explicit style, with include sorting disabled, to
-  every generated `.c` in place before native compilation and to every
-  generated `.titan.h` stage before a consumer probe or publication. It never
-  discovers a project's `.clang-format`; `-v` prints the safely quoted
-  formatter command as well as C tool commands.
+- **clang-format.** Ordinary Linux and macOS builds do not invoke or require a
+  formatter. `titanc --pretty-print` opts in: the `CLANG_FORMAT` command defaults
+  to `clang-format`, is parsed into argv only in that mode, and receives Titan's
+  fixed explicit style with include sorting disabled for every generated `.c`
+  and `.titan.h` stage. It never discovers a project's `.clang-format`; `-v`
+  prints the safely quoted formatter command only when it is executed. Every
+  mode still removes blank physical lines immediately after `#line` directives.
 - **C toolchain**: `CC` (default `cc`) for compilation and for the C FFI's
   predefined-macro/include-search probes, plus `AR` (default `ar`) and
   `RANLIB` (default `ranlib`) for every generated static provider. All three
@@ -323,8 +322,8 @@ busted                                              # full Busted tree — MUST 
 busted spec/parser_spec.lua                         # single spec file
 busted spec/coder/coder_spec.lua --filter='for loop' # single test (Lua pattern on test name)
 
-./titanc [--print-ast] [--test] [--no-uv-bootstrap] [-v] [--static] \
-  [--no-line-directives] \
+./titanc [--print-ast] [--pretty-print] [--test] [--no-uv-bootstrap] \
+  [-v] [--static] [--no-line-directives] \
   [--lua <luasrc>] [--tree <srcroot>] \
   [-l lib1,lib2] [-X object...] <module>...
 ```
@@ -673,7 +672,7 @@ standard shims. Never use `*.a`, `examples/*.a`, or another broad archive/Lua
 glob that can remove user-authored files.
 
 The stdlib configuration/completion stamps own the provider pair as one build:
-they record the archive name, effective `AR`/`RANLIB` and `CLANG_FORMAT`,
+they record the archive name, effective `AR`/`RANLIB`,
 embedded-format/coder inputs, full `-X` payload, LPegLabel source/archive
 identity, libuv mode, platform support, and existing
 compiler/source/flag inputs. Every warm `make stdlib` rescans `titan.a` for the
@@ -758,7 +757,8 @@ record's type identity moved from a `getudatamem` tag word to the udata's
 metatable pointer; `0.7` itself was bumped from `0.6` when record instances and
 module state collapsed to single Lua 5.5 `Udata` objects; `0.6` added the
 native `_fn` closure parameter). `.so`/`.a` providers built by an older Titan
-are incompatible. `-v` prints the exact formatter and C tool command lines.
+are incompatible. `-v` prints the exact executed C tool commands and any
+opted-in formatter command line.
 Without the prepared Lua 5.5.1 installation, only the pure specs pass (cpp,
 lexer, location, parser, symtab, types, util); `spec/checker/`, `spec/coder/`,
 and
@@ -844,12 +844,13 @@ Pipeline (all in `titan-compiler/`): for each logical module, the driver
 resolves a flat source or folder descriptor → `parser.parse` runs
 independently for each real source file → one dense AST → one
 `checker.check` → one `coder.generate` translation unit → `driver` writes the
-`.c` **next to the flat source or canonical folder main**, invokes the
-configured `clang-format` on it in place, and then invokes the parsed `CC`
-command with each argument shell-quoted. A formatter failure retains the raw or
+`.c` **next to the flat source or canonical folder main**, performs required
+`#line` normalization, optionally invokes the configured `clang-format` when
+`--pretty-print` is selected, and then invokes the parsed `CC` command with each
+argument shell-quoted. An opted-in formatter failure retains the raw or
 partially formatted C for diagnosis but prevents native compilation. Generated
-source-foreign `.titan.h` companions instead use a sibling stage and are
-formatted before publication. Folder descriptors are temporary loader
+source-foreign `.titan.h` companions use the same boundary in a sibling stage
+before publication. Folder descriptors are temporary loader
 metadata, not AST nodes or namespaces. In no-main mode, `titanc` derives the
 longest common dotted provider from the deduplicated requested roots, rejects
 unrelated roots,
@@ -1275,16 +1276,15 @@ substitution, recursive; error on missing keys). Key facts:
   or a 0-user-value `Udata0` holding the raw non-GC C scalar inline via
   `getudatamem` (no tagging, no barrier). Boxes are module-internal (never
   cross a module boundary), so the representation is not part of the ABI.
-- The driver formats every compiler-generated `.c` in place before compilation
-  and every generated `.titan.h` stage before a consumer probe or publication.
-  It supplies a fixed `clang-format` style explicitly and disables include
-  sorting, because generated header and preamble include order is intentional;
-  never delegate the style to an ambient project configuration. Generated
-  multiline C comments use ordinary ` *` continuation lines so one formatter
-  pass is already a fixed point. Code generation removes every
-  template-introduced blank physical line immediately after `#line`, and the
-  final formatted-file boundary enforces the same invariant before compilation:
-  the next generated statement retains the exact Titan source line named there.
+- The driver normalizes every compiler-generated `.c` and `.titan.h` stage
+  before compilation, probing, or publication. `--pretty-print` additionally
+  applies a fixed `clang-format` style with include sorting disabled, because
+  generated header and preamble include order is intentional; never delegate the
+  style to an ambient project configuration. Generated multiline C comments use
+  ordinary ` *` continuation lines so an opted-in formatter pass is already a
+  fixed point. Code generation and the final file boundary remove every blank
+  physical line immediately after `#line`: the next generated statement retains
+  the exact Titan source line named there in either mode.
 - Module resolution is compiled-first for dependencies: one complete
   format-preference pass over `.so`/`.a`, then the other compiled format, then
   source. A dependency with no claiming prefix/exact provider but available

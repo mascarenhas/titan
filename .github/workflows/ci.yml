@@ -94,7 +94,7 @@ jobs:
             ubuntu-24.04-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
 
       - name: Install regular build dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang-format cmake curl libssl-dev libtinfo-dev libuv1-dev perl pkg-config
+        run: sudo apt-get update && sudo apt-get install -y cmake curl libssl-dev libtinfo-dev libuv1-dev perl pkg-config
 
       - name: Prepare the ABI-0.24 standalone prefix
         run: |
@@ -330,9 +330,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install compiler test dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang-format
-
       - name: Download prepared Linux tree
         uses: actions/download-artifact@v8
         with:
@@ -449,7 +446,7 @@ jobs:
             macos-latest-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
 
       - name: Install system dependencies (macOS)
-        run: brew install clang-format cmake libuv openssl@3 pkgconf
+        run: brew install cmake libuv openssl@3 pkgconf
 
       - name: Build the bundled Lua 5.5 source tree
         run: |
@@ -600,7 +597,7 @@ jobs:
             >> "$GITHUB_ENV"
 
       - name: Install sanitizer build dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang-format cmake curl libreadline-dev perl
+        run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev perl
 
       - name: Build sanitizer-enabled native dependencies
         run: |

@@ -381,8 +381,9 @@ invocation-wide source-header plan when the CLI owns the compilation:
    source module after checking, rewrites temporary dependency-header edges to
    their final absolute paths, and validates all owned/unowned destinations
    before writing any. It writes each required `*.titan.h` to a sibling stage,
-   runs the configured `clang-format` on that stage, and only then renames the
-   formatted header into place before compiling the first object.
+   applies required `#line` normalization and, only with `--pretty-print`, the
+   configured `clang-format`, then renames the completed header into place
+   before compiling the first object.
    `driver.compile` consumes that supplied plan; a direct programmatic caller
    gets a one-module planning/writing fallback. A folder module's companion is
    beside its canonical main and contributors never own one. See
@@ -394,9 +395,10 @@ invocation-wide source-header plan when the CLI owns the compilation:
    symbols consistently.
 4. The raw translation unit is written **next to the flat source or folder
    main** as `sourcef:gsub("[.]titan$", "") .. ".c"` (if `sourcef` is not
-   given it defaults to the dots-to-slashes path), then formatted in place.
-   Formatting failure aborts before its object is compiled but retains the raw
-   or partially formatted `.c` as a diagnostic artifact. Contributors never
+   given it defaults to the dots-to-slashes path), then normalized in place.
+   `--pretty-print` additionally formats it before compilation. Formatting
+   failure aborts before its object is compiled but retains the raw or partially
+   formatted `.c` as a diagnostic artifact. Contributors never
    receive generated C or object files.
 5. The object is compiled with the parsed `driver.CC`, then
    `TITAN_EXTRA_CPPFLAGS`, Titan's fixed `driver.CFLAGS`, and
@@ -413,14 +415,16 @@ invocation-wide source-header plan when the CLI owns the compilation:
    stack so libbacktrace can unwind them; `-I libbacktrace` finds
    `backtrace.h`.
 
-`CLANG_FORMAT` and the native-tool strings are parsed into dense argument
-arrays with a small shell-word grammar supporting whitespace, single/double
+The native-tool strings, and `CLANG_FORMAT` when `--pretty-print` actually
+selects it, are parsed into dense argument arrays with a small shell-word grammar
+supporting whitespace, single/double
 quotes, and backslash escapes. Each command builder quotes every resulting word
 before its final `os.execute`, so spaces and shell metacharacters remain part of
 one argument rather than being reinterpreted. Unterminated quotes, trailing
 escapes, NUL bytes, an empty configured command, and non-dense programmatic
-argument arrays produce configuration errors. `-v` prints the same safely
-quoted formatter, compiler, and linker commands that are executed.
+argument arrays produce configuration errors. A malformed `CLANG_FORMAT` is
+therefore inert in the default mode. `-v` prints the same safely quoted
+compiler/linker commands—and any opted-in formatter command—that are executed.
 
 `driver.compile_module(modname, mod, static_deps, verbose, options)` is the thin
 wrapper `titanc` uses: it skips modules whose cache entry says `compiled` (the binary
@@ -652,8 +656,9 @@ normal module-init protocol.
 ## The `titanc` command line
 
 ```sh
-./titanc [--print-ast] [-v|--verbose] [-u|--lua <luasrc>] \
-  [--static] [--test] [--no-uv-bootstrap] [--no-line-directives] \
+./titanc [--print-ast] [--pretty-print] [-v|--verbose] \
+  [-u|--lua <luasrc>] [--static] [--test] [--no-uv-bootstrap] \
+  [--no-line-directives] \
   [-t|--tree <srcroot>] [-l|--link lib1,lib2] \
   [-X|--extra-object obj.o...] <module>...
 ```
@@ -662,9 +667,11 @@ normal module-init protocol.
 or more dot-separated module names. `--tree` overrides
 `driver.TITAN_SOURCE_PATH`. In source-checkout mode, `--lua` overrides
 `driver.LUA_SOURCE_PATH`; installed mode rejects it so the installed headers,
-`liblua.a`, and `libtitan.a` remain a matched SDK. `-v` prints every
-`clang-format` and native-tool command line, `--print-ast` dumps each module's
-AST after checking, `--static` swaps the compiled-provider passes to prefer
+`liblua.a`, and `libtitan.a` remain a matched SDK. `--pretty-print` opts every
+emitted C/header boundary into the fixed `clang-format` pass; default builds do
+not invoke it. `-v` prints every native-tool command line plus any opted-in
+formatter command, `--print-ast` dumps each module's AST after checking,
+`--static` swaps the compiled-provider passes to prefer
 self-describing archives before DSOs, `--test` selects the native test pipeline
 described in [Native test runner](test-runner.md), and `--no-uv-bootstrap`
 threads one entrypoint-only option through `driver.compile_program`. The driver
@@ -841,38 +848,44 @@ Its flow:
    and make `titanc` exit with status 1; caught publication failures restore
    the prior owned bundle.
 
-## `clang-format`: generated-source formatting
+## Optional `clang-format` generated-source formatting
 
-The coder still builds C by pasting strings, with no C AST or in-process
-pretty-printer. The driver instead invokes the parsed `CLANG_FORMAT` command
-(default `clang-format`) in place on every emitted `.c` and every `.titan.h`
-stage.
-It supplies an explicit LLVM-based, four-space style and disables include
-sorting rather than discovering an ambient project `.clang-format`. Include
-order is intentional in generated module preambles and source-foreign headers,
-where direct, supplemental, and generated companion headers have distinct
-roles.
+The coder builds C by pasting strings, with no C AST or in-process
+pretty-printer. Presentation formatting is deliberately opt-in:
+`titanc --pretty-print` invokes the parsed `CLANG_FORMAT` command (default
+`clang-format`) in place on every emitted `.c` and every `.titan.h` stage. The
+default pipeline never parses, discovers, or invokes that tool. It persists the
+valid raw template output instead.
 
-The lifecycle is raw write, format, then native compile. Generated headers are
-formatted as sibling stages and renamed into place only after success, so a
-formatter error cannot replace a usable owned header. Temporary checking
-headers are also formatted after their raw write and before any compiler probe
-consumes them. Generated `.c` files are kept at their diagnostic output paths
-when formatting fails, but no native compile begins. This boundary covers
-module translation units, source-foreign companions, generated standalone and
-test entrypoints, and the compiler's generated native-validation translation
-units. The C FFI's semantic and rejection probes are not emitted codegen
-artifacts and continue to go directly to the configured C compiler.
+The opted-in command supplies an explicit LLVM-based, four-space style and
+disables include sorting rather than discovering an ambient project
+`.clang-format`. Include order is intentional in generated module preambles and
+source-foreign headers, where direct, supplemental, and generated companion
+headers have distinct roles.
 
-Templates must produce valid C, but clang-format owns their presentation.
-Generated multiline comments use conventional ` *` continuation lines rather
-than Lua's `**` spelling; this keeps the result at a fixed point after the one
-formatter pass. Code generation removes every template-introduced blank physical
-line immediately after `#line` before formatting. The formatted-file boundary
-then enforces that invariant again before compilation, so the directive's named
-Titan line applies to the following generated statement. With `-v`, Titan prints
-the safely quoted formatter invocation before executing it, just as it does for
-native compiler and linker commands.
+Every generated-file boundary performs the non-presentational normalization
+needed for source maps: it removes all blank physical lines immediately after a
+`#line` directive. The coder performs the same cleanup on its assembled module
+source before returning it. Thus default and pretty-printed builds both make the
+directive's named Titan line apply to the immediately following generated
+statement.
+
+The lifecycle is raw write, optional format, normalization, then native compile.
+Generated headers use sibling stages and are renamed into place only after every
+selected step succeeds, so an I/O or opted-in formatter error cannot replace a
+usable owned header. Temporary checking headers complete the same boundary
+before any compiler probe consumes them. Generated `.c` files remain at their
+diagnostic paths when opted-in formatting fails, but no native compile begins.
+This covers module translation units, source-foreign companions, generated
+standalone/test entrypoints, and generated native-validation units. The C FFI's
+semantic and rejection probes are not emitted codegen artifacts and continue
+directly to the configured C compiler.
+
+Templates must already produce valid C in either mode. Generated multiline
+comments use conventional ` *` continuation lines so an opted-in formatter pass
+is a fixed point. With `-v`, Titan prints the safely quoted formatter invocation
+only when `--pretty-print` selects it, just as it prints executed native tool
+commands.
 
 ## `util.lua`: templates and helpers
 
@@ -1111,7 +1124,7 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `driver.INCLUDE_PATH` | `driver.lua` | `<root>/include` in installed mode | Titan SDK and bundled-libuv headers used by generated C and foreign imports; the non-Lua Titan set is `minicoro.h`, `titan.h` and `titan/ffi.h`. Generated source-foreign companions are source-build intermediates, not installed SDK headers. |
 | `driver.TITAN_RUNTIME_PATH` / `driver.LIBBACKTRACE_PATH` | `driver.lua` | `titan-runtime/` / `libbacktrace` | Checkout-only runtime source/archive/header and separate libbacktrace locations. |
 | `CC` / `driver.CC` | environment / `driver.lua` | `"cc"` | C compiler command, parsed as shell words and shared with foreign-import probing. |
-| `CLANG_FORMAT` / `driver.CLANG_FORMAT` | environment / `driver.lua` | `"clang-format"` | Formatter command, parsed as shell words. The driver appends its in-place operation, fixed explicit style with include sorting disabled, and generated-source path; Make exports the configured value to every recipe-owned `titanc`. |
+| `CLANG_FORMAT` / `driver.CLANG_FORMAT` | environment / `driver.lua` | `"clang-format"` | Formatter command used only by `titanc --pretty-print`, then parsed as shell words. The driver appends its in-place operation, fixed explicit style with include sorting disabled, and generated-source path; default builds neither parse nor invoke it. |
 | `driver.CFLAGS` | `driver.lua` | `"--std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls"` | Flags for every compile and link step. |
 | `TITAN_EXTRA_CPPFLAGS` / `driver.EXTRA_CPPFLAGS` | environment / `driver.lua` | empty | Parsed `-I`/`-D` and other preprocessing inputs; used by foreign-import compiler probes and prepended to every Titan/runtime/entrypoint compilation. |
 | `TITAN_EXTRA_CFLAGS` / `driver.EXTRA_CFLAGS` | environment / `driver.lua` | empty | Parsed compilation-only flags, after fixed defaults; never used by final links. |
