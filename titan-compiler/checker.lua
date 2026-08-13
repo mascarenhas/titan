@@ -8242,8 +8242,52 @@ function checker._generic.inference_type_arguments(context)
     return arguments
 end
 
+function checker._generic.propagate_inference_constraint_evidence(context)
+    local cell_count = 0
+    for _, entry in ipairs(context.scopes) do
+        cell_count = cell_count + #entry.cells
+    end
+    for _ = 1, math.max(1, cell_count) do
+        local before = 0
+        for _, entry in ipairs(context.scopes) do
+            for _, cell in ipairs(entry.cells) do
+                if cell.binding then before = before + 1 end
+            end
+        end
+        for _, entry in ipairs(context.scopes) do
+            for index, typeparam in ipairs(entry.typeparams) do
+                local cell = entry.cells[index]
+                local argument = cell and cell.binding
+                if argument and argument._tag == "Type.Parameter"
+                   and typeparam.constraint ~= false then
+                    local binders = context.st.generic_scope_bindings
+                        and context.st.generic_scope_bindings[argument.scope]
+                    local declared = binders and binders[argument.index]
+                    if declared and declared.constraint ~= false then
+                        local required = checker._generic.substitute_inference(
+                            context, typeparam.constraint, false)
+                        checker._generic.unify_inference(context,
+                            required, declared.constraint,
+                            "declared constraint of rigid argument '" ..
+                                tostring(argument.name or argument.index) .. "'",
+                            cell.loc or context.loc)
+                    end
+                end
+            end
+        end
+        local after = 0
+        for _, entry in ipairs(context.scopes) do
+            for _, cell in ipairs(entry.cells) do
+                if cell.binding then after = after + 1 end
+            end
+        end
+        if after == before then break end
+    end
+end
+
 function checker._generic.close_inference_context(context)
     if context.closed then return context.valid end
+    checker._generic.propagate_inference_constraint_evidence(context)
     context.closed = true
     local valid = true
 

@@ -708,6 +708,9 @@ describe("generic declarations and explicit calls", function()
                 if pair.first is value then end
                 return inner<U, T>(item)
             end
+            function inferred<U: J, T: I<U>>(item: T): T
+                return inner(item)
+            end
         ]])
         local decoded, decode_error = driver.decode_module_interface(
             types.serialize(modtype), "test", "dependent-constraint-test")
