@@ -843,6 +843,8 @@ exact integer-keyed maps
 * variadic functions with `...: T` variadic tail, and flexible multiple
 returns also with a`...: T` tail
 * first-class functions, including anonymous functions with proper lexical scoping
+* explicit invariant [parametric polymorphism](doc/language/generics.md) with
+  Interface constraints, local call-site inference, and constraint-directed erasure
 * modules: early-bound, can be spread over multiple `.titan` files within a single folder,
 module metadata published in `.a`/`.so` files for binary import, direct source import
 allows visibility for module-local declarations ("friend" modules), visibility of module
@@ -870,6 +872,5 @@ finalizer ownership, formatted output
 
 ## Next
 
-* parametric polymorphism (via type erasure and boxed values)
 * Language server
 * ...Titan 1.0!

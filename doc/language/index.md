@@ -49,6 +49,7 @@ use the chapters below for the normative language reference.
 | --- | --- |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
 | [The type system](types.md) | All Titan types; equality, symmetric non-transitive consistency, direct coercions, gradual views, callable adjustment, the normative boundary matrix, inference, and `value`. |
+| [Generics](generics.md) | Explicit type parameters and Interface constraints, applied nominal types, local instantiation, rigid-body capabilities, constraint erasure, shallow run-time checks, eligible FFI arguments, and generic Tasks. |
 | [Type aliases](type-aliases.md) | Transparent compile-time type names, preserved record/union static namespaces, visibility, nominal re-exports, and alias cycles. |
 | [Interfaces](interfaces.md) | Nominal behavioral types, structural satisfaction by records and unions, wrapper conversions, method calls, options, casts, Lua interoperation, and separate compilation. |
 | [Option types](option-types.md) | `T?`: nil-tolerant types — syntax, semantics, defaulting with `or`, and how `nil` flows through arrays, maps, and the Lua boundary. |
