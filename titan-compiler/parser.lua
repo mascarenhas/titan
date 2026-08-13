@@ -332,82 +332,89 @@ end
 -- We represent the suffix of an expression by a function that receives the
 -- base expression and returns a full expression including the suffix.
 
-local function function_call_suffix(pos, typeargs, args)
+local function unpack_membername(member)
+    if type(member) == "table" then
+        return member.name, true
+    end
+    return member, false
+end
+
+-- `callexpsuffix` gives ordinary calls the same capture shape as explicit
+-- generic calls. Keep a fresh empty list on every AST node: the checker owns
+-- and may decorate each call independently.
+function defs.ordinary_call(args, named)
+    return {}, args, named
+end
+
+-- The aggregate-owner branch consumes `.member` together with the preceding
+-- type arguments so the complete generic list is probed only once. This
+-- parser-only carrier preserves both the dot location and contextual C-name
+-- status until `suffix_anyfunccall` builds the existing AST shape.
+function defs.nominal_member_selector(pos, member)
+    local name, contextual = unpack_membername(member)
+    return {
+        loc = pos,
+        name = name,
+        contextual = contextual,
+    }
+end
+
+local function function_call_suffix(pos, typeargs, args, named)
     return function(exp)
-        return ast.ExpCall(pos, exp, ast.ArgsFunc(pos, args), typeargs)
+        local callargs
+        if named then
+            callargs = ast.ArgsNamedFunc(pos, args)
+        else
+            callargs = ast.ArgsFunc(pos, args)
+        end
+        return ast.ExpCall(pos, exp, callargs, typeargs)
     end
 end
 
-function defs.suffix_funccall(pos, args)
-    return function_call_suffix(pos, {}, args)
-end
-
-function defs.suffix_genericfunccall(pos, typeargs, args)
-    return function_call_suffix(pos, typeargs, args)
-end
-
-local function named_function_call_suffix(pos, typeargs, fields)
-    return function(exp)
-        return ast.ExpCall(pos, exp, ast.ArgsNamedFunc(pos, fields), typeargs)
+-- Generic calls and aggregate-owner selections share the one factored suffix
+-- production. A call always supplies the final boolean capture, including
+-- `false` for positional arguments; its absence therefore identifies the
+-- aggregate-owner selector without inspecting user AST data.
+function defs.suffix_anyfunccall(pos, typeargs, args, named)
+    if named ~= nil then
+        return function_call_suffix(pos, typeargs, args, named)
     end
-end
 
-function defs.suffix_namedfunccall(pos, fields)
-    return named_function_call_suffix(pos, {}, fields)
-end
-
-function defs.suffix_genericnamedfunccall(pos, typeargs, fields)
-    return named_function_call_suffix(pos, typeargs, fields)
-end
-
-local function method_call_suffix(pos, name, typeargs, args)
-    return function(exp)
-        return ast.ExpCall(pos, exp, ast.ArgsMethod(pos, name, args), typeargs)
-    end
-end
-
-function defs.suffix_methodcall(pos, name, args)
-    return method_call_suffix(pos, name, {}, args)
-end
-
-function defs.suffix_genericmethodcall(pos, name, typeargs, args)
-    return method_call_suffix(pos, name, typeargs, args)
-end
-
-local function named_method_call_suffix(pos, name, typeargs, fields)
-    return function(exp)
-        return ast.ExpCall(pos, exp,
-            ast.ArgsNamedMethod(pos, name, fields), typeargs)
-    end
-end
-
-function defs.suffix_namedmethodcall(pos, name, fields)
-    return named_method_call_suffix(pos, name, {}, fields)
-end
-
-function defs.suffix_genericnamedmethodcall(pos, name, typeargs, fields)
-    return named_method_call_suffix(pos, name, typeargs, fields)
-end
-
--- An explicit nominal application belongs to the aggregate namespace rather
--- than to one selected constructor or nominal function. Keep it as a parser
--- decoration on the existing namespace expression; checking resolves and
--- closes it before the following dot selector, and erased lowering removes it
--- before code generation.
-function defs.suffix_nominaltypeargs(pos, typeargs)
+    local selector = args
     return function(exp)
         exp._nominal_typeargs = typeargs
         exp._nominal_typeargs_loc = pos
-        return exp
+
+        local var = ast.VarDot(selector.loc, exp, selector.name)
+        if selector.contextual then
+            var._contextual_c_name = true
+        end
+        return ast.ExpVar(selector.loc, var)
     end
 end
 
--- `obj:m` with no argument list is a bound-method reference: it evaluates to a
--- function value (the method with `self` captured), not a call. Tried after the
--- method-call form, so a real call (`obj:m(args)`) still parses as a call.
-function defs.suffix_methodref(pos, name)
+function defs.method_reference_tail()
+    return false
+end
+
+-- Parse `: NAME` once, then distinguish a call tail from the empty tail of a
+-- bound-method reference. Calls retain the existing positional/named argument
+-- nodes and explicit (possibly empty) type-argument list.
+function defs.suffix_anymethod(pos, name, typeargs, args, named)
+    if typeargs == false then
+        return function(exp)
+            return ast.ExpMethodRef(pos, exp, name)
+        end
+    end
+
     return function(exp)
-        return ast.ExpMethodRef(pos, exp, name)
+        local callargs
+        if named then
+            callargs = ast.ArgsNamedMethod(pos, name, args)
+        else
+            callargs = ast.ArgsMethod(pos, name, args)
+        end
+        return ast.ExpCall(pos, exp, callargs, typeargs)
     end
 end
 
@@ -415,13 +422,6 @@ function defs.suffix_bracket(pos, index)
     return function(exp)
         return ast.ExpVar(pos, ast.VarBracket(pos, exp, index))
     end
-end
-
-local function unpack_membername(member)
-    if type(member) == "table" then
-        return member.name, true
-    end
-    return member, false
 end
 
 function defs.contextual_c_name(name)
@@ -1167,8 +1167,10 @@ local grammar = re.compile([[
     -- Parentheses and bare strings are positional call suffixes. Bare braces
     -- are always named calls; passing one constructor positionally therefore
     -- requires parentheses (`f({ ... })`). An angle list is claimed only when
-    -- a complete type-argument list is followed by one of those existing call
-    -- delimiters; otherwise `<` remains an ordinary comparison operator.
+    -- a complete type-argument list is followed by an existing call delimiter
+    -- or by the dot of an aggregate-owner selection; otherwise `<` remains an
+    -- ordinary comparison operator. Successful lists are deliberately parsed
+    -- once in this noncommitting lookahead and once for their AST captures.
     genericcalltypeargprobe
                     <- LT type (COMMA type)* GENERICGT
 
@@ -1177,24 +1179,36 @@ local grammar = re.compile([[
                          (LPAREN / STRINGLIT / LCURLY))
                        typearglist
 
-    -- Aggregate applications are expression suffixes only when a member
-    -- selector follows, keeping comparison parsing unchanged.
-    nominaltypeargs <- &(genericcalltypeargprobe DOT) typearglist
+    genericsuffixtypeargs
+                    <- &(genericcalltypeargprobe
+                         (DOT / LPAREN / STRINGLIT / LCURLY))
+                       typearglist
 
-    expsuffix       <- (P  nominaltypeargs)                      -> suffix_nominaltypeargs
-                     / (P  genericcalltypeargs funcargs)         -> suffix_genericfunccall
-                     / (P  genericcalltypeargs namedargs)        -> suffix_genericnamedfunccall
-                     / (P  funcargs)                             -> suffix_funccall
-                     / (P  namedargs)                            -> suffix_namedfunccall
+    -- Choose positional versus named arguments only after the optional generic
+    -- prefix has been decided. The trailing boolean is a parser-only capture;
+    -- the AST keeps its existing Args* tags and fields.
+    callargs        <- funcargs ('' -> tofalse)
+                     / namedargs ('' -> totrue)
+
+    -- Consume the aggregate member selector in the same factored branch as a
+    -- generic call, so `Owner<T>.member` does not add a second full type-list
+    -- probe ahead of every ordinary expression suffix.
+    nominalmemberselector
+                    <- (&DOT P DOT membername^NameDotExpSuf)
+                                                               -> nominal_member_selector
+
+    callexpsuffix   <- genericsuffixtypeargs
+                         (nominalmemberselector / callargs)
+                     / (callargs -> ordinary_call)
+
+    -- A method name is parsed exactly once. If no complete call tail follows,
+    -- the empty branch preserves the existing bound-method-reference syntax.
+    methodtail      <- ((genericcalltypeargs? -> listopt) callargs)
+                     / ('' -> method_reference_tail)
+
+    expsuffix       <- (P  callexpsuffix)                        -> suffix_anyfunccall
                      / (P  COLON NAME^NameColonExpSuf
-                                 genericcalltypeargs funcargs)   -> suffix_genericmethodcall
-                     / (P  COLON NAME^NameColonExpSuf
-                                 genericcalltypeargs namedargs)  -> suffix_genericnamedmethodcall
-                     / (P  COLON NAME^NameColonExpSuf
-                                 funcargs)                       -> suffix_methodcall
-                     / (P  COLON NAME^NameColonExpSuf
-                                 namedargs)                      -> suffix_namedmethodcall
-                     / (P  COLON NAME^NameColonExpSuf)           -> suffix_methodref
+                                 methodtail)                     -> suffix_anymethod
                      / (P  LBRACKET exp^ExpExpSuf
                                 RBRACKET^RBracketExpSuf)         -> suffix_bracket
                      / (P  DOT membername^NameDotExpSuf)         -> suffix_dot

@@ -1980,6 +1980,54 @@ end
             })
         end)
 
+        it("keeps bare strings positional after the factored generic prefix",
+        function()
+            assert_expression_ast("make<string> 'item'", {
+                _tag = "Ast.ExpCall",
+                typeargs = { { _tag = "Ast.TypeString" } },
+                args = {
+                    _tag = "Ast.ArgsFunc",
+                    args = { { _tag = "Ast.ExpString", value = "item" } },
+                },
+            })
+            assert_expression_ast("object:map<string> 'item'", {
+                _tag = "Ast.ExpCall",
+                typeargs = { { _tag = "Ast.TypeString" } },
+                args = {
+                    _tag = "Ast.ArgsMethod",
+                    method = "map",
+                    args = { { _tag = "Ast.ExpString", value = "item" } },
+                },
+            })
+        end)
+
+        it("keeps adjacent generic closes on aggregate-owner selections",
+        function()
+            assert_expression_ast("Box<Outer<Inner<T>>>.make()", {
+                _tag = "Ast.ExpCall",
+                exp = { var = {
+                    _tag = "Ast.VarDot",
+                    name = "make",
+                    exp = {
+                        _nominal_typeargs = { {
+                            _tag = "Ast.TypeName",
+                            name = "Outer",
+                            typeargs = { {
+                                _tag = "Ast.TypeName",
+                                name = "Inner",
+                                typeargs = { {
+                                    _tag = "Ast.TypeName",
+                                    name = "T",
+                                } },
+                            } },
+                        } },
+                    },
+                } },
+                typeargs = {},
+                args = { _tag = "Ast.ArgsFunc" },
+            })
+        end)
+
         it("does not treat callable arguments as a bound-method specialization",
         function()
             local parsed = parser.parse(
