@@ -6832,7 +6832,10 @@ function coder._codeis(ctx, node)
     if source_type._tag == "Type.Value" then
         local cast = assert(node._written_cast,
             "value type test is missing its checker written-cast plan")
-        if cast.op == "dynamic" then
+        if cast.op == "identity" then
+            predicate_stats = render("(void)($SOURCE);", { SOURCE = source })
+            predicate = "1"
+        elseif cast.op == "dynamic" then
             predicate_stats, predicate =
                 coder._code_dynamic_predicate(
                     ctx, assert(cast.dynamic,
@@ -17754,9 +17757,9 @@ function coder.generate_foreign_header(modname, ast, tlcontext)
     }, "\n")
 end
 
--- Code generation consumes only the ordinary erased checker product. The
--- declared generic module graph is deliberately attached at one root field and
--- is used only for metadata below; following the checked AST recursively is not
+-- Code generation consumes only the ordinary erased checker product. Detached
+-- generic surface graphs live exclusively in `_declared_type` metadata on the
+-- module and its declarations; following the checked AST recursively is not
 -- safe because declaration and type annotations contain cycles. Keep this walk
 -- iterative, identity-aware, and bounded so the entry assertion itself cannot
 -- overflow the Lua stack or chase an accidentally unbounded graph.
@@ -17828,8 +17831,7 @@ function coder._assert_erased_boundary(ast)
                 error(reason .. " reached coder through " .. label, 3)
             end
             for key, child in next, value do
-                if not (skip_declared_type and value == ast
-                        and key == "_declared_type") then
+                if not (skip_declared_type and key == "_declared_type") then
                     enqueue(key)
                     enqueue(child)
                 end

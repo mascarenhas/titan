@@ -3519,6 +3519,18 @@ local function checker_assignment_adjustment(source, target, st, options)
     local applied, application_plan =
         checker._generic.applied_nominal_adjustment(source, target, st)
     if applied then return application_plan, nil, nil end
+    if source._tag == "Type.Option" or target._tag == "Type.Option" then
+        local source_base = source._tag == "Type.Option" and source.base or source
+        local target_base = target._tag == "Type.Option" and target.base or target
+        local inner_applied, inner_plan =
+            checker._generic.applied_nominal_adjustment(
+                source_base, target_base, st)
+        if inner_applied then
+            if not inner_plan then return nil, nil, nil end
+            return checker_assignment_adjustment(
+                types.erase(source), types.erase(target), st, options)
+        end
+    end
 
     -- Rigid transport to or from the binder's own erased constraint is a
     -- representation identity at the generic surface. Distinct parameters do
@@ -3531,6 +3543,22 @@ local function checker_assignment_adjustment(source, target, st, options)
     elseif target_carrier and not source_carrier
        and types.equals(source, target_carrier) then
         return { kind = "identity", source = source, target = target }, nil, nil
+    elseif target_carrier and not source_carrier
+       and (source._tag == "Type.Value" or types.is_c_tvalue(source)) then
+        return checker_assignment_adjustment(
+            source, target_carrier, st, options)
+    elseif source_carrier and not target_carrier
+       and (target._tag == "Type.Value" or types.is_c_tvalue(target)) then
+        return checker_assignment_adjustment(
+            source_carrier, target, st, options)
+    elseif types.contains_generic(source)
+       and (target._tag == "Type.Value" or types.is_c_tvalue(target)) then
+        return checker_assignment_adjustment(
+            types.erase(source), target, st, options)
+    elseif types.contains_generic(target)
+       and (source._tag == "Type.Value" or types.is_c_tvalue(source)) then
+        return checker_assignment_adjustment(
+            source, types.erase(target), st, options)
     end
     if not st then
         return types.assignment_adjustment(source, target, options),
@@ -7817,17 +7845,34 @@ local function check_explicit_cast_relation(node, st, errors)
     local cast_plan
     local applied_application, application_plan =
         checker._generic.applied_nominal_adjustment(source, target, st)
+    if not applied_application
+       and (source._tag == "Type.Option" or target._tag == "Type.Option") then
+        local source_base = source._tag == "Type.Option" and source.base or source
+        local target_base = target._tag == "Type.Option" and target.base or target
+        local inner_applied, inner_plan =
+            checker._generic.applied_nominal_adjustment(
+                source_base, target_base, st)
+        if inner_applied then
+            applied_application = true
+            application_plan = inner_plan and types.written_cast(
+                types.erase(source), types.erase(target)) or false
+        end
+    end
     local rigid_source = checker._generic.rigid_parameter_carrier(source)
     local rigid_target = checker._generic.rigid_parameter_carrier(target)
     if applied_application then
         if application_plan then
-            cast_plan = {
-                kind = "written_cast",
-                op = "identity",
-                source = source,
-                target = target,
-                generic_view = application_plan,
-            }
+            if application_plan.kind == "written_cast" then
+                cast_plan = application_plan
+            else
+                cast_plan = {
+                    kind = "written_cast",
+                    op = "identity",
+                    source = source,
+                    target = target,
+                    generic_view = application_plan,
+                }
+            end
         end
     elseif rigid_source or rigid_target then
         local effective_source = rigid_source or source
@@ -12849,38 +12894,52 @@ end
 
 function checker._generic.erased_descriptor(typ, state)
     if type(typ) ~= "table" or type(typ._tag) ~= "string" then return typ end
+    local cached = state.erased_descriptors[typ]
+    if cached then return cached end
     local tag = typ._tag
+    if not types.contains_generic(typ)
+       and tag ~= "Type.Record" and tag ~= "Type.Union"
+       and tag ~= "Type.Interface" and tag ~= "Type.Field"
+       and tag ~= "Type.Variant" and tag ~= "Type.StaticMethod"
+       and tag ~= "Type.Method" and tag ~= "Type.Module" then
+        state.erased_descriptors[typ] = typ
+        return typ
+    end
+    local erased
     if tag == "Type.Record" or tag == "Type.Union"
        or tag == "Type.Interface" then
-        return state.erased_registry[typ.name] or types.erase(typ)
+        erased = state.erased_registry[typ.name] or types.erase(typ)
     elseif tag == "Type.Field" then
         local owner = state.erased_registry[typ.fqtn]
-        return owner and owner.fields and owner.fields[typ.index + 1]
+        erased = owner and owner.fields and owner.fields[typ.index + 1]
             or types.erase(typ)
     elseif tag == "Type.Variant" then
         local owner = state.erased_registry[typ.fqtn]
-        return owner and owner.variants and owner.variants[typ.index + 1]
+        erased = owner and owner.variants and owner.variants[typ.index + 1]
             or types.erase(typ)
     elseif tag == "Type.StaticMethod" then
         local owner = state.erased_registry[typ.fqtn]
-        return owner and owner.functions and owner.functions[typ.name]
+        erased = owner and owner.functions and owner.functions[typ.name]
             or types.erase(typ)
     elseif tag == "Type.Method" then
         local owner = state.erased_registry[typ.fqtn]
         if owner and owner.methods then
             if owner._tag == "Type.Interface" then
                 for _, method in ipairs(owner.methods) do
-                    if method.name == typ.name then return method end
+                    if method.name == typ.name then erased = method break end
                 end
-            elseif owner.methods[typ.name] then
-                return owner.methods[typ.name]
+            else
+                erased = owner.methods[typ.name]
             end
         end
-        return types.erase(typ)
+        erased = erased or types.erase(typ)
     elseif tag == "Type.Module" then
-        return checker._generic.erased_module_view(typ)
+        erased = checker._generic.erased_module_view(typ)
+    else
+        erased = types.erase(typ)
     end
-    return types.erase(typ)
+    state.erased_descriptors[typ] = erased
+    return erased
 end
 
 function checker._generic.ordinary_assignment(source, target, state)
@@ -13368,6 +13427,90 @@ function checker._generic.reclassify_assignment(node, state)
     end
 end
 
+function checker._generic.ordinary_written_plan(node, source, target, state)
+    local plan = types.written_cast(source, target)
+    node._interface_conversion = nil
+    node._interface_downcast = nil
+    node._interface_test = nil
+    node._callable_adapter = nil
+    if not plan and source._tag == "Type.Nominal"
+       and target._tag == "Type.Nominal" then
+        local concrete = types.registry[source.fqtn]
+        local interface = types.registry[target.fqtn]
+        if concrete
+           and (concrete._tag == "Type.Record"
+                or concrete._tag == "Type.Union")
+           and interface and interface._tag == "Type.Interface" then
+            local policy = interface_relation_policy(state.st)
+            plan = types.written_cast(source, target, policy)
+            if plan then
+                local conversion = make_interface_conversion(
+                    source, target, plan)
+                plan.interface_conversion = conversion
+                node._interface_conversion = conversion
+                if node._tag == "Ast.ExpIs" then
+                    node._interface_test = {
+                        kind = "interface_implementation_test",
+                        conversion = conversion,
+                        allocation_free = true,
+                    }
+                end
+            end
+        end
+    end
+    if not plan then
+        local downcast = interface_downcast_plan(source, target, state.st)
+        if downcast then
+            node._interface_downcast = downcast
+            plan = {
+                kind = "written_cast",
+                op = "interface_downcast",
+                source = source,
+                target = target,
+                interface = downcast.interface,
+                concrete = downcast.concrete,
+                source_optional = downcast.source_optional,
+                downcast = downcast,
+            }
+            if node._tag == "Ast.ExpIs" then
+                node._interface_test = {
+                    kind = "interface_downcast_test",
+                    downcast = downcast,
+                    allocation_free = true,
+                }
+            end
+        end
+    end
+    if plan and plan.op == "callable" and node._tag == "Ast.ExpCast" then
+        node._callable_adapter = checker.freeze_callable_adapter(
+            plan.callable, source, target, node.loc)
+    end
+    return plan
+end
+
+function checker._generic.reclassify_written_expression(
+        node, lowered, surface_target, state)
+    local source = types.erase(lowered._type)
+    local target = types.erase(surface_target)
+    lowered._type = source
+    if node._tag == "Ast.ExpCast" and types.equals(source, target) then
+        return lowered
+    end
+    local plan = checker._generic.ordinary_written_plan(
+        node, source, target, state)
+    if not plan then
+        error(string.format(
+            "generic written boundary has no ordinary cast from %s to %s",
+            types.tostring(source), types.tostring(target)), 0)
+    end
+    node.exp = lowered
+    node.target = target
+    node._written_cast = plan
+    node._adjustment = nil
+    node._type = node._tag == "Ast.ExpIs" and types.Boolean() or target
+    return node
+end
+
 function checker._generic.lower_expression(node, state)
     if type(node) ~= "table" or type(node._tag) ~= "string" then return node end
     local tag = node._tag
@@ -13419,11 +13562,17 @@ function checker._generic.lower_expression(node, state)
         local surface_target = node._type
         local generic_adjustment = node._adjustment
             and types.contains_generic(node._adjustment)
+        local generic_written = node._written_cast
+            and types.contains_generic(node._written_cast)
         local lowered = checker._generic.lower_expression(node.exp, state)
         local carrier = state.reverse_wrappers[lowered]
         if carrier and types.equals(
                 types.erase(surface_target), types.erase(carrier._type)) then
             return carrier
+        end
+        if generic_written then
+            return checker._generic.reclassify_written_expression(
+                node, lowered, surface_target, state)
         end
         if generic_adjustment then
             return checker._generic.erased_boundary_expression(
@@ -13433,7 +13582,23 @@ function checker._generic.lower_expression(node, state)
         node.exp = lowered
         if node.target and type(node.target) == "table"
            and node.target._tag and node.target._tag:match("^Type%.") then
-            node.target = types.erase(node.target)
+            node.target = checker._generic.erased_descriptor(
+                node.target, state)
+        end
+    elseif tag == "Ast.ExpIs" then
+        local surface_target = node.target
+        local generic_written = node._written_cast
+            and types.contains_generic(node._written_cast)
+        local lowered = checker._generic.lower_expression(node.exp, state)
+        if generic_written then
+            return checker._generic.reclassify_written_expression(
+                node, lowered, surface_target, state)
+        end
+        node.exp = lowered
+        if node.target and type(node.target) == "table"
+           and node.target._tag and node.target._tag:match("^Type%.") then
+            node.target = checker._generic.erased_descriptor(
+                node.target, state)
         end
     elseif tag == "Ast.ExpMethodRef" then
         return checker._generic.lower_method_reference(node, state)
@@ -13612,7 +13777,7 @@ function checker._generic.sanitize_erased_graph(root, state)
         end
         local changes = {}
         for key, child in pairs(value) do
-            if not (is_root and key == "_declared_type") then
+            if key ~= "_declared_type" then
                 if type(key) == "string"
                    and (key:match("^_generic")
                         or key == "_closed_generic_declaration"
@@ -13667,10 +13832,47 @@ function checker._generic.refresh_erased_annotations(node)
     visit(node)
 end
 
+function checker._generic.freeze_declared_annotations(root, clone_memo)
+    local seen = {}
+    local function visit(node)
+        if type(node) ~= "table" or seen[node] then return end
+        seen[node] = true
+        local tag = node._tag
+        if type(tag) == "string" and tag:match("^Ast%.") then
+            if node._type and (tag:match("^Ast%.TopLevel")
+                    or tag == "Ast.Decl"
+                    or tag == "Ast.InterfaceMethod"
+                    or tag == "Ast.UnionVariant") then
+                node._declared_type = clone_memo[node._type]
+                    or types.clone_graph(node._type, clone_memo)
+            end
+            for key, child in pairs(node) do
+                if type(key) == "number" or (type(key) == "string"
+                        and (key:sub(1, 1) ~= "_"
+                            or key == "_self"
+                            or key == "_result_decls")) then
+                    if type(child) == "table" then
+                        if child._tag then
+                            visit(child)
+                        else
+                            for _, item in ipairs(child) do visit(item) end
+                        end
+                    end
+                end
+            end
+        elseif tag == nil then
+            for _, item in ipairs(node) do visit(item) end
+        end
+    end
+    visit(root)
+end
+
 function checker._generic.lower_erased_core(modname, tree, st, errors)
-    local declared = types.clone_graph((assert(tree._type,
-        "generic erasure requires the declared module graph")))
+    local clone_memo = {}
+    local declared = types.clone_graph(assert(tree._type,
+        "generic erasure requires the declared module graph"), clone_memo)
     tree._declared_type = declared
+    checker._generic.freeze_declared_annotations(tree, clone_memo)
 
     local surface_registry = types.registry
     local erased_registry = checker._generic.prepare_erased_registry(
@@ -13680,6 +13882,7 @@ function checker._generic.lower_erased_core(modname, tree, st, errors)
         errors = errors,
         surface_registry = surface_registry,
         erased_registry = erased_registry,
+        erased_descriptors = {},
         calls = {},
         reverse_wrappers = {},
         hidden_case = 0,

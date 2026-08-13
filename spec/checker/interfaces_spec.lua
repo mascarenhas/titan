@@ -1,4 +1,5 @@
 local h = require "spec.support.helpers"
+local types = require "titan-compiler.types"
 
 local run_checker = h.run_checker
 local run_checker_modules = h.run_checker_modules
@@ -49,7 +50,10 @@ describe("interfaces (typechecker)", function()
         assert.equal(1, #method._bound_strict_guard_plans)
         assert.is_truthy(method._bound_strict_vararg_guard_plan)
 
-        assert.is_true(modtype.type_members.Stream == interface)
+        assert.is_true(modtype.type_members.Stream ==
+            declaration._declared_type)
+        assert.not_equal(declaration._declared_type, interface)
+        assert.is_true(types.registry["test.Stream"] == interface)
         assert.is_nil(modtype.members.Stream)
     end)
 
