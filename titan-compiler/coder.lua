@@ -17831,7 +17831,9 @@ function coder._assert_erased_boundary(ast)
                 error(reason .. " reached coder through " .. label, 3)
             end
             for key, child in next, value do
-                if not (skip_declared_type and key == "_declared_type") then
+                if not (skip_declared_type and
+                        (key == "_declared_type" or
+                         key == "_erased_registry")) then
                     enqueue(key)
                     enqueue(child)
                 end

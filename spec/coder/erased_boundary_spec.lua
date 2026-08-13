@@ -138,7 +138,7 @@ describe("erased coder boundary", function()
         local tree = checked()
         local owner = MODULE .. ".Box"
         local scope = generic_scope("owner", "record", owner)
-        types.registry[owner] = types.Record(
+        tree._erased_registry[owner] = types.Record(
             owner, {}, {}, {}, 0, scope,
             { types.TypeParameter("T", false) })
         assert_rejected(tree,

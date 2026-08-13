@@ -4050,6 +4050,7 @@ typefromnode = util.make_visitor({
                         "type alias '%s.%s' is not a generic type constructor",
                         node.module, node.name)
                 elseif type_member._tag == "Type.Nominal"
+                   and types.registry[type_member.fqtn]
                    and not is_nominal_visible_from(st, type_member.fqtn) then
                     return invalid(errors, node.loc,
                         "nominal type '%s' is local to module '%s'",
