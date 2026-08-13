@@ -12944,6 +12944,18 @@ function checker._generic.prepare_erased_registry(surface_registry)
     return erased
 end
 
+-- Binary interfaces omit local fields and variants, but each remaining
+-- descriptor retains its physical slot or tag. Visible-list position therefore
+-- cannot identify the corresponding member in an erased owner.
+function checker._generic.canonical_indexed_member(items, member)
+    for _, candidate in ipairs(items or {}) do
+        if candidate.index == member.index and candidate.name == member.name then
+            return candidate
+        end
+    end
+    return nil
+end
+
 function checker._generic.erased_descriptor(typ, state)
     if type(typ) ~= "table" or type(typ._tag) ~= "string" then return typ end
     local cached = state.erased_descriptors[typ]
@@ -12968,12 +12980,12 @@ function checker._generic.erased_descriptor(typ, state)
             or types.erase(typ)
     elseif tag == "Type.Field" then
         local owner = state.erased_registry[typ.fqtn]
-        erased = owner and owner.fields and owner.fields[typ.index + 1]
-            or types.erase(typ)
+        erased = checker._generic.canonical_indexed_member(
+            owner and owner.fields, typ) or types.erase(typ)
     elseif tag == "Type.Variant" then
         local owner = state.erased_registry[typ.fqtn]
-        erased = owner and owner.variants and owner.variants[typ.index + 1]
-            or types.erase(typ)
+        erased = checker._generic.canonical_indexed_member(
+            owner and owner.variants, typ) or types.erase(typ)
     elseif tag == "Type.StaticMethod" then
         local owner = state.erased_registry[typ.fqtn]
         erased = owner and owner.functions and owner.functions[typ.name]
@@ -13488,12 +13500,16 @@ function checker._generic.generic_field_pair(field, state)
     if not owner or owner._tag ~= "Type.Record" or owner.scope == false then
         return nil
     end
-    local canonical = owner.fields[field.index + 1]
+    local canonical = checker._generic.canonical_indexed_member(
+        owner.fields, field)
     if not canonical or not types.contains_generic(canonical.type) then
         return nil
     end
     local erased_owner = state.erased_registry[field.fqtn]
-    return canonical, erased_owner.fields[field.index + 1]
+    local erased = checker._generic.canonical_indexed_member(
+        erased_owner and erased_owner.fields, canonical)
+    if not erased then return nil end
+    return canonical, erased
 end
 
 function checker._generic.lower_field_read(node, state)
@@ -13552,8 +13568,10 @@ function checker._generic.lower_union_init(node, state)
     if not surface or surface._tag ~= "Type.Variant" then return end
     local owner = state.surface_registry[surface.fqtn]
     local erased_owner = state.erased_registry[surface.fqtn]
-    local canonical = owner and owner.variants[surface.index + 1]
-    local carrier = erased_owner and erased_owner.variants[surface.index + 1]
+    local canonical = checker._generic.canonical_indexed_member(
+        owner and owner.variants, surface)
+    local carrier = checker._generic.canonical_indexed_member(
+        erased_owner and erased_owner.variants, surface)
     if not carrier then return end
     node._union = erased_owner
     node._variant = carrier

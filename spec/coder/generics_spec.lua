@@ -18,10 +18,15 @@ local function clean_generated()
         "test__entrypoint.c", "test__entrypoint.o",
         "generic_iteration_fixture.c", "generic_iteration_fixture.o",
         "generic_gc_fixture.c", "generic_gc_fixture.o",
+        "generic_layout_provider.c", "generic_layout_provider.o",
+        "generic_layout_provider.so", "generic_layout_provider.a",
+        "generic_layout_consumer.c", "generic_layout_consumer.o",
+        "generic_layout_consumer.so", "generic_layout_consumer.a",
     }) do
         remove(path)
     end
-    os.execute("rm -rf test.dSYM")
+    os.execute("rm -rf test.dSYM generic_layout_provider.so.dSYM " ..
+        "generic_layout_consumer.so.dSYM")
 end
 
 describe("generic erased core", function()
@@ -257,6 +262,87 @@ describe("generic erased core", function()
                 end
             end
         ]], [[assert(test.use() == 42)]])
+    end)
+
+    it("preserves generic owner slots through a binary interface", function()
+        local ok, err = h.build_so_chain({
+            {
+                name = "generic_layout_provider",
+                src = [[
+                    record Box<T>
+                        local hidden: integer
+                        first: T
+                        second: T
+                        third: T
+                    end
+
+                    function make<T>(hidden: integer, first: T,
+                                     second: T, third: T): Box<T>
+                        return Box.new<T>(hidden, first, second, third)
+                    end
+
+                    function reveal<T>(box: Box<T>): integer
+                        return box.hidden
+                    end
+
+                    union Maybe<T>
+                        local hidden: integer
+                        first: T
+                        second: T
+                        absent
+                    end
+
+                    function hidden<T>(n: integer): Maybe<T>
+                        return Maybe.hidden<T>(n)
+                    end
+                ]],
+            },
+            {
+                name = "generic_layout_consumer",
+                src = [[
+                    local provider = import "generic_layout_provider"
+
+                    function run(): boolean
+                        local box = provider.make<integer>(7, 10, 20, 30)
+                        box.first = 11
+                        box.second = 22
+                        box.third = 33
+                        if box.first ~= 11 or box.second ~= 22 or
+                           box.third ~= 33 or
+                           provider.reveal<integer>(box) ~= 7 then
+                            return false
+                        end
+
+                        local maybe = provider.Maybe.second<integer>(42)
+                        case maybe
+                        when first: item then
+                            return false
+                        when second: item then
+                            if item ~= 42 then return false end
+                        else
+                            return false
+                        end
+
+                        case provider.hidden<integer>(9)
+                        when first: item then
+                            return false
+                        when second: item then
+                            return false
+                        when absent then
+                            return false
+                        else
+                            return true
+                        end
+                    end
+                ]],
+            },
+        })
+        assert.truthy(ok, err)
+
+        local ran, output = h.call("generic_layout_consumer", [[
+            assert(generic_layout_consumer.run())
+        ]])
+        assert.truthy(ran, output)
     end)
 
     it("compiles the generic iteration and GC implementations from source",

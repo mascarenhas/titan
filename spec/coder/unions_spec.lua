@@ -1262,8 +1262,8 @@ describe("unions (end-to-end)", function()
                     end
 
                     union Message
-                        count: integer
                         local hidden: integer
+                        count: integer
                         quit
                     end
 
