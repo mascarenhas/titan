@@ -13297,6 +13297,12 @@ function checker._generic.lower_call_in_place(node, state)
 
     local surface_signature, declaration =
         checker._generic.surface_callable_for_call(node, state)
+    if not surface_signature and node._callee_type
+       and node._callee_type._tag == "Type.Function"
+       and types.contains_generic(node._callee_type) then
+        surface_signature = node._callee_type
+        declaration = node._callee_type
+    end
     if not surface_signature then
         checker._generic.reclassify_node_open_adjustments(node, state)
         info.pending = nil
@@ -13339,9 +13345,12 @@ function checker._generic.lower_call_in_place(node, state)
         if node.exp._tag == "Ast.ExpVar" and node.exp.var then
             node.exp.var._type = signature
             if node.exp.var._decl
-               and node.exp.var._decl._tag ~= "Ast.TopLevelFunc" then
+               and node.exp.var._decl._tag:match("^Type%.") then
                 node.exp.var._decl = checker._generic.erased_descriptor(
                     node.exp.var._decl, state)
+            elseif node.exp.var._decl
+               and node.exp.var._decl._tag == "Ast.Decl" then
+                node.exp.var._decl._type = signature
             end
         end
     end

@@ -180,6 +180,7 @@ describe("generic erased core", function()
         ]], [[
             assert(test.answer() == 42)
             assert(test.missing() == nil)
+            assert(test.apply(function(item) return item + 1 end, 41) == 42)
         ]])
     end)
 
