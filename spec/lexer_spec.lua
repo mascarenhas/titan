@@ -151,6 +151,17 @@ describe("Titan lexer", function()
         assert_lex("-->", {"COMMENT"},           {})
     end)
 
+    it("keeps generic punctuation as the existing comparison and shift tokens",
+    function()
+        assert_lex("Outer<Inner<T>>",
+            {"NAME", "LT", "NAME", "LT", "NAME", "SHR"},
+            {"Outer", "Inner", "T"})
+        assert_lex("> >= >> < <= <<",
+            {"GT", "SPACE", "GE", "SPACE", "SHR", "SPACE",
+             "LT", "SPACE", "LE", "SPACE", "SHL"},
+            {})
+    end)
+
     it("can lex some integers", function()
         assert_lex("0",            {"NUMBER"}, {0})
         assert_lex("17",           {"NUMBER"}, {17})

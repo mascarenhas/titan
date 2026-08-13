@@ -38,6 +38,22 @@ local errors = {
 
    TypeFunc = "Expected a type in function declaration.",
 
+   NameTypeParam = "Expected a type parameter name after '<' or ','.",
+
+   TypeParamConstraint = "Expected an Interface application after ':' in type parameter constraint.",
+
+   RAngleTypeParams = "Expected '>' to close the type parameter list.",
+
+   TypeArgument = "Expected a type argument after '<' or ','.",
+
+   RAngleTypeArgs = "Expected '>' to close the type argument list.",
+
+   GenericForeignFunc = "Foreign functions cannot declare type parameters.",
+
+   GenericLambda = "Anonymous functions cannot declare type parameters.",
+
+   GenericTypeAlias = "Type aliases cannot declare type parameters.",
+
    EndFunc = "Expected 'end' to close the function body.",
 
    ParamSemicolon = "Expected ':' after parameter name.",

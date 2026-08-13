@@ -19,8 +19,9 @@ local THIS_FILENAME = nil
 -- (see THIS_FILENAME), so the per-parse accumulator follows the same contract.
 local PROGRAM_NODES = nil
 
--- Parse-time guardrail on the length of parameter/expression lists (not a
--- runtime bound; runtime vararg counts have their own cap, TITAN_VARARG_MAX).
+-- Parse-time guardrail on the length of parameter, expression, and generic
+-- lists (not a runtime bound; runtime vararg counts have their own cap,
+-- TITAN_VARARG_MAX).
 local LIST_LIMIT = 100
 
 --
@@ -331,29 +332,61 @@ end
 -- We represent the suffix of an expression by a function that receives the
 -- base expression and returns a full expression including the suffix.
 
-function defs.suffix_funccall(pos, args)
+local function function_call_suffix(pos, typeargs, args)
     return function(exp)
-        return ast.ExpCall(pos, exp, ast.ArgsFunc(pos, args))
+        return ast.ExpCall(pos, exp, ast.ArgsFunc(pos, args), typeargs)
+    end
+end
+
+function defs.suffix_funccall(pos, args)
+    return function_call_suffix(pos, {}, args)
+end
+
+function defs.suffix_genericfunccall(pos, typeargs, args)
+    return function_call_suffix(pos, typeargs, args)
+end
+
+local function named_function_call_suffix(pos, typeargs, fields)
+    return function(exp)
+        return ast.ExpCall(pos, exp, ast.ArgsNamedFunc(pos, fields), typeargs)
     end
 end
 
 function defs.suffix_namedfunccall(pos, fields)
+    return named_function_call_suffix(pos, {}, fields)
+end
+
+function defs.suffix_genericnamedfunccall(pos, typeargs, fields)
+    return named_function_call_suffix(pos, typeargs, fields)
+end
+
+local function method_call_suffix(pos, name, typeargs, args)
     return function(exp)
-        return ast.ExpCall(pos, exp, ast.ArgsNamedFunc(pos, fields))
+        return ast.ExpCall(pos, exp, ast.ArgsMethod(pos, name, args), typeargs)
     end
 end
 
 function defs.suffix_methodcall(pos, name, args)
+    return method_call_suffix(pos, name, {}, args)
+end
+
+function defs.suffix_genericmethodcall(pos, name, typeargs, args)
+    return method_call_suffix(pos, name, typeargs, args)
+end
+
+local function named_method_call_suffix(pos, name, typeargs, fields)
     return function(exp)
-        return ast.ExpCall(pos, exp, ast.ArgsMethod(pos, name, args))
+        return ast.ExpCall(pos, exp,
+            ast.ArgsNamedMethod(pos, name, fields), typeargs)
     end
 end
 
 function defs.suffix_namedmethodcall(pos, name, fields)
-    return function(exp)
-        return ast.ExpCall(pos, exp,
-            ast.ArgsNamedMethod(pos, name, fields))
-    end
+    return named_method_call_suffix(pos, name, {}, fields)
+end
+
+function defs.suffix_genericnamedmethodcall(pos, name, typeargs, fields)
+    return named_method_call_suffix(pos, name, typeargs, fields)
 end
 
 -- `obj:m` with no argument list is a bound-method reference: it evaluates to a
@@ -393,9 +426,9 @@ function defs.suffix_dot(pos, member)
     end
 end
 
-function defs.qualifiedtype(pos, module, member)
+function defs.qualifiedtype(pos, module, member, typeargs)
     local name, contextual = unpack_membername(member)
-    local node = ast.TypeQualName(pos, module, name)
+    local node = ast.TypeQualName(pos, module, name, typeargs)
     if contextual then
         node._contextual_c_name = true
     end
@@ -430,20 +463,36 @@ function defs.exp_is_call(_, pos, exp)
     end
 end
 
-function defs.methoddecl(pos, islocal, class, name, params, rettypes,
-                         flexrettype, block)
+function defs.methoddecl(pos, islocal, class, name, typeparams, params,
+                         rettypes, flexrettype, block)
     local node = ast.TopLevelMethod(pos, class, name, params, rettypes,
-        flexrettype, block)
+        flexrettype, block, typeparams)
     node.islocal = islocal
     return node
 end
 
-function defs.staticdecl(pos, islocal, class, name, params, rettypes,
-                         flexrettype, block)
+function defs.staticdecl(pos, islocal, class, name, typeparams, params,
+                         rettypes, flexrettype, block)
     local node = ast.TopLevelStatic(pos, class, name, params, rettypes,
-        flexrettype, block)
+        flexrettype, block, typeparams)
     node.islocal = islocal
     return node
+end
+
+function defs.toplevelfuncdecl(pos, islocal, name, typeparams, params,
+                               rettypes, flexrettype, block)
+    return ast.TopLevelFunc(pos, islocal, name, params, rettypes,
+        flexrettype, block, typeparams)
+end
+
+function defs.interfacedecl(pos, name, typeparams, methods)
+    return ast.TopLevelInterface(pos, name, methods, typeparams)
+end
+
+function defs.interfacemethoddecl(pos, name, typeparams, params, rettypes,
+                                  flexrettype)
+    return ast.InterfaceMethod(pos, name, params, rettypes, flexrettype,
+        typeparams)
 end
 
 local function has_local_field(fields)
@@ -453,7 +502,15 @@ local function has_local_field(fields)
     return false
 end
 
-function defs.recorddecl(pos, islocal, name, fields)
+local function applied_owner_type(pos, name, typeparams)
+    local typeargs = {}
+    for i, typeparam in ipairs(typeparams) do
+        typeargs[i] = ast.TypeName(typeparam.loc, typeparam.name, {})
+    end
+    return ast.TypeName(pos, name, typeargs)
+end
+
+function defs.recorddecl(pos, islocal, name, typeparams, fields)
     local params, initlist = {}, {}
     for _, field in ipairs(fields) do
         table.insert(params, ast.Decl(field.loc, field.name, field.type, false))
@@ -465,10 +522,10 @@ function defs.recorddecl(pos, islocal, name, fields)
             ast.ExpInitList(pos, initlist)
         })
     })
-    local record = ast.TopLevelRecord(pos, name, fields)
+    local record = ast.TopLevelRecord(pos, name, fields, typeparams)
     record.islocal = islocal
     local new = ast.TopLevelStatic(pos, name, "new", params,
-        { ast.TypeName(pos, name) }, false, body)
+        { applied_owner_type(pos, name, typeparams) }, false, body, {})
     new.islocal = islocal or has_local_field(fields)
     new._record_constructor = true
     return record, new
@@ -484,8 +541,8 @@ function defs.localunionvariantdecl(pos, name, payload)
     return variant
 end
 
-function defs.uniondecl(pos, islocal, name, variants)
-    local union = ast.TopLevelUnion(pos, name, variants)
+function defs.uniondecl(pos, islocal, name, typeparams, variants)
+    local union = ast.TopLevelUnion(pos, name, variants, typeparams)
     union.islocal = islocal
 
     local nodes = { union }
@@ -511,9 +568,10 @@ function defs.uniondecl(pos, islocal, name, variants)
             name,
             variant.name,
             params,
-            { ast.TypeName(pos, name) },
+            { applied_owner_type(pos, name, typeparams) },
             false,
-            body)
+            body,
+            {})
         constructor.islocal = islocal or variant.islocal or false
         constructor._union_constructor = true
         constructor._union_variant = variant
@@ -653,8 +711,9 @@ function defs.appendprogram(_, pos, ...)
     return pos
 end
 
--- Match-time guard against absurdly long parameter/expression lists. Used as a
--- `=>` predicate over a captured list: succeeds (re-yielding the list capture)
+-- Match-time guard against absurdly long parameter, expression, and generic
+-- lists. Used as a `=>` predicate over a captured list: succeeds (re-yielding
+-- the list capture)
 -- when within LIST_LIMIT, fails when over so the grammar can throw
 -- `%{ListTooLong}`. The list must be returned explicitly so the surrounding
 -- production keeps it (a bare `true` discards the inner capture).
@@ -682,22 +741,27 @@ local grammar = re.compile([[
                            ((moduleinit)? -> opt) !.) -> makeprogram
 
     method          <- (P  localopt FUNCTION NAME COLON NAME^NameMethod
+                           typeparamsopt
                            LPAREN^LParPList paramlist RPAREN^RParPList
                            rettypeopt block END^EndFunc)         -> methoddecl
 
     static          <- (P  localopt FUNCTION NAME DOT NAME^NameStatic
+                           typeparamsopt
                            LPAREN^LParPList paramlist RPAREN^RParPList
                            rettypeopt block END^EndFunc)         -> staticdecl
 
     toplevelfunc    <- (P  localopt FUNCTION NAME^NameFunc
+                           typeparamsopt
                            LPAREN^LParPList paramlist RPAREN^RParPList
-                           rettypeopt block END^EndFunc)         -> TopLevelFunc
+                           rettypeopt block END^EndFunc)         -> toplevelfuncdecl
 
     foreignfunc     <- (P  FOREIGN FUNCTION NAME^NameFunc
+                           (LT %{GenericForeignFunc})?
                            LPAREN^LParPList paramlist RPAREN^RParPList
                            rettypeopt block END^EndFunc)         -> TopLevelForeignFunc
 
     topleveltype    <- (P  localopt TYPE NAME^NameTypeAlias
+                           (LT %{GenericTypeAlias})?
                            ASSIGN^AssignTypeAlias
                            type^TypeTypeAlias)                   -> TopLevelTypeAlias
 
@@ -706,10 +770,12 @@ local grammar = re.compile([[
                            exp^ExpVarDec)                        -> TopLevelVar
 
     toplevelrecord  <- (P  localopt RECORD NAME^NameRecord
+                           typeparamsopt
                            recordfields^FieldRecord
                            END^EndRecord)                        -> recorddecl
 
     toplevelunion   <- (P  localopt UNION NAME^NameUnion
+                           typeparamsopt
                            unionvariants^VariantUnion
                            END^EndUnion)                         -> uniondecl
 
@@ -719,10 +785,11 @@ local grammar = re.compile([[
     toplevelinterface
                     <- (P  (LOCAL INTERFACE %{LocalInterface} / INTERFACE)
                            NAME^NameInterface
+                           typeparamsopt
                            interfacemethods
                            (END
                             / (!. %{EndInterface})
-                            / %{MemberInterface}))               -> TopLevelInterface
+                            / %{MemberInterface}))               -> interfacedecl
 
     -- Unlike parameter and expression lists, the repeated method declaration
     -- list has no arbitrary source-level length limit.
@@ -732,11 +799,28 @@ local grammar = re.compile([[
 
     interfacemethod <- (P  LOCAL FUNCTION %{LocalInterfaceMethod})
                      / (P  FUNCTION NAME^NameInterfaceMethod
+                           typeparamsopt
                            LPAREN^LParInterfaceMethod paramlist
                            RPAREN^RParInterfaceMethod
-                           interfacerettypeopt)                  -> InterfaceMethod
+                           interfacerettypeopt)                  -> interfacemethoddecl
 
     localopt        <- (LOCAL)?                                  -> boolopt
+
+    -- Declaration binders are nonempty, source ordered, and use the same
+    -- parser guardrail as parameter and expression lists. Constraints are
+    -- syntactically named Interface applications; semantic Interface and
+    -- scope validation belongs to the checker.
+    typeparamsopt   <- (typeparamlist? -> listopt)
+
+    typeparamlist   <- LT
+                       (({| typeparam^NameTypeParam
+                            (COMMA typeparam^NameTypeParam)* |}
+                          => checklist) / %{ListTooLong})
+                       GENERICGT^RAngleTypeParams
+
+    typeparam       <- (P  NAME
+                           ((COLON namedtype^TypeParamConstraint)? -> opt))
+                                                                  -> TypeParam
 
     import          <- (P  LOCAL NAME^NameImport ASSIGN^AssignImport
                           !FOREIGN IMPORT^ImportImport
@@ -788,7 +872,8 @@ local grammar = re.compile([[
     lambdaparam     <- (P  NAME COLON type^TypeDecl)             -> typeddecl
                      / (P  NAME)                                 -> inferreddecl
 
-    funcexp         <- (P  FUNCTION LPAREN^LParPList lambdaparamlist
+    funcexp         <- (P  FUNCTION (LT %{GenericLambda})?
+                           LPAREN^LParPList lambdaparamlist
                            RPAREN^RParPList lambdarettypeopt
                            block END^EndFunc)                    -> ExpFunction
 
@@ -822,7 +907,22 @@ local grammar = re.compile([[
     membername      <- NAME
                      / (CNAME -> contextual_c_name)
 
-    qualifiedtype   <- (P  NAME DOT membername^QualName)         -> qualifiedtype
+    -- Named types are the only type form that accepts applications. The
+    -- contextual close consumes one literal `>` at a time, so nested adjacent
+    -- applications do not weaken the ordinary `>>` expression token.
+    typeargsopt     <- (typearglist? -> listopt)
+
+    typearglist     <- LT
+                       (({| type^TypeArgument
+                            (COMMA type^TypeArgument)* |}
+                          => checklist) / %{ListTooLong})
+                       GENERICGT^RAngleTypeArgs
+
+    namedtype       <- qualifiedtype
+                     / (P  NAME typeargsopt)                     -> TypeName
+
+    qualifiedtype   <- (P  NAME DOT membername^QualName
+                           typeargsopt)                           -> qualifiedtype
 
     -- An owned payload is deliberately optionless: the sole trailing `?` in
     -- `simpletype` wraps the complete owner. The array alternative is selected
@@ -839,8 +939,7 @@ local grammar = re.compile([[
                            cownedpayload^OwnedPayload)           -> constcptrtype
                      / (P  MUL
                            cownedpayload^OwnedPayload)           -> cptrtype
-                     / qualifiedtype
-                     / (P  NAME)                                 -> TypeName
+                     / namedtype
                      / ownedtype
 
     ownedtype       <- (P  OWNED &(cownedpayload LBRACKET)
@@ -859,8 +958,7 @@ local grammar = re.compile([[
                      / ownedtype
                      / (P  CONST MUL simpletype^TypeType)        -> constcptrtype
                      / (P  MUL simpletype^TypeType)              -> cptrtype
-                     / qualifiedtype
-                     / (P  NAME)                                 -> TypeName
+                     / namedtype
                      / (P  LCURLY type^TypeType
                            COLON
                            type^TypeType
@@ -1055,10 +1153,25 @@ local grammar = re.compile([[
 
     -- Parentheses and bare strings are positional call suffixes. Bare braces
     -- are always named calls; passing one constructor positionally therefore
-    -- requires parentheses (`f({ ... })`). Keeping the paths distinct here
-    -- preserves the delimiter choice in the Args node for checker lowering.
-    expsuffix       <- (P  funcargs)                             -> suffix_funccall
-                     / (P  namedargs)                           -> suffix_namedfunccall
+    -- requires parentheses (`f({ ... })`). An angle list is claimed only when
+    -- a complete type-argument list is followed by one of those existing call
+    -- delimiters; otherwise `<` remains an ordinary comparison operator.
+    genericcalltypeargprobe
+                    <- LT type (COMMA type)* GENERICGT
+
+    genericcalltypeargs
+                    <- &(genericcalltypeargprobe
+                         (LPAREN / STRINGLIT / LCURLY))
+                       typearglist
+
+    expsuffix       <- (P  genericcalltypeargs funcargs)         -> suffix_genericfunccall
+                     / (P  genericcalltypeargs namedargs)        -> suffix_genericnamedfunccall
+                     / (P  funcargs)                             -> suffix_funccall
+                     / (P  namedargs)                            -> suffix_namedfunccall
+                     / (P  COLON NAME^NameColonExpSuf
+                                 genericcalltypeargs funcargs)   -> suffix_genericmethodcall
+                     / (P  COLON NAME^NameColonExpSuf
+                                 genericcalltypeargs namedargs)  -> suffix_genericnamedmethodcall
                      / (P  COLON NAME^NameColonExpSuf
                                  funcargs)                       -> suffix_methodcall
                      / (P  COLON NAME^NameColonExpSuf
@@ -1206,6 +1319,10 @@ local grammar = re.compile([[
     FLOAT           <- %FLOAT SKIP*
     STRING          <- %STRING SKIP*
     VALUE           <- %VALUE SKIP*
+
+    -- Generic lists close contextually one byte at a time. Keep %GT and
+    -- %SHR unchanged for ordinary expressions and lexer consumers.
+    GENERICGT       <- '>' SKIP*
 
     ADD             <- %ADD SKIP*
     SUB             <- %SUB SKIP*
