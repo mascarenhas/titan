@@ -12979,9 +12979,10 @@ function checker._generic.erased_descriptor(typ, state)
     return erased
 end
 
-function checker._generic.ordinary_assignment(source, target, state)
+function checker._generic.ordinary_assignment(
+        source, target, state, options)
     local adjustment, conversion = checker_assignment_adjustment(
-        source, target, state.st)
+        source, target, state.st, options)
     return adjustment, conversion
 end
 
@@ -13032,6 +13033,78 @@ function checker._generic.erased_boundary_expression(
             .. subject, 0)
     end
     return lowered
+end
+
+function checker._generic.open_descriptor(source)
+    while source and source._tag == "Ast.ExpCast" do source = source.exp end
+    if not source then return nil end
+    if source._tag == "Ast.ExpCall" then
+        return source._open_results
+    elseif source._tag == "Ast.ExpDots" then
+        return source._open_dots
+    end
+    return nil
+end
+
+function checker._generic.reclassify_open_adjustment(
+        adjusted, state, subject, mirror)
+    if not adjusted or not adjusted.open_source then return end
+    local open = checker._generic.open_descriptor(adjusted.open_source)
+    local source = types.erase(open and open.source_type
+        or adjusted.open_type)
+    local target = types.erase(adjusted.open_target
+        or (open and open.target_type) or source)
+    local prior = adjusted.open_adjustment
+    local prior_source = prior and prior.source
+    local prior_target = prior and prior.target
+    local stale = types.contains_generic(adjusted.open_type)
+        or types.contains_generic(adjusted.open_target)
+        or types.contains_generic(prior)
+        or not types.equals(types.erase(adjusted.open_type), source)
+        or not prior_source or not prior_target
+        or not types.equals(types.erase(prior_source), source)
+        or not types.equals(types.erase(prior_target), target)
+    if not stale then return end
+
+    local plan = checker._generic.ordinary_assignment(
+        source, target, state, { allow_coercion = true })
+    if not plan then
+        error(string.format(
+            "%s has no ordinary open adjustment from %s to %s",
+            subject, types.tostring(source), types.tostring(target)), 0)
+    end
+    local callable_adapter = plan.kind == "callable"
+        and checker.freeze_callable_adapter(
+            plan, source, target, adjusted.open_source.loc)
+        or false
+    adjusted.open_type = source
+    adjusted.open_target = target
+    adjusted.open_adjustment = plan
+    adjusted.open_callable_adapter = callable_adapter
+    adjusted.open_interface_conversion = plan.interface_conversion or false
+    if open then
+        open.source_type = source
+        open.target_type = target
+        open.adjustment = plan
+        open.callable_adapter = callable_adapter
+    end
+    if mirror and mirror ~= false then
+        mirror.source_type = source
+        mirror.target_type = target
+        mirror.adjustment = plan
+        mirror.callable_adapter = callable_adapter
+    end
+end
+
+function checker._generic.reclassify_node_open_adjustments(node, state)
+    checker._generic.reclassify_open_adjustment(
+        node._arg_adjustment, state, "erased call arguments", node._open_args)
+    checker._generic.reclassify_open_adjustment(
+        node._result_adjustment, state, "erased expression results")
+    checker._generic.reclassify_open_adjustment(
+        node._positional_adjustment, state, "erased positional constructor")
+    checker._generic.reclassify_open_adjustment(
+        node._tuple_adjustment, state, "erased iterator tuple")
 end
 
 function checker._generic.surface_callable_for_call(node, state)
@@ -13223,6 +13296,7 @@ function checker._generic.lower_call_in_place(node, state)
     local surface_signature, declaration =
         checker._generic.surface_callable_for_call(node, state)
     if not surface_signature then
+        checker._generic.reclassify_node_open_adjustments(node, state)
         info.pending = nil
         return info
     end
@@ -13246,6 +13320,8 @@ function checker._generic.lower_call_in_place(node, state)
         info.surface_visible[index] = typ
     end
     info.surface_flex = node._flexrettype or false
+    info.surface_open_target = node._open_results
+        and node._open_results.target_type or false
 
     checker._generic.lower_call_arguments(
         node, signature, surface_signature, state)
@@ -13291,14 +13367,29 @@ function checker._generic.lower_call_in_place(node, state)
     end
     node._type = node._visible_types[1] or types.Void()
     if node._open_results then
-        node._open_results.source_type = assert(signature.flexrettype,
+        local source = assert(signature.flexrettype,
             "generic open result lost its erased flexible tail")
-        node._open_results.target_type = node._open_results.source_type
+        local target = types.erase(info.surface_open_target or source)
+        local plan = checker._generic.ordinary_assignment(
+            source, target, state, { allow_coercion = true })
+        if not plan then
+            error(string.format(
+                "generic open result has no ordinary adjustment from %s to %s",
+                types.tostring(source), types.tostring(target)), 0)
+        end
+        node._open_results.source_type = source
+        node._open_results.target_type = target
+        node._open_results.adjustment = plan
+        node._open_results.callable_adapter = plan.kind == "callable"
+            and checker.freeze_callable_adapter(
+                plan, source, target, node.loc)
+            or false
         node._lua_open_result_dynamic_plan =
-            types.dynamic_coercion(signature.flexrettype) or false
+            types.dynamic_coercion(source) or false
         node._strict_open_result_guard_plan =
-            types.gradual_guard(signature.flexrettype) or false
+            types.gradual_guard(source) or false
     end
+    checker._generic.reclassify_node_open_adjustments(node, state)
     node._assignment_adjustment = nil
     info.pending = nil
     return info
@@ -13685,6 +13776,7 @@ function checker._generic.lower_expression(node, state)
         end
     end
     checker._generic.reclassify_assignment(node, state)
+    checker._generic.reclassify_node_open_adjustments(node, state)
     return node
 end
 
@@ -13747,6 +13839,7 @@ function checker._generic.lower_assignment(node, state)
             replace_adjusted_value(node._result_adjustment, old, lowered)
         end
     end
+    checker._generic.reclassify_node_open_adjustments(node, state)
 end
 
 function checker._generic.lower_node(node, state)
@@ -13772,6 +13865,7 @@ function checker._generic.lower_node(node, state)
             end
         end
     end
+    checker._generic.reclassify_node_open_adjustments(node, state)
 
     for key, value in pairs(node) do
         if type(key) == "string" and key:sub(1, 1) ~= "_"

@@ -36,6 +36,14 @@ describe("generic erased core", function()
                 return item
             end
 
+            function accepts<T>(item: T): boolean
+                return item is T
+            end
+
+            function many<T>(item: T): (T, ...: T)
+                return item, item
+            end
+
             function number(): integer
                 return identity(42)
             end
@@ -46,7 +54,11 @@ describe("generic erased core", function()
 
             function same(): boolean
                 local token = Token.new()
-                return identity(token) == token
+                return identity(token) == token and accepts(token)
+            end
+
+            function open(): (integer, ...: integer)
+                return many(41)
             end
         ]])
 
@@ -66,6 +78,8 @@ describe("generic erased core", function()
             assert(test.number() == 42)
             assert(test.text() == "ok")
             assert(test.same())
+            local first, second = test.open()
+            assert(first == 41 and second == 41)
         ]])
         assert.truthy(ok, err)
     end)

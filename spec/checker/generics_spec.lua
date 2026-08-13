@@ -1008,9 +1008,19 @@ describe("generic declarations and explicit calls", function()
             assert.is_nil(use.block.stats[index].exps[1]
                 ._generic_type_arguments)
         end
-        local many = use.block.stats[4].exps[4]
+        local result = use.block.stats[4]
+        local many = result.exps[4]
         assert.is_nil(many._generic_type_arguments)
-        assert.is_truthy(many.exp._open_results)
+        local open = assert(many.exp._open_results)
+        assert.equal("value", types.tostring(open.source_type))
+        assert.equal("integer", types.tostring(open.target_type))
+        assert.equal("gradual_view", open.adjustment.kind)
+        assert.equal("value", types.tostring(
+            result._result_adjustment.open_type))
+        assert.equal("integer", types.tostring(
+            result._result_adjustment.open_target))
+        assert.equal("gradual_view",
+            result._result_adjustment.open_adjustment.kind)
         assert.equal("integer",
             types.tostring(declared_type(use).flexrettype))
         types.assert_erased(many._type)
