@@ -2632,6 +2632,40 @@ describe("Titan types", function()
             assert.is_truthy(types.assignment_adjustment(precise, erased))
         end)
 
+        it("relates each rigid parameter only to its erased constraint carrier",
+        function()
+            local owner_scope = scope(
+                false, "owner", "record", "sample.Box")
+            local unconstrained = types.Parameter(
+                owner_scope, 1, "T", false)
+            local constrained = types.Parameter(owner_scope, 2, "U",
+                types.Nominal("sample.Show", {unconstrained}))
+            local another_scope = scope(
+                false, "other", "record", "sample.Other")
+            local another = types.Parameter(
+                another_scope, 1, "V", false)
+
+            assert.is_true(types.consistent(
+                unconstrained, types.Value()))
+            assert.is_true(types.consistent(
+                types.Value(), unconstrained))
+            assert.is_false(types.consistent(unconstrained, another))
+            assert.is_true(types.consistent(constrained,
+                types.Nominal("sample.Show", {types.Value()})))
+            assert.is_false(types.consistent(constrained, types.Value()))
+            assert.is_true(types.consistent(
+                types.Option(unconstrained),
+                types.Option(types.Value())))
+            assert.is_true(types.consistent(
+                types.Array(unconstrained),
+                types.Array(types.Value())))
+            assert.is_true(types.consistent(
+                types.Function({unconstrained}, {unconstrained},
+                    false, false, false),
+                types.Function({types.Value()}, {types.Value()},
+                    false, false, false)))
+        end)
+
         it("smart-substitutes owner and callable scopes independently",
         function()
             local owner_scope = scope(
@@ -2749,6 +2783,20 @@ describe("Titan types", function()
             assert.is_true(types.assert_erased(erased) == erased)
             assert.has_error(function() types.assert_erased(record) end,
                 "generic type reached erased core")
+        end)
+
+        it("retains recursively erased constraint applications before core erasure",
+        function()
+            local owner_scope = scope(
+                false, "owner", "record", "sample.Box")
+            local constrained = types.Parameter(owner_scope, 1, "C",
+                types.Nominal("sample.J"))
+            local dependent = types.Parameter(owner_scope, 2, "B",
+                types.Nominal("sample.I", {constrained}))
+
+            local carrier = types.erase_constraint(dependent)
+            assert.equal("sample.I<sample.J>", types.tostring(carrier))
+            assert.equal("sample.I", types.tostring(types.erase(dependent)))
         end)
 
         it("recognizes the exact transient round-trip frontier", function()

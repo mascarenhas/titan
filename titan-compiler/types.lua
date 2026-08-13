@@ -2042,7 +2042,8 @@ local function rewrite_type(root, policy)
                     rewrite_list(typ.typeparams, rewrite))
             end
         elseif tag == "Type.Nominal" then
-            if policy.drop_generic then
+            if policy.drop_generic
+               and not policy.keep_nominal_arguments then
                 out = types.Nominal(typ.fqtn)
             else
                 out = types.Nominal(typ.fqtn,
@@ -2244,6 +2245,26 @@ function types.apply_generic_alias(alias, arguments)
         types.validate_type_arguments(alias.typeparams, arguments)
     if not valid then error(argument_error, 2) end
     return types.substitute(alias, alias.target_scope, arguments)
+end
+
+-- Constraint erasure retains recursively erased nominal applications long
+-- enough for surface consistency, constraint checking, member substitution,
+-- and boundary elaboration to observe their component carriers. The later
+-- code-facing erasure drops those applications because runtime identity is
+-- owner-only.
+function types.erase_constraint(typ)
+    return rewrite_type(typ, {
+        arguments = {},
+        drop_generic = true,
+        keep_nominal_arguments = true,
+        closes = function() return true end,
+        parameter = function(parameter, rewrite)
+            if parameter.erased_constraint == false then
+                return types.Value()
+            end
+            return rewrite(parameter.erased_constraint)
+        end,
+    })
 end
 
 -- Erasure selects only an existing ordinary Titan carrier. Applied nominal
@@ -2957,6 +2978,13 @@ local function callable_shape_consistent(source, target, context)
     return true
 end
 
+local function rigid_erased_carrier(parameter)
+    if parameter.erased_constraint == false then
+        return types.Value()
+    end
+    return types.erase_constraint(parameter.erased_constraint)
+end
+
 consistent_impl = function(left, right, context)
     left, right = normalized_pair(left, right)
     if not left or not right
@@ -2997,7 +3025,31 @@ consistent_impl = function(left, right, context)
     right_active[left] = true
 
     local result
-    if left._tag == "Type.Value"
+    if left._tag == "Type.Parameter"
+       and right._tag == "Type.Parameter" then
+        -- Distinct rigid binders do not become mutually consistent merely
+        -- because they erase to the same carrier; gradual consistency is not
+        -- transitive through value.
+        result = false
+    elseif left._tag == "Type.Parameter" then
+        local carrier = rigid_erased_carrier(left)
+        if carrier._tag == "Type.Value" then
+            result = right._tag == "Type.Value"
+        elseif right._tag == "Type.Value" then
+            result = false
+        else
+            result = consistent_impl(carrier, right, context)
+        end
+    elseif right._tag == "Type.Parameter" then
+        local carrier = rigid_erased_carrier(right)
+        if carrier._tag == "Type.Value" then
+            result = left._tag == "Type.Value"
+        elseif left._tag == "Type.Value" then
+            result = false
+        else
+            result = consistent_impl(left, carrier, context)
+        end
+    elseif left._tag == "Type.Value"
        or right._tag == "Type.Value" then
         local other = left._tag == "Type.Value" and right or left
         result = sound_guardable(other, {})
