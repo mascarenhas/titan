@@ -12888,13 +12888,26 @@ end
 -- second type checker.
 -- Build the ordinary import descriptor carried only by the code-facing AST.
 -- The declared Type.Module remains detached on `_declared_type` for metadata.
-function checker._generic.lower_import_descriptor(module)
+function checker._generic.lower_import_descriptor(module, erased_registry)
     local erased = types.erase(module)
+    local function canonicalize_owner(member)
+        local owner = member and member.type
+        local canonical = owner and erased_registry
+            and erased_registry[owner.name]
+        if canonical and (owner._tag == "Type.Record"
+                or owner._tag == "Type.Union") then
+            member.type = canonical
+        end
+        return member
+    end
+    for _, member in ipairs(erased.members or {}) do
+        canonicalize_owner(member)
+    end
     if module._source then
         erased._source = true
         erased.source_members = {}
         for index, member in ipairs(module.source_members or {}) do
-            local item = types.erase(member)
+            local item = canonicalize_owner(types.erase(member))
             erased.source_members[index] = item
             erased.source_members[item.name] = item
         end
@@ -12940,7 +12953,8 @@ function checker._generic.erased_descriptor(typ, state)
        and tag ~= "Type.Record" and tag ~= "Type.Union"
        and tag ~= "Type.Interface" and tag ~= "Type.Field"
        and tag ~= "Type.Variant" and tag ~= "Type.StaticMethod"
-       and tag ~= "Type.Method" and tag ~= "Type.Module" then
+       and tag ~= "Type.Method" and tag ~= "Type.ModuleMember"
+       and tag ~= "Type.ModuleVariable" and tag ~= "Type.Module" then
         state.erased_descriptors[typ] = typ
         return typ
     end
@@ -12948,6 +12962,10 @@ function checker._generic.erased_descriptor(typ, state)
     if tag == "Type.Record" or tag == "Type.Union"
        or tag == "Type.Interface" then
         erased = state.erased_registry[typ.name] or types.erase(typ)
+    elseif tag == "Type.ModuleMember" or tag == "Type.ModuleVariable" then
+        local module = state.import_descriptors[typ.modname]
+        erased = module and types.module_member(module, typ.name, true)
+            or types.erase(typ)
     elseif tag == "Type.Field" then
         local owner = state.erased_registry[typ.fqtn]
         erased = owner and owner.fields and owner.fields[typ.index + 1]
@@ -12973,7 +12991,9 @@ function checker._generic.erased_descriptor(typ, state)
         end
         erased = erased or types.erase(typ)
     elseif tag == "Type.Module" then
-        erased = checker._generic.lower_import_descriptor(typ)
+        erased = state.import_descriptors[typ.name]
+            or checker._generic.lower_import_descriptor(
+                typ, state.erased_registry)
     else
         erased = types.erase(typ)
     end
@@ -14069,7 +14089,15 @@ function checker._generic.lower_erased_core(modname, tree, st, errors)
         calls = {},
         reverse_wrappers = {},
         hidden_case = 0,
+        import_descriptors = {},
     }
+    for _, node in ipairs(tree) do
+        if node._tag == "Ast.TopLevelImport" and node._type then
+            state.import_descriptors[node.modname] =
+                checker._generic.lower_import_descriptor(
+                    node._type, erased_registry)
+        end
+    end
     types.registry = erased_registry
 
     for _, node in ipairs(tree) do checker._generic.lower_node(node, state) end
