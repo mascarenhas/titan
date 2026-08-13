@@ -118,7 +118,7 @@ The call to `foldl` will bind `U` to `string`, since the value passed to `init` 
 type `string`. `S` gets bound to `integer` because of the type of `xs`. The local variable `s`
 gets also gets `string`, and its runtime representation will be an unboxed `TString*`,
 not a boxed `TValue`. Local inference can flow both ways, the anonymous function
-used in the call to `foldl` ends up typed as `(integer, string) -> string`. 
+used in the call to `foldl` ends up typed as `(integer, string) -> string`.
 
 It may be useful to rewrite the existing limited type inference for anonymous
 functions and local variables to also use fresh unbound type parameters, so the same
@@ -126,7 +126,7 @@ unification mechanism handles inference both for polymorphic type parameters and
 local variables/anonymous functions.
 
 Unbound non-free type parameters have a `TValue` or `Udata*` representation depending on whether they are
-constrained or not, so the compiled `map` native entry point and body uses 
+constrained or not, so the compiled `map` native entry point and body uses
 
 This does not affect record fields/union payloads/array elements/map keys/map values,
 since they are always stored in boxed `TValue` form.
