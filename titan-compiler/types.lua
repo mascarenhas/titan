@@ -14,16 +14,21 @@ local types = typedecl("Type", {
         Function    = {"params", "rettypes", "vararg", "varargtype", "flexrettype"},
         Array       = {"elem"},
         Map         = {"keys", "values"},
-        Record      = {"name", "fields", "functions", "methods", "nfields"},
-        Union       = {"name", "variants", "functions", "methods", "nvariants"},
-        Interface   = {"name", "methods"},
+        GenericScope = {"modname", "owner_fqtn", "callable_name", "role", "declaration_kind"},
+        TypeParameter = {"name", "constraint"},
+        Parameter   = {"scope", "index", "diagnostic_name", "erased_constraint"},
+        FunctionScheme = {"scope", "typeparams", "signature"},
+        GenericAlias = {"module", "name", "locality", "target_owner_fqtn", "target_alias_fqtn", "target_scope", "typeparams"},
+        Record      = {"name", "fields", "functions", "methods", "nfields", "scope", "typeparams"},
+        Union       = {"name", "variants", "functions", "methods", "nvariants", "scope", "typeparams"},
+        Interface   = {"name", "methods", "scope", "typeparams"},
         Variant     = {"fqtn", "name", "payload", "index"},
-        Nominal     = {"fqtn"},
+        Nominal     = {"fqtn", "args"},
         Field       = {"fqtn", "name", "type", "index"},
-        Method      = {"fqtn", "name", "params", "rettypes", "varargtype", "flexrettype", "paramnames"},
+        Method      = {"fqtn", "name", "params", "rettypes", "varargtype", "flexrettype", "paramnames", "scope", "typeparams"},
         ModuleMember = {"modname", "name", "type", "paramnames"},
         ModuleVariable = {"modname", "name", "type"},
-        StaticMethod = {"fqtn", "name", "params", "rettypes", "varargtype", "flexrettype", "paramnames"},
+        StaticMethod = {"fqtn", "name", "params", "rettypes", "varargtype", "flexrettype", "paramnames", "scope", "typeparams"},
         Option       = {"base"},
         CVoid        = {},
         CInteger     = {"spelling", "signed", "rank", "bits"},
@@ -61,15 +66,54 @@ function types.CTypedef(name, target, quals)
     return raw_CTypedef(name, target, quals or {})
 end
 
+-- Keep the pre-generics constructors source-compatible while making the
+-- generic surface metadata explicit. An absent scope means that the
+-- descriptor is ordinary and its binder list is therefore empty.
+local raw_Nominal = types.Nominal
+function types.Nominal(fqtn, args)
+    if args == nil then args = {} end
+    return raw_Nominal(fqtn, args)
+end
+
+local raw_Record = types.Record
+function types.Record(name, fields, functions, methods, nfields, scope, typeparams)
+    if scope == nil then scope = false end
+    if typeparams == nil then typeparams = {} end
+    return raw_Record(name, fields, functions, methods, nfields,
+        scope, typeparams)
+end
+
+local raw_Method = types.Method
+function types.Method(fqtn, name, params, rettypes, varargtype,
+                      flexrettype, paramnames, scope, typeparams)
+    if scope == nil then scope = false end
+    if typeparams == nil then typeparams = {} end
+    return raw_Method(fqtn, name, params, rettypes, varargtype,
+        flexrettype, paramnames, scope, typeparams)
+end
+
+local raw_StaticMethod = types.StaticMethod
+function types.StaticMethod(fqtn, name, params, rettypes, varargtype,
+                            flexrettype, paramnames, scope, typeparams)
+    if scope == nil then scope = false end
+    if typeparams == nil then typeparams = {} end
+    return raw_StaticMethod(fqtn, name, params, rettypes, varargtype,
+        flexrettype, paramnames, scope, typeparams)
+end
+
 -- A union's variants retain source order for their stable integer tags while
--- also supporting namespace lookup by name.  Keep both views on the same
+-- also supporting namespace lookup by name. Keep both views on the same
 -- descriptor objects, like Type.Module's member list/map.
 local raw_Union = types.Union
-function types.Union(name, variants, functions, methods, nvariants)
+function types.Union(name, variants, functions, methods, nvariants,
+                     scope, typeparams)
+    if scope == nil then scope = false end
+    if typeparams == nil then typeparams = {} end
     for _, variant in ipairs(variants) do
         variants[variant.name] = variant
     end
-    return raw_Union(name, variants, functions, methods, nvariants)
+    return raw_Union(name, variants, functions, methods, nvariants,
+        scope, typeparams)
 end
 
 -- An interface's methods retain declaration order for their stable payload
@@ -126,12 +170,14 @@ local function validate_interface_constructor_input(name, methods)
     end
 end
 
-function types.Interface(name, methods)
+function types.Interface(name, methods, scope, typeparams)
+    if scope == nil then scope = false end
+    if typeparams == nil then typeparams = {} end
     validate_interface_constructor_input(name, methods)
     for _, method in ipairs(methods) do
         methods[method.name] = method
     end
-    return raw_Interface(name, methods)
+    return raw_Interface(name, methods, scope, typeparams)
 end
 
 -- Validate the canonical hybrid list/map after construction. This is kept
@@ -309,6 +355,28 @@ local function find_c_type(t, include_legacy, descend_function_values)
         local tag = typ._tag
         if is_c_tag(tag) or (include_legacy and legacy_c_tags[tag]) then
             return typ
+        elseif tag == "Type.TypeParameter" then
+            return typ.constraint ~= false
+                and visit_type(typ.constraint, seen) or nil
+        elseif tag == "Type.Parameter" then
+            return typ.erased_constraint ~= false
+                and visit_type(typ.erased_constraint, seen) or nil
+        elseif tag == "Type.FunctionScheme" then
+            for _, typeparam in ipairs(typ.typeparams) do
+                local ctyp = visit_type(typeparam, seen)
+                if ctyp then return ctyp end
+            end
+            return visit_type(typ.signature, seen)
+        elseif tag == "Type.GenericAlias" then
+            for _, typeparam in ipairs(typ.typeparams) do
+                local ctyp = visit_type(typeparam, seen)
+                if ctyp then return ctyp end
+            end
+        elseif tag == "Type.Nominal" then
+            for _, argument in ipairs(typ.args or {}) do
+                local ctyp = visit_type(argument, seen)
+                if ctyp then return ctyp end
+            end
         elseif tag == "Type.Array" then
             return visit_type(typ.elem, seen)
         elseif tag == "Type.Map" then
@@ -338,6 +406,10 @@ local function find_c_type(t, include_legacy, descend_function_values)
             return visit_type(typ.payload, seen)
         elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
             if typ.islocal then return nil end
+            for _, typeparam in ipairs(typ.typeparams or {}) do
+                local ctyp = visit_type(typeparam, seen)
+                if ctyp then return ctyp end
+            end
             for _, param in ipairs(typ.params) do
                 local ctyp = visit_type(param, seen)
                 if ctyp then return ctyp end
@@ -349,6 +421,10 @@ local function find_c_type(t, include_legacy, descend_function_values)
             return visit_type(typ.varargtype, seen) or
                    visit_type(typ.flexrettype, seen)
         elseif tag == "Type.Record" then
+            for _, typeparam in ipairs(typ.typeparams or {}) do
+                local ctyp = visit_type(typeparam, seen)
+                if ctyp then return ctyp end
+            end
             for _, field in ipairs(typ.fields) do
                 local ctyp = not field.islocal and visit_type(field, seen)
                 if ctyp then return ctyp end
@@ -362,6 +438,10 @@ local function find_c_type(t, include_legacy, descend_function_values)
                 if ctyp then return ctyp end
             end
         elseif tag == "Type.Interface" then
+            for _, typeparam in ipairs(typ.typeparams or {}) do
+                local ctyp = visit_type(typeparam, seen)
+                if ctyp then return ctyp end
+            end
             -- Declaration order is ABI-significant for Interfaces. Traverse
             -- only the canonical dense list, not its duplicate name map.
             for _, method in ipairs(typ.methods) do
@@ -369,6 +449,10 @@ local function find_c_type(t, include_legacy, descend_function_values)
                 if ctyp then return ctyp end
             end
         elseif tag == "Type.Union" then
+            for _, typeparam in ipairs(typ.typeparams or {}) do
+                local ctyp = visit_type(typeparam, seen)
+                if ctyp then return ctyp end
+            end
             for _, variant in ipairs(typ.variants) do
                 local ctyp = not variant.islocal
                     and visit_type(variant, seen)
@@ -532,6 +616,7 @@ function types.is_gc(t)
            types.is_c_udata_pointer(t) or
            tag == "Type.String" or
            tag == "Type.Value" or
+           tag == "Type.Parameter" or
            tag == "Type.Function" or
            tag == "Type.Array" or
            tag == "Type.Map" or
@@ -1247,6 +1332,7 @@ function types.has_tvalue_representation(t, seen)
         or tag == "Type.Array"
         or tag == "Type.Map"
         or tag == "Type.Value"
+        or tag == "Type.Parameter"
         or tag == "Type.Nominal"
         or tag == "Type.Function"
         or (tag == "Type.Option"
@@ -1504,6 +1590,63 @@ local function same_list(l1, l2, seen)
     return true
 end
 
+local function generic_scope_equals(left, right)
+    if left == right then return true end
+    if type(left) ~= "table" or type(right) ~= "table"
+       or left._tag ~= "Type.GenericScope"
+       or right._tag ~= "Type.GenericScope" then
+        return false
+    end
+    return left.modname == right.modname
+       and left.owner_fqtn == right.owner_fqtn
+       and left.callable_name == right.callable_name
+       and left.role == right.role
+       and left.declaration_kind == right.declaration_kind
+end
+
+local function same_typeparams(left, right, seen)
+    left, right = left or {}, right or {}
+    if #left ~= #right then return false end
+    for index = 1, #left do
+        if not type_equals(left[index], right[index], seen) then
+            return false
+        end
+    end
+    return true
+end
+
+local function generic_metadata_equals(left, right, seen)
+    local lscope, rscope = left.scope or false, right.scope or false
+    if lscope == false or rscope == false then
+        if lscope ~= rscope then return false end
+    elseif not generic_scope_equals(lscope, rscope) then
+        return false
+    end
+    return same_typeparams(left.typeparams, right.typeparams, seen)
+end
+
+local function scope_component(value)
+    if value == false then return "-" end
+    assert(type(value) == "string", "generic scope components are strings")
+    return #value .. ":" .. value
+end
+
+function types.generic_scope_key(scope)
+    assert(type(scope) == "table" and scope._tag == "Type.GenericScope",
+        "expected a generic scope")
+    return table.concat({
+        scope_component(scope.modname),
+        scope_component(scope.owner_fqtn),
+        scope_component(scope.callable_name),
+        scope_component(scope.role),
+        scope_component(scope.declaration_kind),
+    }, "|")
+end
+
+function types.same_generic_scope(left, right)
+    return generic_scope_equals(left, right)
+end
+
 -- Compare the Titan/Lua callable ABI shape shared by ordinary function values
 -- and declaration descriptors for methods/record functions. C declarations use
 -- Type.CFunction and its separate C compatibility relation. Declaration-only
@@ -1559,7 +1702,35 @@ type_equals = function(t1, t2, seen)
     end
     seen[pairkey] = true
 
-    if tag1 == "Type.Array" then
+    if tag1 == "Type.GenericScope" then
+        return generic_scope_equals(t1, t2)
+    elseif tag1 == "Type.TypeParameter" then
+        -- Binder spellings are diagnostic only. Dense binder position and
+        -- Parameter(scope,index) references carry semantic identity.
+        if (t1.constraint == false) ~= (t2.constraint == false) then
+            return false
+        end
+        return t1.constraint == false
+            or type_equals(t1.constraint, t2.constraint, seen)
+    elseif tag1 == "Type.Parameter" then
+        -- A rigid leaf's semantic identity is exactly (scope,index). The
+        -- binder list owns and validates its constraint; this repeated erased
+        -- carrier is lowering metadata rather than another identity axis.
+        return t1.index == t2.index
+           and generic_scope_equals(t1.scope, t2.scope)
+    elseif tag1 == "Type.FunctionScheme" then
+        return generic_scope_equals(t1.scope, t2.scope)
+           and same_typeparams(t1.typeparams, t2.typeparams, seen)
+           and type_equals(t1.signature, t2.signature, seen)
+    elseif tag1 == "Type.GenericAlias" then
+        return t1.module == t2.module
+           and t1.name == t2.name
+           and t1.locality == t2.locality
+           and t1.target_owner_fqtn == t2.target_owner_fqtn
+           and t1.target_alias_fqtn == t2.target_alias_fqtn
+           and generic_scope_equals(t1.target_scope, t2.target_scope)
+           and same_typeparams(t1.typeparams, t2.typeparams, seen)
+    elseif tag1 == "Type.Array" then
         return type_equals(t1.elem, t2.elem, seen)
     elseif tag1 == "Type.Map" then
         return type_equals(t1.keys, t2.keys, seen) and
@@ -1628,6 +1799,32 @@ type_equals = function(t1, t2, seen)
         -- differing tail element types must therefore fall back from the
         -- first-class native path.
         return callable_shape_equals(t1, t2, seen)
+    elseif tag1 == "Type.Field" then
+        return t1.fqtn == t2.fqtn
+           and t1.name == t2.name
+           and t1.index == t2.index
+           and type_equals(t1.type, t2.type, seen)
+    elseif tag1 == "Type.ModuleMember" then
+        return t1.modname == t2.modname
+           and t1.name == t2.name
+           and same_value(t1.paramnames, t2.paramnames, seen)
+           and type_equals(t1.type, t2.type, seen)
+    elseif tag1 == "Type.ModuleVariable" then
+        return t1.modname == t2.modname
+           and t1.name == t2.name
+           and type_equals(t1.type, t2.type, seen)
+    elseif tag1 == "Type.Module" then
+        return t1.name == t2.name
+           and same_value(t1.members, t2.members, seen)
+           and same_value(t1.type_members or {},
+                t2.type_members or {}, seen)
+    elseif tag1 == "Type.Record" then
+        return t1.name == t2.name
+           and t1.nfields == t2.nfields
+           and generic_metadata_equals(t1, t2, seen)
+           and same_value(t1.fields, t2.fields, seen)
+           and same_value(t1.functions, t2.functions, seen)
+           and same_value(t1.methods, t2.methods, seen)
     elseif tag1 == "Type.Variant" then
         return t1.fqtn == t2.fqtn
            and t1.name == t2.name
@@ -1638,6 +1835,7 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.Union" then
         return t1.name == t2.name
            and t1.nvariants == t2.nvariants
+           and generic_metadata_equals(t1, t2, seen)
            and same_value(t1.variants, t2.variants, seen)
            and same_value(t1.functions, t2.functions, seen)
            and same_value(t1.methods, t2.methods, seen)
@@ -1645,13 +1843,16 @@ type_equals = function(t1, t2, seen)
         return types.validate_interface_descriptor(t1) ~= nil
            and types.validate_interface_descriptor(t2) ~= nil
            and t1.name == t2.name
+           and generic_metadata_equals(t1, t2, seen)
            and same_list(t1.methods, t2.methods, seen)
     elseif tag1 == "Type.Method" or tag1 == "Type.StaticMethod" then
         return t1.fqtn == t2.fqtn
            and t1.name == t2.name
+           and generic_metadata_equals(t1, t2, seen)
            and callable_shape_equals(t1, t2, seen)
     elseif tag1 == "Type.Nominal" then
         return t1.fqtn == t2.fqtn
+           and same_list(t1.args or {}, t2.args or {}, seen)
     elseif tag1 == "Type.Option" then
         return type_equals(t1.base, t2.base, seen)
     elseif tag1 == tag2 then
@@ -1662,6 +1863,13 @@ type_equals = function(t1, t2, seen)
 end
 
 function types.equals(t1, t2)
+    return type_equals(t1, t2)
+end
+
+-- Generic binder names are diagnostic, so exact semantic equality already is
+-- alpha-equivalence. Keep the named entry point for callers that are comparing
+-- declaration schemes rather than ordinary value types.
+function types.alpha_equals(t1, t2)
     return type_equals(t1, t2)
 end
 
@@ -1690,6 +1898,403 @@ function types.normalize(typ)
         else
             break
         end
+    end
+    return typ
+end
+
+-- Generic type argument and reconstruction helpers. These deliberately know
+-- only Titan's existing structural type grammar; constraint satisfaction and
+-- call inference remain checker policy.
+local function dense_list_length(list)
+    if type(list) ~= "table" then
+        return nil, "expected a dense numeric list"
+    end
+    local count, maximum = 0, 0
+    for key in pairs(list) do
+        if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+            return nil, "expected numeric list keys only"
+        end
+        count = count + 1
+        if key > maximum then maximum = key end
+    end
+    if count ~= maximum then
+        return nil, "expected a dense numeric list"
+    end
+    return count
+end
+
+function types.dense_type_list_length(list)
+    return dense_list_length(list)
+end
+
+local function deoptionized(typ)
+    if typ._tag == "Type.Option" then return typ.base end
+    return typ
+end
+
+function types.canonical_option(typ)
+    assert(type(typ) == "table" and typ._tag,
+        "option base must be a type")
+    if typ._tag == "Type.Option" or typ._tag == "Type.Value" then
+        return typ
+    end
+    return types.Option(typ)
+end
+
+function types.canonical_array(elem)
+    assert(type(elem) == "table" and elem._tag,
+        "array element must be a type")
+    return types.Array(deoptionized(elem))
+end
+
+function types.canonical_map(keys, values)
+    assert(type(keys) == "table" and keys._tag
+        and type(values) == "table" and values._tag,
+        "map components must be types")
+    if keys._tag == "Type.Nil" then
+        error("type of map key cannot be nil", 2)
+    elseif keys._tag == "Type.Option" then
+        error("type of map key cannot be option type", 2)
+    end
+    return types.Map(keys, deoptionized(values))
+end
+
+local function copy_scalar_metadata(source, target)
+    for key, value in pairs(source) do
+        if key ~= "_tag" and target[key] == nil
+           and type(key) == "string" and type(value) ~= "table" then
+            target[key] = value
+        end
+    end
+    return target
+end
+
+local function rewrite_map(map, rewrite)
+    local out = {}
+    for key, value in pairs(map or {}) do
+        if type(key) ~= "number" then
+            out[key] = rewrite(value)
+        end
+    end
+    return out
+end
+
+local function rewrite_list(list, rewrite)
+    local out = {}
+    for index, value in ipairs(list or {}) do
+        out[index] = rewrite(value)
+    end
+    return out
+end
+
+local function rewrite_type(root, policy)
+    local memo, active = {}, {}
+
+    local function rewrite(typ)
+        if typ == false or typ == nil then return typ end
+        if type(typ) ~= "table" or type(typ._tag) ~= "string" then
+            error("generic type rewrite expected a Type descriptor", 3)
+        end
+        if memo[typ] then return memo[typ] end
+        if active[typ] then
+            error("cyclic structural type in generic type rewrite", 3)
+        end
+        active[typ] = true
+
+        local tag, out = typ._tag
+        if tag == "Type.Parameter" then
+            out = policy.parameter(typ, rewrite)
+            if out == nil then
+                local erased = typ.erased_constraint
+                out = types.Parameter(typ.scope, typ.index,
+                    typ.diagnostic_name,
+                    erased == false and false or rewrite(erased))
+            end
+        elseif tag == "Type.GenericScope" then
+            out = typ
+        elseif tag == "Type.TypeParameter" then
+            if policy.drop_generic then
+                out = typ.constraint == false and types.Value()
+                    or rewrite(typ.constraint)
+            else
+                out = types.TypeParameter(typ.name,
+                    typ.constraint == false and false
+                        or rewrite(typ.constraint))
+            end
+        elseif tag == "Type.FunctionScheme" then
+            if policy.drop_generic or policy.closes(typ.scope) then
+                out = rewrite(typ.signature)
+            else
+                out = types.FunctionScheme(typ.scope,
+                    rewrite_list(typ.typeparams, rewrite),
+                    rewrite(typ.signature))
+            end
+        elseif tag == "Type.GenericAlias" then
+            if policy.drop_generic then
+                out = types.Nominal(typ.target_owner_fqtn)
+            elseif policy.closes(typ.target_scope) then
+                out = types.Nominal(typ.target_owner_fqtn,
+                    policy.arguments)
+            else
+                out = types.GenericAlias(typ.module, typ.name,
+                    typ.locality, typ.target_owner_fqtn,
+                    typ.target_alias_fqtn, typ.target_scope,
+                    rewrite_list(typ.typeparams, rewrite))
+            end
+        elseif tag == "Type.Nominal" then
+            if policy.drop_generic then
+                out = types.Nominal(typ.fqtn)
+            else
+                out = types.Nominal(typ.fqtn,
+                    rewrite_list(typ.args or {}, rewrite))
+            end
+        elseif tag == "Type.Option" then
+            out = types.canonical_option(rewrite(typ.base))
+        elseif tag == "Type.Array" then
+            out = types.canonical_array(rewrite(typ.elem))
+        elseif tag == "Type.Map" then
+            out = types.canonical_map(
+                rewrite(typ.keys), rewrite(typ.values))
+        elseif tag == "Type.Function" then
+            if typ.vararg ~= false then
+                error("Type.Function reserved vararg field must be false", 3)
+            end
+            out = types.Function(
+                rewrite_list(typ.params, rewrite),
+                rewrite_list(typ.rettypes, rewrite),
+                false,
+                typ.varargtype == false and false
+                    or rewrite(typ.varargtype),
+                typ.flexrettype == false and false
+                    or rewrite(typ.flexrettype))
+        elseif tag == "Type.Field" then
+            out = types.Field(typ.fqtn, typ.name,
+                rewrite(typ.type), typ.index)
+        elseif tag == "Type.Variant" then
+            out = types.Variant(typ.fqtn, typ.name,
+                typ.payload == false and false or rewrite(typ.payload),
+                typ.index)
+        elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
+            local constructor = tag == "Type.Method"
+                and types.Method or types.StaticMethod
+            local closes = policy.drop_generic
+                or (typ.scope ~= false and policy.closes(typ.scope))
+            out = constructor(typ.fqtn, typ.name,
+                rewrite_list(typ.params, rewrite),
+                rewrite_list(typ.rettypes, rewrite),
+                typ.varargtype == false and false
+                    or rewrite(typ.varargtype),
+                typ.flexrettype == false and false
+                    or rewrite(typ.flexrettype),
+                typ.paramnames,
+                (not closes and typ.scope) or false,
+                closes and {} or rewrite_list(
+                    typ.typeparams or {}, rewrite))
+        elseif tag == "Type.Record" then
+            local fields = rewrite_list(typ.fields, rewrite)
+            local closes = policy.drop_generic
+                or (typ.scope ~= false and policy.closes(typ.scope))
+            out = types.Record(typ.name, fields,
+                rewrite_map(typ.functions, rewrite),
+                rewrite_map(typ.methods, rewrite), typ.nfields,
+                (not closes and typ.scope) or false,
+                closes and {} or rewrite_list(
+                    typ.typeparams or {}, rewrite))
+        elseif tag == "Type.Union" then
+            local variants = rewrite_list(typ.variants, rewrite)
+            local closes = policy.drop_generic
+                or (typ.scope ~= false and policy.closes(typ.scope))
+            out = types.Union(typ.name, variants,
+                rewrite_map(typ.functions, rewrite),
+                rewrite_map(typ.methods, rewrite), typ.nvariants,
+                (not closes and typ.scope) or false,
+                closes and {} or rewrite_list(
+                    typ.typeparams or {}, rewrite))
+        elseif tag == "Type.Interface" then
+            local closes = policy.drop_generic
+                or (typ.scope ~= false and policy.closes(typ.scope))
+            out = types.Interface(typ.name,
+                rewrite_list(typ.methods, rewrite),
+                (not closes and typ.scope) or false,
+                closes and {} or rewrite_list(
+                    typ.typeparams or {}, rewrite))
+        elseif tag == "Type.ModuleMember" then
+            out = types.ModuleMember(typ.modname, typ.name,
+                rewrite(typ.type), typ.paramnames)
+        elseif tag == "Type.ModuleVariable" then
+            out = types.ModuleVariable(typ.modname, typ.name,
+                rewrite(typ.type))
+        elseif tag == "Type.Module" then
+            out = types.Module(typ.name,
+                rewrite_list(typ.members, rewrite),
+                rewrite_map(typ.type_members, rewrite))
+        elseif tag == "Type.Typedef" then
+            out = types.clone_graph(typ)
+            out._type = rewrite(typ._type)
+        elseif tag == "Type.Invalid" or tag == "Type.Nil"
+            or tag == "Type.Void" or tag == "Type.Boolean"
+            or tag == "Type.Integer" or tag == "Type.Float"
+            or tag == "Type.String" or tag == "Type.Value"
+            or tag:match("^Type%.C") or tag == "Type.Pointer"
+            or tag == "Struct" or tag == "Union" then
+            -- C declarations are compilation-unit-local immutable leaves from
+            -- the generic algebra's perspective. Type parameters cannot occur
+            -- inside their declarator graph.
+            out = typ
+        else
+            error("unsupported tag in generic type rewrite: " .. tag, 3)
+        end
+
+        active[typ] = nil
+        if out._tag == typ._tag then
+            out = copy_scalar_metadata(typ, out)
+        end
+        memo[typ] = out
+        return out
+    end
+
+    return rewrite(root)
+end
+
+local function checked_arguments(arguments)
+    local count, list_error = dense_list_length(arguments)
+    if not count then error(list_error, 3) end
+    local copy = {}
+    for index = 1, count do
+        local argument = arguments[index]
+        if type(argument) ~= "table" or not argument._tag then
+            error("type argument " .. index .. " is not a type", 3)
+        end
+        local eligible = types.transient_roundtrip(argument)
+        if not eligible then
+            error("type argument " .. index .. " ('" ..
+                types.tostring(argument) ..
+                "') has no sound transient round trip", 3)
+        end
+        copy[index] = argument
+    end
+    return copy
+end
+
+-- Substitute one structural declaration scope. Repeated calls handle owner
+-- and callable-local binders without conflating their identities.
+function types.substitute(typ, scope, arguments)
+    assert(type(scope) == "table" and scope._tag == "Type.GenericScope",
+        "substitution scope must be a GenericScope")
+    local args = checked_arguments(arguments)
+    return rewrite_type(typ, {
+        arguments = args,
+        drop_generic = false,
+        closes = function(candidate)
+            return generic_scope_equals(scope, candidate)
+        end,
+        parameter = function(parameter)
+            if not generic_scope_equals(parameter.scope, scope) then
+                return nil
+            end
+            local replacement = args[parameter.index]
+            if replacement == nil then
+                error("missing type argument " .. parameter.index ..
+                    " for " .. types.generic_scope_key(scope), 3)
+            end
+            return replacement
+        end,
+    })
+end
+
+function types.validate_type_arguments(typeparams, arguments)
+    local parameter_count, parameter_error =
+        dense_list_length(typeparams)
+    if not parameter_count then return nil, parameter_error end
+    local argument_count, argument_error =
+        dense_list_length(arguments)
+    if not argument_count then return nil, argument_error end
+    if argument_count ~= parameter_count then
+        return nil, string.format("expected %d type arguments but found %d",
+            parameter_count, argument_count)
+    end
+    for index, argument in ipairs(arguments) do
+        if type(argument) ~= "table" or not argument._tag then
+            return nil, string.format(
+                "type argument %d is not a type", index)
+        elseif not types.transient_roundtrip(argument) then
+            return nil, string.format(
+                "type argument %d ('%s') has no sound transient round trip",
+                index, types.tostring(argument))
+        end
+    end
+    return arguments
+end
+
+function types.apply_scheme(scheme, arguments)
+    assert(type(scheme) == "table"
+        and scheme._tag == "Type.FunctionScheme",
+        "expected a FunctionScheme")
+    local valid, argument_error =
+        types.validate_type_arguments(scheme.typeparams, arguments)
+    if not valid then error(argument_error, 2) end
+    return types.substitute(scheme, scheme.scope, arguments)
+end
+
+function types.apply_generic_alias(alias, arguments)
+    assert(type(alias) == "table"
+        and alias._tag == "Type.GenericAlias",
+        "expected a GenericAlias")
+    local valid, argument_error =
+        types.validate_type_arguments(alias.typeparams, arguments)
+    if not valid then error(argument_error, 2) end
+    return types.substitute(alias, alias.target_scope, arguments)
+end
+
+-- Erasure selects only an existing ordinary Titan carrier. Applied nominal
+-- arguments disappear after their dependent members have been rewritten.
+function types.erase(typ)
+    return rewrite_type(typ, {
+        arguments = {},
+        drop_generic = true,
+        closes = function() return true end,
+        parameter = function(parameter, rewrite)
+            if parameter.erased_constraint == false then
+                return types.Value()
+            end
+            return rewrite(parameter.erased_constraint)
+        end,
+    })
+end
+
+function types.contains_generic(typ)
+    local seen = {}
+    local function visit(value)
+        if type(value) ~= "table" or seen[value] then return false end
+        seen[value] = true
+        local tag = value._tag
+        if tag == "Type.GenericScope" or tag == "Type.TypeParameter"
+           or tag == "Type.Parameter" or tag == "Type.FunctionScheme"
+           or tag == "Type.GenericAlias" then
+            return true
+        elseif tag == "Type.Nominal" and #(value.args or {}) > 0 then
+            return true
+        elseif (tag == "Type.Record" or tag == "Type.Union"
+                or tag == "Type.Interface" or tag == "Type.Method"
+                or tag == "Type.StaticMethod")
+           and (value.scope ~= false or #(value.typeparams or {}) > 0) then
+            return true
+        end
+        for key, child in pairs(value) do
+            if key ~= "_tag" and visit(child) then return true end
+        end
+        return false
+    end
+    return visit(typ)
+end
+
+function types.is_erased(typ)
+    return not types.contains_generic(typ)
+end
+
+function types.assert_erased(typ)
+    if types.contains_generic(typ) then
+        error("generic type reached erased core", 2)
     end
     return typ
 end
@@ -1784,6 +2389,131 @@ end
 
 function types.has_sound_gradual_guard(typ)
     return sound_guardable(typ, {})
+end
+
+local function complete_owned_payload(owned)
+    local payload, seen = owned.pointee, {}
+    while payload and payload._tag == "Type.CTypedef" do
+        if seen[payload] then return false end
+        seen[payload] = true
+        payload = payload.target
+    end
+    if not payload or not is_c_tag(payload._tag)
+       or payload._tag == "Type.CVoid"
+       or payload._tag == "Type.CFunction"
+       or payload._tag == "Type.CArray"
+       or payload._tag == "Type.COwned"
+       or payload._tag == "Type.CModule" then
+        return false
+    elseif payload._tag == "Type.CStruct"
+        or payload._tag == "Type.CUnion" then
+        return payload.complete == true or types.is_c_tvalue(payload)
+    end
+    return true
+end
+
+-- Prove that generic erasure has a canonical traced carrier and that the
+-- existing strict projection can recover the closed value. This is an
+-- eligibility predicate only; it never authorizes a coercion or checks an
+-- Interface constraint.
+function types.transient_roundtrip(typ)
+    local results, offenders = {}, {}
+
+    local function visit(value)
+        if type(value) ~= "table" or type(value._tag) ~= "string" then
+            return false, value
+        end
+        if results[value] ~= nil then
+            return results[value], offenders[value]
+        end
+        -- Structural cycles are malformed. Nominal recursion ends at a
+        -- Nominal leaf and therefore never depends on accepting such a cycle.
+        results[value] = false
+        offenders[value] = value
+
+        local tag, ok, offender = value._tag, false, value
+        if tag == "Type.Nil" or tag == "Type.Boolean"
+           or tag == "Type.Integer" or tag == "Type.Float"
+           or tag == "Type.String" or tag == "Type.Value" then
+            ok = true
+        elseif tag == "Type.Typedef" then
+            ok, offender = visit(value._type)
+        elseif tag == "Type.CTypedef" then
+            ok, offender = visit(value.target)
+        elseif types.is_c_tvalue(value) then
+            ok = true
+        elseif tag == "Type.CInteger" then
+            -- An unresolved enum's provisional carrier has no certified width.
+            ok = type(value.bits) == "number"
+        elseif tag == "Type.CFloat" then
+            ok = true
+        elseif tag == "Type.COwned" then
+            ok = complete_owned_payload(value)
+        elseif tag == "Type.Parameter" then
+            ok = type(value.scope) == "table"
+                and value.scope._tag == "Type.GenericScope"
+                and type(value.index) == "number"
+                and value.index >= 1 and value.index % 1 == 0
+            if ok and value.erased_constraint ~= false then
+                ok = value.erased_constraint._tag == "Type.Nominal"
+                if ok then ok, offender = visit(value.erased_constraint) end
+            end
+        elseif tag == "Type.Nominal" then
+            local count
+            count, offender = dense_list_length(value.args or {})
+            ok = count ~= nil and types.has_sound_gradual_guard(value)
+            if ok then
+                for index = 1, count do
+                    ok, offender = visit(value.args[index])
+                    if not ok then break end
+                end
+            end
+        elseif tag == "Type.Option" then
+            ok, offender = visit(value.base)
+        elseif tag == "Type.Array" then
+            ok, offender = visit(value.elem)
+        elseif tag == "Type.Map" then
+            if value.keys._tag == "Type.Nil"
+               or value.keys._tag == "Type.Option" then
+                ok, offender = false, value.keys
+            else
+                ok, offender = visit(value.keys)
+                if ok then ok, offender = visit(value.values) end
+            end
+        elseif tag == "Type.Function" then
+            local pcount, rcount = dense_list_length(value.params),
+                dense_list_length(value.rettypes)
+            ok = value.vararg == false and pcount ~= nil and rcount ~= nil
+            if ok then
+                for index = 1, pcount do
+                    ok, offender = visit(value.params[index])
+                    if not ok then break end
+                end
+            end
+            if ok then
+                for index = 1, rcount do
+                    ok, offender = visit(value.rettypes[index])
+                    if not ok then break end
+                end
+            end
+            if ok and value.varargtype ~= false then
+                ok, offender = visit(value.varargtype)
+            end
+            if ok and value.flexrettype ~= false then
+                ok, offender = visit(value.flexrettype)
+            end
+        end
+
+        results[value] = ok and true or false
+        if ok then
+            offenders[value] = nil
+        else
+            offenders[value] = offender
+        end
+        return results[value], offenders[value]
+    end
+
+    return visit(typ)
 end
 
 local function guard_plan(target, seen)
@@ -2952,9 +3682,39 @@ local function serialize_names(names)
     return "{" .. table.concat(out, ",") .. "}"
 end
 
+local function tostring_typeparams(typeparams)
+    if not typeparams or #typeparams == 0 then return "" end
+    local rendered = {}
+    for _, typeparam in ipairs(typeparams) do
+        rendered[#rendered + 1] = types.tostring(typeparam)
+    end
+    return "<" .. table.concat(rendered, ", ") .. ">"
+end
+
 function types.tostring(t)
     local tag = t._tag
-    if     tag == "Type.Integer"     then return "integer"
+    if tag == "Type.GenericScope" then
+        return "scope[" .. types.generic_scope_key(t) .. "]"
+    elseif tag == "Type.TypeParameter" then
+        if t.constraint == false then return t.name end
+        return t.name .. ": " .. types.tostring(t.constraint)
+    elseif tag == "Type.Parameter" then
+        return t.diagnostic_name
+    elseif tag == "Type.FunctionScheme" then
+        return tostring_typeparams(t.typeparams) ..
+            types.tostring(t.signature)
+    elseif tag == "Type.GenericAlias" then
+        local binders = tostring_typeparams(t.typeparams)
+        local arguments = {}
+        for _, typeparam in ipairs(t.typeparams) do
+            arguments[#arguments + 1] = typeparam.name
+        end
+        local target = t.target_owner_fqtn
+        if #arguments > 0 then
+            target = target .. "<" .. table.concat(arguments, ", ") .. ">"
+        end
+        return t.module .. "." .. t.name .. binders .. " = " .. target
+    elseif tag == "Type.Integer"     then return "integer"
     elseif tag == "Type.Boolean"     then return "boolean"
     elseif tag == "Type.String"      then return "string"
     elseif tag == "Type.Nil"         then return "nil"
@@ -3013,7 +3773,7 @@ function types.tostring(t)
     elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
         local out = {t.fqtn,
              tag == "Type.Method" and ":" or ".",
-             t.name, "("}
+             t.name, tostring_typeparams(t.typeparams), "("}
         local ptypes = {}
         for _, param in ipairs(t.params) do
             table.insert(ptypes, types.tostring(param))
@@ -3043,11 +3803,13 @@ function types.tostring(t)
         return table.concat(out)
     elseif tag == "Type.Record" or tag == "Type.Union"
        or tag == "Type.Interface" then
-        return t.name
+        return t.name .. tostring_typeparams(t.typeparams)
     elseif tag == "Type.Variant" then
         return t.fqtn .. "." .. t.name
     elseif tag == "Type.Nominal" then
-        return t.fqtn
+        local args = t.args or {}
+        if #args == 0 then return t.fqtn end
+        return t.fqtn .. "<" .. tostring_list(args) .. ">"
     elseif tag == "Type.Option" then
         return types.tostring(t.base) .. "?"
     elseif tag == "Type.CVoid" then
@@ -3197,6 +3959,27 @@ function types.validate_union_source_projection(union)
     return projection
 end
 
+local function serialize_literal(value)
+    if value == false then return "false" end
+    if value == true then return "true" end
+    if type(value) == "string" then return string.format("%q", value) end
+    error("cannot serialize generic metadata literal " .. tostring(value), 3)
+end
+
+local function serialize_type_list(list)
+    local out = {}
+    for _, typ in ipairs(list or {}) do
+        out[#out + 1] = types.serialize(typ)
+    end
+    return "{" .. table.concat(out, ",") .. "}"
+end
+
+local function serialize_generic_tail(scope, typeparams)
+    if scope == false and #(typeparams or {}) == 0 then return "" end
+    return "," .. types.serialize(scope) .. "," ..
+        serialize_type_list(typeparams)
+end
+
 function types.serialize(t)
     local tag = t._tag
     local ctyp = types.first_c_ffi_type(t)
@@ -3204,7 +3987,36 @@ function types.serialize(t)
         error("cannot serialize C FFI type " .. types.tostring(ctyp))
     end
 
-    if tag == "Type.Array" then
+    if tag == "Type.GenericScope" then
+        return "GenericScope(" ..
+            serialize_literal(t.modname) .. "," ..
+            serialize_literal(t.owner_fqtn) .. "," ..
+            serialize_literal(t.callable_name) .. "," ..
+            serialize_literal(t.role) .. "," ..
+            serialize_literal(t.declaration_kind) .. ")"
+    elseif tag == "Type.TypeParameter" then
+        return "TypeParameter(" .. string.format("%q", t.name) .. "," ..
+            (t.constraint == false and "false"
+                or types.serialize(t.constraint)) .. ")"
+    elseif tag == "Type.Parameter" then
+        return "Parameter(" .. types.serialize(t.scope) .. "," ..
+            tostring(t.index) .. "," ..
+            string.format("%q", t.diagnostic_name) .. "," ..
+            (t.erased_constraint == false and "false"
+                or types.serialize(t.erased_constraint)) .. ")"
+    elseif tag == "Type.FunctionScheme" then
+        return "FunctionScheme(" .. types.serialize(t.scope) .. "," ..
+            serialize_type_list(t.typeparams) .. "," ..
+            types.serialize(t.signature) .. ")"
+    elseif tag == "Type.GenericAlias" then
+        return "GenericAlias(" .. string.format("%q", t.module) .. "," ..
+            string.format("%q", t.name) .. "," ..
+            serialize_literal(t.locality) .. "," ..
+            string.format("%q", t.target_owner_fqtn) .. "," ..
+            serialize_literal(t.target_alias_fqtn) .. "," ..
+            types.serialize(t.target_scope) .. "," ..
+            serialize_type_list(t.typeparams) .. ")"
+    elseif tag == "Type.Array" then
         return "Array(" ..types.serialize(t.elem) .. ")"
     elseif tag == "Type.Map" then
         return "Map(" .. types.serialize(t.keys) .. ", " .. types.serialize(t.values) .. ")"
@@ -3255,7 +4067,12 @@ function types.serialize(t)
             (t.varargtype and types.serialize(t.varargtype) or "false") .. "," ..
             (t.flexrettype and types.serialize(t.flexrettype) or "false") .. ")"
     elseif tag == "Type.Nominal" then
-        return "Nominal('" .. t.fqtn .. "')"
+        local args = t.args or {}
+        if #args == 0 then
+            return "Nominal('" .. t.fqtn .. "')"
+        end
+        return "Nominal(" .. string.format("%q", t.fqtn) .. "," ..
+            serialize_type_list(args) .. ")"
     elseif tag == "Type.Field" then
         return "Field('" .. t.fqtn .. "', '" ..
              t.name .. "', " .. types.serialize(t.type) ..
@@ -3280,7 +4097,8 @@ function types.serialize(t)
             "{" .. table.concat(rettypes, ",") .. "}," ..
             (t.varargtype and types.serialize(t.varargtype) or "false") .. "," ..
             (t.flexrettype and types.serialize(t.flexrettype) or "false") .. "," ..
-            serialize_names(t.paramnames) .. ")"
+            serialize_names(t.paramnames) ..
+            serialize_generic_tail(t.scope, t.typeparams) .. ")"
     elseif tag == "Type.Record" then
         local functions, fields, methods = {}, {}, {}
         for _, field in ipairs(t.fields) do
@@ -3315,6 +4133,7 @@ function types.serialize(t)
             "},{" ..table.concat(functions, ",") .. "}" .. "," ..
             "{" .. table.concat(methods, ",") .. "}" .. "," ..
             tostring(t.nfields or #t.fields) ..
+            serialize_generic_tail(t.scope, t.typeparams) ..
             ")"
     elseif tag == "Type.Union" then
         local functions, variants, methods = {}, {}, {}
@@ -3349,6 +4168,7 @@ function types.serialize(t)
             "},{" .. table.concat(functions, ",") .. "}" .. "," ..
             "{" .. table.concat(methods, ",") .. "}" .. "," ..
             tostring(t.nvariants or #t.variants) ..
+            serialize_generic_tail(t.scope, t.typeparams) ..
             ")"
     elseif tag == "Type.Interface" then
         local valid, validation_error =
@@ -3362,7 +4182,8 @@ function types.serialize(t)
             methods[#methods + 1] = types.serialize(method)
         end
         return "Interface(" .. string.format("%q", t.name) ..
-            ",{" .. table.concat(methods, ",") .. "})"
+            ",{" .. table.concat(methods, ",") .. "}" ..
+            serialize_generic_tail(t.scope, t.typeparams) .. ")"
     elseif tag == "Type.Option" then
         return "Option(" .. types.serialize(t.base) .. ")"
     elseif tag == "Type.Integer"     then return "Integer()"
