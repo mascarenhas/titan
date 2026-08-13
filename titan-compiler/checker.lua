@@ -7434,7 +7434,8 @@ local function named_function_metadata(node)
         return decl.paramnames, "titan", false
     elseif decl._tag == "Type.ModuleMember" and decl.type then
         local foreign = checker._foreign_function_reference(var) ~= nil
-        if decl.type._tag == "Type.Function" then
+        if decl.type._tag == "Type.Function"
+           or decl.type._tag == "Type.FunctionScheme" then
             return decl.paramnames, "titan", false
         elseif foreign and decl.type._tag == "Type.CFunction" then
             return decl.paramnames, "foreign", true
@@ -11008,20 +11009,22 @@ local function register_referenced_nominals(
     if type(t) ~= "table" or not t._tag then return true end
     local tag = t._tag
     local alias_key
+    local context_key = "\0generic-visit:" .. tostring(t) .. ":" ..
+        tostring(position or "value")
     if tag == "Type.GenericAlias" then
         alias_key = t.module .. "." .. t.name
         local resolving_key = "\0generic-alias-resolving:" .. alias_key
         if seen[resolving_key] then
             return nil, "recovered GenericAlias chain is cyclic at '" ..
                 alias_key .. "'"
-        elseif seen[t] then
+        elseif seen[context_key] then
             return true
         end
         seen[resolving_key] = true
-    elseif seen[t] then
+    elseif seen[context_key] then
         return true
     end
-    seen[t] = true
+    seen[context_key] = true
 
     local function visit(child, child_position)
         return register_referenced_nominals(
