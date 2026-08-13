@@ -350,7 +350,7 @@ local function run_server(): value
 end
 
 function main(args: {string}): integer
-  async.run(run_server)
+  async.run<value, value>(run_server)
   return 0
 end
 ```

@@ -550,7 +550,59 @@ end
 -- declaration so every use shares one pointer and a forward alias chain is
 -- resolved only once. Encountering a declaration already being resolved marks
 -- the cycle invalid before unwinding, preventing both recursion and cascades.
-local function resolve_type_alias(node, st, errors)
+local resolve_type_alias
+
+-- An exact bare owner on an alias RHS is an owner-scheme context, not the
+-- ordinary scalar all-value application. Resolve only that constructor shape
+-- here; every other RHS still follows the normal type visitor.
+function checker._generic.bare_forwarding_alias_target(node, st, errors)
+    if node._tag == "Ast.TypeName" then
+        local alias = st:find_type_alias(node.name)
+        if alias then
+            local target = resolve_type_alias(alias, st, errors)
+            if target._tag == "Type.GenericAlias" then
+                local owner = types.registry[target.target_owner_fqtn]
+                local target_alias_fqtn = false
+                if not target.locality then
+                    target_alias_fqtn = target.module .. "." .. target.name
+                end
+                return owner, target_alias_fqtn, true
+            end
+            return nil, false, false
+        end
+        local owner = checker._generic.resolve_local_owner(node.name, st)
+        return owner, false, owner ~= nil
+    elseif node._tag == "Ast.TypeQualName" then
+        local declaration = st:find_symbol(node.module)
+        local module = declaration and declaration._type
+        if not module or module._tag ~= "Type.Module" then
+            return nil, false, false
+        end
+        local include_source = declaration._source_import == true
+        local member = types.module_type_member(
+            module, node.name, include_source)
+        if member and member._tag == "Type.GenericAlias" then
+            local owner = types.registry[member.target_owner_fqtn]
+            local target_alias_fqtn = false
+            if not member.locality then
+                target_alias_fqtn = member.module .. "." .. member.name
+            end
+            return owner, target_alias_fqtn, true
+        elseif member and member._tag == "Type.Interface" then
+            return member, false, true
+        end
+        local nominal = types.module_member(
+            module, node.name, include_source)
+        local owner = nominal and nominal.type
+        if owner and (owner._tag == "Type.Record"
+                or owner._tag == "Type.Union") then
+            return owner, false, true
+        end
+    end
+    return nil, false, false
+end
+
+resolve_type_alias = function(node, st, errors)
     if node._alias_state == "resolved" then
         return node._type
     elseif node._alias_state == "resolving" then
@@ -562,23 +614,15 @@ local function resolve_type_alias(node, st, errors)
     end
 
     node._alias_state = "resolving"
-    -- Resolving a transparent type-only alias is not an enum value use. The
-    -- eventual type use revalidates the resolved graph in its own full or
-    -- spelling-only context.
-    local target = typefromnode(node.type, st, errors, true)
     local rhs_is_bare_name = (node.type._tag == "Ast.TypeName"
             or node.type._tag == "Ast.TypeQualName")
         and #(node.type.typeargs or {}) == 0
+    local target
     if rhs_is_bare_name then
-        local owner, target_alias_fqtn
-        if target._tag == "Type.GenericAlias" then
-            owner = types.registry[target.target_owner_fqtn]
-            target_alias_fqtn = target.module .. "." .. target.name
-        elseif target._tag == "Type.Nominal" then
-            owner = types.registry[target.fqtn]
-            target_alias_fqtn = false
-        end
-        if owner and owner.scope ~= false
+        local owner, target_alias_fqtn, recognized =
+            checker._generic.bare_forwarding_alias_target(
+                node.type, st, errors)
+        if recognized and owner and owner.scope ~= false
            and #(owner.typeparams or {}) > 0 then
             target = types.GenericAlias(
                 st.modname, node.name, node.islocal and true or false,
@@ -586,6 +630,13 @@ local function resolve_type_alias(node, st, errors)
                 owner.typeparams)
         end
     end
+    if not target then
+        -- Resolving a transparent type-only alias is not an enum value use. The
+        -- eventual type use revalidates the resolved graph in its own full or
+        -- spelling-only context.
+        target = typefromnode(node.type, st, errors, true)
+    end
+
     -- A recursive visit marks this declaration resolved/invalid. Preserve that
     -- result instead of wrapping it back in the structural RHS on unwind.
     if node._alias_state == "resolved" then
@@ -661,41 +712,12 @@ local function deoptionize(t)
     end
 end
 
--- The native input-vararg and flexible-result ABIs share the seven
--- `TitanVargX` descriptor representations. Keep the checker-side inventory
--- explicit so unsupported source types are rejected before the coder would
--- need to choose a descriptor.
+-- The native input-vararg and flexible-result ABIs share the TitanVargX
+-- descriptor inventory. Generic reconstruction and metadata validation use the
+-- same type-layer query, so an application cannot manufacture a tail shape that
+-- the written declaration would reject.
 local function has_varg_representation(t)
-    if types.is_c_tvalue(t) then
-        -- The coder deliberately maps Lua's by-value TValue FFI spelling to
-        -- TitanVargValue, the same descriptor used by Titan `value`.
-        return true
-    end
-    local tag = t._tag
-    if tag == "Type.Invalid" then
-        return true -- avoid cascading after an earlier type error
-    elseif tag == "Type.Integer" or tag == "Type.Float"
-        or tag == "Type.Boolean" or tag == "Type.String"
-        or tag == "Type.Array" or tag == "Type.Map"
-        or tag == "Type.Value" or tag == "Type.Nominal"
-        or tag == "Type.Function" or tag == "Type.COwned" then
-        return true
-    elseif tag == "Type.Option" then
-        -- Every supported Option uses the TValue descriptor. Check the base
-        -- here as a defensive mirror of TypeOption validation so programmatic
-        -- types cannot reach the coder with an unboxable C aggregate/function.
-        return types.has_tvalue_representation(t.base)
-    elseif tag == "Type.Parameter" then
-        -- A rigid parameter uses its constraint carrier in the one erased
-        -- body: unconstrained binders select TitanVargValue, while constrained
-        -- binders select the ordinary nominal descriptor family.
-        local carrier = t.erased_constraint ~= false
-            and t.erased_constraint or types.Value()
-        return has_varg_representation(carrier)
-    elseif tag == "Type.Typedef" then
-        return has_varg_representation(t._type)
-    end
-    return false
+    return types.valid_varg_element(t)
 end
 
 -- Validate the element type shared by an input variadic parameter and a
@@ -2100,7 +2122,10 @@ end
 local function alias_namespace_type(typ, st)
     local owner = typ
     if typ and typ._tag == "Type.Nominal" then
-        owner = types.registry[typ.fqtn]
+        -- A concrete alias pre-closes the owner's binders. Its constructor and
+        -- statics retain that application rather than reopening the raw owner
+        -- scheme and accepting a second, contradictory argument list.
+        owner = checker._generic.applied_owner_view(typ)
     elseif typ and typ._tag == "Type.GenericAlias" then
         owner = types.registry[typ.target_owner_fqtn]
     end
@@ -3616,138 +3641,24 @@ function checker._generic.applied_owner_view(nominal, errors, loc)
     return owner
 end
 
-function checker._generic.method_constraint_view(
-        typeparam, scope, arguments)
-    if typeparam.constraint == false then return false end
-    local ok, constraint = pcall(
-        types.substitute, typeparam.constraint, scope, arguments)
-    if not ok then return nil end
-    return constraint
-end
-
-function checker._generic.close_method_pair(concrete, required)
-    local concrete_params = concrete.typeparams or {}
-    local required_params = required.typeparams or {}
-    if #concrete_params == 0 and #required_params == 0 then
-        return concrete, required
-    elseif #concrete_params ~= #required_params
-       or concrete.scope == false or required.scope == false then
-        return nil
-    end
-
-    -- Use the required method's structural scope as one alpha-stable common
-    -- binder identity, then close both declaration-local schemes against it.
-    local arguments = {}
-    for index, typeparam in ipairs(required_params) do
-        arguments[index] = types.Parameter(
-            required.scope, index, typeparam.name, false)
-    end
-    for index = 1, #arguments do
-        local concrete_constraint = checker._generic.method_constraint_view(
-            concrete_params[index], concrete.scope, arguments)
-        local required_constraint = checker._generic.method_constraint_view(
-            required_params[index], required.scope, arguments)
-        if concrete_constraint == nil or required_constraint == nil
-           or (concrete_constraint == false)
-                ~= (required_constraint == false)
-           or (concrete_constraint ~= false
-               and not types.equals(
-                   concrete_constraint, required_constraint)) then
-            return nil
-        end
-        arguments[index].erased_constraint = required_constraint
-    end
-
-    local concrete_ok, concrete_closed =
-        pcall(types.substitute, concrete, concrete.scope, arguments)
-    local required_ok, required_closed =
-        pcall(types.substitute, required, required.scope, arguments)
-    if not concrete_ok or not required_ok then return nil end
-    return concrete_closed, required_closed
-end
-
--- The ordinary Interface matcher consumes monomorphic callable projections.
--- For generic methods, alpha-close each aligned declaration-local scheme to a
--- common rigid scope first, delegate the existing ordered matcher, then restore
--- the canonical declaration descriptors on its result graph.
 function checker._generic.interface_implementation(
         concrete, interface, policy)
-    local concrete_methods = {}
-    for name, method in pairs(concrete.methods or {}) do
-        concrete_methods[name] = method
-    end
-    local required_methods = {}
-    local originals = {}
-
-    for index, required in ipairs(interface.methods or {}) do
-        local method = concrete.methods and concrete.methods[required.name]
-        if method and method._tag == "Type.Method" then
-            local concrete_view, required_view =
-                checker._generic.close_method_pair(method, required)
-            if not concrete_view then
-                return false, {
-                    kind = "interface_mismatch",
-                    reason = "incompatible",
-                    concrete = concrete,
-                    interface = interface,
-                    index = index,
-                    name = required.name,
-                    required = required,
-                    member = method,
-                    concrete_type = types.method_function_type(method),
-                    required_type = types.method_function_type(required),
-                }
-            end
-            concrete_methods[required.name] = concrete_view
-            required_methods[index] = required_view
-            originals[index] = {
-                concrete = method,
-                required = required,
-            }
-        else
-            required_methods[index] = required
-        end
-    end
-
-    local concrete_view = {}
-    for key, value in pairs(concrete) do concrete_view[key] = value end
-    concrete_view.methods = concrete_methods
-    local interface_view = types.Interface(
-        interface.name, required_methods, interface.scope,
-        interface.typeparams)
-    interface_view.islocal = interface.islocal
-
-    local implementation, failure = types.interface_implementation(
-        concrete_view, interface_view, policy)
-    if not implementation then
-        if failure then
-            failure.concrete = concrete
-            failure.interface = interface
-            local original = failure.index and originals[failure.index]
-            if original then
-                failure.required = original.required
-                failure.member = original.concrete
-            end
-        end
-        return false, failure
-    end
-
-    implementation.concrete = concrete
-    implementation.interface = interface
-    for index, mapping in ipairs(implementation.methods) do
-        local original = originals[index]
-        if original then
-            mapping.required = original.required
-            mapping.concrete = original.concrete
-        end
-    end
-    return implementation
+    return types.generic_interface_implementation(concrete, interface, policy)
 end
 
-function checker._generic.generic_constraint_satisfied(argument, constraint, st)
+function checker._generic.generic_constraint_satisfied(
+        argument, constraint, st, policy)
     if argument._tag == "Type.Parameter" then
-        return argument.erased_constraint ~= false
-            and types.equals(argument.erased_constraint, constraint)
+        local binders = st and st.generic_scope_bindings
+            and st.generic_scope_bindings[argument.scope]
+        local declared = binders and binders[argument.index]
+        if not declared and policy then
+            local binding = checker._generic.recovered_scope_binding(
+                policy, argument.scope)
+            declared = binding and binding.typeparams[argument.index]
+        end
+        return declared and declared.constraint ~= false
+            and types.alpha_equals(declared.constraint, constraint)
     elseif argument._tag ~= "Type.Nominal" then
         return false
     elseif types.equals(argument, constraint) then
@@ -3761,18 +3672,22 @@ function checker._generic.generic_constraint_satisfied(argument, constraint, st)
         or interface._tag ~= "Type.Interface" then
         return false
     end
-    if concrete._generic_header or interface._generic_header then
+    if concrete._generic_header or interface._generic_header
+       or (st and st.generic_signatures_incomplete) then
         return nil -- method sets are not complete yet; validate after signatures
     end
     concrete = checker._generic.applied_owner_view(argument)
     interface = checker._generic.applied_owner_view(constraint)
-    local implementation = checker._generic.interface_implementation(
-        concrete, interface, {
+    if not policy then
+        policy = {
             visibility = st.modname,
             method_visible = function(method)
                 return is_nominal_member_visible_from(st, method)
             end,
-        })
+        }
+    end
+    local implementation = checker._generic.interface_implementation(
+        concrete, interface, policy)
     return implementation ~= false
 end
 
@@ -3849,15 +3764,44 @@ function checker._generic.resolve_type_argument_nodes(nodes, st, errors)
     return arguments
 end
 
-function checker._generic.apply_named_owner(owner, typearg_nodes, st, errors, loc, subject)
-    local count = #(owner.typeparams or {})
-    local arguments
-    if #(typearg_nodes or {}) == 0 and count > 0 then
-        arguments = {}
-        for index = 1, count do arguments[index] = types.Value() end
-    else
-        arguments = checker._generic.resolve_type_argument_nodes(typearg_nodes, st, errors)
+function checker._generic.validate_owner_reconstruction(
+        owner, arguments, st, errors, loc, subject, allow_defer)
+    if owner.scope == false then return true end
+    if allow_defer and (owner._generic_header
+            or (st and st.generic_signatures_incomplete)) then
+        st.pending_generic_reconstructions =
+            st.pending_generic_reconstructions or {}
+        st.pending_generic_reconstructions[
+            #st.pending_generic_reconstructions + 1] = {
+                fqtn = owner.name,
+                arguments = arguments,
+                loc = loc,
+                subject = subject,
+            }
+        return true
     end
+    local closed = checker._generic.generic_substitute(
+        owner, owner.scope, arguments, errors, loc,
+        "cannot form " .. subject)
+    return closed ~= nil
+end
+
+function checker._generic.application_arguments(
+        typearg_nodes, count, st, errors)
+    if #(typearg_nodes or {}) == 0 and count > 0 then
+        local arguments = {}
+        for index = 1, count do arguments[index] = types.Value() end
+        return arguments
+    end
+    return checker._generic.resolve_type_argument_nodes(
+        typearg_nodes, st, errors)
+end
+
+function checker._generic.apply_named_owner(
+        owner, typearg_nodes, st, errors, loc, subject)
+    local count = #(owner.typeparams or {})
+    local arguments = checker._generic.application_arguments(
+        typearg_nodes, count, st, errors)
 
     if #arguments ~= count then
         checker.typeerror(errors, loc,
@@ -3865,8 +3809,41 @@ function checker._generic.apply_named_owner(owner, typearg_nodes, st, errors, lo
             subject, count, #arguments)
         return types.Nominal(owner.name, arguments)
     end
-    checker._generic.validate_binder_arguments(owner.scope, owner.typeparams, arguments,
+    local valid = checker._generic.validate_binder_arguments(
+        owner.scope, owner.typeparams, arguments,
         st, errors, loc, subject, true)
+    if valid then
+        checker._generic.validate_owner_reconstruction(
+            owner, arguments, st, errors, loc, subject, true)
+    end
+    return types.Nominal(owner.name, arguments)
+end
+
+function checker._generic.apply_generic_alias(
+        alias, typearg_nodes, st, errors, loc, subject)
+    local owner = types.registry[alias.target_owner_fqtn]
+    if not owner or (owner._tag ~= "Type.Record"
+            and owner._tag ~= "Type.Union"
+            and owner._tag ~= "Type.Interface") then
+        return invalid(errors, loc,
+            "%s does not have a recoverable nominal owner", subject)
+    end
+
+    local count = #(owner.typeparams or {})
+    local arguments = checker._generic.application_arguments(
+        typearg_nodes, count, st, errors)
+    if #arguments ~= count then
+        return invalid(errors, loc,
+            "%s expected %d type arguments but found %d",
+            subject, count, #arguments)
+    end
+    local valid = checker._generic.validate_binder_arguments(
+        owner.scope, owner.typeparams, arguments,
+        st, errors, loc, subject, true)
+    if valid then
+        checker._generic.validate_owner_reconstruction(
+            owner, arguments, st, errors, loc, subject, true)
+    end
     return types.Nominal(owner.name, arguments)
 end
 
@@ -3977,28 +3954,14 @@ typefromnode = util.make_visitor({
         local alias = st:find_type_alias(node.name)
         if alias then
             local typ = resolve_type_alias(alias, st, errors)
-            if #(node.typeargs or {}) > 0 then
-                if typ._tag ~= "Type.GenericAlias" then
-                    return invalid(errors, node.loc,
-                        "type alias '%s' is not a generic type constructor",
-                        node.name)
-                end
-                local arguments = checker._generic.resolve_type_argument_nodes(
-                    node.typeargs, st, errors)
-                local valid, argument_error =
-                    types.validate_type_arguments(typ.typeparams, arguments)
-                if not valid then
-                    return invalid(errors, node.loc,
-                        "type alias '%s' %s", node.name, argument_error)
-                end
-                local ok, applied = pcall(
-                    types.apply_generic_alias, typ, arguments)
-                if not ok then
-                    return invalid(errors, node.loc,
-                        "cannot apply type alias '%s': %s",
-                        node.name, tostring(applied))
-                end
-                return applied
+            if typ._tag == "Type.GenericAlias" then
+                return checker._generic.apply_generic_alias(
+                    typ, node.typeargs, st, errors, node.loc,
+                    "type alias '" .. node.name .. "'")
+            elseif #(node.typeargs or {}) > 0 then
+                return invalid(errors, node.loc,
+                    "type alias '%s' is not a generic type constructor",
+                    node.name)
             end
             if checker._ensure_c_enum_supported(
                     st, typ, node.loc, errors, nil,
@@ -4032,35 +3995,42 @@ typefromnode = util.make_visitor({
                 node.name)
         end
         if mod and mod._type and mod._type._tag == "Type.Module" then
-            local type_member =
-                types.module_type_member(
-                    mod._type, node.name, mod._source_import)
-            local owner = checker._generic.generic_owner_type(type_member)
-            if not owner then
-                local member = types.module_member(
-                    mod._type, node.name, mod._source_import)
-                if member and (member.type._tag == "Type.Record"
-                        or member.type._tag == "Type.Union") then
-                    owner = member.type
-                end
-            end
-            if owner then
-                if not is_nominal_visible_from(st, owner.name) then
+            local type_member = types.module_type_member(
+                mod._type, node.name, mod._source_import)
+            local subject = "type '" .. mod._type.name .. "." ..
+                node.name .. "'"
+            if type_member and type_member._tag == "Type.GenericAlias" then
+                local owner = types.registry[type_member.target_owner_fqtn]
+                if owner and not is_nominal_visible_from(st, owner.name) then
                     return invalid(errors, node.loc,
-                        "%s type '%s' is local to module '%s'",
-                        owner._tag == "Type.Record" and "record"
-                            or (owner._tag == "Type.Union" and "union"
-                                or "interface"),
+                        "nominal type '%s' is local to module '%s'",
+                        owner.name, mod._type.name)
+                end
+                return checker._generic.apply_generic_alias(
+                    type_member, node.typeargs, st, errors,
+                    node.loc, subject)
+            elseif type_member and type_member._tag == "Type.Interface" then
+                if not is_nominal_visible_from(st, type_member.name) then
+                    return invalid(errors, node.loc,
+                        "interface type '%s' is local to module '%s'",
                         node.name, mod._type.name)
                 end
-                return checker._generic.apply_named_owner(owner, node.typeargs, st, errors,
-                    node.loc,
-                    "type '" .. mod._type.name .. "." .. node.name .. "'")
+                return checker._generic.apply_named_owner(
+                    type_member, node.typeargs, st, errors,
+                    node.loc, subject)
             elseif type_member then
+                -- A non-GenericAlias type member is a concrete transparent
+                -- alias. It has zero constructor arity even when its Nominal
+                -- target is an applied generic owner.
                 if #(node.typeargs or {}) > 0 then
                     return invalid(errors, node.loc,
-                        "type '%s.%s' is not a generic type constructor",
+                        "type alias '%s.%s' is not a generic type constructor",
                         node.module, node.name)
+                elseif type_member._tag == "Type.Nominal"
+                   and not is_nominal_visible_from(st, type_member.fqtn) then
+                    return invalid(errors, node.loc,
+                        "nominal type '%s' is local to module '%s'",
+                        type_member.fqtn, mod._type.name)
                 end
                 if checker._ensure_c_enum_supported(
                         st, type_member, node.loc, errors, nil,
@@ -4069,6 +4039,7 @@ typefromnode = util.make_visitor({
                 end
                 return types.Invalid()
             end
+
             local fqtn = mod._type.name .. "." .. node.name
             local member = types.module_member(
                 mod._type, node.name, mod._source_import)
@@ -4291,6 +4262,7 @@ function checker._generic.reserve_generic_binders(node, scope, st, errors)
         node._generic_typeparams[index] = types.TypeParameter(name, false)
         typeparam._type = parameter
     end
+    st.generic_scope_bindings[scope] = node._generic_typeparams
 end
 
 function checker._generic.collect_local_constraint_parameters(
@@ -6873,9 +6845,13 @@ checkvar = util.make_visitor({
                     node._decl = decl
                     node._type = types.Function(decl.params, decl.rettypes, false,
                         decl.varargtype, decl.flexrettype)
+                    -- The selected namespace is authoritative even when a
+                    -- concrete alias has already closed every owner binder.
+                    -- Falling back to the registry would reopen the raw owner
+                    -- scheme and demand or accept a contradictory application.
+                    node._generic_owner = ltype
                     if decl._owner_scope or decl.scope or ltype.scope then
                         node._generic_declaration = decl
-                        node._generic_owner = ltype
                     end
                     -- Preserve the physical imported-module userdata that owns
                     -- a qualified namespace (`m.Rec.static` / `m.U.variant`).
@@ -8266,8 +8242,52 @@ function checker._generic.inference_type_arguments(context)
     return arguments
 end
 
+function checker._generic.propagate_inference_constraint_evidence(context)
+    local cell_count = 0
+    for _, entry in ipairs(context.scopes) do
+        cell_count = cell_count + #entry.cells
+    end
+    for _ = 1, math.max(1, cell_count) do
+        local before = 0
+        for _, entry in ipairs(context.scopes) do
+            for _, cell in ipairs(entry.cells) do
+                if cell.binding then before = before + 1 end
+            end
+        end
+        for _, entry in ipairs(context.scopes) do
+            for index, typeparam in ipairs(entry.typeparams) do
+                local cell = entry.cells[index]
+                local argument = cell and cell.binding
+                if argument and argument._tag == "Type.Parameter"
+                   and typeparam.constraint ~= false then
+                    local binders = context.st.generic_scope_bindings
+                        and context.st.generic_scope_bindings[argument.scope]
+                    local declared = binders and binders[argument.index]
+                    if declared and declared.constraint ~= false then
+                        local required = checker._generic.substitute_inference(
+                            context, typeparam.constraint, false)
+                        checker._generic.unify_inference(context,
+                            required, declared.constraint,
+                            "declared constraint of rigid argument '" ..
+                                tostring(argument.name or argument.index) .. "'",
+                            cell.loc or context.loc)
+                    end
+                end
+            end
+        end
+        local after = 0
+        for _, entry in ipairs(context.scopes) do
+            for _, cell in ipairs(entry.cells) do
+                if cell.binding then after = after + 1 end
+            end
+        end
+        if after == before then break end
+    end
+end
+
 function checker._generic.close_inference_context(context)
     if context.closed then return context.valid end
+    checker._generic.propagate_inference_constraint_evidence(context)
     context.closed = true
     local valid = true
 
@@ -8905,9 +8925,13 @@ function checker._generic.instantiate_static_declaration(
     local closed = declaration
     if owner_count > 0 then
         if valid then
-            checker._generic.validate_binder_arguments(owner.scope,
-                owner.typeparams, owner_arguments,
+            local owner_valid = checker._generic.validate_binder_arguments(
+                owner.scope, owner.typeparams, owner_arguments,
                 st, errors, loc, subject, false)
+            if owner_valid then
+                checker._generic.validate_owner_reconstruction(
+                    owner, owner_arguments, st, errors, loc, subject, false)
+            end
         end
         closed = checker._generic.generic_substitute(closed, owner.scope, owner_arguments,
             errors, loc, "cannot instantiate " .. subject) or closed
@@ -11763,6 +11787,17 @@ function checker._generic.validate_pending_generic_constraints(st, errors)
             application.typeparams, application.arguments,
             st, errors, application.loc, application.subject, false)
     end
+
+    local reconstructions = st.pending_generic_reconstructions or {}
+    st.pending_generic_reconstructions = {}
+    for _, application in ipairs(reconstructions) do
+        local owner = types.registry[application.fqtn]
+        if owner then
+            checker._generic.validate_owner_reconstruction(
+                owner, application.arguments, st, errors,
+                application.loc, application.subject, false)
+        end
+    end
 end
 
 local function collect_nominal_constructors(ast)
@@ -11871,6 +11906,11 @@ local function checktoplevel(ast, st, errors, loader)
     -- contextual probes see exactly the environment the C compiler will see.
     apply_source_foreign_headers(ast, st, errors)
     finalize_foreign_redeclarations(st, errors)
+    -- Structural constraints cannot be decided until every nominal method
+    -- signature has populated its canonical owner descriptor. Keep every
+    -- signature-time application deferrable across aliases, owners, top-level
+    -- functions, methods, and statics, independent of declaration order.
+    st.generic_signatures_incomplete = true
     checker._generic.reserve_generic_owner_headers(ast, st, errors)
 
     for _, node in ipairs(ast) do
@@ -11922,6 +11962,7 @@ local function checktoplevel(ast, st, errors, loader)
         end
     end
 
+    st.generic_signatures_incomplete = false
     checker._generic.validate_pending_generic_constraints(st, errors)
 
     for _, node in ipairs(ast) do
@@ -12039,10 +12080,79 @@ function checker._recover_referenced_owner(
     return owner, memo.error
 end
 
+function checker._generic.recovered_scope_binding(policy, scope)
+    for _, binding in ipairs(policy and policy.generic_scope_bindings or {}) do
+        if types.same_generic_scope(binding.scope, scope) then
+            return binding
+        end
+    end
+end
+
+function checker._generic.validate_recovered_application(
+        nominal, owner, policy)
+    local arguments = nominal.args or {}
+    for index, argument in ipairs(arguments) do
+        if not types.transient_roundtrip(argument) then
+            return nil, "recovered nominal '" .. nominal.fqtn ..
+                "' type argument " .. index ..
+                " has no sound transient round trip"
+        end
+    end
+
+    if owner.scope ~= false then
+        local reconstructed, reconstruction_error = pcall(
+            types.substitute, owner, owner.scope, arguments)
+        if not reconstructed then
+            return nil, "recovered nominal '" .. nominal.fqtn ..
+                "' is not a canonical application: " ..
+                tostring(reconstruction_error)
+        end
+    end
+    for index, typeparam in ipairs(owner.typeparams or {}) do
+        if typeparam.constraint ~= false then
+            local closed, constraint = pcall(
+                types.substitute, typeparam.constraint,
+                owner.scope, arguments)
+            if not closed then
+                return nil, "recovered nominal '" .. nominal.fqtn ..
+                    "' constraint " .. index ..
+                    " could not be reconstructed: " .. tostring(constraint)
+            end
+            if checker._generic.generic_constraint_satisfied(
+                    arguments[index], constraint, nil, policy) ~= true then
+                return nil, "recovered nominal '" .. nominal.fqtn ..
+                    "' type argument " .. index .. " ('" ..
+                    types.tostring(arguments[index]) ..
+                    "') does not satisfy constraint '" ..
+                    types.tostring(constraint) .. "'"
+            end
+        end
+    end
+    return true
+end
+
 local function register_referenced_nominals(
-        t, loader, seen, exposing_module, interface_seen, position)
+        t, loader, seen, exposing_module, interface_seen, position,
+        constraint_policy)
     if type(t) ~= "table" or not t._tag then return true end
     local tag = t._tag
+    constraint_policy = constraint_policy or {
+        visibility = exposing_module and tostring(exposing_module)
+            or "<recovered-interface>",
+        method_visible = function(method) return not method.islocal end,
+        generic_scope_bindings = {},
+    }
+    constraint_policy.generic_scope_bindings =
+        constraint_policy.generic_scope_bindings or {}
+    local function register_scope(scope, typeparams)
+        if scope ~= false and #(typeparams or {}) > 0 then
+            constraint_policy.generic_scope_bindings[
+                #constraint_policy.generic_scope_bindings + 1] = {
+                    scope = scope,
+                    typeparams = typeparams,
+                }
+        end
+    end
     local alias_key
     local context_key = "\0generic-visit:" .. tostring(t) .. ":" ..
         tostring(position or "value")
@@ -12064,7 +12174,7 @@ local function register_referenced_nominals(
     local function visit(child, child_position)
         return register_referenced_nominals(
             child, loader, seen, exposing_module, interface_seen,
-            child_position)
+            child_position, constraint_policy)
     end
     local function visit_list(list, child_position)
         for _, child in ipairs(list or {}) do
@@ -12105,6 +12215,10 @@ local function register_referenced_nominals(
             -- must reconcile before the import can be trusted.
         end
         if ok then ok, err = visit_list(t.args) end
+        if ok and owner then
+            ok, err = checker._generic.validate_recovered_application(
+                t, owner, constraint_policy)
+        end
     elseif tag == "Type.GenericAlias" then
         local owner, owner_error = checker._recover_referenced_owner(
             t.target_owner_fqtn, loader, seen,
@@ -12154,6 +12268,7 @@ local function register_referenced_nominals(
             ok, err = visit(t.constraint, "constraint")
         end
     elseif tag == "Type.FunctionScheme" then
+        register_scope(t.scope, t.typeparams)
         ok, err = visit_binders(t.typeparams)
         if ok then ok, err = visit(t.signature) end
     elseif tag == "Type.Array" then
@@ -12167,12 +12282,14 @@ local function register_referenced_nominals(
         ok, err = visit(t.type)
     elseif tag == "Type.Function" or tag == "Type.Method"
            or tag == "Type.StaticMethod" then
+        register_scope(t.scope, t.typeparams)
         ok, err = visit_binders(t.typeparams)
         if ok then ok, err = visit_list(t.params) end
         if ok then ok, err = visit_list(t.rettypes) end
         if ok and t.varargtype then ok, err = visit(t.varargtype) end
         if ok and t.flexrettype then ok, err = visit(t.flexrettype) end
     elseif tag == "Type.Record" then
+        register_scope(t.scope, t.typeparams)
         ok, err = visit_binders(t.typeparams)
         if ok then
             for _, field in ipairs(t.fields or {}) do
@@ -12199,6 +12316,7 @@ local function register_referenced_nominals(
             end
         end
     elseif tag == "Type.Union" then
+        register_scope(t.scope, t.typeparams)
         ok, err = visit_binders(t.typeparams)
         if ok then
             for _, variant in ipairs(t.variants or {}) do
@@ -12225,6 +12343,7 @@ local function register_referenced_nominals(
             end
         end
     elseif tag == "Type.Interface" then
+        register_scope(t.scope, t.typeparams)
         ok, err = visit_binders(t.typeparams)
         if ok then ok, err = visit_list(t.methods) end
     end
@@ -12460,18 +12579,31 @@ function checker.register_module_interface(
         end
     end
 
-    for _, view in ipairs(member_views) do
+    for view_index, view in ipairs(member_views) do
+        local policy = { visibility = modname }
+        if view_index == 1 then
+            policy.method_visible = function(method)
+                return not method.islocal
+            end
+        end
         for _, member in ipairs(view) do
             local registered, register_error = register_referenced_nominals(
                 member.type or member, loader, seen,
-                exposer, interface_seen)
+                exposer, interface_seen, nil, policy)
             if not registered then return nil, register_error end
         end
     end
-    for _, view in ipairs(type_views) do
+    for view_index, view in ipairs(type_views) do
+        local policy = { visibility = modname }
+        if view_index == 1 then
+            policy.method_visible = function(method)
+                return not method.islocal
+            end
+        end
         for _, member in pairs(view) do
             local registered, register_error = register_referenced_nominals(
-                member, loader, seen, exposer, interface_seen)
+                member, loader, seen, exposer, interface_seen,
+                nil, policy)
             if not registered then return nil, register_error end
         end
     end
@@ -13634,6 +13766,20 @@ function checker.check(modname, ast, subject, filename, loader, options)
         reject_exported_local_nominal_types(modname, ast, errors)
         ast._type = makemoduletype(modname, ast, st)
         local result_type = ast._type
+        if #errors == 0 then
+            -- Prove the source module's public graph through the same canonical
+            -- owner-recovery path used by importers. Public applications may
+            -- not rely on source-private methods omitted by serialization.
+            local registered, registration_error =
+                checker.register_module_interface(
+                    modname, ast._type, loader, modname, {}, true, {})
+            if not registered then
+                checker.typeerror(errors,
+                    (ast[1] and ast[1].loc) or { line = 1, column = 1 },
+                    "public module interface is not recoverable: %s",
+                    tostring(registration_error))
+            end
+        end
         if #errors == 0 then
             result_type, st._surface_registry =
                 checker._generic.lower_erased_core(

@@ -76,11 +76,12 @@ and lets the continuation yield its next call without recursive event-loop
 entry. A persistent-source dispatcher may instead consume buffered state or
 install one waiter without making a new native submission.
 
-`async.run` itself is primed by a zero-duration, non-repeating `uv_timer_t`.
-The timer callback submits `uv_close` and does not resume the new Task. Its
-`close_cb` releases the timer owner and only then resumes the Task for the first
-time. `async.yield` uses the same close-before-resume timer protocol for an
-explicit later turn. Every one-shot timer follows
+The all-value `run_internal` Task is primed by a zero-duration,
+non-repeating `uv_timer_t`; public generic `async.run` only wraps the callback
+and returns a shallow owner view. The timer callback submits `uv_close` and
+does not resume the new Task. Its `close_cb` releases the timer owner and only
+then resumes the Task for the first time. `async.yield` uses the same
+close-before-resume timer protocol for an explicit later turn. Every one-shot timer follows
 `timer_cb -> uv_close -> close_cb -> resume`.
 
 There is no ready queue, scheduler pass, operation generation, or implicit
@@ -90,7 +91,8 @@ fairness turn. Application code is the body of the current libuv callback.
 
 The Runtime sets `current_task` immediately before entering a coroutine and
 clears it with `defer` as soon as that coroutine yields, returns, or escapes.
-`async.running()` returns that field and raises when it is absent. Terminal
+`async.running()` returns that field as `Task<value, value>` and raises when
+it is absent. Terminal
 notification consequently runs on the Lua main thread after the terminating
 coroutine is no longer the running Task.
 
@@ -387,32 +389,51 @@ lengths and never depend on C-string termination.
 
 ## Task completion and errors
 
+The public owners are `Task<A, B>`, `TaskStatus<A, B>`, and
+`CancellationReason<B>`. The Runtime itself is deliberately concrete:
+`task_roots: {Task}` and `current_task: Task?` are the exact bare
+`Task<value, value>` application, as are every waiter, request owner, callback,
+and operational helper. `run_internal` accepts `() -> value` and returns that
+all-value Task. Public `async.run<A, B>` wraps its `() -> A` callback as the real
+erased callable and returns a shallow view of the same userdata; no type
+argument, witness, application descriptor, or parallel Task core enters
+Runtime state. `async.running()` truthfully returns the all-value view.
+
 A Task keeps its coroutine, its current suspension ownership, cancellation
-request/reason, terminal-listener Array, explicit-suspension state, and one
-public `TaskStatus` value. Its live variants are `ready`, `running`, and
-`waiting`. `Task:cancel` privately installs the first reason and invokes the
-current cancellation action without publishing an intermediate variant; the
-public state remains live until final `cancelled`. A dead coroutine's returned
-value becomes the `succeeded` payload. A terminal raised value and its
-catch-local traceback become `async.Error { error, traceback }`; libuv failures
-nested there retain their separate
+request/reason, terminal-registration Array, explicit-suspension state, and one
+public status value. Its live variants are `ready`, `running`, and `waiting`.
+`Task:cancel` privately installs the first reason and invokes the current
+cancellation action without publishing an intermediate variant; the public
+state remains live until final `cancelled`. A dead coroutine's raw returned
+value becomes `TaskStatus<value, value>.succeeded`. A terminal raised value and
+its catch-local traceback become `async.Error { error, traceback }`; libuv
+failures nested there retain their separate
 `async.OperationError { code, name, message, operation }` identity.
-Cancellation stores its original `async.CancellationReason` union privately
-until the terminal `cancelled` variant. Its `simple` arm contains a string and
-its `complex` arm retains an arbitrary Titan value; an omitted reason becomes
-`CancellationReason.simple("cancelled")`.
+Cancellation stores `CancellationReason<value>` privately until the terminal
+`cancelled` variant. Its `simple` arm contains a string and its `complex` arm
+retains an arbitrary Titan value; an omitted reason becomes
+`CancellationReason.simple<value>("cancelled")`. Exact `A` and `B` checks occur
+only when a typed public view projects a success or complex-cancellation
+payload.
+
+Each `add_terminal_listener` call creates a fresh local
+`TerminalRegistration<A, B> { listener, live }`, appends it, and returns a
+remover closure capturing that registration and Task. A live remover clears
+`live` and deletes that exact record from the dense Array; repeated calls are
+no-ops. Adjusted callbacks may have fresh closure identity, so neither removal
+nor duplicate registration compares listener closures.
 
 Terminal publication stores the final status before notifying observers. The
-main-thread continuation driver detaches the current listener Array into a
-local `listeners` snapshot and immediately installs an empty live Array on the
-Task. It then uses `for index = 1, #listeners` in registration order, wrapping
-each call in its own empty `catch`. Removal during delivery can mutate only the
-new live Array, so it cannot shift this stable snapshot and skip a later
-callback. A listener error therefore neither changes the Task's outcome nor
+main-thread continuation driver detaches the current registration Array into a
+stable snapshot, immediately installs an empty live Array on the Task, and
+clears every snapshot registration's `live` ownership before invoking any
+listener. It then traverses the snapshot in registration order without
+consulting `live`, wrapping each call in its own empty `catch`. A remover called
+during delivery is therefore a no-op and cannot shift this snapshot or skip a
+later callback. A listener error neither changes the Task's outcome nor
 prevents later listeners from running. Only after notification does the Runtime
-retire the Task root and decide whether shutdown should begin. Adding a
-listener to a terminal Task is a no-op; removing an absent listener is also a
-no-op.
+retire the Task root and decide whether shutdown should begin. Registering on a
+terminal Task returns an idempotent no-op remover.
 
 An uncaught Task error is not a Runtime fatal condition. The continuation marks
 only that Task failed, renders the error, writes it and the preserved traceback
@@ -421,10 +442,11 @@ last Task finishes—successfully, by cancellation, or by uncaught error—the
 Runtime starts ordinary cleanup.
 
 The high-level `async` combinators use that listener protocol directly. Each
-fixed arity first obtains the current Task, rejects it as any operand, and scans
-the named operands from left to right. It never erases them into a common
-`{Task}` Array, so the public arities can later acquire heterogeneous
-polymorphic Task result and cancellation types without being rewritten.
+fixed arity is generic over an independent `(A_i,B_i)` pair for every named
+operand. It first obtains the bare all-value current Task, rejects it as any
+operand, and scans the named operands from left to right. It never collects them
+into a common `{Task}` Array, which would collapse every position to the
+all-value application and discard the public result/status precision.
 
 If the initial statuses do not decide the result, the implementation creates a
 separate closure for each still-relevant named operand. Those listeners capture
@@ -432,10 +454,10 @@ the result slots, terminal counter, or winner position required by that family.
 The listener that makes the result decidable calls `resume()` on the suspended
 current Task; resume only installs its coalesced zero-timer wake and returns to
 the terminal publisher. The combinator calls `suspend()` once, then returns or
-raises from the captured state after that wake. Every registration has a
-matching deferred removal. If another Task cancels the suspended combinator,
-the cancellation wake resumes it through the same timer protocol and its
-defers remove all outstanding listeners before it unwinds.
+raises from the captured state after that wake. Every registration returns an
+idempotent remover that is called by a matching `defer`. If another Task
+cancels the suspended combinator, the cancellation wake resumes it through
+the same timer protocol and those defers remove all outstanding registrations before it unwinds.
 
 Because the loop is non-reentrant, no other Task can terminalize between the
 initial scan, the listener registrations, and suspension. Already-terminal

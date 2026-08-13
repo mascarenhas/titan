@@ -589,7 +589,7 @@ describe("libuv Makefile configuration", function()
             "TaskStatus:has_finished", "TaskStatus:has_succeeded",
             "TaskStatus:has_failed", "TaskStatus:has_cancelled", "Task",
             "Task:status", "Task:add_terminal_listener",
-            "Task:remove_terminal_listener", "Task:cancel", "Task:resume",
+            "Task:cancel", "Task:resume",
         }, public_declarations("titan/uv/task.titan"))
         for _, contributor in ipairs({
             "file", "os", "process", "runtime", "tcp",
@@ -597,6 +597,57 @@ describe("libuv Makefile configuration", function()
             assert.same({}, public_declarations(
                 "titan/uv/" .. contributor .. ".titan"))
         end
+    end)
+
+    it("keeps generic Tasks over an all-value uv Runtime", function()
+        local task = read_file("titan/uv/task.titan")
+        for _, contract in ipairs({
+            "union CancellationReason<B>",
+            "union TaskStatus<A, B>",
+            "record Task<A, B>",
+            "local record TerminalRegistration<A, B>",
+            "listener: (TaskStatus<A, B>) -> ()): () -> ()",
+            "local function run_internal(func: () -> value): " ..
+                "Task<value, value>",
+            "Task.new<value, value>(",
+        }) do
+            assert.truthy(task:find(contract, 1, true), contract)
+        end
+        assert.falsy(task:find("remove_terminal_listener", 1, true), task)
+
+        local async = read_file("titan/async.titan")
+        for _, contract in ipairs({
+            "function run<A, B>(func: () -> A): Task<A, B>",
+            "function running(): Task",
+            "union AnyTwoResult<A1, A2>",
+            "union AnyFiveResult<A1, A2, A3, A4, A5>",
+            "union RaceTwoResult<A1, B1, A2, B2>",
+            "union RaceFiveResult<A1, B1, A2, B2, A3, B3, " ..
+                "A4, B4, A5, B5>",
+            "union AllTwoError<A1, B1, A2, B2>",
+            "union AllFiveError<A1, B1, A2, B2, A3, B3, " ..
+                "A4, B4, A5, B5>",
+            "function any_two<A1, B1, A2, B2>(",
+            "function any_five<A1, B1, A2, B2, A3, B3, " ..
+                "A4, B4, A5, B5>(",
+            "function race_two<A1, B1, A2, B2>(",
+            "function race_five<A1, B1, A2, B2, A3, B3, " ..
+                "A4, B4, A5, B5>(",
+            "function all_two<A1, B1, A2, B2>(",
+            "function all_five<A1, B1, A2, B2, A3, B3, " ..
+                "A4, B4, A5, B5>(",
+            "function join<A, B>(task: Task<A, B>): TaskStatus<A, B>",
+            "function join_five<A1, B1, A2, B2, A3, B3, " ..
+                "A4, B4, A5, B5>(",
+        }) do
+            assert.truthy(async:find(contract, 1, true), contract)
+        end
+
+        local http = read_file("titan/http/server.titan")
+        assert.truthy(http:find(
+            "async.run<Request?, value>(", 1, true), http)
+        assert.truthy(http:find(
+            "async.run<nil, value>(", 1, true), http)
     end)
 
     it("keeps the reviewed HTTP source list equal to the folder ensemble",
@@ -2411,7 +2462,7 @@ exit 73
                 'local gc = import "titan.gc"',
                 'local testing = import "test"',
                 'not testing.testing() and not testing.verbose()',
-                "local peer = async.run(",
+                "local peer = async.run<value, value>(",
                 "timer.sleep(0)",
                 "fs.write_file(marker,",
                 "local metadata = fs.stat(marker)",

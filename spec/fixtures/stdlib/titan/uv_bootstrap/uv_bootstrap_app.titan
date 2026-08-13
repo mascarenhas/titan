@@ -30,8 +30,8 @@ function main(args: {string}): integer
     return 0
   elseif mode == "isolated" then
     local marker = args[2]
-    async.run(unhandled_origin)
-    async.run(function (): value
+    async.run<value, value>(unhandled_origin)
+    async.run<value, value>(function (): value
       timer.sleep(10)
       fs.write_file(marker, "healthy-sibling-finished")
       return nil
@@ -39,7 +39,7 @@ function main(args: {string}): integer
     return 0
   elseif mode == "main-failure" then
     local marker = args[2]
-    async.run(function (): value
+    async.run<value, value>(function (): value
       timer.sleep(10)
       fs.write_file(marker, "healthy-child-after-main-failure")
       return nil

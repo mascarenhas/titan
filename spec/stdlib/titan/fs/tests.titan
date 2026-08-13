@@ -271,12 +271,12 @@ function test_fs_independent_continuations(context: test.Context)
     support.cleanup_path(context, first_path)
     support.cleanup_path(context, second_path)
 
-    local first = async.run(function (): value
+    local first = async.run<value, value>(function (): value
       fs.write_file(first_path, "first")
       return nil
     end)
     task_support.cleanup_task(first, "first filesystem Task cleanup")
-    local second = async.run(function (): value
+    local second = async.run<value, value>(function (): value
       fs.write_file(second_path, "second")
       return nil
     end)

@@ -129,7 +129,7 @@ function test_stream_facade_close_wakes_pending_reader(
     local output = process_support.required_input(process.stdout, "pending stdout")
     local diagnostics = process_support.required_input(process.stderr, "pending stderr")
     local read_result = "not-resumed"
-    local reader = async.run(function (): value
+    local reader = async.run<value, value>(function (): value
       local chunk? = output:read()
       if chunk then
         read_result = chunk as string

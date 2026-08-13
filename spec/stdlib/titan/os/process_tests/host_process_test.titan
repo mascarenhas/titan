@@ -141,20 +141,20 @@ function test_process_cancellation_waits_for_accepted_callbacks(
     test.assert(output:read_until("\n", true) == "READY",
                 "detached-wait child did not become ready")
 
-    local waiter = async.run(function (): value
+    local waiter = async.run<value, value>(function (): value
       process:wait()
       return nil
     end)
     task_support.cleanup_task(waiter, "detached process waiter cleanup")
-    local reader = async.run(function (): value
+    local reader = async.run<value, value>(function (): value
       output:read()
       return nil
     end)
     task_support.cleanup_task(reader, "detached process reader cleanup")
     process_support.wait_until_waiting(waiter, "process waiter")
     process_support.wait_until_waiting(reader, "process reader")
-    waiter:cancel(async.CancellationReason.simple("detach process waiter"))
-    reader:cancel(async.CancellationReason.simple("detach process reader"))
+    waiter:cancel(async.CancellationReason.simple<value>("detach process waiter"))
+    reader:cancel(async.CancellationReason.simple<value>("detach process reader"))
     test.assert(waiter:status():as_string() == "waiting" and
                 reader:status():as_string() == "waiting",
                 "process waiters left accepted operations before callbacks")

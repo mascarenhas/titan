@@ -214,7 +214,7 @@ function fetch_head(): value
 end
 
 function main(args: {string}): integer
-  async.run(fetch_head)
+  async.run<value, value>(fetch_head)
   return 0
 end
 ```

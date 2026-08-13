@@ -318,8 +318,85 @@ function test_race_combinators_all_arities_ties_and_statuses(context: test.Conte
                                       pending)) == "1:failed",
           "race did not return failure")
 
-    pending:cancel(async.CancellationReason.simple("race cleanup"))
+    pending:cancel(async.CancellationReason.simple<value>("race cleanup"))
     async.join(pending)
     context:log("END expected uncaught async Task diagnostics")
+  end)
+end
+
+function test_generic_any_and_race_operand_positions(context: test.Context)
+  runtime_test.run(function ()
+    local number = async.run<integer, string>(function (): integer
+      return 41
+    end)
+    task_support.cleanup_task(number, "generic any/race number cleanup")
+    local text = async.run<string, integer>(function (): string
+      return "typed"
+    end)
+    task_support.cleanup_task(text, "generic any/race text cleanup")
+    local flag = async.run<boolean, {string: integer}>(function (): boolean
+      return true
+    end)
+    task_support.cleanup_task(flag, "generic any/race flag cleanup")
+    local nothing = async.run<nil, boolean>(function (): nil
+      return nil
+    end)
+    task_support.cleanup_task(nothing, "generic any/race nil cleanup")
+    local decimal = async.run<float, string>(function (): float
+      return 2.5
+    end)
+    task_support.cleanup_task(decimal, "generic any/race float cleanup")
+
+    async.join_five(number, text, flag, nothing, decimal)
+
+    case async.any_two(number, text)
+    when first: payload then
+      test.assert(payload + 1 == 42, "generic any_two lost first result type")
+    else raise "generic any_two selected the wrong operand"
+    end
+    case async.any_three(text, number, flag)
+    when first: payload then
+      test.assert(payload == "typed", "generic any_three lost first result type")
+    else raise "generic any_three selected the wrong operand"
+    end
+    case async.any_four(flag, number, text, nothing)
+    when first: payload then
+      test.assert(payload, "generic any_four lost first result type")
+    else raise "generic any_four selected the wrong operand"
+    end
+    case async.any_five(decimal, number, text, flag, nothing)
+    when first: payload then
+      test.assert(payload == 2.5, "generic any_five lost first result type")
+    else raise "generic any_five selected the wrong operand"
+    end
+
+    case async.race_two(text, number)
+    when first: status then
+      local succeeded, payload? = status:has_succeeded()
+      test.assert(succeeded and (payload as string) == "typed",
+            "generic race_two lost first status type")
+    else raise "generic race_two selected the wrong operand"
+    end
+    case async.race_three(flag, text, number)
+    when first: status then
+      local succeeded, payload? = status:has_succeeded()
+      test.assert(succeeded and (payload as boolean),
+            "generic race_three lost first status type")
+    else raise "generic race_three selected the wrong operand"
+    end
+    case async.race_four(nothing, flag, text, number)
+    when first: status then
+      local succeeded, payload? = status:has_succeeded()
+      test.assert(succeeded and payload == nil,
+            "generic race_four lost first status type")
+    else raise "generic race_four selected the wrong operand"
+    end
+    case async.race_five(decimal, nothing, flag, text, number)
+    when first: status then
+      local succeeded, payload? = status:has_succeeded()
+      test.assert(succeeded and (payload as float) == 2.5,
+            "generic race_five lost first status type")
+    else raise "generic race_five selected the wrong operand"
+    end
   end)
 end

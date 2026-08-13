@@ -22,14 +22,14 @@ local function cancelled_with(status: async.TaskStatus,
 end
 
 local function successful(result: value): async.Task
-  return async.run(function (): value
+  return async.run<value, value>(function (): value
     return result
   end)
 end
 
 local function sleeping(milliseconds: integer,
                         result: value): async.Task
-  return async.run(function (): value
+  return async.run<value, value>(function (): value
     timer.sleep(milliseconds)
     return result
   end)
@@ -37,12 +37,12 @@ end
 
 local function cancelled(reason: string): async.Task
   local task = sleeping(60000, "unexpected cancellation return")
-  task:cancel(async.CancellationReason.simple(reason))
+  task:cancel(async.CancellationReason.simple<value>(reason))
   return task
 end
 
 local function failing(reason: value): async.Task
-  return async.run(function (): value
+  return async.run<value, value>(function (): value
     timer.yield()
     raise reason
     return nil
