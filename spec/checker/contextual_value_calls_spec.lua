@@ -328,6 +328,70 @@ describe("contextual calls through value (typechecker)", function()
         end
     end)
 
+    it("carries dependent scalar and open-run demands through derived uses",
+    function()
+        local ok, err, tree = run_checker([[
+            function agree<T>(left: T, right: T): T return left end
+            function take<T>(items: {T}, witness: T): T return witness end
+            function pick<T>(left: T?, right: T): T return right end
+            function make_map<T>(): {T: T} return {} end
+            function spread<T>(): (...: T)
+                return (42 as value) as T
+            end
+
+            function parenthesized(callback: value): integer
+                return take({(callback())}, 42)
+            end
+            function key(callback: value): string
+                return pick(make_map()[callback()], "item")
+            end
+            function open_input(callback: value): integer
+                return agree(callback(spread()), 42)
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local function peel(exp)
+            while exp._tag == "Ast.ExpCast" do exp = exp.exp end
+            return exp
+        end
+        local parent = peel(find_function(tree, "parenthesized")
+            .block.stats[1].exps[1])
+        local array = peel(parent.args.args[1])
+        local paren = array._positional_adjustment.tail_scalars[1]
+        assert.equal("Ast.ExpAdjust", paren._tag)
+        assert.same(types.Function({}, { types.Integer() },
+            false, false, false), paren.exp._callee_type)
+
+        local keyed = peel(find_function(tree, "key")
+            .block.stats[1].exps[1])
+        local index = peel(keyed.args.args[1])
+        local key_call = index.var.exp2
+        assert.same(types.Function({}, { types.String() },
+            false, false, false), key_call._callee_type)
+
+        local open = peel(find_function(tree, "open_input")
+            .block.stats[1].exps[1])
+        local callback = peel(open.args.args[1])
+        assert.same(types.Function({}, { types.Integer() },
+            false, types.Value(), false), callback._callee_type)
+        assert.is_true(callback._open_args.source ==
+            callback._arg_adjustment.open_source)
+        assert.same(types.Value(), callback._open_args.source_type)
+        assert.same(types.Value(), callback._open_args.target_type)
+        assert.same(types.Value(), callback._arg_adjustment.open_type)
+        assert.same(types.Value(), callback._arg_adjustment.open_target)
+        assert.equal(callback._arg_adjustment.open_start,
+            callback._open_args.start)
+        assert.is_true(callback._open_args.adjustment ==
+            callback._arg_adjustment.open_adjustment)
+        assert.equal("identity", callback._open_args.adjustment.kind)
+        assert.same(types.Value(),
+            callback._open_args.source._open_results.source_type)
+        assert.same(types.Value(),
+            callback._open_args.source._open_results.target_type)
+    end)
+
     it("checks a dependent contextual value call exactly once", function()
         local errs = h.check_errs([[
             function agree<T>(left: T, right: T): T return left end

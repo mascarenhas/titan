@@ -1618,6 +1618,128 @@ describe("generic declarations and explicit calls", function()
         end
     end)
 
+    it("closes direct computed calls and option-backed record owners",
+    function()
+        local ast = assert_check([[
+            record FnBox<T>
+                callback: () -> T
+            end
+            record Box<T>
+                item: T
+            end
+            function Box:get(): T return self.item end
+            record Holder<T>
+                box: Box<T>
+            end
+            record Plain
+                item: integer
+            end
+
+            function make<T>(): FnBox<T>
+                return FnBox<T>.new(function(): T
+                    return (42 as value) as T
+                end)
+            end
+            function make_callbacks<T>(): {() -> T}
+                return {function(): T return (42 as value) as T end}
+            end
+            function make_boxes<T>(): {Box<T>}
+                return {Box<T>.new((42 as value) as T)}
+            end
+            function make_holder<T>(): Holder<T>
+                return Holder<T>.new(Box<T>.new((42 as value) as T))
+            end
+            function maybe(): Plain? return Plain.new(42) end
+            function agree<T>(left: T, right: T): T return left end
+
+            function direct_field(): integer
+                return agree(make().callback(), 42)
+            end
+            function direct_bracket(): integer
+                return agree(make_callbacks()[1](), 42)
+            end
+            function direct_method_receiver(): integer
+                return agree(make_holder().box:get(), 42)
+            end
+            function direct_bracket_method(): integer
+                return agree(make_boxes()[1]:get(), 42)
+            end
+            function option_record()
+                local got = agree({item = 42}, maybe())
+            end
+        ]])
+
+        local function peel(exp)
+            while exp._tag == "Ast.ExpCast" do exp = exp.exp end
+            return exp
+        end
+        for _, name in ipairs({ "direct_field", "direct_bracket" }) do
+            local outer = peel(toplevel(ast, "Ast.TopLevelFunc", name)
+                .block.stats[1].exps[1])
+            local inner = peel(outer.args.args[1])
+            assert.equal("Ast.ExpCall", inner._tag)
+            assert.same(types.Integer(), inner._type)
+            assert.same(types.Function({}, { types.Integer() },
+                false, false, false), inner._callee_type)
+        end
+
+        local seen = {}
+        local function find_constructor(value)
+            if type(value) ~= "table" or seen[value] then return nil end
+            seen[value] = true
+            if value._tag == "Ast.ExpInitList" then return value end
+            for key, child in pairs(value) do
+                if key ~= "_decl" and key ~= "_declared_type"
+                   and key ~= "_generic_scheme"
+                   and key ~= "_generic_declaration"
+                   and key ~= "_generic_owner" then
+                    local found = find_constructor(child)
+                    if found then return found end
+                end
+            end
+        end
+        local constructor = assert(find_constructor(
+            toplevel(ast, "Ast.TopLevelFunc", "option_record").block))
+        assert_nominal(constructor._type, "test.Plain", {})
+
+        for _, name in ipairs({
+            "direct_field", "direct_bracket", "direct_method_receiver",
+            "direct_bracket_method", "option_record",
+        }) do
+            assert_runtime_ast_erased(
+                toplevel(ast, "Ast.TopLevelFunc", name).block)
+        end
+    end)
+
+    it("recovers an unknown deferred record field once with a closed AST",
+    function()
+        local ok, err, ast = run_checker([[
+            record Plain
+                item: integer
+            end
+            function agree<T>(left: T, right: T): T return left end
+            function bad()
+                local got = agree({wrong = 42}, Plain.new(42))
+            end
+        ]])
+        assert.falsy(ok)
+        local _, diagnostics = err:gsub("type error:", "")
+        assert.equal(1, diagnostics)
+        assert.match("field 'wrong' not found in record type 'test.Plain'", err)
+        local bad = toplevel(ast, "Ast.TopLevelFunc", "bad")
+        local outer = bad.block.stats[1]._result_adjustment.fixed[1]
+        while outer._tag == "Ast.ExpCast" do outer = outer.exp end
+        local constructor = outer.args.args[1]
+        while constructor._tag == "Ast.ExpCast" do
+            constructor = constructor.exp
+        end
+        assert.equal("Ast.ExpInitList", constructor._tag)
+        assert_nominal(constructor._type, "test.Plain", {})
+        assert.is_nil(constructor._generic_inference_context)
+        assert.is_nil(constructor._generic_inference_use)
+        assert.is_nil(constructor._generic_inference_operation_use)
+    end)
+
     it("rejects recursive cross-use inference equations without expansion",
     function()
         local diagnostic = "cannot infer a recursive type for type parameter "

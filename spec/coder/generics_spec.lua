@@ -452,6 +452,91 @@ describe("generic erased core", function()
         ]])
     end)
 
+    it("runs direct computed calls and option-backed records once in order",
+    function()
+        h.run_coder([[
+            record FnBox<T>
+                callback: () -> T
+            end
+            record Box<T>
+                item: T
+                callback_step: integer
+            end
+            function Box:get(): T
+                mark(self.callback_step)
+                return self.item
+            end
+            record Holder<T>
+                box: Box<T>
+            end
+            record Plain
+                item: integer
+            end
+
+            local steps: integer = 0
+            local order_okay: boolean = true
+            local function reset_trace()
+                steps = 0
+                order_okay = true
+            end
+            local function mark(expected: integer): integer
+                steps = steps + 1
+                if steps ~= expected then order_okay = false end
+                return 42
+            end
+            function count(): integer return steps end
+            function ordered(): boolean return order_okay end
+
+            function make<T>(expected: integer): FnBox<T>
+                mark(expected)
+                return FnBox<T>.new(function(): T
+                    return (mark(expected + 1) as value) as T
+                end)
+            end
+            function make_callbacks<T>(expected: integer): {() -> T}
+                mark(expected)
+                return {function(): T
+                    return (mark(expected + 1) as value) as T
+                end}
+            end
+            function make_boxes<T>(expected: integer): {Box<T>}
+                mark(expected)
+                return {Box<T>.new((42 as value) as T, expected + 1)}
+            end
+            function make_holder<T>(expected: integer): Holder<T>
+                mark(expected)
+                return Holder<T>.new(Box<T>.new(
+                    (42 as value) as T, expected + 1))
+            end
+            function maybe(expected: integer): Plain?
+                return Plain.new(mark(expected))
+            end
+            function agree<T>(left: T, right: T): T return left end
+
+            function computed_calls(): integer
+                reset_trace()
+                local field = agree(make(1).callback(), mark(3))
+                local bracket = agree(make_callbacks(4)[1](), mark(6))
+                local method = agree(make_holder(7).box:get(), mark(9))
+                local bracket_method = agree(
+                    make_boxes(10)[1]:get(), mark(12))
+                return field + bracket + method + bracket_method
+            end
+            function option_record(): integer
+                reset_trace()
+                local got = agree({item = mark(1)}, maybe(2))
+                return got.item
+            end
+        ]], [[
+            assert(test.computed_calls() == 168)
+            assert(test.count() == 12)
+            assert(test.ordered())
+            assert(test.option_record() == 42)
+            assert(test.count() == 2)
+            assert(test.ordered())
+        ]])
+    end)
+
     it("runs nested fixed and open generic result projections", function()
         h.run_coder([[
             function make<T>(): T return (42 as value) as T end

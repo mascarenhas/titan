@@ -322,31 +322,44 @@ zero-binder operation use before descending. This shared derived-operation
 protocol covers ordinary computed calls/methods, direct contextual calls through
 `value`, parentheses, record fields, Array/Map indexing, bound methods,
 finite/open result projections, and Array, Map, or context-only record
-constructors. A dependent callable signature gathers argument and result
-evidence, while structural projections and constructor components retain
-explicit equations without freezing adjustments against open cells.
+constructors. Syntax-directed direct-call and foreign-call paths that inspect an
+`ExpVar` through its `VarDot`/`VarBracket` child still install that `ExpVar` as
+the operation owner; an auto-forced computed callee or method receiver rebuilds
+only its checker-synthesized Option cast after the child closes. A dependent
+callable signature gathers argument and result evidence, while structural
+projections and constructor components retain explicit equations without
+freezing adjustments against open cells.
 
-Generic discovery keeps an unresolved result pattern nonsemantic for ordinary
-expressions but gives it provisionally to a contextual `value` call. That call
-checks its callee and discovers its input run once; its operation later closes
-the synthesized function type, argument edges, callee cast, fixed results, and
-flexible result tail without redispatching the written subtree.
+Generic discovery keeps an unresolved scalar pattern nonsemantic for ordinary
+expressions but gives it provisionally to a contextual `value` call. The side
+channel follows the scalar's actual consumer position: a parenthesized call in
+an open constructor maps the tail pattern to its one fixed child result, and a
+dependent `VarBracket` carries its unresolved Map-key pattern to a contextual
+key call. That call checks its callee and discovers its input run once; its
+operation later closes the synthesized function type, argument edges, callee
+cast, fixed results, and flexible result tail without redispatching the written
+subtree.
 
 A context-only record constructor whose expected type is still a direct
 inference cell cannot resolve its field descriptors immediately. It checks each
 written field expression exactly once in lexical order, registers its nested
 uses, and queues a one-shot discovery callback. Before carrier defaults, the
 owner repeatedly runs discovery and constraint propagation to a bounded fixed
-point. Once sibling evidence identifies the record owner, discovery maps the
-already checked expressions to the closed field patterns and contributes their
-equations. It never redispatches a field expression.
+point. Once sibling evidence identifies the record owner, discovery and finish
+both look through the same one outer Option, map the already checked expressions
+to the closed field patterns, and contribute their equations. An invalid field
+mapping reports once and leaves the constructor on its closed nominal recovery
+(or `Invalid` when no owner closed), never on the fresh Parameter. It never
+redispatches a field expression.
 
 After child uses close, reusable postorder annotation finalizers smart-substitute
 or rebuild the operation's `_type`, field/index guard, method/Interface,
-parenthesized, result-projection, writer, and adjustment annotations. Named
-computed-function calls remain unavailable by the ordinary direct-declaration
-rule; a contextual `value` call inside a direct generic named argument and named
-methods use their surrounding operation plans.
+parenthesized, result-projection, writer, and adjustment annotations. Closing an
+adjusted argument run also refreshes every field of the call's copied
+`_open_args` descriptor after its producer, source/target types, and plan close.
+Named computed-function calls remain unavailable by the ordinary
+direct-declaration rule; a contextual `value` call inside a direct generic named
+argument and named methods use their surrounding operation plans.
 A generic use creates and owns a context only when there is no ambient owner. A
 complete explicit type-argument list remains closed locally and contributes its
 resulting ordinary type as evidence.

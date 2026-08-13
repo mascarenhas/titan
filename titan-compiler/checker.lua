@@ -431,6 +431,21 @@ local checkexp
 local checkvar
 local checkfuncbody
 checker._generic = {}
+
+-- Some syntax-directed consumers inspect an ExpVar through its Var child so
+-- they can preserve direct-call/foreign-call behavior.  A dependent VarDot or
+-- VarBracket must still register the surrounding expression as its one AST
+-- operation owner; otherwise its postorder finalizer refreshes only the Var and
+-- leaves the delivered ExpVar carrying provisional inference parameters.
+function checker._generic.checkvar_for_expression(
+        exp, st, errors, context, mode)
+    assert(exp and exp._tag == "Ast.ExpVar")
+    local prior_owner = st.generic_inference_expression_owner
+    st.generic_inference_expression_owner = exp
+    local result = table.pack(checkvar(exp.var, st, errors, context, mode))
+    st.generic_inference_expression_owner = prior_owner
+    return table.unpack(result, 1, result.n)
+end
 local annotate_call_results
 local check_generic_result_limit
 
@@ -5494,7 +5509,7 @@ function checker._generic.constructor_result_demand(
     })
 end
 
-function checker._generic.constructor_scalar_demand(
+function checker._generic.dependent_scalar_demand(
         operation, pattern, expected, term, loc)
     -- Preserve the ordinary default demand (and its diagnostics) whenever a
     -- real expected type exists. This side channel exists only for an
@@ -5723,14 +5738,14 @@ local function check_computed_map_constructor(
         local key_expected = checker._generic.constructor_context_for_expression(
             operation, kcontext, field.name)
         checkexp(field.name, st, errors, key_expected,
-            checker._generic.constructor_scalar_demand(
+            checker._generic.dependent_scalar_demand(
                 operation, kcontext, key_expected,
                 "map key initializer", field.name.loc))
         table.insert(ktypes, field.name._type)
         local value_expected = checker._generic.constructor_context_for_expression(
             operation, vcontext, field.exp)
         checkexp(field.exp, st, errors, value_expected,
-            checker._generic.constructor_scalar_demand(
+            checker._generic.dependent_scalar_demand(
                 operation, vcontext, value_expected,
                 "map value initializer", field.exp.loc))
         table.insert(vtypes, field.exp._type)
@@ -5817,8 +5832,13 @@ end
 
 function checker._generic.finish_named_record_constructor(
         node, st, errors, context, written_fields, operation)
-    local closed_context = checker._generic.substitute_constructor_type(
-        operation, context, true)
+    -- Discovery resolves a context-only record owner through the same single
+    -- outer Option projection accepted by ordinary result/constructor evidence.
+    -- Finish against that nominal base; the enclosing argument sink owns any
+    -- eventual Plain -> Plain? adjustment.
+    local closed_context = deoptionize(
+        checker._generic.substitute_constructor_type(
+            operation, context, true))
     local record = checker._generic.applied_owner_view(
         closed_context, errors, node.loc)
     local visible_fields = visible_record_fields(record, st)
@@ -5952,6 +5972,15 @@ function checker._generic.check_named_record_constructor(
             if plan.valid then
                 checker._generic.finish_named_record_constructor(
                     node, st, errors, context, written_fields, operation)
+            else
+                -- The owner/field diagnostic above is authoritative.  When the
+                -- owner itself closed successfully, retain that closed nominal
+                -- as recovery so the parent sink does not add a redundant type
+                -- mismatch; otherwise use Invalid.  Never leave the original
+                -- fresh Parameter on the runtime-facing constructor node.
+                node._type = candidate
+                    and candidate._tag == "Type.Nominal"
+                    and candidate or types.Invalid()
             end
         end)
         return
@@ -5986,7 +6015,7 @@ function checker._generic.check_named_record_constructor(
             local expected = checker._generic.constructor_context_for_expression(
                 operation, found.type, cfield.exp)
             checkexp(cfield.exp, st, errors, expected,
-                checker._generic.constructor_scalar_demand(
+                checker._generic.dependent_scalar_demand(
                     operation, found.type, expected,
                     "field " .. cfield.name, cfield.loc))
             cfield._field = found
@@ -6261,7 +6290,7 @@ end
 
 local function check_forin_callable_exp(exp, st, errors, context, demand)
     if exp._tag == "Ast.ExpVar" and exp.var._tag == "Ast.VarDot" then
-        checkvar(exp.var, st, errors)
+        checker._generic.checkvar_for_expression(exp, st, errors)
         if exp.var._decl then exp.var._decl._used = true end
         local ftype = exp.var._type
         local cfunc = c_resolve(ftype)
@@ -7346,7 +7375,7 @@ checkvar = util.make_visitor({
         local written_exp = node.exp
         local nominal_field_projection = false
         if node.exp._tag == "Ast.ExpVar" then
-            checkvar(node.exp.var, st, errors)
+            checker._generic.checkvar_for_expression(node.exp, st, errors)
             if node.exp.var._decl then node.exp.var._decl._used = true end
             node.exp._type = node.exp.var._type
         else
@@ -7685,7 +7714,10 @@ checkvar = util.make_visitor({
 
             local expected = checker._generic.closed_inference_pattern(
                 operation.context, keystype)
-            checkexp(written_exp2, st, errors, expected)
+            checkexp(written_exp2, st, errors, expected,
+                checker._generic.dependent_scalar_demand(
+                    operation, keystype, expected,
+                    term .. " key", written_exp2.loc))
             node.exp2 = written_exp2
             checker._generic.unify_inference(operation.context,
                 keystype, written_exp2._type, term .. " key", node.loc)
@@ -9071,6 +9103,25 @@ function checker._generic.defer_inference_derived_annotations(
     return true
 end
 
+-- Auto-forcing a dependent computed callee/receiver creates a checker-owned
+-- ExpCast whose target is copied from the still-open child.  Rebuild only that
+-- wrapper after the child's operation closes; the written expression remains
+-- checked once and retains its AST identity.
+function checker._generic.defer_inference_force(
+        operation, node, written, expected_base_tag)
+    if not operation or node.exp == written then return false end
+    checker._generic.add_inference_finalizer(operation, function()
+        node.exp = written
+        local typ = written._type
+        if typ and typ._tag == "Type.Option"
+           and typ.base._tag == expected_base_tag then
+            node.exp = tryforce(written)
+        end
+    end)
+    operation.dependent_derived = true
+    return true
+end
+
 function checker._generic.finalize_inference_use(use)
     -- Postorder gives every parent closed child annotations before it freezes
     -- its own argument adjustments. Siblings remain in lexical registration
@@ -10090,8 +10141,8 @@ function checker._generic.finish_generic_open_arguments(adjusted, target, st, er
     end
 end
 
-function checker._generic.close_generic_adjusted_arguments(adjusted, args, signature,
-                                                st, errors, term)
+function checker._generic.close_generic_adjusted_arguments(
+        node, adjusted, args, signature, st, errors, term)
     checker._generic.refresh_finalized_argument_projections(adjusted)
     for index, exp in pairs(adjusted.fixed) do
         local target = signature.params[index]
@@ -10117,6 +10168,12 @@ function checker._generic.close_generic_adjusted_arguments(adjusted, args, signa
     end
     for index = #args, 1, -1 do args[index] = nil end
     for _, exp in ipairs(adjusted.exps) do args[#args + 1] = exp end
+
+    -- annotate_call_arguments copies the adjusted open-run descriptor for the
+    -- coder.  An inherited operation may already have made that copy before
+    -- its postorder close substituted a dependent producer/target/plan, so
+    -- refresh every copied field from the now-final adjusted record.
+    annotate_call_arguments(node, adjusted)
 end
 
 function checker._generic.is_generic_first_class_expression(
@@ -10129,7 +10186,7 @@ function checker._generic.is_generic_first_class_expression(
             return false
         end
     end
-    checkvar(exp.var, st, errors)
+    checker._generic.checkvar_for_expression(exp, st, errors)
     if exp.var._decl then exp.var._decl._used = true end
     exp._type = exp.var._type
     local generic = exp._type._tag == "Type.FunctionScheme"
@@ -10427,7 +10484,7 @@ function checker._generic.infer_call_application(context, use, signature, node,
             checker._generic.close_deferred_generic_arguments(
                 context, deferred, st, errors)
             checker._generic.close_generic_adjusted_arguments(
-                adjusted, node.args.args, closed, st, errors, term)
+                node, adjusted, node.args.args, closed, st, errors, term)
         end
     end)
 
@@ -10488,7 +10545,7 @@ function checker._generic.infer_dependent_value_call_application(
             operation.context, signature, true)
         operation.closed = closed
         checker._generic.close_generic_adjusted_arguments(
-            adjusted, node.args.args, closed, st, errors, term)
+            node, adjusted, node.args.args, closed, st, errors, term)
         finalize(closed)
     end)
     return signature, true
@@ -11126,12 +11183,9 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpVar"] = function(node, st, errors, context)
-        local prior_owner = st.generic_inference_expression_owner
-        st.generic_inference_expression_owner = node
         if not node._generic_var_prechecked then
-            checkvar(node.var, st, errors, context)
+            checker._generic.checkvar_for_expression(node, st, errors, context)
         end
-        st.generic_inference_expression_owner = prior_owner
         if node.var._decl then node.var._decl._used = true end
         local texp = node.var._type
         if node.var._generic_owner_explicit then
@@ -11531,9 +11585,11 @@ checkexp = util.make_visitor({
         return checker._generic.with_inference_operation(node, st,
         function(inference_operation)
         demand = demand or default_call_result_demand(node, context)
+        local written_exp = node.exp
         if node.exp._tag == "Ast.ExpVar" then
             local var = node.exp.var
-            checkvar(var, st, errors, c_pseudo_callee_context)
+            checker._generic.checkvar_for_expression(
+                node.exp, st, errors, c_pseudo_callee_context)
             if var._decl then var._decl._used = true end
             node.exp._type = var._type
         else
@@ -11716,7 +11772,7 @@ checkexp = util.make_visitor({
                         end)
                 if not dependent_call then
                     checker._generic.close_generic_adjusted_arguments(
-                        contextual_args, node.args.args, synthesized,
+                        node, contextual_args, node.args.args, synthesized,
                         st, errors, "function '" .. fname .. "'")
                     checker._generic.finalize_contextual_value_callee(
                         node, original, synthesized, errors)
@@ -11730,6 +11786,8 @@ checkexp = util.make_visitor({
             if ftype._tag == "Type.Option" and ftype.base._tag == "Type.Function" then
                 node.exp = tryforce(node.exp)
                 ftype = ftype.base
+                checker._generic.defer_inference_force(
+                    inference_operation, node, written_exp, "Type.Function")
             end
             if ftype._tag ~= "Type.Function" then
                 node._type = invalid(errors, node.loc,
@@ -11819,6 +11877,8 @@ checkexp = util.make_visitor({
             if otype._tag == "Type.Option" and otype.base._tag == "Type.Nominal" then
                 node.exp = tryforce(node.exp)
                 otype = otype.base
+                checker._generic.defer_inference_force(
+                    inference_operation, node, written_exp, "Type.Nominal")
             end
             if otype._tag == "Type.Parameter"
                and otype.erased_constraint ~= false then
@@ -11975,6 +12035,14 @@ checkexp = util.make_visitor({
             -- call without making it an ordinary expected type elsewhere.
             local provisional = demand and demand.inference_fixed
                 and demand.inference_fixed[1] or false
+            if not provisional and demand
+               and #(demand.fixed or {}) == 0 and demand.tail then
+                -- ExpAdjust turns its child's first result into one scalar.  If
+                -- that scalar occupies an open consumer (for example the sole
+                -- field of a dependent positional constructor), its inference
+                -- pattern lives on the tail side channel rather than slot 1.
+                provisional = demand.inference_tail or false
+            end
             checkexp(node.exp, st, errors, context,
                 result_demand({ context or UNKNOWN_SLOT }, false, {
                     term = "parenthesized expression",
