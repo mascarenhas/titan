@@ -1390,6 +1390,12 @@ describe("generic declarations and explicit calls", function()
             function bad(): value return take(dup) end
         ]])
 
+        check([[
+            function optionize<U>(item: U): U? return item end
+            function take<T>(callback: (T) -> T): value return nil end
+            function bad(): value return take(optionize) end
+        ]])
+
         -- Unrelated free binders increase the old fixed-point pass count. Keep
         -- this larger scope under a generous VM-instruction bound so a future
         -- self-expanding substitution fails instead of hanging the checker job.
