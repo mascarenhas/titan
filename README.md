@@ -115,7 +115,7 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/include/titan/ffi.h` | Namespaced portable FFI and audited Lua-internal bridge header |
 | `$ROCKS_TREE/lib/titan/0.24/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus eighteen independent logical modules from `titan.coroutine` through `titan.test` |
 | `$ROCKS_TREE/lib/titan/0.24/titan.a` | The self-describing static form of the same eighteen logical standard modules, plus native support, private LPegLabel/llhttp payload, and bundled libuv/OpenSSL payload when those modes are selected |
-| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc,test}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
+| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
 | `$ROCKS_TREE/share/titan/0.24/src/titan/test.titan` | Canonical compiler-data source used for the source-private native test-runner protocol |
 
 The eighteen-module pair, shims, and test support source are the coordinated
@@ -459,7 +459,7 @@ someone who explicitly changes `TITAN_PATH` to hide that provider is choosing
 a different module installation. Modules explicitly named on the `titanc`
 command line must come from source and use the folder-before-flat rule. Titan
 code uses those fourteen short imports; the four qualified-only modules are
-imported as `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc`. Lua uses the
+imported as `titan.math`, `titan.lua`, `titan.iteration`, and `titan.gc`. Lua uses the
 qualified
 names `require "titan.coroutine"`, `require "titan.async"`,
 `require "titan.timer"`, `require "titan.io"`, `require "titan.fs"`,
@@ -467,7 +467,7 @@ names `require "titan.coroutine"`, `require "titan.async"`,
 `require "titan.http"`, and
 `require "titan.os"`, plus `require "titan.peg"`,
 `require "titan.string"`, `require "titan.math"`, `require "titan.lua"`,
-`require "titan.iter"`, `require "titan.gc"`, and `require "titan.test"`.
+`require "titan.iteration"`, `require "titan.gc"`, and `require "titan.test"`.
 The private `titan.uv` logical module remains available
 for runtime plumbing and direct-libuv extensions. Lua's own `coroutine` and
 `os` modules remain unchanged.
@@ -481,7 +481,7 @@ Interface vocabulary and I/O helpers. The high-level `titan.ssl` and
 `titan.http` modules compose over public networking and I/O APIs without
 changing `titan.uv`; `titan.url` supplies HTTP and applications with reusable
 PEG-based URL parsing. Math, dynamic Lua loading, generic
-iteration, and GC control live in `titan.math`, `titan.lua`, `titan.iter`, and
+iteration, and GC control live in `titan.math`, `titan.lua`, `titan.iteration`, and
 `titan.gc`; `titan.test` supplies native test contexts and assertions. GC-backed
 owners can attach table/full-userdata finalizers
 without discarding an existing metatable. Clean validation builds pass all

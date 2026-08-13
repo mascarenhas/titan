@@ -156,7 +156,7 @@ resolve type parameters, since first-class functions cannot be polymorphic.
 Functions in the `iter` module are obvious candidates. Rename the `iter` module to `iteration`,
 to make its name more in line other modules (`string`, `coroutine`).
 
-An addition to the `iter` module could be a family of iterator constructor interfaces usable with the
+An addition to the `iteration` module could be a family of iterator constructor interfaces usable with the
 `for/in` loop (where the iterator itself is the state):
 
 * `IteratorOne<A>` produces a `A` on every turn

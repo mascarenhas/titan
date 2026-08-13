@@ -85,7 +85,7 @@ use the chapters below for the normative language reference.
 | [PEG standard library](standard-library-peg.md) | Typed parsing-expression constructors and combinators, labeled failure/recovery, captures and callback timing, anchored pattern matching and leftmost search, locale controls, and relabel source notation. |
 | [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, synchronous in-memory streams, and compiled byte-regex matching, capture iteration, splitting, and substitution. |
 | [Lua loading standard library](standard-library-lua.md) | Binary-safe chunk compilation, Reader and file loading, asynchronous Lua-source `require`, cache semantics, C/Titan loaders, and the custom-searcher policy. |
-| [Iteration standard library](standard-library-iter.md) | Lua-compatible Map traversal, corrected generic-for iterator tuples, and Array iteration that preserves inner nil elements. |
+| [Iteration standard library](standard-library-iteration.md) | Lua-compatible Map traversal, corrected generic-for iterator tuples, and Array iteration that preserves inner nil elements. |
 | [Garbage-collection standard library](standard-library-gc.md) | Weak Maps and ephemerons, collector actions and mode switches, byte counts, and Lua 5.5 tuning parameters. |
 | [Testing Titan code](standard-library-test.md) | The `titan.test` API, native `titanc --test` discovery, subtests and cleanup, filtering, failure output, and process statuses. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, ownership, allocation, and limitations. |
@@ -197,7 +197,7 @@ Lua and `value` never discover an implementation from a bare record or union.
   `http` short imports;
   portable `os` helpers and direct child processes;
   typed PEG construction; byte-oriented string/regex operations; the
-  qualified `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc` modules,
+  qualified `titan.math`, `titan.lua`, `titan.iteration`, and `titan.gc` modules,
   including explicit weak-map policy and table/userdata finalizer ownership;
   and native test infrastructure through `titan.test`.
   Lua loads every standard module through its qualified `titan.*` name,

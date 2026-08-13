@@ -71,7 +71,7 @@
 /titan/string.lua
 /titan/math.lua
 /titan/lua.lua
-/titan/iter.lua
+/titan/iteration.lua
 /titan/gc.lua
 /titan/test.lua
 

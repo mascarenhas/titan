@@ -426,14 +426,14 @@ describe("recoverable paired standard-library publication", function()
     it("owns the exact current eighteen-module public layout", function()
         assert.same({
             "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-            "url", "http", "os", "peg", "string", "math", "lua", "iter",
+            "url", "http", "os", "peg", "string", "math", "lua", "iteration",
             "gc", "test",
         }, installer.MODULES)
         assert.same({
             "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
             "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
             "titan.http", "titan.os", "titan.peg", "titan.string",
-            "titan.math", "titan.lua", "titan.iter", "titan.gc",
+            "titan.math", "titan.lua", "titan.iteration", "titan.gc",
             "titan.test",
         }, installer.MODULE_NAMES)
     end)

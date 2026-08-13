@@ -423,7 +423,7 @@ The source build invokes one compiler process for the eighteen logical roots:
 ```text
 titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs
 titan.net titan.ssl titan.url titan.http titan.os titan.peg titan.string
-titan.math titan.lua titan.iter titan.gc titan.test
+titan.math titan.lua titan.iteration titan.gc titan.test
 ```
 
 The paired `titan.so`/`titan.a` has eighteen logical ABI/types protocols,

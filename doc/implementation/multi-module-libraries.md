@@ -340,7 +340,7 @@ dSYM), eighteen Lua shims, and the canonical test-support source:
 <root>/lib/titan/0.24/titan.so
 <root>/lib/titan/0.24/titan.a
 <root>/lib/titan/0.24/titan.so.dSYM          # macOS only
-<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc,test}.lua
+<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test}.lua
 <root>/share/titan/0.24/src/titan/test.titan
 ```
 

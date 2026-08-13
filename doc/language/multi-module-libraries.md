@@ -300,7 +300,7 @@ $ROCKS_TREE/lib/titan/0.24/titan.a
 contains the native support entry plus the independent logical modules
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
 `titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.os`,
-`titan.peg`, `titan.string`, `titan.math`, `titan.lua`, `titan.iter`,
+`titan.peg`, `titan.string`, `titan.math`, `titan.lua`, `titan.iteration`,
 `titan.gc`, and `titan.test`. Their
 generated logical loaders live at:
 
@@ -320,7 +320,7 @@ $ROCKS_TREE/share/lua/5.5/titan/peg.lua
 $ROCKS_TREE/share/lua/5.5/titan/string.lua
 $ROCKS_TREE/share/lua/5.5/titan/math.lua
 $ROCKS_TREE/share/lua/5.5/titan/lua.lua
-$ROCKS_TREE/share/lua/5.5/titan/iter.lua
+$ROCKS_TREE/share/lua/5.5/titan/iteration.lua
 $ROCKS_TREE/share/lua/5.5/titan/gc.lua
 $ROCKS_TREE/share/lua/5.5/titan/test.lua
 ```

@@ -92,7 +92,7 @@ compiler/toolchain use instead of silently mixing installations.
 The standard library consists of eighteen ordinary qualified logical modules:
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
 `titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.os`,
-`titan.peg`, `titan.string`, `titan.math`, `titan.lua`, `titan.iter`,
+`titan.peg`, `titan.string`, `titan.math`, `titan.lua`, `titan.iteration`,
 `titan.gc`, and `titan.test`. Most
 checkout sources are `titan/<name>.titan`; `titan.uv`, `titan.http`,
 `titan.peg`, and `titan.string` are folder
@@ -726,7 +726,7 @@ in one command:
 titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
   titan.ssl titan.url titan.http titan.os \
   titan.peg titan.string \
-  titan.math titan.lua titan.iter titan.gc titan.test \
+  titan.math titan.lua titan.iteration titan.gc titan.test \
   -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
      openssl-build/libssl.a openssl-build/libcrypto.a  # bundled modes

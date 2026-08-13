@@ -1,14 +1,14 @@
 # Iteration standard library
 
-The `titan.iter` module provides the small, dynamically typed iterator kernel
+The `titan.iteration` module provides the small, dynamically typed iterator kernel
 used for generic maps and Arrays. Import it by its qualified name:
 
 ```titan
-local iter = import "titan.iter"
+local iteration = import "titan.iteration"
 ```
 
-There is deliberately no compiler-level `iter` import alias. Lua code loads the
-same installed standard-provider module with `require "titan.iter"`.
+There is deliberately no compiler-level `iteration` import alias. Lua code loads the
+same installed standard-provider module with `require "titan.iteration"`.
 
 ## Map iteration
 
@@ -29,14 +29,14 @@ and item nevertheless have static type `value`, so consumers cast them or give
 the generic-for declarations the desired types:
 
 ```titan
-local iter = import "titan.iter"
+local iteration = import "titan.iteration"
 
 local scores: {string: integer} = {
   alice = 10,
   bob = 20,
 }
 
-for name: string, score: integer in iter.pairs(scores) do
+for name: string, score: integer in iteration.pairs(scores) do
   use_score(name, score)
 end
 ```
@@ -68,10 +68,10 @@ nil element does not stop the traversal because the nonnil index is the first
 iterator result:
 
 ```titan
-local iter = import "titan.iter"
+local iteration = import "titan.iteration"
 local items: {value} = { "first", nil, "third" }
 
-for index, item in iter.ipairs(items) do
+for index, item in iteration.ipairs(items) do
   -- Runs for indexes 1, 2, and 3; item is nil at index 2.
   consume(index, item)
 end

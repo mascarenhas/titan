@@ -111,7 +111,7 @@ check_canonical_container() {
         test -f "$PROVIDER.dSYM/Contents/Resources/DWARF/titan.so"
     fi
 
-    for module in coroutine uv async timer io fs net ssl url http os peg string math lua iter gc test; do
+    for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test; do
         local shim="$SHIM_ROOT/titan/$module.lua"
         test -f "$shim"
         test ! -L "$shim"
@@ -154,7 +154,7 @@ local expected = {
     ["titan.string"] = true,
     ["titan.math"] = true,
     ["titan.lua"] = true,
-    ["titan.iter"] = true,
+    ["titan.iteration"] = true,
     ["titan.gc"] = true,
     ["titan.test"] = true,
 }
@@ -507,7 +507,7 @@ local peg = import "peg"
 local strings = import "string"
 local math = import "titan.math"
 local lua = import "titan.lua"
-local iter = import "titan.iter"
+local iteration = import "titan.iteration"
 local gc = import "titan.gc"
 local testing = import "test"
 
@@ -586,7 +586,7 @@ function main(args: {string}): integer
       ["right"] = 22,
     }
     local total = 0
-    for _key: string, item: integer in iter.pairs(values) do
+    for _key: string, item: integer in iteration.pairs(values) do
       total = total + item
     end
     check(total == 42, "static iterator provider behavior failed")

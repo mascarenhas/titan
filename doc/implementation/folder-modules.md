@@ -323,7 +323,7 @@ roots:
 titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
   titan.ssl titan.url titan.http titan.os \
   titan.peg titan.string \
-  titan.math titan.lua titan.iter titan.gc titan.test \
+  titan.math titan.lua titan.iteration titan.gc titan.test \
   -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
      openssl-build/libssl.a openssl-build/libcrypto.a  # bundled modes

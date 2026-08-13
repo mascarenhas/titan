@@ -345,13 +345,13 @@ local strings = require "titan.string"
 ```
 
 This keeps Lua's standard `io`, `os`, `string`, and other global/module names
-unchanged. The `titan.math`, `titan.iter`, `titan.gc`, and `titan.lua` modules
+unchanged. The `titan.math`, `titan.iteration`, `titan.gc`, and `titan.lua` modules
 have no compiler short-import sugar, so their qualified names are the canonical
 Titan spellings as well as their Lua load names:
 
 ```titan
 local math = import "titan.math"
-local iter = import "titan.iter"
+local iteration = import "titan.iteration"
 ```
 
 Do not publish or document an unqualified Lua replacement for a standard Lua

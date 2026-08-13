@@ -19,7 +19,7 @@ local peg = require "titan.peg"
 local strings = require "titan.string"
 local math = require "titan.math"
 local lua = require "titan.lua"
-local iter = require "titan.iter"
+local iteration = require "titan.iteration"
 local gc = require "titan.gc"
 local testing = require "titan.test"
 
@@ -69,7 +69,7 @@ assert(values.n == 3 and values[1] == 1 and
 
 local count = 0
 local sum = 0
-for _key, value in iter.pairs({ left = 20, right = 22 }) do
+for _key, value in iteration.pairs({ left = 20, right = 22 }) do
     count = count + 1
     sum = sum + value
 end

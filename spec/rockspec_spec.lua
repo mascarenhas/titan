@@ -4,7 +4,7 @@ local lfs = require "lfs"
 
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-    "url", "http", "os", "peg", "string", "math", "lua", "iter", "gc",
+    "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
     "test",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
@@ -559,7 +559,7 @@ describe("standalone-prefix source installation", function()
             "spec/stdlib/titan/io/tests/core_test.titan",
             "spec/stdlib/titan/io/tests/process_test.titan",
             "spec/stdlib/titan/io/tests/tests.titan",
-            "spec/stdlib/titan/iter/tests.titan",
+            "spec/stdlib/titan/iteration/tests.titan",
             "spec/stdlib/titan/lua/test_support.titan",
             "spec/stdlib/titan/lua/tests/core_test.titan",
             "spec/stdlib/titan/lua/tests/dofile_test.titan",
@@ -649,7 +649,7 @@ describe("standalone-prefix source installation", function()
             "titan/string/regex_parser.titan",
             "titan/math.titan",
             "titan/lua.titan",
-            "titan/iter.titan",
+            "titan/iteration.titan",
             "titan/gc.titan",
             "titan/test.titan",
             "titan-compiler/test_runner.lua",
@@ -894,7 +894,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             local titan_string = require "titan.string"
             local titan_math = require "titan.math"
             local titan_lua = require "titan.lua"
-            local iter = require "titan.iter"
+            local iteration = require "titan.iteration"
             local gc = require "titan.gc"
             local testing = require "titan.test"
             local builtin_string = require "string"
@@ -940,7 +940,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             assert(type(titan_string) == "userdata")
             assert(type(titan_math) == "userdata")
             assert(type(titan_lua) == "userdata")
-            assert(type(iter) == "userdata")
+            assert(type(iteration) == "userdata")
             assert(type(gc) == "userdata")
             assert(type(testing) == "userdata")
             assert(not testing.testing())
@@ -970,7 +970,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 string = titan_string,
                 math = titan_math,
                 lua = titan_lua,
-                iter = iter,
+                iteration = iteration,
                 gc = gc,
                 test = testing,
             }) do

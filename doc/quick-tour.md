@@ -428,7 +428,7 @@ process APIs target Titan's current Linux and macOS hosts.
 
 ## Math, collection iteration, GC, and dynamic Lua
 
-The newer `math`, `iter`, `gc`, and `lua` modules use qualified Titan names.
+The newer `math`, `iteration`, `gc`, and `lua` modules use qualified Titan names.
 They do not replace Lua's libraries and do not add compiler short-import
 sugar.
 
@@ -454,15 +454,15 @@ end
 a float. `titan.math` deliberately has no `type` operation: use Titan's static
 types or the ordinary `is`/`as` gradual checks at a `value` boundary.
 
-`titan.iter` supplies the familiar collection iterators without adding methods
+`titan.iteration` supplies the familiar collection iterators without adding methods
 to Array or Map types:
 
 ```titan
-local iter = import "titan.iter"
+local iteration = import "titan.iteration"
 
 function total(scores: {string: integer}): integer
   local result = 0
-  for _name: string, score: integer in iter.pairs(scores) do
+  for _name: string, score: integer in iteration.pairs(scores) do
     result = result + score
   end
   return result
@@ -470,7 +470,7 @@ end
 
 function visit_holes(values: {value}): integer
   local positions = 0
-  for _index, _item in iter.ipairs(values) do
+  for _index, _item in iteration.ipairs(values) do
     positions = positions + 1
   end
   return positions

@@ -1,10 +1,10 @@
 # Iteration-library implementation
 
 The user-facing contract is in the
-[iteration standard-library chapter](../language/standard-library-iter.md).
-`titan.iter` is a flat Titan source module. It needs no compiler syntax,
+[iteration standard-library chapter](../language/standard-library-iteration.md).
+`titan.iteration` is a flat Titan source module. It needs no compiler syntax,
 type-relation, or code-generator changes: callers use the qualified
-`import "titan.iter"`, and `pairs` returns the generic-for protocol already
+`import "titan.iteration"`, and `pairs` returns the generic-for protocol already
 implemented by the language.
 
 ## `next` as an audited Lua-stack operation

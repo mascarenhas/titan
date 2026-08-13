@@ -12,21 +12,21 @@ local STDLIB_TYPES_FIXTURE =
 "spec/fixtures/stdlib/titan_stdlib_types.lua"
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-    "url", "http", "os", "peg", "string", "math", "lua", "iter", "gc",
+    "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
     "test",
 }
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
     "titan.http", "titan.os", "titan.peg", "titan.string", "titan.math",
-    "titan.lua", "titan.iter", "titan.gc", "titan.test",
+    "titan.lua", "titan.iteration", "titan.gc", "titan.test",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
     "titan/timer.lua", "titan/io.lua", "titan/fs.lua", "titan/net.lua",
     "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/os.lua",
     "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
-    "titan/iter.lua", "titan/gc.lua", "titan/test.lua",
+    "titan/iteration.lua", "titan/gc.lua", "titan/test.lua",
 }
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
@@ -955,7 +955,7 @@ describe("libuv Makefile configuration", function()
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
                 "titan/math.titan", "titan/lua.titan",
-                "titan/iter.titan", "titan/gc.titan", "titan/test.titan",
+                "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
             }, expanded)
         end)
 
@@ -1896,7 +1896,7 @@ esac
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
                 "titan/math.titan", "titan/lua.titan",
-                "titan/iter.titan", "titan/gc.titan", "titan/test.titan",
+                "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
             }
             for _, source in ipairs(makefile_words("UV_TITAN_SOURCES")) do
                 sources[#sources + 1] = source
@@ -2370,7 +2370,7 @@ exit 73
                 'cmp -s "$manifest" "$restored_manifest"',
                 '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
                 '"$shim_dir/math.lua" "$shim_dir/lua.lua"',
-                '"$shim_dir/iter.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"',
+                '"$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"',
                 'test_source=$prefix_rel/share/titan/0.24/src/titan/test.titan',
                 '"$test_source"',
                 'rm -f "$test_source"',
@@ -2401,7 +2401,7 @@ exit 73
                 'strings.find("static\\0string", "\\0str")',
                 'local math = import "titan.math"',
                 'local lua = import "titan.lua"',
-                'local iter = import "titan.iter"',
+                'local iteration = import "titan.iteration"',
                 'local gc = import "titan.gc"',
                 'local testing = import "test"',
                 'not testing.testing() and not testing.verbose()',
@@ -2480,7 +2480,7 @@ exit 73
                 'local http = require "titan.http"',
                 'local math = require "titan.math"',
                 'local lua = require "titan.lua"',
-                'local iter = require "titan.iter"',
+                'local iteration = require "titan.iteration"',
                 'local gc = require "titan.gc"',
                 'local testing = require "titan.test"',
                 'assert(not testing.testing())',
@@ -2792,7 +2792,7 @@ exit 73
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "for module in coroutine uv async timer io fs net ssl url " ..
-                "http os peg string math lua iter gc test; do",
+                "http os peg string math lua iteration gc test; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "share/titan/0.24/src/titan/test.titan", 1, true), workflow)

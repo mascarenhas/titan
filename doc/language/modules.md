@@ -544,7 +544,7 @@ Titan's `titan.os` module without colliding with Lua's own `os` library, which
 is not importable as a Titan module. Likewise, `import "string"` selects
 Titan's module without replacing Lua's `string` table.
 
-The additional standard modules `titan.math`, `titan.lua`, `titan.iter`, and
+The additional standard modules `titan.math`, `titan.lua`, `titan.iteration`, and
 `titan.gc` use their qualified names in Titan source as well as Lua. Short
 Titan imports never add unqualified Lua modules or replace Lua's bare
 standard-library names.

@@ -206,7 +206,7 @@ not add epicycles around what may be a misunderstood simpler design.
   ensemble, `titan/{async,timer,io,fs,net,ssl,url,os}.titan`, the explicit
   `titan/http/` folder ensemble, and the explicit
   `titan/peg/` and `titan/string/` folder ensembles, plus
-  `titan/{math,lua,iter,gc}.titan`, and `titan/test.titan`. Each logical
+  `titan/{math,lua,iteration,gc}.titan`, and `titan/test.titan`. Each logical
   module
   remains independent, but the physical outputs are the paired `titan.so` and
   self-describing `titan.a`. In bundled mode the pinned private `libuv.a`
@@ -237,7 +237,7 @@ not add epicycles around what may be a misunderstood simpler design.
   canonical artifacts are `$ROCKS_TREE/lib/titan/0.24/{titan.so,titan.a}`, the DSO's
   macOS dSYM, the compiler source
   `$ROCKS_TREE/share/titan/0.24/src/titan/test.titan`, and generated
-  `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc,test}.lua`.
+  `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test}.lua`.
   No symbolic links, hard links, child DSOs, or `lib/lua` compatibility copies
   are used, and separately versioned 0.17/0.18/0.19/0.20/0.21/0.22/0.23 trees are not purged,
   migrated, or cleaned up. These direct
@@ -614,7 +614,7 @@ eighteen protocols plus bare `luaopen_titan` support, for nineteen
 `luaopen_*` entries total. `titan.io`
 owns the standard Interface vocabulary and high-level I/O helpers.
 `import "async"` is parser sugar for `import "titan.async"` (likewise for
-`coroutine`, `uv`, `timer`, `io`, `fs`, `net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, and `test`). The `titan.math`, `titan.lua`, `titan.iter`, and
+`coroutine`, `uv`, `timer`, `io`, `fs`, `net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, and `test`). The `titan.math`, `titan.lua`, `titan.iteration`, and
   `titan.gc` modules
 use their qualified names and deliberately add no compiler short-import sugar.
 Dependencies resolve binaries before sources; modules explicitly named on the
