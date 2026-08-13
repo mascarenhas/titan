@@ -566,6 +566,26 @@ local function resolve_type_alias(node, st, errors)
     -- eventual type use revalidates the resolved graph in its own full or
     -- spelling-only context.
     local target = typefromnode(node.type, st, errors, true)
+    local rhs_is_bare_name = (node.type._tag == "Ast.TypeName"
+            or node.type._tag == "Ast.TypeQualName")
+        and #(node.type.typeargs or {}) == 0
+    if rhs_is_bare_name then
+        local owner, target_alias_fqtn
+        if target._tag == "Type.GenericAlias" then
+            owner = types.registry[target.target_owner_fqtn]
+            target_alias_fqtn = target.module .. "." .. target.name
+        elseif target._tag == "Type.Nominal" then
+            owner = types.registry[target.fqtn]
+            target_alias_fqtn = false
+        end
+        if owner and owner.scope ~= false
+           and #(owner.typeparams or {}) > 0 then
+            target = types.GenericAlias(
+                st.modname, node.name, node.islocal and true or false,
+                owner.name, target_alias_fqtn, owner.scope,
+                owner.typeparams)
+        end
+    end
     -- A recursive visit marks this declaration resolved/invalid. Preserve that
     -- result instead of wrapping it back in the structural RHS on unwind.
     if node._alias_state == "resolved" then
@@ -2081,6 +2101,8 @@ local function alias_namespace_type(typ, st)
     local owner = typ
     if typ and typ._tag == "Type.Nominal" then
         owner = types.registry[typ.fqtn]
+    elseif typ and typ._tag == "Type.GenericAlias" then
+        owner = types.registry[typ.target_owner_fqtn]
     end
     if not owner
        or (owner._tag ~= "Type.Record" and owner._tag ~= "Type.Union")

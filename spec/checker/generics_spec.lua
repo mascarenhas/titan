@@ -391,6 +391,30 @@ describe("generic declarations and explicit calls", function()
         ]])
     end)
 
+    it("preserves generic owner applicability through bare aliases", function()
+        local ast = assert_check([[
+            record Pair<T, U>
+                first: T
+                second: U
+            end
+            type Either = Pair
+            local type PrivateEither = Either
+            function make(): Either<string, integer>
+                return Either.new<string, integer>("ok", 1)
+            end
+            function make_private(): PrivateEither<boolean, string>
+                return PrivateEither.new<boolean, string>(true, "yes")
+            end
+        ]])
+        local alias = toplevel(ast, "Ast.TopLevelTypeAlias", "Either")
+        assert.equal("Type.GenericAlias", alias._type._tag)
+        assert.equal("test.Pair", alias._type.target_owner_fqtn)
+        local private_alias = toplevel(
+            ast, "Ast.TopLevelTypeAlias", "PrivateEither")
+        assert.equal("Type.GenericAlias", private_alias._type._tag)
+        assert.equal("test.Either", private_alias._type.target_alias_fqtn)
+    end)
+
     it("uses the all-value application for a bare generic owner", function()
         local ast = assert_check([[
             record Cell<T>
