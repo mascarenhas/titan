@@ -480,9 +480,37 @@ local function checktype(typ, loc, errors, seen)
     seen[typ] = true
 
     local tag = typ._tag
-    if tag == "Type.Nominal" and not types.registry[typ.fqtn] then
-        checker.typeerror(errors, loc,
-            "invalid type '%s' in type declaration", typ.fqtn)
+    if tag == "Type.Nominal" then
+        if not types.registry[typ.fqtn] then
+            checker.typeerror(errors, loc,
+                "invalid type '%s' in type declaration", typ.fqtn)
+        end
+        for _, argument in ipairs(typ.args or {}) do
+            checktype(argument, loc, errors, seen)
+        end
+    elseif tag == "Type.Parameter" then
+        if typ.erased_constraint ~= false then
+            checktype(typ.erased_constraint, loc, errors, seen)
+        end
+    elseif tag == "Type.TypeParameter" then
+        if typ.constraint ~= false then
+            checktype(typ.constraint, loc, errors, seen)
+        end
+    elseif tag == "Type.FunctionScheme" then
+        for _, typeparam in ipairs(typ.typeparams or {}) do
+            checktype(typeparam, loc, errors, seen)
+        end
+        checktype(typ.signature, loc, errors, seen)
+    elseif tag == "Type.GenericAlias" then
+        local owner = types.registry[typ.target_owner_fqtn]
+        if not owner then
+            checker.typeerror(errors, loc,
+                "invalid type '%s' in type declaration",
+                typ.target_owner_fqtn)
+        end
+        for _, typeparam in ipairs(typ.typeparams or {}) do
+            checktype(typeparam, loc, errors, seen)
+        end
     elseif tag == "Type.Array" then
         checktype(typ.elem, loc, errors, seen)
     elseif tag == "Type.Map" then
@@ -492,6 +520,9 @@ local function checktype(typ, loc, errors, seen)
         checktype(typ.base, loc, errors, seen)
     elseif tag == "Type.Function" or tag == "Type.Method"
            or tag == "Type.StaticMethod" then
+        for _, typeparam in ipairs(typ.typeparams or {}) do
+            checktype(typeparam, loc, errors, seen)
+        end
         for _, param in ipairs(typ.params) do
             checktype(param, loc, errors, seen)
         end
@@ -505,6 +536,9 @@ local function checktype(typ, loc, errors, seen)
             checktype(typ.flexrettype, loc, errors, seen)
         end
     elseif tag == "Type.Interface" then
+        for _, typeparam in ipairs(typ.typeparams or {}) do
+            checktype(typeparam, loc, errors, seen)
+        end
         for _, method in ipairs(typ.methods or {}) do
             checktype(method, loc, errors, seen)
         end
@@ -9706,119 +9740,286 @@ function checker.has_main(ast)
     return false
 end
 
--- Walk a recovered interface type and, for every Nominal that names a nominal
--- of *another* module, recover that module so its definition and its own
--- referenced nominals register too. This makes nominal types resolve
--- transitively across compiled-only imports (a module's interface may
--- return/accept a record defined in a module it imported but that this
--- importer does not import directly). `seen` guards one interface's type
--- graph; `interface_seen` guards the recursive module graph while preserving
--- the original physical exposer. Load failures are ignored — the nominal
--- simply stays unresolved, exactly as before this pass existed.
+-- Walk a recovered interface type and, for every Nominal or forwarding
+-- GenericAlias that names another module, recover that module before
+-- reconciling generic arity and canonical binder projections. This preserves
+-- the existing nominal-owner/exposer provenance path; it does not introduce a
+-- second registry or another provider identity mechanism.
+function checker._recovered_nominal_owner(module, fqtn)
+    if type(module) ~= "table" then return nil end
+    for _, member in ipairs(module.members or {}) do
+        local typ = member.type or member
+        if type(typ) == "table" and typ.name == fqtn
+           and (typ._tag == "Type.Record" or typ._tag == "Type.Union") then
+            return typ
+        end
+    end
+    local name = fqtn:match("([^.]+)$")
+    local typ = name and module.type_members and module.type_members[name]
+    if type(typ) == "table" and typ.name == fqtn
+       and typ._tag == "Type.Interface" then
+        return typ
+    end
+end
+
+function checker._recovered_generic_alias(module, fqtn)
+    if type(module) ~= "table" then return nil end
+    local name = fqtn:match("([^.]+)$")
+    local alias = name and module.type_members and module.type_members[name]
+    if type(alias) == "table" and alias._tag == "Type.GenericAlias"
+       and alias.module .. "." .. alias.name == fqtn then
+        return alias
+    end
+end
+
+function checker._recovered_typeparams_equal(left, right)
+    left, right = left or {}, right or {}
+    if #left ~= #right then return false end
+    for index = 1, #left do
+        if not types.alpha_equals(left[index], right[index]) then
+            return false
+        end
+    end
+    return true
+end
+
+function checker._recover_referenced_module(
+        modname, loader, seen, exposing_module, interface_seen)
+    local module_key = "\0module-interface:" .. modname
+    if seen[module_key] then return seen[module_key] end
+
+    local memo = { pending = true }
+    seen[module_key] = memo
+    local request = {
+        kind = "nominal-owner",
+        exposer = exposing_module,
+        interface_seen = interface_seen,
+        reference_seen = seen,
+    }
+    local called, module, err = pcall(
+        checker.checkimport, modname, loader, request)
+    memo.pending = nil
+    if called and module then
+        memo.module = module
+    elseif called then
+        memo.error = err
+    else
+        memo.error = tostring(module)
+    end
+    return memo
+end
+
+function checker._recover_referenced_owner(
+        fqtn, loader, seen, exposing_module, interface_seen)
+    local modname = fqtn:match("^(.*)%.[^.]+$")
+    if not modname or modname == "" then return nil, nil end
+    local memo = checker._recover_referenced_module(
+        modname, loader, seen, exposing_module, interface_seen)
+    local owner = checker._recovered_nominal_owner(memo.module, fqtn)
+    if memo.module then
+        if not owner then
+            return nil, "recovered module '" .. modname ..
+                "' does not publish nominal owner '" .. fqtn .. "'"
+        end
+    else
+        owner = types.registry[fqtn]
+    end
+    return owner, memo.error
+end
+
 local function register_referenced_nominals(
-        t, loader, seen, exposing_module, interface_seen)
-    if type(t) ~= "table" or not t._tag or seen[t] then return end
-    seen[t] = true
+        t, loader, seen, exposing_module, interface_seen, position)
+    if type(t) ~= "table" or not t._tag then return true end
     local tag = t._tag
-    if tag == "Type.Nominal" then
-        local mod = t.fqtn:match("^(.*)%.[^.]+$")
-        if mod and mod ~= "" then
-            -- One recovered interface can mention several distinct records
-            -- from the same owner. Native provenance is an owner/exposer
-            -- relation, so recovering it more than once only repeats loader
-            -- work and can produce duplicate observable loads for callers.
-            local owner_key = "\0nominal-owner:" .. mod
-            if not seen[owner_key] then
-                seen[owner_key] = true
-                local request = {
-                    kind = "nominal-owner",
-                    exposer = exposing_module,
-                    interface_seen = interface_seen,
-                }
-                -- A previously registered nominal still needs its complete
-                -- interface replayed for this exposer. `interface_seen`
-                -- terminates cyclic nominal graphs without dropping nested
-                -- native-provenance edges.
-                pcall(checker.checkimport, mod, loader, request)
+    local alias_key
+    if tag == "Type.GenericAlias" then
+        alias_key = t.module .. "." .. t.name
+        local resolving_key = "\0generic-alias-resolving:" .. alias_key
+        if seen[resolving_key] then
+            return nil, "recovered GenericAlias chain is cyclic at '" ..
+                alias_key .. "'"
+        elseif seen[t] then
+            return true
+        end
+        seen[resolving_key] = true
+    elseif seen[t] then
+        return true
+    end
+    seen[t] = true
+
+    local function visit(child, child_position)
+        return register_referenced_nominals(
+            child, loader, seen, exposing_module, interface_seen,
+            child_position)
+    end
+    local function visit_list(list, child_position)
+        for _, child in ipairs(list or {}) do
+            local ok, err = visit(child, child_position)
+            if not ok then return nil, err end
+        end
+        return true
+    end
+    local function visit_binders(typeparams)
+        for _, typeparam in ipairs(typeparams or {}) do
+            if typeparam.constraint ~= false then
+                local ok, err = visit(typeparam.constraint, "constraint")
+                if not ok then return nil, err end
             end
         end
+        return true
+    end
+
+    local ok, err = true, nil
+    if tag == "Type.Nominal" then
+        local owner, recovery_error = checker._recover_referenced_owner(
+            t.fqtn, loader, seen, exposing_module, interface_seen)
+        if owner then
+            local expected = position == "erased-constraint"
+                and 0 or #(owner.typeparams or {})
+            if #(t.args or {}) ~= expected then
+                ok, err = nil, "recovered nominal '" .. t.fqtn ..
+                    "' expects " .. expected .. " type arguments but found " ..
+                    #(t.args or {})
+            elseif position == "constraint"
+               and owner._tag ~= "Type.Interface" then
+                ok, err = nil, "generic constraint '" .. t.fqtn ..
+                    "' does not name an Interface"
+            end
+        elseif recovery_error then
+            -- Preserve the historical best-effort nominal recovery boundary:
+            -- an unavailable owner stays unresolved and the ordinary checker
+            -- reports it at its use. Successfully recovered owners, however,
+            -- must reconcile before the import can be trusted.
+        end
+        if ok then ok, err = visit_list(t.args) end
+    elseif tag == "Type.GenericAlias" then
+        local owner, owner_error = checker._recover_referenced_owner(
+            t.target_owner_fqtn, loader, seen,
+            exposing_module, interface_seen)
+        if not owner then
+            ok, err = nil, owner_error or
+                ("could not recover GenericAlias owner '" ..
+                    t.target_owner_fqtn .. "'")
+        elseif not types.same_generic_scope(t.target_scope, owner.scope)
+           or not checker._recovered_typeparams_equal(
+                t.typeparams, owner.typeparams) then
+            ok, err = nil,
+                "recovered GenericAlias projection does not match owner '" ..
+                    t.target_owner_fqtn .. "'"
+        end
+        if ok and t.target_alias_fqtn ~= false then
+            local target_module_name =
+                t.target_alias_fqtn:match("^(.*)%.[^.]+$")
+            local memo = checker._recover_referenced_module(
+                target_module_name, loader, seen,
+                exposing_module, interface_seen)
+            local target = checker._recovered_generic_alias(
+                memo.module, t.target_alias_fqtn)
+            if not target then
+                ok, err = nil, memo.error or
+                    ("could not recover target GenericAlias '" ..
+                        t.target_alias_fqtn .. "'")
+            elseif target.target_owner_fqtn ~= t.target_owner_fqtn
+               or not types.same_generic_scope(
+                    target.target_scope, t.target_scope)
+               or not checker._recovered_typeparams_equal(
+                    target.typeparams, t.typeparams) then
+                ok, err = nil,
+                    "recovered GenericAlias projection does not match alias '" ..
+                        t.target_alias_fqtn .. "'"
+            else
+                ok, err = visit(target)
+            end
+        end
+        if ok then ok, err = visit_binders(t.typeparams) end
+    elseif tag == "Type.Parameter" then
+        if t.erased_constraint ~= false then
+            ok, err = visit(t.erased_constraint, "erased-constraint")
+        end
+    elseif tag == "Type.TypeParameter" then
+        if t.constraint ~= false then
+            ok, err = visit(t.constraint, "constraint")
+        end
+    elseif tag == "Type.FunctionScheme" then
+        ok, err = visit_binders(t.typeparams)
+        if ok then ok, err = visit(t.signature) end
     elseif tag == "Type.Array" then
-        register_referenced_nominals(
-            t.elem, loader, seen, exposing_module, interface_seen)
+        ok, err = visit(t.elem)
     elseif tag == "Type.Map" then
-        register_referenced_nominals(
-            t.keys, loader, seen, exposing_module, interface_seen)
-        register_referenced_nominals(
-            t.values, loader, seen, exposing_module, interface_seen)
+        ok, err = visit(t.keys)
+        if ok then ok, err = visit(t.values) end
     elseif tag == "Type.Option" then
-        register_referenced_nominals(
-            t.base, loader, seen, exposing_module, interface_seen)
+        ok, err = visit(t.base)
     elseif tag == "Type.ModuleMember" or tag == "Type.ModuleVariable" then
-        register_referenced_nominals(
-            t.type, loader, seen, exposing_module, interface_seen)
+        ok, err = visit(t.type)
     elseif tag == "Type.Function" or tag == "Type.Method"
            or tag == "Type.StaticMethod" then
-        for _, p in ipairs(t.params or {}) do
-            register_referenced_nominals(
-                p, loader, seen, exposing_module, interface_seen)
-        end
-        for _, r in ipairs(t.rettypes or {}) do
-            register_referenced_nominals(
-                r, loader, seen, exposing_module, interface_seen)
-        end
-        if t.varargtype then
-            register_referenced_nominals(
-                t.varargtype, loader, seen, exposing_module, interface_seen)
-        end
-        if t.flexrettype then
-            register_referenced_nominals(
-                t.flexrettype, loader, seen, exposing_module, interface_seen)
-        end
+        ok, err = visit_binders(t.typeparams)
+        if ok then ok, err = visit_list(t.params) end
+        if ok then ok, err = visit_list(t.rettypes) end
+        if ok and t.varargtype then ok, err = visit(t.varargtype) end
+        if ok and t.flexrettype then ok, err = visit(t.flexrettype) end
     elseif tag == "Type.Record" then
-        for _, f in ipairs(t.fields or {}) do
-            if not f.islocal then
-                register_referenced_nominals(
-                    f.type, loader, seen, exposing_module, interface_seen)
+        ok, err = visit_binders(t.typeparams)
+        if ok then
+            for _, field in ipairs(t.fields or {}) do
+                if not field.islocal then
+                    ok, err = visit(field.type)
+                    if not ok then break end
+                end
             end
         end
-        for _, fn in pairs(t.functions or {}) do
-            if not fn.islocal then
-                register_referenced_nominals(
-                    fn, loader, seen, exposing_module, interface_seen)
+        if ok then
+            for _, fn in pairs(t.functions or {}) do
+                if not fn.islocal then
+                    ok, err = visit(fn)
+                    if not ok then break end
+                end
             end
         end
-        for _, method in pairs(t.methods or {}) do
-            if not method.islocal then
-                register_referenced_nominals(
-                    method, loader, seen, exposing_module, interface_seen)
+        if ok then
+            for _, method in pairs(t.methods or {}) do
+                if not method.islocal then
+                    ok, err = visit(method)
+                    if not ok then break end
+                end
             end
         end
     elseif tag == "Type.Union" then
-        for _, variant in ipairs(t.variants or {}) do
-            if not variant.islocal and variant.payload ~= false then
-                register_referenced_nominals(
-                    variant.payload, loader, seen,
-                    exposing_module, interface_seen)
+        ok, err = visit_binders(t.typeparams)
+        if ok then
+            for _, variant in ipairs(t.variants or {}) do
+                if not variant.islocal and variant.payload ~= false then
+                    ok, err = visit(variant.payload)
+                    if not ok then break end
+                end
             end
         end
-        for _, fn in pairs(t.functions or {}) do
-            if not fn.islocal then
-                register_referenced_nominals(
-                    fn, loader, seen, exposing_module, interface_seen)
+        if ok then
+            for _, fn in pairs(t.functions or {}) do
+                if not fn.islocal then
+                    ok, err = visit(fn)
+                    if not ok then break end
+                end
             end
         end
-        for _, method in pairs(t.methods or {}) do
-            if not method.islocal then
-                register_referenced_nominals(
-                    method, loader, seen, exposing_module, interface_seen)
+        if ok then
+            for _, method in pairs(t.methods or {}) do
+                if not method.islocal then
+                    ok, err = visit(method)
+                    if not ok then break end
+                end
             end
         end
     elseif tag == "Type.Interface" then
-        for _, method in ipairs(t.methods or {}) do
-            register_referenced_nominals(
-                method, loader, seen, exposing_module, interface_seen)
-        end
+        ok, err = visit_binders(t.typeparams)
+        if ok then ok, err = visit_list(t.methods) end
     end
+
+    if alias_key then
+        seen["\0generic-alias-resolving:" .. alias_key] = nil
+    end
+    return ok, err
 end
 
 local function first_local_nominal_type(typ, seen)
@@ -9833,8 +10034,40 @@ local function first_local_nominal_type(typ, seen)
         if nominal and nominal.islocal then
             return typ
         end
+        for _, argument in ipairs(typ.args or {}) do
+            local found = first_local_nominal_type(argument, seen)
+            if found then return found end
+        end
+    elseif tag == "Type.Parameter" then
+        if typ.erased_constraint ~= false then
+            return first_local_nominal_type(
+                typ.erased_constraint, seen)
+        end
+    elseif tag == "Type.TypeParameter" then
+        if typ.constraint ~= false then
+            return first_local_nominal_type(typ.constraint, seen)
+        end
+    elseif tag == "Type.FunctionScheme" then
+        for _, typeparam in ipairs(typ.typeparams or {}) do
+            local found = first_local_nominal_type(typeparam, seen)
+            if found then return found end
+        end
+        return first_local_nominal_type(typ.signature, seen)
+    elseif tag == "Type.GenericAlias" then
+        local owner = types.registry[typ.target_owner_fqtn]
+        if owner and owner.islocal then
+            return types.Nominal(typ.target_owner_fqtn)
+        end
+        for _, typeparam in ipairs(typ.typeparams or {}) do
+            local found = first_local_nominal_type(typeparam, seen)
+            if found then return found end
+        end
     elseif tag == "Type.Record" then
         if typ.islocal then return typ end
+        for _, typeparam in ipairs(typ.typeparams or {}) do
+            local found = first_local_nominal_type(typeparam, seen)
+            if found then return found end
+        end
         for _, field in ipairs(typ.fields or {}) do
             if not field.islocal then
                 local found = first_local_nominal_type(field.type, seen)
@@ -9855,6 +10088,10 @@ local function first_local_nominal_type(typ, seen)
         end
     elseif tag == "Type.Union" then
         if typ.islocal then return typ end
+        for _, typeparam in ipairs(typ.typeparams or {}) do
+            local found = first_local_nominal_type(typeparam, seen)
+            if found then return found end
+        end
         for _, variant in ipairs(typ.variants or {}) do
             if not variant.islocal and variant.payload ~= false then
                 local found =
@@ -9876,6 +10113,10 @@ local function first_local_nominal_type(typ, seen)
         end
     elseif tag == "Type.Interface" then
         if typ.islocal then return typ end
+        for _, typeparam in ipairs(typ.typeparams or {}) do
+            local found = first_local_nominal_type(typeparam, seen)
+            if found then return found end
+        end
         for _, method in ipairs(typ.methods or {}) do
             local found = first_local_nominal_type(method, seen)
             if found then return found end
@@ -9892,6 +10133,10 @@ local function first_local_nominal_type(typ, seen)
         return first_local_nominal_type(typ.type, seen)
     elseif tag == "Type.Function" or tag == "Type.Method"
            or tag == "Type.StaticMethod" then
+        for _, typeparam in ipairs(typ.typeparams or {}) do
+            local found = first_local_nominal_type(typeparam, seen)
+            if found then return found end
+        end
         for _, p in ipairs(typ.params or {}) do
             local found = first_local_nominal_type(p, seen)
             if found then return found end
@@ -9927,7 +10172,7 @@ end
 
 function checker.register_module_interface(
         modname, type_or_error, loader, exposer, interface_seen,
-        trusted_source)
+        trusted_source, reference_seen)
     exposer = exposer or modname
     interface_seen = interface_seen or {}
     local exposer_key
@@ -9938,8 +10183,17 @@ function checker.register_module_interface(
         exposer_key = tostring(exposer)
     end
     local interface_key = exposer_key .. "\0" .. modname
-    if interface_seen[interface_key] then return end
+    if interface_seen[interface_key] then return true end
     interface_seen[interface_key] = true
+
+    local seen = reference_seen or {}
+    local module_key = "\0module-interface:" .. modname
+    local module_memo = seen[module_key]
+    if not module_memo then
+        module_memo = {}
+        seen[module_key] = module_memo
+    end
+    module_memo.module = type_or_error
 
     -- Type-only re-exports do not copy a nominal's static closures into the
     -- facade module. Stamp the canonical descriptors with their deterministic
@@ -9991,29 +10245,34 @@ function checker.register_module_interface(
         end
     end
 
-    local seen = {}
     for _, view in ipairs(member_views) do
         for _, member in ipairs(view) do
-            register_referenced_nominals(
-                member.type or member, loader, seen, exposer, interface_seen)
+            local registered, register_error = register_referenced_nominals(
+                member.type or member, loader, seen,
+                exposer, interface_seen)
+            if not registered then return nil, register_error end
         end
     end
     for _, view in ipairs(type_views) do
         for _, member in pairs(view) do
-            register_referenced_nominals(
+            local registered, register_error = register_referenced_nominals(
                 member, loader, seen, exposer, interface_seen)
+            if not registered then return nil, register_error end
         end
     end
+    return true
 end
 
 function checker.checkimport(modname, loader, request)
     local ok, type_or_error, errors, import_info = loader(modname, request)
     if not ok then return nil, type_or_error end
-    checker.register_module_interface(
+    local registered, register_error = checker.register_module_interface(
         modname, type_or_error, loader, request and request.exposer,
         request and request.interface_seen,
         import_info and import_info.kind == "source"
-            and type_or_error._source == true)
+            and type_or_error._source == true,
+        request and request.reference_seen)
+    if not registered then return nil, register_error end
     return type_or_error, errors, import_info
 end
 
