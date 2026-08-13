@@ -266,6 +266,22 @@ Here `{integer}` binds `T`, `""` and the expected result bind `U` to `string`,
 and the lambda is checked once with type
 `(integer,string) -> string`. `text` is `string`.
 
+Evidence is gathered across the complete application rather than committed
+left-to-right. In particular, a contextual call through `value` keeps its
+surrounding generic result slot open until the other arguments have contributed:
+
+```titan
+function agree<T>(left: T, right: T): T return left end
+
+function from_dynamic(callback: value): integer
+    return agree(callback(), 42)
+end
+```
+
+Here `42` closes `T` to `integer`, so `callback()` is checked as an integer
+result just as it is in `agree(42, callback())`. The source order still controls
+evaluation order; inference does not recheck or reevaluate either expression.
+
 Inference is local and invariant. It unifies corresponding parts of Options,
 Arrays, Maps, function shapes, and applications of the same owner. It does not:
 

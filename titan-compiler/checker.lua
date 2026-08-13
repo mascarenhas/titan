@@ -4913,6 +4913,12 @@ local function result_demand(fixed, tail, opts)
         dots_nilfill = opts.dots_nilfill,
         defer_open_check = opts.defer_open_check,
         suppress_flex_cap = opts.suppress_flex_cap,
+        -- Ordinary consumers keep UNKNOWN_SLOT nonsemantic. Generic discovery
+        -- may additionally preserve its unresolved pattern here so a direct
+        -- contextual call through `value` can publish provisional result
+        -- evidence and close that AST-owned operation with the ambient use.
+        inference_fixed = opts.inference_fixed,
+        inference_tail = opts.inference_tail,
     }
 end
 
@@ -4932,12 +4938,20 @@ local function synthesize_function_type(params, varargtype, demand, loc,
                                         errors)
     local rettypes = {}
     for i, target in ipairs(demand.fixed) do
-        rettypes[i] = expected_type(target) or types.Value()
+        -- A generic discovery slot remains unknown to ordinary expression
+        -- checking, but a contextual `value` call is itself the producer of
+        -- that slot. Preserve the fresh inference pattern provisionally so a
+        -- later sibling can close it before code-facing annotations freeze.
+        rettypes[i] = expected_type(target)
+            or (demand.inference_fixed and demand.inference_fixed[i])
+            or types.Value()
     end
 
     local flexrettype = false
     if demand.tail then
-        flexrettype = expected_type(demand.tail) or types.Value()
+        flexrettype = expected_type(demand.tail)
+            or demand.inference_tail
+            or types.Value()
         flexrettype = check_varg_elem(flexrettype,
             demand.loc or loc, errors, "return")
     end
@@ -4970,9 +4984,11 @@ local function coerce_demanded_value(exp, target, term, errors)
 end
 
 local function remaining_demand(demand, first)
-    local fixed = {}
+    local fixed, inference_fixed = {}, {}
     for i = first, #demand.fixed do
         table.insert(fixed, demand.fixed[i])
+        table.insert(inference_fixed,
+            demand.inference_fixed and demand.inference_fixed[i] or false)
     end
     return result_demand(fixed, demand.tail, {
         missing = demand.missing,
@@ -4990,6 +5006,8 @@ local function remaining_demand(demand, first)
         dots_nilfill = demand.dots_nilfill,
         defer_open_check = demand.defer_open_check,
         suppress_flex_cap = demand.suppress_flex_cap,
+        inference_fixed = inference_fixed,
+        inference_tail = demand.inference_tail,
     })
 end
 
@@ -5096,8 +5114,12 @@ local function adjust_explist(exps, demand, st, errors)
         local target, intail = current_target()
         local subdemand
         if target then
+            local inference_target = intail and demand.inference_tail
+                or (demand.inference_fixed
+                    and demand.inference_fixed[next_fixed])
             subdemand = result_demand({ target }, false, {
                 term = demand_term(demand, next_fixed),
+                inference_fixed = { inference_target or false },
             })
         else
             subdemand = result_demand({}, false, { term = demand.term })
@@ -5431,21 +5453,35 @@ function checker._generic.constructor_context_for_expression(operation, pattern,
     local context = operation.context
     local closed = checker._generic.closed_inference_pattern(context, pattern)
     if closed then return closed end
-    -- Only another constructor can consume an unresolved structural owner
-    -- without freezing an ordinary adjustment. Generic calls and scalar
+    -- Only another constructor can consume an unresolved structural owner as
+    -- an ordinary expected type without freezing an adjustment. Other
     -- expressions contribute their provisional types through explicit
-    -- constructor evidence below.
+    -- constructor evidence below; a contextual `value` call separately sees
+    -- the pattern through its nonsemantic inference demand.
     if exp._tag == "Ast.ExpInitList" then
         return checker._generic.substitute_inference(context, pattern, false)
     end
     return nil
 end
 
-function checker._generic.constructor_result_demand(pattern, demand)
-    if not pattern then return demand end
-    local fixed = {}
-    for index in ipairs(demand.fixed or {}) do fixed[index] = pattern end
-    local tail = demand.tail and pattern or false
+function checker._generic.constructor_result_demand(
+        expected, demand, operation, pattern)
+    local provisional = operation and pattern and
+        checker._generic.substitute_inference(
+            operation.context, pattern, false) or false
+    if not expected and not provisional then return demand end
+
+    local fixed, inference_fixed = {}, {}
+    for index, target in ipairs(demand.fixed or {}) do
+        fixed[index] = expected or target
+        inference_fixed[index] = provisional
+            or (demand.inference_fixed
+                and demand.inference_fixed[index])
+            or false
+    end
+    local tail = demand.tail and (expected or demand.tail) or false
+    local inference_tail = demand.tail and
+        (provisional or demand.inference_tail) or false
     return result_demand(fixed, tail, {
         term = demand.term,
         loc = demand.loc,
@@ -5453,6 +5489,24 @@ function checker._generic.constructor_result_demand(pattern, demand)
         explicit_surplus = demand.explicit_surplus,
         open_coerce = demand.open_coerce,
         defer_open_check = demand.defer_open_check,
+        inference_fixed = inference_fixed,
+        inference_tail = inference_tail,
+    })
+end
+
+function checker._generic.constructor_scalar_demand(
+        operation, pattern, expected, term, loc)
+    -- Preserve the ordinary default demand (and its diagnostics) whenever a
+    -- real expected type exists. This side channel exists only for an
+    -- unresolved dependent field/key/value; every expression except a direct
+    -- contextual `value` call continues to treat the slot as unknown.
+    if expected or not operation or not pattern then return nil end
+    local provisional = checker._generic.substitute_inference(
+        operation.context, pattern, false)
+    return result_demand({ UNKNOWN_SLOT }, false, {
+        term = term,
+        loc = loc,
+        inference_fixed = { provisional },
     })
 end
 
@@ -5596,7 +5650,8 @@ local function check_positional_constructor(node, st, errors, container_tag,
                 local expected = checker._generic.constructor_context_for_expression(
                     operation, elem_context, exp)
                 checkexp(exp, est, eerrors, expected,
-                    checker._generic.constructor_result_demand(expected, demand))
+                    checker._generic.constructor_result_demand(
+                        expected, demand, operation, elem_context))
             end or nil,
         }), st, errors)
 
@@ -5667,11 +5722,17 @@ local function check_computed_map_constructor(
         assert(constructor_field_kind(field) == "computed")
         local key_expected = checker._generic.constructor_context_for_expression(
             operation, kcontext, field.name)
-        checkexp(field.name, st, errors, key_expected)
+        checkexp(field.name, st, errors, key_expected,
+            checker._generic.constructor_scalar_demand(
+                operation, kcontext, key_expected,
+                "map key initializer", field.name.loc))
         table.insert(ktypes, field.name._type)
         local value_expected = checker._generic.constructor_context_for_expression(
             operation, vcontext, field.exp)
-        checkexp(field.exp, st, errors, value_expected)
+        checkexp(field.exp, st, errors, value_expected,
+            checker._generic.constructor_scalar_demand(
+                operation, vcontext, value_expected,
+                "map value initializer", field.exp.loc))
         table.insert(vtypes, field.exp._type)
     end
 
@@ -5839,7 +5900,10 @@ function checker._generic.check_named_record_constructor(
         else
             local expected = checker._generic.constructor_context_for_expression(
                 operation, found.type, cfield.exp)
-            checkexp(cfield.exp, st, errors, expected)
+            checkexp(cfield.exp, st, errors, expected,
+                checker._generic.constructor_scalar_demand(
+                    operation, found.type, expected,
+                    "field " .. cfield.name, cfield.loc))
             cfield._field = found
             supplied[found.name] = true
             if operation then
@@ -7810,6 +7874,10 @@ local function synthesize_value_call_inputs(args, loc, st, errors)
             loc = loc,
             missing = "error",
             explicit_surplus = "discard",
+            -- The synthesized signature may still mention ambient inference
+            -- cells. Its AST-owned close classifies the one open input edge
+            -- only after those cells and nested producers have finalized.
+            defer_open_check = true,
         }), st, errors)
 
     local params = {}
@@ -7838,6 +7906,29 @@ local function synthesize_value_call_type(node, demand, st, errors)
 
     return synthesize_function_type(params, varargtype, demand, node.loc,
         errors), adjusted
+end
+
+function checker._generic.finalize_contextual_value_callee(
+        node, original, synthesized, errors)
+    local cast = trycoerce(original, synthesized, errors)
+    if cast == original then
+        -- Error recovery: an invalid synthesized component (or an
+        -- unreifiable raw-pointer tail) has already been diagnosed. Retain the
+        -- contextual call shape without claiming that an assignment plan
+        -- exists, so later checker passes can report each source error once.
+        cast = ast.ExpCast(original.loc, original, synthesized)
+        cast._type = synthesized
+        cast._implicit_coercion = true
+        cast._adjustment_failed = true
+    end
+    assert(cast._tag == "Ast.ExpCast")
+    -- This cast target is already a resolved Type.Function. It is deliberately
+    -- not redispatched through the ExpCast visitor: the callee and every
+    -- argument were checked exactly once.
+    cast._contextual_value_cast = true
+    node.exp = cast
+    node._contextual_value_call = true
+    node._contextual_function_type = synthesized
 end
 
 -- Record both result shapes of a checked call. `_types` remains the callable's
@@ -9509,24 +9600,33 @@ function checker._generic.inference_expression_context(context, pattern, exp)
 end
 
 function checker._generic.generic_discovery_demand(context, signature, first, original)
-    local fixed = {}
+    local fixed, inference_fixed = {}, {}
     for offset = 1, #(original.fixed or {}) do
-        local pattern = checker._generic.generic_formal_pattern(signature, first + offset - 1)
-        fixed[offset] = pattern
-            and checker._generic.closed_inference_pattern(context, pattern)
-            or UNKNOWN_SLOT
+        local pattern = checker._generic.generic_formal_pattern(
+            signature, first + offset - 1)
+        local closed = pattern and
+            checker._generic.closed_inference_pattern(context, pattern)
+        fixed[offset] = closed or UNKNOWN_SLOT
+        inference_fixed[offset] = pattern and
+            checker._generic.substitute_inference(context, pattern, false)
+            or false
     end
-    local tail = false
+    local tail, inference_tail = false, false
     if original.tail then
-        tail = signature.varargtype
-            and checker._generic.closed_inference_pattern(
-                context, signature.varargtype)
-            or INFER_OPEN
+        local pattern = signature.varargtype
+        local closed = pattern and
+            checker._generic.closed_inference_pattern(context, pattern)
+        tail = closed or INFER_OPEN
+        inference_tail = pattern and
+            checker._generic.substitute_inference(context, pattern, false)
+            or false
     end
     return result_demand(fixed, tail, {
         term = original.term,
         loc = original.loc,
         suppress_flex_cap = original.suppress_flex_cap,
+        inference_fixed = inference_fixed,
+        inference_tail = inference_tail,
     })
 end
 
@@ -9791,9 +9891,13 @@ function checker._generic.infer_named_call(context, signature, fields,
             else
                 local expected = checker._generic.inference_expression_context(
                     context, pattern, field.exp)
+                local provisional = not expected and
+                    checker._generic.substitute_inference(
+                        context, pattern, false) or false
                 checkexp(field.exp, st, errors, expected,
                     result_demand({ expected or UNKNOWN_SLOT }, false, {
                         term = "named generic argument",
+                        inference_fixed = { provisional },
                     }))
                 checker._generic.unify_inference(context, pattern,
                     field.exp._type, "named argument '" .. field.name .. "'",
@@ -9959,6 +10063,37 @@ function checker._generic.infer_dependent_call_application(
         end)
     end
     return provisional, true
+end
+
+-- A direct call through `value` has already checked its callee and discovered
+-- its argument run exactly once before its contextual function shape exists.
+-- When that shape contains ambient cells, keep the zero-binder operation open:
+-- later sibling evidence closes the synthesized parameters/results, then this
+-- postorder finalizer freezes the ordinary argument edges and callee cast
+-- without redispatching any written expression.
+function checker._generic.infer_dependent_value_call_application(
+        operation, signature, node, adjusted, st, errors, term, finalize)
+    if not operation
+       or not checker._generic.inference_type_has_unresolved(
+           operation.context, signature) then
+        return signature, false
+    end
+
+    assert(operation.node == node)
+    assert(not operation.signature
+            and not operation.contextual_value_signature,
+        "ordinary inference operation registered more than one call plan")
+    operation.contextual_value_signature = signature
+    operation.dependent = true
+    checker._generic.add_inference_finalizer(operation, function()
+        local closed = checker._generic.substitute_inference(
+            operation.context, signature, true)
+        operation.closed = closed
+        checker._generic.close_generic_adjusted_arguments(
+            adjusted, node.args.args, closed, st, errors, term)
+        finalize(closed)
+    end)
+    return signature, true
 end
 
 function checker._generic.close_inference_declaration(
@@ -11147,6 +11282,7 @@ checkexp = util.make_visitor({
                 return
             end
             local contextual_args
+            local dependent_call = false
             if ftype._tag == "Type.Value" then
                 if named then
                     node._type = types.Invalid()
@@ -11159,26 +11295,23 @@ checkexp = util.make_visitor({
                 synthesized, contextual_args = synthesize_value_call_type(
                     node, demand, st, errors)
                 local original = node.exp
-                node.exp = trycoerce(original, synthesized, errors)
-                if node.exp == original then
-                    -- Error recovery: an invalid synthesized component (or an
-                    -- unreifiable raw-pointer tail) has already been diagnosed.
-                    -- Retain the contextual call shape without claiming that
-                    -- an assignment plan exists, so later checker passes can
-                    -- continue and report each source error exactly once.
-                    node.exp = ast.ExpCast(
-                        original.loc, original, synthesized)
-                    node.exp._type = synthesized
-                    node.exp._implicit_coercion = true
-                    node.exp._adjustment_failed = true
-                end
-                assert(node.exp._tag == "Ast.ExpCast")
-                -- This cast target is already a resolved Type.Function. It is
-                -- deliberately not redispatched through the ExpCast visitor:
-                -- the callee and every argument were checked exactly once.
-                node.exp._contextual_value_cast = true
                 node._contextual_value_call = true
                 node._contextual_function_type = synthesized
+                synthesized, dependent_call =
+                    checker._generic.infer_dependent_value_call_application(
+                        inference_operation, synthesized, node,
+                        contextual_args, st, errors,
+                        "function '" .. fname .. "'", function(closed)
+                            checker._generic.finalize_contextual_value_callee(
+                                node, original, closed, errors)
+                        end)
+                if not dependent_call then
+                    checker._generic.close_generic_adjusted_arguments(
+                        contextual_args, node.args.args, synthesized,
+                        st, errors, "function '" .. fname .. "'")
+                    checker._generic.finalize_contextual_value_callee(
+                        node, original, synthesized, errors)
+                end
                 ftype = synthesized
             end
             -- Auto-unwrap an option-of-function callee (e.g. an array element
@@ -11197,7 +11330,6 @@ checkexp = util.make_visitor({
                 return
             end
 
-            local dependent_call = false
             -- Named function syntax requires a direct declaration, so a
             -- computed generic result cannot be its callee. Positional calls
             -- through such a result contribute ordinary argument/result
@@ -11422,16 +11554,21 @@ checkexp = util.make_visitor({
         node._type = types.Boolean()
     end,
 
-    ["Ast.ExpAdjust"] = function(node, st, errors, context)
+    ["Ast.ExpAdjust"] = function(node, st, errors, context, demand)
         node.exp._voidok = true
         -- Parentheses force exactly one result even though `_voidok` permits a
         -- genuinely zero-return call (which is adjusted upward to nil below).
         -- Pass the demand explicitly so `_voidok` is not mistaken for a
-        -- statement/discard context.
+        -- statement/discard context. Preserve a generic discovery pattern for
+        -- a directly enclosed contextual `value` call without making it an
+        -- ordinary expected type for any other expression.
+        local provisional = demand and demand.inference_fixed
+            and demand.inference_fixed[1] or false
         checkexp(node.exp, st, errors, context,
             result_demand({ context or UNKNOWN_SLOT }, false, {
                 term = "parenthesized expression",
                 loc = node.loc,
+                inference_fixed = { provisional },
             }))
         if node.exp._type._tag == "Type.Void" then
             -- `(f())` on a zero-return call adjusts up to a single `nil`,

@@ -315,14 +315,21 @@ constructor, method, bound method, or contextual first-class use inherits the
 ambient context instead of closing a private one. A generic occurrence registers
 its own fresh scope entries and a child use record; direct cell-to-cell
 unification records an equation, so a nested cell can remain equal to an outer
-cell until later sibling evidence resolves either side. An ordinary call or an
-enclosing Array, Map, or context-only record constructor registers a zero-binder
-operation use before descending. A dependent callable signature gathers argument
-and result evidence, while constructor fields contribute key/value equations,
-without freezing adjustments against open cells. After child uses close, the
-operation freezes its call, method, Interface, container, record-field, writer,
-and adjustment annotations. Named computed-function calls remain unavailable by
-the ordinary direct-declaration rule; named methods use the same operation plan.
+cell until later sibling evidence resolves either side. An ordinary call, a
+direct contextual call through `value`, or an enclosing Array, Map, or
+context-only record constructor registers a zero-binder operation use before
+descending. A dependent callable signature gathers argument and result evidence,
+while constructor fields contribute key/value equations, without freezing
+adjustments against open cells. Generic discovery keeps an unresolved result
+pattern nonsemantic for ordinary expressions but gives it provisionally to a
+contextual `value` call. That call checks its callee and discovers its input run
+once; its operation later closes the synthesized function type, argument edges,
+callee cast, fixed results, and flexible result tail without redispatching the
+written subtree. After child uses close, each operation freezes its call, method,
+Interface, container, record-field, writer, and adjustment annotations. Named
+computed-function calls remain unavailable by the ordinary direct-declaration
+rule; a contextual `value` call inside a direct generic named argument and named
+methods use their surrounding operation plans.
 A generic use creates and owns a context only when there is no ambient owner. A
 complete explicit type-argument list remains closed locally and contributes its
 resulting ordinary type as evidence.
