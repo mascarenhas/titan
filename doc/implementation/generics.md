@@ -315,18 +315,35 @@ constructor, method, bound method, or contextual first-class use inherits the
 ambient context instead of closing a private one. A generic occurrence registers
 its own fresh scope entries and a child use record; direct cell-to-cell
 unification records an equation, so a nested cell can remain equal to an outer
-cell until later sibling evidence resolves either side. An ordinary call, a
-direct contextual call through `value`, or an enclosing Array, Map, or
-context-only record constructor registers a zero-binder operation use before
-descending. A dependent callable signature gathers argument and result evidence,
-while constructor fields contribute key/value equations, without freezing
-adjustments against open cells. Generic discovery keeps an unresolved result
-pattern nonsemantic for ordinary expressions but gives it provisionally to a
-contextual `value` call. That call checks its callee and discovers its input run
-once; its operation later closes the synthesized function type, argument edges,
-callee cast, fixed results, and flexible result tail without redispatching the
-written subtree. After child uses close, each operation freezes its call, method,
-Interface, container, record-field, writer, and adjustment annotations. Named
+cell until later sibling evidence resolves either side.
+
+Any expression that derives checker-owned annotations from a child registers a
+zero-binder operation use before descending. This shared derived-operation
+protocol covers ordinary computed calls/methods, direct contextual calls through
+`value`, parentheses, record fields, Array/Map indexing, bound methods,
+finite/open result projections, and Array, Map, or context-only record
+constructors. A dependent callable signature gathers argument and result
+evidence, while structural projections and constructor components retain
+explicit equations without freezing adjustments against open cells.
+
+Generic discovery keeps an unresolved result pattern nonsemantic for ordinary
+expressions but gives it provisionally to a contextual `value` call. That call
+checks its callee and discovers its input run once; its operation later closes
+the synthesized function type, argument edges, callee cast, fixed results, and
+flexible result tail without redispatching the written subtree.
+
+A context-only record constructor whose expected type is still a direct
+inference cell cannot resolve its field descriptors immediately. It checks each
+written field expression exactly once in lexical order, registers its nested
+uses, and queues a one-shot discovery callback. Before carrier defaults, the
+owner repeatedly runs discovery and constraint propagation to a bounded fixed
+point. Once sibling evidence identifies the record owner, discovery maps the
+already checked expressions to the closed field patterns and contributes their
+equations. It never redispatches a field expression.
+
+After child uses close, reusable postorder annotation finalizers smart-substitute
+or rebuild the operation's `_type`, field/index guard, method/Interface,
+parenthesized, result-projection, writer, and adjustment annotations. Named
 computed-function calls remain unavailable by the ordinary direct-declaration
 rule; a contextual `value` call inside a direct generic named argument and named
 methods use their surrounding operation plans.
@@ -344,23 +361,27 @@ has contributed evidence. The checker then:
    parameter and result types, registering nested applications without
    finalizing them;
 3. invariantly unifies structural evidence and cross-use cell equations;
-4. propagates declared constraint evidence across the equation classes;
+4. alternates declared-constraint propagation with one-shot pre-close
+   discovery callbacks until no new owner-dependent equation can be contributed;
 5. after evidence is exhausted, closes each equivalence class to its declared
    erased carrier, preferring any resolvable constrained Interface application
    before the unconstrained `value` default;
 6. validates every declaration-local constraint and
    `types.transient_roundtrip` against the closed class binding; and
-7. finalizes the registered use tree in postorder: deepest children before their
-   parent, left-to-right among siblings. Finalization smart-substitutes each
-   closed application, refreshes provisional container/record annotations before
-   its parent adjustment, freezes argument/result adjustments, and checks each
-   deferred contextual lambda body exactly once.
+7. finalizes the registered application-and-operation tree in postorder: deepest
+   children before their parent, left-to-right among siblings. Finalization
+   smart-substitutes each closed application, refreshes every derived annotation
+   before its parent adjustment, freezes argument/result adjustments, and checks
+   each deferred contextual lambda body exactly once.
 
 The context is owned by the AST, while its temporary ambient pointer lives only
 in the current checker symbol-table state during recursive expression checking.
-It is neither process-global nor run-time state. Postorder finalization does not
-reevaluate or recheck written argument expressions; their original lexical
-checking and evaluation order remains authoritative.
+It is neither process-global nor run-time state. Discovery and postorder
+finalization do not reevaluate or recheck written callees, receivers, fields,
+indices, or argument expressions; their original lexical checking and evaluation
+order remains authoritative. Operation markers and inference cells are removed
+before the code-facing AST is returned, so no `Type.Parameter` survives on a
+runtime-facing annotation.
 
 Result evidence remains authoritative for empty union variants, phantom
 parameters, and result-only parameters such as the async Task cancellation

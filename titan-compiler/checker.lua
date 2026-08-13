@@ -5766,6 +5766,55 @@ local function check_computed_map_constructor(
     end
 end
 
+function checker._generic.resolve_named_record_constructor_context(
+        node, st, errors, context)
+    if not context then
+        node._type = invalid(errors, node.loc,
+            "no context to provide type for record constructor")
+        return nil
+    elseif context._tag ~= "Type.Nominal"
+       or not types.registry[context.fqtn] then
+        node._type = invalid(errors, node.loc,
+            "record type '%s' in context of record constructor does not exist",
+            types.tostring(context))
+        return nil
+    end
+
+    local record = checker._generic.applied_owner_view(
+        context, errors, node.loc)
+    if record._tag == "Type.Union" then
+        node._type = invalid(errors, node.loc,
+            "union type '%s' cannot be constructed with a record "
+            .. "initializer; call one of its variant constructors",
+            context.fqtn)
+        return nil
+    elseif record._tag ~= "Type.Record" then
+        node._type = invalid(errors, node.loc,
+            "nominal type '%s' is not a record type",
+            context.fqtn)
+        return nil
+    elseif record.islocal
+       and not is_nominal_visible_from(st, context.fqtn) then
+        node._type = invalid(errors, node.loc,
+            "record type '%s' is local to module '%s'",
+            context.fqtn, nominal_module(context.fqtn))
+        return nil
+    end
+
+    local visible_fields = visible_record_fields(record, st)
+    if (record.nfields or #record.fields) > #visible_fields then
+        node._type = invalid(errors, node.loc,
+            "cannot construct record type '%s' outside module '%s' because it has local fields",
+            context.fqtn, nominal_module(context.fqtn))
+        return nil
+    end
+    local visible_by_name = {}
+    for _, field in ipairs(visible_fields) do
+        visible_by_name[field.name] = field
+    end
+    return record, visible_fields, visible_by_name
+end
+
 function checker._generic.finish_named_record_constructor(
         node, st, errors, context, written_fields, operation)
     local closed_context = checker._generic.substitute_constructor_type(
@@ -5819,69 +5868,105 @@ end
 
 function checker._generic.check_named_record_constructor(
         node, st, errors, context, operation)
-    if not context then
-        node._type = invalid(errors, node.loc,
-            "no context to provide type for record constructor")
-        for _, field in ipairs(node.fields) do
+    local provisional = operation and context
+        and checker._generic.substitute_constructor_type(
+            operation, context, false) or context
+    local deferred_owner = operation and provisional
+        and provisional._tag == "Type.Parameter"
+        and checker._generic.inference_type_has_unresolved(
+            operation.context, provisional)
+    if deferred_owner then
+        local written_fields = { table.unpack(node.fields) }
+        -- The record owner is not known yet, but every written field expression
+        -- still owns its lexical checking slot. Descend exactly once now so
+        -- nested generic uses register distinct ambient cells.
+        for _, field in ipairs(written_fields) do
             checkexp(field.exp, st, errors)
         end
+        node._type = context
+
+        local plan = { complete = false, valid = false }
+        local function map_fields(candidate, visible_by_name, contribute)
+            local valid = true
+            for _, cfield in ipairs(written_fields) do
+                local found = visible_by_name[cfield.name]
+                if not found then
+                    valid = false
+                    if cfield.name then
+                        checker.typeerror(errors, cfield.loc,
+                            "field '%s' not found in record type '%s'",
+                            cfield.name, types.tostring(candidate))
+                    else
+                        checker.typeerror(errors, cfield.loc,
+                            "missing field in initializer for record type '%s'",
+                            types.tostring(candidate))
+                    end
+                else
+                    cfield._field = found
+                    if contribute then
+                        checker._generic.constructor_unify(operation,
+                            found.type, cfield.exp._type,
+                            "field " .. cfield.name, cfield.loc)
+                    end
+                end
+            end
+            return valid
+        end
+
+        checker._generic.add_inference_discovery(operation, function()
+            local candidate = checker._generic.substitute_constructor_type(
+                operation, context, false)
+            candidate = candidate and deoptionize(candidate)
+            if candidate and candidate._tag == "Type.Parameter"
+               and checker._generic.inference_type_has_unresolved(
+                   operation.context, candidate) then
+                return false
+            end
+            local _, _, visible_by_name =
+                checker._generic.resolve_named_record_constructor_context(
+                    node, st, errors, candidate)
+            plan.complete = true
+            if visible_by_name then
+                plan.valid = map_fields(candidate, visible_by_name, true)
+            end
+            return true
+        end)
+
+        checker._generic.add_inference_finalizer(operation, function()
+            local candidate = checker._generic.substitute_constructor_type(
+                operation, context, true)
+            candidate = candidate and deoptionize(candidate)
+            if not plan.complete then
+                local _, _, visible_by_name =
+                    checker._generic.resolve_named_record_constructor_context(
+                        node, st, errors, candidate)
+                plan.complete = true
+                if visible_by_name then
+                    -- Carrier defaults have already run. This recovery mapping
+                    -- may freeze diagnostics and annotations but never adds late
+                    -- equations to the closed owner.
+                    plan.valid = map_fields(
+                        candidate, visible_by_name, false)
+                end
+            end
+            if plan.valid then
+                checker._generic.finish_named_record_constructor(
+                    node, st, errors, context, written_fields, operation)
+            end
+        end)
         return
-    elseif not types.registry[context.fqtn] then
-        node._type = invalid(errors, node.loc,
-            "record type '%s' in context of record constructor does not exist",
-            types.tostring(context))
+    end
+
+    local record, visible_fields, visible_by_name =
+        checker._generic.resolve_named_record_constructor_context(
+            node, st, errors, context)
+    if not record then
         for _, field in ipairs(node.fields) do
             checkexp(field.exp, st, errors)
         end
         return
     end
 
-    local record = checker._generic.applied_owner_view(
-        context, errors, node.loc)
-    if record._tag == "Type.Union" then
-        node._type = invalid(errors, node.loc,
-            "union type '%s' cannot be constructed with a record "
-            .. "initializer; call one of its variant constructors",
-            context.fqtn)
-        for _, field in ipairs(node.fields) do
-            checkexp(field.exp, st, errors)
-        end
-        return
-    elseif record._tag ~= "Type.Record" then
-        node._type = invalid(errors, node.loc,
-            "nominal type '%s' is not a record type",
-            context.fqtn)
-        for _, field in ipairs(node.fields) do
-            checkexp(field.exp, st, errors)
-        end
-        return
-    end
-    if record.islocal
-       and not is_nominal_visible_from(st, context.fqtn) then
-        node._type = invalid(errors, node.loc,
-            "record type '%s' is local to module '%s'",
-            context.fqtn, nominal_module(context.fqtn))
-        for _, field in ipairs(node.fields) do
-            checkexp(field.exp, st, errors)
-        end
-        return
-    end
-
-    local visible_fields = visible_record_fields(record, st)
-    if (record.nfields or #record.fields) > #visible_fields then
-        node._type = invalid(errors, node.loc,
-            "cannot construct record type '%s' outside module '%s' because it has local fields",
-            context.fqtn, nominal_module(context.fqtn))
-        for _, field in ipairs(node.fields) do
-            checkexp(field.exp, st, errors)
-        end
-        return
-    end
-
-    local visible_by_name = {}
-    for _, field in ipairs(visible_fields) do
-        visible_by_name[field.name] = field
-    end
     local written_fields = { table.unpack(node.fields) }
     local supplied = {}
     for _, cfield in ipairs(written_fields) do
@@ -7256,6 +7341,10 @@ checkvar = util.make_visitor({
     end,
 
     ["Ast.VarDot"] = function(node, st, errors, context)
+        return checker._generic.with_inference_operation(node, st,
+        function(operation)
+        local written_exp = node.exp
+        local nominal_field_projection = false
         if node.exp._tag == "Ast.ExpVar" then
             checkvar(node.exp.var, st, errors)
             if node.exp.var._decl then node.exp.var._decl._used = true end
@@ -7422,6 +7511,7 @@ checkvar = util.make_visitor({
                        and is_nominal_member_visible_from(st, field) then
                         node._decl = field
                         node._type = field.type
+                        nominal_field_projection = true
                         break
                     end
                 end
@@ -7543,11 +7633,119 @@ checkvar = util.make_visitor({
                 node._type = types.Invalid()
             end
         end
+        if nominal_field_projection then
+            checker._generic.defer_inference_derived_annotations(
+                operation, node, {
+                    _type = true,
+                    _decl = true,
+                    _assignment_adjustment = function(value)
+                        return checker._generic.finalize_adjustment_annotation(
+                            operation, value)
+                    end,
+                }, function()
+                    -- Rebuild only the checker-synthesized Option projection.
+                    -- The written receiver and its nested uses were checked
+                    -- exactly once and have already finalized in postorder.
+                    node.exp = written_exp
+                    if node.exp._type._tag == "Type.Option"
+                       and node.exp._type.base._tag == "Type.Nominal" then
+                        node.exp = tryforce(node.exp)
+                    end
+                end)
+        end
+        end, "field projection")
     end,
 
     ["Ast.VarBracket"] = function(node, st, errors, _, mode)
+        return checker._generic.with_inference_operation(node, st,
+        function(operation)
+        local written_exp1, written_exp2 = node.exp1, node.exp2
         checkexp(node.exp1, st, errors)
         node.exp1 = tryforce(node.exp1)
+
+        local provisional = node.exp1._type
+        local dependent_container = operation
+            and (provisional._tag == "Type.Array"
+                or provisional._tag == "Type.Map")
+            and checker._generic.inference_type_has_unresolved(
+                operation.context, provisional)
+        if dependent_container then
+            local keystype, term
+            if provisional._tag == "Type.Array" then
+                node._type = optionize(provisional.elem)
+                keystype = types.Integer()
+                term = "array indexing"
+            else
+                node._type = optionize(provisional.values)
+                keystype = provisional.keys
+                term = "map indexing"
+            end
+            node._read_guard = false
+            node._generic_read_type = nil
+
+            local expected = checker._generic.closed_inference_pattern(
+                operation.context, keystype)
+            checkexp(written_exp2, st, errors, expected)
+            node.exp2 = written_exp2
+            checker._generic.unify_inference(operation.context,
+                keystype, written_exp2._type, term .. " key", node.loc)
+
+            checker._generic.defer_inference_derived_annotations(
+                operation, node, {
+                    _type = true,
+                    _assignment_adjustment = function(value)
+                        return checker._generic.finalize_adjustment_annotation(
+                            operation, value)
+                    end,
+                }, function()
+                    node.exp1 = written_exp1
+                    node.exp1 = tryforce(node.exp1)
+                    local closed = node.exp1._type
+                    local final_key, elem
+                    if closed._tag == "Type.Array" then
+                        final_key, elem = types.Integer(), closed.elem
+                        term = "array indexing"
+                    elseif closed._tag == "Type.Map" then
+                        final_key, elem = closed.keys, closed.values
+                        term = "map indexing"
+                    else
+                        -- The provisional structural owner cannot change after
+                        -- invariant unification; retain finite recovery if an
+                        -- earlier conflict made the context invalid.
+                        node._type = types.Invalid()
+                        node._read_guard = false
+                        return
+                    end
+                    node._type = optionize(elem)
+                    local read_type = checker._generic.runtime_carrier(
+                        node._type)
+                    node._read_guard = types.gradual_guard(read_type) or false
+                    node._generic_read_type = read_type ~= node._type
+                        and node._type or nil
+                    if mode ~= "write" and not node._read_guard then
+                        if closed._tag == "Type.Array" then
+                            checker.typeerror(errors, node.loc,
+                                "cannot read array elements of type '%s' "
+                                .. "because the type has no sound runtime guard",
+                                types.tostring(elem))
+                        else
+                            checker.typeerror(errors, node.loc,
+                                "cannot read map values of type '%s' "
+                                .. "because the type has no sound runtime guard",
+                                types.tostring(elem))
+                        end
+                    end
+                    node.exp2 = coerce_and_check(written_exp2, final_key,
+                        term, errors, written_exp2.loc)
+                    if node._type._tag ~= "Type.Invalid"
+                       and not checker._ensure_c_enum_supported(
+                           st, node._type, node.loc, errors) then
+                        node._type = types.Invalid()
+                    end
+                end)
+            return
+        end
+
         local keystype, term
         local fam_access = node.exp1._c_fam_access
         local celem, cterm, cerr
@@ -7619,6 +7817,7 @@ checkvar = util.make_visitor({
                st, node._type, node.loc, errors) then
             node._type = types.Invalid()
         end
+        end, "index projection")
     end,
 })
 
@@ -8708,7 +8907,9 @@ function checker._generic.register_inference_use(
         loc = loc,
         scopes = scopes or {},
         children = {},
+        discoveries = {},
         finalizers = {},
+        derived_nodes = {},
         context = context,
         parent = context.active_use or false,
         owns_context = owns_context and true or false,
@@ -8771,19 +8972,103 @@ function checker._generic.with_inference_operation(node, st, action, subject)
         return action(false)
     end
 
+    -- An ExpVar delegates projection checking to its Var child. Keep the
+    -- expression itself as the operation identity so parent expression-list
+    -- aliases observe the finalized annotations on the delivered AST node.
+    local operation_node = node
+    if node._tag == "Ast.VarDot" or node._tag == "Ast.VarBracket" then
+        operation_node = st.generic_inference_expression_owner or node
+    end
+
     -- A dependent operation needs its own use-tree position before descending,
     -- so nested generic uses and operations finalize before it freezes the
     -- annotations derived from their provisional types.
     local use = checker._generic.register_inference_use(
-        context, node, subject or "dependent operation", node.loc, {}, false)
-    node._generic_inference_operation_use = use
+        context, operation_node, subject or "dependent operation",
+        operation_node.loc, {}, false)
+    use.derived_nodes[1] = operation_node
+    operation_node._generic_inference_operation_use = use
     return checker._generic.with_inference_use(context, use, st, function()
         return action(use)
     end)
 end
 
+function checker._generic.add_inference_discovery(use, discovery)
+    use.discoveries[#use.discoveries + 1] = {
+        callback = discovery,
+        complete = false,
+    }
+end
+
 function checker._generic.add_inference_finalizer(use, finalizer)
     use.finalizers[#use.finalizers + 1] = finalizer
+end
+
+function checker._generic.substitute_inference_graph(
+        operation, value, recover, seen)
+    if type(value) ~= "table" then return value end
+    if type(value._tag) == "string"
+       and value._tag:match("^Type%.") then
+        return checker._generic.substitute_inference(
+            operation.context, value, recover ~= false)
+    end
+    seen = seen or {}
+    if seen[value] then return seen[value] end
+    local out = {}
+    seen[value] = out
+    for key, child in pairs(value) do
+        out[key] = checker._generic.substitute_inference_graph(
+            operation, child, recover, seen)
+    end
+    return out
+end
+
+function checker._generic.finalize_inference_annotation(
+        operation, value, recover)
+    return checker._generic.substitute_inference_graph(
+        operation, value, recover, {})
+end
+
+-- Derived expressions own no fresh binders. They still need a postorder slot so
+-- checker annotations copied from an open child are refreshed only after that
+-- child has closed, without redispatching any written expression. `fields`
+-- maps each annotation key to either true (smart-substitute a Type value) or a
+-- refresh callback `(old, context, operation_node, node) -> new`.
+function checker._generic.register_inference_derived_node(operation, node)
+    operation.derived_nodes[#operation.derived_nodes + 1] = node
+end
+
+function checker._generic.defer_inference_derived_annotations(
+        operation, node, fields, finalizer)
+    if not operation then return false end
+    local operation_node = operation.node or node
+    checker._generic.register_inference_derived_node(operation, node)
+    if operation_node ~= node then
+        checker._generic.register_inference_derived_node(
+            operation, operation_node)
+    end
+    checker._generic.add_inference_finalizer(operation, function()
+        local copies = {}
+        for key, refresh in pairs(fields or {}) do
+            local value = node[key]
+            if refresh == true then
+                value = checker._generic.finalize_inference_annotation(
+                    operation, value, true)
+            else
+                value = refresh(value, operation.context,
+                    operation_node, node)
+            end
+            node[key] = value
+            copies[key] = value
+        end
+        if finalizer then finalizer(operation.context, operation_node) end
+        if operation_node ~= node then
+            for key, value in pairs(copies) do operation_node[key] = value end
+            if node._type then operation_node._type = node._type end
+        end
+    end)
+    operation.dependent_derived = true
+    return true
 end
 
 function checker._generic.finalize_inference_use(use)
@@ -9239,6 +9524,45 @@ function checker._generic.infer_constraint_evidence(context)
     end
 end
 
+function checker._generic.inference_discovery_pass(use)
+    local completed = 0
+    -- A parent discovery may depend on a nested derived operation. Match the
+    -- finalizer order here: deepest children first, lexical siblings in order.
+    for _, child in ipairs(use.children) do
+        completed = completed + checker._generic.inference_discovery_pass(child)
+    end
+    for _, discovery in ipairs(use.discoveries) do
+        if not discovery.complete and discovery.callback() then
+            discovery.complete = true
+            completed = completed + 1
+        end
+    end
+    return completed
+end
+
+function checker._generic.discover_inference_evidence(context)
+    local count = 0
+    local function count_use(use)
+        count = count + #use.discoveries
+        for _, child in ipairs(use.children) do count_use(child) end
+    end
+    for _, use in ipairs(context.roots) do count_use(use) end
+
+    -- Constraint propagation can make a deferred owner shape visible; a newly
+    -- discovered field/index equation can in turn unlock another constraint or
+    -- discovery. Each callback completes at most once, so this fixed point is
+    -- bounded by the number of AST-owned discovery records.
+    for _ = 1, math.max(1, count + 1) do
+        checker._generic.infer_constraint_evidence(context)
+        local completed = 0
+        for _, use in ipairs(context.roots) do
+            completed = completed + checker._generic.inference_discovery_pass(use)
+        end
+        if completed == 0 then break end
+    end
+    checker._generic.infer_constraint_evidence(context)
+end
+
 function checker._generic.default_inference_cells(context)
     -- Defaults belong to equivalence classes, not declaration positions. A
     -- nested constrained binder equated with an unconstrained outer binder must
@@ -9325,11 +9649,43 @@ function checker._generic.default_inference_cells(context)
     return unresolved
 end
 
+function checker._generic.assert_inference_derived_nodes_closed(context)
+    local source_backreference = {
+        _decl = true,
+        _declared_type = true,
+        _generic_scheme = true,
+        _generic_declaration = true,
+        _generic_owner = true,
+    }
+    local seen = {}
+    local function visit(value, path)
+        if type(value) ~= "table" or seen[value] then return end
+        seen[value] = true
+        if value._tag == "Type.Parameter"
+           and checker._generic.inference_cell(context, value) then
+            error("ambient inference parameter survived derived finalization at "
+                .. path, 0)
+        end
+        for key, child in pairs(value) do
+            if not source_backreference[key] then
+                visit(child, path .. "." .. tostring(key))
+            end
+        end
+    end
+    local function visit_use(use)
+        for _, node in ipairs(use.derived_nodes) do
+            visit(node, node._tag or "derived operation")
+        end
+        for _, child in ipairs(use.children) do visit_use(child) end
+    end
+    for _, use in ipairs(context.roots) do visit_use(use) end
+end
+
 function checker._generic.close_inference_context(context)
     if context.closed then return context.valid end
     assert(not context.closing, "recursive generic inference-context close")
     context.closing = true
-    checker._generic.infer_constraint_evidence(context)
+    checker._generic.discover_inference_evidence(context)
     local unresolved = checker._generic.default_inference_cells(context)
     local valid = unresolved == 0
 
@@ -9397,6 +9753,7 @@ function checker._generic.close_inference_context(context)
     for _, use in ipairs(context.roots) do
         checker._generic.finalize_inference_use(use)
     end
+    checker._generic.assert_inference_derived_nodes_closed(context)
     return valid
 end
 
@@ -9630,7 +9987,44 @@ function checker._generic.generic_discovery_demand(context, signature, first, or
     })
 end
 
+function checker._generic.finalize_adjustment_annotation(
+        operation, adjustment)
+    return checker._generic.finalize_inference_annotation(
+        operation, adjustment, true)
+end
+
 function checker._generic.refresh_finalized_argument_projections(adjusted)
+    -- A scalar derived expression (field/index/bound method/parentheses) can
+    -- retain its original AST identity while postorder finalization replaces
+    -- only checker-owned annotations. Keep the owning expression-list aliases
+    -- synchronized before classifying its final sink adjustment.
+    for index, exp in pairs(adjusted.fixed) do
+        local delivered = exp._demand_slot == index and exp or nil
+        if not delivered then
+            for _, candidate in ipairs(adjusted.exps) do
+                if candidate._demand_slot == index then
+                    delivered = candidate
+                    break
+                end
+            end
+        end
+        if delivered and delivered ~= exp then adjusted.fixed[index] = delivered end
+    end
+    for index, exp in ipairs(adjusted.tail_scalars) do
+        local delivered = exp._demand_tail and exp or nil
+        if not delivered then
+            for _, candidate in ipairs(adjusted.exps) do
+                if candidate._demand_tail then
+                    delivered = candidate
+                    break
+                end
+            end
+        end
+        if delivered and delivered ~= exp then
+            adjusted.tail_scalars[index] = delivered
+        end
+    end
+
     -- A trailing child call is checked once while its generic occurrence is
     -- still open. `adjust_explist` consequently snapshots its finite extras and
     -- open element type before postorder finalization closes that child. Refresh
@@ -9702,10 +10096,14 @@ function checker._generic.close_generic_adjusted_arguments(adjusted, args, signa
     for index, exp in pairs(adjusted.fixed) do
         local target = signature.params[index]
         if target then
+            local source = exp
             local replacement = coerce_and_check(exp, target,
                 "argument " .. index .. " of " .. term,
                 errors, exp.loc)
-            replace_adjusted_value(adjusted, exp, replacement)
+            replace_adjusted_value(adjusted, source, replacement)
+            for position, argument in ipairs(args) do
+                if argument == source then args[position] = replacement end
+            end
         end
     end
     if signature.varargtype then
@@ -10626,6 +11024,9 @@ checkexp = util.make_visitor({
         return checker._generic.with_inference_operation(
             node, st, function(operation)
         context = context and deoptionize(context)
+        local dependent_context = operation and context
+            and checker._generic.inference_type_has_unresolved(
+                operation.context, context)
         local shape, kinds, dots_field, invalid_dots =
             classify_constructor_fields(node, errors)
 
@@ -10653,7 +11054,12 @@ checkexp = util.make_visitor({
                 -- useful structural context.
                 expected = "Type.Array"
             end
-            context = nil
+            -- A direct ambient cell has no owner shape yet. Preserve it only
+            -- for a named constructor: its fields can be checked once now and
+            -- the record owner can be discovered from later sibling evidence.
+            if not (shape == "named" and dependent_context) then
+                context = nil
+            end
         end
 
         if dots_field and expected == "Type.Nominal" then
@@ -10720,9 +11126,12 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpVar"] = function(node, st, errors, context)
+        local prior_owner = st.generic_inference_expression_owner
+        st.generic_inference_expression_owner = node
         if not node._generic_var_prechecked then
             checkvar(node.var, st, errors, context)
         end
+        st.generic_inference_expression_owner = prior_owner
         if node.var._decl then node.var._decl._used = true end
         local texp = node.var._type
         if node.var._generic_owner_explicit then
@@ -11555,29 +11964,44 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpAdjust"] = function(node, st, errors, context, demand)
-        node.exp._voidok = true
-        -- Parentheses force exactly one result even though `_voidok` permits a
-        -- genuinely zero-return call (which is adjusted upward to nil below).
-        -- Pass the demand explicitly so `_voidok` is not mistaken for a
-        -- statement/discard context. Preserve a generic discovery pattern for
-        -- a directly enclosed contextual `value` call without making it an
-        -- ordinary expected type for any other expression.
-        local provisional = demand and demand.inference_fixed
-            and demand.inference_fixed[1] or false
-        checkexp(node.exp, st, errors, context,
-            result_demand({ context or UNKNOWN_SLOT }, false, {
-                term = "parenthesized expression",
-                loc = node.loc,
-                inference_fixed = { provisional },
-            }))
-        if node.exp._type._tag == "Type.Void" then
-            -- `(f())` on a zero-return call adjusts up to a single `nil`,
-            -- mirroring Lua's parenthesized-call adjustment.
-            node._type = types.Nil()
-            node._adjustvoid = true
-        else
-            node._type = node.exp._type
-        end
+        return checker._generic.with_inference_operation(node, st,
+        function(operation)
+            node.exp._voidok = true
+            -- Parentheses force exactly one result even though `_voidok`
+            -- permits a genuinely zero-return call (which is adjusted upward
+            -- to nil below). Pass the demand explicitly so `_voidok` is not
+            -- mistaken for a statement/discard context. Preserve a generic
+            -- discovery pattern for a directly enclosed contextual `value`
+            -- call without making it an ordinary expected type elsewhere.
+            local provisional = demand and demand.inference_fixed
+                and demand.inference_fixed[1] or false
+            checkexp(node.exp, st, errors, context,
+                result_demand({ context or UNKNOWN_SLOT }, false, {
+                    term = "parenthesized expression",
+                    loc = node.loc,
+                    inference_fixed = { provisional },
+                }))
+
+            local function finish()
+                if node.exp._type._tag == "Type.Void" then
+                    -- `(f())` on a zero-return call adjusts up to a single
+                    -- `nil`, mirroring Lua's parenthesized-call adjustment.
+                    node._type = types.Nil()
+                    node._adjustvoid = true
+                else
+                    node._type = node.exp._type
+                    node._adjustvoid = nil
+                end
+            end
+            finish()
+            checker._generic.defer_inference_derived_annotations(
+                operation, node, {
+                    _assignment_adjustment = function(value)
+                        return checker._generic.finalize_adjustment_annotation(
+                            operation, value)
+                    end,
+                }, finish)
+        end, "parenthesized expression")
     end,
 
     -- Anonymous function expression (lambda). Both parameter and return types
@@ -11704,6 +12128,9 @@ checkexp = util.make_visitor({
     -- method's type with the implicit `self` removed and the receiver captured.
     -- Mirrors the method-resolution of the ArgsMethod arm of ExpCall.
     ["Ast.ExpMethodRef"] = function(node, st, errors, context)
+        return checker._generic.with_inference_operation(node, st,
+        function(operation)
+        local written_exp = node.exp
         checkexp(node.exp, st, errors)
         local otype = node.exp._type
         -- auto-unwrap an option receiver, like a method call does, so `p:m` on a
@@ -11801,7 +12228,26 @@ checkexp = util.make_visitor({
                 "expected record in receiver of method reference but found '%s'",
                 types.tostring(types.registry[otype.fqtn]))
         end
+        checker._generic.defer_inference_derived_annotations(
+            operation, node, {
+                _type = true,
+                _method = true,
+                _interface = true,
+                _interface_method = true,
+                _rigid_receiver_type = true,
+                _assignment_adjustment = function(value)
+                    return checker._generic.finalize_adjustment_annotation(
+                        operation, value)
+                end,
+            }, function()
+                node.exp = written_exp
+                if node.exp._type._tag == "Type.Option"
+                   and node.exp._type.base._tag == "Type.Nominal" then
+                    node.exp = tryforce(node.exp)
+                end
+            end)
         return node._type
+        end, "bound method projection")
     end,
 
     -- Bare `...` in a value position. `...` is only legal as the sole, trailing

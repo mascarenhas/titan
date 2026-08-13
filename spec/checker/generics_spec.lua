@@ -41,6 +41,35 @@ local function assert_nominal(typ, fqtn, arguments)
     end
 end
 
+local function assert_runtime_ast_erased(root)
+    local seen = {}
+    local source_backreference = {
+        _decl = true,
+        _declared_type = true,
+        _generic_scheme = true,
+        _generic_declaration = true,
+        _generic_owner = true,
+    }
+    local function visit(value, path)
+        if type(value) ~= "table" or seen[value] then return nil end
+        seen[value] = true
+        if value._tag == "Type.Parameter" then return path end
+        if value._generic_inference_context
+           or value._generic_inference_use
+           or value._generic_inference_operation_use then
+            return path .. ".inference-marker"
+        end
+        for key, child in pairs(value) do
+            if not source_backreference[key] then
+                local found = visit(child, path .. "." .. tostring(key))
+                if found then return found end
+            end
+        end
+    end
+    local leak = visit(root, "ast")
+    assert.falsy(leak, "inference parameter leaked through " .. tostring(leak))
+end
+
 describe("generic declarations and explicit calls", function()
     it("reserves owner and callable binders and builds immutable schemes",
     function()
@@ -1514,6 +1543,79 @@ describe("generic declarations and explicit calls", function()
             .block.stats[1].exps[1]
         assert.truthy(open._arg_adjustment.open_source)
         types.assert_erased(open._arg_adjustment.open_type)
+    end)
+
+    it("finalizes ambient derived projections before parent arguments",
+    function()
+        local ast = assert_check([[
+            record Box<T>
+                item: T
+            end
+            function Box:id(): T return self.item end
+
+            record Plain
+                item: integer
+            end
+
+            function make<T>(): Box<T>
+                return Box<T>.new((nil as value) as T)
+            end
+            function make_array<T>(): {T}
+                return {((nil as value) as T)}
+            end
+            function make_map<K, V>(): {K: V} return {} end
+            function make_item<T>(): T return (nil as value) as T end
+            function agree<T>(left: T, right: T): T return left end
+            function consume<T>(left: T?, right: T): value return nil end
+            function take<T>(left: () -> T, right: T): T return left() end
+            function take_reversed<T>(left: T, right: () -> T): T
+                return right()
+            end
+
+            function field_left(): integer
+                return agree(make().item, 42)
+            end
+            function field_right(): integer
+                return agree(42, make().item)
+            end
+            function index_left(): value
+                return consume(make_array()[1], 42)
+            end
+            function index_right(): value
+                return consume(42, make_array()[1])
+            end
+            function map_index_left(): value
+                return consume(make_map()["item"], 42)
+            end
+            function map_index_right(): value
+                return consume(42, make_map()["item"])
+            end
+            function record_left()
+                local got = agree({item = make_item()}, Plain.new(42))
+            end
+            function record_right()
+                local got = agree(Plain.new(42), {item = make_item()})
+            end
+            function bound_left(): integer
+                return take(make():id, 42)
+            end
+            function bound_right(): integer
+                return take_reversed(42, make():id)
+            end
+            function parenthesized(): integer
+                return agree((make_item()), 42)
+            end
+        ]])
+
+        for _, name in ipairs({
+            "field_left", "field_right", "index_left", "index_right",
+            "map_index_left", "map_index_right", "record_left", "record_right",
+            "bound_left", "bound_right",
+            "parenthesized",
+        }) do
+            assert_runtime_ast_erased(
+                toplevel(ast, "Ast.TopLevelFunc", name).block)
+        end
     end)
 
     it("rejects recursive cross-use inference equations without expansion",

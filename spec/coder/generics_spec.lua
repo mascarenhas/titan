@@ -368,6 +368,89 @@ describe("generic erased core", function()
         ]])
     end)
 
+    it("runs ambient derived projections exactly once in source order", function()
+        h.run_coder([[
+            record Box<T>
+                item: T
+            end
+            function Box:id(): T return self.item end
+
+            record Plain
+                item: integer
+            end
+
+            steps: integer = 0
+            order_okay: boolean = true
+            local function mark(expected: integer): integer
+                steps = steps + 1
+                if steps ~= expected then order_okay = false end
+                return 42
+            end
+            function count(): integer return steps end
+            function ordered(): boolean return order_okay end
+
+            function make<T>(expected: integer): Box<T>
+                return Box<T>.new((mark(expected) as value) as T)
+            end
+            function make_array<T>(expected: integer): {T}
+                return {((mark(expected) as value) as T)}
+            end
+            function make_map<K, V>(expected: integer, key: K): {K: V}
+                return {[key] = ((mark(expected) as value) as V)}
+            end
+            function make_item<T>(expected: integer): T
+                return (mark(expected) as value) as T
+            end
+            function agree<T>(left: T, right: T): T return left end
+            function consume<T>(left: T?, right: T): value return right end
+            function take<T>(left: () -> T, right: T): T return left() end
+            function take_reversed<T>(left: T, right: () -> T): T
+                return right()
+            end
+
+            function field_orders(): integer
+                local left = agree(make(1).item, mark(2))
+                local right = agree(mark(3), make(4).item)
+                return left + right
+            end
+            function index_orders(): integer
+                local left = consume(make_array(5)[1], mark(6))
+                local right = consume(mark(7), make_array(8)[1])
+                return (left as integer) + (right as integer)
+            end
+            function record_orders(): integer
+                local left = agree(
+                    {item = make_item(9)}, Plain.new(mark(10)))
+                local right = agree(
+                    Plain.new(mark(11)), {item = make_item(12)})
+                return left.item + right.item
+            end
+            function bound_orders(): integer
+                local left = take(make(13):id, mark(14))
+                local right = take_reversed(mark(15), make(16):id)
+                return left + right
+            end
+            function parenthesized(): integer
+                return agree((make_item(17)), mark(18))
+            end
+            function map_index_orders(): integer
+                local left = consume(
+                    make_map(19, "item")["item"], mark(20))
+                local right = consume(
+                    mark(21), make_map(22, "item")["item"])
+                return (left as integer) + (right as integer)
+            end
+        ]], [[
+            assert(test.field_orders() == 84)
+            assert(test.index_orders() == 84)
+            assert(test.record_orders() == 84)
+            assert(test.bound_orders() == 84)
+            assert(test.parenthesized() == 42)
+            assert(test.map_index_orders() == 84)
+            assert(test.count() == 22)
+            assert(test.ordered())
+        ]])
+    end)
 
     it("runs nested fixed and open generic result projections", function()
         h.run_coder([[
