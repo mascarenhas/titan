@@ -8179,6 +8179,7 @@ function checker._generic.inference_scope_entry(scope, typeparams, parameters)
             binding = false,
             evidence = false,
             invalid = false,
+            recursive_inference = false,
             conflicts = {},
         }
         cell.parent = cell
@@ -8250,6 +8251,7 @@ function checker._generic.freshen_inference_entries(
                 binding = false,
                 evidence = false,
                 invalid = false,
+                recursive_inference = false,
                 conflicts = {},
             }
             cell.parent = cell
@@ -8378,6 +8380,72 @@ function checker._generic.inference_evidence_name(evidence)
     return evidence or "type context"
 end
 
+-- Follow only inference equations, not the declared constraints of free cells.
+-- A constraint may validly mention another binder and does not equate that
+-- binder with its carrier. Bindings, on the other hand, are equations and must
+-- remain acyclic before the fixed-point substitution path can expand them.
+function checker._generic.inference_type_occurs(
+        context, target, typ, seen_types, seen_roots)
+    if typ == false or typ == nil or type(typ) ~= "table" then return false end
+    target = checker._generic.inference_root(target)
+    seen_types = seen_types or {}
+    seen_roots = seen_roots or {}
+
+    if typ._tag == "Type.Parameter" then
+        local cell = checker._generic.inference_cell(context, typ)
+        if not cell then return false end
+        local root = checker._generic.inference_root(cell)
+        if root == target then return true end
+        if seen_roots[root] then return false end
+        seen_roots[root] = true
+        return root.binding and checker._generic.inference_type_occurs(
+            context, target, root.binding, seen_types, seen_roots) or false
+    end
+
+    if seen_types[typ] then return false end
+    seen_types[typ] = true
+    for key, value in pairs(typ) do
+        if key ~= "scope" and type(value) == "table" then
+            if value._tag then
+                if checker._generic.inference_type_occurs(
+                        context, target, value, seen_types, seen_roots) then
+                    return true
+                end
+            else
+                for _, item in pairs(value) do
+                    if checker._generic.inference_type_occurs(
+                            context, target, item, seen_types, seen_roots) then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+function checker._generic.reject_recursive_inference(
+        context, cell, related, evidence, loc)
+    cell = checker._generic.inference_root(cell)
+    related = related and checker._generic.inference_root(related) or nil
+    local reported = cell.recursive_inference
+        or (related and related.recursive_inference)
+    cell.invalid = true
+    cell.recursive_inference = true
+    if related then
+        related.invalid = true
+        related.recursive_inference = true
+    end
+    if not reported then
+        checker.typeerror(context.errors, loc or cell.loc or context.loc,
+            "cannot infer a recursive type for type parameter '%s' in %s from %s",
+            cell.name, cell.subject
+                or (related and related.subject) or context.subject,
+            checker._generic.inference_evidence_name(evidence))
+    end
+    return false
+end
+
 function checker._generic.union_inference_cells(context, left, right,
                                                  evidence, loc)
     left = checker._generic.inference_root(left)
@@ -8385,11 +8453,24 @@ function checker._generic.union_inference_cells(context, left, right,
     if left == right then return true end
 
     local left_binding, right_binding = left.binding, right.binding
+    -- Joining two classes also substitutes either representative through the
+    -- other's existing structural equation. Reject that edge before changing
+    -- the union-find forest when it would make either binding self-referential.
+    if (left_binding and checker._generic.inference_type_occurs(
+            context, right, left_binding))
+       or (right_binding and checker._generic.inference_type_occurs(
+            context, left, right_binding)) then
+        return checker._generic.reject_recursive_inference(
+            context, left, right, evidence, loc)
+    end
+
     -- Keep the pattern-side representative stable. Besides producing clearer
     -- diagnostics, this makes an outer owner's cell the canonical endpoint of
     -- an equation registered by a nested use.
     right.parent = left
     left.invalid = left.invalid or right.invalid
+    left.recursive_inference = left.recursive_inference
+        or right.recursive_inference
     for key in pairs(right.conflicts) do left.conflicts[key] = true end
     if not left.subject then left.subject = right.subject end
     if not left.loc then left.loc = right.loc end
@@ -8416,6 +8497,10 @@ function checker._generic.bind_inference_cell(context, cell, candidate,
     if candidate_cell then
         return checker._generic.union_inference_cells(
             context, cell, candidate_cell, evidence, loc)
+    end
+    if checker._generic.inference_type_occurs(context, cell, candidate) then
+        return checker._generic.reject_recursive_inference(
+            context, cell, nil, evidence, loc)
     end
 
     if not cell.binding then

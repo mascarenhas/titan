@@ -1333,6 +1333,81 @@ describe("generic declarations and explicit calls", function()
         types.assert_erased(open._arg_adjustment.open_type)
     end)
 
+    it("rejects recursive cross-use inference equations without expansion",
+    function()
+        local diagnostic = "cannot infer a recursive type for type parameter "
+            .. "'T' in call to 'take' from generic function argument"
+
+        local function check(source, instruction_budget)
+            local result
+            if instruction_budget then
+                local prior_hook, prior_mask, prior_count = debug.gethook()
+                local interval = 10000
+                local remaining = math.ceil(instruction_budget / interval)
+                debug.sethook(function()
+                    remaining = remaining - 1
+                    if remaining <= 0 then
+                        error("generic occurs check exceeded its instruction budget", 2)
+                    end
+                end, "", interval)
+                result = table.pack(pcall(run_checker, source))
+                if prior_hook then
+                    debug.sethook(prior_hook, prior_mask, prior_count)
+                else
+                    debug.sethook()
+                end
+                assert.truthy(result[1], result[2])
+                result = table.pack(table.unpack(result, 2, result.n))
+            else
+                result = table.pack(run_checker(source))
+            end
+
+            local ok, err, ast = table.unpack(result, 1, result.n)
+            assert.falsy(ok)
+            assert.truthy(err:find(diagnostic, 1, true), err)
+            local _, count = err:gsub("cannot infer a recursive type", "")
+            assert.equal(1, count)
+            assert.is_true(#err < 256)
+
+            -- Error recovery closes both sides to their finite erased carriers;
+            -- it must never retain the rejected T = Pair<T, T> equation.
+            local bad = toplevel(ast, "Ast.TopLevelFunc", "bad")
+            local call = bad.block.stats[1].exps[1]
+            assert.equal(1, #call._generic_type_arguments)
+            assert.equal("value", types.tostring(
+                call._generic_type_arguments[1]))
+        end
+
+        check([[
+            record Pair<T, U>
+                first: T
+                second: U
+            end
+            function dup<U>(item: U): Pair<U, U>
+                return Pair<U, U>.new(item, item)
+            end
+            function take<T>(callback: (T) -> T): value return nil end
+            function bad(): value return take(dup) end
+        ]])
+
+        -- Unrelated free binders increase the old fixed-point pass count. Keep
+        -- this larger scope under a generous VM-instruction bound so a future
+        -- self-expanding substitution fails instead of hanging the checker job.
+        check([[
+            record Pair<T, U>
+                first: T
+                second: U
+            end
+            function dup<A, B, C, D, E, F, G, H, I, J,
+                         K, L, M, N, O, P, Q, R, S, U>(item: U): Pair<U, U>
+                return Pair<U, U>.new(item, item)
+            end
+            function take<T>(callback: (T) -> T): value return nil end
+            function bad(): value return take(dup) end
+        ]], 20000000)
+
+    end)
+
     it("does not erase a cached source interface through imported annotations",
     function()
         local previous_registry = types.registry
