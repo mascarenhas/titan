@@ -20,8 +20,12 @@ function symtab.new(modname)
         source_imports = {},
         -- Generic type parameters form a separate lexical type namespace. Each
         -- declaration pushes one dense binder map while its signature or body
-        -- is checked; lambdas inherit the surrounding stack naturally.
+        -- is checked; lambdas inherit the surrounding stack naturally. The
+        -- declaration index keeps the canonical binder list reachable after a
+        -- scope is popped, so rigid constraint evidence can resolve semantic
+        -- (scope,index) identities without consulting erased carriers.
         generic_type_scopes = {},
+        generic_scope_bindings = {},
         modname = modname
     }
     return setmetatable(self, symtab)

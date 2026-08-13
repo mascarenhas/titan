@@ -1654,6 +1654,37 @@ function types.same_generic_scope(left, right)
     return generic_scope_equals(left, right)
 end
 
+-- Resolve a rigid Parameter back to the declaration binder that owns its
+-- surface constraint. Parameter.erased_constraint is lowering metadata and
+-- must never serve as evidence that one generic constraint entails another.
+-- Callers keep binder lists indexed by canonical GenericScope spelling because
+-- decoded and reconstructed descriptors need not share scope table identity.
+function types.parameter_surface_constraint(parameter, scope_bindings)
+    if type(parameter) ~= "table"
+       or parameter._tag ~= "Type.Parameter"
+       or type(scope_bindings) ~= "table" then
+        return nil
+    end
+    local ok, key = pcall(types.generic_scope_key, parameter.scope)
+    if not ok then return nil end
+    local typeparams = scope_bindings[key]
+    if type(typeparams) ~= "table"
+       or type(parameter.index) ~= "number"
+       or math.type(parameter.index) ~= "integer"
+       or parameter.index < 1 then
+        return nil
+    end
+    local typeparam = typeparams[parameter.index]
+    if type(typeparam) ~= "table"
+       or typeparam._tag ~= "Type.TypeParameter"
+       or (typeparam.constraint ~= false
+           and (type(typeparam.constraint) ~= "table"
+                or not typeparam.constraint._tag)) then
+        return nil
+    end
+    return typeparam.constraint
+end
+
 -- Compare the Titan/Lua callable ABI shape shared by ordinary function values
 -- and declaration descriptors for methods/record functions. C declarations use
 -- Type.CFunction and its separate C compatibility relation. Declaration-only
@@ -2038,6 +2069,56 @@ function types.canonical_map(keys, values)
     return types.Map(keys, deoptionized(values))
 end
 
+-- Input variadics and flexible-result tails share the TitanVargX carrier
+-- inventory. Keep the structural admission query in the type layer so generic
+-- substitution and metadata validation reconstruct the same canonical callable
+-- shapes as the source checker.
+function types.valid_varg_element(typ)
+    if type(typ) ~= "table" or type(typ._tag) ~= "string" then return false end
+    if types.is_c_tvalue(typ) then return true end
+
+    local tag = typ._tag
+    if tag == "Type.Invalid" then
+        return true -- suppress cascades after an earlier source error
+    elseif tag == "Type.Integer" or tag == "Type.Float"
+        or tag == "Type.Boolean" or tag == "Type.String"
+        or tag == "Type.Array" or tag == "Type.Map"
+        or tag == "Type.Value" or tag == "Type.Nominal"
+        or tag == "Type.Function" or tag == "Type.COwned" then
+        return true
+    elseif tag == "Type.Option" then
+        return types.has_tvalue_representation(typ.base)
+    elseif tag == "Type.Parameter" then
+        local carrier = typ.erased_constraint ~= false
+            and typ.erased_constraint or types.Value()
+        return types.valid_varg_element(carrier)
+    elseif tag == "Type.Typedef" then
+        return types.valid_varg_element(typ._type)
+    end
+    return false
+end
+
+local function canonical_callable_tail(typ, role)
+    if typ == false then return false end
+    if typ._tag == "Type.Nil" then
+        error("a " .. role .. " cannot have type nil", 3)
+    elseif typ._tag == "Type.Pointer"
+       or types.resolve_c_typedef(typ)._tag == "Type.CPointer" then
+        error("a " .. role .. " cannot have a foreign pointer type", 3)
+    elseif not types.valid_varg_element(typ) then
+        error("a " .. role .. " cannot use type " .. types.tostring(typ) ..
+            " because it has no supported variadic-value representation", 3)
+    end
+    return typ
+end
+
+function types.canonical_function(
+        params, rettypes, varargtype, flexrettype)
+    return types.Function(params, rettypes, false,
+        canonical_callable_tail(varargtype, "variadic parameter"),
+        canonical_callable_tail(flexrettype, "flexible return"))
+end
+
 local function copy_scalar_metadata(source, target)
     for key, value in pairs(source) do
         if key ~= "_tag" and target[key] == nil
@@ -2139,10 +2220,9 @@ local function rewrite_type(root, policy)
             if typ.vararg ~= false then
                 error("Type.Function reserved vararg field must be false", 3)
             end
-            out = types.Function(
+            out = types.canonical_function(
                 rewrite_list(typ.params, rewrite),
                 rewrite_list(typ.rettypes, rewrite),
-                false,
                 typ.varargtype == false and false
                     or rewrite(typ.varargtype),
                 typ.flexrettype == false and false
@@ -2159,14 +2239,16 @@ local function rewrite_type(root, policy)
                 and types.Method or types.StaticMethod
             local closes = policy.drop_generic
                 or (typ.scope ~= false and policy.closes(typ.scope))
+            local varargtype = typ.varargtype == false and false
+                or rewrite(typ.varargtype)
+            local flexrettype = typ.flexrettype == false and false
+                or rewrite(typ.flexrettype)
+            canonical_callable_tail(varargtype, "variadic parameter")
+            canonical_callable_tail(flexrettype, "flexible return")
             out = constructor(typ.fqtn, typ.name,
                 rewrite_list(typ.params, rewrite),
                 rewrite_list(typ.rettypes, rewrite),
-                typ.varargtype == false and false
-                    or rewrite(typ.varargtype),
-                typ.flexrettype == false and false
-                    or rewrite(typ.flexrettype),
-                typ.paramnames,
+                varargtype, flexrettype, typ.paramnames,
                 (not closes and typ.scope) or false,
                 closes and {} or rewrite_list(
                     typ.typeparams or {}, rewrite))
@@ -3419,6 +3501,129 @@ function types.interface_implementation(concrete, interface, policy)
         methods = mappings,
         exact = all_exact,
     }
+end
+
+local function generic_method_constraint_view(typeparam, scope, arguments)
+    if typeparam.constraint == false then return false end
+    local ok, constraint = pcall(
+        types.substitute, typeparam.constraint, scope, arguments)
+    if not ok then return nil end
+    return constraint
+end
+
+local function close_generic_method_pair(concrete, required)
+    local concrete_params = concrete.typeparams or {}
+    local required_params = required.typeparams or {}
+    if #concrete_params == 0 and #required_params == 0 then
+        return concrete, required
+    elseif #concrete_params ~= #required_params
+       or concrete.scope == false or required.scope == false then
+        return nil
+    end
+
+    local arguments = {}
+    for index, typeparam in ipairs(required_params) do
+        arguments[index] = types.Parameter(
+            required.scope, index, typeparam.name, false)
+    end
+    for index = 1, #arguments do
+        local concrete_constraint = generic_method_constraint_view(
+            concrete_params[index], concrete.scope, arguments)
+        local required_constraint = generic_method_constraint_view(
+            required_params[index], required.scope, arguments)
+        if concrete_constraint == nil or required_constraint == nil
+           or (concrete_constraint == false)
+                ~= (required_constraint == false)
+           or (concrete_constraint ~= false
+               and not types.equals(
+                   concrete_constraint, required_constraint)) then
+            return nil
+        end
+        arguments[index].erased_constraint = required_constraint
+    end
+
+    local concrete_ok, concrete_closed =
+        pcall(types.substitute, concrete, concrete.scope, arguments)
+    local required_ok, required_closed =
+        pcall(types.substitute, required, required.scope, arguments)
+    if not concrete_ok or not required_ok then return nil end
+    return concrete_closed, required_closed
+end
+
+-- Close declaration-local method binders alpha-stably before using the ordinary
+-- Interface matcher. This shared semantic proof is used both by the source
+-- checker and by closed metadata validation/recovery.
+function types.generic_interface_implementation(concrete, interface, policy)
+    local concrete_methods = {}
+    for name, method in pairs(concrete.methods or {}) do
+        concrete_methods[name] = method
+    end
+    local required_methods = {}
+    local originals = {}
+
+    for index, required in ipairs(interface.methods or {}) do
+        local method = concrete.methods and concrete.methods[required.name]
+        if method and method._tag == "Type.Method" then
+            local concrete_view, required_view =
+                close_generic_method_pair(method, required)
+            if not concrete_view then
+                return false, {
+                    kind = "interface_mismatch",
+                    reason = "incompatible",
+                    concrete = concrete,
+                    interface = interface,
+                    index = index,
+                    name = required.name,
+                    required = required,
+                    member = method,
+                    concrete_type = types.method_function_type(method),
+                    required_type = types.method_function_type(required),
+                }
+            end
+            concrete_methods[required.name] = concrete_view
+            required_methods[index] = required_view
+            originals[index] = {
+                concrete = method,
+                required = required,
+            }
+        else
+            required_methods[index] = required
+        end
+    end
+
+    local concrete_view = {}
+    for key, value in pairs(concrete) do concrete_view[key] = value end
+    concrete_view.methods = concrete_methods
+    local interface_view = types.Interface(
+        interface.name, required_methods, interface.scope,
+        interface.typeparams)
+    interface_view.islocal = interface.islocal
+
+    local implementation, failure = types.interface_implementation(
+        concrete_view, interface_view, policy)
+    if not implementation then
+        if failure then
+            failure.concrete = concrete
+            failure.interface = interface
+            local original = failure.index and originals[failure.index]
+            if original then
+                failure.required = original.required
+                failure.member = original.concrete
+            end
+        end
+        return false, failure
+    end
+
+    implementation.concrete = concrete
+    implementation.interface = interface
+    for index, mapping in ipairs(implementation.methods) do
+        local original = originals[index]
+        if original then
+            mapping.required = original.required
+            mapping.concrete = original.concrete
+        end
+    end
+    return implementation
 end
 
 local function coercion_plan(op, source, target, fields)
