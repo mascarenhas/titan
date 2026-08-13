@@ -3677,16 +3677,11 @@ end
 function checker._generic.generic_constraint_satisfied(
         argument, constraint, st, policy)
     if argument._tag == "Type.Parameter" then
-        local binders = st and st.generic_scope_bindings
-            and st.generic_scope_bindings[argument.scope]
-        local declared = binders and binders[argument.index]
-        if not declared and policy then
-            local binding = checker._generic.recovered_scope_binding(
-                policy, argument.scope)
-            declared = binding and binding.typeparams[argument.index]
-        end
-        return declared and declared.constraint ~= false
-            and types.alpha_equals(declared.constraint, constraint)
+        local bindings = policy and policy.generic_scope_bindings
+            or (st and st.generic_scope_bindings)
+        local surface = types.parameter_surface_constraint(argument, bindings)
+        return surface ~= nil and surface ~= false
+            and types.equals(surface, constraint)
     elseif argument._tag ~= "Type.Nominal" then
         return false
     elseif types.equals(argument, constraint) then
@@ -4290,7 +4285,8 @@ function checker._generic.reserve_generic_binders(node, scope, st, errors)
         node._generic_typeparams[index] = types.TypeParameter(name, false)
         typeparam._type = parameter
     end
-    st.generic_scope_bindings[scope] = node._generic_typeparams
+    st.generic_scope_bindings[types.generic_scope_key(scope)] =
+        node._generic_typeparams
 end
 
 function checker._generic.collect_local_constraint_parameters(
@@ -8287,53 +8283,72 @@ function checker._generic.inference_type_arguments(context)
     return arguments
 end
 
-function checker._generic.propagate_inference_constraint_evidence(context)
+-- A rigid actual parameter can contribute dependency evidence without being
+-- replaced by its erased runtime carrier. If W is bound to an outer T whose
+-- declared surface constraint is I<U>, a callee constraint W: I<V> provides
+-- the invariant equation I<V> = I<U> and can therefore bind V to U. Iterate a
+-- bounded number of times so chains of dependent constraints settle before
+-- unresolved inference cells are diagnosed.
+function checker._generic.infer_constraint_evidence(context)
     local cell_count = 0
     for _, entry in ipairs(context.scopes) do
         cell_count = cell_count + #entry.cells
     end
     for _ = 1, math.max(1, cell_count) do
-        local before = 0
-        for _, entry in ipairs(context.scopes) do
-            for _, cell in ipairs(entry.cells) do
-                if cell.binding then before = before + 1 end
-            end
-        end
+        local changed = false
         for _, entry in ipairs(context.scopes) do
             for index, typeparam in ipairs(entry.typeparams) do
                 local cell = entry.cells[index]
                 local argument = cell and cell.binding
                 if argument and argument._tag == "Type.Parameter"
+                   and not cell.invalid
                    and typeparam.constraint ~= false then
-                    local binders = context.st.generic_scope_bindings
-                        and context.st.generic_scope_bindings[argument.scope]
-                    local declared = binders and binders[argument.index]
-                    if declared and declared.constraint ~= false then
-                        local required = checker._generic.substitute_inference(
-                            context, typeparam.constraint, false)
-                        checker._generic.unify_inference(context,
-                            required, declared.constraint,
-                            "declared constraint of rigid argument '" ..
-                                tostring(argument.name or argument.index) .. "'",
+                    local surface = types.parameter_surface_constraint(
+                        argument, context.st and
+                            context.st.generic_scope_bindings)
+                    local required = checker._generic.substitute_inference(
+                        context, typeparam.constraint, false)
+                    local surface_owner = surface and surface ~= false
+                        and checker._generic.generic_owner_type(surface)
+                    local required_owner = required
+                        and checker._generic.generic_owner_type(required)
+                    if surface and surface ~= false
+                       and surface._tag == "Type.Nominal"
+                       and required and required._tag == "Type.Nominal"
+                       and surface.fqtn == required.fqtn
+                       and surface_owner and required_owner
+                       and surface_owner._tag == "Type.Interface"
+                       and required_owner._tag == "Type.Interface"
+                       and #(surface.args or {}) == #(required.args or {}) then
+                        local before = {}
+                        for _, scope_entry in ipairs(context.scopes) do
+                            for _, evidence_cell in ipairs(scope_entry.cells) do
+                                before[evidence_cell] = evidence_cell.binding
+                            end
+                        end
+                        checker._generic.unify_inference(
+                            context, required, surface,
+                            "declared constraint of type parameter '" ..
+                                tostring(argument.diagnostic_name) .. "'",
                             cell.loc or context.loc)
+                        for evidence_cell, binding in pairs(before) do
+                            if evidence_cell.binding ~= binding then
+                                changed = true
+                                break
+                            end
+                        end
                     end
                 end
             end
         end
-        local after = 0
-        for _, entry in ipairs(context.scopes) do
-            for _, cell in ipairs(entry.cells) do
-                if cell.binding then after = after + 1 end
-            end
-        end
-        if after == before then break end
+        if not changed then break end
     end
 end
 
 function checker._generic.close_inference_context(context)
     if context.closed then return context.valid end
-    checker._generic.propagate_inference_constraint_evidence(context)
     context.closed = true
+    checker._generic.infer_constraint_evidence(context)
     local valid = true
 
     for _, entry in ipairs(context.scopes) do
@@ -12125,14 +12140,6 @@ function checker._recover_referenced_owner(
     return owner, memo.error
 end
 
-function checker._generic.recovered_scope_binding(policy, scope)
-    for _, binding in ipairs(policy and policy.generic_scope_bindings or {}) do
-        if types.same_generic_scope(binding.scope, scope) then
-            return binding
-        end
-    end
-end
-
 function checker._generic.validate_recovered_application(
         nominal, owner, policy)
     local arguments = nominal.args or {}
@@ -12190,31 +12197,57 @@ local function register_referenced_nominals(
     constraint_policy.generic_scope_bindings =
         constraint_policy.generic_scope_bindings or {}
     local function register_scope(scope, typeparams)
-        if scope ~= false and #(typeparams or {}) > 0 then
-            constraint_policy.generic_scope_bindings[
-                #constraint_policy.generic_scope_bindings + 1] = {
-                    scope = scope,
-                    typeparams = typeparams,
-                }
+        if scope == false or scope == nil then return true end
+        local key_ok, key = pcall(types.generic_scope_key, scope)
+        if not key_ok then
+            return nil, "recovered generic scope has an invalid schema"
         end
+        local previous = constraint_policy.generic_scope_bindings[key]
+        if previous and not checker._recovered_typeparams_equal(
+                previous, typeparams) then
+            return nil,
+                "recovered generic scope has conflicting binder declarations"
+        end
+        constraint_policy.generic_scope_bindings[key] = previous or typeparams
+        return true
     end
     local alias_key
-    local context_key = "\0generic-visit:" .. tostring(t) .. ":" ..
-        tostring(position or "value")
+    -- Constraint satisfaction depends on the visibility policy. In particular,
+    -- a trusted source-private view may admit local methods that the public
+    -- serialized view must reject. Keep graph-cycle/module recovery memoization
+    -- shared, but never let a permissive type visit satisfy a stricter policy.
+    -- Hold the policy and type objects as real keys rather than stringifying
+    -- their addresses, so GC address reuse cannot alias two later visits.
+    local policy_visits = seen["\0generic-visit-policies"]
+    if not policy_visits then
+        policy_visits = {}
+        seen["\0generic-visit-policies"] = policy_visits
+    end
+    local type_visits = policy_visits[constraint_policy]
+    if not type_visits then
+        type_visits = {}
+        policy_visits[constraint_policy] = type_visits
+    end
+    local position_visits = type_visits[t]
+    if not position_visits then
+        position_visits = {}
+        type_visits[t] = position_visits
+    end
+    local visit_position = position or "value"
     if tag == "Type.GenericAlias" then
         alias_key = t.module .. "." .. t.name
         local resolving_key = "\0generic-alias-resolving:" .. alias_key
         if seen[resolving_key] then
             return nil, "recovered GenericAlias chain is cyclic at '" ..
                 alias_key .. "'"
-        elseif seen[context_key] then
+        elseif position_visits[visit_position] then
             return true
         end
         seen[resolving_key] = true
-    elseif seen[context_key] then
+    elseif position_visits[visit_position] then
         return true
     end
-    seen[context_key] = true
+    position_visits[visit_position] = true
 
     local function visit(child, child_position)
         return register_referenced_nominals(
@@ -12265,19 +12298,23 @@ local function register_referenced_nominals(
                 t, owner, constraint_policy)
         end
     elseif tag == "Type.GenericAlias" then
-        local owner, owner_error = checker._recover_referenced_owner(
-            t.target_owner_fqtn, loader, seen,
-            exposing_module, interface_seen)
-        if not owner then
-            ok, err = nil, owner_error or
-                ("could not recover GenericAlias owner '" ..
-                    t.target_owner_fqtn .. "'")
-        elseif not types.same_generic_scope(t.target_scope, owner.scope)
-           or not checker._recovered_typeparams_equal(
-                t.typeparams, owner.typeparams) then
-            ok, err = nil,
-                "recovered GenericAlias projection does not match owner '" ..
-                    t.target_owner_fqtn .. "'"
+        ok, err = register_scope(t.target_scope, t.typeparams)
+        local owner, owner_error
+        if ok then
+            owner, owner_error = checker._recover_referenced_owner(
+                t.target_owner_fqtn, loader, seen,
+                exposing_module, interface_seen)
+            if not owner then
+                ok, err = nil, owner_error or
+                    ("could not recover GenericAlias owner '" ..
+                        t.target_owner_fqtn .. "'")
+            elseif not types.same_generic_scope(t.target_scope, owner.scope)
+               or not checker._recovered_typeparams_equal(
+                    t.typeparams, owner.typeparams) then
+                ok, err = nil,
+                    "recovered GenericAlias projection does not match owner '" ..
+                        t.target_owner_fqtn .. "'"
+            end
         end
         if ok and t.target_alias_fqtn ~= false then
             local target_module_name =
@@ -12313,8 +12350,8 @@ local function register_referenced_nominals(
             ok, err = visit(t.constraint, "constraint")
         end
     elseif tag == "Type.FunctionScheme" then
-        register_scope(t.scope, t.typeparams)
-        ok, err = visit_binders(t.typeparams)
+        ok, err = register_scope(t.scope, t.typeparams)
+        if ok then ok, err = visit_binders(t.typeparams) end
         if ok then ok, err = visit(t.signature) end
     elseif tag == "Type.Array" then
         ok, err = visit(t.elem)
@@ -12327,15 +12364,15 @@ local function register_referenced_nominals(
         ok, err = visit(t.type)
     elseif tag == "Type.Function" or tag == "Type.Method"
            or tag == "Type.StaticMethod" then
-        register_scope(t.scope, t.typeparams)
-        ok, err = visit_binders(t.typeparams)
+        ok, err = register_scope(t.scope, t.typeparams)
+        if ok then ok, err = visit_binders(t.typeparams) end
         if ok then ok, err = visit_list(t.params) end
         if ok then ok, err = visit_list(t.rettypes) end
         if ok and t.varargtype then ok, err = visit(t.varargtype) end
         if ok and t.flexrettype then ok, err = visit(t.flexrettype) end
     elseif tag == "Type.Record" then
-        register_scope(t.scope, t.typeparams)
-        ok, err = visit_binders(t.typeparams)
+        ok, err = register_scope(t.scope, t.typeparams)
+        if ok then ok, err = visit_binders(t.typeparams) end
         if ok then
             for _, field in ipairs(t.fields or {}) do
                 if not field.islocal then
@@ -12361,8 +12398,8 @@ local function register_referenced_nominals(
             end
         end
     elseif tag == "Type.Union" then
-        register_scope(t.scope, t.typeparams)
-        ok, err = visit_binders(t.typeparams)
+        ok, err = register_scope(t.scope, t.typeparams)
+        if ok then ok, err = visit_binders(t.typeparams) end
         if ok then
             for _, variant in ipairs(t.variants or {}) do
                 if not variant.islocal and variant.payload ~= false then
@@ -12388,8 +12425,8 @@ local function register_referenced_nominals(
             end
         end
     elseif tag == "Type.Interface" then
-        register_scope(t.scope, t.typeparams)
-        ok, err = visit_binders(t.typeparams)
+        ok, err = register_scope(t.scope, t.typeparams)
+        if ok then ok, err = visit_binders(t.typeparams) end
         if ok then ok, err = visit_list(t.methods) end
     end
 

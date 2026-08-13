@@ -972,7 +972,16 @@ local function validate_generic_binders(
     scopes[key] = { scope = scope, typeparams = typeparams }
     local validation = context and context.validation
     if validation then
-        validation.scope_bindings[key] = scopes[key]
+        local previous = validation.scope_bindings[key]
+        local same_ok, same = true, true
+        if previous then
+            same_ok, same = pcall(
+                typeparameter_lists_alpha_equal, previous, typeparams)
+        end
+        if not same_ok or not same then
+            return nil, "generic scope has conflicting binder declarations"
+        end
+        validation.scope_bindings[key] = previous or typeparams
     end
 
     for index = 1, count do
@@ -1472,11 +1481,10 @@ end
 function driver._metadata_generic_constraint_satisfied(
         argument, constraint, validation)
     if argument._tag == "Type.Parameter" then
-        local key = generic_scope_key(argument.scope)
-        local binding = key and validation.scope_bindings[key]
-        local declared = binding and binding.typeparams[argument.index]
-        return declared and declared.constraint ~= false
-            and types.alpha_equals(declared.constraint, constraint)
+        local surface = types.parameter_surface_constraint(
+            argument, validation.scope_bindings)
+        return surface ~= nil and surface ~= false
+            and types.equals(surface, constraint)
     elseif argument._tag ~= "Type.Nominal" then
         return false
     elseif types.equals(argument, constraint) then

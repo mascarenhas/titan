@@ -1659,6 +1659,7 @@ end
 -- must never serve as evidence that one generic constraint entails another.
 -- Callers keep binder lists indexed by canonical GenericScope spelling because
 -- decoded and reconstructed descriptors need not share scope table identity.
+-- False is an unconstrained binder; nil is missing or malformed evidence.
 function types.parameter_surface_constraint(parameter, scope_bindings)
     if type(parameter) ~= "table"
        or parameter._tag ~= "Type.Parameter"

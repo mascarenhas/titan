@@ -722,14 +722,17 @@ describe("generic declarations and explicit calls", function()
                 first: A
                 second: B
             end
-            function inner<V: J, W: I<V>>(item: W): W return item end
-            function outer<U: J, T: I<U>>(first: U, item: T): T
-                local pair: G<U, T> = G.new<U, T>(first, item)
-                if pair.first is value then end
-                return inner<U, T>(item)
+            record R<A: J>
+                marker: A
             end
-            function inferred<U: J, T: I<U>>(item: T): T
-                return inner(item)
+            function R:m<B: I<A>>(item: B): B return item end
+            function inner<V: J, W: I<V>>(item: W): W return item end
+            function outer<U: J, T: I<U>>(first: U, item: T): (T, T, T)
+                local pair: G<U, T> = G.new<U, T>(first, item)
+                return pair.second, inner<U, T>(item), inner(item)
+            end
+            function nested<X: J, T: I<X>>(receiver: R<X>, item: T): (T, T)
+                return receiver:m<T>(item), receiver:m(item)
             end
         ]])
         local decoded, decode_error = driver.decode_module_interface(
@@ -747,6 +750,24 @@ describe("generic declarations and explicit calls", function()
             function bad<X: J, T: I<X>>(item: T): T
                 return inner<T>(item)
             end
+        ]])
+
+        -- The local function and public alias deliberately share the same
+        -- resolved Box<PrivateRenderable> type graph. A permissive source-view
+        -- visit must not memoize constraint success for the public view.
+        assert_error("public module interface is not recoverable", [[
+            interface Renderable
+                function render(): string
+            end
+            record PrivateRenderable
+                marker: integer
+            end
+            local function PrivateRenderable:render(): string return "ok" end
+            record RenderedBox<T: Renderable>
+                item: T
+            end
+            local function private_use(item: PublicBox) end
+            type PublicBox = RenderedBox<PrivateRenderable>
         ]])
     end)
 
