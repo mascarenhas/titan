@@ -1,5 +1,7 @@
+require "titan-compiler.coder.core"
 local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
+local coder_names = require "titan-compiler.coder.names"
 
 local MODULE = "symbol.case"
 local CFILE = "symbol/case.c"
@@ -170,7 +172,7 @@ describe("native callable symbol separators", function()
 
     it("converts both UCN separators to linkage spellings", function()
         assert.equal("a_ℳ_R_ℱ_f_titanmethod",
-            coder._linkage_symbol_name(
+            coder_names._linkage_symbol_name(
                 "a_\\u2133_R_\\u2131_f_titanmethod"))
     end)
 end)

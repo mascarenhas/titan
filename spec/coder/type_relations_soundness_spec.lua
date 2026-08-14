@@ -1,5 +1,8 @@
+require "titan-compiler.coder.core"
 local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
+local coder_values = require "titan-compiler.coder.values"
+local coder_numerics = require "titan-compiler.coder.numerics"
 local types = require "titan-compiler.types"
 
 local run_coder = h.run_coder
@@ -1618,7 +1621,7 @@ describe("type-relation soundness (end-to-end)", function()
             target = int_pointer,
         }
         assert.equal(valid_address,
-            coder._checked_coercion_plan(
+            coder_values._checked_coercion_plan(
                 valid_address, c_integer, int_pointer,
                 "test mutable C address"))
 
@@ -1629,7 +1632,7 @@ describe("type-relation soundness (end-to-end)", function()
         end
         local function rejects_coercion(op, source, target)
             rejects(function()
-                coder._checked_coercion_plan({
+                coder_values._checked_coercion_plan({
                     kind = "coercion",
                     op = op,
                     source = source,
@@ -1639,7 +1642,7 @@ describe("type-relation soundness (end-to-end)", function()
         end
         local function rejects_explicit(op, source, target)
             rejects(function()
-                coder._checked_explicit_conversion_plan({
+                coder_values._checked_explicit_conversion_plan({
                     kind = "explicit_conversion",
                     op = op,
                     source = source,
@@ -1651,7 +1654,7 @@ describe("type-relation soundness (end-to-end)", function()
         local function validates_coercion(source, target, expected_op)
             local plan = assert(types.coercion(source, target))
             assert.equal(expected_op, plan.op)
-            assert.equal(plan, coder._checked_coercion_plan(
+            assert.equal(plan, coder_values._checked_coercion_plan(
                 plan, source, target, "test valid C pointer conversion"))
         end
         local function validates_explicit(source, target, expected_op)
@@ -1659,7 +1662,7 @@ describe("type-relation soundness (end-to-end)", function()
             assert.equal("explicit", cast.op)
             assert.equal(expected_op, cast.conversion.op)
             assert.equal(cast.conversion,
-                coder._checked_explicit_conversion_plan(
+                coder_values._checked_explicit_conversion_plan(
                     cast.conversion, source, target,
                     "test valid C pointer conversion"))
         end
@@ -1685,7 +1688,7 @@ describe("type-relation soundness (end-to-end)", function()
         end
 
         rejects(function()
-            coder._checked_coercion_plan({
+            coder_values._checked_coercion_plan({
                 kind = "coercion",
                 op = "mutable_c_address",
                 source = int_pointer,
@@ -1694,7 +1697,7 @@ describe("type-relation soundness (end-to-end)", function()
                 "test C pointer conversion")
         end)
         rejects(function()
-            coder._checked_coercion_plan({
+            coder_values._checked_coercion_plan({
                 kind = "coercion",
                 op = "mutable_c_address",
                 source = c_integer,
@@ -1703,7 +1706,7 @@ describe("type-relation soundness (end-to-end)", function()
                 "test C pointer conversion")
         end)
         rejects(function()
-            coder._checked_coercion_plan({
+            coder_values._checked_coercion_plan({
                 kind = "coercion",
                 op = "mutable_c_address",
                 source = c_integer,
@@ -1713,7 +1716,7 @@ describe("type-relation soundness (end-to-end)", function()
         end)
 
         rejects(function()
-            coder._checked_explicit_conversion_plan({
+            coder_values._checked_explicit_conversion_plan({
                 kind = "explicit_conversion",
                 op = "c_mutable_address",
                 source = c_integer,
@@ -1750,7 +1753,7 @@ describe("type-relation soundness (end-to-end)", function()
 
         local c_array = types.CArray(c_integer, 4)
         rejects(function()
-            coder._checked_explicit_conversion_plan({
+            coder_values._checked_explicit_conversion_plan({
                 kind = "address_then_unsafe_object_pointer",
                 source = int_pointer,
                 target = float_pointer,
@@ -1760,7 +1763,7 @@ describe("type-relation soundness (end-to-end)", function()
         end)
 
         rejects(function()
-            coder._checked_explicit_conversion_plan({
+            coder_values._checked_explicit_conversion_plan({
                 kind = "explicit_conversion",
                 op = "c_unsafe_object_pointer_candidate",
                 source = int_pointer,
@@ -1776,7 +1779,7 @@ describe("type-relation soundness (end-to-end)", function()
             probe_key = "checked-pointer-probe",
         }
         assert.equal(checked_pointer,
-            coder._checked_explicit_conversion_plan(
+            coder_values._checked_explicit_conversion_plan(
                 checked_pointer, int_pointer, float_pointer,
                 "test checked C pointer conversion"))
     end)
@@ -1784,10 +1787,10 @@ describe("type-relation soundness (end-to-end)", function()
     it("asserts missing and unknown boundary lowering plans", function()
         local integer = types.Integer()
         assert.has_error(function()
-            coder._checked_dynamic_plan(nil, integer, "test boundary")
+            coder_values._checked_dynamic_plan(nil, integer, "test boundary")
         end, "test boundary is missing its checker plan")
         assert.has_error(function()
-            coder._checked_dynamic_plan({
+            coder_values._checked_dynamic_plan({
                 kind = "dynamic_coercion",
                 op = "mystery",
                 target = integer,
@@ -1796,12 +1799,12 @@ describe("type-relation soundness (end-to-end)", function()
 
         local pointer = types.CPointer(
             types.CInteger("int", true, 3, 32), {})
-        assert.is_false(coder._checked_dynamic_plan(
+        assert.is_false(coder_values._checked_dynamic_plan(
             false, pointer, "test unavailable boundary"))
 
         local option = types.Option(integer)
         assert.has_error(function()
-            coder._checked_dynamic_plan({
+            coder_values._checked_dynamic_plan({
                 kind = "dynamic_coercion",
                 op = "option",
                 target = option,
@@ -1813,7 +1816,7 @@ describe("type-relation soundness (end-to-end)", function()
             }, option, "test boundary")
         end, "test boundary Option present value plan target does not match integer")
         assert.has_error(function()
-            coder._checked_dynamic_plan({
+            coder_values._checked_dynamic_plan({
                 kind = "dynamic_coercion",
                 op = "option",
                 target = option,
@@ -1822,20 +1825,20 @@ describe("type-relation soundness (end-to-end)", function()
         end, "test boundary Option present value contains an unavailable recursive plan")
 
         assert.has_error(function()
-            coder._checked_gradual_guard(nil, integer, "test observation")
+            coder_values._checked_gradual_guard(nil, integer, "test observation")
         end, "test observation is missing its checker guard plan")
         assert.has_error(function()
-            coder._checked_gradual_guard({
+            coder_values._checked_gradual_guard({
                 kind = "gradual_guard",
                 op = "mystery",
                 target = integer,
             }, integer, "test observation")
         end, "test observation has unknown/mismatched guard operation mystery")
-        assert.is_false(coder._checked_gradual_guard(
+        assert.is_false(coder_values._checked_gradual_guard(
             false, pointer, "test unavailable observation"))
 
         assert.has_error(function()
-            coder._checked_gradual_guard({
+            coder_values._checked_gradual_guard({
                 kind = "gradual_guard",
                 op = "option",
                 target = option,
@@ -1847,7 +1850,7 @@ describe("type-relation soundness (end-to-end)", function()
             }, option, "test observation")
         end, "test observation Option present value guard target does not match integer")
         assert.has_error(function()
-            coder._checked_gradual_guard({
+            coder_values._checked_gradual_guard({
                 kind = "gradual_guard",
                 op = "option",
                 target = option,
@@ -1856,11 +1859,11 @@ describe("type-relation soundness (end-to-end)", function()
         end, "test observation Option present value contains an unavailable recursive guard")
 
         assert.has_error(function()
-            coder._checked_comparison_plan(
+            coder_values._checked_comparison_plan(
                 nil, integer, integer, "test equality")
         end, "test equality is missing its checker comparison plan")
         assert.has_error(function()
-            coder._checked_comparison_plan({
+            coder_values._checked_comparison_plan({
                 kind = "comparison",
                 op = "mystery",
                 left = integer,
@@ -1868,7 +1871,7 @@ describe("type-relation soundness (end-to-end)", function()
             }, integer, integer, "test equality")
         end, "test equality has unknown comparison operation mystery")
         assert.has_error(function()
-            coder._checked_comparison_plan({
+            coder_values._checked_comparison_plan({
                 kind = "comparison",
                 op = "consistent",
                 left = integer,
@@ -1876,7 +1879,7 @@ describe("type-relation soundness (end-to-end)", function()
             }, integer, types.Float(), "test equality")
         end, "test equality has no structural consistency evidence")
         assert.has_error(function()
-            coder._checked_comparison_plan({
+            coder_values._checked_comparison_plan({
                 kind = "comparison",
                 op = "consistent",
                 left = types.Value(),
@@ -1892,16 +1895,16 @@ describe("type-relation soundness (end-to-end)", function()
 
         local float = types.Float()
         assert.has_error(function()
-            coder._checked_numeric_coercion(
+            coder_numerics._checked_numeric_coercion(
                 nil, integer, float, "test numeric coercion")
         end, "test numeric coercion lacks its checker plan")
         assert.has_error(function()
-            coder._checked_numeric_coercion({
+            coder_numerics._checked_numeric_coercion({
                 kind = "mystery",
             }, integer, float, "test numeric coercion")
         end, "test numeric coercion has unknown plan kind mystery")
         assert.has_error(function()
-            coder._checked_numeric_coercion({
+            coder_numerics._checked_numeric_coercion({
                 kind = "coercion",
                 op = "integer_to_float",
                 source = integer,
@@ -1909,7 +1912,7 @@ describe("type-relation soundness (end-to-end)", function()
             }, integer, float, "test numeric coercion")
         end, "test numeric coercion plan does not match its operand types")
         assert.has_error(function()
-            coder._checked_numeric_coercion({
+            coder_numerics._checked_numeric_coercion({
                 kind = "coercion",
                 op = "mystery",
                 source = integer,
@@ -1917,7 +1920,7 @@ describe("type-relation soundness (end-to-end)", function()
             }, integer, float, "test numeric coercion")
         end, "test numeric coercion has unknown/mismatched operation mystery")
         assert.has_error(function()
-            coder._checked_coercion_plan({
+            coder_values._checked_coercion_plan({
                 kind = "coercion",
                 op = "truthiness",
                 source = integer,
@@ -1927,7 +1930,7 @@ describe("type-relation soundness (end-to-end)", function()
 
         local option_float = types.Option(float)
         assert.has_error(function()
-            coder._checked_coercion_plan({
+            coder_values._checked_coercion_plan({
                 kind = "coercion",
                 op = "option_map",
                 source = option,
@@ -1941,7 +1944,7 @@ describe("type-relation soundness (end-to-end)", function()
         end, "test coercion Option map plan does not match its operand types")
 
         assert.has_error(function()
-            coder._checked_adjustment_plan({
+            coder_values._checked_adjustment_plan({
                 kind = "identity",
                 source = integer,
                 target = float,
@@ -1953,7 +1956,7 @@ describe("type-relation soundness (end-to-end)", function()
         local target_callable = types.Function(
             { integer }, {}, false, false, false)
         assert.has_error(function()
-            coder._checked_callable_plan({
+            coder_values._checked_callable_plan({
                 kind = "callable",
                 source = source_callable,
                 target = target_callable,
@@ -1983,17 +1986,17 @@ describe("type-relation soundness (end-to-end)", function()
         local c_integer = types.CInteger("int", true, 3, 32)
         local c_float = types.CFloat("double")
         assert.has_error(function()
-            coder._checked_explicit_numeric_conversion(
+            coder_numerics._checked_explicit_numeric_conversion(
                 nil, c_integer, c_float, "test explicit numeric cast")
         end, "test explicit numeric cast lacks its checker plan")
         assert.has_error(function()
-            coder._checked_explicit_numeric_conversion({
+            coder_numerics._checked_explicit_numeric_conversion({
                 kind = "explicit_conversion",
                 op = "mystery",
             }, c_integer, c_float, "test explicit numeric cast")
         end, "test explicit numeric cast has unknown plan operation mystery")
         assert.has_error(function()
-            coder._checked_explicit_numeric_conversion({
+            coder_numerics._checked_explicit_numeric_conversion({
                 kind = "explicit_conversion",
                 op = "c_numeric",
                 source = c_integer,
@@ -2001,18 +2004,18 @@ describe("type-relation soundness (end-to-end)", function()
             }, c_integer, c_float, "test explicit numeric cast")
         end, "test explicit numeric cast plan does not match its operand types")
 
-        assert.equal(127, coder._float_integer_capacity({
+        assert.equal(127, coder_numerics._float_integer_capacity({
             kind = "float",
             radix = 2,
             maximum_exponent = 128,
         }))
-        assert.equal(196, coder._float_integer_capacity({
+        assert.equal(196, coder_numerics._float_integer_capacity({
             kind = "float",
             radix = 16,
             maximum_exponent = 50,
         }))
         assert.has_error(function()
-            coder._float_integer_capacity({
+            coder_numerics._float_integer_capacity({
                 kind = "float",
                 maximum_exponent = 128,
             })

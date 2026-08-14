@@ -1,5 +1,7 @@
+require "titan-compiler.coder.core"
 local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
+local coder_interfaces = require "titan-compiler.coder.interfaces"
 local types = require "titan-compiler.types"
 local cdriver = require "c-parser.cdriver"
 
@@ -56,7 +58,7 @@ describe("interfaces (end-to-end)", function()
             upvalue = 0,
         }
         local ctx = { tlcontext = tlcontext }
-        local generated = coder._interface_adapter_identity_prelude(
+        local generated = coder_interfaces._interface_adapter_identity_prelude(
             ctx, {
                 concrete_owner_module = "provider",
                 arguments = {{

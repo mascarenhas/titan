@@ -4,6 +4,7 @@ local coder = require 'titan-compiler.coder'
 local driver = require 'titan-compiler.driver'
 local util = require 'titan-compiler.util'
 local h = require 'spec.support.helpers'
+local source_inventory = require 'spec.support.source_inventory'
 
 local parse = h.parse
 local compile = h.compile
@@ -815,11 +816,18 @@ describe("Titan code generator", function()
         ]])
         assert.truthy(csrc:find("setnilvalue2s(_s);", 1, true), csrc)
 
-        local file = assert(io.open("titan-compiler/coder.lua", "rb"))
-        local source = assert(file:read("*a"))
-        assert.truthy(file:close())
-        assert.falsy(source:find(
-            "setnilvalue%s*%(%s*s2v%s*%(", 1), source)
+        local paths = { "titan-compiler/coder.lua" }
+        for _, path in ipairs(source_inventory.lua_files(
+                "titan-compiler/coder")) do
+            paths[#paths + 1] = path
+        end
+        for _, path in ipairs(paths) do
+            local file = assert(io.open(path, "rb"))
+            local source = assert(file:read("*a"))
+            assert.truthy(file:close())
+            assert.falsy(source:find(
+                "setnilvalue%s*%(%s*s2v%s*%(", 1), path)
+        end
     end)
 
     it("accepts a bare return in a zero-return function", function()

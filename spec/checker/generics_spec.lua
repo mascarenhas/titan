@@ -1,3 +1,4 @@
+local checker_core = require "titan-compiler.checker.core"
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 local driver = require "titan-compiler.driver"
@@ -1359,12 +1360,12 @@ describe("generic declarations and explicit calls", function()
             local scope = types.GenericScope(
                 "test", false, "make", "function", "function")
             local parameter = types.Parameter(scope, 1, "B", false)
-            local entry = checker._generic.inference_scope_entry(scope, {
+            local entry = checker_core.generic_inference_scope_entry(scope, {
                 types.TypeParameter("B", false),
             }, { parameter })
-            local inference = checker._generic.new_inference_context(
+            local inference = checker_core.generic_new_inference_context(
                 "option result", { entry }, false, {}, false)
-            checker._generic.infer_result_evidence(inference,
+            checker_core.generic_infer_result_evidence(inference,
                 types.Function({}, { pattern(parameter) },
                     false, false, false), { fixed = { target } })
             return entry.cells[1].binding
@@ -2329,8 +2330,8 @@ describe("generic declarations and explicit calls", function()
     it("preserves a deferred contextual call's complete open constructor run",
     function()
         local direct_open = 0
-        local original = checker._generic.check_direct_positional_constructor
-        checker._generic.check_direct_positional_constructor = function(node, ...)
+        local original = checker_core.generic_check_direct_positional_constructor
+        checker_core.generic_check_direct_positional_constructor = function(node, ...)
             if node.fields[1]
                and node.fields[1].exp._tag == "Ast.ExpCall" then
                 direct_open = direct_open + 1
@@ -2363,7 +2364,7 @@ describe("generic declarations and explicit calls", function()
                 return agree({{function(x) return x end}}, callbacks())
             end
         ]]))
-        checker._generic.check_direct_positional_constructor = original
+        checker_core.generic_check_direct_positional_constructor = original
         assert.truthy(result[1], result[2])
         local ast = result[2]
         assert.equal(3, direct_open)
@@ -2436,13 +2437,13 @@ describe("generic declarations and explicit calls", function()
             end
         ]]
         local operation_counts = {}
-        local original = checker._generic.with_inference_operation
-        checker._generic.with_inference_operation = function(node, ...)
+        local original = checker_core.generic_with_inference_operation
+        checker_core.generic_with_inference_operation = function(node, ...)
             operation_counts[node] = (operation_counts[node] or 0) + 1
             return original(node, ...)
         end
         local result = table.pack(pcall(assert_check, source))
-        checker._generic.with_inference_operation = original
+        checker_core.generic_with_inference_operation = original
         assert.truthy(result[1], result[2])
         local ast = result[2]
         local use = toplevel(ast, "Ast.TopLevelFunc", "use")
@@ -2566,13 +2567,13 @@ describe("generic declarations and explicit calls", function()
                 function use(): integer return %s end
             ]=]):format(case.call)
             local operation_counts = {}
-            local original = checker._generic.with_inference_operation
-            checker._generic.with_inference_operation = function(node, ...)
+            local original = checker_core.generic_with_inference_operation
+            checker_core.generic_with_inference_operation = function(node, ...)
                 operation_counts[node] = (operation_counts[node] or 0) + 1
                 return original(node, ...)
             end
             local result = table.pack(pcall(run_checker, source))
-            checker._generic.with_inference_operation = original
+            checker_core.generic_with_inference_operation = original
             assert.truthy(result[1], result[2])
 
             local ok, err, ast = table.unpack(result, 2, result.n)
@@ -2601,8 +2602,8 @@ describe("generic declarations and explicit calls", function()
     it("preserves computed argument context after generic eligibility probes",
     function()
         local operation_counts = {}
-        local original = checker._generic.with_inference_operation
-        checker._generic.with_inference_operation = function(node, ...)
+        local original = checker_core.generic_with_inference_operation
+        checker_core.generic_with_inference_operation = function(node, ...)
             operation_counts[node] = (operation_counts[node] or 0) + 1
             return original(node, ...)
         end
@@ -2630,7 +2631,7 @@ describe("generic declarations and explicit calls", function()
                 return d
             end
         ]]))
-        checker._generic.with_inference_operation = original
+        checker_core.generic_with_inference_operation = original
         assert.truthy(result[1], result[2])
         local ast = result[2]
         for node, count in pairs(operation_counts) do

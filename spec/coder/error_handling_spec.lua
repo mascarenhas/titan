@@ -1,3 +1,4 @@
+require "titan-compiler.coder.core"
 -- End-to-end coverage for Titan error handling in generated C.
 --
 -- This file exercises `raise`, `catch`, `finally`, trace preservation,
@@ -13,6 +14,7 @@
 -- surfaces the raised value as the pcall error and records the Titan frames.
 local h = require 'spec.support.helpers'
 local coder = require 'titan-compiler.coder'
+local coder_names = require 'titan-compiler.coder.names'
 
 local compile_and_run = h.compile_and_run
 local compile_and_read_c = h.compile_and_read_c
@@ -1197,7 +1199,7 @@ describe("catch", function()
             end
         ]])
         local native_callback =
-            coder._function_prefix("test", "native_callback") ..
+            coder_names._function_prefix("test", "native_callback") ..
             "_titan"
         local _, prototype = assert(csrc:find(native_callback, 1, true))
         local definition = assert(csrc:find(

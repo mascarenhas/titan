@@ -1,6 +1,13 @@
 # Code generator: overview
 
-The code generator is `titan-compiler/coder.lua`. Its single entry point is
+The small `titan-compiler/coder.lua` facade eagerly assembles the code
+generator slices under `titan-compiler/coder/`. `core.lua` owns their shared
+private lexical environment and generation policy; implementation helper names
+remain there rather than entering Lua's global namespace. The other modules
+group native names, value and boundary lowering, flow analysis, Interfaces, numerics,
+statements, calls, expressions, declarations, module artifacts, and final
+generation. The facade exposes the two driver operations
+`generate_foreign_header` and:
 
 ```lua
 coder.generate(modname, ast, static_deps, abi[, emit_line_directives])
@@ -208,7 +215,8 @@ strict result actions after the declaration entry or wrapper relay has boxed
 the native results. An exactly tagged realized wrapper instead executes its
 frozen result actions inside the target-native adapter.
 
-Module protocol names come from `mangle_qn` (`coder.lua`), which replaces `.`
+Module protocol names come from `mangle_qn` (`coder/names.lua`), which
+replaces `.`
 and `-` with `_`. The driver has already restricted every logical component to
 `[A-Za-z_][A-Za-z0-9_-]*`, so this does not admit arbitrary path or template
 bytes. Module `foo.bar` yields `foo_bar_init`, `foo_bar_abi`, `foo_bar_types`,
@@ -334,7 +342,7 @@ publication. See
 ### The Titan-native function and its calling convention
 
 The authoritative statement is the comment above `codefuncdec` in
-`coder.lua`:
+`coder/declarations.lua`:
 
 ```
 -- Titan calling convention:

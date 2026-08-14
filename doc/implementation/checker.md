@@ -2,9 +2,17 @@
 
 The checker takes the AST the parser built (see
 [Lexer and parser](lexer-parser.md)) and produces the typed, *elaborated* AST
-the [code generator](codegen-overview.md) consumes. It lives in three files
-under `titan-compiler/`: `checker.lua` (the traversal), `types.lua` (type
-values and relations), and `symtab.lua` (scoping). Above all: the checker
+the [code generator](codegen-overview.md) consumes. The small
+`titan-compiler/checker.lua` facade exposes the production checker API and
+eagerly assembles the implementation slices under `titan-compiler/checker/`.
+`core.lua` owns their one shared private lexical environment and mutable checker
+state. Generic helpers stay with their semantic slices under `generic_`-prefixed
+private names rather than a `checker._generic` table. The remaining slices group
+C types and probes, common type operations, Interfaces, type syntax, expression
+lists, statements, variables, calls, expressions, declarations, imported
+interfaces, generic lowering, and the final check lifecycle. `types.lua` still
+owns type values and relations, while
+`symtab.lua` owns scoping. Above all: the checker
 does not merely *check* — it **rewrites** the AST so that every implicit
 conversion, every finite extra call projection, and every defaulted loop step
 exists as an explicit node, while finite/open list demand is recorded on its
@@ -17,7 +25,8 @@ never decides to coerce anything on its own.
 function checker.check(modname, ast, subject, filename, loader, options)
 ```
 
-(`checker.lua`, `checker.check`.) It builds a fresh symbol table with
+(`checker/entry.lua`, exported directly by the `checker.lua` facade.) It
+builds a fresh symbol table with
 `symtab.new(modname)`, runs staged top-level declaration collection followed by
 body checking (below), computes the module's interface type with
 `makemoduletype`, stores it in `ast._type`, and returns **`ast._type, errors`**

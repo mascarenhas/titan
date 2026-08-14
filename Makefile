@@ -381,7 +381,7 @@ STDLIB_LICENSES := LICENSES/libuv-LICENSE \
 	LICENSES/ta-regex-LICENSE LICENSES/lua-LICENSE \
 	LICENSES/llhttp-LICENSE LICENSES/openssl-LICENSE
 STDLIB_EMBEDDED_FORMAT_INPUTS := titan-compiler/staticmetadata.lua \
-	titan-compiler/coder.lua
+	titan-compiler/coder.lua $(wildcard titan-compiler/coder/*.lua)
 TITAN_BOOTSTRAP_SO := titan-runtime/bootstrap/titan.so
 STDLIB_BOOTSTRAP_PREREQ := $(TITAN_BOOTSTRAP_SO)
 ROCK_LUA_INCDIR ?= $(PREFIX)/include
@@ -403,7 +403,8 @@ TITAN_LUA ?= $(ROCK_LUA)
 # keeps developer stdlib rebuilds on the edits that triggered them, while Lua's
 # configured default paths still find third-party dependencies under PREFIX.
 TITANC    ?= $(TITAN_LUA) -E -e 'package.path="./?.lua;./?/init.lua;" .. package.path; package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath' ./titanc
-TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua)
+TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua \
+	titan-compiler/checker/*.lua titan-compiler/coder/*.lua c-parser/*.lua)
 
 # Standard modules have one installed pathname. PREFIX owns Lua; ROCKS_TREE
 # owns these Titan artifacts when it is supplied. The source-tree

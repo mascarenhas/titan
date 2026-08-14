@@ -1,5 +1,8 @@
+require "titan-compiler.coder.core"
 local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
+local coder_names = require "titan-compiler.coder.names"
+local coder_declarations = require "titan-compiler.coder.declarations"
 local types = require "titan-compiler.types"
 
 local GENERATED_HEADER_BANNER =
@@ -91,8 +94,8 @@ describe("source-defined foreign functions", function()
             local generated = read_file("test.titan.h")
             assert.equal(GENERATED_HEADER_BANNER,
                 generated:sub(1, #GENERATED_HEADER_BANNER))
-            local add = coder._foreign_func_name("test", "add_one")
-            local accumulate = coder._foreign_func_name("test", "accumulate")
+            local add = coder_names._foreign_func_name("test", "add_one")
+            local accumulate = coder_names._foreign_func_name("test", "accumulate")
             assert.truthy(add:find("\\u2133", 1, true))
             assert.truthy(generated:find("static inline ffi_int " .. add, 1, true))
             assert.truthy(generated:find("TITAN_SOURCE_LOCAL ffi_int " .. accumulate,
@@ -105,7 +108,7 @@ describe("source-defined foreign functions", function()
             local symbols = assert(pipe:read("*a"))
             assert.truthy(pipe:close())
             assert.truthy(symbols:find(
-                coder._linkage_symbol_name(accumulate), 1, true), symbols)
+                coder_names._linkage_symbol_name(accumulate), 1, true), symbols)
             assert.falsy(symbols:find("\\u2133", 1, true), symbols)
 
             local ok, err = h.call("test", [[
@@ -314,8 +317,8 @@ describe("source-defined foreign functions", function()
 
     it("renders the closed raw-C variable and inline-shape branches", function()
         local cmodule = types.CModule("fixture", {}, {})
-        local ctx = coder._new_foreign_context({ module = "test" })
-        local _, cname = coder._foreign_raw_var(ctx, {
+        local ctx = coder_declarations._new_foreign_context({ module = "test" })
+        local _, cname = coder_declarations._foreign_raw_var(ctx, {
             _tag = "Ast.VarDot",
             name = "C_VALUE",
             exp = { _type = cmodule },
@@ -325,7 +328,7 @@ describe("source-defined foreign functions", function()
 
         local cint = types.CInteger("int", true, 3, 32)
         local size = { _tag = "Type.CPseudoSize", name = "sizeof", ctype = cint }
-        local _, sizeof = coder._foreign_raw_var(ctx, {
+        local _, sizeof = coder_declarations._foreign_raw_var(ctx, {
             _tag = "Ast.VarDot",
             name = "sizeof",
             exp = { _type = cint },
@@ -337,36 +340,36 @@ describe("source-defined foreign functions", function()
         local foreign = types.ModuleMember("other", "callback",
             types.CFunction({}, cint, false, false), {})
         foreign._foreign_source = true
-        local _, reference = coder._foreign_raw_var(ctx, {
+        local _, reference = coder_declarations._foreign_raw_var(ctx, {
             _tag = "Ast.VarDot",
             name = "callback",
             exp = { _type = { _tag = "Type.Module" } },
             _decl = foreign,
             _type = foreign.type,
         })
-        assert.equal(coder._foreign_func_name("other", "callback"), reference)
+        assert.equal(coder_names._foreign_func_name("other", "callback"), reference)
 
         assert.has_error(function()
-            coder._foreign_raw_var(ctx, {
+            coder_declarations._foreign_raw_var(ctx, {
                 _tag = "Ast.VarName", name = "missing",
             })
         end, "foreign variable lacks a C name: missing")
         assert.has_error(function()
-            coder._foreign_raw_var(ctx, { _tag = "Ast.VarInvalid" })
+            coder_declarations._foreign_raw_var(ctx, { _tag = "Ast.VarInvalid" })
         end, "unsupported foreign variable Ast.VarInvalid")
 
         local ret = { _tag = "Ast.StatReturn" }
         local block = function(stats)
             return { _tag = "Ast.StatBlock", stats = stats }
         end
-        assert.is_true(coder._foreign_function_is_inline({
+        assert.is_true(coder_declarations._foreign_function_is_inline({
             block = block({ {
                 _tag = "Ast.StatIf",
                 thens = { { block = block({ ret }) } },
                 elsestat = block({ ret }),
             } }),
         }))
-        assert.is_true(coder._foreign_function_is_inline({
+        assert.is_true(coder_declarations._foreign_function_is_inline({
             block = block({ {
                 _tag = "Ast.StatIf",
                 thens = { { block = block({ ret }) } },
