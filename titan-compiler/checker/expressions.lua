@@ -104,33 +104,33 @@ checkexp = util.make_visitor({
                 errors, node.loc)
         end
         node._type = types.Nominal(
-            union.name, checker._generic.generic_parameter_arguments(union))
+            union.name, generic_parameter_arguments(union))
     end,
 
     ["Ast.ExpInitList"] = function(node, st, errors, context)
-        return checker._generic.with_inference_operation(
+        return generic_with_inference_operation(
             node, st, function(operation)
         context = context and deoptionize(context)
         local dependent_context = operation and context
-            and checker._generic.inference_type_has_unresolved(
+            and generic_inference_type_has_unresolved(
                 operation.context, context)
         local shape, kinds, dots_field, invalid_dots =
             classify_constructor_fields(node, errors)
 
         local direct_context = dependent_context
             and context._tag == "Type.Parameter"
-            and checker._generic.inference_cell(
+            and generic_inference_cell(
                 operation.context, context)
         if shape == "empty" and direct_context then
-            checker._generic.defer_empty_constructor(
+            generic_defer_empty_constructor(
                 node, st, errors, context, operation)
             return
         elseif shape == "positional" and direct_context then
-            checker._generic.check_direct_positional_constructor(
+            generic_check_direct_positional_constructor(
                 node, st, errors, context, operation)
             return
         elseif shape == "computed" and direct_context then
-            checker._generic.check_direct_computed_constructor(
+            generic_check_direct_computed_constructor(
                 node, st, errors, context, operation)
             return
         end
@@ -224,7 +224,7 @@ checkexp = util.make_visitor({
                 node._type = context
             end
         elseif expected == "Type.Nominal" then
-            checker._generic.check_named_record_constructor(
+            generic_check_named_record_constructor(
                 node, st, errors, context, operation)
         end
         end, "constructor")
@@ -235,7 +235,7 @@ checkexp = util.make_visitor({
         -- Reuse its annotations, then continue with this consumer's contextual
         -- first-class, foreign-function, and value handling below.
         if not node._generic_var_prechecked then
-            checker._generic.checkvar_for_expression(node, st, errors, context)
+            generic_checkvar_for_expression(node, st, errors, context)
         end
         if node.var._decl then node.var._decl._used = true end
         local texp = node.var._type
@@ -268,7 +268,7 @@ checkexp = util.make_visitor({
         elseif texp._tag == "Type.FunctionScheme"
            or (texp._tag == "Type.Function"
                and node.var._generic_declaration) then
-            local closed = checker._generic.instantiate_first_class_variable(
+            local closed = generic_instantiate_first_class_variable(
                 node, node.var, texp, context, st, errors)
             if closed then
                 node._type = closed
@@ -442,8 +442,8 @@ checkexp = util.make_visitor({
             end
             local comparison = types.comparable(tlhs, trhs)
             if not comparison then
-                local lcarrier = checker._generic.rigid_parameter_carrier(tlhs)
-                local rcarrier = checker._generic.rigid_parameter_carrier(trhs)
+                local lcarrier = generic_rigid_parameter_carrier(tlhs)
+                local rcarrier = generic_rigid_parameter_carrier(trhs)
                 if (lcarrier and not rcarrier and types.equals(lcarrier, trhs))
                    or (rcarrier and not lcarrier and types.equals(tlhs, rcarrier)) then
                     comparison = {
@@ -633,7 +633,7 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpCall"] = function(node, st, errors, context, demand)
-        return checker._generic.with_inference_operation(node, st,
+        return generic_with_inference_operation(node, st,
         function(inference_operation)
         demand = demand or default_call_result_demand(node, context)
         local written_exp = node.exp
@@ -642,7 +642,7 @@ checkexp = util.make_visitor({
             if node.exp._generic_var_prechecked then
                 node.exp._generic_var_prechecked = nil
             else
-                checker._generic.checkvar_for_expression(
+                generic_checkvar_for_expression(
                     node.exp, st, errors, c_pseudo_callee_context)
             end
             if var._decl then var._decl._used = true end
@@ -663,7 +663,7 @@ checkexp = util.make_visitor({
             or argtag == "Ast.ArgsNamedMethod")
 
         if not method then
-            local ftype = checker._generic.instantiate_direct_call(
+            local ftype = generic_instantiate_direct_call(
                 node, node.exp._type, st, errors, demand)
             local fname = expname(node.exp)
             local pseudo_new = node.exp._tag == "Ast.ExpVar"
@@ -820,18 +820,18 @@ checkexp = util.make_visitor({
                 node._contextual_value_call = true
                 node._contextual_function_type = synthesized
                 synthesized, dependent_call =
-                    checker._generic.infer_dependent_value_call_application(
+                    generic_infer_dependent_value_call_application(
                         inference_operation, synthesized, node,
                         contextual_args, st, errors,
                         "function '" .. fname .. "'", function(closed)
-                            checker._generic.finalize_contextual_value_callee(
+                            generic_finalize_contextual_value_callee(
                                 node, original, closed, errors)
                         end)
                 if not dependent_call then
-                    checker._generic.close_generic_adjusted_arguments(
+                    generic_close_generic_adjusted_arguments(
                         node, contextual_args, node.args.args, synthesized,
                         st, errors, "function '" .. fname .. "'")
-                    checker._generic.finalize_contextual_value_callee(
+                    generic_finalize_contextual_value_callee(
                         node, original, synthesized, errors)
                 end
                 ftype = synthesized
@@ -843,7 +843,7 @@ checkexp = util.make_visitor({
             if ftype._tag == "Type.Option" and ftype.base._tag == "Type.Function" then
                 node.exp = tryforce(node.exp)
                 ftype = ftype.base
-                checker._generic.defer_inference_force(
+                generic_defer_inference_force(
                     inference_operation, node, written_exp, "Type.Function")
             end
             if ftype._tag ~= "Type.Function" then
@@ -860,7 +860,7 @@ checkexp = util.make_visitor({
             -- evidence to the ambient inference context instead.
             if not named and not contextual_args then
                 ftype, dependent_call =
-                    checker._generic.infer_dependent_call_application(
+                    generic_infer_dependent_call_application(
                         inference_operation, ftype, node, demand, st, errors,
                         "function '" .. fname .. "'")
             end
@@ -914,7 +914,7 @@ checkexp = util.make_visitor({
                 end
             end
             annotate_call_results(node, ftype, demand, errors)
-            checker._generic.defer_inherited_call_result_finalization(
+            generic_defer_inherited_call_result_finalization(
                 node, demand, dependent_call and inference_operation or nil)
             check_generic_result_limit(node, errors)
             if node._type._tag == "Type.Void" and not node._voidok
@@ -934,7 +934,7 @@ checkexp = util.make_visitor({
             if otype._tag == "Type.Option" and otype.base._tag == "Type.Nominal" then
                 node.exp = tryforce(node.exp)
                 otype = otype.base
-                checker._generic.defer_inference_force(
+                generic_defer_inference_force(
                     inference_operation, node, written_exp, "Type.Nominal")
             end
             if otype._tag == "Type.Parameter"
@@ -947,7 +947,7 @@ checkexp = util.make_visitor({
                (types.registry[otype.fqtn]._tag == "Type.Record"
                 or types.registry[otype.fqtn]._tag == "Type.Union"
                 or types.registry[otype.fqtn]._tag == "Type.Interface") then
-                local class = checker._generic.applied_owner_view(
+                local class = generic_applied_owner_view(
                     otype, errors, node.loc)
                 local owner_kind = class._tag == "Type.Record"
                     and "record"
@@ -975,13 +975,13 @@ checkexp = util.make_visitor({
                     check_call_argument_expressions(node.args, st, errors)
                     return
                 end
-                ftype = checker._generic.instantiate_method_declaration(
+                ftype = generic_instantiate_method_declaration(
                     node, ftype, st, errors, class.name, demand)
                 local dependent_call = false
                 if not named or (not ftype.varargtype
                         and type(ftype.paramnames) == "table") then
                     ftype, dependent_call =
-                        checker._generic.infer_dependent_call_application(
+                        generic_infer_dependent_call_application(
                             inference_operation, ftype, node, demand,
                             st, errors,
                             "method '" .. class.name .. ":"
@@ -1038,11 +1038,11 @@ checkexp = util.make_visitor({
                         assert(interface_method_index(
                             class, method_name_text))
                 end
-                checker._generic.defer_inherited_interface_finalization(
+                generic_defer_inherited_interface_finalization(
                     node, class, method_name_text,
                     dependent_call and inference_operation or nil)
                 annotate_call_results(node, ftype, demand, errors)
-                checker._generic.defer_inherited_call_result_finalization(
+                generic_defer_inherited_call_result_finalization(
                     node, demand,
                     dependent_call and inference_operation or nil)
                 if node._type._tag == "Type.Void" and not node._voidok
@@ -1081,7 +1081,7 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpAdjust"] = function(node, st, errors, context, demand)
-        return checker._generic.with_inference_operation(node, st,
+        return generic_with_inference_operation(node, st,
         function(operation)
             node.exp._voidok = true
             -- Parentheses force exactly one result even though `_voidok`
@@ -1119,10 +1119,10 @@ checkexp = util.make_visitor({
                 end
             end
             finish()
-            checker._generic.defer_inference_derived_annotations(
+            generic_defer_inference_derived_annotations(
                 operation, node, {
                     _assignment_adjustment = function(value)
-                        return checker._generic.finalize_adjustment_annotation(
+                        return generic_finalize_adjustment_annotation(
                             operation, value)
                     end,
                 }, finish)
@@ -1253,7 +1253,7 @@ checkexp = util.make_visitor({
     -- method's type with the implicit `self` removed and the receiver captured.
     -- Mirrors the method-resolution of the ArgsMethod arm of ExpCall.
     ["Ast.ExpMethodRef"] = function(node, st, errors, context)
-        return checker._generic.with_inference_operation(node, st,
+        return generic_with_inference_operation(node, st,
         function(operation)
         local written_exp = node.exp
         checkexp(node.exp, st, errors)
@@ -1277,7 +1277,7 @@ checkexp = util.make_visitor({
            (types.registry[otype.fqtn]._tag == "Type.Record"
             or types.registry[otype.fqtn]._tag == "Type.Union"
             or types.registry[otype.fqtn]._tag == "Type.Interface") then
-            local class = checker._generic.applied_owner_view(
+            local class = generic_applied_owner_view(
                 otype, errors, node.loc)
             local owner_kind = class._tag == "Type.Record"
                 and "record"
@@ -1308,14 +1308,14 @@ checkexp = util.make_visitor({
                 local subject = "generic bound method '" .. class.name
                     .. ":" .. node.name .. "'"
                 node._generic_declaration = mtype
-                local closed = checker._generic.infer_first_class_application(
-                    node, subject, { checker._generic.inference_scope_entry(
+                local closed = generic_infer_first_class_application(
+                    node, subject, { generic_inference_scope_entry(
                         mtype.scope, mtype.typeparams) },
                     types.method_function_type(mtype), expected,
                     st, errors, node.loc,
                     function(final_type, arguments, inference, use)
                         local closed_method =
-                            checker._generic.close_inference_declaration(
+                            generic_close_inference_declaration(
                                 inference, use, mtype, true)
                         node._generic_type_arguments = arguments
                         node._method = closed_method
@@ -1353,7 +1353,7 @@ checkexp = util.make_visitor({
                 "expected record in receiver of method reference but found '%s'",
                 types.tostring(types.registry[otype.fqtn]))
         end
-        checker._generic.defer_inference_derived_annotations(
+        generic_defer_inference_derived_annotations(
             operation, node, {
                 _type = true,
                 _method = true,
@@ -1361,7 +1361,7 @@ checkexp = util.make_visitor({
                 _interface_method = true,
                 _rigid_receiver_type = true,
                 _assignment_adjustment = function(value)
-                    return checker._generic.finalize_adjustment_annotation(
+                    return generic_finalize_adjustment_annotation(
                         operation, value)
                 end,
             }, function()

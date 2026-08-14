@@ -1,5 +1,6 @@
 -- Shared lexical environment for the checker implementation slices.
--- Feature modules install declarations here in facade-controlled order.
+-- Feature modules install private declarations here in facade-controlled order;
+-- global language and library names remain available through __index lookups.
 local core = setmetatable({}, { __index = _G })
 local _ENV = core
 
@@ -26,7 +27,5 @@ cprobe = require "titan-compiler.cprobe"
 csemantics = require "titan-compiler.csemantics"
 
 cdeclarator = require "titan-compiler.cdeclarator"
-
-checker._generic = {}
 
 return core

@@ -11,7 +11,7 @@ function alias_namespace_type(typ, st)
         -- A concrete alias pre-closes the owner's binders. Its constructor and
         -- statics retain that application rather than reopening the raw owner
         -- scheme and accepting a second, contradictory argument list.
-        owner = checker._generic.applied_owner_view(typ)
+        owner = generic_applied_owner_view(typ)
     elseif typ and typ._tag == "Type.GenericAlias" then
         owner = types.registry[typ.target_owner_fqtn]
     end
@@ -49,9 +49,9 @@ function interface_relation_policy(st, options)
     policy.interface_coercion = function(source, target, received)
         policy.interface_failure = false
         local concrete = source._tag == "Type.Nominal"
-            and checker._generic.applied_owner_view(source) or nil
+            and generic_applied_owner_view(source) or nil
         local interface = target._tag == "Type.Nominal"
-            and checker._generic.applied_owner_view(target) or nil
+            and generic_applied_owner_view(target) or nil
         if not concrete
            or (concrete._tag ~= "Type.Record"
                and concrete._tag ~= "Type.Union")
@@ -62,7 +62,7 @@ function interface_relation_policy(st, options)
         end
 
         local implementation, failure =
-            checker._generic.interface_implementation(
+            generic_interface_implementation(
                 concrete, interface, received)
         policy.interface_failure = failure or false
         if implementation then
@@ -1322,7 +1322,7 @@ function make_interface_conversion(source, target, adjustment)
     }
 end
 
-function checker._generic.rigid_parameter_carrier(parameter)
+function generic_rigid_parameter_carrier(parameter)
     if not parameter or parameter._tag ~= "Type.Parameter" then return nil end
     return parameter.erased_constraint ~= false
         and parameter.erased_constraint or types.Value()
@@ -1331,7 +1331,7 @@ end
 -- Surface generic types have not reached the erased-core pass yet.  Whenever
 -- an existing checker annotation needs the eventual runtime carrier, erase a
 -- detached Type view rather than weakening the rigid surface type itself.
-function checker._generic.runtime_carrier(typ)
+function generic_runtime_carrier(typ)
     if types.contains_generic(typ) then return types.erase(typ) end
     return typ
 end
@@ -1341,7 +1341,7 @@ end
 -- sanctioned shallow consistency edge pointwise: an argument may move to or
 -- from its binder's erased carrier, never directly to another precise
 -- application merely because both values share one metatable.
-function checker._generic.surface_argument_consistent(
+function generic_surface_argument_consistent(
         left, right, typeparam, owner, left_args, right_args, st)
     left, right = types.normalize(left), types.normalize(right)
     if not left or not right then return false end
@@ -1356,20 +1356,20 @@ function checker._generic.surface_argument_consistent(
         return left._tag == "Type.Value" or right._tag == "Type.Value"
     end
 
-    local left_constraint = checker._generic.generic_substitute(
+    local left_constraint = generic_substitute(
         typeparam.constraint, owner.scope, left_args)
-    local right_constraint = checker._generic.generic_substitute(
+    local right_constraint = generic_substitute(
         typeparam.constraint, owner.scope, right_args)
     if not left_constraint or not right_constraint then return false end
     return (types.equals(right, right_constraint)
-            and checker._generic.generic_constraint_satisfied(
+            and generic_constraint_satisfied(
                 left, left_constraint, st) == true)
         or (types.equals(left, left_constraint)
-            and checker._generic.generic_constraint_satisfied(
+            and generic_constraint_satisfied(
                 right, right_constraint, st) == true)
 end
 
-function checker._generic.applied_nominal_adjustment(source, target, st)
+function generic_applied_nominal_adjustment(source, target, st)
     source, target = types.normalize(source), types.normalize(target)
     if not source or not target
        or source._tag ~= "Type.Nominal"
@@ -1387,7 +1387,7 @@ function checker._generic.applied_nominal_adjustment(source, target, st)
     for index = 1, #source_args do
         local typeparam = owner and owner.typeparams
             and owner.typeparams[index] or nil
-        local consistent = checker._generic.surface_argument_consistent(
+        local consistent = generic_surface_argument_consistent(
             source_args[index], target_args[index], typeparam, owner,
             source_args, target_args, st)
         if not consistent then return true, false end
@@ -1403,13 +1403,13 @@ end
 function checker_assignment_adjustment(source, target, st, options)
     st = st or active_check_state
     local applied, application_plan =
-        checker._generic.applied_nominal_adjustment(source, target, st)
+        generic_applied_nominal_adjustment(source, target, st)
     if applied then return application_plan, nil, nil end
     if source._tag == "Type.Option" or target._tag == "Type.Option" then
         local source_base = source._tag == "Type.Option" and source.base or source
         local target_base = target._tag == "Type.Option" and target.base or target
         local inner_applied, inner_plan =
-            checker._generic.applied_nominal_adjustment(
+            generic_applied_nominal_adjustment(
                 source_base, target_base, st)
         if inner_applied then
             if not inner_plan then return nil, nil, nil end
@@ -1421,8 +1421,8 @@ function checker_assignment_adjustment(source, target, st, options)
     -- Rigid transport to or from the binder's own erased constraint is a
     -- representation identity at the generic surface. Distinct parameters do
     -- not become assignable merely because their carriers happen to match.
-    local source_carrier = checker._generic.rigid_parameter_carrier(source)
-    local target_carrier = checker._generic.rigid_parameter_carrier(target)
+    local source_carrier = generic_rigid_parameter_carrier(source)
+    local target_carrier = generic_rigid_parameter_carrier(target)
     if source_carrier and not target_carrier
        and types.equals(source_carrier, target) then
         return { kind = "identity", source = source, target = target }, nil, nil
@@ -1511,7 +1511,7 @@ end
 -- Generic applications are surface-only checker types. The owner registry keeps
 -- one declaration descriptor; an application substitutes its immutable binder
 -- scope into a fresh view for field, variant, and method lookup.
-function checker._generic.generic_owner_type(typ)
+function generic_owner_type(typ)
     if not typ then return nil end
     if typ._tag == "Type.Nominal" then
         return types.registry[typ.fqtn]
@@ -1521,7 +1521,7 @@ function checker._generic.generic_owner_type(typ)
     end
 end
 
-function checker._generic.generic_parameter_arguments(owner)
+function generic_parameter_arguments(owner)
     local arguments = {}
     if owner and owner.scope ~= false then
         for index, typeparam in ipairs(owner.typeparams or {}) do
@@ -1533,15 +1533,15 @@ function checker._generic.generic_parameter_arguments(owner)
     return arguments
 end
 
-function checker._generic.generic_substitute(typ, scope, arguments, errors, loc, subject)
+function generic_substitute(typ, scope, arguments, errors, loc, subject)
     local ok, result = pcall(types.substitute, typ, scope, arguments)
     if ok then return result end
     checker.typeerror(errors, loc, "%s: %s", subject, tostring(result))
     return nil
 end
 
-function checker._generic.applied_owner_view(nominal, errors, loc)
-    local owner = checker._generic.generic_owner_type(nominal)
+function generic_applied_owner_view(nominal, errors, loc)
+    local owner = generic_owner_type(nominal)
     if not owner or owner.scope == false then return owner end
     local arguments = nominal.args or {}
     if #arguments ~= #(owner.typeparams or {}) then return owner end
@@ -1555,12 +1555,12 @@ function checker._generic.applied_owner_view(nominal, errors, loc)
     return owner
 end
 
-function checker._generic.interface_implementation(
+function generic_interface_implementation(
         concrete, interface, policy)
     return types.generic_interface_implementation(concrete, interface, policy)
 end
 
-function checker._generic.generic_constraint_satisfied(
+function generic_constraint_satisfied(
         argument, constraint, st, policy)
     if argument._tag == "Type.Parameter" then
         local bindings = policy and policy.generic_scope_bindings
@@ -1574,8 +1574,8 @@ function checker._generic.generic_constraint_satisfied(
         return true
     end
 
-    local concrete = checker._generic.generic_owner_type(argument)
-    local interface = checker._generic.generic_owner_type(constraint)
+    local concrete = generic_owner_type(argument)
+    local interface = generic_owner_type(constraint)
     if not concrete or not interface
         or (concrete._tag ~= "Type.Record" and concrete._tag ~= "Type.Union")
         or interface._tag ~= "Type.Interface" then
@@ -1585,8 +1585,8 @@ function checker._generic.generic_constraint_satisfied(
        or (st and st.generic_signatures_incomplete) then
         return nil -- method sets are not complete yet; validate after signatures
     end
-    concrete = checker._generic.applied_owner_view(argument)
-    interface = checker._generic.applied_owner_view(constraint)
+    concrete = generic_applied_owner_view(argument)
+    interface = generic_applied_owner_view(constraint)
     if not policy then
         policy = {
             visibility = st.modname,
@@ -1595,12 +1595,12 @@ function checker._generic.generic_constraint_satisfied(
             end,
         }
     end
-    local implementation = checker._generic.interface_implementation(
+    local implementation = generic_interface_implementation(
         concrete, interface, policy)
     return implementation ~= false
 end
 
-function checker._generic.defer_constraint_application(
+function generic_defer_constraint_application(
         scope, typeparams, arguments, st, loc, subject)
     st.pending_generic_constraints = st.pending_generic_constraints or {}
     st.pending_generic_constraints[#st.pending_generic_constraints + 1] = {
@@ -1612,7 +1612,7 @@ function checker._generic.defer_constraint_application(
     }
 end
 
-function checker._generic.validate_binder_arguments(scope, typeparams, arguments,
+function generic_validate_binder_arguments(scope, typeparams, arguments,
                                          st, errors, loc, subject,
                                          allow_defer)
     local valid, argument_error =
@@ -1630,7 +1630,7 @@ function checker._generic.validate_binder_arguments(scope, typeparams, arguments
     -- sets are complete.
     if allow_defer and st.resolving_generic_owner_constraints
        and #(typeparams or {}) > 0 then
-        checker._generic.defer_constraint_application(
+        generic_defer_constraint_application(
             scope, typeparams, arguments, st, loc, subject)
         return true
     end
@@ -1641,11 +1641,11 @@ function checker._generic.validate_binder_arguments(scope, typeparams, arguments
         if typeparam.constraint ~= false then
             local constraint = typeparam.constraint
             if scope ~= false then
-                constraint = checker._generic.generic_substitute(
+                constraint = generic_substitute(
                     constraint, scope, arguments, errors, loc, subject)
                     or constraint
             end
-            local satisfied = checker._generic.generic_constraint_satisfied(
+            local satisfied = generic_constraint_satisfied(
                 arguments[index], constraint, st)
             if satisfied == nil and allow_defer then
                 deferred = true
@@ -1659,13 +1659,13 @@ function checker._generic.validate_binder_arguments(scope, typeparams, arguments
         end
     end
     if deferred then
-        checker._generic.defer_constraint_application(
+        generic_defer_constraint_application(
             scope, typeparams, arguments, st, loc, subject)
     end
     return ok
 end
 
-function checker._generic.resolve_type_argument_nodes(nodes, st, errors)
+function generic_resolve_type_argument_nodes(nodes, st, errors)
     local arguments = {}
     for index, typenode in ipairs(nodes or {}) do
         arguments[index] = typefromnode(typenode, st, errors)
@@ -1673,7 +1673,7 @@ function checker._generic.resolve_type_argument_nodes(nodes, st, errors)
     return arguments
 end
 
-function checker._generic.validate_owner_reconstruction(
+function generic_validate_owner_reconstruction(
         owner, arguments, st, errors, loc, subject, allow_defer)
     if owner.scope == false then return true end
     if allow_defer and (owner._generic_header
@@ -1689,27 +1689,27 @@ function checker._generic.validate_owner_reconstruction(
             }
         return true
     end
-    local closed = checker._generic.generic_substitute(
+    local closed = generic_substitute(
         owner, owner.scope, arguments, errors, loc,
         "cannot form " .. subject)
     return closed ~= nil
 end
 
-function checker._generic.application_arguments(
+function generic_application_arguments(
         typearg_nodes, count, st, errors)
     if #(typearg_nodes or {}) == 0 and count > 0 then
         local arguments = {}
         for index = 1, count do arguments[index] = types.Value() end
         return arguments
     end
-    return checker._generic.resolve_type_argument_nodes(
+    return generic_resolve_type_argument_nodes(
         typearg_nodes, st, errors)
 end
 
-function checker._generic.apply_named_owner(
+function generic_apply_named_owner(
         owner, typearg_nodes, st, errors, loc, subject)
     local count = #(owner.typeparams or {})
-    local arguments = checker._generic.application_arguments(
+    local arguments = generic_application_arguments(
         typearg_nodes, count, st, errors)
 
     if #arguments ~= count then
@@ -1718,17 +1718,17 @@ function checker._generic.apply_named_owner(
             subject, count, #arguments)
         return types.Nominal(owner.name, arguments)
     end
-    local valid = checker._generic.validate_binder_arguments(
+    local valid = generic_validate_binder_arguments(
         owner.scope, owner.typeparams, arguments,
         st, errors, loc, subject, true)
     if valid then
-        checker._generic.validate_owner_reconstruction(
+        generic_validate_owner_reconstruction(
             owner, arguments, st, errors, loc, subject, true)
     end
     return types.Nominal(owner.name, arguments)
 end
 
-function checker._generic.apply_generic_alias(
+function generic_apply_generic_alias(
         alias, typearg_nodes, st, errors, loc, subject)
     local owner = types.registry[alias.target_owner_fqtn]
     if not owner or (owner._tag ~= "Type.Record"
@@ -1739,18 +1739,18 @@ function checker._generic.apply_generic_alias(
     end
 
     local count = #(owner.typeparams or {})
-    local arguments = checker._generic.application_arguments(
+    local arguments = generic_application_arguments(
         typearg_nodes, count, st, errors)
     if #arguments ~= count then
         return invalid(errors, loc,
             "%s expected %d type arguments but found %d",
             subject, count, #arguments)
     end
-    local valid = checker._generic.validate_binder_arguments(
+    local valid = generic_validate_binder_arguments(
         owner.scope, owner.typeparams, arguments,
         st, errors, loc, subject, true)
     if valid then
-        checker._generic.validate_owner_reconstruction(
+        generic_validate_owner_reconstruction(
             owner, arguments, st, errors, loc, subject, true)
     end
     return types.Nominal(owner.name, arguments)
@@ -1759,7 +1759,7 @@ end
 -- Record how a type-only alias reaches its canonical runtime namespace.  A
 -- forwarding alias leaves the owner's binders open; a concrete alias fixes
 -- them once and cannot be applied again.
-function checker._generic.annotate_alias_namespace(node, alias_type, namespace)
+function generic_annotate_alias_namespace(node, alias_type, namespace)
     node._alias_namespace = true
     local owner, arguments, fixed
     if alias_type and alias_type._tag == "Type.GenericAlias" then
@@ -1787,7 +1787,7 @@ end
 -- selecting its constructor or nominal function.  The selected expression
 -- retains the canonical owner separately so the later code-facing lowering
 -- still sees the shared generic declaration.
-function checker._generic.apply_namespace_typeargs(exp, st, errors)
+function generic_apply_namespace_typeargs(exp, st, errors)
     local nodes = exp._nominal_typeargs
     if nodes == nil then return exp._type end
     local variable = exp._tag == "Ast.ExpVar" and exp.var or nil
@@ -1812,10 +1812,10 @@ function checker._generic.apply_namespace_typeargs(exp, st, errors)
     end
 
     local subject = "nominal namespace '" .. (variable.name or owner.name) .. "'"
-    local nominal = checker._generic.apply_named_owner(
+    local nominal = generic_apply_named_owner(
         owner, nodes, st, errors,
         exp._nominal_typeargs_loc or exp.loc, subject)
-    local closed = checker._generic.applied_owner_view(
+    local closed = generic_applied_owner_view(
         nominal, errors, exp._nominal_typeargs_loc or exp.loc) or owner
     variable._generic_namespace_owner = owner
     variable._generic_namespace_arguments = nominal.args or {}
@@ -1827,7 +1827,7 @@ function checker._generic.apply_namespace_typeargs(exp, st, errors)
     return closed
 end
 
-function checker._generic.resolve_local_owner(name, st)
+function generic_resolve_local_owner(name, st)
     local declaration = st:find_symbol(name)
     if declaration and (declaration._tag == "Ast.TopLevelRecord"
             or declaration._tag == "Ast.TopLevelUnion") then

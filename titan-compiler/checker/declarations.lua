@@ -199,7 +199,7 @@ end
 --   st: symbol table
 --   errors: list of compile-time errors
 function checkfunc(node, st, errors)
-    return checker._generic.with_declaration_bindings(node, st,
+    return generic_with_declaration_bindings(node, st,
         checkfuncbody, node, st, errors)
 end
 
@@ -223,13 +223,13 @@ end
 --   st: symbol table
 --   errors: list of compile-time errors
 function checkmethod(node, st, errors)
-    return checker._generic.with_declaration_bindings(node, st, function()
+    return generic_with_declaration_bindings(node, st, function()
         local owner = node._nominal_owner._type
         local self = ast.Decl(node.loc, "self",
             ast.TypeName(node.loc, node._nominal_owner.name, {}), false)
         node._self = self
         self._type = types.Nominal(owner.name,
-            checker._generic.generic_parameter_arguments(owner))
+            generic_parameter_arguments(owner))
         -- `self` is declared into this method's own frame (inside
         -- checkfuncbody), so a nested lambda captures it like any parameter.
         checkfuncbody(node, st, errors, { self_decl = self })
@@ -818,7 +818,7 @@ toplevel_visitor = util.make_visitor({
     end,
 
     ["Ast.TopLevelInterface"] = function(node, st, errors)
-        return checker._generic.with_owner_bindings(node, st, function()
+        return generic_with_owner_bindings(node, st, function()
             local fqtn = st.modname .. "." .. node.name
             local methods = {}
             local method_names = {}
@@ -837,8 +837,8 @@ toplevel_visitor = util.make_visitor({
                     method._ignore = true
                 else
                     method_names[method.name] = method
-                    checker._generic.prepare_generic_binders(method, st, errors, node)
-                    checker._generic.with_generic_binding_map(st, method._generic_bindings,
+                    generic_prepare_generic_binders(method, st, errors, node)
+                    generic_with_generic_binding_map(st, method._generic_bindings,
                         function()
                             local ptypes, varargtype, paramnames =
                                 param_types(method.params, st, errors)
@@ -887,8 +887,8 @@ toplevel_visitor = util.make_visitor({
     end,
 
     ["Ast.TopLevelFunc"] = function(node, st, errors)
-        checker._generic.prepare_generic_binders(node, st, errors)
-        return checker._generic.with_generic_binding_map(st, node._generic_bindings, function()
+        generic_prepare_generic_binders(node, st, errors)
+        return generic_with_generic_binding_map(st, node._generic_bindings, function()
             local ptypes, varargtype, paramnames =
                 param_types(node.params, st, errors)
             local rettypes = {}
@@ -943,7 +943,7 @@ toplevel_visitor = util.make_visitor({
     end,
 
     ["Ast.TopLevelRecord"] = function(node, st, errors)
-        return checker._generic.with_owner_bindings(node, st, function()
+        return generic_with_owner_bindings(node, st, function()
             local fields = {}
             local nameset = {}
             local fqtn = st.modname .. "." .. node.name
@@ -971,14 +971,14 @@ toplevel_visitor = util.make_visitor({
             node._type.islocal = node.islocal and true or false
             node._type._source_complete = true
             node._dynamic_receiver_plan = assert(types.dynamic_coercion(
-                types.Nominal(fqtn, checker._generic.generic_parameter_arguments(node._type))),
+                types.Nominal(fqtn, generic_parameter_arguments(node._type))),
                 "record nominal lacks its dynamic receiver plan")
             types.registry[fqtn] = node._type
         end)
     end,
 
     ["Ast.TopLevelUnion"] = function(node, st, errors)
-        return checker._generic.with_owner_bindings(node, st, function()
+        return generic_with_owner_bindings(node, st, function()
             local variants = {}
             local nameset = {}
             local fqtn = st.modname .. "." .. node.name
@@ -1011,7 +1011,7 @@ toplevel_visitor = util.make_visitor({
             node._type.islocal = node.islocal and true or false
             node._type._source_complete = true
             node._dynamic_receiver_plan = assert(types.dynamic_coercion(
-                types.Nominal(fqtn, checker._generic.generic_parameter_arguments(node._type))),
+                types.Nominal(fqtn, generic_parameter_arguments(node._type))),
                 "union nominal lacks its dynamic receiver plan")
             types.registry[fqtn] = node._type
         end)
@@ -1074,9 +1074,9 @@ toplevel_visitor = util.make_visitor({
         end
         if owner.islocal then node.islocal = true end
         node._nominal_owner = owner
-        checker._generic.with_owner_bindings(owner, st, function()
-            checker._generic.prepare_generic_binders(node, st, errors, owner)
-            checker._generic.with_generic_binding_map(st, node._generic_bindings, function()
+        generic_with_owner_bindings(owner, st, function()
+            generic_prepare_generic_binders(node, st, errors, owner)
+            generic_with_generic_binding_map(st, node._generic_bindings, function()
                 local ptypes, varargtype, paramnames =
                     param_types(node.params, st, errors)
                 local rettypes = {}
@@ -1149,9 +1149,9 @@ toplevel_visitor = util.make_visitor({
         end
         if owner.islocal then node.islocal = true end
         node._nominal_owner = owner
-        checker._generic.with_owner_bindings(owner, st, function()
-            checker._generic.prepare_generic_binders(node, st, errors, owner)
-            checker._generic.with_generic_binding_map(st, node._generic_bindings, function()
+        generic_with_owner_bindings(owner, st, function()
+            generic_prepare_generic_binders(node, st, errors, owner)
+            generic_with_generic_binding_map(st, node._generic_bindings, function()
                 local ptypes, varargtype, paramnames =
                     param_types(node.params, st, errors)
                 local rettypes = {}
@@ -1277,15 +1277,15 @@ end
 -- immediately after its declaration. Treat them as part of the nominal
 -- declaration pass: an earlier module variable or explicit member can then use
 -- the complete namespace even when the written declaration appears later.
-function checker._generic.reserve_generic_owner_headers(ast, st, errors)
+function generic_reserve_generic_owner_headers(ast, st, errors)
     local owners = {}
     for _, node in ipairs(ast) do
         if not node._ignore and (node._tag == "Ast.TopLevelRecord"
                 or node._tag == "Ast.TopLevelUnion"
                 or node._tag == "Ast.TopLevelInterface") then
             if #(node.typeparams or {}) > 0 then
-                local scope = checker._generic.generic_scope_for_node(node, st)
-                checker._generic.reserve_generic_binders(node, scope, st, errors)
+                local scope = generic_scope_for_node(node, st)
+                generic_reserve_generic_binders(node, scope, st, errors)
             else
                 node._generic_scope = false
                 node._generic_bindings = {}
@@ -1329,17 +1329,17 @@ function checker._generic.reserve_generic_owner_headers(ast, st, errors)
     st.resolving_generic_owner_constraints = true
     for _, node in ipairs(owners) do
         if not node._generic_constraints_resolved then
-            checker._generic.resolve_generic_constraints(node, st, errors)
+            generic_resolve_generic_constraints(node, st, errors)
         end
     end
     st.resolving_generic_owner_constraints = false
 end
 
-function checker._generic.validate_pending_generic_constraints(st, errors)
+function generic_validate_pending_generic_constraints(st, errors)
     local pending = st.pending_generic_constraints or {}
     st.pending_generic_constraints = {}
     for _, application in ipairs(pending) do
-        checker._generic.validate_binder_arguments(application.scope,
+        generic_validate_binder_arguments(application.scope,
             application.typeparams, application.arguments,
             st, errors, application.loc, application.subject, false)
     end
@@ -1349,7 +1349,7 @@ function checker._generic.validate_pending_generic_constraints(st, errors)
     for _, application in ipairs(reconstructions) do
         local owner = types.registry[application.fqtn]
         if owner then
-            checker._generic.validate_owner_reconstruction(
+            generic_validate_owner_reconstruction(
                 owner, application.arguments, st, errors,
                 application.loc, application.subject, false)
         end
@@ -1467,7 +1467,7 @@ function checktoplevel(ast, st, errors, loader)
     -- signature-time application deferrable across aliases, owners, top-level
     -- functions, methods, and statics, independent of declaration order.
     st.generic_signatures_incomplete = true
-    checker._generic.reserve_generic_owner_headers(ast, st, errors)
+    generic_reserve_generic_owner_headers(ast, st, errors)
 
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelTypeAlias" then
@@ -1519,7 +1519,7 @@ function checktoplevel(ast, st, errors, loader)
     end
 
     st.generic_signatures_incomplete = false
-    checker._generic.validate_pending_generic_constraints(st, errors)
+    generic_validate_pending_generic_constraints(st, errors)
 
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelVar" then

@@ -24,7 +24,7 @@ checkvar = util.make_visitor({
             local interface = st.interface_declarations
                 and st.interface_declarations[node.name]
             if namespace then
-                checker._generic.annotate_alias_namespace(
+                generic_annotate_alias_namespace(
                     node, resolved_alias, namespace)
                 node._alias_decl = alias
                 node._type = namespace
@@ -98,19 +98,19 @@ checkvar = util.make_visitor({
     end,
 
     ["Ast.VarDot"] = function(node, st, errors, context)
-        return checker._generic.with_inference_operation(node, st,
+        return generic_with_inference_operation(node, st,
         function(operation)
         local written_exp = node.exp
         local nominal_field_projection = false
         if node.exp._tag == "Ast.ExpVar" then
-            checker._generic.checkvar_for_expression(node.exp, st, errors)
+            generic_checkvar_for_expression(node.exp, st, errors)
             if node.exp.var._decl then node.exp.var._decl._used = true end
             node.exp._type = node.exp.var._type
         else
             checkexp(node.exp, st, errors)
         end
         if node.exp._nominal_typeargs ~= nil then
-            checker._generic.apply_namespace_typeargs(node.exp, st, errors)
+            generic_apply_namespace_typeargs(node.exp, st, errors)
         end
         node.exp = tryforce(node.exp)
         local ltype = node.exp._type
@@ -164,7 +164,7 @@ checkvar = util.make_visitor({
                     mod, node.name, include_source)
                 local namespace = alias_namespace_type(member, st)
                 if namespace then
-                    checker._generic.annotate_alias_namespace(
+                    generic_annotate_alias_namespace(
                         node, member, namespace)
                     node._alias_type = member
                     node._type = namespace
@@ -242,7 +242,7 @@ checkvar = util.make_visitor({
                     kind, node.name)
             end
         elseif ltype._tag == "Type.Nominal" then
-            local type = checker._generic.applied_owner_view(ltype, errors, node.loc)
+            local type = generic_applied_owner_view(ltype, errors, node.loc)
             if not type then
                 node._type = invalid(errors, node.loc,
                     "type '%s' not found", ltype.fqtn)
@@ -391,12 +391,12 @@ checkvar = util.make_visitor({
             end
         end
         if nominal_field_projection then
-            checker._generic.defer_inference_derived_annotations(
+            generic_defer_inference_derived_annotations(
                 operation, node, {
                     _type = true,
                     _decl = true,
                     _assignment_adjustment = function(value)
-                        return checker._generic.finalize_adjustment_annotation(
+                        return generic_finalize_adjustment_annotation(
                             operation, value)
                     end,
                 }, function()
@@ -414,7 +414,7 @@ checkvar = util.make_visitor({
     end,
 
     ["Ast.VarBracket"] = function(node, st, errors, _, mode)
-        return checker._generic.with_inference_operation(node, st,
+        return generic_with_inference_operation(node, st,
         function(operation)
         local written_exp1, written_exp2 = node.exp1, node.exp2
         checkexp(node.exp1, st, errors)
@@ -424,7 +424,7 @@ checkvar = util.make_visitor({
         local dependent_container = operation
             and (provisional._tag == "Type.Array"
                 or provisional._tag == "Type.Map")
-            and checker._generic.inference_type_has_unresolved(
+            and generic_inference_type_has_unresolved(
                 operation.context, provisional)
         if dependent_container then
             local keystype, term
@@ -440,21 +440,21 @@ checkvar = util.make_visitor({
             node._read_guard = false
             node._generic_read_type = nil
 
-            local expected = checker._generic.closed_inference_pattern(
+            local expected = generic_closed_inference_pattern(
                 operation.context, keystype)
             checkexp(written_exp2, st, errors, expected,
-                checker._generic.dependent_scalar_demand(
+                generic_dependent_scalar_demand(
                     operation, keystype, expected,
                     term .. " key", written_exp2.loc))
             node.exp2 = written_exp2
-            checker._generic.unify_inference(operation.context,
+            generic_unify_inference(operation.context,
                 keystype, written_exp2._type, term .. " key", node.loc)
 
-            checker._generic.defer_inference_derived_annotations(
+            generic_defer_inference_derived_annotations(
                 operation, node, {
                     _type = true,
                     _assignment_adjustment = function(value)
-                        return checker._generic.finalize_adjustment_annotation(
+                        return generic_finalize_adjustment_annotation(
                             operation, value)
                     end,
                 }, function()
@@ -477,7 +477,7 @@ checkvar = util.make_visitor({
                         return
                     end
                     node._type = optionize(elem)
-                    local read_type = checker._generic.runtime_carrier(
+                    local read_type = generic_runtime_carrier(
                         node._type)
                     node._read_guard = types.gradual_guard(read_type) or false
                     node._generic_read_type = read_type ~= node._type
@@ -520,7 +520,7 @@ checkvar = util.make_visitor({
         if node.exp1._type._tag == "Type.Array" then
             local elem = node.exp1._type.elem
             node._type = optionize(elem)
-            local read_type = checker._generic.runtime_carrier(node._type)
+            local read_type = generic_runtime_carrier(node._type)
             node._read_guard = types.gradual_guard(read_type) or false
             if read_type ~= node._type then
                 node._generic_read_type = node._type
@@ -535,7 +535,7 @@ checkvar = util.make_visitor({
         elseif node.exp1._type._tag == "Type.Map" then
             local values = node.exp1._type.values
             node._type = optionize(values)
-            local read_type = checker._generic.runtime_carrier(node._type)
+            local read_type = generic_runtime_carrier(node._type)
             node._read_guard = types.gradual_guard(read_type) or false
             if read_type ~= node._type then
                 node._generic_read_type = node._type
@@ -867,7 +867,7 @@ function synthesize_value_call_type(node, demand, st, errors)
         errors), adjusted
 end
 
-function checker._generic.finalize_contextual_value_callee(
+function generic_finalize_contextual_value_callee(
         node, original, synthesized, errors)
     local cast = trycoerce(original, synthesized, errors)
     if cast == original then

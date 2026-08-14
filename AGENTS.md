@@ -876,13 +876,16 @@ Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` expor
 ### Checker (`checker.lua`, `checker/*.lua`, `types.lua`, `symtab.lua`)
 
 `checker.lua` is the five-operation production facade. It eagerly loads the
-logical slices under `checker/`; every slice installs into the single lexical
-environment and state table from `checker/core.lua`, so cross-slice recursion,
-visitor dispatch, probe ownership, and checker lifecycle state remain one
-instance. Slices require `core`, never the facade or one another. Keep the
-facade limited to `configure_foreign_c`, `check`, `register_module_interface`,
-`checkimport`, and `has_main`; white-box tests require `checker/core` before
-helpers/the facade and then require the owning slice, because Busted insulation
+logical slices under `checker/`; every slice installs into the single private
+lexical environment and state table from `checker/core.lua`, so cross-slice
+recursion, visitor dispatch, probe ownership, and checker lifecycle state remain
+one instance without publishing implementation names in `_G`. Slices require
+`core`, never the facade or one another. Generic implementation helpers remain
+in their semantic slices and use `generic_`-prefixed names in that private core;
+do not recreate a `checker._generic` namespace. Keep the facade limited to
+`configure_foreign_c`, `check`, `register_module_interface`, `checkimport`, and
+`has_main`; white-box tests require `checker/core` before helpers/the facade and
+then inspect that core or require the owning slice, because Busted insulation
 unloads dependencies reached only through another module.
 
 `checker.check(modname, ast, subject, filename, loader) -> moduletype, errors`; callers test `#errors == 0`. Without reordering the AST, it marks ordinary duplicate winners and `_toplevel_order`, precollects aliases and Interfaces, then stages name reservation; imports in AST order; alias resolution; records and unions; Interface descriptors; parser-marked synthesized constructors; ordinary callable/module-initializer signatures; methods and nominal functions; module variables in AST order; and finally bodies. It annotates `_ignore` on rejected duplicates. The checker also annotates (`_type`, `_types` for multi-return calls, `_decl` on variable uses, `_used`/`_assigned`, union case/variant metadata, and checker-owned Interface conversion/adapter plans) and **mutates** the AST:
@@ -995,9 +998,10 @@ save and restore both together.
 ### Coder and driver (`coder.lua`, `coder/*.lua`, `driver.lua`)
 
 `coder.lua` is the four-operation production facade. It eagerly loads the
-logical slices under `coder/`, all of which install into the single lexical
-environment and policy table from `coder/core.lua`; slices require only that
-core, never the facade or each other. Keep the facade limited to `generate`,
+logical slices under `coder/`, all of which install into the single private
+lexical environment and policy table from `coder/core.lua`; slices require only
+that core, never the facade or each other, and implementation helpers must never
+be proxied into `_G`. Keep the facade limited to `generate`,
 `generate_foreign_header`, `external_symbols`, and
 `interface_external_symbols`. White-box tests must require `coder/core` before
 helpers/the facade and then the owning slice so Busted's dependency insulation

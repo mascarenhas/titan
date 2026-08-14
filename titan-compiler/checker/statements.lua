@@ -198,7 +198,7 @@ end
 
 function check_forin_callable_exp(exp, st, errors, context, demand)
     if exp._tag == "Ast.ExpVar" and exp.var._tag == "Ast.VarDot" then
-        checker._generic.precheckvar_for_expression(exp, st, errors)
+        generic_precheckvar_for_expression(exp, st, errors)
         if exp.var._decl then exp.var._decl._used = true end
         local ftype = exp.var._type
         local cfunc = c_resolve(ftype)
@@ -305,7 +305,7 @@ function make_forin_call(loc, iter_decl, args, ftype, nresults, cfunc,
     return call
 end
 
-function checker._generic.infer_forin_scheme(
+function generic_infer_forin_scheme(
         exp, scheme, node, st, errors)
     local subject = "generic for iterator"
     -- The iterator owns an isolated occurrence context, as before, but its
@@ -313,14 +313,14 @@ function checker._generic.infer_forin_scheme(
     -- Nested generic state/control producers therefore retain equations, and a
     -- trailing multi-result expression contributes state then control (and close)
     -- in delivered slot order without being checked twice.
-    local context = checker._generic.new_inference_context(
+    local context = generic_new_inference_context(
         subject, {}, st, errors, exp.loc)
     context.owner = exp
-    local scopes = { checker._generic.inference_scope_entry(
+    local scopes = { generic_inference_scope_entry(
         scheme.scope, scheme.typeparams) }
-    checker._generic.freshen_inference_entries(
+    generic_freshen_inference_entries(
         context, scopes, subject, exp.loc)
-    local use = checker._generic.register_inference_use(
+    local use = generic_register_inference_use(
         context, exp, subject, exp.loc, scopes, true)
     for _, entry in ipairs(scopes) do
         entry.subject = subject
@@ -351,11 +351,11 @@ function checker._generic.infer_forin_scheme(
     exp._generic_inference_context = context
     exp._generic_inference_use = use
 
-    local signature = checker._generic.freshen_inference_type(
+    local signature = generic_freshen_inference_type(
         context, scheme.signature, scopes, subject, exp.loc)
     local tuple_adjustment
     local consumed_results = {}
-    checker._generic.with_inference_use(context, use, st, function()
+    generic_with_inference_use(context, use, st, function()
         local tuple_fixed = {
             UNKNOWN_SLOT, UNKNOWN_SLOT, UNKNOWN_SLOT, UNKNOWN_SLOT,
         }
@@ -374,23 +374,23 @@ function checker._generic.infer_forin_scheme(
                     local pattern = signature.params[formal_index]
                     if pattern then
                         local expected =
-                            checker._generic.inference_expression_context(
+                            generic_inference_expression_context(
                                 context, pattern, actual)
                         checkexp(actual, est, eerrors, expected,
-                            checker._generic.generic_discovery_demand(
+                            generic_discovery_demand(
                                 context, signature, formal_index, demand))
-                        checker._generic.generic_unify_expression_results(
+                        generic_unify_expression_results(
                             context, signature, actual, formal_index,
                             "generic for hidden argument")
                         local results =
-                            checker._generic.generic_expression_result_types(actual)
+                            generic_expression_result_types(actual)
                         consumed_results[actual] = #results
                     elseif sink_index == 4
-                       and checker._generic.is_generic_first_class_expression(
+                       and generic_is_generic_first_class_expression(
                             actual, est, eerrors) then
                         local params = {}
                         if signature.params[1] then
-                            params[1] = checker._generic.substitute_inference(
+                            params[1] = generic_substitute_inference(
                                 context, signature.params[1], false)
                         end
                         local expected = types.Function(
@@ -425,10 +425,10 @@ function checker._generic.infer_forin_scheme(
         for index, parameter in ipairs(signature.params) do
             local actual = tuple_adjustment.fixed[index + 1]
             if actual and not already_consumed(actual) then
-                checker._generic.unify_inference(context, parameter,
+                generic_unify_inference(context, parameter,
                     actual._type, "generic for hidden argument " .. index,
                     actual.loc)
-                checker._generic.infer_constraint_evidence(context)
+                generic_infer_constraint_evidence(context)
             end
         end
 
@@ -442,7 +442,7 @@ function checker._generic.infer_forin_scheme(
                     pattern = optionize(signature.flexrettype)
                 end
                 if pattern then
-                    checker._generic.unify_result_inference(context, pattern,
+                    generic_unify_result_inference(context, pattern,
                         expected, "generic for variable " .. decl.name,
                         decl.loc)
                 end
@@ -450,16 +450,16 @@ function checker._generic.infer_forin_scheme(
         end
     end)
 
-    checker._generic.add_inference_finalizer(use, function()
-        checker._generic.refresh_finalized_argument_projections(tuple_adjustment)
-        use.closed = checker._generic.substitute_inference(
+    generic_add_inference_finalizer(use, function()
+        generic_refresh_finalized_argument_projections(tuple_adjustment)
+        use.closed = generic_substitute_inference(
             context, signature, true)
         exp._generic_scheme = scheme
         exp._generic_type_arguments =
-            checker._generic.inference_type_arguments(context, scopes)
+            generic_inference_type_arguments(context, scopes)
         exp._type = use.closed
     end)
-    checker._generic.close_inference_context(context)
+    generic_close_inference_context(context)
     return use.closed, tuple_adjustment
 end
 
@@ -468,10 +468,10 @@ function checkforin(node, st, errors)
     local inferred_tuple
     local iterator = node.exps[1]
     if iterator
-       and checker._generic.is_generic_first_class_expression(
+       and generic_is_generic_first_class_expression(
             iterator, st, errors)
        and iterator._type._tag == "Type.FunctionScheme" then
-        _, inferred_tuple = checker._generic.infer_forin_scheme(
+        _, inferred_tuple = generic_infer_forin_scheme(
             iterator, iterator._type, node, st, errors)
         generic_prechecked[iterator] = true
     end
@@ -499,7 +499,7 @@ function checkforin(node, st, errors)
                                         sink_index)
                 if generic_prechecked[exp] then return end
                 if sink_index == 4
-                   and checker._generic.is_generic_first_class_expression(
+                   and generic_is_generic_first_class_expression(
                         exp, est, eerrors) then
                     local params = {}
                     local state = node.exps[2]
@@ -1181,7 +1181,7 @@ checkstat_visitor = util.make_visitor({
                 "case expression must have a union type, but found '%s'",
                 types.tostring(scrutinee_type))
         else
-            local owner = checker._generic.applied_owner_view(
+            local owner = generic_applied_owner_view(
                 scrutinee_type, errors, node.exp.loc)
             if not owner then
                 checker.typeerror(errors, node.exp.loc,

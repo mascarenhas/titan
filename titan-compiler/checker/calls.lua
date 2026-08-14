@@ -307,13 +307,13 @@ function check_explicit_cast_relation(node, st, errors)
     end
     local cast_plan
     local applied_application, application_plan =
-        checker._generic.applied_nominal_adjustment(source, target, st)
+        generic_applied_nominal_adjustment(source, target, st)
     if not applied_application
        and (source._tag == "Type.Option" or target._tag == "Type.Option") then
         local source_base = source._tag == "Type.Option" and source.base or source
         local target_base = target._tag == "Type.Option" and target.base or target
         local inner_applied, inner_plan =
-            checker._generic.applied_nominal_adjustment(
+            generic_applied_nominal_adjustment(
                 source_base, target_base, st)
         if inner_applied then
             applied_application = true
@@ -321,8 +321,8 @@ function check_explicit_cast_relation(node, st, errors)
                 types.erase(source), types.erase(target)) or false
         end
     end
-    local rigid_source = checker._generic.rigid_parameter_carrier(source)
-    local rigid_target = checker._generic.rigid_parameter_carrier(target)
+    local rigid_source = generic_rigid_parameter_carrier(source)
+    local rigid_target = generic_rigid_parameter_carrier(target)
     if applied_application then
         if application_plan then
             if application_plan.kind == "written_cast" then
@@ -481,9 +481,9 @@ function check_explicit_cast_relation(node, st, errors)
     return target
 end
 
-function checker._generic.recover_complete_type_arguments(
+function generic_recover_complete_type_arguments(
         typearg_nodes, count, st, errors, loc, subject)
-    local arguments = checker._generic.resolve_type_argument_nodes(
+    local arguments = generic_resolve_type_argument_nodes(
         typearg_nodes, st, errors)
     local written = #arguments
     local valid = written == count
@@ -518,12 +518,12 @@ function checker._generic.recover_complete_type_arguments(
     return recovered, valid
 end
 
-function checker._generic.callable_function_type(callable)
+function generic_callable_function_type(callable)
     return types.Function(callable.params, callable.rettypes, false,
         callable.varargtype or false, callable.flexrettype or false)
 end
 
-function checker._generic.inference_scope_entry(scope, typeparams, parameters)
+function generic_inference_scope_entry(scope, typeparams, parameters)
     local entry = {
         scope = scope,
         typeparams = typeparams or {},
@@ -553,7 +553,7 @@ function checker._generic.inference_scope_entry(scope, typeparams, parameters)
     return entry
 end
 
-function checker._generic.new_inference_context(subject, scopes, st, errors, loc)
+function generic_new_inference_context(subject, scopes, st, errors, loc)
     local context = {
         subject = subject,
         scopes = {},
@@ -583,11 +583,11 @@ function checker._generic.new_inference_context(subject, scopes, st, errors, loc
     return context
 end
 
-function checker._generic.freshen_inference_type(
+function generic_freshen_inference_type(
         context, typ, entries, subject, loc)
     local out = typ
     for _, entry in ipairs(entries or {}) do
-        out = checker._generic.generic_substitute(
+        out = generic_substitute(
             out, entry.declaration_scope, entry.parameters,
             context.errors, loc or entry.loc or context.loc,
             "cannot create fresh inference variables for "
@@ -596,7 +596,7 @@ function checker._generic.freshen_inference_type(
     return out
 end
 
-function checker._generic.freshen_inference_entries(
+function generic_freshen_inference_entries(
         context, entries, subject, loc)
     for _, entry in ipairs(entries) do
         context.next_scope = (context.next_scope or 0) + 1
@@ -637,7 +637,7 @@ function checker._generic.freshen_inference_entries(
         for index, typeparam in ipairs(entry.source_typeparams) do
             local constraint = typeparam.constraint
             if constraint ~= false then
-                constraint = checker._generic.freshen_inference_type(
+                constraint = generic_freshen_inference_type(
                     context, constraint, entries, subject, loc)
             end
             fresh_typeparams[index] =
@@ -646,7 +646,7 @@ function checker._generic.freshen_inference_entries(
             local erased = source and source.erased_constraint or false
             if erased ~= false then
                 entry.parameters[index].erased_constraint =
-                    checker._generic.freshen_inference_type(
+                    generic_freshen_inference_type(
                         context, erased, entries, subject, loc)
             end
         end
@@ -654,7 +654,7 @@ function checker._generic.freshen_inference_entries(
     end
 end
 
-function checker._generic.register_inference_use(
+function generic_register_inference_use(
         context, node, subject, loc, scopes, owns_context)
     local use = {
         node = node,
@@ -677,21 +677,21 @@ function checker._generic.register_inference_use(
     return use
 end
 
-function checker._generic.acquire_inference_context(
+function generic_acquire_inference_context(
         node, subject, scopes, st, errors, loc)
     local context = st and st.generic_inference_context or nil
     if context and context.closed then context = nil end
     local owns = context == nil
     if owns then
-        context = checker._generic.new_inference_context(
+        context = generic_new_inference_context(
             subject, {}, st, errors, loc)
         context.owner = node
     end
 
     scopes = scopes or {}
-    checker._generic.freshen_inference_entries(
+    generic_freshen_inference_entries(
         context, scopes, subject, loc)
-    local use = checker._generic.register_inference_use(
+    local use = generic_register_inference_use(
         context, node, subject, loc, scopes, owns)
     for _, entry in ipairs(use.scopes) do
         entry.subject = subject
@@ -724,7 +724,7 @@ function checker._generic.acquire_inference_context(
     return context, use, owns
 end
 
-function checker._generic.with_inference_use(context, use, st, action)
+function generic_with_inference_use(context, use, st, action)
     local prior_context = st and st.generic_inference_context or nil
     local prior_use = context.active_use
     if st then st.generic_inference_context = context end
@@ -736,7 +736,7 @@ function checker._generic.with_inference_use(context, use, st, action)
     return table.unpack(result, 2, result.n)
 end
 
-function checker._generic.with_inference_operation(node, st, action, subject)
+function generic_with_inference_operation(node, st, action, subject)
     local context = st and st.generic_inference_context or nil
     if not context or context.closed or not context.active_use then
         return action(false)
@@ -753,17 +753,17 @@ function checker._generic.with_inference_operation(node, st, action, subject)
     -- A dependent operation needs its own use-tree position before descending,
     -- so nested generic uses and operations finalize before it freezes the
     -- annotations derived from their provisional types.
-    local use = checker._generic.register_inference_use(
+    local use = generic_register_inference_use(
         context, operation_node, subject or "dependent operation",
         operation_node.loc, {}, false)
     use.derived_nodes[1] = operation_node
     operation_node._generic_inference_operation_use = use
-    return checker._generic.with_inference_use(context, use, st, function()
+    return generic_with_inference_use(context, use, st, function()
         return action(use)
     end)
 end
 
-function checker._generic.add_inference_discovery(use, discovery, phase)
+function generic_add_inference_discovery(use, discovery, phase)
     use.discoveries[#use.discoveries + 1] = {
         callback = discovery,
         complete = false,
@@ -771,16 +771,16 @@ function checker._generic.add_inference_discovery(use, discovery, phase)
     }
 end
 
-function checker._generic.add_inference_finalizer(use, finalizer)
+function generic_add_inference_finalizer(use, finalizer)
     use.finalizers[#use.finalizers + 1] = finalizer
 end
 
-function checker._generic.substitute_inference_graph(
+function generic_substitute_inference_graph(
         operation, value, recover, seen)
     if type(value) ~= "table" then return value end
     if type(value._tag) == "string"
        and value._tag:match("^Type%.") then
-        return checker._generic.substitute_inference(
+        return generic_substitute_inference(
             operation.context, value, recover ~= false)
     end
     seen = seen or {}
@@ -788,15 +788,15 @@ function checker._generic.substitute_inference_graph(
     local out = {}
     seen[value] = out
     for key, child in pairs(value) do
-        out[key] = checker._generic.substitute_inference_graph(
+        out[key] = generic_substitute_inference_graph(
             operation, child, recover, seen)
     end
     return out
 end
 
-function checker._generic.finalize_inference_annotation(
+function generic_finalize_inference_annotation(
         operation, value, recover)
-    return checker._generic.substitute_inference_graph(
+    return generic_substitute_inference_graph(
         operation, value, recover, {})
 end
 
@@ -805,25 +805,25 @@ end
 -- child has closed, without redispatching any written expression. `fields`
 -- maps each annotation key to either true (smart-substitute a Type value) or a
 -- refresh callback `(old, context, operation_node, node) -> new`.
-function checker._generic.register_inference_derived_node(operation, node)
+function generic_register_inference_derived_node(operation, node)
     operation.derived_nodes[#operation.derived_nodes + 1] = node
 end
 
-function checker._generic.defer_inference_derived_annotations(
+function generic_defer_inference_derived_annotations(
         operation, node, fields, finalizer)
     if not operation then return false end
     local operation_node = operation.node or node
-    checker._generic.register_inference_derived_node(operation, node)
+    generic_register_inference_derived_node(operation, node)
     if operation_node ~= node then
-        checker._generic.register_inference_derived_node(
+        generic_register_inference_derived_node(
             operation, operation_node)
     end
-    checker._generic.add_inference_finalizer(operation, function()
+    generic_add_inference_finalizer(operation, function()
         local copies = {}
         for key, refresh in pairs(fields or {}) do
             local value = node[key]
             if refresh == true then
-                value = checker._generic.finalize_inference_annotation(
+                value = generic_finalize_inference_annotation(
                     operation, value, true)
             else
                 value = refresh(value, operation.context,
@@ -846,10 +846,10 @@ end
 -- ExpCast whose target is copied from the still-open child.  Rebuild only that
 -- wrapper after the child's operation closes; the written expression remains
 -- checked once and retains its AST identity.
-function checker._generic.defer_inference_force(
+function generic_defer_inference_force(
         operation, node, written, expected_base_tag)
     if not operation or node.exp == written then return false end
-    checker._generic.add_inference_finalizer(operation, function()
+    generic_add_inference_finalizer(operation, function()
         node.exp = written
         local typ = written._type
         if typ and typ._tag == "Type.Option"
@@ -861,12 +861,12 @@ function checker._generic.defer_inference_force(
     return true
 end
 
-function checker._generic.finalize_inference_use(use)
+function generic_finalize_inference_use(use)
     -- Postorder gives every parent closed child annotations before it freezes
     -- its own argument adjustments. Siblings remain in lexical registration
     -- order, preserving diagnostic and checking order.
     for _, child in ipairs(use.children) do
-        checker._generic.finalize_inference_use(child)
+        generic_finalize_inference_use(child)
     end
     for _, finalizer in ipairs(use.finalizers) do finalizer() end
     if use.node then
@@ -880,14 +880,14 @@ function checker._generic.finalize_inference_use(use)
     end
 end
 
-function checker._generic.inference_root(cell)
+function generic_inference_root(cell)
     if cell.parent ~= cell then
-        cell.parent = checker._generic.inference_root(cell.parent)
+        cell.parent = generic_inference_root(cell.parent)
     end
     return cell.parent
 end
 
-function checker._generic.inference_cell(context, parameter)
+function generic_inference_cell(context, parameter)
     if not parameter or parameter._tag ~= "Type.Parameter" then return nil end
     local entry = context.scope_entries and context.scope_entries[parameter.scope]
     if entry then return entry.cells[parameter.index] end
@@ -903,7 +903,7 @@ function checker._generic.inference_cell(context, parameter)
     return nil
 end
 
-function checker._generic.inference_evidence_name(evidence)
+function generic_inference_evidence_name(evidence)
     return evidence or "type context"
 end
 
@@ -911,21 +911,21 @@ end
 -- A constraint may validly mention another binder and does not equate that
 -- binder with its carrier. Bindings, on the other hand, are equations and must
 -- remain acyclic before the fixed-point substitution path can expand them.
-function checker._generic.inference_type_occurs(
+function generic_inference_type_occurs(
         context, target, typ, seen_types, seen_roots)
     if typ == false or typ == nil or type(typ) ~= "table" then return false end
-    target = checker._generic.inference_root(target)
+    target = generic_inference_root(target)
     seen_types = seen_types or {}
     seen_roots = seen_roots or {}
 
     if typ._tag == "Type.Parameter" then
-        local cell = checker._generic.inference_cell(context, typ)
+        local cell = generic_inference_cell(context, typ)
         if not cell then return false end
-        local root = checker._generic.inference_root(cell)
+        local root = generic_inference_root(cell)
         if root == target then return true end
         if seen_roots[root] then return false end
         seen_roots[root] = true
-        return root.binding and checker._generic.inference_type_occurs(
+        return root.binding and generic_inference_type_occurs(
             context, target, root.binding, seen_types, seen_roots) or false
     end
 
@@ -934,13 +934,13 @@ function checker._generic.inference_type_occurs(
     for key, value in pairs(typ) do
         if key ~= "scope" and type(value) == "table" then
             if value._tag then
-                if checker._generic.inference_type_occurs(
+                if generic_inference_type_occurs(
                         context, target, value, seen_types, seen_roots) then
                     return true
                 end
             else
                 for _, item in pairs(value) do
-                    if checker._generic.inference_type_occurs(
+                    if generic_inference_type_occurs(
                             context, target, item, seen_types, seen_roots) then
                         return true
                     end
@@ -951,10 +951,10 @@ function checker._generic.inference_type_occurs(
     return false
 end
 
-function checker._generic.reject_recursive_inference(
+function generic_reject_recursive_inference(
         context, cell, related, evidence, loc)
-    cell = checker._generic.inference_root(cell)
-    related = related and checker._generic.inference_root(related) or nil
+    cell = generic_inference_root(cell)
+    related = related and generic_inference_root(related) or nil
     local reported = cell.recursive_inference
         or (related and related.recursive_inference)
     cell.invalid = true
@@ -968,13 +968,13 @@ function checker._generic.reject_recursive_inference(
             "cannot infer a recursive type for type parameter '%s' in %s from %s",
             cell.name, cell.subject
                 or (related and related.subject) or context.subject,
-            checker._generic.inference_evidence_name(evidence))
+            generic_inference_evidence_name(evidence))
     end
     return false
 end
 
-function checker._generic.enqueue_constraint_root(context, cell)
-    local root = checker._generic.inference_root(cell)
+function generic_enqueue_constraint_root(context, cell)
+    local root = generic_inference_root(cell)
     for _, record in ipairs(root.constraint_records or {}) do
         if not context.constraint_queued[record] then
             context.constraint_queued[record] = true
@@ -983,21 +983,21 @@ function checker._generic.enqueue_constraint_root(context, cell)
     end
 end
 
-function checker._generic.union_inference_cells(context, left, right,
+function generic_union_inference_cells(context, left, right,
                                                  evidence, loc)
-    left = checker._generic.inference_root(left)
-    right = checker._generic.inference_root(right)
+    left = generic_inference_root(left)
+    right = generic_inference_root(right)
     if left == right then return true end
 
     local left_binding, right_binding = left.binding, right.binding
     -- Joining two classes also substitutes either representative through the
     -- other's existing structural equation. Reject that edge before changing
     -- the union-find forest when it would make either binding self-referential.
-    if (left_binding and checker._generic.inference_type_occurs(
+    if (left_binding and generic_inference_type_occurs(
             context, right, left_binding))
-       or (right_binding and checker._generic.inference_type_occurs(
+       or (right_binding and generic_inference_type_occurs(
             context, left, right_binding)) then
-        return checker._generic.reject_recursive_inference(
+        return generic_reject_recursive_inference(
             context, left, right, evidence, loc)
     end
 
@@ -1022,51 +1022,51 @@ function checker._generic.union_inference_cells(context, left, right,
     left.binding = left_binding or right_binding
     if left_binding and right_binding then
         left.binding = left_binding
-        checker._generic.enqueue_constraint_root(context, left)
-        return checker._generic.bind_inference_cell(
+        generic_enqueue_constraint_root(context, left)
+        return generic_bind_inference_cell(
             context, left, right_binding, evidence, loc)
     end
     if right_binding and not left_binding then
         left.evidence, left.loc = right.evidence, right.loc
     end
     if left.binding then
-        checker._generic.enqueue_constraint_root(context, left)
+        generic_enqueue_constraint_root(context, left)
     end
     return true
 end
 
-function checker._generic.bind_inference_cell(context, cell, candidate,
+function generic_bind_inference_cell(context, cell, candidate,
                                                evidence, loc)
-    cell = checker._generic.inference_root(cell)
+    cell = generic_inference_root(cell)
     candidate = types.normalize(candidate) or candidate
     if not candidate or candidate._tag == "Type.Invalid" then return false end
 
-    local candidate_cell = checker._generic.inference_cell(context, candidate)
+    local candidate_cell = generic_inference_cell(context, candidate)
     if candidate_cell then
-        return checker._generic.union_inference_cells(
+        return generic_union_inference_cells(
             context, cell, candidate_cell, evidence, loc)
     end
-    if checker._generic.inference_type_occurs(context, cell, candidate) then
-        return checker._generic.reject_recursive_inference(
+    if generic_inference_type_occurs(context, cell, candidate) then
+        return generic_reject_recursive_inference(
             context, cell, nil, evidence, loc)
     end
 
     if not cell.binding then
         cell.binding = candidate
-        cell.evidence = checker._generic.inference_evidence_name(evidence)
+        cell.evidence = generic_inference_evidence_name(evidence)
         cell.loc = loc
-        checker._generic.enqueue_constraint_root(context, cell)
+        generic_enqueue_constraint_root(context, cell)
         return true
     end
     if types.equals(cell.binding, candidate) then return true end
-    local resolved_binding = checker._generic.substitute_inference(
+    local resolved_binding = generic_substitute_inference(
         context, cell.binding, false)
-    local resolved_candidate = checker._generic.substitute_inference(
+    local resolved_candidate = generic_substitute_inference(
         context, candidate, false)
     if types.equals(resolved_binding, resolved_candidate) then
         if not types.equals(cell.binding, resolved_binding) then
             cell.binding = resolved_binding
-            checker._generic.enqueue_constraint_root(context, cell)
+            generic_enqueue_constraint_root(context, cell)
         end
         return true
     end
@@ -1074,11 +1074,11 @@ function checker._generic.bind_inference_cell(context, cell, candidate,
     -- cells owned by a nested use (for example outer U = Maybe<V>). Later
     -- concrete evidence must decompose that equation before it can be called a
     -- conflict.
-    if checker._generic.inference_type_has_unresolved(
+    if generic_inference_type_has_unresolved(
             context, cell.binding)
-       or checker._generic.inference_type_has_unresolved(
+       or generic_inference_type_has_unresolved(
             context, candidate) then
-        if checker._generic.unify_inference(
+        if generic_unify_inference(
                 context, cell.binding, candidate, evidence, loc) then
             return true
         end
@@ -1092,7 +1092,7 @@ function checker._generic.bind_inference_cell(context, cell, candidate,
             .. "inferred '%s' from %s but found '%s' from %s",
             cell.name, cell.subject or context.subject,
             types.tostring(cell.binding), cell.evidence, key,
-            checker._generic.inference_evidence_name(evidence))
+            generic_inference_evidence_name(evidence))
     end
     cell.invalid = true
     return false
@@ -1101,15 +1101,15 @@ end
 -- Phase-one inference is invariant only while an ambient cell remains open.
 -- Once both smart-substituted endpoints are closed, the owning phase-two
 -- finalizer applies Titan's ordinary directional assignment relation instead.
-function checker._generic.unify_inference(context, pattern, evidence,
+function generic_unify_inference(context, pattern, evidence,
                                           term, loc, seen)
     if not pattern or not evidence then return false end
-    pattern = checker._generic.substitute_inference(context, pattern, false)
-    evidence = checker._generic.substitute_inference(context, evidence, false)
+    pattern = generic_substitute_inference(context, pattern, false)
+    evidence = generic_substitute_inference(context, evidence, false)
     pattern, evidence = types.normalize(pattern), types.normalize(evidence)
     if not pattern or not evidence
-       or checker._generic.inference_type_has_invalid(pattern)
-       or checker._generic.inference_type_has_invalid(evidence) then
+       or generic_inference_type_has_invalid(pattern)
+       or generic_inference_type_has_invalid(evidence) then
         return false
     end
 
@@ -1118,19 +1118,19 @@ function checker._generic.unify_inference(context, pattern, evidence,
     -- adjustment is frozen by the owning use's finalization pass. If either side
     -- still contains an ambient cell, structural descent must continue so a
     -- closed target can bind cells owned by a nested producer.
-    if not checker._generic.inference_type_has_unresolved(context, pattern)
-       and not checker._generic.inference_type_has_unresolved(context, evidence) then
+    if not generic_inference_type_has_unresolved(context, pattern)
+       and not generic_inference_type_has_unresolved(context, evidence) then
         return true
     end
 
-    local cell = checker._generic.inference_cell(context, pattern)
+    local cell = generic_inference_cell(context, pattern)
     if cell then
-        return checker._generic.bind_inference_cell(
+        return generic_bind_inference_cell(
             context, cell, evidence, term, loc)
     end
-    local evidence_cell = checker._generic.inference_cell(context, evidence)
+    local evidence_cell = generic_inference_cell(context, evidence)
     if evidence_cell then
-        return checker._generic.bind_inference_cell(
+        return generic_bind_inference_cell(
             context, evidence_cell, pattern, term, loc)
     end
     if types.equals(pattern, evidence) then return true end
@@ -1145,20 +1145,20 @@ function checker._generic.unify_inference(context, pattern, evidence,
 
     local ptag, etag = pattern._tag, evidence._tag
     if ptag == "Type.Option" and etag == "Type.Option" then
-        return checker._generic.unify_inference(context,
+        return generic_unify_inference(context,
             pattern.base, evidence.base, term, loc, seen)
     elseif ptag == "Type.Option" and etag == "Type.Value" then
         -- Option(value) canonicalizes to value. This is reconstruction of the
         -- same invariant application, not a lifted gradual conversion.
-        return checker._generic.unify_inference(context,
+        return generic_unify_inference(context,
             pattern.base, evidence, term, loc, seen)
     elseif ptag == "Type.Array" and etag == "Type.Array" then
-        return checker._generic.unify_inference(context,
+        return generic_unify_inference(context,
             pattern.elem, evidence.elem, term, loc, seen)
     elseif ptag == "Type.Map" and etag == "Type.Map" then
-        local keys = checker._generic.unify_inference(context,
+        local keys = generic_unify_inference(context,
             pattern.keys, evidence.keys, term, loc, seen)
-        local values = checker._generic.unify_inference(context,
+        local values = generic_unify_inference(context,
             pattern.values, evidence.values, term, loc, seen)
         return keys and values
     elseif ptag == "Type.Nominal" and etag == "Type.Nominal"
@@ -1166,7 +1166,7 @@ function checker._generic.unify_inference(context, pattern, evidence,
        and #(pattern.args or {}) == #(evidence.args or {}) then
         local ok = true
         for index, argument in ipairs(pattern.args or {}) do
-            ok = checker._generic.unify_inference(context, argument,
+            ok = generic_unify_inference(context, argument,
                 evidence.args[index], term, loc, seen) and ok
         end
         return ok
@@ -1177,20 +1177,20 @@ function checker._generic.unify_inference(context, pattern, evidence,
        and (pattern.flexrettype == false) == (evidence.flexrettype == false) then
         local ok = true
         for index, parameter in ipairs(pattern.params) do
-            ok = checker._generic.unify_inference(context, parameter,
+            ok = generic_unify_inference(context, parameter,
                 evidence.params[index], term, loc, seen) and ok
         end
         for index, result in ipairs(pattern.rettypes) do
-            ok = checker._generic.unify_inference(context, result,
+            ok = generic_unify_inference(context, result,
                 evidence.rettypes[index], term, loc, seen) and ok
         end
         if pattern.varargtype ~= false then
-            ok = checker._generic.unify_inference(context,
+            ok = generic_unify_inference(context,
                 pattern.varargtype, evidence.varargtype,
                 term, loc, seen) and ok
         end
         if pattern.flexrettype ~= false then
-            ok = checker._generic.unify_inference(context,
+            ok = generic_unify_inference(context,
                 pattern.flexrettype, evidence.flexrettype,
                 term, loc, seen) and ok
         end
@@ -1199,19 +1199,19 @@ function checker._generic.unify_inference(context, pattern, evidence,
     return false
 end
 
-function checker._generic.inference_arguments(entry, recover)
+function generic_inference_arguments(entry, recover)
     local arguments = {}
     for index, cell in ipairs(entry.cells) do
-        local root = checker._generic.inference_root(cell)
+        local root = generic_inference_root(cell)
         arguments[index] = root.binding
-            or (recover and checker._generic.rigid_parameter_carrier(
+            or (recover and generic_rigid_parameter_carrier(
                 entry.parameters[index]))
             or entry.parameters[index]
     end
     return arguments
 end
 
-function checker._generic.substitute_inference(context, typ, recover)
+function generic_substitute_inference(context, typ, recover)
     local out = typ
     local entries, present = {}, {}
 
@@ -1221,7 +1221,7 @@ function checker._generic.substitute_inference(context, typ, recover)
         if seen[value] then return end
         seen[value] = true
         if value._tag == "Type.Parameter" then
-            local cell = checker._generic.inference_cell(context, value)
+            local cell = generic_inference_cell(context, value)
             local entry = cell and cell.entry
             if entry and not present[entry] then
                 present[entry] = true
@@ -1253,7 +1253,7 @@ function checker._generic.substitute_inference(context, typ, recover)
             local entry = entries[index]
             local ok, rewritten = pcall(types.substitute_inference,
                 out, entry.scope,
-                checker._generic.inference_arguments(entry, recover))
+                generic_inference_arguments(entry, recover))
             if not ok then
                 context.substitution_failures =
                     context.substitution_failures or {}
@@ -1284,29 +1284,29 @@ function checker._generic.substitute_inference(context, typ, recover)
     return out
 end
 
-function checker._generic.inference_type_has_unresolved(context, typ, seen)
+function generic_inference_type_has_unresolved(context, typ, seen)
     if typ == false or typ == nil or type(typ) ~= "table" then return false end
     seen = seen or {}
     if seen[typ] then return false end
     seen[typ] = true
 
     if typ._tag == "Type.Parameter" then
-        local cell = checker._generic.inference_cell(context, typ)
+        local cell = generic_inference_cell(context, typ)
         if not cell then return false end
-        local root = checker._generic.inference_root(cell)
+        local root = generic_inference_root(cell)
         if not root.binding then return true end
-        return checker._generic.inference_type_has_unresolved(
+        return generic_inference_type_has_unresolved(
             context, root.binding, seen)
     end
     for key, value in pairs(typ) do
         if key ~= "scope" and type(value) == "table" then
             if value._tag then
-                if checker._generic.inference_type_has_unresolved(context, value, seen) then
+                if generic_inference_type_has_unresolved(context, value, seen) then
                     return true
                 end
             else
                 for _, item in pairs(value) do
-                    if checker._generic.inference_type_has_unresolved(context, item, seen) then
+                    if generic_inference_type_has_unresolved(context, item, seen) then
                         return true
                     end
                 end
@@ -1316,28 +1316,28 @@ function checker._generic.inference_type_has_unresolved(context, typ, seen)
     return false
 end
 
-function checker._generic.closed_inference_pattern(context, typ)
-    local substituted = checker._generic.substitute_inference(
+function generic_closed_inference_pattern(context, typ)
+    local substituted = generic_substitute_inference(
         context, typ, false)
-    if checker._generic.inference_type_has_unresolved(context, substituted) then return nil end
+    if generic_inference_type_has_unresolved(context, substituted) then return nil end
     return substituted
 end
 
-function checker._generic.inference_entry_type_arguments(context, entry)
+function generic_inference_entry_type_arguments(context, entry)
     local arguments = {}
     for index, cell in ipairs(entry.cells) do
-        local root = checker._generic.inference_root(cell)
-        arguments[index] = checker._generic.substitute_inference(
+        local root = generic_inference_root(cell)
+        arguments[index] = generic_substitute_inference(
             context, root.binding or entry.parameters[index], true)
     end
     return arguments
 end
 
-function checker._generic.inference_type_arguments(context, entries)
+function generic_inference_type_arguments(context, entries)
     local arguments = {}
     for _, entry in ipairs(entries or context.scopes) do
         local local_arguments =
-            checker._generic.inference_entry_type_arguments(context, entry)
+            generic_inference_entry_type_arguments(context, entry)
         for _, argument in ipairs(local_arguments) do
             arguments[#arguments + 1] = argument
         end
@@ -1351,7 +1351,7 @@ end
 -- the invariant equation I<V> = I<U> and can therefore bind V to U. Iterate a
 -- bounded number of times so chains of dependent constraints settle before
 -- free inference cells close to their declared carriers.
-function checker._generic.infer_constraint_evidence(context)
+function generic_infer_constraint_evidence(context)
     local queue = context.constraint_queue
     while context.constraint_head <= #queue do
         local record = queue[context.constraint_head]
@@ -1360,18 +1360,18 @@ function checker._generic.infer_constraint_evidence(context)
 
         local cell = record.cell
         local typeparam = record.typeparam
-        local root = cell and checker._generic.inference_root(cell)
+        local root = cell and generic_inference_root(cell)
         local argument = root and root.binding
         if argument and argument._tag == "Type.Parameter"
            and not root.invalid and typeparam.constraint ~= false then
             local surface = types.parameter_surface_constraint(
                 argument, context.st and context.st.generic_scope_bindings)
-            local required = checker._generic.substitute_inference(
+            local required = generic_substitute_inference(
                 context, typeparam.constraint, false)
             local surface_owner = surface and surface ~= false
-                and checker._generic.generic_owner_type(surface)
+                and generic_owner_type(surface)
             local required_owner = required
-                and checker._generic.generic_owner_type(required)
+                and generic_owner_type(required)
             if surface and surface ~= false
                and surface._tag == "Type.Nominal"
                and required and required._tag == "Type.Nominal"
@@ -1380,7 +1380,7 @@ function checker._generic.infer_constraint_evidence(context)
                and surface_owner._tag == "Type.Interface"
                and required_owner._tag == "Type.Interface"
                and #(surface.args or {}) == #(required.args or {}) then
-                checker._generic.unify_inference(
+                generic_unify_inference(
                     context, required, surface,
                     "declared constraint of type parameter '" ..
                         tostring(argument.diagnostic_name) .. "'",
@@ -1394,20 +1394,20 @@ function checker._generic.infer_constraint_evidence(context)
     context.constraint_head = 1
 end
 
-function checker._generic.inference_discovery_pass(use, phase)
+function generic_inference_discovery_pass(use, phase)
     local completed = 0
     -- A parent discovery may depend on a nested derived operation. Match the
     -- finalizer order here: deepest children first, lexical siblings in order.
     for _, child in ipairs(use.children) do
         completed = completed
-            + checker._generic.inference_discovery_pass(child, phase)
+            + generic_inference_discovery_pass(child, phase)
     end
     for _, discovery in ipairs(use.discoveries) do
         if not discovery.complete and discovery.phase == phase then
             -- A deferred expression must register any nested generic use below
             -- its original AST-owned occurrence, not below whichever sibling
             -- happened to unlock it.
-            local done = checker._generic.with_inference_use(
+            local done = generic_with_inference_use(
                 use.context, use, use.context.st, discovery.callback)
             if done then
                 discovery.complete = true
@@ -1418,37 +1418,37 @@ function checker._generic.inference_discovery_pass(use, phase)
     return completed
 end
 
-function checker._generic.run_inference_discovery_phase(context, phase)
+function generic_run_inference_discovery_phase(context, phase)
     local total = 0
     while true do
-        checker._generic.infer_constraint_evidence(context)
+        generic_infer_constraint_evidence(context)
         local completed = 0
         for _, use in ipairs(context.roots) do
             completed = completed
-                + checker._generic.inference_discovery_pass(use, phase)
+                + generic_inference_discovery_pass(use, phase)
         end
         if completed == 0 then break end
         total = total + completed
     end
-    checker._generic.infer_constraint_evidence(context)
+    generic_infer_constraint_evidence(context)
     return total
 end
 
-function checker._generic.discover_inference_evidence(context)
+function generic_discover_inference_evidence(context)
     -- Real equations and context-ready producers always settle before a
     -- syntax default. A default may in turn close an earlier pending term, so
     -- drain evidence again after each finite default round. Generic carrier
     -- closure happens only after this language-level fixed point.
     while true do
-        checker._generic.run_inference_discovery_phase(context, "evidence")
-        local defaulted = checker._generic.run_inference_discovery_phase(
+        generic_run_inference_discovery_phase(context, "evidence")
+        local defaulted = generic_run_inference_discovery_phase(
             context, "default")
         if defaulted == 0 then break end
     end
-    checker._generic.run_inference_discovery_phase(context, "evidence")
+    generic_run_inference_discovery_phase(context, "evidence")
 end
 
-function checker._generic.default_inference_cells(context)
+function generic_default_inference_cells(context)
     -- Defaults belong to equivalence classes, not declaration positions. A
     -- nested constrained binder equated with an unconstrained outer binder must
     -- contribute its Interface carrier before `value` can close that class.
@@ -1459,7 +1459,7 @@ function checker._generic.default_inference_cells(context)
         local out, order = {}, {}
         for _, entry in ipairs(context.scopes) do
             for index, cell in ipairs(entry.cells) do
-                local root = checker._generic.inference_root(cell)
+                local root = generic_inference_root(cell)
                 local class = out[root]
                 if not class then
                     class = { root = root, members = {}, constrained = false }
@@ -1484,14 +1484,14 @@ function checker._generic.default_inference_cells(context)
         local changed = false
         local current = classes()
         for _, class in ipairs(current) do
-            local root = checker._generic.inference_root(class.root)
+            local root = generic_inference_root(class.root)
             if not root.binding then
                 for _, member in ipairs(class.members) do
                     local constraint = member.typeparam.constraint
                     if constraint ~= false then
-                        constraint = checker._generic.substitute_inference(
+                        constraint = generic_substitute_inference(
                             context, constraint, false)
-                        if not checker._generic.inference_type_has_unresolved(
+                        if not generic_inference_type_has_unresolved(
                                 context, constraint) then
                             root.binding = constraint
                             root.evidence = "declared erased carrier"
@@ -1505,13 +1505,13 @@ function checker._generic.default_inference_cells(context)
             end
         end
         if changed then
-            checker._generic.infer_constraint_evidence(context)
+            generic_infer_constraint_evidence(context)
         else
             -- Only classes without any constrained declaration are genuinely
             -- free at this point. Their fixed carrier can unlock a dependent
             -- constrained class on the next iteration.
             for _, class in ipairs(current) do
-                local root = checker._generic.inference_root(class.root)
+                local root = generic_inference_root(class.root)
                 if not root.binding and not class.constrained then
                     root.binding = types.Value()
                     root.evidence = "declared erased carrier"
@@ -1525,7 +1525,7 @@ function checker._generic.default_inference_cells(context)
 
     local unresolved, seen = 0, {}
     for _, class in ipairs(classes()) do
-        local root = checker._generic.inference_root(class.root)
+        local root = generic_inference_root(class.root)
         if not seen[root] and not root.binding then
             seen[root] = true
             unresolved = unresolved + 1
@@ -1534,7 +1534,7 @@ function checker._generic.default_inference_cells(context)
     return unresolved
 end
 
-function checker._generic.assert_inference_derived_nodes_closed(context)
+function generic_assert_inference_derived_nodes_closed(context)
     local source_backreference = {
         _decl = true,
         _declared_type = true,
@@ -1547,7 +1547,7 @@ function checker._generic.assert_inference_derived_nodes_closed(context)
         if type(value) ~= "table" or seen[value] then return end
         seen[value] = true
         if value._tag == "Type.Parameter"
-           and checker._generic.inference_cell(context, value) then
+           and generic_inference_cell(context, value) then
             error("ambient inference parameter survived derived finalization at "
                 .. path, 0)
         end
@@ -1566,18 +1566,18 @@ function checker._generic.assert_inference_derived_nodes_closed(context)
     for _, use in ipairs(context.roots) do visit_use(use) end
 end
 
-function checker._generic.close_inference_context(context)
+function generic_close_inference_context(context)
     if context.closed then return context.valid end
     assert(not context.closing, "recursive generic inference-context close")
     context.closing = true
-    checker._generic.discover_inference_evidence(context)
-    local unresolved = checker._generic.default_inference_cells(context)
+    generic_discover_inference_evidence(context)
+    local unresolved = generic_default_inference_cells(context)
     local valid = unresolved == 0
 
     local seen_roots = {}
     for _, entry in ipairs(context.scopes) do
         for _, cell in ipairs(entry.cells) do
-            local root = checker._generic.inference_root(cell)
+            local root = generic_inference_root(cell)
             if not seen_roots[root] then
                 seen_roots[root] = true
                 if not root.binding then
@@ -1588,7 +1588,7 @@ function checker._generic.close_inference_context(context)
                     root.invalid = true
                     valid = false
                 else
-                    root.binding = checker._generic.substitute_inference(
+                    root.binding = generic_substitute_inference(
                         context, root.binding, true)
                     if not types.transient_roundtrip(root.binding) then
                         checker.typeerror(context.errors,
@@ -1615,13 +1615,13 @@ function checker._generic.close_inference_context(context)
     -- the one closed equivalence-class argument.
     for _, entry in ipairs(context.scopes) do
         for index, typeparam in ipairs(entry.typeparams) do
-            local root = checker._generic.inference_root(entry.cells[index])
+            local root = generic_inference_root(entry.cells[index])
             if not root.invalid and typeparam.constraint ~= false then
-                local constraint = checker._generic.substitute_inference(
+                local constraint = generic_substitute_inference(
                     context, typeparam.constraint, true)
-                local argument = checker._generic.substitute_inference(
+                local argument = generic_substitute_inference(
                     context, root.binding, true)
-                local satisfied = checker._generic.generic_constraint_satisfied(
+                local satisfied = generic_constraint_satisfied(
                     argument, constraint, context.st)
                 if not satisfied then
                     checker.typeerror(context.errors,
@@ -1639,42 +1639,42 @@ function checker._generic.close_inference_context(context)
     context.closed = true
     context.closing = false
     for _, use in ipairs(context.roots) do
-        checker._generic.finalize_inference_use(use)
+        generic_finalize_inference_use(use)
     end
-    checker._generic.assert_inference_derived_nodes_closed(context)
+    generic_assert_inference_derived_nodes_closed(context)
     return valid
 end
 
-function checker._generic.unify_result_inference(
+function generic_unify_result_inference(
         context, pattern, target, term, loc)
     -- Ordinary sinks may add or remove one outer option around a structured
     -- result.  Use the option's element as contextual evidence, while keeping
     -- a direct binder authoritative (`T` itself still binds to `X?`).  The
     -- eventual ordinary assignment check remains responsible for admitting
     -- the actual option conversion.
-    local direct = checker._generic.inference_cell(context, pattern)
+    local direct = generic_inference_cell(context, pattern)
     local ok
     if not direct and pattern and target then
         if pattern._tag ~= "Type.Option"
            and target._tag == "Type.Option" then
-            ok = checker._generic.unify_inference(
+            ok = generic_unify_inference(
                 context, pattern, target.base, term, loc)
         elseif pattern._tag == "Type.Option"
            and target._tag ~= "Type.Option"
            and target._tag ~= "Type.Nil" then
-            ok = checker._generic.unify_inference(
+            ok = generic_unify_inference(
                 context, pattern.base, target, term, loc)
         end
     end
     if ok == nil then
-        ok = checker._generic.unify_inference(
+        ok = generic_unify_inference(
             context, pattern, target, term, loc)
     end
-    checker._generic.infer_constraint_evidence(context)
+    generic_infer_constraint_evidence(context)
     return ok
 end
 
-function checker._generic.infer_result_evidence(context, signature, demand)
+function generic_infer_result_evidence(context, signature, demand)
     for index, target in ipairs(demand.fixed or {}) do
         target = expected_type(target)
         if target then
@@ -1683,7 +1683,7 @@ function checker._generic.infer_result_evidence(context, signature, demand)
                 pattern = optionize(signature.flexrettype)
             end
             if pattern then
-                checker._generic.unify_result_inference(context, pattern, target,
+                generic_unify_result_inference(context, pattern, target,
                     "expected result " .. index, demand.loc or context.loc)
             end
         end
@@ -1691,12 +1691,12 @@ function checker._generic.infer_result_evidence(context, signature, demand)
     local tail = expected_type(demand.tail)
     if tail then
         for index = #(demand.fixed or {}) + 1, #signature.rettypes do
-            checker._generic.unify_result_inference(context,
+            generic_unify_result_inference(context,
                 signature.rettypes[index], tail,
                 "expected open result", demand.loc or context.loc)
         end
         if signature.flexrettype then
-            checker._generic.unify_result_inference(context,
+            generic_unify_result_inference(context,
                 signature.flexrettype, tail,
                 "expected open result", demand.loc or context.loc)
         end
@@ -1707,12 +1707,12 @@ end
 -- It has no run-time evaluation and currently selects open callable-local cells
 -- after the callee/receiver but before evaluated arguments. Keep this policy
 -- isolated here while its precedence remains an explicit language-design choice.
-function checker._generic.infer_static_result_context(
+function generic_infer_static_result_context(
         context, signature, demand)
-    checker._generic.infer_result_evidence(context, signature, demand)
+    generic_infer_result_evidence(context, signature, demand)
 end
 
-function checker._generic.generic_lambda_full_explicit_type(node)
+function generic_lambda_full_explicit_type(node)
     local nparams = #node.params
     local vararg = node.params[nparams]
     local has_vararg = vararg and vararg.name == false
@@ -1736,7 +1736,7 @@ function checker._generic.generic_lambda_full_explicit_type(node)
         false, varargtype, node._generic_inference_flexrettype)
 end
 
-function checker._generic.prepare_lambda_inference(node, pattern,
+function generic_prepare_lambda_inference(node, pattern,
                                                    context, st, errors)
     local nparams = #node.params
     local vararg = node.params[nparams]
@@ -1767,16 +1767,16 @@ function checker._generic.prepare_lambda_inference(node, pattern,
             or false
     end
 
-    local current = checker._generic.substitute_inference(
+    local current = generic_substitute_inference(
         context, pattern, false)
     local cell = current._tag == "Type.Parameter"
-        and checker._generic.inference_cell(context, current) or nil
+        and generic_inference_cell(context, current) or nil
     if cell then
-        local explicit = checker._generic.generic_lambda_full_explicit_type(node)
+        local explicit = generic_lambda_full_explicit_type(node)
         if explicit then
-            checker._generic.bind_inference_cell(context, cell, explicit,
+            generic_bind_inference_cell(context, cell, explicit,
                 "explicit lambda signature", node.loc)
-            checker._generic.infer_constraint_evidence(context)
+            generic_infer_constraint_evidence(context)
         end
         return
     end
@@ -1787,39 +1787,39 @@ function checker._generic.prepare_lambda_inference(node, pattern,
     for index = 1, nfixed do
         local actual = node.params[index]._generic_inference_type
         if actual then
-            checker._generic.unify_inference(context,
+            generic_unify_inference(context,
                 current.params[index], actual,
                 "lambda parameter " .. index, node.params[index].loc)
         end
     end
     if has_vararg and vararg._generic_inference_type
        and current.varargtype ~= false then
-        checker._generic.unify_inference(context,
+        generic_unify_inference(context,
             current.varargtype, vararg._generic_inference_type,
             "lambda variadic parameter", vararg.loc)
     end
     if node._generic_inference_rettypes
        and #node._generic_inference_rettypes == #current.rettypes then
         for index, actual in ipairs(node._generic_inference_rettypes) do
-            checker._generic.unify_inference(context,
+            generic_unify_inference(context,
                 current.rettypes[index], actual,
                 "lambda result " .. index, node.loc)
         end
         if node._generic_inference_flexrettype ~= false
            and current.flexrettype ~= false then
-            checker._generic.unify_inference(context,
+            generic_unify_inference(context,
                 current.flexrettype, node._generic_inference_flexrettype,
                 "lambda flexible result", node.loc)
         end
     end
-    checker._generic.infer_constraint_evidence(context)
+    generic_infer_constraint_evidence(context)
 end
 
-function checker._generic.generic_formal_pattern(signature, index)
+function generic_formal_pattern(signature, index)
     return signature.params[index] or signature.varargtype or nil
 end
 
-function checker._generic.generic_expression_result_types(exp)
+function generic_expression_result_types(exp)
     if exp._tag == "Ast.ExpCall" then
         return exp._visible_types or exp._types or {},
             exp._open_results and exp._open_results.source_type or false
@@ -1827,7 +1827,7 @@ function checker._generic.generic_expression_result_types(exp)
     return { exp._type }, false
 end
 
-function checker._generic.contextual_record_constructor_evidence(
+function generic_contextual_record_constructor_evidence(
         context, pattern, exp, evidence)
     -- A record initializer has no independent nominal owner: its expected type
     -- selects the record, and the initializer itself builds that non-Option
@@ -1849,7 +1849,7 @@ function checker._generic.contextual_record_constructor_evidence(
     if not owner or owner._tag ~= "Type.Record" then return evidence end
 
     local expected = types.normalize(
-        checker._generic.substitute_inference(context, pattern, false))
+        generic_substitute_inference(context, pattern, false))
     if not expected then return evidence end
     local one_option_apart =
         (expected._tag == "Type.Option"
@@ -1860,63 +1860,63 @@ function checker._generic.contextual_record_constructor_evidence(
     return expected
 end
 
-function checker._generic.generic_unify_expression_results(context, signature, exp,
+function generic_unify_expression_results(context, signature, exp,
                                                 first, term)
-    local results, open = checker._generic.generic_expression_result_types(exp)
+    local results, open = generic_expression_result_types(exp)
     local index = first
     for _, actual in ipairs(results) do
-        local pattern = checker._generic.generic_formal_pattern(signature, index)
+        local pattern = generic_formal_pattern(signature, index)
         if pattern then
-            actual = checker._generic.contextual_record_constructor_evidence(
+            actual = generic_contextual_record_constructor_evidence(
                 context, pattern, exp, actual)
-            checker._generic.unify_inference(context, pattern, actual,
+            generic_unify_inference(context, pattern, actual,
                 term .. " " .. index, exp.loc)
-            checker._generic.infer_constraint_evidence(context)
+            generic_infer_constraint_evidence(context)
         end
         index = index + 1
     end
     if open and signature.varargtype then
-        checker._generic.unify_inference(context,
+        generic_unify_inference(context,
             signature.varargtype, open, term .. " open tail", exp.loc)
-        checker._generic.infer_constraint_evidence(context)
+        generic_infer_constraint_evidence(context)
     end
 end
 
-function checker._generic.inference_expression_context(context, pattern, exp)
+function generic_inference_expression_context(context, pattern, exp)
     local expected = pattern
-        and checker._generic.closed_inference_pattern(context, pattern)
+        and generic_closed_inference_pattern(context, pattern)
         or nil
     -- Brace constructors can preserve an unresolved structural owner without
     -- committing any ordinary adjustment. Their AST-owned operation finalizer
     -- substitutes that provisional context after every sibling has contributed
     -- evidence. Other expressions continue to receive only closed contexts.
     if not expected and pattern and exp._tag == "Ast.ExpInitList" then
-        expected = checker._generic.substitute_inference(
+        expected = generic_substitute_inference(
             context, pattern, false)
     end
     return expected
 end
 
-function checker._generic.generic_discovery_demand(context, signature, first, original)
+function generic_discovery_demand(context, signature, first, original)
     local fixed, inference_fixed = {}, {}
     for offset = 1, #(original.fixed or {}) do
-        local pattern = checker._generic.generic_formal_pattern(
+        local pattern = generic_formal_pattern(
             signature, first + offset - 1)
         local closed = pattern and
-            checker._generic.closed_inference_pattern(context, pattern)
+            generic_closed_inference_pattern(context, pattern)
         fixed[offset] = closed or UNKNOWN_SLOT
         inference_fixed[offset] = pattern and
-            checker._generic.substitute_inference(context, pattern, false)
+            generic_substitute_inference(context, pattern, false)
             or false
     end
     local tail, inference_tail = false, false
     if original.tail then
         local pattern = signature.varargtype
         local closed = pattern and
-            checker._generic.closed_inference_pattern(context, pattern)
+            generic_closed_inference_pattern(context, pattern)
         tail = closed or INFER_OPEN
         inference_tail = pattern and
-            checker._generic.substitute_inference(context, pattern, false)
+            generic_substitute_inference(context, pattern, false)
             or false
     end
     return result_demand(fixed, tail, {
@@ -1928,13 +1928,13 @@ function checker._generic.generic_discovery_demand(context, signature, first, or
     })
 end
 
-function checker._generic.finalize_adjustment_annotation(
+function generic_finalize_adjustment_annotation(
         operation, adjustment)
-    return checker._generic.finalize_inference_annotation(
+    return generic_finalize_inference_annotation(
         operation, adjustment, true)
 end
 
-function checker._generic.refresh_finalized_argument_projections(adjusted)
+function generic_refresh_finalized_argument_projections(adjusted)
     -- A scalar derived expression (field/index/bound method/parentheses) can
     -- retain its original AST identity while postorder finalization replaces
     -- only checker-owned annotations. Keep the owning expression-list aliases
@@ -1995,7 +1995,7 @@ function checker._generic.refresh_finalized_argument_projections(adjusted)
     end
 end
 
-function checker._generic.finish_generic_open_arguments(adjusted, target, st, errors,
+function generic_finish_generic_open_arguments(adjusted, target, st, errors,
                                              term)
     if not adjusted.open_source then return end
     adjusted.open_target = target
@@ -2032,9 +2032,9 @@ function checker._generic.finish_generic_open_arguments(adjusted, target, st, er
     end
 end
 
-function checker._generic.close_generic_adjusted_arguments(
+function generic_close_generic_adjusted_arguments(
         node, adjusted, args, signature, st, errors, term)
-    checker._generic.refresh_finalized_argument_projections(adjusted)
+    generic_refresh_finalized_argument_projections(adjusted)
     for index = 1, #adjusted.fixed do
         local exp = adjusted.fixed[index]
         local target = signature.params[index]
@@ -2059,7 +2059,7 @@ function checker._generic.close_generic_adjusted_arguments(
                 replace_adjusted_value(adjusted, exp, replacement)
             end
         end
-        checker._generic.finish_generic_open_arguments(adjusted, signature.varargtype,
+        generic_finish_generic_open_arguments(adjusted, signature.varargtype,
             st, errors, term)
     end
     for index = #args, 1, -1 do args[index] = nil end
@@ -2072,7 +2072,7 @@ function checker._generic.close_generic_adjusted_arguments(
     annotate_call_arguments(node, adjusted)
 end
 
-function checker._generic.is_generic_first_class_expression(
+function generic_is_generic_first_class_expression(
         exp, st, errors, context)
     if exp._tag ~= "Ast.ExpVar" then return false end
     if exp.var._tag == "Ast.VarName" then
@@ -2082,7 +2082,7 @@ function checker._generic.is_generic_first_class_expression(
             return false
         end
     end
-    checker._generic.precheckvar_for_expression(
+    generic_precheckvar_for_expression(
         exp, st, errors, context)
     if exp.var._decl then exp.var._decl._used = true end
     exp._type = exp.var._type
@@ -2091,7 +2091,7 @@ function checker._generic.is_generic_first_class_expression(
             and exp.var._generic_declaration ~= nil)
 end
 
-function checker._generic.resolve_deferred_generic_arguments(
+function generic_resolve_deferred_generic_arguments(
         context, deferred, st, errors, label)
     -- A generic declaration contributes a fresh function-shaped occurrence to
     -- the ambient context. A complete outer pattern supplies immediate
@@ -2100,20 +2100,20 @@ function checker._generic.resolve_deferred_generic_arguments(
     -- because v1 never infers their missing annotations from the body.
     for _, item in ipairs(deferred) do
         if item.exp._tag ~= "Ast.ExpFunction" then
-            local expected = checker._generic.closed_inference_pattern(
+            local expected = generic_closed_inference_pattern(
                 context, item.pattern)
             checkexp(item.exp, st, errors, expected,
                 result_demand({ expected or UNKNOWN_SLOT }, false, {
                     term = label,
                 }))
-            checker._generic.unify_inference(context, item.pattern,
+            generic_unify_inference(context, item.pattern,
                 item.exp._type, label, item.exp.loc)
             item.checked = true
         end
     end
 end
 
-function checker._generic.infer_positional_call(context, signature, args,
+function generic_infer_positional_call(context, signature, args,
                                                 st, errors, term)
     local deferred, deferred_by_exp = {}, {}
     local consumed_results, consumed_open = {}, {}
@@ -2131,10 +2131,10 @@ function checker._generic.infer_positional_call(context, signature, args,
             defer_open_check = true,
             check_expression = function(exp, est, eerrors, _, subdemand,
                                         sink_index)
-                local pattern = checker._generic.generic_formal_pattern(
+                local pattern = generic_formal_pattern(
                     signature, sink_index)
                 local expected = pattern and
-                    checker._generic.inference_expression_context(
+                    generic_inference_expression_context(
                         context, pattern, exp) or nil
 
                 -- Eligibility probing is itself a descent through a possibly
@@ -2144,23 +2144,23 @@ function checker._generic.infer_positional_call(context, signature, args,
                 local contextual = pattern
                     and exp._tag == "Ast.ExpFunction"
                 if contextual then
-                    checker._generic.prepare_lambda_inference(
+                    generic_prepare_lambda_inference(
                         exp, pattern, context, est, eerrors)
                     local item = { exp = exp, pattern = pattern }
                     deferred[#deferred + 1] = item
                     deferred_by_exp[exp] = item
-                    exp._type = checker._generic.closed_inference_pattern(
+                    exp._type = generic_closed_inference_pattern(
                         context, pattern) or types.Invalid()
                     return
                 end
 
-                local demand = checker._generic.generic_discovery_demand(
+                local demand = generic_discovery_demand(
                     context, signature, sink_index, subdemand)
                 checkexp(exp, est, eerrors, expected, demand)
-                checker._generic.generic_unify_expression_results(
+                generic_unify_expression_results(
                     context, signature, exp, sink_index, "argument")
                 local results, open =
-                    checker._generic.generic_expression_result_types(exp)
+                    generic_expression_result_types(exp)
                 consumed_results[exp] = #results
                 if open then consumed_open[exp] = true end
             end,
@@ -2178,44 +2178,44 @@ function checker._generic.infer_positional_call(context, signature, args,
     -- it in delivered slot order as well.
     for index = 1, #adjusted.fixed do
         local exp = adjusted.fixed[index]
-        local pattern = checker._generic.generic_formal_pattern(
+        local pattern = generic_formal_pattern(
             signature, index)
         if pattern and not deferred_by_exp[exp]
            and not already_consumed(exp) then
             local evidence =
-                checker._generic.contextual_record_constructor_evidence(
+                generic_contextual_record_constructor_evidence(
                     context, pattern, exp, exp._type)
-            checker._generic.unify_inference(context, pattern,
+            generic_unify_inference(context, pattern,
                 evidence, "argument " .. index, exp.loc)
-            checker._generic.infer_constraint_evidence(context)
+            generic_infer_constraint_evidence(context)
         end
     end
     for _, exp in ipairs(adjusted.tail_scalars) do
         if signature.varargtype and not deferred_by_exp[exp]
            and not already_consumed(exp) then
             local evidence =
-                checker._generic.contextual_record_constructor_evidence(
+                generic_contextual_record_constructor_evidence(
                     context, signature.varargtype, exp, exp._type)
-            checker._generic.unify_inference(context,
+            generic_unify_inference(context,
                 signature.varargtype, evidence,
                 "variadic argument", exp.loc)
-            checker._generic.infer_constraint_evidence(context)
+            generic_infer_constraint_evidence(context)
         end
     end
     if adjusted.open_source and signature.varargtype
        and not consumed_open[adjusted.open_source] then
-        checker._generic.unify_inference(context,
+        generic_unify_inference(context,
             signature.varargtype, adjusted.open_type,
             "open variadic argument", adjusted.open_source.loc)
     end
 
-    checker._generic.infer_constraint_evidence(context)
-    checker._generic.resolve_deferred_generic_arguments(
+    generic_infer_constraint_evidence(context)
+    generic_resolve_deferred_generic_arguments(
         context, deferred, st, errors, "generic function argument")
     return adjusted, deferred
 end
 
-function checker._generic.generic_decl_paramnames(node)
+function generic_decl_paramnames(node)
     local variable = node.exp._tag == "Ast.ExpVar" and node.exp.var or nil
     local declaration = variable and variable._decl or nil
     if not declaration then return nil end
@@ -2229,7 +2229,7 @@ function checker._generic.generic_decl_paramnames(node)
     end
 end
 
-function checker._generic.infer_named_call(context, signature, fields,
+function generic_infer_named_call(context, signature, fields,
                                            paramnames, st, errors, term)
     if type(paramnames) ~= "table" then
         for _, field in ipairs(fields) do checkexp(field.exp, st, errors) end
@@ -2250,10 +2250,10 @@ function checker._generic.infer_named_call(context, signature, fields,
             checkexp(field.exp, st, errors)
         else
             local pattern = signature.params[index]
-            local expected = checker._generic.inference_expression_context(
+            local expected = generic_inference_expression_context(
                 context, pattern, field.exp)
             if field.exp._tag == "Ast.ExpFunction" then
-                checker._generic.prepare_lambda_inference(
+                generic_prepare_lambda_inference(
                     field.exp, pattern, context, st, errors)
                 deferred[#deferred + 1] = {
                     exp = field.exp,
@@ -2261,7 +2261,7 @@ function checker._generic.infer_named_call(context, signature, fields,
                 }
             else
                 local provisional = not expected and
-                    checker._generic.substitute_inference(
+                    generic_substitute_inference(
                         context, pattern, false) or false
                 checkexp(field.exp, st, errors, expected,
                     result_demand({ expected or UNKNOWN_SLOT }, false, {
@@ -2269,12 +2269,12 @@ function checker._generic.infer_named_call(context, signature, fields,
                         inference_fixed = { provisional },
                     }))
                 local evidence =
-                    checker._generic.contextual_record_constructor_evidence(
+                    generic_contextual_record_constructor_evidence(
                         context, pattern, field.exp, field.exp._type)
-                checker._generic.unify_inference(context, pattern,
+                generic_unify_inference(context, pattern,
                     evidence, "named argument '" .. field.name .. "'",
                     field.loc)
-                checker._generic.infer_constraint_evidence(context)
+                generic_infer_constraint_evidence(context)
             end
             checked[field] = index
             if supplied[index] then
@@ -2287,15 +2287,15 @@ function checker._generic.infer_named_call(context, signature, fields,
     end
     for index, name in ipairs(paramnames) do
         if not supplied[index] then
-            checker._generic.unify_inference(context,
+            generic_unify_inference(context,
                 signature.params[index], types.Nil(),
                 "omitted named argument '" .. name .. "'", context.loc)
-            checker._generic.infer_constraint_evidence(context)
+            generic_infer_constraint_evidence(context)
         end
     end
 
-    checker._generic.infer_constraint_evidence(context)
-    checker._generic.resolve_deferred_generic_arguments(
+    generic_infer_constraint_evidence(context)
+    generic_resolve_deferred_generic_arguments(
         context, deferred, st, errors, "named generic function argument")
     return {
         fields = fields,
@@ -2306,11 +2306,11 @@ function checker._generic.infer_named_call(context, signature, fields,
     }
 end
 
-function checker._generic.close_deferred_generic_arguments(
+function generic_close_deferred_generic_arguments(
         context, deferred, st, errors)
     for _, item in ipairs(deferred or {}) do
         if not item.checked then
-            local expected = checker._generic.substitute_inference(
+            local expected = generic_substitute_inference(
                 context, item.pattern, true)
             checkexp(item.exp, st, errors, expected,
                 result_demand({ expected }, false, {
@@ -2321,10 +2321,10 @@ function checker._generic.close_deferred_generic_arguments(
     end
 end
 
-function checker._generic.close_named_inference_plan(
+function generic_close_named_inference_plan(
         context, plan, closed, st, errors, term)
     if plan.unavailable then return nil, nil end
-    checker._generic.close_deferred_generic_arguments(
+    generic_close_deferred_generic_arguments(
         context, plan.deferred, st, errors)
 
     local dense, order = {}, {}
@@ -2356,34 +2356,34 @@ function checker._generic.close_named_inference_plan(
     return dense, order
 end
 
-function checker._generic.infer_call_application(context, use, signature, node,
+function generic_infer_call_application(context, use, signature, node,
                                                   demand, st, errors, term,
                                                   paramnames)
     local named = node.args._tag == "Ast.ArgsNamedFunc"
         or node.args._tag == "Ast.ArgsNamedMethod"
     local named_plan, adjusted, deferred
-    checker._generic.with_inference_use(context, use, st, function()
-        checker._generic.infer_static_result_context(
+    generic_with_inference_use(context, use, st, function()
+        generic_infer_static_result_context(
             context, signature, demand)
         if named then
-            named_plan = checker._generic.infer_named_call(
+            named_plan = generic_infer_named_call(
                 context, signature, node.args.fields,
-                paramnames or checker._generic.generic_decl_paramnames(node),
+                paramnames or generic_decl_paramnames(node),
                 st, errors, term)
         else
-            adjusted, deferred = checker._generic.infer_positional_call(
+            adjusted, deferred = generic_infer_positional_call(
                 context, signature, node.args.args, st, errors, term)
             node._generic_arg_adjustment = adjusted
         end
     end)
 
     use.signature = signature
-    checker._generic.add_inference_finalizer(use, function()
-        local closed = checker._generic.substitute_inference(
+    generic_add_inference_finalizer(use, function()
+        local closed = generic_substitute_inference(
             context, signature, true)
         use.closed = closed
         if named then
-            local dense, order = checker._generic.close_named_inference_plan(
+            local dense, order = generic_close_named_inference_plan(
                 context, named_plan, closed, st, errors, term)
             node._generic_named_dense = dense
             node._generic_named_order = order
@@ -2401,14 +2401,14 @@ function checker._generic.infer_call_application(context, use, signature, node,
                 node._named_call_kind = "titan"
             end
         else
-            checker._generic.close_deferred_generic_arguments(
+            generic_close_deferred_generic_arguments(
                 context, deferred, st, errors)
-            checker._generic.close_generic_adjusted_arguments(
+            generic_close_generic_adjusted_arguments(
                 node, adjusted, node.args.args, closed, st, errors, term)
         end
     end)
 
-    local provisional = checker._generic.substitute_inference(
+    local provisional = generic_substitute_inference(
         context, signature, false)
     if named and not use.owns_context then
         node._generic_named_pending = true
@@ -2416,11 +2416,11 @@ function checker._generic.infer_call_application(context, use, signature, node,
     return provisional
 end
 
-function checker._generic.infer_dependent_call_application(
+function generic_infer_dependent_call_application(
         operation, signature, node, demand, st, errors, term, paramnames,
         finalize)
     if not operation or node._generic_inference_use
-       or not checker._generic.inference_type_has_unresolved(
+       or not generic_inference_type_has_unresolved(
            operation.context, signature) then
         return signature, false
     end
@@ -2428,12 +2428,12 @@ function checker._generic.infer_dependent_call_application(
     assert(operation.node == node)
     assert(not operation.signature,
         "ordinary inference operation registered more than one call plan")
-    local provisional = checker._generic.infer_call_application(
+    local provisional = generic_infer_call_application(
         operation.context, operation, signature, node, demand,
         st, errors, term, paramnames)
     operation.dependent = true
     if finalize then
-        checker._generic.add_inference_finalizer(operation, function()
+        generic_add_inference_finalizer(operation, function()
             finalize(operation.closed)
         end)
     end
@@ -2446,10 +2446,10 @@ end
 -- later sibling evidence closes the synthesized parameters/results, then this
 -- postorder finalizer freezes the ordinary argument edges and callee cast
 -- without redispatching any written expression.
-function checker._generic.infer_dependent_value_call_application(
+function generic_infer_dependent_value_call_application(
         operation, signature, node, adjusted, st, errors, term, finalize)
     if not operation
-       or not checker._generic.inference_type_has_unresolved(
+       or not generic_inference_type_has_unresolved(
            operation.context, signature) then
         return signature, false
     end
@@ -2460,55 +2460,55 @@ function checker._generic.infer_dependent_value_call_application(
         "ordinary inference operation registered more than one call plan")
     operation.contextual_value_signature = signature
     operation.dependent = true
-    checker._generic.add_inference_finalizer(operation, function()
-        local closed = checker._generic.substitute_inference(
+    generic_add_inference_finalizer(operation, function()
+        local closed = generic_substitute_inference(
             operation.context, signature, true)
         operation.closed = closed
-        checker._generic.close_generic_adjusted_arguments(
+        generic_close_generic_adjusted_arguments(
             node, adjusted, node.args.args, closed, st, errors, term)
         finalize(closed)
     end)
     return signature, true
 end
 
-function checker._generic.close_inference_declaration(
+function generic_close_inference_declaration(
         context, use, declaration, recover)
-    local fresh = checker._generic.freshen_inference_type(
+    local fresh = generic_freshen_inference_type(
         context, declaration, use.scopes, use.subject, use.loc)
-    return checker._generic.substitute_inference(
+    return generic_substitute_inference(
         context, fresh, recover)
 end
 
-function checker._generic.infer_call_use(
+function generic_infer_call_use(
         node, subject, scopes, signature, demand, st, errors, paramnames,
         finalize)
-    local context, use, owns = checker._generic.acquire_inference_context(
+    local context, use, owns = generic_acquire_inference_context(
         node, subject, scopes, st, errors, node.loc)
-    signature = checker._generic.freshen_inference_type(
+    signature = generic_freshen_inference_type(
         context, signature, use.scopes, subject, node.loc)
-    local provisional = checker._generic.infer_call_application(
+    local provisional = generic_infer_call_application(
         context, use, signature, node, demand, st, errors, subject, paramnames)
     if finalize then
-        checker._generic.add_inference_finalizer(use, function()
-            local arguments = checker._generic.inference_type_arguments(
+        generic_add_inference_finalizer(use, function()
+            local arguments = generic_inference_type_arguments(
                 context, use.scopes)
             use.arguments = arguments
             finalize(use.closed, arguments, context, use)
         end)
     end
-    if owns then checker._generic.close_inference_context(context) end
+    if owns then generic_close_inference_context(context) end
     return use.closed or provisional, use.arguments, context, use
 end
 
-function checker._generic.defer_inherited_interface_finalization(
+function generic_defer_inherited_interface_finalization(
         node, class, method_name, operation)
     local use = operation or node._generic_inference_use
     if class._tag ~= "Type.Interface" or not use
        or use.owns_context or use.context.closed then
         return
     end
-    checker._generic.add_inference_finalizer(use, function()
-        local closed_class = checker._generic.substitute_inference(
+    generic_add_inference_finalizer(use, function()
+        local closed_class = generic_substitute_inference(
             use.context, class, true)
         node._interface = closed_class
         node._interface_method = node._method
@@ -2517,47 +2517,47 @@ function checker._generic.defer_inherited_interface_finalization(
     end)
 end
 
-function checker._generic.defer_inherited_call_result_finalization(
+function generic_defer_inherited_call_result_finalization(
         node, demand, operation)
     local use = operation or node._generic_inference_use
     if not use or use.owns_context or use.context.closed then return end
-    checker._generic.add_inference_finalizer(use, function()
+    generic_add_inference_finalizer(use, function()
         local callable = use.closed or node._method or node.exp._type
         annotate_call_results(node, callable, demand, {})
     end)
 end
 
-function checker._generic.infer_first_class_application(
+function generic_infer_first_class_application(
         node, subject, scopes, signature, expected, st, errors, loc,
         finalize)
-    local context, use, owns = checker._generic.acquire_inference_context(
+    local context, use, owns = generic_acquire_inference_context(
         node, subject, scopes, st, errors, loc)
-    signature = checker._generic.freshen_inference_type(
+    signature = generic_freshen_inference_type(
         context, signature, use.scopes, subject, loc)
-    checker._generic.with_inference_use(context, use, st, function()
+    generic_with_inference_use(context, use, st, function()
         if expected then
-            checker._generic.unify_inference(context, signature, expected,
+            generic_unify_inference(context, signature, expected,
                 "expected first-class function type", loc)
         end
     end)
-    checker._generic.add_inference_finalizer(use, function()
-        use.closed = checker._generic.substitute_inference(
+    generic_add_inference_finalizer(use, function()
+        use.closed = generic_substitute_inference(
             context, signature, true)
-        use.arguments = checker._generic.inference_type_arguments(
+        use.arguments = generic_inference_type_arguments(
             context, use.scopes)
     end)
     if finalize then
-        checker._generic.add_inference_finalizer(use, function()
+        generic_add_inference_finalizer(use, function()
             finalize(use.closed, use.arguments, context, use)
         end)
     end
-    local provisional = checker._generic.substitute_inference(
+    local provisional = generic_substitute_inference(
         context, signature, false)
-    if owns then checker._generic.close_inference_context(context) end
+    if owns then generic_close_inference_context(context) end
     return use.closed or provisional, use.arguments, context, use
 end
 
-function checker._generic.instantiate_first_class_variable(
+function generic_instantiate_first_class_variable(
         node, variable, declared, expected, st, errors)
     if expected and expected._tag == "Type.Option"
        and expected.base._tag == "Type.Function" then
@@ -2570,7 +2570,7 @@ function checker._generic.instantiate_first_class_variable(
     local subject = "generic declaration '" .. variable.name .. "'"
     local scopes, signature, declaration = {}, nil, nil
     if declared._tag == "Type.FunctionScheme" then
-        scopes[1] = checker._generic.inference_scope_entry(
+        scopes[1] = generic_inference_scope_entry(
             declared.scope, declared.typeparams)
         signature = declared.signature
     elseif declared._tag == "Type.Function" then
@@ -2584,15 +2584,15 @@ function checker._generic.instantiate_first_class_variable(
         if variable._generic_owner_fixed then
             callable = variable._closed_generic_declaration or declaration
         elseif owner and #(owner.typeparams or {}) > 0 then
-            scopes[#scopes + 1] = checker._generic.inference_scope_entry(
+            scopes[#scopes + 1] = generic_inference_scope_entry(
                 owner.scope, owner.typeparams, owner._generic_parameters)
         end
         if #(callable.typeparams or {}) > 0 then
-            scopes[#scopes + 1] = checker._generic.inference_scope_entry(
+            scopes[#scopes + 1] = generic_inference_scope_entry(
                 callable.scope, callable.typeparams)
         end
         if #scopes == 0 and not variable._generic_owner_fixed then return nil end
-        signature = checker._generic.callable_function_type(callable)
+        signature = generic_callable_function_type(callable)
     else
         return nil
     end
@@ -2602,7 +2602,7 @@ function checker._generic.instantiate_first_class_variable(
     else
         node._generic_declaration = declaration
     end
-    local closed = checker._generic.infer_first_class_application(
+    local closed = generic_infer_first_class_application(
         node, subject, scopes, signature, expected,
         st, errors, node.loc,
         function(final_type, arguments, context, use)
@@ -2610,36 +2610,36 @@ function checker._generic.instantiate_first_class_variable(
             node._type = final_type
             if declaration then
                 node._closed_generic_declaration =
-                    checker._generic.close_inference_declaration(
+                    generic_close_inference_declaration(
                         context, use, declaration, true)
             end
         end)
     return closed
 end
 
-function checker._generic.instantiate_function_scheme(
+function generic_instantiate_function_scheme(
         scheme, typearg_nodes, st, errors, loc, subject)
     local count = #(scheme.typeparams or {})
     local arguments, valid =
-        checker._generic.recover_complete_type_arguments(
+        generic_recover_complete_type_arguments(
             typearg_nodes, count, st, errors, loc, subject)
     if valid then
-        checker._generic.validate_binder_arguments(scheme.scope,
+        generic_validate_binder_arguments(scheme.scope,
             scheme.typeparams, arguments, st, errors, loc, subject, false)
     end
-    local closed = checker._generic.generic_substitute(
+    local closed = generic_substitute(
         scheme.signature, scheme.scope, arguments,
         errors, loc, "cannot instantiate " .. subject)
     return closed or scheme.signature, arguments
 end
 
-function checker._generic.instantiate_static_declaration(
+function generic_instantiate_static_declaration(
         declaration, owner, typearg_nodes, st, errors, loc, subject)
     local owner_count = owner and #(owner.typeparams or {}) or 0
     local local_count = #(declaration.typeparams or {})
     local total = owner_count + local_count
     local arguments, valid =
-        checker._generic.recover_complete_type_arguments(
+        generic_recover_complete_type_arguments(
             typearg_nodes, total, st, errors, loc, subject)
     local owner_arguments, local_arguments = {}, {}
     for index = 1, owner_count do
@@ -2652,32 +2652,32 @@ function checker._generic.instantiate_static_declaration(
     local closed = declaration
     if owner_count > 0 then
         if valid then
-            local owner_valid = checker._generic.validate_binder_arguments(
+            local owner_valid = generic_validate_binder_arguments(
                 owner.scope, owner.typeparams, owner_arguments,
                 st, errors, loc, subject, false)
             if owner_valid then
-                checker._generic.validate_owner_reconstruction(
+                generic_validate_owner_reconstruction(
                     owner, owner_arguments, st, errors, loc, subject, false)
             end
         end
-        closed = checker._generic.generic_substitute(closed, owner.scope, owner_arguments,
+        closed = generic_substitute(closed, owner.scope, owner_arguments,
             errors, loc, "cannot instantiate " .. subject) or closed
     end
     if local_count > 0 then
         -- Owner substitution also specializes constraints that mention owner
         -- binders, so validate against the fresh method/static view.
         if valid then
-            checker._generic.validate_binder_arguments(closed.scope,
+            generic_validate_binder_arguments(closed.scope,
                 closed.typeparams, local_arguments,
                 st, errors, loc, subject, false)
         end
-        closed = checker._generic.generic_substitute(closed, closed.scope, local_arguments,
+        closed = generic_substitute(closed, closed.scope, local_arguments,
             errors, loc, "cannot instantiate " .. subject) or closed
     end
-    return checker._generic.callable_function_type(closed), arguments, closed
+    return generic_callable_function_type(closed), arguments, closed
 end
 
-function checker._generic.instantiate_owner_applied_static(
+function generic_instantiate_owner_applied_static(
         node, declaration, closed_owner_declaration, variable,
         st, errors, demand, subject)
     local local_count = #(closed_owner_declaration.typeparams or {})
@@ -2695,31 +2695,31 @@ function checker._generic.instantiate_owner_applied_static(
         if local_was_written then
             local valid
             local_arguments, valid =
-                checker._generic.recover_complete_type_arguments(
+                generic_recover_complete_type_arguments(
                     node.typeargs, local_count, st, errors, node.loc, subject)
             if valid then
-                checker._generic.validate_binder_arguments(
+                generic_validate_binder_arguments(
                     closed_owner_declaration.scope,
                     closed_owner_declaration.typeparams, local_arguments,
                     st, errors, node.loc, subject, false)
             end
-            closed = checker._generic.generic_substitute(
+            closed = generic_substitute(
                 closed_owner_declaration, closed_owner_declaration.scope,
                 local_arguments, errors, node.loc,
                 "cannot instantiate " .. subject) or closed_owner_declaration
         elseif not owner_was_written then
-            local scopes = { checker._generic.inference_scope_entry(
+            local scopes = { generic_inference_scope_entry(
                 closed_owner_declaration.scope,
                 closed_owner_declaration.typeparams) }
             node._generic_declaration = declaration
-            local signature = checker._generic.infer_call_use(
+            local signature = generic_infer_call_use(
                 node, subject, scopes,
-                checker._generic.callable_function_type(
+                generic_callable_function_type(
                     closed_owner_declaration), demand, st, errors,
                 closed_owner_declaration.paramnames,
                 function(final_signature, arguments, context, use)
                     local final_declaration =
-                        checker._generic.close_inference_declaration(
+                        generic_close_inference_declaration(
                             context, use, closed_owner_declaration, true)
                     node._generic_type_arguments = arguments
                     node._closed_generic_declaration = final_declaration
@@ -2737,27 +2737,27 @@ function checker._generic.instantiate_owner_applied_static(
     node._generic_declaration = declaration
     node._generic_type_arguments = local_arguments
     node._closed_generic_declaration = closed
-    local signature = checker._generic.callable_function_type(closed)
+    local signature = generic_callable_function_type(closed)
     node.exp._type = signature
     return signature
 end
 
-function checker._generic.instantiate_direct_call(
+function generic_instantiate_direct_call(
         node, ftype, st, errors, demand)
     local subject = "call to '" .. expname(node.exp) .. "'"
     if ftype._tag == "Type.FunctionScheme" then
         node._generic_scheme = ftype
         if #(node.typeargs or {}) > 0 then
             local closed, arguments =
-                checker._generic.instantiate_function_scheme(
+                generic_instantiate_function_scheme(
                     ftype, node.typeargs, st, errors, node.loc, subject)
             node._generic_type_arguments = arguments
             node.exp._type = closed
             return closed
         end
-        local scopes = { checker._generic.inference_scope_entry(
+        local scopes = { generic_inference_scope_entry(
             ftype.scope, ftype.typeparams) }
-        local closed = checker._generic.infer_call_use(
+        local closed = generic_infer_call_use(
             node, subject, scopes, ftype.signature, demand, st, errors, nil,
             function(final_signature, arguments)
                 node._generic_type_arguments = arguments
@@ -2775,7 +2775,7 @@ function checker._generic.instantiate_direct_call(
         if variable._generic_owner_fixed then
             local closed_owner = variable._closed_generic_declaration
                 or node._closed_generic_declaration or declaration
-            return checker._generic.instantiate_owner_applied_static(
+            return generic_instantiate_owner_applied_static(
                 node, declaration, closed_owner, variable,
                 st, errors, demand, subject)
         end
@@ -2791,30 +2791,30 @@ function checker._generic.instantiate_direct_call(
                         subject)
                 end
                 closed, arguments, closed_declaration =
-                    checker._generic.instantiate_static_declaration(
+                    generic_instantiate_static_declaration(
                         declaration, owner, node.typeargs, st, errors,
                         node.loc, subject)
             else
                 local scopes = {}
                 if owner_count > 0 then
-                    scopes[#scopes + 1] = checker._generic.inference_scope_entry(
+                    scopes[#scopes + 1] = generic_inference_scope_entry(
                         owner.scope, owner.typeparams,
                         owner._generic_parameters)
                 end
                 if local_count > 0 then
-                    scopes[#scopes + 1] = checker._generic.inference_scope_entry(
+                    scopes[#scopes + 1] = generic_inference_scope_entry(
                         declaration.scope, declaration.typeparams)
                 end
                 node._generic_declaration = declaration
-                local signature = checker._generic.callable_function_type(
+                local signature = generic_callable_function_type(
                     declaration)
-                closed = checker._generic.infer_call_use(
+                closed = generic_infer_call_use(
                     node, subject, scopes, signature, demand, st, errors,
                     declaration.paramnames,
                     function(final_signature, final_arguments, context, use)
                         node._generic_type_arguments = final_arguments
                         node._closed_generic_declaration =
-                            checker._generic.close_inference_declaration(
+                            generic_close_inference_declaration(
                                 context, use, declaration, true)
                         node.exp._type = final_signature
                     end)
@@ -2836,7 +2836,7 @@ function checker._generic.instantiate_direct_call(
     return ftype
 end
 
-function checker._generic.instantiate_method_declaration(
+function generic_instantiate_method_declaration(
         node, method, st, errors, owner_name, demand)
     local count = #(method.typeparams or {})
     local subject = "call to method '" .. owner_name .. ":"
@@ -2853,27 +2853,27 @@ function checker._generic.instantiate_method_declaration(
     if #(node.typeargs or {}) > 0 then
         local valid
         arguments, valid =
-            checker._generic.recover_complete_type_arguments(
+            generic_recover_complete_type_arguments(
                 node.typeargs, count, st, errors, node.loc, subject)
         if valid then
-            checker._generic.validate_binder_arguments(method.scope,
+            generic_validate_binder_arguments(method.scope,
                 method.typeparams, arguments,
                 st, errors, node.loc, subject, false)
         end
-        closed = checker._generic.generic_substitute(
+        closed = generic_substitute(
             method, method.scope, arguments, errors, node.loc,
             "cannot instantiate " .. subject) or method
     else
-        local scopes = { checker._generic.inference_scope_entry(
+        local scopes = { generic_inference_scope_entry(
             method.scope, method.typeparams) }
         local final_method
         node._generic_declaration = method
-        local _, _, context = checker._generic.infer_call_use(
+        local _, _, context = generic_infer_call_use(
             node, subject, scopes,
-            checker._generic.callable_function_type(method), demand,
+            generic_callable_function_type(method), demand,
             st, errors, method.paramnames,
             function(_, final_arguments, inference, use)
-                final_method = checker._generic.close_inference_declaration(
+                final_method = generic_close_inference_declaration(
                     inference, use, method, true)
                 node._generic_type_arguments = final_arguments
                 node._method = final_method
@@ -2881,7 +2881,7 @@ function checker._generic.instantiate_method_declaration(
                     node._interface_method = final_method
                 end
             end)
-        closed = final_method or checker._generic.close_inference_declaration(
+        closed = final_method or generic_close_inference_declaration(
             context, node._generic_inference_use, method, false)
         return closed
     end

@@ -46,7 +46,7 @@ typefromnode = util.make_visitor({
         if alias then
             local typ = resolve_type_alias(alias, st, errors)
             if typ._tag == "Type.GenericAlias" then
-                return checker._generic.apply_generic_alias(
+                return generic_apply_generic_alias(
                     typ, node.typeargs, st, errors, node.loc,
                     "type alias '" .. node.name .. "'")
             elseif #(node.typeargs or {}) > 0 then
@@ -62,11 +62,11 @@ typefromnode = util.make_visitor({
             return types.Invalid()
         end
 
-        local owner = checker._generic.resolve_local_owner(node.name, st)
+        local owner = generic_resolve_local_owner(node.name, st)
         if owner and (owner._tag == "Type.Record"
                 or owner._tag == "Type.Union"
                 or owner._tag == "Type.Interface") then
-            return checker._generic.apply_named_owner(owner, node.typeargs, st, errors,
+            return generic_apply_named_owner(owner, node.typeargs, st, errors,
                 node.loc, "type '" .. node.name .. "'")
         end
         if #(node.typeargs or {}) > 0 then
@@ -97,7 +97,7 @@ typefromnode = util.make_visitor({
                         "nominal type '%s' is local to module '%s'",
                         owner.name, mod._type.name)
                 end
-                return checker._generic.apply_generic_alias(
+                return generic_apply_generic_alias(
                     type_member, node.typeargs, st, errors,
                     node.loc, subject)
             elseif type_member and type_member._tag == "Type.Interface" then
@@ -106,7 +106,7 @@ typefromnode = util.make_visitor({
                         "interface type '%s' is local to module '%s'",
                         node.name, mod._type.name)
                 end
-                return checker._generic.apply_named_owner(
+                return generic_apply_named_owner(
                     type_member, node.typeargs, st, errors,
                     node.loc, subject)
             elseif type_member then
@@ -150,7 +150,7 @@ typefromnode = util.make_visitor({
                     member.type._tag == "Type.Record" and "record" or "union",
                     node.name, mod._type.name)
             end
-            return checker._generic.apply_named_owner(member.type, node.typeargs,
+            return generic_apply_named_owner(member.type, node.typeargs,
                 st, errors, node.loc, "type '" .. fqtn .. "'")
         elseif mod and mod._type and mod._type._tag == "Type.CModule" then
             local typ = mod._type.type_members
@@ -299,7 +299,7 @@ typefromnode = util.make_visitor({
     end
 })
 
-function checker._generic.generic_scope_for_node(node, st, owner)
+function generic_scope_for_node(node, st, owner)
     local owner_fqtn = owner and owner._type and owner._type.name or false
     local tag = node._tag
     local role, kind
@@ -324,7 +324,7 @@ function checker._generic.generic_scope_for_node(node, st, owner)
         callable_name, role, kind)
 end
 
-function checker._generic.reserve_generic_binders(node, scope, st, errors)
+function generic_reserve_generic_binders(node, scope, st, errors)
     if node._generic_bindings then return end
     node._generic_scope = scope
     node._generic_bindings = {}
@@ -358,7 +358,7 @@ function checker._generic.reserve_generic_binders(node, scope, st, errors)
         node._generic_typeparams
 end
 
-function checker._generic.collect_local_constraint_parameters(
+function generic_collect_local_constraint_parameters(
         typ, scope, found, seen)
     if type(typ) ~= "table" or not typ._tag then return end
     seen = seen or {}
@@ -374,47 +374,47 @@ function checker._generic.collect_local_constraint_parameters(
         -- the caller, not a structural child of this occurrence.
     elseif tag == "Type.Nominal" then
         for _, argument in ipairs(typ.args or {}) do
-            checker._generic.collect_local_constraint_parameters(
+            generic_collect_local_constraint_parameters(
                 argument, scope, found, seen)
         end
     elseif tag == "Type.Option" then
-        checker._generic.collect_local_constraint_parameters(
+        generic_collect_local_constraint_parameters(
             typ.base, scope, found, seen)
     elseif tag == "Type.Array" then
-        checker._generic.collect_local_constraint_parameters(
+        generic_collect_local_constraint_parameters(
             typ.elem, scope, found, seen)
     elseif tag == "Type.Map" then
-        checker._generic.collect_local_constraint_parameters(
+        generic_collect_local_constraint_parameters(
             typ.keys, scope, found, seen)
-        checker._generic.collect_local_constraint_parameters(
+        generic_collect_local_constraint_parameters(
             typ.values, scope, found, seen)
     elseif tag == "Type.Function" then
         for _, parameter in ipairs(typ.params or {}) do
-            checker._generic.collect_local_constraint_parameters(
+            generic_collect_local_constraint_parameters(
                 parameter, scope, found, seen)
         end
         for _, result in ipairs(typ.rettypes or {}) do
-            checker._generic.collect_local_constraint_parameters(
+            generic_collect_local_constraint_parameters(
                 result, scope, found, seen)
         end
         if typ.varargtype then
-            checker._generic.collect_local_constraint_parameters(
+            generic_collect_local_constraint_parameters(
                 typ.varargtype, scope, found, seen)
         end
         if typ.flexrettype then
-            checker._generic.collect_local_constraint_parameters(
+            generic_collect_local_constraint_parameters(
                 typ.flexrettype, scope, found, seen)
         end
     elseif tag == "Type.Typedef" then
-        checker._generic.collect_local_constraint_parameters(
+        generic_collect_local_constraint_parameters(
             typ._type, scope, found, seen)
     elseif tag == "Type.CTypedef" then
-        checker._generic.collect_local_constraint_parameters(
+        generic_collect_local_constraint_parameters(
             typ.target, scope, found, seen)
     end
 end
 
-function checker._generic.reject_constraint_cycles(node, errors)
+function generic_reject_constraint_cycles(node, errors)
     local count = #(node._generic_typeparams or {})
     if count == 0 or node._generic_scope == false then return end
 
@@ -422,7 +422,7 @@ function checker._generic.reject_constraint_cycles(node, errors)
     for index, typeparam in ipairs(node._generic_typeparams) do
         edges[index] = {}
         if typeparam.constraint ~= false then
-            checker._generic.collect_local_constraint_parameters(
+            generic_collect_local_constraint_parameters(
                 typeparam.constraint, node._generic_scope, edges[index])
         end
     end
@@ -473,7 +473,7 @@ function checker._generic.reject_constraint_cycles(node, errors)
     end
 end
 
-function checker._generic.resolve_generic_constraints(node, st, errors)
+function generic_resolve_generic_constraints(node, st, errors)
     if node._generic_constraints_resolved then return end
     node._generic_constraints_resolved = true
     st:push_generic_type_scope(node._generic_bindings)
@@ -481,7 +481,7 @@ function checker._generic.resolve_generic_constraints(node, st, errors)
         local constraint = false
         if syntax.constraint then
             local resolved = typefromnode(syntax.constraint, st, errors)
-            local owner = checker._generic.generic_owner_type(resolved)
+            local owner = generic_owner_type(resolved)
             if resolved._tag ~= "Type.Nominal" or not owner
                or owner._tag ~= "Type.Interface" then
                 checker.typeerror(errors, syntax.constraint.loc or syntax.loc,
@@ -494,7 +494,7 @@ function checker._generic.resolve_generic_constraints(node, st, errors)
         node._generic_typeparams[index] =
             types.TypeParameter(syntax.name, constraint)
     end
-    checker._generic.reject_constraint_cycles(node, errors)
+    generic_reject_constraint_cycles(node, errors)
     -- Every same-scope binder is reserved before constraints resolve, so a
     -- forward acyclic constraint may depend on a later binder's carrier.
     -- Iterate the finite dependency DAG after cycle recovery until every
@@ -517,7 +517,7 @@ function checker._generic.resolve_generic_constraints(node, st, errors)
     st:pop_generic_type_scope()
 end
 
-function checker._generic.prepare_generic_binders(node, st, errors, owner)
+function generic_prepare_generic_binders(node, st, errors, owner)
     if #(node.typeparams or {}) == 0 then
         node._generic_scope = false
         node._generic_bindings = node._generic_bindings or {}
@@ -526,12 +526,12 @@ function checker._generic.prepare_generic_binders(node, st, errors, owner)
         node._generic_constraints_resolved = true
         return
     end
-    local scope = node._generic_scope or checker._generic.generic_scope_for_node(node, st, owner)
-    checker._generic.reserve_generic_binders(node, scope, st, errors)
-    checker._generic.resolve_generic_constraints(node, st, errors)
+    local scope = node._generic_scope or generic_scope_for_node(node, st, owner)
+    generic_reserve_generic_binders(node, scope, st, errors)
+    generic_resolve_generic_constraints(node, st, errors)
 end
 
-function checker._generic.with_generic_binding_map(st, bindings, body, ...)
+function generic_with_generic_binding_map(st, bindings, body, ...)
     if not bindings or next(bindings) == nil then
         return body(...)
     end
@@ -541,18 +541,18 @@ function checker._generic.with_generic_binding_map(st, bindings, body, ...)
     return table.unpack(results, 1, results.n)
 end
 
-function checker._generic.with_owner_bindings(owner, st, body, ...)
-    return checker._generic.with_generic_binding_map(
+function generic_with_owner_bindings(owner, st, body, ...)
+    return generic_with_generic_binding_map(
         st, owner and owner._generic_bindings, body, ...)
 end
 
-function checker._generic.with_declaration_bindings(node, st, body, ...)
+function generic_with_declaration_bindings(node, st, body, ...)
     local owner = node._nominal_owner
     local function with_local(...)
-        return checker._generic.with_generic_binding_map(
+        return generic_with_generic_binding_map(
             st, node._generic_bindings, body, ...)
     end
-    return checker._generic.with_owner_bindings(owner, st, with_local, ...)
+    return generic_with_owner_bindings(owner, st, with_local, ...)
 end
 
 -- tries to coerce node to target type

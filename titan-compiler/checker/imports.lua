@@ -88,7 +88,7 @@ function checker._recover_referenced_owner(
     return owner, memo.error
 end
 
-function checker._generic.validate_recovered_application(
+function generic_validate_recovered_application(
         nominal, owner, policy)
     local arguments = nominal.args or {}
     for index, argument in ipairs(arguments) do
@@ -118,7 +118,7 @@ function checker._generic.validate_recovered_application(
                     "' constraint " .. index ..
                     " could not be reconstructed: " .. tostring(constraint)
             end
-            if checker._generic.generic_constraint_satisfied(
+            if generic_constraint_satisfied(
                     arguments[index], constraint, nil, policy) ~= true then
                 return nil, "recovered nominal '" .. nominal.fqtn ..
                     "' type argument " .. index .. " ('" ..
@@ -242,7 +242,7 @@ function register_referenced_nominals(
         end
         if ok then ok, err = visit_list(t.args) end
         if ok and owner then
-            ok, err = checker._generic.validate_recovered_application(
+            ok, err = generic_validate_recovered_application(
                 t, owner, constraint_policy)
         end
     elseif tag == "Type.GenericAlias" then

@@ -554,7 +554,7 @@ function annotate_array_writer(node, elem, errors)
         return
     end
     node._array_element_type = normalized
-    local writer_type = checker._generic.runtime_carrier(normalized)
+    local writer_type = generic_runtime_carrier(normalized)
     node._array_writer_plan = types.dynamic_coercion(writer_type) or false
     if writer_type ~= normalized then
         node._generic_array_writer_type = writer_type
@@ -572,11 +572,11 @@ end
 -- expression-list consumer. The checker elaboration is intentionally
 -- representation-neutral; code generation decides whether the sink is a
 -- private Array backing or an ordinary Map Table.
-function checker._generic.constructor_context_for_expression(operation, pattern, exp)
+function generic_constructor_context_for_expression(operation, pattern, exp)
     if not pattern then return nil end
     if not operation then return pattern end
     local context = operation.context
-    local closed = checker._generic.closed_inference_pattern(context, pattern)
+    local closed = generic_closed_inference_pattern(context, pattern)
     if closed then return closed end
     -- Only another constructor can consume an unresolved structural owner as
     -- an ordinary expected type without freezing an adjustment. Other
@@ -584,15 +584,15 @@ function checker._generic.constructor_context_for_expression(operation, pattern,
     -- constructor evidence below; a contextual `value` call separately sees
     -- the pattern through its nonsemantic inference demand.
     if exp._tag == "Ast.ExpInitList" then
-        return checker._generic.substitute_inference(context, pattern, false)
+        return generic_substitute_inference(context, pattern, false)
     end
     return nil
 end
 
-function checker._generic.constructor_result_demand(
+function generic_constructor_result_demand(
         expected, demand, operation, pattern)
     local provisional = operation and pattern and
-        checker._generic.substitute_inference(
+        generic_substitute_inference(
             operation.context, pattern, false) or false
     if not expected and not provisional then return demand end
 
@@ -619,14 +619,14 @@ function checker._generic.constructor_result_demand(
     })
 end
 
-function checker._generic.dependent_scalar_demand(
+function generic_dependent_scalar_demand(
         operation, pattern, expected, term, loc)
     -- Preserve the ordinary default demand (and its diagnostics) whenever a
     -- real expected type exists. This side channel exists only for an
     -- unresolved dependent field/key/value; every expression except a direct
     -- contextual `value` call continues to treat the slot as unknown.
     if expected or not operation or not pattern then return nil end
-    local provisional = checker._generic.substitute_inference(
+    local provisional = generic_substitute_inference(
         operation.context, pattern, false)
     return result_demand({ UNKNOWN_SLOT }, false, {
         term = term,
@@ -635,14 +635,14 @@ function checker._generic.dependent_scalar_demand(
     })
 end
 
-function checker._generic.constructor_unify(operation, pattern, evidence, term, loc)
+function generic_constructor_unify(operation, pattern, evidence, term, loc)
     if not operation or not pattern or not evidence then return end
-    checker._generic.unify_inference(
+    generic_unify_inference(
         operation.context, pattern, evidence, term, loc)
-    checker._generic.infer_constraint_evidence(operation.context)
+    generic_infer_constraint_evidence(operation.context)
 end
 
-function checker._generic.constructor_expression_needs_context(
+function generic_constructor_expression_needs_context(
         exp, st, errors)
     if exp._tag == "Ast.ExpFunction" then
         local nparams = #exp.params
@@ -661,9 +661,9 @@ function checker._generic.constructor_expression_needs_context(
         if shape == "empty" or shape == "named" then return true end
         if shape == "computed" then
             for _, field in ipairs(exp.fields) do
-                if checker._generic.constructor_expression_needs_context(
+                if generic_constructor_expression_needs_context(
                         field.name, st, errors)
-                   or checker._generic.constructor_expression_needs_context(
+                   or generic_constructor_expression_needs_context(
                         field.exp, st, errors) then
                     return true
                 end
@@ -678,7 +678,7 @@ function checker._generic.constructor_expression_needs_context(
         -- one real check.
         for _, field in ipairs(exp.fields) do
             if field.exp._tag == "Ast.ExpDots"
-               or not checker._generic.constructor_expression_needs_context(
+               or not generic_constructor_expression_needs_context(
                     field.exp, st, errors) then
                 return false
             end
@@ -692,7 +692,7 @@ function checker._generic.constructor_expression_needs_context(
     elseif exp._tag == "Ast.ExpCall" then
         local callee = exp.exp
         if callee._tag == "Ast.ExpVar" then
-            checker._generic.precheckvar_for_expression(
+            generic_precheckvar_for_expression(
                 callee, st, errors, c_pseudo_callee_context)
             callee._type = callee.var._type
         elseif not exp._generic_callee_prechecked then
@@ -705,19 +705,19 @@ function checker._generic.constructor_expression_needs_context(
     return false
 end
 
-function checker._generic.defer_contextual_constructor_component(
+function generic_defer_contextual_constructor_component(
         operation, exp, pattern, st, errors, term, demand)
     if not operation or not pattern
-       or checker._generic.closed_inference_pattern(
+       or generic_closed_inference_pattern(
             operation.context, pattern) then
         return nil
     end
 
     local contextual = false
     if exp._tag == "Ast.ExpFunction" then
-        checker._generic.prepare_lambda_inference(
+        generic_prepare_lambda_inference(
             exp, pattern, operation.context, st, errors)
-        contextual = not checker._generic.generic_lambda_full_explicit_type(exp)
+        contextual = not generic_lambda_full_explicit_type(exp)
     end
     if not contextual then return nil end
 
@@ -728,31 +728,31 @@ function checker._generic.defer_contextual_constructor_component(
         term = term,
         checked = false,
     }
-    exp._type = checker._generic.substitute_inference(
+    exp._type = generic_substitute_inference(
         operation.context, pattern, false)
 
     local function finish(recover)
         if item.checked then return true end
         local expected = recover
-            and checker._generic.substitute_inference(
+            and generic_substitute_inference(
                 operation.context, pattern, true)
-            or checker._generic.closed_inference_pattern(
+            or generic_closed_inference_pattern(
                 operation.context, pattern)
         if not expected then return false end
         checkexp(exp, st, errors, expected,
-            checker._generic.constructor_result_demand(
+            generic_constructor_result_demand(
                 expected, demand, operation, pattern))
         item.checked = true
         return true
     end
     item.finish = finish
-    checker._generic.add_inference_discovery(operation, function()
+    generic_add_inference_discovery(operation, function()
         return finish(false)
     end, "evidence")
     return item
 end
 
-function checker._generic.close_contextual_constructor_components(adjusted)
+function generic_close_contextual_constructor_components(adjusted)
     for _, item in ipairs(adjusted._generic_deferred_components or {}) do
         item.finish(true)
     end
@@ -760,13 +760,13 @@ function checker._generic.close_contextual_constructor_components(adjusted)
     adjusted._generic_deferred_by_exp = nil
 end
 
-function checker._generic.substitute_constructor_type(operation, typ, recover)
+function generic_substitute_constructor_type(operation, typ, recover)
     if not operation or not typ then return typ end
-    return checker._generic.substitute_inference(
+    return generic_substitute_inference(
         operation.context, typ, recover)
 end
 
-function checker._generic.positional_constructor_element_type(
+function generic_positional_constructor_element_type(
         adjusted, elem_context, operation, recover)
     local etype = elem_context
         or (adjusted.open_type
@@ -775,19 +775,19 @@ function checker._generic.positional_constructor_element_type(
         or (adjusted.tail_scalars[1]
             and deoptionize(adjusted.tail_scalars[1]._type))
         or types.Integer()
-    return checker._generic.substitute_constructor_type(operation, etype, recover)
+    return generic_substitute_constructor_type(operation, etype, recover)
 end
 
-function checker._generic.finish_positional_constructor(node, st, errors, container_tag,
+function generic_finish_positional_constructor(node, st, errors, container_tag,
                                                keytype, elem_context, adjusted,
                                                operation)
-    checker._generic.close_contextual_constructor_components(adjusted)
+    generic_close_contextual_constructor_components(adjusted)
     if operation then
-        checker._generic.refresh_finalized_argument_projections(adjusted)
+        generic_refresh_finalized_argument_projections(adjusted)
     end
-    local etype = checker._generic.positional_constructor_element_type(
+    local etype = generic_positional_constructor_element_type(
         adjusted, elem_context, operation, true)
-    local closed_keytype = checker._generic.substitute_constructor_type(
+    local closed_keytype = generic_substitute_constructor_type(
         operation, keytype, true)
 
     if container_tag == "Type.Array" then
@@ -813,7 +813,7 @@ function checker._generic.finish_positional_constructor(node, st, errors, contai
     end
 
     if adjusted.open_source then
-        local source = checker._generic.substitute_constructor_type(
+        local source = generic_substitute_constructor_type(
             operation, adjusted.open_type, true)
         adjusted.open_type = source
         local container_name = container_tag == "Type.Array"
@@ -900,7 +900,7 @@ function check_positional_constructor(node, st, errors, container_tag,
             check_expression = operation and function(
                     exp, est, eerrors, _, demand)
                 local deferred =
-                    checker._generic.defer_contextual_constructor_component(
+                    generic_defer_contextual_constructor_component(
                         operation, exp, elem_context, est, eerrors,
                         term, demand)
                 if deferred then
@@ -909,10 +909,10 @@ function check_positional_constructor(node, st, errors, container_tag,
                     return
                 end
 
-                local expected = checker._generic.constructor_context_for_expression(
+                local expected = generic_constructor_context_for_expression(
                     operation, elem_context, exp)
                 checkexp(exp, est, eerrors, expected,
-                    checker._generic.constructor_result_demand(
+                    generic_constructor_result_demand(
                         expected, demand, operation, elem_context))
 
                 -- Consume every delivered result at the written expression's
@@ -920,17 +920,17 @@ function check_positional_constructor(node, st, errors, container_tag,
                 -- left to right and then its open tail without being checked or
                 -- evaluated again.
                 local results, open =
-                    checker._generic.generic_expression_result_types(exp)
+                    generic_expression_result_types(exp)
                 for _, actual in ipairs(results) do
                     delivered = delivered + 1
                     evidence_pattern = evidence_pattern or deoptionize(actual)
-                    checker._generic.constructor_unify(operation,
+                    generic_constructor_unify(operation,
                         evidence_pattern, deoptionize(actual),
                         term .. " at position " .. delivered, exp.loc)
                 end
                 if open then
                     evidence_pattern = evidence_pattern or deoptionize(open)
-                    checker._generic.constructor_unify(operation,
+                    generic_constructor_unify(operation,
                         evidence_pattern, deoptionize(open),
                         term .. " open result", exp.loc)
                     open_consumed = true
@@ -940,7 +940,7 @@ function check_positional_constructor(node, st, errors, container_tag,
     adjusted._generic_deferred_components = deferred_components
     adjusted._generic_deferred_by_exp = deferred_by_exp
 
-    local etype = checker._generic.positional_constructor_element_type(
+    local etype = generic_positional_constructor_element_type(
         adjusted, elem_context, operation, false)
     if operation then
         -- A trailing `...` bypasses the ordinary expression callback. Its open
@@ -948,28 +948,28 @@ function check_positional_constructor(node, st, errors, container_tag,
         if adjusted.open_source and not open_consumed then
             evidence_pattern = evidence_pattern
                 or deoptionize(adjusted.open_type)
-            checker._generic.constructor_unify(operation, evidence_pattern,
+            generic_constructor_unify(operation, evidence_pattern,
                 deoptionize(adjusted.open_type),
                 term .. " open result", adjusted.open_source.loc)
         end
-        etype = checker._generic.substitute_constructor_type(operation, etype, false)
-        local provisional_key = checker._generic.substitute_constructor_type(
+        etype = generic_substitute_constructor_type(operation, etype, false)
+        local provisional_key = generic_substitute_constructor_type(
             operation, keytype, false)
         node._type = container_tag == "Type.Array"
             and types.Array(etype)
             or types.Map(assert(provisional_key), etype)
         node._positional_adjustment = adjusted
-        checker._generic.add_inference_finalizer(operation, function()
-            checker._generic.finish_positional_constructor(node, st, errors, container_tag,
+        generic_add_inference_finalizer(operation, function()
+            generic_finish_positional_constructor(node, st, errors, container_tag,
                 keytype, elem_context, adjusted, operation)
         end)
     else
-        checker._generic.finish_positional_constructor(node, st, errors, container_tag,
+        generic_finish_positional_constructor(node, st, errors, container_tag,
             keytype, elem_context, adjusted, false)
     end
 end
 
-function checker._generic.computed_map_constructor_types(
+function generic_computed_map_constructor_types(
         context, ktypes, vtypes, operation, recover)
     local ktype = context and context.keys
         or (ktypes[1] and deoptionize(ktypes[1]))
@@ -977,15 +977,15 @@ function checker._generic.computed_map_constructor_types(
     local vtype = context and context.values
         or (vtypes[1] and deoptionize(vtypes[1]))
         or types.Integer()
-    return checker._generic.substitute_constructor_type(operation, ktype, recover),
-        checker._generic.substitute_constructor_type(operation, vtype, recover)
+    return generic_substitute_constructor_type(operation, ktype, recover),
+        generic_substitute_constructor_type(operation, vtype, recover)
 end
 
-function checker._generic.finish_computed_map_constructor(
+function generic_finish_computed_map_constructor(
         node, errors, context, ktypes, vtypes, operation,
         deferred_components)
     for _, item in ipairs(deferred_components or {}) do item.finish(true) end
-    local ktype, vtype = checker._generic.computed_map_constructor_types(
+    local ktype, vtype = generic_computed_map_constructor_types(
         context, ktypes, vtypes, operation, true)
     node._type = types.Map(ktype, vtype)
     for i, field in ipairs(node.fields) do
@@ -1009,21 +1009,21 @@ function check_computed_map_constructor(
 
     for index, field in ipairs(node.fields) do
         assert(constructor_field_kind(field) == "computed")
-        local key_demand = checker._generic.dependent_scalar_demand(
+        local key_demand = generic_dependent_scalar_demand(
             operation, kcontext, nil,
             "map key initializer", field.name.loc)
         local deferred =
-            checker._generic.defer_contextual_constructor_component(
+            generic_defer_contextual_constructor_component(
                 operation, field.name, kcontext, st, errors,
                 "map key initializer", key_demand)
         if deferred then
             deferred_components[#deferred_components + 1] = deferred
         else
             local key_expected =
-                checker._generic.constructor_context_for_expression(
+                generic_constructor_context_for_expression(
                     operation, kcontext, field.name)
             checkexp(field.name, st, errors, key_expected,
-                checker._generic.dependent_scalar_demand(
+                generic_dependent_scalar_demand(
                     operation, kcontext, key_expected,
                     "map key initializer", field.name.loc))
         end
@@ -1031,7 +1031,7 @@ function check_computed_map_constructor(
         table.insert(ktypes, keytype)
         if operation and not deferred then
             key_pattern = key_pattern or deoptionize(keytype)
-            checker._generic.constructor_unify(operation,
+            generic_constructor_unify(operation,
                 key_pattern, deoptionize(keytype),
                 "map key initializer at position " .. index,
                 field.name.loc)
@@ -1040,20 +1040,20 @@ function check_computed_map_constructor(
         -- A computed field evaluates and contributes its key before its value.
         -- Do not batch all keys ahead of all values: K and V may be the same
         -- inference cell.
-        local value_demand = checker._generic.dependent_scalar_demand(
+        local value_demand = generic_dependent_scalar_demand(
             operation, vcontext, nil,
             "map value initializer", field.exp.loc)
-        deferred = checker._generic.defer_contextual_constructor_component(
+        deferred = generic_defer_contextual_constructor_component(
             operation, field.exp, vcontext, st, errors,
             "map value initializer", value_demand)
         if deferred then
             deferred_components[#deferred_components + 1] = deferred
         else
             local value_expected =
-                checker._generic.constructor_context_for_expression(
+                generic_constructor_context_for_expression(
                     operation, vcontext, field.exp)
             checkexp(field.exp, st, errors, value_expected,
-                checker._generic.dependent_scalar_demand(
+                generic_dependent_scalar_demand(
                     operation, vcontext, value_expected,
                     "map value initializer", field.exp.loc))
         end
@@ -1061,7 +1061,7 @@ function check_computed_map_constructor(
         table.insert(vtypes, valuetype)
         if operation and not deferred then
             value_pattern = value_pattern or deoptionize(valuetype)
-            checker._generic.constructor_unify(operation,
+            generic_constructor_unify(operation,
                 value_pattern, deoptionize(valuetype),
                 "map value initializer at position " .. index,
                 field.exp.loc)
@@ -1070,24 +1070,24 @@ function check_computed_map_constructor(
 
     -- Empty constructors reach this helper only with a Map context; a
     -- no-context empty constructor is the default empty Array.
-    local ktype, vtype = checker._generic.computed_map_constructor_types(
+    local ktype, vtype = generic_computed_map_constructor_types(
         context, ktypes, vtypes, operation, false)
     if operation then
-        ktype = checker._generic.substitute_constructor_type(operation, ktype, false)
-        vtype = checker._generic.substitute_constructor_type(operation, vtype, false)
+        ktype = generic_substitute_constructor_type(operation, ktype, false)
+        vtype = generic_substitute_constructor_type(operation, vtype, false)
         node._type = types.Map(ktype, vtype)
-        checker._generic.add_inference_finalizer(operation, function()
-            checker._generic.finish_computed_map_constructor(
+        generic_add_inference_finalizer(operation, function()
+            generic_finish_computed_map_constructor(
                 node, errors, context, ktypes, vtypes, operation,
                 deferred_components)
         end)
     else
-        checker._generic.finish_computed_map_constructor(
+        generic_finish_computed_map_constructor(
             node, errors, context, ktypes, vtypes, false)
     end
 end
 
-function checker._generic.resolve_named_record_constructor_context(
+function generic_resolve_named_record_constructor_context(
         node, st, errors, context)
     if not context then
         node._type = invalid(errors, node.loc,
@@ -1101,7 +1101,7 @@ function checker._generic.resolve_named_record_constructor_context(
         return nil
     end
 
-    local record = checker._generic.applied_owner_view(
+    local record = generic_applied_owner_view(
         context, errors, node.loc)
     if record._tag == "Type.Union" then
         node._type = invalid(errors, node.loc,
@@ -1136,7 +1136,7 @@ function checker._generic.resolve_named_record_constructor_context(
     return record, visible_fields, visible_by_name
 end
 
-function checker._generic.finish_named_record_constructor(
+function generic_finish_named_record_constructor(
         node, st, errors, context, written_fields, operation,
         deferred_components)
     for _, item in ipairs(deferred_components or {}) do item.finish(true) end
@@ -1145,9 +1145,9 @@ function checker._generic.finish_named_record_constructor(
     -- Finish against that nominal base; the enclosing argument sink owns any
     -- eventual Plain -> Plain? adjustment.
     local closed_context = deoptionize(
-        checker._generic.substitute_constructor_type(
+        generic_substitute_constructor_type(
             operation, context, true))
-    local record = checker._generic.applied_owner_view(
+    local record = generic_applied_owner_view(
         closed_context, errors, node.loc)
     local visible_fields = visible_record_fields(record, st)
     local visible_by_name = {}
@@ -1200,14 +1200,14 @@ function checker._generic.finish_named_record_constructor(
     node._type = closed_context
 end
 
-function checker._generic.check_named_record_constructor(
+function generic_check_named_record_constructor(
         node, st, errors, context, operation)
     local provisional = operation and context
-        and checker._generic.substitute_constructor_type(
+        and generic_substitute_constructor_type(
             operation, context, false) or context
     local deferred_owner = operation and provisional
         and provisional._tag == "Type.Parameter"
-        and checker._generic.inference_type_has_unresolved(
+        and generic_inference_type_has_unresolved(
             operation.context, provisional)
     if deferred_owner then
         local written_fields = { table.unpack(node.fields) }
@@ -1217,7 +1217,7 @@ function checker._generic.check_named_record_constructor(
         -- supplies its descriptor, so retain that AST and finish it once during
         -- owner discovery under this constructor's original inference use.
         for _, field in ipairs(written_fields) do
-            if checker._generic.constructor_expression_needs_context(
+            if generic_constructor_expression_needs_context(
                     field.exp, st, errors) then
                 deferred_by_field[field] = { checked = false }
                 field.exp._type = types.Invalid()
@@ -1231,7 +1231,7 @@ function checker._generic.check_named_record_constructor(
         local function finish_field(cfield, expected)
             local item = deferred_by_field[cfield]
             if not item or item.checked then return end
-            local demand = expected and checker._generic.dependent_scalar_demand(
+            local demand = expected and generic_dependent_scalar_demand(
                 operation, expected, expected,
                 "field " .. tostring(cfield.name), cfield.loc) or nil
             checkexp(cfield.exp, st, errors, expected, demand)
@@ -1255,7 +1255,7 @@ function checker._generic.check_named_record_constructor(
                     finish_field(cfield, found.type)
                     cfield._field = found
                     if contribute then
-                        checker._generic.constructor_unify(operation,
+                        generic_constructor_unify(operation,
                             found.type, cfield.exp._type,
                             "field " .. cfield.name, cfield.loc)
                     end
@@ -1263,17 +1263,17 @@ function checker._generic.check_named_record_constructor(
             end
         end
 
-        checker._generic.add_inference_discovery(operation, function()
-            local candidate = checker._generic.substitute_constructor_type(
+        generic_add_inference_discovery(operation, function()
+            local candidate = generic_substitute_constructor_type(
                 operation, context, false)
             candidate = candidate and deoptionize(candidate)
             if candidate and candidate._tag == "Type.Parameter"
-               and checker._generic.inference_type_has_unresolved(
+               and generic_inference_type_has_unresolved(
                    operation.context, candidate) then
                 return false
             end
             local _, _, visible_by_name =
-                checker._generic.resolve_named_record_constructor_context(
+                generic_resolve_named_record_constructor_context(
                     node, st, errors, candidate)
             plan.complete = true
             if visible_by_name then
@@ -1283,12 +1283,12 @@ function checker._generic.check_named_record_constructor(
             return true
         end)
 
-        checker._generic.add_inference_discovery(operation, function()
+        generic_add_inference_discovery(operation, function()
             if plan.complete then return true end
-            local candidate = checker._generic.substitute_constructor_type(
+            local candidate = generic_substitute_constructor_type(
                 operation, context, false)
             candidate = candidate and deoptionize(candidate)
-            if not checker._generic.inference_type_has_unresolved(
+            if not generic_inference_type_has_unresolved(
                     operation.context, candidate) then
                 return true -- the evidence-phase callback owns this case
             end
@@ -1302,13 +1302,13 @@ function checker._generic.check_named_record_constructor(
             return true
         end, "default")
 
-        checker._generic.add_inference_finalizer(operation, function()
-            local candidate = checker._generic.substitute_constructor_type(
+        generic_add_inference_finalizer(operation, function()
+            local candidate = generic_substitute_constructor_type(
                 operation, context, true)
             candidate = candidate and deoptionize(candidate)
             if not plan.complete then
                 local _, _, visible_by_name =
-                    checker._generic.resolve_named_record_constructor_context(
+                    generic_resolve_named_record_constructor_context(
                         node, st, errors, candidate)
                 plan.complete = true
                 if visible_by_name then
@@ -1324,7 +1324,7 @@ function checker._generic.check_named_record_constructor(
                 -- pass. It consumes only the descriptors discovered above, so
                 -- every written expression remains checked exactly once while
                 -- every missing required field is still diagnosed.
-                checker._generic.finish_named_record_constructor(
+                generic_finish_named_record_constructor(
                     node, st, errors, context, written_fields, operation)
             else
                 -- The invalid owner was already diagnosed. Context-only fields
@@ -1344,7 +1344,7 @@ function checker._generic.check_named_record_constructor(
     end
 
     local record, visible_fields, visible_by_name =
-        checker._generic.resolve_named_record_constructor_context(
+        generic_resolve_named_record_constructor_context(
             node, st, errors, context)
     if not record then
         for _, field in ipairs(node.fields) do
@@ -1370,28 +1370,28 @@ function checker._generic.check_named_record_constructor(
             end
             checkexp(cfield.exp, st, errors)
         else
-            local field_demand = checker._generic.dependent_scalar_demand(
+            local field_demand = generic_dependent_scalar_demand(
                 operation, found.type, nil,
                 "field " .. cfield.name, cfield.loc)
             local deferred =
-                checker._generic.defer_contextual_constructor_component(
+                generic_defer_contextual_constructor_component(
                     operation, cfield.exp, found.type, st, errors,
                     "field " .. cfield.name, field_demand)
             if deferred then
                 deferred_components[#deferred_components + 1] = deferred
             else
                 local expected =
-                    checker._generic.constructor_context_for_expression(
+                    generic_constructor_context_for_expression(
                         operation, found.type, cfield.exp)
                 checkexp(cfield.exp, st, errors, expected,
-                    checker._generic.dependent_scalar_demand(
+                    generic_dependent_scalar_demand(
                         operation, found.type, expected,
                         "field " .. cfield.name, cfield.loc))
             end
             cfield._field = found
             supplied[found.name] = true
             if operation and not deferred then
-                checker._generic.constructor_unify(operation,
+                generic_constructor_unify(operation,
                     found.type, cfield.exp._type,
                     "field " .. cfield.name, cfield.loc)
             elseif not operation then
@@ -1409,15 +1409,15 @@ function checker._generic.check_named_record_constructor(
         -- omission adjustment or diagnostic.
         for _, rfield in ipairs(visible_fields) do
             if not supplied[rfield.name] then
-                checker._generic.constructor_unify(operation,
+                generic_constructor_unify(operation,
                     rfield.type, types.Nil(),
                     "omitted field " .. rfield.name, node.loc)
             end
         end
-        node._type = checker._generic.substitute_constructor_type(
+        node._type = generic_substitute_constructor_type(
             operation, context, false)
-        checker._generic.add_inference_finalizer(operation, function()
-            checker._generic.finish_named_record_constructor(
+        generic_add_inference_finalizer(operation, function()
+            generic_finish_named_record_constructor(
                 node, st, errors, context, written_fields, operation,
                 deferred_components)
         end)
@@ -1450,7 +1450,7 @@ function checker._generic.check_named_record_constructor(
     end
 end
 
-function checker._generic.inference_type_has_invalid(typ, seen)
+function generic_inference_type_has_invalid(typ, seen)
     if type(typ) ~= "table" then return false end
     if typ._tag == "Type.Invalid" then return true end
     seen = seen or {}
@@ -1459,12 +1459,12 @@ function checker._generic.inference_type_has_invalid(typ, seen)
     for key, child in pairs(typ) do
         if key ~= "scope" and type(child) == "table" then
             if child._tag then
-                if checker._generic.inference_type_has_invalid(child, seen) then
+                if generic_inference_type_has_invalid(child, seen) then
                     return true
                 end
             else
                 for _, item in pairs(child) do
-                    if checker._generic.inference_type_has_invalid(item, seen) then
+                    if generic_inference_type_has_invalid(item, seen) then
                         return true
                     end
                 end
@@ -1478,31 +1478,31 @@ end
 -- has no key/value cells of its own. If either side is context-only, keep the
 -- constructor pending until a later whole Map supplies those component types;
 -- otherwise build the ordinary Map now and let it select the whole cell.
-function checker._generic.check_direct_computed_constructor(
+function generic_check_direct_computed_constructor(
         node, st, errors, pattern, operation)
     local contextual = false
     for _, field in ipairs(node.fields) do
         assert(constructor_field_kind(field) == "computed")
-        contextual = checker._generic.constructor_expression_needs_context(
+        contextual = generic_constructor_expression_needs_context(
             field.name, st, errors) or contextual
-        contextual = checker._generic.constructor_expression_needs_context(
+        contextual = generic_constructor_expression_needs_context(
             field.exp, st, errors) or contextual
     end
 
     if not contextual then
         check_computed_map_constructor(node, st, errors, nil, operation)
-        if checker._generic.inference_type_has_invalid(node._type) then
+        if generic_inference_type_has_invalid(node._type) then
             -- Never advertise a structural Invalid component to an enclosing
             -- phase-one edge; keep the finalizer only to restore Invalid after
             -- the local constructor's own pending finalizer has run.
             node._type = types.Invalid()
-            checker._generic.add_inference_finalizer(operation, function()
+            generic_add_inference_finalizer(operation, function()
                 node._type = types.Invalid()
             end)
         else
-            checker._generic.constructor_unify(operation, pattern, node._type,
+            generic_constructor_unify(operation, pattern, node._type,
                 "computed map constructor", node.loc)
-            node._type = checker._generic.substitute_constructor_type(
+            node._type = generic_substitute_constructor_type(
                 operation, pattern, false)
         end
         return
@@ -1512,9 +1512,9 @@ function checker._generic.check_direct_computed_constructor(
     node._type = pattern
     local function finish(recover)
         if plan.complete then return true end
-        local candidate = checker._generic.substitute_constructor_type(
+        local candidate = generic_substitute_constructor_type(
             operation, pattern, recover)
-        if checker._generic.inference_type_has_unresolved(
+        if generic_inference_type_has_unresolved(
                 operation.context, candidate) then
             return false
         end
@@ -1529,10 +1529,10 @@ function checker._generic.check_direct_computed_constructor(
         return true
     end
 
-    checker._generic.add_inference_discovery(operation, function()
+    generic_add_inference_discovery(operation, function()
         return finish(false)
     end, "evidence")
-    checker._generic.add_inference_discovery(operation, function()
+    generic_add_inference_discovery(operation, function()
         if finish(false) then return true end
         -- Settle component producers inside-out. A nested empty constructor or
         -- generic first-class value may yield a complete Map without any later
@@ -1540,18 +1540,18 @@ function checker._generic.check_direct_computed_constructor(
         -- generic erasure with a provisional Invalid component.
         plan.complete = true
         check_computed_map_constructor(node, st, errors, nil, operation)
-        if checker._generic.inference_type_has_invalid(node._type) then
+        if generic_inference_type_has_invalid(node._type) then
             -- Never advertise a structural Invalid component to an enclosing
             -- phase-one edge; keep the finalizer only to restore Invalid after
             -- the local constructor's own pending finalizer has run.
             node._type = types.Invalid()
-            checker._generic.add_inference_finalizer(operation, function()
+            generic_add_inference_finalizer(operation, function()
                 node._type = types.Invalid()
             end)
         else
-            checker._generic.constructor_unify(operation, pattern, node._type,
+            generic_constructor_unify(operation, pattern, node._type,
                 "default computed map constructor", node.loc)
-            node._type = checker._generic.substitute_constructor_type(
+            node._type = generic_substitute_constructor_type(
                 operation, pattern, false)
         end
         return true
@@ -1563,7 +1563,7 @@ end
 -- order. Real component evidence selects the ordinary Array shape immediately;
 -- if every component still needs context, keep the whole constructor
 -- pending so later whole-value evidence may select Array or integer-keyed Map.
-function checker._generic.check_direct_positional_constructor(
+function generic_check_direct_positional_constructor(
         node, st, errors, pattern, operation)
     local exps = {}
     for _, field in ipairs(node.fields) do
@@ -1579,24 +1579,24 @@ function checker._generic.check_direct_positional_constructor(
     }
 
     local function current_type(typ, recover)
-        return checker._generic.substitute_constructor_type(
+        return generic_substitute_constructor_type(
             operation, typ, recover)
     end
 
     local function select_first_component(typ, loc)
         if plan.selected or not typ
-           or checker._generic.inference_type_has_invalid(typ) then
+           or generic_inference_type_has_invalid(typ) then
             return false
         end
         typ = deoptionize(current_type(typ, false))
-        if checker._generic.inference_type_has_invalid(typ) then
+        if generic_inference_type_has_invalid(typ) then
             return false
         end
-        if checker._generic.inference_type_has_unresolved(
+        if generic_inference_type_has_unresolved(
                 operation.context, typ) then
             return false
         end
-        checker._generic.unify_inference(operation.context, pattern,
+        generic_unify_inference(operation.context, pattern,
             types.Array(typ), "positional constructor first component", loc)
         local candidate = current_type(pattern, false)
         if candidate._tag ~= "Type.Array" then return false end
@@ -1619,7 +1619,7 @@ function checker._generic.check_direct_positional_constructor(
             defer_open_check = true,
             check_expression = function(exp, est, eerrors, _, demand)
                 if not plan.selected
-                   and checker._generic.constructor_expression_needs_context(
+                   and generic_constructor_expression_needs_context(
                         exp, est, eerrors) then
                     local item = {
                         exp = exp,
@@ -1654,10 +1654,10 @@ function checker._generic.check_direct_positional_constructor(
                 local expected = plan.selected
                     and current_type(plan.elem, false) or nil
                 checkexp(exp, est, eerrors, expected,
-                    expected and checker._generic.constructor_result_demand(
+                    expected and generic_constructor_result_demand(
                         expected, demand, operation, plan.elem) or demand)
                 if not plan.selected then
-                    local results = checker._generic.generic_expression_result_types(exp)
+                    local results = generic_expression_result_types(exp)
                     select_first_component(results[1], exp.loc)
                 end
             end,
@@ -1671,11 +1671,11 @@ function checker._generic.check_direct_positional_constructor(
         for _, exp in ipairs(adjusted.tail_scalars) do
             if not plan.deferred_by_exp[exp]
                and exp._type
-               and not checker._generic.inference_type_has_invalid(exp._type) then
+               and not generic_inference_type_has_invalid(exp._type) then
                 local typ = deoptionize(current_type(exp._type, false))
-                local unresolved = checker._generic.inference_type_has_unresolved(
+                local unresolved = generic_inference_type_has_unresolved(
                     operation.context, typ)
-                if not checker._generic.inference_type_has_invalid(typ)
+                if not generic_inference_type_has_invalid(typ)
                    and (not require_closed or not unresolved) then
                     out[#out + 1] = { type = typ, loc = exp.loc }
                 end
@@ -1684,12 +1684,12 @@ function checker._generic.check_direct_positional_constructor(
         if adjusted.open_source
            and not plan.deferred_by_exp[adjusted.open_source]
            and adjusted.open_type
-           and not checker._generic.inference_type_has_invalid(
+           and not generic_inference_type_has_invalid(
                 adjusted.open_type) then
             local typ = deoptionize(current_type(adjusted.open_type, false))
-            local unresolved = checker._generic.inference_type_has_unresolved(
+            local unresolved = generic_inference_type_has_unresolved(
                 operation.context, typ)
-            if not checker._generic.inference_type_has_invalid(typ)
+            if not generic_inference_type_has_invalid(typ)
                and (not require_closed or not unresolved) then
                 out[#out + 1] = {
                     type = typ,
@@ -1704,8 +1704,8 @@ function checker._generic.check_direct_positional_constructor(
     local function select(candidate)
         if plan.selected then return true end
         candidate = deoptionize(current_type(candidate, false))
-        if checker._generic.inference_type_has_invalid(candidate)
-           or checker._generic.inference_type_has_unresolved(
+        if generic_inference_type_has_invalid(candidate)
+           or generic_inference_type_has_unresolved(
                 operation.context, candidate) then
             return false
         end
@@ -1733,7 +1733,7 @@ function checker._generic.check_direct_positional_constructor(
                     types.tostring(candidate))
             end
             local _, visible_fields =
-                checker._generic.resolve_named_record_constructor_context(
+                generic_resolve_named_record_constructor_context(
                     node, st, errors, candidate)
             for _, field in ipairs(visible_fields or {}) do
                 if not types.assignment_adjustment(types.Nil(), field.type) then
@@ -1755,7 +1755,7 @@ function checker._generic.check_direct_positional_constructor(
 
         if not plan.rejected then
             for index, source in ipairs(independent_sources(false)) do
-                checker._generic.constructor_unify(operation,
+                generic_constructor_unify(operation,
                     plan.elem, source.type,
                     "positional constructor at position " .. index,
                     source.loc)
@@ -1785,54 +1785,54 @@ function checker._generic.check_direct_positional_constructor(
         for _, item in ipairs(plan.deferred) do
             if not item.checked then
                 checkexp(item.exp, st, errors, expected,
-                    checker._generic.constructor_result_demand(
+                    generic_constructor_result_demand(
                         expected, item.demand, operation, plan.elem))
                 item.checked = true
             end
         end
     end
 
-    local closed = checker._generic.closed_inference_pattern(
+    local closed = generic_closed_inference_pattern(
         operation.context, pattern)
     local sources = independent_sources(true)
     if closed then
         select(closed)
     elseif sources[1] then
-        checker._generic.unify_inference(operation.context, pattern,
+        generic_unify_inference(operation.context, pattern,
             types.Array(sources[1].type),
             "positional constructor first component", sources[1].loc)
-        select(checker._generic.substitute_inference(
+        select(generic_substitute_inference(
             operation.context, pattern, false))
     end
 
-    checker._generic.add_inference_discovery(operation, function()
+    generic_add_inference_discovery(operation, function()
         if plan.selected then return true end
-        local candidate = checker._generic.closed_inference_pattern(
+        local candidate = generic_closed_inference_pattern(
             operation.context, pattern)
         if candidate then return select(candidate) end
         local ready = independent_sources(true)
         if ready[1] then
-            checker._generic.unify_inference(operation.context, pattern,
+            generic_unify_inference(operation.context, pattern,
                 types.Array(ready[1].type),
                 "positional constructor first component", ready[1].loc)
-            return select(checker._generic.substitute_inference(
+            return select(generic_substitute_inference(
                 operation.context, pattern, false))
         end
         return false
     end, "evidence")
 
-    checker._generic.add_inference_discovery(operation, function()
+    generic_add_inference_discovery(operation, function()
         if plan.selected then return true end
-        local candidate = checker._generic.closed_inference_pattern(
+        local candidate = generic_closed_inference_pattern(
             operation.context, pattern)
         if candidate then return select(candidate) end
 
         local equations = independent_sources(false)
         if equations[1] then
-            checker._generic.unify_inference(operation.context, pattern,
+            generic_unify_inference(operation.context, pattern,
                 types.Array(equations[1].type),
                 "default positional constructor shape", equations[1].loc)
-            return select(checker._generic.substitute_inference(
+            return select(generic_substitute_inference(
                 operation.context, pattern, false))
         end
 
@@ -1847,14 +1847,14 @@ function checker._generic.check_direct_positional_constructor(
                 item.checked = true
             end
             local results, open =
-                checker._generic.generic_expression_result_types(item.exp)
+                generic_expression_result_types(item.exp)
             local elem = results[1] or open
             if elem
-               and not checker._generic.inference_type_has_invalid(elem) then
-                checker._generic.unify_inference(operation.context, pattern,
+               and not generic_inference_type_has_invalid(elem) then
+                generic_unify_inference(operation.context, pattern,
                     types.Array(deoptionize(elem)),
                     "default positional constructor component", item.exp.loc)
-                return select(checker._generic.substitute_inference(
+                return select(generic_substitute_inference(
                     operation.context, pattern, false))
             end
         end
@@ -1864,22 +1864,22 @@ function checker._generic.check_direct_positional_constructor(
         return true
     end, "default")
 
-    checker._generic.add_inference_finalizer(operation, function()
+    generic_add_inference_finalizer(operation, function()
         if plan.no_evidence then
             finish_deferred()
             node._type = types.Invalid()
             return
         end
         if not plan.selected then
-            select(checker._generic.substitute_inference(
+            select(generic_substitute_inference(
                 operation.context, pattern, true))
         end
         finish_deferred()
         if not plan.rejected then
-            checker._generic.finish_positional_constructor(
+            generic_finish_positional_constructor(
                 node, st, errors, plan.container_tag, plan.key,
                 current_type(plan.elem, true), adjusted, operation)
-        elseif checker._generic.inference_type_has_unresolved(
+        elseif generic_inference_type_has_unresolved(
                 operation.context, node._type) then
             node._type = current_type(node._type, true)
         end
@@ -1891,16 +1891,16 @@ end
 -- producer: a later whole-value witness may select Array, integer-keyed Map, or
 -- record context. Only the constructor-default phase may otherwise select the
 -- ordinary `{integer}` Array, before generic carrier fallback.
-function checker._generic.defer_empty_constructor(
+function generic_defer_empty_constructor(
         node, st, errors, pattern, operation)
     local plan = { complete = false }
     node._type = pattern
 
     local function finish(recover)
         if plan.complete then return true end
-        local candidate = checker._generic.substitute_constructor_type(
+        local candidate = generic_substitute_constructor_type(
             operation, pattern, recover)
-        if checker._generic.inference_type_has_unresolved(
+        if generic_inference_type_has_unresolved(
                 operation.context, candidate) then
             return false
         end
@@ -1913,7 +1913,7 @@ function checker._generic.defer_empty_constructor(
             check_computed_map_constructor(
                 node, st, errors, candidate, operation)
         elseif candidate._tag == "Type.Nominal" then
-            checker._generic.check_named_record_constructor(
+            generic_check_named_record_constructor(
                 node, st, errors, candidate, operation)
         else
             -- A closed nonconstructor target cannot reshape brace syntax. Build
@@ -1925,20 +1925,20 @@ function checker._generic.defer_empty_constructor(
         return true
     end
 
-    checker._generic.add_inference_discovery(operation, function()
+    generic_add_inference_discovery(operation, function()
         return finish(false)
     end, "evidence")
-    checker._generic.add_inference_discovery(operation, function()
+    generic_add_inference_discovery(operation, function()
         if finish(false) then return true end
-        checker._generic.unify_inference(operation.context, pattern,
+        generic_unify_inference(operation.context, pattern,
             types.Array(types.Integer()), "default empty constructor", node.loc)
         return finish(false)
     end, "default")
-    checker._generic.add_inference_finalizer(operation, function()
+    generic_add_inference_finalizer(operation, function()
         if not plan.complete then finish(true) end
-        if checker._generic.inference_type_has_unresolved(
+        if generic_inference_type_has_unresolved(
                 operation.context, node._type) then
-            node._type = checker._generic.substitute_constructor_type(
+            node._type = generic_substitute_constructor_type(
                 operation, node._type, true)
         end
     end)

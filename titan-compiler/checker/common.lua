@@ -22,7 +22,7 @@ checkfuncbody = nil
 -- VarBracket must still register the surrounding expression as its one AST
 -- operation owner; otherwise its postorder finalizer refreshes only the Var and
 -- leaves the delivered ExpVar carrying provisional inference parameters.
-function checker._generic.checkvar_for_expression(
+function generic_checkvar_for_expression(
         exp, st, errors, context, mode)
     assert(exp and exp._tag == "Ast.ExpVar")
     local prior_owner = st.generic_inference_expression_owner
@@ -37,11 +37,11 @@ end
 -- owns the one descent through a computed VarDot/VarBracket, using any expected
 -- context already closed for context-sensitive C references, and transfers that
 -- completed child check to the later consumer instead of redispatching it.
-function checker._generic.precheckvar_for_expression(
+function generic_precheckvar_for_expression(
         exp, st, errors, context, mode)
     assert(exp and exp._tag == "Ast.ExpVar")
     if exp._generic_var_prechecked then return end
-    checker._generic.checkvar_for_expression(exp, st, errors, context, mode)
+    generic_checkvar_for_expression(exp, st, errors, context, mode)
     exp._generic_var_prechecked = true
 end
 
@@ -174,7 +174,7 @@ resolve_type_alias = nil
 -- An exact bare owner on an alias RHS is an owner-scheme context, not the
 -- ordinary scalar all-value application. Resolve only that constructor shape
 -- here; every other RHS still follows the normal type visitor.
-function checker._generic.bare_forwarding_alias_target(node, st, errors)
+function generic_bare_forwarding_alias_target(node, st, errors)
     if node._tag == "Ast.TypeName" then
         local alias = st:find_type_alias(node.name)
         if alias then
@@ -189,7 +189,7 @@ function checker._generic.bare_forwarding_alias_target(node, st, errors)
             end
             return nil, false, false
         end
-        local owner = checker._generic.resolve_local_owner(node.name, st)
+        local owner = generic_resolve_local_owner(node.name, st)
         return owner, false, owner ~= nil
     elseif node._tag == "Ast.TypeQualName" then
         local declaration = st:find_symbol(node.module)
@@ -239,7 +239,7 @@ resolve_type_alias = function(node, st, errors)
     local target
     if rhs_is_bare_name then
         local owner, target_alias_fqtn, recognized =
-            checker._generic.bare_forwarding_alias_target(
+            generic_bare_forwarding_alias_target(
                 node.type, st, errors)
         if recognized and owner and owner.scope ~= false
            and #(owner.typeparams or {}) > 0 then

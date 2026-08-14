@@ -2,8 +2,9 @@
 
 The small `titan-compiler/coder.lua` facade eagerly assembles the code
 generator slices under `titan-compiler/coder/`. `core.lua` owns their shared
-lexical environment and generation policy; the other modules group native
-names, value and boundary lowering, flow analysis, Interfaces, numerics,
+private lexical environment and generation policy; implementation helper names
+remain there rather than entering Lua's global namespace. The other modules
+group native names, value and boundary lowering, flow analysis, Interfaces, numerics,
 statements, calls, expressions, declarations, module artifacts, and final
 generation. The facade exposes the two driver operations
 `generate_foreign_header` and:

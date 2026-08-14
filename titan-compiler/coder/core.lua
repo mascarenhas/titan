@@ -1,24 +1,7 @@
 -- Shared lexical environment for the implementation slices.
--- Feature modules install declarations here in facade-controlled order.
--- These names were genuine _ENV globals in the monolith; proxy them to _G
--- so this mechanical split preserves their binding and mutation semantics.
-local global_bindings = {
-    array_metatable = true,
-    setboxed = true,
-    copyboxed = true,
-    checkandgetmixed = true,
-    checkandsetmixed = true,
-}
-local core = setmetatable({}, {
-    __index = _G,
-    __newindex = function(self, name, value)
-        if global_bindings[name] then
-            rawset(_G, name, value)
-        else
-            rawset(self, name, value)
-        end
-    end,
-})
+-- Feature modules install private declarations here in facade-controlled order;
+-- global language and library names remain available through __index lookups.
+local core = setmetatable({}, { __index = _G })
 local _ENV = core
 
 types = require "titan-compiler.types"

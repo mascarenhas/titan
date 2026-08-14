@@ -5,11 +5,13 @@ The checker takes the AST the parser built (see
 the [code generator](codegen-overview.md) consumes. The small
 `titan-compiler/checker.lua` facade exposes the production checker API and
 eagerly assembles the implementation slices under `titan-compiler/checker/`.
-`core.lua` owns their one shared lexical environment and mutable checker state;
-the remaining slices group C types and probes, common type operations,
-Interfaces, type syntax, expression lists, statements, variables, calls,
-expressions, declarations, imported interfaces, generic lowering, and the final
-check lifecycle. `types.lua` still owns type values and relations, while
+`core.lua` owns their one shared private lexical environment and mutable checker
+state. Generic helpers stay with their semantic slices under `generic_`-prefixed
+private names rather than a `checker._generic` table. The remaining slices group
+C types and probes, common type operations, Interfaces, type syntax, expression
+lists, statements, variables, calls, expressions, declarations, imported
+interfaces, generic lowering, and the final check lifecycle. `types.lua` still
+owns type values and relations, while
 `symtab.lua` owns scoping. Above all: the checker
 does not merely *check* — it **rewrites** the AST so that every implicit
 conversion, every finite extra call projection, and every defaulted loop step

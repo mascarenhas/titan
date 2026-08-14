@@ -66,7 +66,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
         end
         if #errors == 0 then
             result_type, st._surface_registry =
-                checker._generic.lower_erased_core(
+                generic_lower_erased_core(
                     modname, ast, st, errors)
         end
         return result_type, errors
