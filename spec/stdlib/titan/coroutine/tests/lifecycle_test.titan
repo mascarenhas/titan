@@ -25,7 +25,7 @@ local function fresh_fail(): value
   return nil
 end
 
-local function uncaught_body(_arg: value): value
+local function uncaught_body(_: value): value
   return fail()
 end
 
@@ -36,7 +36,7 @@ end
 
 local injected_trace: string? = nil
 
-local function catcher(_arg: value): value
+local function catcher(_: value): value
   do
     coroutine.yield("ready", "tag")
   catch
@@ -93,7 +93,7 @@ end
 
 local finally_log = ""
 
-local function finally_body(_arg: value): value
+local function finally_body(_: value): value
   do
     defer finally_log = finally_log .. "finally;"
     finally_log = finally_log .. "body;"

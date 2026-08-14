@@ -138,6 +138,7 @@ from its public schema and public closure prefix, and because every module's
 userdata gains the fixed physical-provider identity slot used to authenticate
 source-private state. ABI 0.21 providers are rejected before metadata decoding.
 ABI 0.23 retains that overlay/layout but adds source foreign collaboration and
-changes the separated callable symbol families; 0.22 providers are rejected before
-metadata decoding or native linking. Earlier trees are neither migrated nor
-deleted.
+changes the separated callable symbol families; 0.22 providers are rejected
+before metadata decoding or native linking. ABI 0.24 retains the overlay and
+native layout while extending generic declaration metadata; 0.23 providers are
+rejected before decoding. Earlier trees are neither migrated nor deleted.

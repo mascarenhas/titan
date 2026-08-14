@@ -54,14 +54,15 @@ The pieces:
   parenthesized list may instead end in a flexible tail, such as
   `: (...: string)` or `: (boolean, ...: integer)`, whose run-time length is
   chosen by each call; see [Flexible returns](flexible-returns.md).
-* **Functions whose first fixed return is not `nil` must not fall through on
-  any control path.** A reachable path may return or may provably never reach
-  the end (for example, an unbreakable literal `while true`). If some path can
-  fall off the end of the body, the compiler rejects the function with the
-  compile-time error `function can return nil but return type is not nil`.
-  Zero-return (`()`) functions and `nil`-returning functions may simply fall
-  off the end. A function with only
-  a flexible return tail may also fall off, producing an empty run. A `return`
+* **A function with fixed returns may fall through only when that fixed
+  prefix is exactly one `nil`.** A reachable path may return or may provably
+  never reach the end (for example, an unbreakable literal `while true`). If
+  some other fixed-result function can fall off the end, the compiler rejects
+  it. This includes multi-result signatures whose first result happens to be
+  `nil`: every additional fixed result still requires an explicit value.
+  Zero-return (`()`) functions and exactly-one-`nil` functions may simply fall
+  off the end. A function with only a flexible return tail may also fall off,
+  producing an empty run. A `return`
   statement can only appear as the last statement of a block — see
   [Statements](statements.md).
   A `case` establishes this fact when every `when` arm terminates and either
@@ -78,10 +79,12 @@ In a zero-return (`()`) function — including any function written without
 a return annotation — a bare `return` returns no values. Expressions may also
 be written: they are evaluated from left to right for their effects, but the
 zero-result function exposes none of their values. Thus `return nil` still
-returns zero values in such a function; it differs from the same statement in
-an explicitly `: nil` function, which returns one `nil`. For option- or
-`value`-returning functions, write `return nil` explicitly when that result is
-intended.
+returns zero values in such a function. In an explicitly `: nil` function, a
+bare `return` or fallthrough supplies one `nil` through ordinary return
+adjustment. That convenience applies only to exactly one fixed `nil`; a
+multi-result function must supply every fixed position explicitly. For option-
+or `value`-returning functions, write `return nil` explicitly when that result
+is intended.
 
 ## Exported and `local` functions
 
@@ -484,7 +487,7 @@ additional traced source-closure link, but Titan does not lower the source
 capture limit: an already-full closure (or a wrapper chain that becomes full)
 uses the generic fallback at the next edge. ABI 0.20 added the fixed brand and
 strict trailer; ABI 0.21 retained that layout while advancing the matched Lua
-runtime to 5.5.1, and ABIs 0.22 and 0.23 retain it. Adjustment wrappers change no fixed
+runtime to 5.5.1, and ABIs 0.22 through 0.24 retain it. Adjustment wrappers change no fixed
 slot or native signature and require no further ABI bump. A prior-ABI provider
 is rejected before function values can be exchanged.
 

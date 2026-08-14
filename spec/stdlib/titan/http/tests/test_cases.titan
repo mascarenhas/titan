@@ -3,7 +3,7 @@
 -- public status/support.outcome oracle while executing the protocols in one Runtime.
 local type CaseStart = (integer) -> async.Task
 
-local function run_case(context: test.Context, start: CaseStart,
+local function run_case(_: test.Context, start: CaseStart,
                         first_port: integer, expected: string)
   local task = start(first_port)
   runtime_test.cleanup(function ()

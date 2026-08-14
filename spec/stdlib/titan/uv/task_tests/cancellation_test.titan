@@ -1,7 +1,7 @@
 function test_caught_cancellation_remains_authoritative(
     context: test.Context)
   runtime_test.run(function ()
-    local returned = async.run(function (): value
+    local returned = async.run<value, value>(function (): value
       do
         timer.sleep(60000)
       catch
@@ -10,7 +10,7 @@ function test_caught_cancellation_remains_authoritative(
       return "unexpected return"
     end)
     task_support.cleanup_task(returned, "caught-return Task cleanup")
-    local replaced = async.run(function (): value
+    local replaced = async.run<value, value>(function (): value
       do
         timer.sleep(60000)
       catch
@@ -54,7 +54,7 @@ function test_cancellation_shields_file_cleanup_calls(
     local cleanup_progress = 0
     local task: async.Task? = nil
 
-    task = async.run(function (): value
+    task = async.run<value, value>(function (): value
       local first = fs.open(first_path, "w")
       local second = fs.open(second_path, "w")
       first_file = first
@@ -98,7 +98,7 @@ function test_cancellation_crosses_close_callback(
   runtime_test.run(function ()
     local close_started = false
     local close_finished = false
-    local target = async.run(function (): value
+    local target = async.run<value, value>(function (): value
       local ticker = timer.ticker(60000)
       close_started = true
       ticker:close()
@@ -106,7 +106,7 @@ function test_cancellation_crosses_close_callback(
       return nil
     end)
     task_support.cleanup_task(target, "close target cleanup")
-    local canceller = async.run(function (): value
+    local canceller = async.run<value, value>(function (): value
       while not close_started do timer.yield() end
       target:cancel(async.CancellationReason.simple(
         "close callback cancellation"))

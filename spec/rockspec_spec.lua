@@ -4,7 +4,7 @@ local lfs = require "lfs"
 
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-    "url", "http", "os", "peg", "string", "math", "lua", "iter", "gc",
+    "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
     "test",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
@@ -100,11 +100,11 @@ assert.truthy(PREFIX:sub(1, 1) == "/",
 local LUA = PREFIX .. "/bin/lua"
 local LUAROCKS = PREFIX .. "/bin/luarocks"
 local TITANC = PREFIX .. "/bin/titanc"
-local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.23"
+local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.24"
 local STDLIB_PROVIDER = TITAN_LIBDIR .. "/titan.so"
 local STDLIB_STATIC_ARCHIVE = TITAN_LIBDIR .. "/titan.a"
 local TEST_SUPPORT_SOURCE =
-    PREFIX .. "/share/titan/0.23/src/titan/test.titan"
+    PREFIX .. "/share/titan/0.24/src/titan/test.titan"
 local LUA_LIBDIR = PREFIX .. "/lib/lua/5.5"
 local LUA_SHAREDIR = PREFIX .. "/share/lua/5.5"
 local STDLIB_SHIMDIR = LUA_SHAREDIR .. "/titan"
@@ -120,6 +120,7 @@ local function clean_environment(argv)
         "-u", "LUAROCKS_CONFIG",
         "-u", "LUAROCKS_CONFIG_5_5",
         "-u", "LUAROCKS_SYSCONFDIR",
+        "-u", "TITAN_PATH_0_24",
         "-u", "TITAN_PATH_0_23",
         "-u", "TITAN_PATH_0_21",
         "-u", "TITAN_PATH_0_20",
@@ -191,13 +192,13 @@ local function assert_generated_shim(path, module)
 end
 
 local function assert_no_obsolete_module_layout(root, module)
-    local abi_dir = root .. "/lib/titan/0.23"
+    local abi_dir = root .. "/lib/titan/0.24"
     local lua_libdir = root .. "/lib/lua/5.5"
     for _, obsolete in ipairs({
         abi_dir .. "/titan/" .. module .. ".so",
         abi_dir .. "/" .. module .. ".so",
         lua_libdir .. "/titan/" .. module .. ".so",
-        lua_libdir .. "/titan/stdlib_0_23/" .. module .. ".so",
+        lua_libdir .. "/titan/stdlib_0_24/" .. module .. ".so",
     }) do
         assert_absent(obsolete)
         assert_absent(obsolete .. ".dSYM")
@@ -331,7 +332,7 @@ describe("standalone-prefix source installation", function()
         assert.truthy(public_config:find(
             '#define LUA_ROOT "' .. PREFIX .. '/"', 1, true), public_config)
         assert.truthy(public_config:find(
-            '#define LUA_TITAN_CDIR%s+LUA_ROOT "lib/titan/0.23/"'),
+            '#define LUA_TITAN_CDIR%s+LUA_ROOT "lib/titan/0.24/"'),
             public_config)
         local _, titan_cdir_definitions = public_config:gsub(
             "#define LUA_TITAN_CDIR", "")
@@ -558,7 +559,7 @@ describe("standalone-prefix source installation", function()
             "spec/stdlib/titan/io/tests/core_test.titan",
             "spec/stdlib/titan/io/tests/process_test.titan",
             "spec/stdlib/titan/io/tests/tests.titan",
-            "spec/stdlib/titan/iter/tests.titan",
+            "spec/stdlib/titan/iteration/tests.titan",
             "spec/stdlib/titan/lua/test_support.titan",
             "spec/stdlib/titan/lua/tests/core_test.titan",
             "spec/stdlib/titan/lua/tests/dofile_test.titan",
@@ -648,7 +649,7 @@ describe("standalone-prefix source installation", function()
             "titan/string/regex_parser.titan",
             "titan/math.titan",
             "titan/lua.titan",
-            "titan/iter.titan",
+            "titan/iteration.titan",
             "titan/gc.titan",
             "titan/test.titan",
             "titan-compiler/test_runner.lua",
@@ -679,22 +680,22 @@ describe("standalone-prefix source installation", function()
         workspace = temporary_directory("stdlib-layout-publication")
 
         local stage = workspace .. "/stage"
-        local canonical = workspace .. "/lib/titan/0.23/titan.so"
-        local canonical_archive = workspace .. "/lib/titan/0.23/titan.a"
-        local preserved = workspace .. "/lib/titan/0.21/titan/uv.so"
+        local canonical = workspace .. "/lib/titan/0.24/titan.so"
+        local canonical_archive = workspace .. "/lib/titan/0.24/titan.a"
+        local preserved = workspace .. "/lib/titan/0.23/titan/uv.so"
         local preserved_legacy =
-            workspace .. "/lib/lua/5.5/titan/stdlib_0_21/uv.so"
+            workspace .. "/lib/lua/5.5/titan/stdlib_0_23/uv.so"
 
         local function seed_layout()
             make_directory(assert(canonical:match("^(.+)/[^/]+$")))
             write_file(canonical, "prior combined image\n")
             for _, module in ipairs(STDLIB_MODULES) do
                 for _, path in ipairs({
-                    workspace .. "/lib/titan/0.23/titan/" ..
+                    workspace .. "/lib/titan/0.24/titan/" ..
                         module .. ".so",
-                    workspace .. "/lib/titan/0.23/" .. module .. ".so",
+                    workspace .. "/lib/titan/0.24/" .. module .. ".so",
                     workspace .. "/lib/lua/5.5/titan/" .. module .. ".so",
-                    workspace .. "/lib/lua/5.5/titan/stdlib_0_23/" ..
+                    workspace .. "/lib/lua/5.5/titan/stdlib_0_24/" ..
                         module .. ".so",
                 }) do
                     make_directory(assert(path:match("^(.+)/[^/]+$")))
@@ -712,12 +713,12 @@ describe("standalone-prefix source installation", function()
                 write_file(path .. ".dSYM/obsolete", "obsolete symbols\n")
             end
             make_directory(assert(preserved:match("^(.+)/[^/]+$")))
-            write_file(preserved, "preserved 0.21 image\n")
+            write_file(preserved, "preserved 0.23 image\n")
             make_directory(preserved .. ".dSYM")
             write_file(preserved .. ".dSYM/symbols", "preserved\n")
             make_directory(assert(
                 preserved_legacy:match("^(.+)/[^/]+$")))
-            write_file(preserved_legacy, "preserved legacy 0.21 image\n")
+            write_file(preserved_legacy, "preserved legacy 0.23 image\n")
             make_directory(preserved_legacy .. ".dSYM")
             write_file(
                 preserved_legacy .. ".dSYM/symbols", "preserved legacy\n")
@@ -750,13 +751,13 @@ describe("standalone-prefix source installation", function()
                 assert_no_obsolete_module_layout(workspace, module)
             end
             assert.equal(read_file(stage .. "/titan/test.titan"), read_file(
-                workspace .. "/share/titan/0.23/src/titan/test.titan"))
+                workspace .. "/share/titan/0.24/src/titan/test.titan"))
             assert_absent(workspace .. "/lib/lua/5.5/titan.so")
             assert_absent(workspace .. "/lib/lua/5.5/titan.so.dSYM")
-            assert.equal("preserved 0.21 image\n", read_file(preserved))
+            assert.equal("preserved 0.23 image\n", read_file(preserved))
             assert.equal("directory",
                 lfs.symlinkattributes(preserved .. ".dSYM", "mode"))
-            assert.equal("preserved legacy 0.21 image\n",
+            assert.equal("preserved legacy 0.23 image\n",
                 read_file(preserved_legacy))
             assert.equal("directory",
                 lfs.symlinkattributes(
@@ -806,8 +807,8 @@ describe("standalone-prefix source installation", function()
         assert_file(STDLIB_PROVIDER)
         assert_file(STDLIB_STATIC_ARCHIVE)
         workspace = temporary_directory("stdlib-bootstrap")
-        local canonical = workspace .. "/lib/titan/0.23/titan.so"
-        local canonical_archive = workspace .. "/lib/titan/0.23/titan.a"
+        local canonical = workspace .. "/lib/titan/0.24/titan.so"
+        local canonical_archive = workspace .. "/lib/titan/0.24/titan.a"
         local stage = {
             "make", "--no-print-directory", "-s",
             "PREFIX=" .. PREFIX,
@@ -893,7 +894,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             local titan_string = require "titan.string"
             local titan_math = require "titan.math"
             local titan_lua = require "titan.lua"
-            local iter = require "titan.iter"
+            local iteration = require "titan.iteration"
             local gc = require "titan.gc"
             local testing = require "titan.test"
             local builtin_string = require "string"
@@ -939,7 +940,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             assert(type(titan_string) == "userdata")
             assert(type(titan_math) == "userdata")
             assert(type(titan_lua) == "userdata")
-            assert(type(iter) == "userdata")
+            assert(type(iteration) == "userdata")
             assert(type(gc) == "userdata")
             assert(type(testing) == "userdata")
             assert(not testing.testing())
@@ -969,7 +970,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 string = titan_string,
                 math = titan_math,
                 lua = titan_lua,
-                iter = iter,
+                iteration = iteration,
                 gc = gc,
                 test = testing,
             }) do

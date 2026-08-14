@@ -124,7 +124,7 @@ local fs = import "fs"
 local io = import "io"
 
 local file = fs.open("input.txt", "r")
-for line: string in io.lines(file) do
+for line in io.lines(file) do
   consume(line)
 end
 ```

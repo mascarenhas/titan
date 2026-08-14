@@ -269,8 +269,8 @@ ifndef LUA_PLATFORM
   endif
 endif
 
-# Kept in sync with titan-compiler/driver.lua (driver.CC, driver.CLANG_FORMAT,
-# and driver.CFLAGS).
+# Kept in sync with titan-compiler/driver.lua (driver.CC, the opt-in
+# driver.CLANG_FORMAT, and driver.CFLAGS).
 CC           ?= cc
 AR           ?= ar
 RANLIB       ?= ranlib
@@ -337,13 +337,13 @@ STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan \
 	titan/http/server.titan
 STDLIB_MODULES := coroutine uv async timer io fs net ssl url http os peg string \
-	math lua iter gc test
+	math lua iteration gc test
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.os \
 	titan.peg titan.string \
-	titan.math titan.lua titan.iter titan.gc titan.test
+	titan.math titan.lua titan.iteration titan.gc titan.test
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
 	titan/net.titan titan/ssl.titan titan/url.titan \
@@ -355,7 +355,7 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/string/format.titan titan/string/pack.titan \
 	titan/string/regex_api.titan titan/string/regex_compile.titan \
 	titan/string/regex_parser.titan \
-	titan/math.titan titan/lua.titan titan/iter.titan titan/gc.titan \
+	titan/math.titan titan/lua.titan titan/iteration.titan titan/gc.titan \
 	titan/test.titan
 STDLIB_GENERATED_FOREIGN_HEADERS := titan/coroutine.titan.h \
 	titan/uv/uv.titan.h titan/http/http.titan.h
@@ -363,7 +363,7 @@ STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
 	titan/url.lua titan/http.lua titan/os.lua \
 	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
-	titan/iter.lua titan/gc.lua titan/test.lua
+	titan/iteration.lua titan/gc.lua titan/test.lua
 STDLIB_CONTAINER := titan.so
 STDLIB_STATIC_ARCHIVE := titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
@@ -415,7 +415,7 @@ STDLIB_INSTALL_STAGE       ?= $(CURDIR)
 # pairs for failure-only sanitizer symbolization before later tests can replace
 # those outputs. Ordinary builds leave this empty and pay no snapshot cost.
 TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT ?=
-TITAN_ABI_VERSION          := 0.23
+TITAN_ABI_VERSION          := 0.24
 TITAN_STDLIB_ABI_DIR       ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)
 TITAN_CANONICAL_SUPPORT_SO ?= $(TITAN_STDLIB_ABI_DIR)/titan.so
 TITAN_CANONICAL_STATIC_ARCHIVE ?= $(TITAN_STDLIB_ABI_DIR)/titan.a
@@ -464,15 +464,15 @@ help: ## Show this help
 	@echo "$(OPENSSL_VERSION), and llhttp $(LLHTTP_VERSION) by default. Use"
 	@echo "LIBUV_MODE=system and/or OPENSSL_MODE=system to select pkg-config"
 	@echo "libraries (libuv >= $(LIBUV_MIN_VERSION), OpenSSL >= $(OPENSSL_MIN_VERSION))."
-	@echo "All builds require a C compiler and clang-format. Bundled dependencies"
-	@echo "also need CMake, Perl, git, tar, curl/wget, and sha256sum/shasum"
-	@echo "(macOS: xcode-select --install; brew install clang-format cmake)."
+	@echo "All builds require a C compiler. titanc --pretty-print additionally needs"
+	@echo "clang-format. Bundled dependencies need CMake, Perl, git, tar, curl/wget,"
+	@echo "and sha256sum/shasum (macOS: xcode-select --install; brew install cmake)."
 	@echo "A usable system Readline is preferred; otherwise make lua builds pinned"
 	@echo "GNU Readline $(READLINE_RELEASE) into PREFIX automatically; that fallback also"
 	@echo "needs a linkable curses, tinfo, or termcap provider. Optional system packages:"
-	@echo "Ubuntu/Debian clang-format libreadline-dev libuv1-dev libssl-dev pkg-config;"
-	@echo "Fedora clang-tools-extra readline-devel libuv-devel openssl-devel"
-	@echo "pkgconf-pkg-config; macOS brew install clang-format libuv openssl@3 pkgconf."
+	@echo "Ubuntu/Debian libreadline-dev libuv1-dev libssl-dev pkg-config; Fedora"
+	@echo "readline-devel libuv-devel openssl-devel pkgconf-pkg-config; macOS brew"
+	@echo "install libuv openssl@3 pkgconf. Add clang-format only for --pretty-print."
 	@echo "llhttp is always bundled."
 	@echo "For a standalone installation, choose one writable PREFIX and run:"
 	@echo "  make lua PREFIX=/path && make luarocks PREFIX=/path && make libuv"
@@ -1911,7 +1911,6 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,TITAN_ABI_VERSION=$(TITAN_ABI_VERSION)) \
 		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,CLANG_FORMAT=$(CLANG_FORMAT)) \
 		$(call make_shell_quote,AR=$(AR)) \
 		$(call make_shell_quote,RANLIB=$(RANLIB)) \
 		$(call make_shell_quote,TITANC=$(TITANC)) \
@@ -2010,7 +2009,7 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
 	  CC=$(call make_shell_quote,$(CC)) \
 	    AR=$(call make_shell_quote,$(AR)) \
 	    RANLIB=$(call make_shell_quote,$(RANLIB)) \
-	    TITAN_PATH_0_23=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+	    TITAN_PATH_0_24=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 	    TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)) \
 	    TITAN_RUNTIME_PREBUILT=1 \
 	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
@@ -2051,7 +2050,7 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 	  export CC=$(call make_shell_quote,$(CC)); \
 	  export AR=$(call make_shell_quote,$(AR)); \
 	  export RANLIB=$(call make_shell_quote,$(RANLIB)); \
-	  export TITAN_PATH_0_23=$(call make_shell_quote,$(CURDIR)); \
+	  export TITAN_PATH_0_24=$(call make_shell_quote,$(CURDIR)); \
 	  export TITAN_PATH=; \
 	  export TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)); \
 	  export TITAN_RUNTIME_PREBUILT=1; \
@@ -2101,7 +2100,7 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS) openssl
 	  mkdir -p titan; \
 	  install -m 0644 "$(CURDIR)/titan/test.titan" titan/test.titan; \
 	  export TITAN_ROCKS_ROOT="$$rocks_tree"; \
-	  export TITAN_PATH_0_23="$$abi_dir"; \
+	  export TITAN_PATH_0_24="$$abi_dir"; \
 	  export TITAN_PATH=; \
 	  export TITAN_RUNTIME_PREBUILT=1; \
 	  export CC=$(call make_shell_quote,$(CC)); \
@@ -2135,7 +2134,7 @@ rock-build: titan
 TITAN_STDLIB_TEST_PROGRAM_ROOT := test.tests
 TITAN_STDLIB_TEST_PROGRAM_OUTPUT := test/tests
 TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
-	coroutine.tests iter.tests gc.tests lua.tests math.tests peg.tests \
+	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test async.tests \
 	uv.task_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests \
 	url.tests os.tests os.process_tests uv.runtime_tests

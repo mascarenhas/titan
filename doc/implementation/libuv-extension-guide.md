@@ -413,22 +413,25 @@ Cover the applicable public lifecycle:
 
 Do not recreate a scheduler queue, generation fence, delayed-source variant,
 or reentrant `uv_run`; those abstractions are absent from this design. The
-public Task terminal-listener Array is the one intentional observation
-primitive. Terminal publication stores the final status, detaches the current
-Array as a stable snapshot, and installs an empty live list before calling the
-snapshot sequentially on the main thread with each call protected by an empty
-`catch`. Removal during delivery therefore cannot shift the snapshot or skip a
-later callback. This is Task-local notification, not a scheduler-owned join
-protocol or native operation queue.
+public Task terminal-registration Array is the one intentional observation
+primitive. Each addition returns an idempotent remover for its fresh
+registration. Terminal publication stores the final status, detaches the
+current Array as a stable snapshot, installs an empty live list, and clears
+snapshot ownership before calling every listener sequentially on the main
+thread with each call protected by an empty `catch`. A remover called during
+delivery therefore cannot shift the snapshot or skip a later callback. This is
+Task-local notification, not a scheduler-owned join protocol or native
+operation queue.
 
 The public `async.join*`, `any_*`, `race_*`, and `all_*` functions first scan
 their fixed named operands. If the result is not yet decided, they install a
 separate listener closure directly on each still-relevant operand, suspend the
 current Task once, and let the captured result/counter state decide when to
-call `Task:resume()`. Each registration has a deferred removal so external
+call `Task:resume()`. Each registration has a deferred remover call so external
 cancellation of the suspended combinator cannot leave a stale listener. Do not
 collect operands into a `{Task}` helper: keeping each named path expanded
-preserves heterogeneous result and cancellation types for future generic Tasks.
+preserves the heterogeneous generic result and cancellation type of every
+position.
 
 `Task:resume()` is synchronous from either terminal notification or another
 running Task. It coalesces requests and installs a target-owned zero-duration
@@ -585,7 +588,7 @@ its exact serialized interface and compare it with
 `spec/fixtures/libuv/titan_uv_types.lua`:
 
 ```sh
-TITAN_UV_PROVIDER="$PREFIX/lib/titan/0.23/titan.so" \
+TITAN_UV_PROVIDER="$PREFIX/lib/titan/0.24/titan.so" \
 "$PREFIX/bin/lua" -e '
 local support = require "titan"
 local types = assert(support._loadlib(
@@ -687,8 +690,10 @@ not a handle. Neither `uv_loop_t`, `uv_dir_t`, nor any request
 type belongs in the handle denominator. If the two abstract base entries are
 mechanically included, Titan uses 8 of 16 map entries, or 50.0%; the concrete
 6-of-14 figure is the useful measure of supported handle kinds.
-Task composition uses terminal listeners and target-owned timer wakes, so it
-requires neither a check-handle wrapper nor an idle-handle phase bridge.
+Task composition uses remover-returning terminal registrations and
+target-owned timer wakes, so it requires neither callback-identity removal, a
+generic Runtime witness, a check-handle wrapper, nor an idle-handle phase
+bridge. Runtime-facing Tasks remain the concrete all-`value` application.
 
 The function denominator is the 318 unique public `UV_EXTERN uv_*`
 declarations in `include/uv.h`, before host preprocessing. No platform header

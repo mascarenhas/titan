@@ -1,11 +1,11 @@
 local function nested_yield_run(): string
   local tag_main: value = "main"
   local tag_a: value = "a"
-  local b = coroutine.create(function(_arg: value): value
+  local b = coroutine.create(function(_: value): value
     coroutine.yield("from-b", tag_main)
     return "b-done"
   end, tag_a)
-  local a = coroutine.create(function(_arg: value): value
+  local a = coroutine.create(function(_: value): value
     local got = b:resume("to-b")
     return "a:" .. (got as string)
   end, tag_main)
@@ -25,7 +25,7 @@ end
 local function nested_error_run(): string
   local tag_main: value = "main"
   local tag_a: value = "a"
-  local b = coroutine.create(function(_arg: value): value
+  local b = coroutine.create(function(_: value): value
     do
       coroutine.yield("from-b", tag_main)
     catch
@@ -33,7 +33,7 @@ local function nested_error_run(): string
     end
     return "b-missed"
   end, tag_a)
-  local a = coroutine.create(function(_arg: value): value
+  local a = coroutine.create(function(_: value): value
     local got = b:resume("to-b")
     return "a:" .. (got as string)
   end, tag_main)
@@ -52,7 +52,7 @@ end
 local nested_main_tag: value = nil
 local nested_a_tag: value = nil
 
-local function nested_fail_body(_arg: value): value
+local function nested_fail_body(_: value): value
   coroutine.yield("from-b", nested_main_tag)
   return "missed"
 end
@@ -61,7 +61,7 @@ local function nested_uncaught(): value
   nested_main_tag = "main"
   nested_a_tag = "a"
   local b = coroutine.create(nested_fail_body, nested_a_tag)
-  local a = coroutine.create(function(_arg: value): value
+  local a = coroutine.create(function(_: value): value
     local got = b:resume("to-b")
     return "a:" .. (got as string)
   end, nested_main_tag)
@@ -91,11 +91,11 @@ end
 local function stacked_resume_run(): string
   local tag_main: value = "main"
   local tag_a: value = "a"
-  local b = coroutine.create(function(_arg: value): value
+  local b = coroutine.create(function(_: value): value
     coroutine.yield("from-b", tag_main)
     return "b-done"
   end, tag_a)
-  local a = coroutine.create(function(_arg: value): value
+  local a = coroutine.create(function(_: value): value
     local got = b:resume("to-b")
     return "a:" .. (got as string)
   end, tag_main)

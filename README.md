@@ -22,12 +22,12 @@ The supported developer install and CI configure LuaRocks' sole system tree so
 `ROCKS_TREE == PREFIX`. That equality is the current deployment policy, not an
 inherent requirement of what either name owns.
 
-Supported Linux and macOS builds require `clang-format` on `PATH`; install the
-`clang-format` package on Debian/Ubuntu, `clang-tools-extra` on Fedora, or run
-`brew install clang-format` on macOS. Titan runs it on every compiler-generated
-`.c` and `.titan.h` file before native compilation or publication. Set
-`CLANG_FORMAT` to select a different compatible command; the Makefile exports
-that setting to every `titanc` invocation.
+Generated C is compiled directly by default, so ordinary Linux and macOS builds
+do not require a formatter. Pass `titanc --pretty-print` to run `clang-format`
+on generated `.c` and `.titan.h` files before native compilation or
+publication; install the `clang-format` package on Debian/Ubuntu,
+`clang-tools-extra` on Fedora, or `brew install clang-format` on macOS for that
+opt-in mode. `CLANG_FORMAT` selects a different compatible command.
 
 For example:
 
@@ -98,9 +98,9 @@ Use a fresh prefix when migrating a directory that previously used
 launchers such as `busted` embed the active Lua paths when their rocks are
 installed; changing LuaRocks' configuration later correctly migrates the
 Titan-owned tools, but cannot rewrite arbitrary already-installed launchers.
-ABI 0.23 uses its own versioned provider namespace while retaining the Lua
-5.5.1 contract. It does not migrate, clean, or replace an existing ABI-0.22
-installation; separately installed 0.22 artifacts remain a preserved prior
+ABI 0.24 uses its own versioned provider namespace while retaining the Lua
+5.5.1 contract. It does not migrate, clean, or replace an existing ABI-0.23
+installation; separately installed 0.23 artifacts remain a preserved prior
 version.
 
 The installed files used to compile Titan code include:
@@ -113,13 +113,13 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/ffi.h` | Namespaced portable FFI and audited Lua-internal bridge header |
-| `$ROCKS_TREE/lib/titan/0.23/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus eighteen independent logical modules from `titan.coroutine` through `titan.test` |
-| `$ROCKS_TREE/lib/titan/0.23/titan.a` | The self-describing static form of the same eighteen logical standard modules, plus native support, private LPegLabel/llhttp payload, and bundled libuv/OpenSSL payload when those modes are selected |
-| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc,test}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
-| `$ROCKS_TREE/share/titan/0.23/src/titan/test.titan` | Canonical compiler-data source used for the source-private native test-runner protocol |
+| `$ROCKS_TREE/lib/titan/0.24/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus eighteen independent logical modules from `titan.coroutine` through `titan.test` |
+| `$ROCKS_TREE/lib/titan/0.24/titan.a` | The self-describing static form of the same eighteen logical standard modules, plus native support, private LPegLabel/llhttp payload, and bundled libuv/OpenSSL payload when those modes are selected |
+| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
+| `$ROCKS_TREE/share/titan/0.24/src/titan/test.titan` | Canonical compiler-data source used for the source-private native test-runner protocol |
 
 The eighteen-module pair, shims, and test support source are the coordinated
-ABI-0.23 standard image. `titan.io` owns the shared Interface vocabulary and
+ABI-0.24 standard image. `titan.io` owns the shared Interface vocabulary and
 I/O helpers; bare native support adds the nineteenth DSO opener without adding
 a logical metadata key.
 
@@ -289,7 +289,7 @@ database. See [TLS standard library](doc/language/standard-library-ssl.md) for
 explicit CA-file selection and the complete verification contract.
 
 The Titan-owned Lua's configured default `package.cpath` contains
-`$PREFIX/lib/titan/0.23/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
+`$PREFIX/lib/titan/0.24/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
 template lets the generated `titan.*` loaders find the canonical provider; the
 second remains the root-discovery anchor. The default `package.path` finds all
 eighteen loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
@@ -299,16 +299,16 @@ layout
 During the source rock's post-install build, the internal `TITAN_ROCKS_ROOT`
 override identifies `ROCKS_TREE` directly. The recovered Titan root supplies
 the staged Lua sources and archives and compiled provider under
-`$ROCKS_TREE/lib/titan/0.23/`; the standard library's qualified `titan.*`
+`$ROCKS_TREE/lib/titan/0.24/`; the standard library's qualified `titan.*`
 modules consequently live as independent entries inside both `titan.so` and
 `titan.a`. This
 discovery rule implements the supported equal-root layout; it does not redefine the
 separately owned `PREFIX` and `ROCKS_TREE` as one concept.
 
 At startup a compiled executable inherits Lua's default `package.cpath` and
-ensures `$ROCKS_TREE/lib/titan/0.23/?.so` is present. Both it and the installed
+ensures `$ROCKS_TREE/lib/titan/0.24/?.so` is present. Both it and the installed
 Lua therefore resolve `titan.<name>` through a generated loader to the same
-canonical file at `$ROCKS_TREE/lib/titan/0.23/titan.so`; there are no child,
+canonical file at `$ROCKS_TREE/lib/titan/0.24/titan.so`; there are no child,
 Lua-facing, or parent-level compatibility copies.
 
 An unmodified Lua 5.5 can reproduce those search paths with versioned
@@ -317,16 +317,16 @@ is also Titan's installation-root anchor:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.23/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.24/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
 If that root-anchor template is deliberately omitted, set
-`TITAN_PATH_0_23="$ROCKS_TREE/lib/titan/0.23"` as well.
+`TITAN_PATH_0_24="$ROCKS_TREE/lib/titan/0.24"` as well.
 
-`TITAN_PATH_0_23` (or the unversioned `TITAN_PATH`) overrides the Titan binary
+`TITAN_PATH_0_24` (or the unversioned `TITAN_PATH`) overrides the Titan binary
 search path. A short standard-library import is desugared before resolution
 (`import "timer"` becomes `import "titan.timer"`), so ordinary qualified
-lookup below `$ROCKS_TREE/lib/titan/0.23` reaches the canonical provider. In a
+lookup below `$ROCKS_TREE/lib/titan/0.24` reaches the canonical provider. In a
 source checkout, `--lua` can select another complete Lua source/build tree for an
 individual compiler invocation. An installed compiler rejects `--lua` because
 its headers, `liblua.a`, and `libtitan.a` are one matched SDK. These overrides
@@ -338,9 +338,9 @@ and applications: give a project its own standalone absolute `PREFIX` and use
 the currently equal system-style `ROCKS_TREE` and installed `titanc`. The
 current Titan rock is likewise a **source-install** package. Its
 `build_target = "titan"` builds the runtime, a private support-only bootstrap,
-and the SDK archives/headers/Lua sources. When the canonical 0.23 provider is
+and the SDK archives/headers/Lua sources. When the canonical 0.24 provider is
 absent, the build atomically stages that bootstrap at
-`$ROCKS_TREE/lib/titan/0.23/titan.so` so the just-installed compiler can load
+`$ROCKS_TREE/lib/titan/0.24/titan.so` so the just-installed compiler can load
 its native support table; a repeated install preserves an already valid full
 image. After LuaRocks deploys the compiler, the source-only `post_install` hook
 invokes that `titanc` once for all eighteen current standard roots, with private
@@ -350,7 +350,7 @@ compiler source privately, validates them, and publishes them with rollback, com
 `titan.a` before `titan.so` and using the DSO rename as the final commit point.
 Publication recognizes the bootstrap, immediately preceding canonical
 seventeen-key pair, and current complete pair as recoverable predecessor states
-in the active ABI-0.23 namespace. It neither treats ABI 0.21 as an upgrade
+in the active ABI-0.24 namespace. It neither treats ABI 0.23 as an upgrade
 predecessor nor removes it; eighteen modules are the current installed
 contract.
 There is no separate Make install pass or pre-install hook. The provider,
@@ -384,8 +384,8 @@ request. Modules
 are looked up in the source tree (defaults to the current working directory,
 but you can override this with the `--tree` option), as well as in the Titan
 binary path, a semicolon-separated list of paths. By default this is the
-current directory plus `<root>/lib/titan/0.23`, where `<root>` is recovered
-from `package.cpath`; override it with `TITAN_PATH_0_23` or `TITAN_PATH`.
+current directory plus `<root>/lib/titan/0.24`, where `<root>` is recovered
+from `package.cpath`; override it with `TITAN_PATH_0_24` or `TITAN_PATH`.
 
 Compiled dependency lookup probes component-prefix providers. For logical
 `a.b.c`, the default first performs a complete shared pass at `a.so`,
@@ -459,7 +459,7 @@ someone who explicitly changes `TITAN_PATH` to hide that provider is choosing
 a different module installation. Modules explicitly named on the `titanc`
 command line must come from source and use the folder-before-flat rule. Titan
 code uses those fourteen short imports; the four qualified-only modules are
-imported as `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc`. Lua uses the
+imported as `titan.math`, `titan.lua`, `titan.iteration`, and `titan.gc`. Lua uses the
 qualified
 names `require "titan.coroutine"`, `require "titan.async"`,
 `require "titan.timer"`, `require "titan.io"`, `require "titan.fs"`,
@@ -467,7 +467,7 @@ names `require "titan.coroutine"`, `require "titan.async"`,
 `require "titan.http"`, and
 `require "titan.os"`, plus `require "titan.peg"`,
 `require "titan.string"`, `require "titan.math"`, `require "titan.lua"`,
-`require "titan.iter"`, `require "titan.gc"`, and `require "titan.test"`.
+`require "titan.iteration"`, `require "titan.gc"`, and `require "titan.test"`.
 The private `titan.uv` logical module remains available
 for runtime plumbing and direct-libuv extensions. Lua's own `coroutine` and
 `os` modules remain unchanged.
@@ -481,7 +481,7 @@ Interface vocabulary and I/O helpers. The high-level `titan.ssl` and
 `titan.http` modules compose over public networking and I/O APIs without
 changing `titan.uv`; `titan.url` supplies HTTP and applications with reusable
 PEG-based URL parsing. Math, dynamic Lua loading, generic
-iteration, and GC control live in `titan.math`, `titan.lua`, `titan.iter`, and
+iteration, and GC control live in `titan.math`, `titan.lua`, `titan.iteration`, and
 `titan.gc`; `titan.test` supplies native test contexts and assertions. GC-backed
 owners can attach table/full-userdata finalizers
 without discarding an existing metatable. Clean validation builds pass all
@@ -535,14 +535,16 @@ relation-only and Interface-only layouts were never independently publishable.
 ABI 0.21 retained the ABI-0.20 Array, function-closure, and Interface
 contracts while advancing the embedded Lua contract from 5.5.0 to 5.5.1.
 ABI 0.22 made the source-local `titan.uv` surface/private-provider boundary.
-The active compiled-module ABI is 0.23: generated source foreign callbacks
-replace the runtime and standard-provider callback shims, and callable symbols
-use injective module/nominal/member separators (`_\u2133_` and `_\u2131_`).
-These native-contract changes retain Lua 5.5.1 and the ABI-0.22 serialized
-layouts.
-Current lookup and publication use `TITAN_PATH_0_23` and `lib/titan/0.23`;
-0.22 metadata is rejected before decoding. There is no 0.22-to-0.23 migration
-or cleanup path: separately versioned 0.17 through 0.22 trees remain untouched.
+ABI 0.23 replaced the runtime and standard-provider callback shims with generated
+source foreign callbacks and adopted injective module/nominal/member callable
+separators (`_\u2133_` and `_\u2131_`). The active compiled-module ABI is
+0.24: serialized interfaces add generic binder scopes, parameter references,
+applied nominal arguments, declaration schemes, generic owners and methods,
+and constructor-preserving aliases while retaining Lua 5.5.1 and the erased
+native layouts.
+Current lookup and publication use `TITAN_PATH_0_24` and `lib/titan/0.24`;
+0.23 metadata is rejected before decoding. There is no 0.23-to-0.24 migration
+or cleanup path: separately versioned 0.17 through 0.23 trees remain untouched.
 CI retired the historical 0.17-to-0.18 cutover canary; the ordinary manually
 dispatched full macOS pre-merge suite is still required.
 
@@ -789,9 +791,10 @@ when it is no longer needed.
 
 ```
         --print-ast                       Print the AST.
+        --pretty-print                    Format generated C and headers with clang-format.
         --test                            Build a native Titan test executable.
         --no-uv-bootstrap                 Call standalone main directly even if titan.uv installs its bootstrap hook.
-        -v, --verbose                     Print safely quoted formatter and C toolchain commands.
+        -v, --verbose                     Print safely quoted executed toolchain commands.
         --static                          Prefer static Titan archive providers.
         --no-line-directives              Omit Titan source #line directives from generated C.
         --lua <path>                      Path to a Lua source/build tree (source checkouts only).
@@ -805,9 +808,10 @@ when it is no longer needed.
 ordinary dependencies; it does not request a system-linker static build and
 still permits DSO/source fallback. In library mode, `-X` object/archive
 payload enters both the shared and static output; in executable mode it keeps
-its established final-link role. `CC` selects the compiler. `CLANG_FORMAT`
-selects the formatter command; Titan appends its fixed in-place style arguments
-and does not consult an ambient project configuration.
+its established final-link role. `CC` selects the compiler. `--pretty-print`
+selects the otherwise unused `CLANG_FORMAT` command; Titan appends its fixed
+in-place style arguments and does not consult an ambient project configuration.
+Without the option even a missing or malformed formatter command is inert.
 `--no-line-directives` leaves generated C attributed to its physical `.c`
 file and line numbers, which is useful when investigating native diagnostics
 such as sanitizer reports. The default keeps Titan source attribution.
@@ -841,6 +845,8 @@ exact integer-keyed maps
 * variadic functions with `...: T` variadic tail, and flexible multiple
 returns also with a`...: T` tail
 * first-class functions, including anonymous functions with proper lexical scoping
+* explicit invariant [parametric polymorphism](doc/language/generics.md) with
+  Interface constraints, local call-site inference, and constraint-directed erasure
 * modules: early-bound, can be spread over multiple `.titan` files within a single folder,
 module metadata published in `.a`/`.so` files for binary import, direct source import
 allows visibility for module-local declarations ("friend" modules), visibility of module
@@ -868,6 +874,5 @@ finalizer ownership, formatted output
 
 ## Next
 
-* parametric polymorphism (via type erasure and boxed values)
 * Language server
 * ...Titan 1.0!

@@ -8,8 +8,8 @@ return typedecl("Ast", {
         TypeFloat       = {"loc"},
         TypeString      = {"loc"},
         TypeValue       = {"loc"},
-        TypeQualName    = {"loc", "module", "name"},
-        TypeName        = {"loc", "name"},
+        TypeQualName    = {"loc", "module", "name", "typeargs"},
+        TypeName        = {"loc", "name", "typeargs"},
         TypeCPointer    = {"loc", "subtype", "const"},
         TypeCArray      = {"loc", "base", "length"},
         TypeCOwned      = {"loc", "subtype", "count"},
@@ -21,17 +21,21 @@ return typedecl("Ast", {
     },
 
     TopLevel = {
-        TopLevelMethod  = {"loc", "class", "name", "params", "rettypes", "flexrettype", "block"},
-        TopLevelStatic  = {"loc", "class", "name", "params", "rettypes", "flexrettype", "block"},
-        TopLevelFunc    = {"loc", "islocal", "name", "params", "rettypes", "flexrettype", "block"},
+        TopLevelMethod  = {"loc", "class", "name", "params", "rettypes", "flexrettype", "block", "typeparams"},
+        TopLevelStatic  = {"loc", "class", "name", "params", "rettypes", "flexrettype", "block", "typeparams"},
+        TopLevelFunc    = {"loc", "islocal", "name", "params", "rettypes", "flexrettype", "block", "typeparams"},
         TopLevelForeignFunc = {"loc", "name", "params", "rettypes", "flexrettype", "block"},
         TopLevelVar     = {"loc", "islocal", "decl", "value"},
         TopLevelTypeAlias = {"loc", "islocal", "name", "type"},
-        TopLevelRecord  = {"loc", "name", "fields"},
-        TopLevelUnion   = {"loc", "name", "variants"},
-        TopLevelInterface = {"loc", "name", "methods"},
+        TopLevelRecord  = {"loc", "name", "fields", "typeparams"},
+        TopLevelUnion   = {"loc", "name", "variants", "typeparams"},
+        TopLevelInterface = {"loc", "name", "methods", "typeparams"},
         TopLevelImport  = {"loc", "localname", "modname"},
         TopLevelForeignImport = {"loc", "localname", "headername"},
+    },
+
+    TypeParam = {
+        TypeParam = {"loc", "name", "constraint"},
     },
 
     Decl = {
@@ -43,7 +47,7 @@ return typedecl("Ast", {
     },
 
     Interface = {
-        InterfaceMethod = {"loc", "name", "params", "rettypes", "flexrettype"},
+        InterfaceMethod = {"loc", "name", "params", "rettypes", "flexrettype", "typeparams"},
     },
 
     Stat = {
@@ -84,7 +88,7 @@ return typedecl("Ast", {
         ExpFloat        = {"loc", "value"},
         ExpString       = {"loc", "value"},
         ExpInitList     = {"loc", "fields"},
-        ExpCall         = {"loc", "exp", "args"},
+        ExpCall         = {"loc", "exp", "args", "typeargs"},
         ExpVar          = {"loc", "var"},
         ExpUnop         = {"loc", "op", "exp"},
         ExpConcat       = {"loc", "exps"},

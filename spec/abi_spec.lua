@@ -38,11 +38,11 @@ describe("compiled-module ABI version", function()
     after_each(function()
         os.remove("legacy.c")
         os.remove("legacy.so")
-        os.remove("legacy21.c")
-        os.remove("legacy21.so")
-        os.remove("legacy21archive.c")
-        os.remove("legacy21archive.o")
-        os.remove("legacy21archive.a")
+        os.remove("legacy23.c")
+        os.remove("legacy23.so")
+        os.remove("legacy23archive.c")
+        os.remove("legacy23archive.o")
+        os.remove("legacy23archive.a")
     end)
 
     it("keeps the compiler lookup and runtime loader versions in sync", function()
@@ -71,8 +71,8 @@ describe("compiled-module ABI version", function()
         assert.equal(driver.TITAN_VER_SUFFIX, runtime_suffix)
         assert.equal("_" .. driver.TITAN_VER:gsub("%.", "_"),
             driver.TITAN_VER_SUFFIX)
-        assert.equal("0.23", driver.TITAN_VER)
-        assert.equal("_0_23", driver.TITAN_VER_SUFFIX)
+        assert.equal("0.24", driver.TITAN_VER)
+        assert.equal("_0_24", driver.TITAN_VER_SUFFIX)
         assert.truthy(makefile:find(
             "LUA_VERSION      ?= 5.5.1", 1, true))
         assert.truthy(makefile:find(
@@ -112,16 +112,16 @@ describe("compiled-module ABI version", function()
             1, true))
         assert.truthy(makefile:find(
             "-Wl,-l:libtinfo.so.6", 1, true))
-        assert.match("TITAN_ABI_VERSION%s*:?=%s*0%.23", makefile)
-        assert.match("TITAN_PATH_0_23", makefile)
-        assert.match("TITAN_PATH_0_23", workflow)
-        assert.not_match("TITAN_PATH_0_22", makefile)
+        assert.match("TITAN_ABI_VERSION%s*:?=%s*0%.24", makefile)
+        assert.match("TITAN_PATH_0_24", makefile)
+        assert.match("TITAN_PATH_0_24", workflow)
+        assert.not_match("TITAN_PATH_0_23", makefile)
         assert.equal(2, count_plain(
-            workflow, 'TITAN_ABI_VERSION: "0.23"'))
+            workflow, 'TITAN_ABI_VERSION: "0.24"'))
         local cache_abi = "abi-${{ env.TITAN_ABI_VERSION }}"
         assert.equal(4, count_plain(workflow, cache_abi))
         assert.truthy(workflow:find(
-            "Prepare the ABI-0.23 standalone prefix", 1, true))
+            "Prepare the ABI-0.24 standalone prefix", 1, true))
         assert.truthy(workflow:find(
             'READLINE_MODE: bundled', 1, true))
         assert.truthy(workflow:find(
@@ -143,21 +143,20 @@ describe("compiled-module ABI version", function()
         assert.truthy(workflow:find(
             '"$PREFIX/bin/luarocks" remove titan --force', 1, true))
         assert.truthy(workflow:find(
-            '"/lib/titan/0.23/?.so"', 1, true))
+            '"/lib/titan/0.24/?.so"', 1, true))
         assert.truthy(workflow:find(
-            '"/lib/titan/0.22/?.so"', 1, true))
+            '"/lib/titan/0.23/?.so"', 1, true))
         assert.truthy(workflow:find(
             "assert(not cpath:find(previous, 1, true), cpath)", 1, true))
         assert.not_match("ci_abi_migration_smoke", workflow)
         assert.is_nil(io.open("spec/support/ci_abi_migration_smoke.sh", "r"))
-        assert.not_match("lib/titan/0%.22", installer)
-        assert.match("stdlib_0_23", installer)
-        assert.not_match("lib/titan/0%.21", installer)
-        assert.not_match("stdlib_0_21", installer)
+        assert.not_match("lib/titan/0%.23", installer)
+        assert.match("stdlib_0_24", installer)
+        assert.not_match("stdlib_0_23", installer)
         assert.truthy(async_support:find(
-            "/lib/titan/0%.22/titan%.so$", 1, true))
+            "/lib/titan/0%.23/titan%.so$", 1, true))
         assert.falsy(async_support:find(
-            "/lib/titan/0%.21/titan%.so$", 1, true))
+            "/lib/titan/0%.22/titan%.so$", 1, true))
     end)
 
     it("rejects a compiled container with types but no ABI marker", function()
@@ -186,20 +185,20 @@ describe("compiled-module ABI version", function()
         assert.match("missing metadata symbol 'legacy_abi'", err, 1, true)
     end)
 
-    it("rejects a 0.21 DSO before executing its old type metadata", function()
-        os.remove("legacy21.titan")
-        local f = assert(io.open("legacy21.c", "w"))
+    it("rejects a 0.23 DSO before executing its old type metadata", function()
+        os.remove("legacy23.titan")
+        local f = assert(io.open("legacy23.c", "w"))
         f:write([[
             typedef struct lua_State lua_State;
             extern const char *lua_pushstring(lua_State *L, const char *s);
 
-            int legacy21_abi(lua_State *L) {
-                lua_pushstring(L, "0.21");
+            int legacy23_abi(lua_State *L) {
+                lua_pushstring(L, "0.23");
                 return 1;
             }
 
-            int legacy21_types(lua_State *L) {
-                lua_pushstring(L, "this is deliberately invalid 0.21 metadata");
+            int legacy23_types(lua_State *L) {
+                lua_pushstring(L, "this is deliberately invalid 0.23 metadata");
                 return 1;
             }
         ]])
@@ -207,25 +206,25 @@ describe("compiled-module ABI version", function()
         local shared = driver.IS_DARWIN and "-shared -undefined dynamic_lookup"
             or "-shared"
         local ok = os.execute(table.concat({
-            driver.CC, "-fPIC", shared, "-o", "legacy21.so", "legacy21.c"
+            driver.CC, "-fPIC", shared, "-o", "legacy23.so", "legacy23.c"
         }, " "))
-        assert.truthy(ok, "could not build fake 0.21 module")
+        assert.truthy(ok, "could not build fake 0.23 module")
 
         local loader = driver.defaultloader({})
         local loaded, err = driver.with_loader(loader, function(loader)
-            return loader("legacy21")
+            return loader("legacy23")
         end)
         assert.falsy(loaded)
-        assert.match("ABI mismatch: expected 0.23 but found 0.21", err, 1, true)
+        assert.match("ABI mismatch: expected 0.24 but found 0.23", err, 1, true)
     end)
 
-    it("rejects a 0.21 archive before decoding or linking old metadata",
+    it("rejects a 0.23 archive before decoding or linking old metadata",
         function()
             local payload = assert(staticmetadata.render(
-                "legacy21archive", "0.21",
-                "this is deliberately invalid 0.21 metadata"))
+                "legacy23archive", "0.23",
+                "this is deliberately invalid 0.23 metadata"))
             local initializer = assert(staticmetadata.c_initializer(payload))
-            local f = assert(io.open("legacy21archive.c", "w"))
+            local f = assert(io.open("legacy23archive.c", "w"))
             f:write(string.format([[
 #if defined(__APPLE__)
 #define TITAN_META_SECTION \
@@ -235,21 +234,21 @@ describe("compiled-module ABI version", function()
     __attribute__((used, aligned(1), section(".titan.meta")))
 #endif
 TITAN_META_SECTION
-static const unsigned char legacy21archive_metadata[] = %s;
-int legacy21archive_payload(void) { return 0; }
+static const unsigned char legacy23archive_metadata[] = %s;
+int legacy23archive_payload(void) { return 0; }
 ]], initializer))
             f:close()
 
             local ok = os.execute(configured_command(
-                driver.CC, "-c", "-fPIC", "legacy21archive.c",
-                "-o", "legacy21archive.o"))
-            assert.truthy(ok, "could not build fake 0.21 archive object")
+                driver.CC, "-c", "-fPIC", "legacy23archive.c",
+                "-o", "legacy23archive.o"))
+            assert.truthy(ok, "could not build fake 0.23 archive object")
             ok = os.execute(configured_command(
-                driver.AR, "rcs", "legacy21archive.a", "legacy21archive.o"))
-            assert.truthy(ok, "could not build fake 0.21 archive")
+                driver.AR, "rcs", "legacy23archive.a", "legacy23archive.o"))
+            assert.truthy(ok, "could not build fake 0.23 archive")
             ok = os.execute(configured_command(
-                driver.RANLIB, "legacy21archive.a"))
-            assert.truthy(ok, "could not index fake 0.21 archive")
+                driver.RANLIB, "legacy23archive.a"))
+            assert.truthy(ok, "could not index fake 0.23 archive")
 
             driver.imported = {}
             local decoded = false
@@ -263,7 +262,7 @@ int legacy21archive_payload(void) { return 0; }
             })
             local result = table.pack(pcall(function()
                 return driver.with_loader(loader, function(loader)
-                    return loader("legacy21archive")
+                    return loader("legacy23archive")
                 end)
             end))
             driver.decode_module_interface = original_decode
@@ -272,7 +271,7 @@ int legacy21archive_payload(void) { return 0; }
             assert.falsy(loaded)
             assert.falsy(decoded)
             assert.match("ABI mismatch", err, 1, true)
-            assert.match("expected 0.23 but found 0.21", err, 1, true)
+            assert.match("expected 0.24 but found 0.23", err, 1, true)
         end)
 
     it("ignores the previous versioned Titan path variable", function()
@@ -281,8 +280,8 @@ int legacy21archive_payload(void) { return 0; }
         local script = [[
             package.path = "./?.lua;./?/init.lua;" .. package.path
             local current = require "titan-compiler.driver"
-            assert(current.TITAN_BIN_PATH ~= "/obsolete/titan-0.22")
-            assert(current.TITAN_BIN_PATH:match("0%.23"))
+            assert(current.TITAN_BIN_PATH ~= "/obsolete/titan-0.23")
+            assert(current.TITAN_BIN_PATH:match("0%.24"))
         ]]
         local ok = os.execute(shell_command({
             "env",
@@ -290,9 +289,9 @@ int legacy21archive_payload(void) { return 0; }
             "-u", "LUA_CPATH",
             "-u", "LUA_PATH_5_5",
             "-u", "LUA_CPATH_5_5",
-            "-u", "TITAN_PATH_0_23",
+            "-u", "TITAN_PATH_0_24",
             "-u", "TITAN_PATH",
-            "TITAN_PATH_0_22=/obsolete/titan-0.22",
+            "TITAN_PATH_0_23=/obsolete/titan-0.23",
             prefix .. "/bin/lua", "-e", script,
         }))
         assert.truthy(ok)

@@ -391,8 +391,8 @@ The compiler driver is invoked with dot-separated *module names*, not
 file paths:
 
 ```sh
-titanc [--print-ast] [-v] [--static] [--test] [--no-uv-bootstrap] \
-  [--no-line-directives] [--lua <luasrc>] \
+titanc [--print-ast] [--pretty-print] [-v] [--static] [--test] \
+  [--no-uv-bootstrap] [--no-line-directives] [--lua <luasrc>] \
   [--tree <srcroot>] [-l lib1,lib2] [-X object...] <module>...
 ```
 
@@ -428,19 +428,23 @@ titanc [--print-ast] [-v] [--static] [--test] [--no-uv-bootstrap] \
   traceback validation.
 * `-X/--extra-object` adds native object/archive payload. Library mode carries
   it into both provider forms; executable mode uses it at final link.
-* `-v/--verbose` prints the formatter and C tool command lines;
-  `--print-ast` dumps the parsed AST.
+* `--pretty-print` runs `clang-format` on generated C and source-foreign
+  headers. Formatting is opt-in; without it Titan preserves the generator's raw
+  layout while still removing blank physical lines after `#line` directives.
+* `-v/--verbose` prints every C tool command line and, with `--pretty-print`,
+  the formatter command line; `--print-ast` dumps the parsed AST.
 
 `titanc` first typechecks every requested module and every transitive
 dependency, reports *all* errors, and exits with status 1 before
 generating any code if any module failed. Only when everything checks
 does it compile and link.
 
-Supported Linux and macOS builds require `clang-format` on `PATH`;
-`CLANG_FORMAT` selects a different compatible command. Titan formats every
-generated `.c` in place before invoking the C compiler and every generated
-`.titan.h` before a compiler check consumes or publishes it. A formatter
-failure aborts native compilation and provider publication.
+`clang-format` is needed only for `--pretty-print`; `CLANG_FORMAT` selects a
+different compatible command. In that mode Titan formats every generated `.c`
+in place before invoking the C compiler and every generated `.titan.h` before a
+compiler check consumes or publishes it. A formatter failure aborts native
+compilation and provider publication. Default builds do not discover or invoke
+a formatter.
 
 Compilation goes through C: each logical module becomes one C translation
 unit, written beside its canonical source, and the system C compiler (`cc`,
@@ -509,8 +513,8 @@ the structure of the generated C is in
   directory, as described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of plain directories taken from
-  `TITAN_PATH_0_23`, or `TITAN_PATH` if that is unset. Otherwise the default
-  is `.;<root>/lib/titan/0.23`. An installed `titanc` recovers `<root>` from
+  `TITAN_PATH_0_24`, or `TITAN_PATH` if that is unset. Otherwise the default
+  is `.;<root>/lib/titan/0.24`. An installed `titanc` recovers `<root>` from
   the first literal `package.cpath` entry ending in
   `/lib/lua/5.5/?.so`. For logical `a.b.c`, the default performs a complete
   pass over `a.so`, `a/b.so`, and exact `a/b/c.so`, then a complete pass over
@@ -544,7 +548,7 @@ Titan's `titan.os` module without colliding with Lua's own `os` library, which
 is not importable as a Titan module. Likewise, `import "string"` selects
 Titan's module without replacing Lua's `string` table.
 
-The additional standard modules `titan.math`, `titan.lua`, `titan.iter`, and
+The additional standard modules `titan.math`, `titan.lua`, `titan.iteration`, and
 `titan.gc` use their qualified names in Titan source as well as Lua. Short
 Titan imports never add unqualified Lua modules or replace Lua's bare
 standard-library names.
@@ -559,14 +563,14 @@ Lua's `require`, for its part, finds a generated logical loader through
 `package.cpath`, loads it globally, and invokes the module's exact
 `luaopen_*` entry (see [Requiring a Titan
 module](lua-interop.md#requiring-a-titan-module)). Titan's installed Lua
-default includes `<root>/lib/titan/0.23/?.so` and the standard loader root.
+default includes `<root>/lib/titan/0.24/?.so` and the standard loader root.
 A qualified standard name such as `titan.os` therefore runs
 `<root>/share/lua/5.5/titan/os.lua`, which opens the canonical DSO
-`<root>/lib/titan/0.23/titan.so`. Default Titan imports select that same
+`<root>/lib/titan/0.24/titan.so`. Default Titan imports select that same
 physical file by validating the `titan.os` callable metadata; `--static`
 prefers the paired self-describing `titan.a`. Installation creates no child
 DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
-ABI 0.23 does not migrate or clean up a separately installed 0.22 provider;
+ABI 0.24 does not migrate or clean up a separately installed 0.23 provider;
 that versioned directory remains preserved prior-version state and is not on
 the active default path.
 
@@ -660,7 +664,7 @@ dynamic. Qualified standard-library dependencies therefore use the installed
 `titan.so` by default, while `--static` prefers `titan.a`.
 After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
-`<root>/lib/titan/0.23/?.so` if it is absent, and initializes the Titan module
+`<root>/lib/titan/0.24/?.so` if it is absent, and initializes the Titan module
 path from that same root. Deploy the standard provider and loaders as described
 under [where modules are found](#where-modules-are-found). `args[1]` onward
 contain only the user-supplied arguments; index 0 is absent and the executable
@@ -727,11 +731,11 @@ Titan's configured search paths with:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.23/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.24/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
 The ordinary `/lib/lua/5.5/?.so` template is Titan's root-discovery anchor. If
 it is omitted, also set
-`TITAN_PATH_0_23="$ROCKS_TREE/lib/titan/0.23"`. Titan still targets the exact
+`TITAN_PATH_0_24="$ROCKS_TREE/lib/titan/0.24"`. Titan still targets the exact
 Lua 5.5 runtime ABI and internals; using the stock loader does not make a module
 compatible with another Lua version or configuration.

@@ -184,6 +184,226 @@ describe("contextual calls through value (typechecker)", function()
         assert.same(types.String(), outer._open_args.target_type)
     end)
 
+    it("defers contextual value-call shapes until ambient inference closes",
+    function()
+        local ok, err, tree = run_checker([[
+            function agree<T>(left: T, right: T): T
+                return left
+            end
+
+            function make_fixed<T>(): (T, T) -> T
+                return function(left: T, right: T): T return left end
+            end
+
+            function make_open<T>(): (...: T) -> T
+                return function(...: T): T return ...[1] end
+            end
+
+            record Box<T>
+                item: T
+            end
+
+            function take_array<T>(items: {T}, witness: T): T
+                return witness
+            end
+
+            function take_map<T>(items: {string: T}, witness: T): T
+                return witness
+            end
+
+            function take_box<T>(box: Box<T>, witness: T): T
+                return witness
+            end
+
+            function left(callback: value): integer
+                return agree(callback(), 42)
+            end
+
+            function right(callback: value): integer
+                return agree(42, callback())
+            end
+
+            function named(callback: value): integer
+                return agree { left = callback(), right = 42 }
+            end
+
+            function parenthesized(callback: value): integer
+                return agree((callback()), 42)
+            end
+
+            function fixed(callback: value): integer
+                return agree(make_fixed()(callback()), 42)
+            end
+
+            function open(callback: value): integer
+                return agree(make_open()(callback()), 42)
+            end
+
+            function array(callback: value): integer
+                local got = take_array({ callback() }, 42)
+                return got
+            end
+
+            function map(callback: value): integer
+                local got = take_map({ ["item"] = callback() }, 42)
+                return got
+            end
+
+            function boxed(callback: value): integer
+                local got = take_box({ item = callback() }, 42)
+                return got
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local source_backreference = {
+            _decl = true,
+            _generic_scheme = true,
+            _generic_declaration = true,
+            _generic_owner = true,
+        }
+        local function collect(value, seen, calls)
+            if type(value) ~= "table" or seen[value] then return end
+            seen[value] = true
+            if value._tag == "Ast.ExpCall"
+               and value._contextual_value_call then
+                calls[#calls + 1] = value
+            end
+            for key, child in pairs(value) do
+                if not source_backreference[key] then
+                    collect(child, seen, calls)
+                end
+            end
+        end
+        local function contextual_call(name)
+            local calls = {}
+            collect(find_function(tree, name).block, {}, calls)
+            assert.same(1, #calls)
+            return calls[1]
+        end
+        local function find_parameter(value, path, seen)
+            if type(value) ~= "table" or seen[value] then return nil end
+            seen[value] = true
+            if value._tag == "Type.Parameter" then return path end
+            for key, child in pairs(value) do
+                if not source_backreference[key] then
+                    local found = find_parameter(child,
+                        path .. "." .. tostring(key), seen)
+                    if found then return found end
+                end
+            end
+        end
+
+        local scalar = types.Function({}, { types.Integer() },
+            false, false, false)
+        for _, name in ipairs({
+            "left", "right", "named", "parenthesized", "map", "boxed",
+        }) do
+            local call = contextual_call(name)
+            assert.same(scalar, call._callee_type)
+            assert.same(scalar, call._contextual_function_type)
+            assert.same(scalar, call.exp.target)
+        end
+
+        local fixed = contextual_call("fixed")
+        assert.same(types.Function({},
+            { types.Integer(), types.Integer() }, false, false, false),
+            fixed._callee_type)
+        for _, name in ipairs({ "open", "array" }) do
+            local open = contextual_call(name)
+            assert.same(types.Function({}, {}, false, false, types.Integer()),
+                open._callee_type)
+            assert.same("open", open._flex_result_demand)
+            assert.same(types.Integer(), open._open_results.source_type)
+        end
+
+        for _, name in ipairs({
+            "left", "right", "named", "parenthesized", "fixed", "open",
+            "array", "map", "boxed",
+        }) do
+            local leak = find_parameter(
+                find_function(tree, name).block, name, {})
+            assert.falsy(leak,
+                "inference parameter leaked through " .. tostring(leak))
+        end
+    end)
+
+    it("carries dependent scalar and open-run demands through derived uses",
+    function()
+        local ok, err, tree = run_checker([[
+            function agree<T>(left: T, right: T): T return left end
+            function take<T>(items: {T}, witness: T): T return witness end
+            function pick<T>(left: T?, right: T): T return right end
+            function make_map<T>(): {T: T} return {} end
+            function spread<T>(): (...: T)
+                return (42 as value) as T
+            end
+
+            function parenthesized(callback: value): integer
+                return take({(callback())}, 42)
+            end
+            function key(callback: value): string
+                return pick(make_map()[callback()], "item")
+            end
+            function open_input(callback: value): integer
+                return agree(callback(spread()), 42)
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local function peel(exp)
+            while exp._tag == "Ast.ExpCast" do exp = exp.exp end
+            return exp
+        end
+        local parent = peel(find_function(tree, "parenthesized")
+            .block.stats[1].exps[1])
+        local array = peel(parent.args.args[1])
+        local paren = array._positional_adjustment.tail_scalars[1]
+        assert.equal("Ast.ExpAdjust", paren._tag)
+        assert.same(types.Function({}, { types.Integer() },
+            false, false, false), paren.exp._callee_type)
+
+        local keyed = peel(find_function(tree, "key")
+            .block.stats[1].exps[1])
+        local index = peel(keyed.args.args[1])
+        local key_call = index.var.exp2
+        assert.same(types.Function({}, { types.String() },
+            false, false, false), key_call._callee_type)
+
+        local open = peel(find_function(tree, "open_input")
+            .block.stats[1].exps[1])
+        local callback = peel(open.args.args[1])
+        assert.same(types.Function({}, { types.Integer() },
+            false, types.Value(), false), callback._callee_type)
+        assert.is_true(callback._open_args.source ==
+            callback._arg_adjustment.open_source)
+        assert.same(types.Value(), callback._open_args.source_type)
+        assert.same(types.Value(), callback._open_args.target_type)
+        assert.same(types.Value(), callback._arg_adjustment.open_type)
+        assert.same(types.Value(), callback._arg_adjustment.open_target)
+        assert.equal(callback._arg_adjustment.open_start,
+            callback._open_args.start)
+        assert.is_true(callback._open_args.adjustment ==
+            callback._arg_adjustment.open_adjustment)
+        assert.equal("identity", callback._open_args.adjustment.kind)
+        assert.same(types.Value(),
+            callback._open_args.source._open_results.source_type)
+        assert.same(types.Value(),
+            callback._open_args.source._open_results.target_type)
+    end)
+
+    it("checks a dependent contextual value call exactly once", function()
+        local errs = h.check_errs([[
+            function agree<T>(left: T, right: T): T return left end
+
+            function use(callback: value): integer
+                return agree(callback(missing), 42)
+            end
+        ]])
+        assert.same(1, #errs)
+        assert.match("variable 'missing' not declared", errs[1])
+    end)
+
     it("uses a fixed outer call to constrain every inner result", function()
         local ok, err, tree = run_checker([[
             function take(number: integer, label: string): nil

@@ -77,7 +77,7 @@ local function run(body: Body)
   active_session = session
   defer active_session = nil
 
-  local task = async.run(function (): value
+  local task = async.run<value, value>(function (): value
     do
       body()
     catch

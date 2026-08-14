@@ -22,7 +22,7 @@ of native ABI truth.
 
 This chapter describes the completed implementation, including the generic
 open-consumer and pending-`finally` lifetime paths. Flexible returns introduced
-compiled-module ABI 0.14; current installed-module paths use ABI 0.23.
+compiled-module ABI 0.14; current installed-module paths use ABI 0.24.
 
 ## Representation in the AST and type graph
 
@@ -50,8 +50,8 @@ Type.StaticMethod(fqtn, name, params, rettypes,
                   varargtype, flexrettype, paramnames)
 ```
 
-The third `Type.Function` position is a required ABI-0.23 reserved-false
-sentinel. `varargtype` is Titan's typed input tail, while `flexrettype` is
+The third `Type.Function` position remains a required reserved-false sentinel
+in ABI 0.24. `varargtype` is Titan's typed input tail, while `flexrettype` is
 Titan's typed output tail; the two may coexist. Direct C declarations instead
 use `Type.CFunction(params, ret, vararg, abi)`: C `...` belongs only to its
 `vararg` bit, and a C signature has neither a flexible result tail nor any
@@ -415,8 +415,8 @@ its own C frame and never replaces `_flexout->args`. Nested or forwarded runs
 are copied into the outer caller's buffer.
 
 Every exit initializes `_flexout->n_args`, including bare return,
-flexible-only fallthrough, a fallthrough whose fixed prefix accepts nil,
-and pending-return dispatch after `finally`. A producer still evaluates
+flexible-only fallthrough, a fallthrough whose fixed prefix is exactly one
+`nil`, and pending-return dispatch after `finally`. A producer still evaluates
 expressions beyond a finite `_flexwant`; it discards their values instead of
 materializing them in the output buffer.
 

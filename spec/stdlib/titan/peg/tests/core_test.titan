@@ -46,7 +46,7 @@ local function no_runtime_results(
     whole: string): (...: value)
 end
 
-local function no_capture_results(first: value,
+local function no_capture_results(_: value,
                                   ...: value): (...: value)
 end
 
@@ -550,7 +550,7 @@ function test_core_callback_timing_and_titan_callables(context: test.Context)
   test.assert(fold_arities[1] == 0 and fold_arities[2] == 2)
 
   local explode: (value, ...: value) -> (...: value) =
-    function(first, ...)
+    function(_, ...)
       raise "callback exploded"
     end
   local bad = pattern.function_capture(

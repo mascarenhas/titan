@@ -16,11 +16,11 @@ local function expect_failure(action: CheckedAction, message: string)
   test.assert(failed, message)
 end
 
-local function cleanup_server(context: test.Context, server: net.Server)
+local function cleanup_server(_: test.Context, server: net.Server)
   runtime_test.cleanup(function () server:close() end)
 end
 
-local function cleanup_connection(context: test.Context,
+local function cleanup_connection(_: test.Context,
                                   connection: net.Connection)
   runtime_test.cleanup(function () connection:close() end)
 end
@@ -29,7 +29,7 @@ end
 -- only address-use collisions from concurrent workers.
 local function listen_available(first_port: integer): (net.Server, integer)
   local port = first_port
-  for _index = 1, 100 do
+  for _ = 1, 100 do
     do
       local server = net.listen("127.0.0.1", port)
       return server, port

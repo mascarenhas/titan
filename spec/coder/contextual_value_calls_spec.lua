@@ -125,6 +125,223 @@ describe("contextual calls through value (code generation)", function()
         ]])
     end)
 
+    it("closes dependent contextual calls without repeating lexical evaluation",
+    function()
+        run_coder([[
+            function agree<T>(left: T, right: T): T
+                return left
+            end
+
+            function make_fixed<T>(): (T, T) -> T
+                return function(left: T, right: T): T return left end
+            end
+
+            function make_open<T>(): (...: T) -> T
+                return function(...: T): T return ...[1] end
+            end
+
+            record Box<T>
+                item: T
+            end
+
+            function take_array<T>(items: {T}, witness: T): T
+                return witness
+            end
+
+            function take_map<T>(items: {string: T}, witness: T): T
+                return witness
+            end
+
+            function take_box<T>(box: Box<T>, witness: T): T
+                return witness
+            end
+
+            local phase: integer = 0
+            local selections: integer = 0
+
+            function select_callback(callback: value): value
+                selections = selections + 1
+                phase = phase * 10 + 1
+                return callback
+            end
+
+            function callback_result(): integer
+                phase = phase * 10 + 2
+                return 42
+            end
+
+            local function witness(): integer
+                phase = phase * 10 + 3
+                return 42
+            end
+
+            local function reset_trace()
+                phase = 0
+                selections = 0
+            end
+
+            function trace(): integer
+                return phase * 10 + selections
+            end
+
+            function scalar(callback: value): integer
+                reset_trace()
+                return agree(select_callback(callback)(), witness())
+            end
+
+            function named(callback: value): integer
+                reset_trace()
+                return agree {
+                    left = select_callback(callback)(),
+                    right = witness()
+                }
+            end
+
+            function fixed(callback: value): integer
+                reset_trace()
+                return agree(
+                    make_fixed()(select_callback(callback)()), witness())
+            end
+
+            function open(callback: value): integer
+                reset_trace()
+                return agree(
+                    make_open()(select_callback(callback)()), witness())
+            end
+
+            function array(callback: value): integer
+                reset_trace()
+                local got = take_array(
+                    { select_callback(callback)() }, witness())
+                return got
+            end
+
+            function map(callback: value): integer
+                reset_trace()
+                local got = take_map(
+                    { ["item"] = select_callback(callback)() }, witness())
+                return got
+            end
+
+            function boxed(callback: value): integer
+                reset_trace()
+                local got = take_box(
+                    { item = select_callback(callback)() }, witness())
+                return got
+            end
+        ]], [[
+            for _, invoke in ipairs({
+                test.scalar, test.named, test.fixed, test.open,
+                test.array, test.map, test.boxed,
+            }) do
+                local calls = 0
+                local got = invoke(function()
+                    calls = calls + 1
+                    local number = test.callback_result()
+                    return number, number + 1
+                end)
+                assert(got == 42)
+                assert(calls == 1)
+                -- select/callback/witness remain left-to-right (123), and the
+                -- callback expression itself was selected exactly once (1).
+                assert(test.trace() == 1231, test.trace())
+            end
+        ]])
+    end)
+
+    it("runs dependent derived demands and open inputs once in order",
+    function()
+        run_coder([[
+            function agree<T>(left: T, right: T): T return left end
+            function take<T>(items: {T}, witness: T): T return witness end
+            function pick<T>(left: T?, right: T): T return right end
+            function make_map<T>(): {T: T} return {} end
+
+            local steps: integer = 0
+            local selections: integer = 0
+            local order_okay: boolean = true
+            local function reset_trace()
+                steps = 0
+                selections = 0
+                order_okay = true
+            end
+            local function mark(expected: integer)
+                steps = steps + 1
+                if steps ~= expected then order_okay = false end
+            end
+            function count(): integer return steps end
+            function selected(): integer return selections end
+            function ordered(): boolean return order_okay end
+
+            function select_callback(callback: value): value
+                mark(1)
+                selections = selections + 1
+                return callback
+            end
+            function integer_result(expected: integer): integer
+                mark(expected)
+                return 42
+            end
+            function string_result(expected: integer): string
+                mark(expected)
+                return "item"
+            end
+            function spread<T>(expected: integer): (...: T)
+                mark(expected)
+                return (40 as value) as T, (41 as value) as T
+            end
+
+            function parenthesized(callback: value): integer
+                reset_trace()
+                return take(
+                    {(select_callback(callback)())}, integer_result(3))
+            end
+            function key(callback: value): string
+                reset_trace()
+                return pick(make_map()[select_callback(callback)()],
+                    string_result(3))
+            end
+            function open_input(callback: value): integer
+                reset_trace()
+                return agree(select_callback(callback)(spread(2)),
+                    integer_result(4))
+            end
+        ]], [[
+            local calls = 0
+            assert(test.parenthesized(function()
+                calls = calls + 1
+                return test.integer_result(2), 99
+            end) == 42)
+            assert(calls == 1)
+            assert(test.count() == 3)
+            assert(test.selected() == 1)
+            assert(test.ordered())
+
+            calls = 0
+            assert(test.key(function()
+                calls = calls + 1
+                return test.string_result(2)
+            end) == "item")
+            assert(calls == 1)
+            assert(test.count() == 3)
+            assert(test.selected() == 1)
+            assert(test.ordered())
+
+            calls = 0
+            assert(test.open_input(function(...)
+                calls = calls + 1
+                assert(select("#", ...) == 2)
+                local first, second = ...
+                assert(first == 40 and second == 41)
+                return test.integer_result(3), 99
+            end) == 42)
+            assert(calls == 1)
+            assert(test.count() == 4)
+            assert(test.selected() == 1)
+            assert(test.ordered())
+        ]])
+    end)
+
     it("keeps inner results open in nested outer(inner()) calls", function()
         run_coder([[
             function nested_finite(outer: value, inner: value): integer

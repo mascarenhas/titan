@@ -66,8 +66,8 @@ end
 local function make_abandoned_stacked(tag_main: value,
                                       tag_b: value): coroutine.Coro
   local stacked: coroutine.Coro? = nil
-  local a: coroutine.Coro? = coroutine.create(function(_arg: value): value
-    local b = coroutine.create(function(_inner_arg: value): value
+  local a: coroutine.Coro? = coroutine.create(function(_: value): value
+    local b = coroutine.create(function(_: value): value
       return coroutine.yield("from-b", tag_main)
     end, tag_b)
     stacked = b

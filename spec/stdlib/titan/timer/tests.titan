@@ -31,7 +31,7 @@ function test_timer_ticker_waited_and_retained_ticks(
     defer ticker:close()
 
     local count = 0
-    for _index = 1, 3 do
+    for _ = 1, 3 do
       if ticker:tick() then count = count + 1 end
     end
     test.assert(count == 3, "Ticker lost a waited tick")
@@ -54,7 +54,7 @@ function test_timer_ticker_pending_close_and_invalid_period(
     local ticker = timer.ticker(10000)
     defer ticker:close()
     local ticked = true
-    local waiter = async.run(function (): value
+    local waiter = async.run<value, value>(function (): value
       ticked = ticker:tick()
       return nil
     end)

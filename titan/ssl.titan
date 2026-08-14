@@ -31,8 +31,8 @@ end
 local default_client_context_owner: DefaultClientContextOwner? = nil
 local default_client_context: *openssl.SSL_CTX = nil
 
-local function finalize_default_client_context(owner_value: value)
-  local owner = owner_value as DefaultClientContextOwner
+local function finalize_default_client_context(
+    owner: DefaultClientContextOwner)
   local context = owner.context
   if not context then return end
 
@@ -48,7 +48,8 @@ local function allocate_default_client_context_owner():
     DefaultClientContextOwner
   local owner = DefaultClientContextOwner.new(nil)
   default_client_context_owner = owner
-  gc.finalizable(owner, finalize_default_client_context)
+  gc.finalizable<DefaultClientContextOwner>(
+      owner, finalize_default_client_context)
   return owner
 end
 

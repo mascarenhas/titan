@@ -361,7 +361,7 @@ therefore not itself a stack-relocation hazard.
 
 ## ABI and search path
 
-The current compiled-module ABI is `0.23`. The error-handling control-flow
+The current compiled-module ABI is `0.24`. The error-handling control-flow
 machinery did not by itself require an ABI bump. The earlier ABI-0.10 change
 changed the `TitanVargX` structs from inline flexible-array backing
 objects to descriptor structs with an `args` pointer. That layout change
@@ -415,19 +415,20 @@ first-class function closure, and Interface metadata/wrappers/bound
 trampolines. ABI 0.21 retained this machinery while advancing the matched Lua
 internal-header/runtime contract to 5.5.1. ABI 0.22 retained it while changing
 the source-local `titan.uv` schema/module prefix and adding the fixed physical-
-provider identity slot. ABI 0.23 retains all of this error machinery again;
-its boundary is the source-defined callback and separated
-module/nominal/member native-name contract. Errors raised by an Interface adapter,
+provider identity slot. ABI 0.23 retained all of this error machinery while
+moving callbacks into source and separating the module/nominal/member native-name
+contract. ABI 0.24 retains the machinery again while extending serialized
+interfaces for generic declarations. Errors raised by an Interface adapter,
 strict guard, dynamic conversion, or failed exact downcast still use the same
 Titan error handler; all wrapper and adapter roots are ordinary Lua-traced
 values, so unwinding requires no resource-specific cleanup path.
 
 The compiler and runtime therefore agree on:
 
-* `TITAN_VER "0.23"`
-* `TITAN_VER_SUFFIX "_0_23"`
-* versioned binary path variable `TITAN_PATH_0_23`
-* default binary path `.;<root>/lib/titan/0.23`, with `<root>` recovered from
+* `TITAN_VER "0.24"`
+* `TITAN_VER_SUFFIX "_0_24"`
+* versioned binary path variable `TITAN_PATH_0_24`
+* default binary path `.;<root>/lib/titan/0.24`, with `<root>` recovered from
   the Lua `PREFIX`'s `package.cpath` in the currently supported layout where
   that path also names the equal Titan `ROCKS_TREE`
 

@@ -30,7 +30,7 @@ local m = require "sum"
 print(m.sum_list(m.sample())) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.23
+This is the reference for the language as implemented by the Titan 0.24
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -49,6 +49,7 @@ use the chapters below for the normative language reference.
 | --- | --- |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
 | [The type system](types.md) | All Titan types; equality, symmetric non-transitive consistency, direct coercions, gradual views, callable adjustment, the normative boundary matrix, inference, and `value`. |
+| [Generics](generics.md) | Explicit type parameters and Interface constraints, applied nominal types, local instantiation, rigid-body capabilities, constraint erasure, shallow run-time checks, eligible FFI arguments, and generic Tasks. |
 | [Type aliases](type-aliases.md) | Transparent compile-time type names, preserved record/union static namespaces, visibility, nominal re-exports, and alias cycles. |
 | [Interfaces](interfaces.md) | Nominal behavioral types, structural satisfaction by records and unions, wrapper conversions, method calls, options, casts, Lua interoperation, and separate compilation. |
 | [Option types](option-types.md) | `T?`: nil-tolerant types — syntax, semantics, defaulting with `or`, and how `nil` flows through arrays, maps, and the Lua boundary. |
@@ -85,7 +86,7 @@ use the chapters below for the normative language reference.
 | [PEG standard library](standard-library-peg.md) | Typed parsing-expression constructors and combinators, labeled failure/recovery, captures and callback timing, anchored pattern matching and leftmost search, locale controls, and relabel source notation. |
 | [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, synchronous in-memory streams, and compiled byte-regex matching, capture iteration, splitting, and substitution. |
 | [Lua loading standard library](standard-library-lua.md) | Binary-safe chunk compilation, Reader and file loading, asynchronous Lua-source `require`, cache semantics, C/Titan loaders, and the custom-searcher policy. |
-| [Iteration standard library](standard-library-iter.md) | Lua-compatible Map traversal, corrected generic-for iterator tuples, and Array iteration that preserves inner nil elements. |
+| [Iteration standard library](standard-library-iteration.md) | Lua-compatible Map traversal, corrected generic-for iterator tuples, and Array iteration that preserves inner nil elements. |
 | [Garbage-collection standard library](standard-library-gc.md) | Weak Maps and ephemerons, collector actions and mode switches, byte counts, and Lua 5.5 tuning parameters. |
 | [Testing Titan code](standard-library-test.md) | The `titan.test` API, native `titanc --test` discovery, subtests and cleanup, filtering, failure output, and process statuses. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, ownership, allocation, and limitations. |
@@ -95,12 +96,12 @@ use the chapters below for the normative language reference.
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.23. The language documented here is
+Titan is a working prototype, version 0.24. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
 
-Interfaces were introduced in ABI 0.20 and remain part of ABI 0.23. A record
+Interfaces were introduced in ABI 0.20 and remain part of ABI 0.24. A record
 or union satisfies an Interface structurally at a statically known conversion
 site, but the conversion constructs a fresh wrapper; it is not subtyping or
 gradual consistency and does not lift through containers or functions. Dynamic
@@ -197,7 +198,7 @@ Lua and `value` never discover an implementation from a bare record or union.
   `http` short imports;
   portable `os` helpers and direct child processes;
   typed PEG construction; byte-oriented string/regex operations; the
-  qualified `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc` modules,
+  qualified `titan.math`, `titan.lua`, `titan.iteration`, and `titan.gc` modules,
   including explicit weak-map policy and table/userdata finalizer ownership;
   and native test infrastructure through `titan.test`.
   Lua loads every standard module through its qualified `titan.*` name,

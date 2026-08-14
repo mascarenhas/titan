@@ -231,7 +231,7 @@ describe("Titan types", function()
         assert.falsy(types.equals(base, fn({i}, {i}, false, i)))
     end)
 
-    it("keeps the ABI-0.23 Function vararg slot reserved false", function()
+    it("keeps the ABI-0.24 Function vararg slot reserved false", function()
         local valid = types.Function(
             { types.Integer() }, { types.Integer() }, false, false, false)
         local malformed = types.Function(
@@ -2530,6 +2530,831 @@ describe("Titan types", function()
                 "ffi_iptr", types.CPointer(cint(), {}))))
             assert.truthy(types.is_truthy(types.COwned(cint(), false)))
             assert.falsy(types.is_falsy(types.CPointer(cint(), {})))
+        end)
+    end)
+
+    describe("generic surface type algebra", function()
+        local function scope(callable, role, kind, owner)
+            return types.GenericScope(
+                "sample", owner or false, callable or false,
+                role or "function", kind or "function")
+        end
+
+        local function reload(typ)
+            return assert(load(
+                "return " .. types.serialize(typ),
+                "generic-type", "t", types))()
+        end
+
+        it("builds structural scopes and deterministic diagnostics", function()
+            local owner_scope = scope(false, "owner", "record", "sample.Pair")
+            local callable_scope = scope("map", "method", "method", "sample.Pair")
+            local tparam = types.TypeParameter("T", false)
+            local uparam = types.TypeParameter(
+                "U", types.Nominal("sample.Show", {types.Value()}))
+            local rigid = types.Parameter(callable_scope, 1, "U", false)
+            local scheme = types.FunctionScheme(callable_scope, {uparam},
+                types.Function({rigid}, {rigid}, false, false, false))
+
+            assert.equal(types.generic_scope_key(owner_scope),
+                types.generic_scope_key(scope(
+                    false, "owner", "record", "sample.Pair")))
+            assert.equal("T", types.tostring(tparam))
+            assert.equal("U: sample.Show<value>", types.tostring(uparam))
+            assert.equal("<U: sample.Show<value>>(U) -> U",
+                types.tostring(scheme))
+            assert.equal("sample.Pair<integer, string>", types.tostring(
+                types.Nominal("sample.Pair",
+                    {types.Integer(), types.String()})))
+            assert.same({}, types.Nominal("sample.Legacy").args)
+        end)
+
+        it("uses scope and index identity while alpha-renaming diagnostics",
+        function()
+            local first_scope = scope("id")
+            local renamed_scope = scope("id")
+            local first = types.FunctionScheme(first_scope,
+                {types.TypeParameter("T", false)},
+                types.Function(
+                    {types.Parameter(first_scope, 1, "T", false)},
+                    {types.Parameter(first_scope, 1, "T", false)},
+                    false, false, false))
+            local renamed = types.FunctionScheme(renamed_scope,
+                {types.TypeParameter("Element", false)},
+                types.Function(
+                    {types.Parameter(renamed_scope, 1, "Element", false)},
+                    {types.Parameter(renamed_scope, 1, "Element", false)},
+                    false, false, false))
+
+            assert.is_true(types.equals(first, renamed))
+            assert.is_true(types.alpha_equals(first, renamed))
+            assert.is_true(types.equals(
+                types.Parameter(first_scope, 1, "T", false),
+                types.Parameter(first_scope, 1, "Renamed",
+                    types.Nominal("sample.Show"))))
+            assert.is_false(types.equals(
+                types.Parameter(first_scope, 1, "T", false),
+                types.Parameter(first_scope, 2, "T", false)))
+            assert.is_false(types.equals(
+                types.Parameter(first_scope, 1, "T", false),
+                types.Parameter(scope("other"), 1, "T", false)))
+        end)
+
+        it("alpha-compares corresponding binders from different declaration scopes",
+        function()
+            local left_scope = types.GenericScope(
+                "sample", "sample.I", "map", "method", "interface")
+            local right_scope = types.GenericScope(
+                "sample", "sample.R", "map", "method", "record")
+            local left = types.Method("sample.I", "map", {
+                types.Parameter(left_scope, 1, "T", false),
+            }, {
+                types.Parameter(left_scope, 1, "T", false),
+            }, false, false, {"x"}, left_scope, {
+                types.TypeParameter("T", false),
+            })
+            local right = types.Method("sample.I", "map", {
+                types.Parameter(right_scope, 1, "U", false),
+            }, {
+                types.Parameter(right_scope, 1, "U", false),
+            }, false, false, {"x"}, right_scope, {
+                types.TypeParameter("U", false),
+            })
+
+            assert.is_false(types.equals(left, right))
+            assert.is_true(types.alpha_equals(left, right))
+        end)
+
+        it("keeps applied nominals invariant and erases only arguments",
+        function()
+            local first = types.Nominal("sample.Pair",
+                {types.Integer(), types.String()})
+            local same = types.Nominal("sample.Pair",
+                {types.Integer(), types.String()})
+            local different = types.Nominal("sample.Pair",
+                {types.String(), types.Integer()})
+
+            assert.is_true(types.equals(first, same))
+            assert.is_false(types.equals(first, different))
+            assert.is_true(types.contains_generic(first))
+            assert.is_true(types.equals(
+                types.erase(first), types.erase(different)))
+            assert.same({}, types.erase(first).args)
+            assert.is_true(types.is_erased(types.erase(first)))
+        end)
+
+        it("keeps applied owners invariant while allowing shallow value consistency",
+        function()
+            local cell_scope = types.GenericScope(
+                "sample", "sample.Cell", false, "owner", "record")
+            types.registry["sample.Cell"] = types.Record(
+                "sample.Cell", {}, {}, {}, 0, cell_scope, {
+                    types.TypeParameter("T", false),
+                })
+            local precise = types.Nominal("sample.Cell", {types.Integer()})
+            local erased = types.Nominal("sample.Cell", {types.Value()})
+            local wrong = types.Nominal("sample.Cell", {types.String()})
+            local nested = types.Nominal("sample.Cell", {
+                types.Array(types.Integer()),
+            })
+            local nested_view = types.Nominal("sample.Cell", {
+                types.Array(types.Value()),
+            })
+
+            assert.is_false(types.equals(precise, erased))
+            assert.is_true(types.consistent(precise, erased))
+            assert.is_true(types.consistent(erased, precise))
+            assert.is_false(types.consistent(precise, wrong))
+            assert.is_false(types.consistent(nested, nested_view))
+            assert.is_true(types.consistent(nested, erased))
+            assert.is_false(types.assignment_adjustment(precise, wrong))
+            assert.is_false(types.assignment_adjustment(precise, erased))
+            assert.is_truthy(types.generic_owner_view(precise, erased))
+
+            local box_scope = types.GenericScope(
+                "sample", "sample.Box", false, "owner", "record")
+            types.registry["sample.Box"] = types.Record(
+                "sample.Box", {}, {}, {}, 0, box_scope, {
+                    types.TypeParameter("T", types.Nominal("sample.Show")),
+                })
+            local implementation = types.Nominal("sample.Shown")
+            local constrained = types.Nominal(
+                "sample.Box", {implementation})
+            local carrier = types.Nominal("sample.Box", {
+                types.Nominal("sample.Show"),
+            })
+            local invalid = types.Nominal(
+                "sample.Box", {types.Value()})
+            assert.is_true(types.consistent(constrained, carrier))
+            assert.is_false(types.consistent(constrained, invalid))
+        end)
+
+        it("relates each rigid parameter only to its erased constraint carrier",
+        function()
+            local owner_scope = scope(
+                false, "owner", "record", "sample.Box")
+            local unconstrained = types.Parameter(
+                owner_scope, 1, "T", false)
+            local constrained = types.Parameter(owner_scope, 2, "U",
+                types.Nominal("sample.Show", {unconstrained}))
+            local another_scope = scope(
+                false, "other", "record", "sample.Other")
+            local another = types.Parameter(
+                another_scope, 1, "V", false)
+
+            assert.is_true(types.consistent(
+                unconstrained, types.Value()))
+            assert.is_true(types.consistent(
+                types.Value(), unconstrained))
+            assert.is_false(types.consistent(unconstrained, another))
+            assert.is_false(types.is_truthy(unconstrained))
+            assert.is_true(types.is_truthy(constrained))
+            assert.is_true(types.consistent(constrained,
+                types.Nominal("sample.Show", {types.Value()})))
+            assert.is_false(types.consistent(constrained, types.Value()))
+            assert.is_true(types.consistent(
+                types.Option(unconstrained),
+                types.Option(types.Value())))
+            assert.is_true(types.consistent(
+                types.Array(unconstrained),
+                types.Array(types.Value())))
+            assert.is_true(types.consistent(
+                types.Function({unconstrained}, {unconstrained},
+                    false, false, false),
+                types.Function({types.Value()}, {types.Value()},
+                    false, false, false)))
+        end)
+
+        it("smart-substitutes owner and callable scopes independently",
+        function()
+            local owner_scope = scope(
+                false, "owner", "record", "sample.Pair")
+            local method_scope = scope(
+                "convert", "method", "method", "sample.Pair")
+            local t = types.Parameter(owner_scope, 1, "T", false)
+            local u = types.Parameter(method_scope, 1, "U", false)
+            local method = types.Method("sample.Pair", "convert", {
+                types.Array(types.Option(t)),
+                types.Map(types.String(), types.Option(t)),
+                u,
+            }, {
+                types.Nominal("sample.Pair", {t, u}),
+            }, u, t, {"items", "lookup", "value"}, method_scope, {
+                types.TypeParameter("U",
+                    types.Nominal("sample.Mapper", {t})),
+            })
+
+            local owner_view = types.substitute(
+                method, owner_scope, {types.Integer()})
+            assert.is_true(types.same_generic_scope(
+                method_scope, owner_view.scope))
+            assert.equal("sample.Mapper<integer>", types.tostring(
+                owner_view.typeparams[1].constraint))
+
+            local local_closed = types.substitute(
+                method, method_scope, {types.String()})
+            assert.is_false(local_closed.scope)
+            assert.same({}, local_closed.typeparams)
+            assert.equal("string", types.tostring(local_closed.params[3]))
+            assert.equal("T", types.tostring(local_closed.params[1].elem))
+
+            local closed = types.substitute(
+                local_closed, owner_scope, {types.Integer()})
+            assert.equal("{ integer }", types.tostring(closed.params[1]))
+            assert.equal("{ string : integer }",
+                types.tostring(closed.params[2]))
+            assert.equal("sample.Pair<integer, string>",
+                types.tostring(closed.rettypes[1]))
+            assert.equal("string", types.tostring(closed.varargtype))
+            assert.equal("integer", types.tostring(closed.flexrettype))
+
+            local bad_key = types.Map(t, types.Integer())
+            assert.has_error(function()
+                types.substitute(bad_key, owner_scope,
+                    {types.Option(types.Integer())})
+            end, "type of map key cannot be option type")
+
+            assert.equal("value", types.tostring(types.substitute(
+                types.Option(t), owner_scope, {types.Value()})))
+        end)
+
+        it("closes schemes and constructor-preserving aliases", function()
+            local fn_scope = scope("choose")
+            local t = types.Parameter(fn_scope, 1, "T", false)
+            local scheme = types.FunctionScheme(fn_scope,
+                {types.TypeParameter("T", false)},
+                types.Function({t, t}, {t}, false, false, false))
+            local closed = types.apply_scheme(scheme, {types.Integer()})
+            assert.equal("(integer, integer) -> integer",
+                types.tostring(closed))
+
+            local owner_scope = scope(
+                false, "owner", "record", "sample.Pair")
+            local alias = types.GenericAlias(
+                "sample", "Either", false, "sample.Pair", false,
+                owner_scope, {
+                    types.TypeParameter("A", false),
+                    types.TypeParameter("B", false),
+                })
+            local applied = types.apply_generic_alias(alias,
+                {types.Integer(), types.String()})
+            assert.equal("sample.Pair<integer, string>",
+                types.tostring(applied))
+            assert.equal(
+                "sample.Either<A, B> = sample.Pair<A, B>",
+                types.tostring(alias))
+            assert.has_error(function()
+                types.apply_generic_alias(alias, {types.Integer()})
+            end, "expected 2 type arguments but found 1")
+            assert.is_true(types.alpha_equals(alias, reload(alias)))
+        end)
+
+        it("erases rigid carriers throughout declaration descriptors",
+        function()
+            local owner_scope = scope(
+                false, "owner", "record", "sample.Box")
+            local t = types.Parameter(owner_scope, 1, "T", false)
+            local constrained = types.Parameter(owner_scope, 2, "S",
+                types.Nominal("sample.Show", {t}))
+            local record = types.Record("sample.Box", {
+                types.Field("sample.Box", "item", t, 0),
+                types.Field("sample.Box", "shown", constrained, 1),
+            }, {
+                make = types.StaticMethod("sample.Box", "make", {t}, {
+                    types.Nominal("sample.Box", {t, constrained}),
+                }, false, false, {}),
+            }, {}, 2, owner_scope, {
+                types.TypeParameter("T", false),
+                types.TypeParameter("S",
+                    types.Nominal("sample.Show", {t})),
+            })
+
+            assert.is_true(types.alpha_equals(record, reload(record)))
+            local erased = types.erase(record)
+            assert.is_false(erased.scope)
+            assert.same({}, erased.typeparams)
+            assert.equal("value", types.tostring(erased.fields[1].type))
+            assert.equal("sample.Show",
+                types.tostring(erased.fields[2].type))
+            assert.equal("sample.Box", types.tostring(
+                erased.functions.make.rettypes[1]))
+            assert.is_true(types.is_erased(erased))
+            assert.is_true(types.assert_erased(erased) == erased)
+            assert.has_error(function() types.assert_erased(record) end,
+                "generic type reached erased core")
+        end)
+
+        it("retains recursively erased constraint applications before core erasure",
+        function()
+            local owner_scope = scope(
+                false, "owner", "record", "sample.Box")
+            local constrained = types.Parameter(owner_scope, 1, "C",
+                types.Nominal("sample.J"))
+            local dependent = types.Parameter(owner_scope, 2, "B",
+                types.Nominal("sample.I", {constrained}))
+
+            local carrier = types.erase_constraint(dependent)
+            assert.equal("sample.I<sample.J>", types.tostring(carrier))
+            assert.equal("sample.I", types.tostring(types.erase(dependent)))
+        end)
+
+        it("recognizes the exact transient round-trip frontier", function()
+            local cinteger = types.CInteger("int", true, 3, 32)
+            local cfloat = types.CFloat("double")
+            local point = types.CStruct(
+                "point", "point", false, {}, true, false)
+            local incomplete = types.CStruct(
+                "opaque", "opaque", false, {}, false, false)
+            local flexible = types.CStruct(
+                "flexible", "flexible", false, {}, true, true)
+            local tvalue = types.CStruct(
+                "TValue", "TValue", false, {}, false, false)
+            local rigid_scope = scope("rigid")
+            local rigid = types.Parameter(rigid_scope, 1, "T", false)
+            local constrained = types.Parameter(rigid_scope, 2, "S",
+                types.Nominal("sample.Show", {rigid}))
+
+            local positive = {
+                types.Nil(), types.Boolean(), types.Integer(), types.Float(),
+                types.String(), types.Value(), types.Option(types.Integer()),
+                types.Array(types.String()),
+                types.Map(types.String(), types.Integer()),
+                types.Function({types.Integer()}, {types.String()},
+                    false, types.Value(), types.Boolean()),
+                types.Nominal("sample.Box", {types.Integer()}),
+                rigid, constrained, cinteger, cfloat,
+                types.COwned(point, false), tvalue,
+                types.CTypedef("number_t", cinteger),
+            }
+            for _, typ in ipairs(positive) do
+                assert.is_true(types.transient_roundtrip(typ),
+                    types.tostring(typ))
+            end
+
+            local pointer = types.CPointer(cinteger, {})
+            local cfunction = types.CFunction({}, cinteger, false, "c")
+            local negative = {
+                types.Invalid(), types.Void(), pointer,
+                types.CArray(cinteger, 2), cfunction,
+                types.CPointer(cfunction, {}), point,
+                types.COwned(incomplete, false),
+                types.COwned(flexible, false),
+                types.COwned(flexible, true),
+                types.CInteger("enum pending", true, 3, false),
+                types.CModule("ffi", {}, {}),
+                types.Option(pointer), types.Array(pointer),
+                types.Map(types.String(), pointer),
+                types.Function({types.Integer()}, {pointer},
+                    false, false, false),
+                types.Function({}, {}, false,
+                    types.Nil(), false),
+                types.Function({}, {}, false,
+                    false, cinteger),
+                types.Nominal("sample.Phantom", {pointer}),
+                types.Map(types.Option(types.Integer()), types.String()),
+                types.Option(types.Value()),
+                types.Option(types.Option(types.Integer())),
+                types.Array(types.Option(types.Integer())),
+                types.Map(types.String(), types.Option(types.Integer())),
+            }
+            for _, typ in ipairs(negative) do
+                assert.is_false(types.transient_roundtrip(typ),
+                    types.tostring(typ))
+            end
+
+            local first = types.CTypedef("first", cinteger)
+            local second = types.CTypedef("second", first)
+            first.target = second
+            assert.is_false(types.transient_roundtrip(first))
+        end)
+
+        it("rejects malformed generic scope and binder metadata", function()
+            local first_scope = scope("id")
+            local other_scope = scope("other")
+
+            assert.is_false(types.same_generic_scope(
+                first_scope, types.Integer()))
+            assert.is_false(types.equals(first_scope, other_scope))
+            assert.equal("scope[" .. types.generic_scope_key(first_scope) ..
+                "]", types.tostring(first_scope))
+            assert.is_false(types.equals(
+                types.TypeParameter("T", false),
+                types.TypeParameter("T", types.Integer())))
+
+            local signature = types.Function(
+                {}, {}, false, false, false)
+            local integer_scheme = types.FunctionScheme(first_scope, {
+                types.TypeParameter("T", types.Integer()),
+            }, signature)
+            local string_scheme = types.FunctionScheme(first_scope, {
+                types.TypeParameter("T", types.String()),
+            }, signature)
+            assert.is_false(types.equals(integer_scheme, string_scheme))
+
+            local first_variable = types.ModuleVariable(
+                "sample", "item", types.Integer())
+            assert.is_true(types.equals(first_variable,
+                types.ModuleVariable("sample", "item", types.Integer())))
+            assert.is_false(types.equals(first_variable,
+                types.ModuleVariable("sample", "item", types.String())))
+
+            local rigid = types.Parameter(
+                first_scope, 1, "T", types.Nominal("sample.Erased"))
+            local key = types.generic_scope_key(first_scope)
+            assert.is_nil(types.parameter_surface_constraint(false, {}))
+            assert.is_nil(types.parameter_surface_constraint(rigid, {}))
+            assert.is_nil(types.parameter_surface_constraint(rigid, {
+                [key] = {
+                    types.TypeParameter("T", "not a constraint"),
+                },
+            }))
+            assert.is_false(types.parameter_surface_constraint(rigid, {
+                [key] = {types.TypeParameter("T", false)},
+            }))
+            local constraint = types.Nominal("sample.Show")
+            assert.is_true(constraint ==
+                types.parameter_surface_constraint(rigid, {
+                    [key] = {types.TypeParameter("T", constraint)},
+                }))
+
+            assert.has_error(function()
+                types.serialize(types.GenericScope(
+                    "sample", false, false, "function", 7))
+            end, "cannot serialize generic metadata literal 7")
+        end)
+
+        it("validates dense type arguments before substitution", function()
+            local count, list_error =
+                types.dense_type_list_length(false)
+            assert.is_nil(count)
+            assert.equal("expected a dense numeric list", list_error)
+
+            count, list_error = types.dense_type_list_length({
+                argument = types.Integer(),
+            })
+            assert.is_nil(count)
+            assert.equal("expected numeric list keys only", list_error)
+
+            count, list_error = types.dense_type_list_length({
+                [2] = types.Integer(),
+            })
+            assert.is_nil(count)
+            assert.equal("expected a dense numeric list", list_error)
+            assert.equal(2, types.dense_type_list_length({
+                types.Integer(), types.String(),
+            }))
+
+            local generic_scope = scope("id")
+            local rigid = types.Parameter(
+                generic_scope, 1, "T", false)
+            local pointer = types.CPointer(
+                types.CInteger("int", true, 3, 32), {})
+            assert.has_error(function()
+                types.substitute(rigid, generic_scope, {7})
+            end, "type argument 1 is not a type")
+            assert.has_error(function()
+                types.substitute(rigid, generic_scope, {pointer})
+            end, "type argument 1 ('int *') has no sound transient round trip")
+            assert.is_true(types.equals(pointer,
+                types.substitute_inference(
+                    rigid, generic_scope, {pointer})))
+            assert.has_error(function()
+                types.substitute(rigid, generic_scope, {})
+            end, "missing type argument 1 for " ..
+                types.generic_scope_key(generic_scope))
+
+            local typeparams = {types.TypeParameter("T", false)}
+            local valid, argument_error =
+                types.validate_type_arguments(typeparams, {7})
+            assert.is_nil(valid)
+            assert.equal("type argument 1 is not a type", argument_error)
+            valid, argument_error =
+                types.validate_type_arguments(typeparams, {pointer})
+            assert.is_nil(valid)
+            assert.equal("type argument 1 ('int *') has no sound " ..
+                "transient round trip", argument_error)
+        end)
+
+        it("preserves unrelated scopes during generic rewrites", function()
+            local generic_scope = scope("id")
+            local unrelated_scope = scope("other")
+            local rigid = types.Parameter(
+                generic_scope, 1, "T", false)
+            local scheme = types.FunctionScheme(generic_scope, {
+                types.TypeParameter("T", false),
+            }, types.Function({rigid}, {rigid}, false, false, false))
+            local alias = types.GenericAlias(
+                "sample", "Boxed", false, "sample.Box", false,
+                generic_scope, {types.TypeParameter("T", false)})
+
+            local rewritten_scheme = types.substitute(
+                scheme, unrelated_scope, {types.Integer()})
+            local rewritten_alias = types.substitute(
+                alias, unrelated_scope, {types.Integer()})
+            assert.is_true(types.alpha_equals(scheme, rewritten_scheme))
+            assert.is_true(types.alpha_equals(alias, rewritten_alias))
+            assert.is_false(scheme == rewritten_scheme)
+            assert.is_false(alias == rewritten_alias)
+            assert.is_true(types.same_generic_scope(
+                types.erase(generic_scope), generic_scope))
+            assert.equal("value", types.tostring(types.erase(
+                types.TypeParameter("T", false))))
+            assert.equal("sample.Show", types.tostring(types.erase(
+                types.TypeParameter(
+                    "T", types.Nominal("sample.Show")))))
+
+            local legacy_alias = {
+                _tag = "Type.Typedef",
+                name = "legacy",
+                _type = rigid,
+            }
+            local rewritten_legacy = types.substitute(
+                legacy_alias, generic_scope, {types.Integer()})
+            assert.is_false(rewritten_legacy == legacy_alias)
+            assert.equal("legacy", rewritten_legacy.name)
+            assert.equal("Type.Integer", rewritten_legacy._type._tag)
+            assert.equal("Type.Parameter", legacy_alias._type._tag)
+
+            local legacy_struct = {_tag = "Struct", name = "Legacy"}
+            assert.is_true(types.erase(legacy_struct) == legacy_struct)
+        end)
+
+        it("rejects malformed generic rewrites and callable tails", function()
+            local integer_alias = {
+                _tag = "Type.Typedef",
+                name = "integer_alias",
+                _type = types.Integer(),
+            }
+            assert.is_true(types.valid_varg_element(integer_alias))
+
+            local pointer = types.CPointer(
+                types.CInteger("int", true, 3, 32), {})
+            assert.has_error(function()
+                types.canonical_function({}, {}, false, pointer)
+            end, "a flexible return cannot have a foreign pointer type")
+            assert.has_error(function()
+                types.canonical_function({}, {}, false, types.CVoid())
+            end, "a flexible return cannot use type void because it has " ..
+                "no supported variadic-value representation")
+
+            assert.has_error(function()
+                types.erase("not a type")
+            end, "generic type rewrite expected a Type descriptor")
+            local cycle = types.Array(types.Integer())
+            cycle.elem = cycle
+            assert.has_error(function()
+                types.erase(cycle)
+            end, "cyclic structural type in generic type rewrite")
+            assert.has_error(function()
+                types.erase(types.Function(
+                    {}, {}, true, false, false))
+            end, "Type.Function reserved vararg field must be false")
+            assert.has_error(function()
+                types.erase({_tag = "Type.Unknown"})
+            end, "unsupported tag in generic type rewrite: Type.Unknown")
+        end)
+
+        it("recognizes aliased owned payloads and generic callable tails",
+        function()
+            local cinteger = types.CInteger("int", true, 3, 32)
+            local complete_union = types.CUnion(
+                "number", "number", false, {}, true)
+            local incomplete_union = types.CUnion(
+                "opaque", "opaque", false, {}, false)
+            assert.is_true(types.transient_roundtrip(
+                types.COwned(complete_union, false)))
+            assert.is_false(types.transient_roundtrip(
+                types.COwned(incomplete_union, false)))
+            assert.is_true(types.transient_roundtrip(
+                types.COwned(cinteger, false)))
+            assert.is_false(types.transient_roundtrip(
+                types.COwned(types.CArray(cinteger, 2), false)))
+
+            local first = types.CTypedef("first", cinteger)
+            local second = types.CTypedef("second", first)
+            first.target = second
+            assert.is_false(types.transient_roundtrip(
+                types.COwned(first, false)))
+
+            local generic_scope = scope("tail")
+            local rigid = types.Parameter(
+                generic_scope, 1, "T", false)
+            local integer_alias = {
+                _tag = "Type.Typedef",
+                name = "integer_alias",
+                _type = types.Integer(),
+            }
+            local tvalue = types.CStruct(
+                "TValue", "TValue", false, {}, false, false)
+            for _, tail in ipairs({
+                rigid,
+                integer_alias,
+                types.Option(types.Integer()),
+                tvalue,
+            }) do
+                assert.is_true(types.transient_roundtrip(
+                    types.Function({}, {}, false, tail, false)))
+            end
+            assert.is_true(types.transient_roundtrip(integer_alias))
+            assert.is_false(types.transient_roundtrip(
+                types.Nominal("sample.Malformed", {false})))
+        end)
+
+        it("keeps generic relation defenses symmetric", function()
+            local first_record = types.Record(
+                "sample.Identity", {}, {}, {}, 0)
+            local second_record = types.Record(
+                "sample.Identity", {
+                    types.Field("sample.Identity", "item",
+                        types.Integer(), 0),
+                }, {}, {}, 1)
+            assert.is_true(types.consistent(first_record, second_record))
+
+            local short_scope = types.GenericScope(
+                "sample", "sample.Short", false, "owner", "record")
+            types.registry["sample.Short"] = types.Record(
+                "sample.Short", {}, {}, {}, 0, short_scope, {
+                    types.TypeParameter("T", false),
+                })
+            assert.is_false(types.consistent(
+                types.Nominal("sample.Short", {
+                    types.Integer(), types.Integer(),
+                }),
+                types.Nominal("sample.Short", {
+                    types.Integer(), types.String(),
+                })))
+
+            local rigid_scope = scope("constrained")
+            local constrained = types.Parameter(
+                rigid_scope, 1, "T", types.Nominal("sample.Show"))
+            assert.is_false(types.consistent(types.Value(), constrained))
+            assert.is_true(types.consistent(
+                types.Nominal("sample.Show"), constrained))
+            assert.is_false(types.generic_owner_view(
+                types.Nominal("sample.Left", {types.Integer()}),
+                types.Nominal("sample.Right", {types.Integer()})))
+        end)
+
+        it("alpha-closes generic methods for Interface matching", function()
+            local function method_scope(owner)
+                return types.GenericScope(
+                    "sample", owner, "map", "method", "method")
+            end
+            local function generic_method(
+                    owner, generic_scope, constraint, binder_count)
+                local params, paramnames, typeparams = {}, {}, {}
+                for index = 1, binder_count do
+                    local name = "T" .. index
+                    params[index] = types.Parameter(
+                        generic_scope, index, name, false)
+                    paramnames[index] = "value" .. index
+                    typeparams[index] = types.TypeParameter(
+                        name, index == 1 and constraint or false)
+                end
+                return types.Method(owner, "map", params, {params[1]},
+                    false, false, paramnames, generic_scope, typeparams)
+            end
+
+            local required_scope = method_scope("sample.Mapper")
+            local concrete_scope = method_scope("sample.Box")
+            local required = generic_method(
+                "sample.Mapper", required_scope,
+                types.Nominal("sample.Show"), 1)
+            local concrete = generic_method(
+                "sample.Box", concrete_scope,
+                types.Nominal("sample.Show"), 1)
+            local interface = types.Interface("sample.Mapper", {required})
+            local record = types.Record(
+                "sample.Box", {}, {}, {map = concrete}, 0)
+            local implementation = assert(
+                types.generic_interface_implementation(
+                    record, interface, {visibility = "sample"}))
+            assert.equal("interface_implementation", implementation.kind)
+            assert.is_true(implementation.exact)
+            assert.is_true(concrete ==
+                implementation.methods[1].concrete)
+            assert.is_true(required ==
+                implementation.methods[1].required)
+
+            local function expect_incompatible(method)
+                local candidate = types.Record(
+                    "sample.Box", {}, {}, {map = method}, 0)
+                local matched, failure =
+                    types.generic_interface_implementation(
+                        candidate, interface, {visibility = "sample"})
+                assert.is_false(matched)
+                assert.equal("interface_mismatch", failure.kind)
+                assert.equal("incompatible", failure.reason)
+                assert.equal("map", failure.name)
+                return failure
+            end
+
+            expect_incompatible(generic_method(
+                "sample.Box", concrete_scope,
+                types.Nominal("sample.Hash"), 1))
+            expect_incompatible(generic_method(
+                "sample.Box", concrete_scope,
+                types.Nominal("sample.Show"), 2))
+            local incompatible = generic_method(
+                "sample.Box", concrete_scope,
+                types.Nominal("sample.Show"), 1)
+            incompatible.rettypes = {types.String()}
+            local failure = expect_incompatible(incompatible)
+            assert.is_true(failure.required == required)
+            assert.is_true(failure.member == incompatible)
+        end)
+
+        it("preserves selected module provenance during generic rewrites",
+        function()
+            local generic_scope = scope("id")
+            local parameter = types.Parameter(
+                generic_scope, 1, "T", false)
+            local module = types.Module("sample.child", {
+                types.ModuleMember("sample.child", "id",
+                    types.FunctionScheme(generic_scope, {
+                        types.TypeParameter("T", false),
+                    }, types.Function({parameter}, {parameter},
+                        false, false, false)), {"x"}),
+            }, {})
+            module.file = "/selected/provider.so"
+            module.prefix = "selected_prefix_"
+
+            local applied = types.substitute(
+                module, generic_scope, {types.Integer()})
+            assert.equal("/selected/provider.so", applied.file)
+            assert.equal("selected_prefix_", applied.prefix)
+            local erased = types.erase(module)
+            assert.equal("/selected/provider.so", erased.file)
+            assert.equal("selected_prefix_", erased.prefix)
+        end)
+
+        it("serializes generic metadata deterministically and round-trips it",
+        function()
+            local fn_scope = scope("id")
+            local t = types.Parameter(fn_scope, 1, "T", false)
+            local scheme = types.FunctionScheme(fn_scope,
+                {types.TypeParameter("T", false)},
+                types.Function({t}, {types.Option(t)},
+                    false, t, t))
+            local owner_scope = scope(
+                false, "owner", "record", "sample.Pair")
+            local first_alias = types.GenericAlias(
+                "sample", "Either", false, "sample.Pair", false,
+                owner_scope, {
+                    types.TypeParameter("A", false),
+                    types.TypeParameter("B", false),
+                })
+            local second_alias = types.GenericAlias(
+                "sample", "Choice", false, "sample.Pair",
+                "sample.Either", owner_scope, {
+                    types.TypeParameter("A", false),
+                    types.TypeParameter("B", false),
+                })
+            local result_scope = scope(
+                false, "owner", "union", "sample.Result")
+            local result_t = types.Parameter(
+                result_scope, 1, "T", false)
+            local ok_variant = types.Variant(
+                "sample.Result", "ok", result_t, 0)
+            local result = types.Union("sample.Result", {ok_variant}, {
+                ok = types.StaticMethod("sample.Result", "ok", {
+                    result_t,
+                }, {
+                    types.Nominal("sample.Result", {result_t}),
+                }, false, false, false),
+            }, {}, 1, result_scope, {
+                types.TypeParameter("T", false),
+            })
+            local show_scope = scope(
+                false, "owner", "interface", "sample.Show")
+            local show_t = types.Parameter(show_scope, 1, "T", false)
+            local show = types.Interface("sample.Show", {
+                types.Method("sample.Show", "show", {show_t},
+                    {types.String()}, false, false, {"value"}),
+            }, show_scope, {types.TypeParameter("T", false)})
+            local module = types.Module("sample", {
+                types.ModuleMember("sample", "id", scheme, {"value"}),
+            }, {
+                Choice = second_alias,
+                Either = first_alias,
+                Result = result,
+                Show = show,
+            })
+
+            local serialized = types.serialize(module)
+            assert.equal(serialized, types.serialize(module))
+            assert.is_true(serialized:find('["Choice"]', 1, true) <
+                serialized:find('["Either"]', 1, true))
+            local rebuilt = reload(module)
+            assert.is_true(types.alpha_equals(module, rebuilt))
+            assert.is_true(types.alpha_equals(
+                scheme, rebuilt.members.id.type))
+            assert.is_true(types.alpha_equals(
+                result, rebuilt.type_members.Result))
+            assert.is_true(types.alpha_equals(
+                show, rebuilt.type_members.Show))
+            assert.equal(types.serialize(scheme),
+                types.serialize(reload(scheme)))
         end)
     end)
 

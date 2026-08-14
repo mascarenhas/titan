@@ -12,6 +12,7 @@ local util = require 'titan-compiler.util'
 local p = argparse('titan', 'Titan compiler')
 p:argument('module', 'Names of the modules to compile.'):args("+")
 p:flag('--print-ast', 'Print the AST.')
+p:flag('--pretty-print', 'Format generated C and headers with clang-format.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
 p:flag('--static', 'Prefer static Titan archive providers.')
 p:flag('--test', 'Build a native Titan test executable.')
@@ -87,6 +88,7 @@ resolver_context = driver.new_resolver_context({
     prefer_static = args.static,
     source_first = args.test,
     verbose = args.verbose,
+    pretty_print = args.pretty_print,
 })
 for _, modname in ipairs(requested_modules) do
     if args.test and modname == test_runner.MODULE_NAME then
@@ -388,15 +390,17 @@ if #errors > 0 then exit(table.concat(errors, "\n")) end
 local libnames = {}
 local used_native_names = {}
 
-local headers_ok, headers_err =
-    driver.write_foreign_header_plans(header_plans, args.verbose)
+local headers_ok, headers_err = driver.write_foreign_header_plans(
+    header_plans, args.verbose, args.pretty_print)
 if not headers_ok then exit(headers_err) end
 
 for _, name in ipairs(linked_names) do
     local mod = driver.imported[name]
-    local compile_options = test_modules[name] and {
-        extra_compile_flags = test_runner.TEST_COMPILE_FLAGS,
-    } or nil
+    local compile_options = {
+        pretty_print = args.pretty_print,
+        extra_compile_flags = test_modules[name]
+            and test_runner.TEST_COMPILE_FLAGS or nil,
+    }
     local ok, err, libname = driver.compile_module(
         name, mod, resolver_context.native_static_names, args.verbose,
         compile_options)
@@ -456,7 +460,7 @@ if main_module then
     local probe_ok, probe_err = driver.run_standalone_archive_probe(
         archive_entries, archive_names, ofiles, selected_static_archives,
         args.link, args.verbose, args.extra_object,
-        validate_titan_support)
+        validate_titan_support, { pretty_print = args.pretty_print })
     if not probe_ok then
         table.insert(errors, probe_err)
     else
@@ -467,7 +471,10 @@ if main_module then
             program_output, selected_static_archives,
             test_entrypoint_output,
             args.test and requested_modules[1]:gsub(".*[.]", "") or nil,
-            { no_uv_bootstrap = args.no_uv_bootstrap })
+            {
+                no_uv_bootstrap = args.no_uv_bootstrap,
+                pretty_print = args.pretty_print,
+            })
         if not ok then
             table.insert(errors, link_failed("program", main_module, term, code))
         end

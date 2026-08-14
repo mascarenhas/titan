@@ -13,6 +13,7 @@
 -- run-time behaviour of the same path lives in spec/coder/so_import_spec.lua.
 local h = require 'spec.support.helpers'
 local lfs = require 'lfs'
+local checker = require 'titan-compiler.checker'
 local types = require 'titan-compiler.types'
 local generated_modules = {}
 
@@ -621,6 +622,120 @@ describe("typechecker rehydration of .so-only imports", function()
         ]])
         assert.truthy(#bad >= 1)
         assert.match("expected integer but found string", table.concat(bad, "\n"))
+    end)
+
+    it("recovers generic owners and forwarding aliases before arity checks",
+    function()
+        h.reset(true)
+
+        local owner_scope = types.GenericScope(
+            "generic_owner", "generic_owner.Box", false,
+            "owner", "record")
+        local owner_parameter = types.Parameter(
+            owner_scope, 1, "T", false)
+        local owner = types.Record("generic_owner.Box", {
+            types.Field("generic_owner.Box", "item", owner_parameter, 0),
+        }, {
+            new = types.StaticMethod("generic_owner.Box", "new",
+                {owner_parameter}, {
+                    types.Nominal("generic_owner.Box", {owner_parameter}),
+                }, false, false, {"item"}),
+        }, {}, 1, owner_scope, {types.TypeParameter("T", false)})
+        local owner_module = types.Module("generic_owner", {
+            types.ModuleMember("generic_owner", "Box", owner, false),
+        })
+
+        local alias = types.GenericAlias(
+            "generic_facade", "Crate", false, "generic_owner.Box", false,
+            owner_scope, {types.TypeParameter("T", false)})
+        local choice = types.GenericAlias(
+            "generic_facade", "Choice", false, "generic_owner.Box",
+            "generic_facade.Crate", owner_scope,
+            {types.TypeParameter("T", false)})
+        local facade = types.Module("generic_facade", {
+            types.ModuleMember("generic_facade", "make",
+                types.Function({}, {
+                    types.Nominal("generic_owner.Box", {types.Integer()}),
+                }, false, false, false), {}),
+        }, {Crate = alias, Choice = choice})
+
+        local requests = {}
+        local function loader(modname, request)
+            requests[#requests + 1] = {
+                modname, request and request.kind or false,
+            }
+            if modname == "generic_facade" then
+                return true, facade, {}, {kind = "compiled"}
+            elseif modname == "generic_owner" then
+                return true, owner_module, {}, {kind = "compiled"}
+            end
+            return false, "unexpected module '" .. modname .. "'"
+        end
+
+        local imported, errors = checker.checkimport(
+            "generic_facade", loader)
+        assert.equal(facade, imported)
+        assert.same({}, errors)
+        assert.equal(owner, types.registry["generic_owner.Box"])
+        assert.same({
+            {"generic_facade", false},
+            {"generic_owner", "nominal-owner"},
+        }, requests)
+    end)
+
+    it("rejects recovered generic nominal and alias projection mismatches",
+    function()
+        h.reset(true)
+
+        local owner_scope = types.GenericScope(
+            "generic_bad_owner", "generic_bad_owner.Box", false,
+            "owner", "record")
+        local parameter = types.Parameter(owner_scope, 1, "T", false)
+        local owner = types.Record("generic_bad_owner.Box", {
+            types.Field("generic_bad_owner.Box", "item", parameter, 0),
+        }, {
+            new = types.StaticMethod("generic_bad_owner.Box", "new",
+                {parameter}, {
+                    types.Nominal("generic_bad_owner.Box", {parameter}),
+                }, false, false, {"item"}),
+        }, {}, 1, owner_scope, {types.TypeParameter("T", false)})
+        local owner_module = types.Module("generic_bad_owner", {
+            types.ModuleMember("generic_bad_owner", "Box", owner, false),
+        })
+
+        local facade = types.Module("generic_bad_facade", {
+            types.ModuleMember("generic_bad_facade", "make",
+                types.Function({}, {
+                    types.Nominal("generic_bad_owner.Box", {}),
+                }, false, false, false), {}),
+        })
+        local function loader(modname)
+            if modname == "generic_bad_facade" then
+                return true, facade, {}, {kind = "compiled"}
+            elseif modname == "generic_bad_owner" then
+                return true, owner_module, {}, {kind = "compiled"}
+            end
+            return false, "missing"
+        end
+        local imported, err = checker.checkimport(
+            "generic_bad_facade", loader)
+        assert.falsy(imported)
+        assert.match("expects 1 type arguments but found 0", err)
+
+        h.reset(true)
+        local bad_alias = types.GenericAlias(
+            "generic_bad_facade", "Crate", false,
+            "generic_bad_owner.Box", false,
+            types.GenericScope("generic_bad_owner", "generic_bad_owner.Box",
+                false, "owner", "union"),
+            {types.TypeParameter("T", false)})
+        facade = types.Module("generic_bad_facade", {}, {
+            Crate = bad_alias,
+        })
+        imported, err = checker.checkimport(
+            "generic_bad_facade", loader)
+        assert.falsy(imported)
+        assert.match("GenericAlias projection does not match owner", err)
     end)
 
     it("rehydrates flexible tails for functions, statics, and methods", function ()

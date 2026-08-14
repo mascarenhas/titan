@@ -18,6 +18,14 @@ function symtab.new(modname)
         -- direct source import of that owning module. This set deliberately
         -- does not inherit the imported module's own source dependencies.
         source_imports = {},
+        -- Generic type parameters form a separate lexical type namespace. Each
+        -- declaration pushes one dense binder map while its signature or body
+        -- is checked; lambdas inherit the surrounding stack naturally. The
+        -- declaration index keeps the canonical binder list reachable after a
+        -- scope is popped, so rigid constraint evidence can resolve semantic
+        -- (scope,index) identities without consulting erased carriers.
+        generic_type_scopes = {},
+        generic_scope_bindings = {},
         modname = modname
     }
     return setmetatable(self, symtab)
@@ -96,6 +104,23 @@ end
 
 function symtab:find_type_alias(name)
     return self.type_aliases[name]
+end
+
+function symtab:push_generic_type_scope(bindings)
+    assert(type(bindings) == "table", "generic type scope must be a table")
+    self.generic_type_scopes[#self.generic_type_scopes + 1] = bindings
+end
+
+function symtab:pop_generic_type_scope()
+    assert(#self.generic_type_scopes > 0, "no generic type scope")
+    return table.remove(self.generic_type_scopes)
+end
+
+function symtab:find_type_parameter(name)
+    for index = #self.generic_type_scopes, 1, -1 do
+        local parameter = self.generic_type_scopes[index][name]
+        if parameter then return parameter end
+    end
 end
 
 function symtab:add_foreign_type(name, decl)

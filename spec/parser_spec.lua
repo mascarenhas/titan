@@ -1,4 +1,5 @@
 local parser = require 'titan-compiler.parser'
+local syntax_errors = require 'titan-compiler.syntax_errors'
 local util = require 'titan-compiler.util'
 
 --
@@ -95,6 +96,7 @@ local function assert_expression_ast(code, expected_ast)
     local program_ast = assert_parses_successfuly(program_str)
     local ast = program_ast[1].block.stats[1].exps[1]
     assert_is_subset(expected_ast, ast)
+    return ast
 end
 
 local function assert_expression_syntax_error(code, expected_error_label)
@@ -1080,6 +1082,66 @@ end
                   valuestype = {_tag = "Ast.TypeName", name = "int" } } } )
     end)
 
+    describe("can parse generic type applications", function()
+        it("retains direct and qualified applications with nested closers",
+        function()
+            assert_type_ast("Pair<integer, string>", {
+                _tag = "Ast.TypeName",
+                name = "Pair",
+                typeargs = {
+                    { _tag = "Ast.TypeInteger" },
+                    { _tag = "Ast.TypeString" },
+                },
+            })
+            assert_type_ast("mod.Outer<mod.Inner<T>>", {
+                _tag = "Ast.TypeQualName",
+                module = "mod",
+                name = "Outer",
+                typeargs = {
+                    {
+                        _tag = "Ast.TypeQualName",
+                        module = "mod",
+                        name = "Inner",
+                        typeargs = {
+                            { _tag = "Ast.TypeName", name = "T", typeargs = {} },
+                        },
+                    },
+                },
+            })
+        end)
+
+        it("binds applications more tightly than the option suffix", function()
+            assert_type_ast("Pair<T, {mod.Item}>?", {
+                _tag = "Ast.TypeOption",
+                basetype = {
+                    _tag = "Ast.TypeName",
+                    name = "Pair",
+                    typeargs = {
+                        { _tag = "Ast.TypeName", name = "T", typeargs = {} },
+                        {
+                            _tag = "Ast.TypeArray",
+                            subtype = {
+                                _tag = "Ast.TypeQualName",
+                                module = "mod",
+                                name = "Item",
+                                typeargs = {},
+                            },
+                        },
+                    },
+                },
+            })
+        end)
+
+        it("always records an explicit type-argument list", function()
+            local program = assert_parses_successfuly([[
+                local direct: Plain = nil
+                local qualified: mod.Plain = nil
+            ]])
+            assert.are.same({}, program[1].decl.type.typeargs)
+            assert.are.same({}, program[2].decl.type.typeargs)
+        end)
+    end)
+
     describe("can parse function types", function()
         it("with parameter lists of length = 0", function()
             assert_type_ast("() -> ()",
@@ -1831,6 +1893,174 @@ end
         assert_expression_ast([[ o:m{} ]], empty)
     end)
 
+    describe("can parse generic call suffixes", function()
+        it("keeps inferred and explicit function-call arguments distinct",
+        function()
+            local inferred = assert_expression_ast("f(x)", {
+                _tag = "Ast.ExpCall",
+                typeargs = {},
+                args = { _tag = "Ast.ArgsFunc" },
+            })
+            assert.are.same({}, inferred.typeargs)
+
+            assert_expression_ast("f < Outer<Inner<T>> > (x)", {
+                _tag = "Ast.ExpCall",
+                exp = { var = { name = "f" } },
+                typeargs = {
+                    {
+                        _tag = "Ast.TypeName",
+                        name = "Outer",
+                        typeargs = { {
+                            _tag = "Ast.TypeName",
+                            name = "Inner",
+                            typeargs = { {
+                                _tag = "Ast.TypeName",
+                                name = "T",
+                                typeargs = {},
+                            } },
+                        } },
+                    },
+                },
+                args = {
+                    _tag = "Ast.ArgsFunc",
+                    args = { { var = { name = "x" } } },
+                },
+            })
+        end)
+
+        it("supports explicit named, method, and constructor calls", function()
+            assert_expression_ast("make<integer>{item = x}", {
+                _tag = "Ast.ExpCall",
+                typeargs = { { _tag = "Ast.TypeInteger" } },
+                args = {
+                    _tag = "Ast.ArgsNamedFunc",
+                    fields = { { name = "item", exp = { var = { name = "x" } } } },
+                },
+            })
+            assert_expression_ast("object:map<string>(x)", {
+                _tag = "Ast.ExpCall",
+                typeargs = { { _tag = "Ast.TypeString" } },
+                args = { _tag = "Ast.ArgsMethod", method = "map" },
+            })
+            assert_expression_ast("object:map<string>{item = x}", {
+                _tag = "Ast.ExpCall",
+                typeargs = { { _tag = "Ast.TypeString" } },
+                args = { _tag = "Ast.ArgsNamedMethod", method = "map" },
+            })
+            assert_expression_ast("Pair<integer, string>.new(1, 'one')", {
+                _tag = "Ast.ExpCall",
+                exp = { var = {
+                    _tag = "Ast.VarDot",
+                    name = "new",
+                    exp = {
+                        _nominal_typeargs = {
+                            { _tag = "Ast.TypeInteger" },
+                            { _tag = "Ast.TypeString" },
+                        },
+                    },
+                } },
+                typeargs = {},
+                args = { _tag = "Ast.ArgsFunc" },
+            })
+            assert_expression_ast("library.Pair<T>.from<U>{item = x}", {
+                _tag = "Ast.ExpCall",
+                exp = { var = {
+                    _tag = "Ast.VarDot",
+                    name = "from",
+                    exp = {
+                        _nominal_typeargs = {
+                            { _tag = "Ast.TypeName", name = "T" },
+                        },
+                    },
+                } },
+                typeargs = {
+                    { _tag = "Ast.TypeName", name = "U" },
+                },
+                args = { _tag = "Ast.ArgsNamedFunc" },
+            })
+        end)
+
+        it("keeps bare strings positional after the factored generic prefix",
+        function()
+            assert_expression_ast("make<string> 'item'", {
+                _tag = "Ast.ExpCall",
+                typeargs = { { _tag = "Ast.TypeString" } },
+                args = {
+                    _tag = "Ast.ArgsFunc",
+                    args = { { _tag = "Ast.ExpString", value = "item" } },
+                },
+            })
+            assert_expression_ast("object:map<string> 'item'", {
+                _tag = "Ast.ExpCall",
+                typeargs = { { _tag = "Ast.TypeString" } },
+                args = {
+                    _tag = "Ast.ArgsMethod",
+                    method = "map",
+                    args = { { _tag = "Ast.ExpString", value = "item" } },
+                },
+            })
+        end)
+
+        it("keeps adjacent generic closes on aggregate-owner selections",
+        function()
+            assert_expression_ast("Box<Outer<Inner<T>>>.make()", {
+                _tag = "Ast.ExpCall",
+                exp = { var = {
+                    _tag = "Ast.VarDot",
+                    name = "make",
+                    exp = {
+                        _nominal_typeargs = { {
+                            _tag = "Ast.TypeName",
+                            name = "Outer",
+                            typeargs = { {
+                                _tag = "Ast.TypeName",
+                                name = "Inner",
+                                typeargs = { {
+                                    _tag = "Ast.TypeName",
+                                    name = "T",
+                                } },
+                            } },
+                        } },
+                    },
+                } },
+                typeargs = {},
+                args = { _tag = "Ast.ArgsFunc" },
+            })
+        end)
+
+        it("does not treat callable arguments as a bound-method specialization",
+        function()
+            local parsed = parser.parse(
+                "(parser_spec)", "local f = object:map<integer>")
+            assert.is_false(parsed)
+        end)
+
+        it("gives a complete generic call suffix priority over comparisons",
+        function()
+            assert_expression_ast("a < b > c", {
+                _tag = "Ast.ExpBinop",
+                op = ">",
+                lhs = { _tag = "Ast.ExpBinop", op = "<" },
+            })
+            assert_expression_ast("a < b > (c)", {
+                _tag = "Ast.ExpCall",
+                exp = { var = { name = "a" } },
+                typeargs = { { _tag = "Ast.TypeName", name = "b" } },
+            })
+            assert_expression_ast("(a < b) > (c)", {
+                _tag = "Ast.ExpBinop",
+                op = ">",
+                lhs = { _tag = "Ast.ExpBinop", op = "<" },
+            })
+            assert_expression_ast("a >= b", {
+                _tag = "Ast.ExpBinop", op = ">=",
+            })
+            assert_expression_ast("a >> b", {
+                _tag = "Ast.ExpBinop", op = ">>",
+            })
+        end)
+    end)
+
     it("keeps constructor arguments positional when parenthesized", function()
         local function positional_constructor(fields)
             return { _tag = "Ast.ExpCall", args = {
@@ -2480,6 +2710,162 @@ function f()]],
         assert.falsy(parsed)
     end)
 
+    describe("can parse generic declarations", function()
+        it("retains owner and callable binders in their source scopes",
+        function()
+            local program = assert_parses_successfuly([[
+                record Pair<T, U: api.Show<T>>
+                    first: T
+                    second: U
+                end
+
+                union Result<T, E>
+                    ok: T
+                    error: E
+                end
+
+                interface Stack<E>
+                    function push<R: Stack<E>>(item: E): R
+                end
+
+                function id<T>(x: T): T return x end
+                function Pair:map<V>(f: (T) -> V): Pair<V, U>
+                    return nil
+                end
+                function Pair.make<V>(item: V): Pair<V, V>
+                    return nil
+                end
+            ]])
+
+            assert_is_subset({
+                {
+                    _tag = "Ast.TopLevelRecord",
+                    name = "Pair",
+                    typeparams = {
+                        { _tag = "Ast.TypeParam", name = "T", constraint = false },
+                        {
+                            _tag = "Ast.TypeParam",
+                            name = "U",
+                            constraint = {
+                                _tag = "Ast.TypeQualName",
+                                module = "api",
+                                name = "Show",
+                                typeargs = {
+                                    { _tag = "Ast.TypeName", name = "T", typeargs = {} },
+                                },
+                            },
+                        },
+                    },
+                    fields = {
+                        { name = "first", type = {
+                            _tag = "Ast.TypeName", name = "T", typeargs = {} } },
+                        { name = "second", type = {
+                            _tag = "Ast.TypeName", name = "U", typeargs = {} } },
+                    },
+                },
+                {
+                    _tag = "Ast.TopLevelStatic",
+                    class = "Pair",
+                    name = "new",
+                    typeparams = {},
+                    rettypes = {
+                        {
+                            _tag = "Ast.TypeName",
+                            name = "Pair",
+                            typeargs = {
+                                { _tag = "Ast.TypeName", name = "T", typeargs = {} },
+                                { _tag = "Ast.TypeName", name = "U", typeargs = {} },
+                            },
+                        },
+                    },
+                },
+                {
+                    _tag = "Ast.TopLevelUnion",
+                    name = "Result",
+                    typeparams = {
+                        { name = "T", constraint = false },
+                        { name = "E", constraint = false },
+                    },
+                },
+                {
+                    _tag = "Ast.TopLevelStatic",
+                    class = "Result",
+                    name = "ok",
+                    typeparams = {},
+                    rettypes = { {
+                        name = "Result",
+                        typeargs = {
+                            { name = "T", typeargs = {} },
+                            { name = "E", typeargs = {} },
+                        },
+                    } },
+                },
+                {
+                    _tag = "Ast.TopLevelStatic",
+                    class = "Result",
+                    name = "error",
+                    typeparams = {},
+                },
+                {
+                    _tag = "Ast.TopLevelInterface",
+                    name = "Stack",
+                    typeparams = { { name = "E", constraint = false } },
+                    methods = { {
+                        _tag = "Ast.InterfaceMethod",
+                        name = "push",
+                        typeparams = { {
+                            name = "R",
+                            constraint = {
+                                _tag = "Ast.TypeName",
+                                name = "Stack",
+                                typeargs = { { name = "E", typeargs = {} } },
+                            },
+                        } },
+                    } },
+                },
+                {
+                    _tag = "Ast.TopLevelFunc",
+                    name = "id",
+                    typeparams = { { name = "T", constraint = false } },
+                },
+                {
+                    _tag = "Ast.TopLevelMethod",
+                    class = "Pair",
+                    name = "map",
+                    typeparams = { { name = "V", constraint = false } },
+                },
+                {
+                    _tag = "Ast.TopLevelStatic",
+                    class = "Pair",
+                    name = "make",
+                    typeparams = { { name = "V", constraint = false } },
+                },
+            }, program)
+
+            assert.are.equal(9, #program)
+        end)
+
+        it("records empty binder lists on existing declarations", function()
+            local program = assert_parses_successfuly([[
+                record Plain item: integer end
+                union Maybe none end
+                interface Ping function ping() end
+                function plain(): nil end
+                function Plain:method(): nil end
+                function Plain.static(): nil end
+            ]])
+            assert.are.same({}, program[1].typeparams)
+            assert.are.same({}, program[2].typeparams)
+            assert.are.same({}, program[3].typeparams)
+            assert.are.same({}, program[4].typeparams)
+            assert.are.same({}, program[5].typeparams)
+            assert.are.same({}, program[5].methods[1].typeparams)
+            assert.are.same({}, program[6].typeparams)
+            assert.are.same({}, program[7].typeparams)
+            assert.are.same({}, program[8].typeparams)
+        end)
+    end)
+
     it("can parse public and local type aliases", function()
         assert_program_ast([[
             type Count = integer
@@ -2717,6 +3103,68 @@ end]])
             line = 3,
             col = 12,
         }, case_err.loc)
+    end)
+
+    describe("reports focused generic syntax errors", function()
+        it("labels malformed declaration binders and type applications",
+        function()
+            assert_program_syntax_error("record Empty<> end", "NameTypeParam")
+            assert_program_syntax_error(
+                "record Trailing<T,> item: T end", "NameTypeParam")
+            assert_program_syntax_error(
+                "record Missing<T:> item: T end", "TypeParamConstraint")
+            assert_program_syntax_error(
+                "record Unclosed<T item: T end", "RAngleTypeParams")
+
+            assert_type_syntax_error("Pair<>", "TypeArgument")
+            assert_type_syntax_error("Pair<T,>", "TypeArgument")
+            assert_type_syntax_error("Pair<T", "RAngleTypeArgs")
+        end)
+
+        it("rejects binders on foreign functions, lambdas, and aliases",
+        function()
+            assert_program_syntax_error([[
+                foreign function callback<T>(item: T): T return item end
+            ]], "GenericForeignFunc")
+            assert_program_syntax_error([[
+                function outer(): nil
+                    local callback = function<T>(item: T): T return item end
+                end
+            ]], "GenericLambda")
+            assert_program_syntax_error(
+                "type Identity<T> = T", "GenericTypeAlias")
+        end)
+
+        it("does not commit an incomplete ambiguous call suffix", function()
+            assert_expression_syntax_error("f<T,>(x)", "ExpExpList")
+        end)
+
+        it("registers every lexer and parser failure label", function()
+            local labels = {}
+            for _, filename in ipairs({
+                "titan-compiler/lexer.lua",
+                "titan-compiler/parser.lua",
+            }) do
+                local file = assert(io.open(filename, "r"))
+                local source = file:read("*a")
+                file:close()
+
+                for label in source:gmatch("%^([%a_][%w_]*)") do
+                    labels[label] = true
+                end
+                for label in source:gmatch("%%{([%a_][%w_]*)}") do
+                    labels[label] = true
+                end
+                for label in source:gmatch('T%("([%a_][%w_]*)"%)') do
+                    labels[label] = true
+                end
+            end
+
+            for label in pairs(labels) do
+                assert.truthy(syntax_errors.errors[label],
+                    "missing syntax_errors entry for " .. label)
+            end
+        end)
     end)
 
     it("uses specific error labels for some errors", function()
@@ -3663,6 +4111,31 @@ end]])
             local src = "function f(): nil\n  local g = function(" ..
                 repeated("p%d", 101, ", ") .. ") return 1 end\nend"
             assert_program_syntax_error(src, "ListTooLong")
+        end)
+
+        it("applies the limit to type parameter lists", function()
+            local accepted = "record Many<" ..
+                repeated("T%d", 100, ", ") .. "> end"
+            assert_parses_successfuly(accepted)
+
+            local rejected = "record TooMany<" ..
+                repeated("T%d", 101, ", ") .. "> end"
+            assert_program_syntax_error(rejected, "ListTooLong")
+        end)
+
+        it("applies the limit to type argument lists", function()
+            local accepted_args = repeated("T%d", 100, ", ")
+            local accepted = "Holder<" .. accepted_args .. ">"
+            assert_type_ast(accepted, { _tag = "Ast.TypeName" })
+            assert_expression_ast("make<" .. accepted_args .. ">()", {
+                _tag = "Ast.ExpCall",
+            })
+
+            local rejected_args = repeated("T%d", 101, ", ")
+            local rejected = "Holder<" .. rejected_args .. ">"
+            assert_type_syntax_error(rejected, "ListTooLong")
+            assert_expression_syntax_error(
+                "make<" .. rejected_args .. ">()", "ListTooLong")
         end)
     end)
 

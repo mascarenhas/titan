@@ -15,8 +15,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.23"
-driver.TITAN_VER_SUFFIX = "_0_23"
+driver.TITAN_VER = "0.24"
+driver.TITAN_VER_SUFFIX = "_0_24"
 driver.LUA_VERSION = "5.5"
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
@@ -199,15 +199,8 @@ driver.EXTRA_CFLAGS, cflags_error =
     parse_extra_flags("TITAN_EXTRA_CFLAGS")
 driver.EXTRA_LDFLAGS, ldflags_error =
     parse_extra_flags("TITAN_EXTRA_LDFLAGS")
-local formatter_words, formatter_error =
-    cdriver.split_shell_words(driver.CLANG_FORMAT)
-if not formatter_words then
-    formatter_error = "invalid CLANG_FORMAT: " .. formatter_error
-elseif #formatter_words == 0 then
-    formatter_error = "CLANG_FORMAT command is empty"
-end
-driver.TOOLCHAIN_ERROR = driver.INSTALLATION_ERROR or formatter_error or
-    cppflags_error or cflags_error or ldflags_error
+driver.TOOLCHAIN_ERROR = driver.INSTALLATION_ERROR or cppflags_error or
+    cflags_error or ldflags_error
 driver.FOREIGN_C_CONFIGURATION_ID = 0
 
 function driver.foreign_include_dirs()
@@ -277,6 +270,7 @@ function driver.new_resolver_context(options)
         native_constraints = {},
         source_modules = {},
         probe_verbose = options.verbose == true,
+        pretty_print = options.pretty_print == true,
     }
 end
 
@@ -336,56 +330,62 @@ local function run_argv(argv, verbose)
     return os.execute(cmd)
 end
 
-function driver.format_generated_file(filename, verbose)
+function driver.format_generated_file(filename, verbose, pretty_print)
     local label = "generated file '" .. tostring(filename) .. "'"
-    local args, err = parsed_words(driver.CLANG_FORMAT, "CLANG_FORMAT")
-    if not args then
-        return nil, "failed to format " .. label .. ": " .. tostring(err)
-    end
-    if #args == 0 then
-        return nil, "failed to format " .. label ..
-            ": CLANG_FORMAT command is empty"
-    end
-    append_argv(args, {
-        "-i",
-        "--style={BasedOnStyle: LLVM, IndentWidth: 4, SortIncludes: false}",
-        "--",
-        filename,
-    })
-    local ok, term, code = run_argv(args, verbose)
-    if ok then
-        local contents, read_err = util.get_file_contents(filename)
-        if not contents then
-            return nil, "failed to normalize " .. label ..
-                " after clang-format: " .. tostring(read_err)
+    if pretty_print then
+        local args, err = parsed_words(driver.CLANG_FORMAT, "CLANG_FORMAT")
+        if not args then
+            return nil, "failed to format " .. label .. ": " .. tostring(err)
         end
-        -- clang-format owns all generated-C styling. Enforce only the
-        -- source-map invariant that its `#line` directive maps the immediately
-        -- following physical statement rather than a blank line.
-        local normalized = contents
-        local removed
-        repeat
-            normalized, removed = normalized:gsub(
-                "([ \t]*#line[^\n]*\n)[ \t]*\n", "%1")
-        until removed == 0
-        if normalized ~= contents then
-            local write_ok, write_err =
-                util.set_file_contents(filename, normalized)
-            if not write_ok then
-                return nil, "failed to normalize " .. label ..
-                    " after clang-format: " .. tostring(write_err)
+        if #args == 0 then
+            return nil, "failed to format " .. label ..
+                ": CLANG_FORMAT command is empty"
+        end
+        append_argv(args, {
+            "-i",
+            "--style={BasedOnStyle: LLVM, IndentWidth: 4, SortIncludes: false}",
+            "--",
+            filename,
+        })
+        local ok, term, code = run_argv(args, verbose)
+        if not ok then
+            local detail
+            if code ~= nil then
+                detail = " (" .. tostring(term) .. ", exit " ..
+                    tostring(code) .. ")"
+            else
+                detail = ": " .. tostring(term)
             end
+            return nil, "failed to format " .. label ..
+                " with clang-format" .. detail
         end
-        return true
     end
-    local detail
-    if code ~= nil then
-        detail = " (" .. tostring(term) .. ", exit " .. tostring(code) .. ")"
-    else
-        detail = ": " .. tostring(term)
+
+    local contents, read_err = util.get_file_contents(filename)
+    if not contents then
+        return nil, "failed to normalize " .. label ..
+            (pretty_print and " after clang-format" or "") ..
+            ": " .. tostring(read_err)
     end
-    return nil, "failed to format " .. label ..
-        " with clang-format" .. detail
+    -- Formatting is presentation-only. Always enforce the source-map
+    -- invariant that a `#line` directive maps the immediately following
+    -- physical statement rather than a blank line.
+    local normalized = contents
+    local removed
+    repeat
+        normalized, removed = normalized:gsub(
+            "([ \t]*#line[^\n]*\n)[ \t]*\n", "%1")
+    until removed == 0
+    if normalized ~= contents then
+        local write_ok, write_err =
+            util.set_file_contents(filename, normalized)
+        if not write_ok then
+            return nil, "failed to normalize " .. label ..
+                (pretty_print and " after clang-format" or "") ..
+                ": " .. tostring(write_err)
+        end
+    end
+    return true
 end
 
 local function compiler_argv(include_extra_compile_flags)
@@ -835,7 +835,217 @@ local function validate_name_list(names, expected_length)
     return true
 end
 
-local function validate_callable_descriptor(callable, owner, kind, seen)
+local function generic_scope_component(value)
+    if value == false then return "-" end
+    if type(value) ~= "string" then return nil end
+    return #value .. ":" .. value
+end
+
+local function generic_scope_key(scope)
+    if type(scope) ~= "table" or scope._tag ~= "Type.GenericScope" then
+        return nil
+    end
+    local components = {
+        generic_scope_component(scope.modname),
+        generic_scope_component(scope.owner_fqtn),
+        generic_scope_component(scope.callable_name),
+        generic_scope_component(scope.role),
+        generic_scope_component(scope.declaration_kind),
+    }
+    for _, component in ipairs(components) do
+        if component == nil then return nil end
+    end
+    return table.concat(components, "|")
+end
+
+local function copy_scope_bindings(bindings)
+    local copy = {}
+    for key, binding in pairs(bindings or {}) do copy[key] = binding end
+    return copy
+end
+
+local function validate_generic_scope(scope, expected)
+    local key = generic_scope_key(scope)
+    if not key
+       or not staticmetadata.valid_module_name(scope.modname)
+       or (scope.owner_fqtn ~= false
+           and not valid_qualified_nominal_name(scope.owner_fqtn))
+       or (scope.callable_name ~= false
+           and not valid_source_identifier(scope.callable_name))
+       or not valid_source_identifier(scope.role)
+       or not valid_source_identifier(scope.declaration_kind) then
+        return nil, "generic scope has an invalid schema"
+    end
+    if expected and
+       (scope.modname ~= expected.modname
+        or scope.owner_fqtn ~= expected.owner_fqtn
+        or scope.callable_name ~= expected.callable_name
+        or scope.role ~= expected.role
+        or scope.declaration_kind ~= expected.declaration_kind) then
+        return nil, "generic scope does not match its declaration"
+    end
+    return key
+end
+
+local function typeparameter_lists_alpha_equal(left, right)
+    local left_length = dense_plain_list_length(left)
+    local right_length = dense_plain_list_length(right)
+    if not left_length or left_length ~= right_length then return false end
+    for index = 1, left_length do
+        if not types.alpha_equals(left[index], right[index]) then
+            return false
+        end
+    end
+    return true
+end
+
+local function value_context(context, scopes)
+    return {
+        kind = "value",
+        scopes = scopes or (context and context.scopes) or {},
+        validation = context and context.validation,
+    }
+end
+
+local function validation_context_key(context)
+    local scope_keys = {}
+    for key, binding in pairs(context and context.scopes or {}) do
+        scope_keys[#scope_keys + 1] = key .. "@" ..
+            tostring(binding.typeparams)
+    end
+    table.sort(scope_keys, util.bytewise_less)
+    return tostring(context and context.kind or "value") .. "\0" ..
+        table.concat(scope_keys, "\0")
+end
+
+local function mark_validation_seen(seen, typ, context)
+    local contexts = seen[typ]
+    local key = validation_context_key(context)
+    if contexts and contexts[key] then return true end
+    if not contexts then
+        contexts = {}
+        seen[typ] = contexts
+    end
+    contexts[key] = true
+    return false
+end
+
+local function validate_generic_binders(
+        scope, typeparams, expected, context, seen)
+    local count = dense_plain_list_length(typeparams)
+    if not count then
+        return nil, "generic binder list is not dense"
+    elseif scope == false then
+        if count ~= 0 then
+            return nil, "generic binder list has no scope"
+        end
+        return (context and context.scopes) or {}
+    elseif count == 0 then
+        return nil, "generic scope has an empty binder list"
+    end
+
+    local key, scope_error = validate_generic_scope(scope, expected)
+    if not key then return nil, scope_error end
+    local scopes = copy_scope_bindings(context and context.scopes)
+    if scopes[key] then
+        return nil, "generic scope is bound more than once"
+    end
+
+    local names = {}
+    for _, binding in pairs(context and context.scopes or {}) do
+        for _, typeparam in ipairs(binding.typeparams) do
+            names[typeparam.name] = true
+        end
+    end
+    for index = 1, count do
+        local typeparam = typeparams[index]
+        if type(typeparam) ~= "table"
+           or typeparam._tag ~= "Type.TypeParameter"
+           or not valid_source_identifier(typeparam.name)
+           or names[typeparam.name]
+           or (typeparam.constraint ~= false
+               and type(typeparam.constraint) ~= "table") then
+            return nil, "generic binder " .. index .. " has an invalid schema"
+        end
+        names[typeparam.name] = true
+    end
+    scopes[key] = { scope = scope, typeparams = typeparams }
+    local validation = context and context.validation
+    if validation then
+        local previous = validation.scope_bindings[key]
+        local same_ok, same = true, true
+        if previous then
+            same_ok, same = pcall(
+                typeparameter_lists_alpha_equal, previous, typeparams)
+        end
+        if not same_ok or not same then
+            return nil, "generic scope has conflicting binder declarations"
+        end
+        validation.scope_bindings[key] = previous or typeparams
+    end
+
+    for index = 1, count do
+        local constraint = typeparams[index].constraint
+        if constraint ~= false then
+            if constraint._tag ~= "Type.Nominal" then
+                return nil, "generic binder constraint is not an Interface application"
+            end
+            local valid, constraint_error = validate_interface_type(
+                constraint, value_context(context, scopes), seen)
+            if not valid then return nil, constraint_error end
+            local validation = context and context.validation
+            local owner = validation and validation.owners[constraint.fqtn]
+            if owner and owner._tag ~= "Type.Interface" then
+                return nil, "generic binder constraint does not name an Interface"
+            end
+        end
+    end
+    return scopes
+end
+
+local function validate_parameter_descriptor(parameter, context, seen)
+    local key, scope_error = validate_generic_scope(parameter.scope)
+    if not key then return nil, scope_error end
+    local binding = context and context.scopes and context.scopes[key]
+    if not binding
+       or not types.same_generic_scope(parameter.scope, binding.scope) then
+        return nil, "generic Parameter has a free scope reference"
+    end
+    if type(parameter.index) ~= "number"
+       or math.type(parameter.index) ~= "integer"
+       or parameter.index < 1
+       or parameter.index > #binding.typeparams then
+        return nil, "generic Parameter has an invalid binder index"
+    end
+    local typeparam = binding.typeparams[parameter.index]
+    if not valid_source_identifier(parameter.diagnostic_name)
+       or parameter.diagnostic_name ~= typeparam.name then
+        return nil, "generic Parameter has a noncanonical diagnostic name"
+    end
+
+    if typeparam.constraint == false then
+        if parameter.erased_constraint ~= false then
+            return nil, "generic Parameter has a noncanonical erased constraint"
+        end
+        return true
+    elseif type(parameter.erased_constraint) ~= "table"
+       or parameter.erased_constraint._tag ~= "Type.Nominal"
+       or dense_plain_list_length(parameter.erased_constraint.args) == nil then
+        return nil, "generic Parameter has a noncanonical erased constraint"
+    end
+
+    local erased_ok, expected = pcall(
+        types.erase_constraint, typeparam.constraint)
+    if not erased_ok or not types.alpha_equals(parameter.erased_constraint, expected) then
+        return nil, "generic Parameter has a noncanonical erased constraint"
+    end
+    local erased_context = value_context(context, {})
+    erased_context.kind = "erased-constraint"
+    return validate_interface_type(
+        parameter.erased_constraint, erased_context, seen)
+end
+
+local function validate_callable_descriptor(callable, owner, kind, seen, context)
     if type(callable) ~= "table"
        or callable._tag ~= kind
        or callable.fqtn ~= owner.name
@@ -847,30 +1057,47 @@ local function validate_callable_descriptor(callable, owner, kind, seen)
            callable.paramnames, #callable.params) then
         return nil, "callable member has an invalid schema"
     end
+
+    local role = kind == "Type.Method" and "method" or "static"
+    local scopes, generic_error = validate_generic_binders(
+        callable.scope, callable.typeparams, {
+            modname = context.validation.modname,
+            owner_fqtn = owner.name,
+            callable_name = callable.name,
+            role = role,
+            declaration_kind = role,
+        }, context, seen)
+    if not scopes then return nil, generic_error end
+    local nested = value_context(context, scopes)
+
     if callable.varargtype ~= false then
         local ok, err = validate_interface_type(
-            callable.varargtype, { kind = "value" }, seen)
+            callable.varargtype, nested, seen)
         if not ok then return nil, err end
+        if not types.valid_varg_element(callable.varargtype) then
+            return nil, "variadic parameter has a noncanonical element type"
+        end
     end
     if callable.flexrettype ~= false then
         local ok, err = validate_interface_type(
-            callable.flexrettype, { kind = "value" }, seen)
+            callable.flexrettype, nested, seen)
         if not ok then return nil, err end
+        if not types.valid_varg_element(callable.flexrettype) then
+            return nil, "flexible return has a noncanonical element type"
+        end
     end
     for _, param in ipairs(callable.params) do
-        local ok, err =
-            validate_interface_type(param, { kind = "value" }, seen)
+        local ok, err = validate_interface_type(param, nested, seen)
         if not ok then return nil, err end
     end
     for _, rettype in ipairs(callable.rettypes) do
-        local ok, err =
-            validate_interface_type(rettype, { kind = "value" }, seen)
+        local ok, err = validate_interface_type(rettype, nested, seen)
         if not ok then return nil, err end
     end
     return true
 end
 
-local function validate_nominal_member_maps(owner, seen)
+local function validate_nominal_member_maps(owner, seen, context)
     if type(owner.functions) ~= "table"
        or type(owner.methods) ~= "table" then
         return nil, "nominal member maps have an invalid schema"
@@ -881,7 +1108,7 @@ local function validate_nominal_member_maps(owner, seen)
             return nil, "nominal function map has an invalid entry"
         end
         local ok, err = validate_callable_descriptor(
-            fn, owner, "Type.StaticMethod", seen)
+            fn, owner, "Type.StaticMethod", seen, context)
         if not ok then return nil, err end
     end
     for name, method in pairs(owner.methods) do
@@ -893,8 +1120,32 @@ local function validate_nominal_member_maps(owner, seen)
                 name .. "'"
         end
         local ok, err = validate_callable_descriptor(
-            method, owner, "Type.Method", seen)
+            method, owner, "Type.Method", seen, context)
         if not ok then return nil, err end
+    end
+    return true
+end
+
+local function canonical_owner_application(nominal, owner)
+    if type(nominal) ~= "table" or nominal._tag ~= "Type.Nominal"
+       or nominal.fqtn ~= owner.name then
+        return false
+    end
+    local argument_count = dense_plain_list_length(nominal.args)
+    local parameter_count = dense_plain_list_length(owner.typeparams)
+    if not argument_count or not parameter_count
+       or argument_count ~= parameter_count then
+        return false
+    end
+    if parameter_count == 0 then return true end
+    for index = 1, parameter_count do
+        local argument = nominal.args[index]
+        if type(argument) ~= "table"
+           or argument._tag ~= "Type.Parameter"
+           or argument.index ~= index
+           or not types.same_generic_scope(argument.scope, owner.scope) then
+            return false
+        end
     end
     return true
 end
@@ -908,6 +1159,23 @@ local function validate_record_interface(record, context, seen)
        or record.nfields < 0 then
         return nil, "record has a noncanonical owner or field count"
     end
+    local scopes, generic_error = validate_generic_binders(
+        record.scope, record.typeparams, {
+            modname = context.modname,
+            owner_fqtn = record.name,
+            callable_name = false,
+            role = "owner",
+            declaration_kind = "record",
+        }, context, seen)
+    if not scopes then return nil, generic_error end
+    local owner_context = {
+        kind = context.kind,
+        modname = context.modname,
+        name = context.name,
+        scopes = scopes,
+        validation = context.validation,
+    }
+
     local nfields = dense_plain_list_length(record.fields)
     if not nfields then return nil, "record field list is not dense" end
     local names, indexes = {}, {}
@@ -926,11 +1194,12 @@ local function validate_record_interface(record, context, seen)
         end
         names[field.name], indexes[field.index] = true, true
         previous_index = field.index
-        local ok, err =
-            validate_interface_type(field.type, { kind = "value" }, seen)
+        local ok, err = validate_interface_type(
+            field.type, value_context(owner_context), seen)
         if not ok then return nil, err end
     end
-    local ok, err = validate_nominal_member_maps(record, seen)
+    local ok, err = validate_nominal_member_maps(
+        record, seen, owner_context)
     if not ok then return nil, err end
     for name in pairs(record.functions) do
         if names[name] then
@@ -951,14 +1220,16 @@ local function validate_record_interface(record, context, seen)
     end
     if constructor then
         if record.nfields ~= nfields
+           or constructor.scope ~= false
+           or #constructor.typeparams ~= 0
            or constructor.varargtype ~= false
            or constructor.flexrettype ~= false
            or type(constructor.paramnames) ~= "table"
            or #constructor.paramnames ~= nfields
            or #constructor.params ~= nfields
            or #constructor.rettypes ~= 1
-           or constructor.rettypes[1]._tag ~= "Type.Nominal"
-           or constructor.rettypes[1].fqtn ~= record.name then
+           or not canonical_owner_application(
+               constructor.rettypes[1], record) then
             return nil, "record constructor does not match its owner"
         end
         for index, field in ipairs(record.fields) do
@@ -981,6 +1252,23 @@ local function validate_union_interface(union, context, seen)
        or union.nvariants <= 0 then
         return nil, "union has a noncanonical owner or variant count"
     end
+    local scopes, generic_error = validate_generic_binders(
+        union.scope, union.typeparams, {
+            modname = context.modname,
+            owner_fqtn = union.name,
+            callable_name = false,
+            role = "owner",
+            declaration_kind = "union",
+        }, context, seen)
+    if not scopes then return nil, generic_error end
+    local owner_context = {
+        kind = context.kind,
+        modname = context.modname,
+        name = context.name,
+        scopes = scopes,
+        validation = context.validation,
+    }
+
     local npublic = dense_array_length(union.variants)
     if not npublic then return nil, "union variant list is not dense" end
 
@@ -1006,6 +1294,8 @@ local function validate_union_interface(union, context, seen)
         local ok, err = validate_interface_type(variant, {
             kind = "union-variant",
             owner = union,
+            scopes = owner_context.scopes,
+            validation = context.validation,
         }, seen)
         if not ok then return nil, err end
     end
@@ -1017,7 +1307,8 @@ local function validate_union_interface(union, context, seen)
         end
     end
 
-    local ok, err = validate_nominal_member_maps(union, seen)
+    local ok, err = validate_nominal_member_maps(
+        union, seen, owner_context)
     if not ok then return nil, err end
     for _, variant in ipairs(union.variants) do
         if union.methods[variant.name] then
@@ -1027,13 +1318,15 @@ local function validate_union_interface(union, context, seen)
         local constructor = union.functions[variant.name]
         local payload_params = variant.payload == false and 0 or 1
         if not constructor
+           or constructor.scope ~= false
+           or #constructor.typeparams ~= 0
            or constructor.varargtype ~= false
            or constructor.flexrettype ~= false
            or constructor.paramnames ~= false
            or #constructor.params ~= payload_params
            or #constructor.rettypes ~= 1
-           or constructor.rettypes[1]._tag ~= "Type.Nominal"
-           or constructor.rettypes[1].fqtn ~= union.name
+           or not canonical_owner_application(
+               constructor.rettypes[1], union)
            or (variant.payload ~= false
                and not types.equals(
                    constructor.params[1], variant.payload)) then
@@ -1058,14 +1351,204 @@ local function validate_declared_interface(interface, context, seen)
             tostring(canonical_err)
     end
 
+    local scopes, generic_error = validate_generic_binders(
+        interface.scope, interface.typeparams, {
+            modname = context.modname,
+            owner_fqtn = interface.name,
+            callable_name = false,
+            role = "owner",
+            declaration_kind = "interface",
+        }, context, seen)
+    if not scopes then return nil, generic_error end
+    local owner_context = {
+        kind = context.kind,
+        modname = context.modname,
+        name = context.name,
+        scopes = scopes,
+        validation = context.validation,
+    }
+
     for _, method in ipairs(interface.methods) do
         if type(method.paramnames) ~= "table" then
             return nil,
                 "interface method parameter names have an invalid schema"
         end
         local ok, err = validate_callable_descriptor(
-            method, interface, "Type.Method", seen)
+            method, interface, "Type.Method", seen, owner_context)
         if not ok then return nil, err end
+    end
+    return true
+end
+
+local function validate_function_scheme(scheme, context, seen)
+    if not context or context.kind ~= "module-member"
+       or type(scheme.signature) ~= "table"
+       or scheme.signature._tag ~= "Type.Function" then
+        return nil, "FunctionScheme is not a module function declaration"
+    end
+    local scopes, generic_error = validate_generic_binders(
+        scheme.scope, scheme.typeparams, {
+            modname = context.modname,
+            owner_fqtn = false,
+            callable_name = context.name,
+            role = "function",
+            declaration_kind = "function",
+        }, context, seen)
+    if not scopes then return nil, generic_error end
+    return validate_interface_type(
+        scheme.signature, value_context(context, scopes), seen)
+end
+
+local function validate_generic_alias(alias, context, seen)
+    if not context or context.kind ~= "generic-alias-type-member"
+       or alias.module ~= context.modname
+       or alias.name ~= context.name
+       or alias.locality ~= false
+       or not valid_qualified_nominal_name(alias.target_owner_fqtn)
+       or (alias.target_alias_fqtn ~= false
+           and not valid_qualified_nominal_name(alias.target_alias_fqtn))
+       or type(alias.target_scope) ~= "table"
+       or alias.target_scope._tag ~= "Type.GenericScope"
+       or (alias.target_scope.declaration_kind ~= "record"
+           and alias.target_scope.declaration_kind ~= "union"
+           and alias.target_scope.declaration_kind ~= "interface") then
+        return nil, "GenericAlias has an invalid schema"
+    end
+    local target_module = alias.target_owner_fqtn:match("^(.*)%.[^.]+$")
+    local scopes, generic_error = validate_generic_binders(
+        alias.target_scope, alias.typeparams, {
+            modname = target_module,
+            owner_fqtn = alias.target_owner_fqtn,
+            callable_name = false,
+            role = "owner",
+            declaration_kind = alias.target_scope.declaration_kind,
+        }, context, seen)
+    if not scopes then return nil, generic_error end
+
+    local owner = context.validation.owners[alias.target_owner_fqtn]
+    if owner then
+        if owner._tag ~= "Type.Record" and owner._tag ~= "Type.Union"
+           and owner._tag ~= "Type.Interface" then
+            return nil, "GenericAlias target is not a nominal owner"
+        elseif not types.same_generic_scope(
+                alias.target_scope, owner.scope)
+           or not typeparameter_lists_alpha_equal(
+                alias.typeparams, owner.typeparams) then
+            return nil, "GenericAlias projection does not match its target owner"
+        end
+    elseif target_module == context.modname then
+        return nil, "GenericAlias target owner is missing from its module"
+    end
+    return true
+end
+
+local function validate_local_alias_projection(
+        alias, validation, resolving, validated)
+    local fqtn = alias.module .. "." .. alias.name
+    if validated[fqtn] then return true end
+    if resolving[fqtn] then
+        return nil, "GenericAlias chain is cyclic at '" .. fqtn .. "'"
+    end
+    resolving[fqtn] = true
+
+    if alias.target_alias_fqtn ~= false then
+        local target_module =
+            alias.target_alias_fqtn:match("^(.*)%.[^.]+$")
+        if target_module == validation.modname then
+            local target = validation.aliases[alias.target_alias_fqtn]
+            if not target then
+                return nil, "GenericAlias target alias is missing from its module"
+            end
+            local ok, err = validate_local_alias_projection(
+                target, validation, resolving, validated)
+            if not ok then return nil, err end
+            if target.target_owner_fqtn ~= alias.target_owner_fqtn
+               or not types.same_generic_scope(
+                    target.target_scope, alias.target_scope)
+               or not typeparameter_lists_alpha_equal(
+                    target.typeparams, alias.typeparams) then
+                return nil,
+                    "GenericAlias projection does not match its target alias"
+            end
+        end
+    end
+
+    resolving[fqtn] = nil
+    validated[fqtn] = true
+    return true
+end
+
+function driver._metadata_generic_constraint_satisfied(
+        argument, constraint, validation)
+    if argument._tag == "Type.Parameter" then
+        local surface = types.parameter_surface_constraint(
+            argument, validation.scope_bindings)
+        return surface ~= nil and surface ~= false
+            and types.equals(surface, constraint)
+    elseif argument._tag ~= "Type.Nominal" then
+        return false
+    elseif types.equals(argument, constraint) then
+        return true
+    end
+
+    local concrete = validation.owners[argument.fqtn]
+    local interface = validation.owners[constraint.fqtn]
+    if not concrete or not interface then
+        return nil -- an external canonical owner is recovered by the checker
+    elseif (concrete._tag ~= "Type.Record"
+            and concrete._tag ~= "Type.Union")
+       or interface._tag ~= "Type.Interface" then
+        return false
+    end
+
+    local concrete_ok, concrete_view = true, concrete
+    if concrete.scope ~= false then
+        concrete_ok, concrete_view = pcall(
+            types.substitute, concrete, concrete.scope, argument.args or {})
+    end
+    local interface_ok, interface_view = true, interface
+    if interface.scope ~= false then
+        interface_ok, interface_view = pcall(
+            types.substitute, interface, interface.scope,
+            constraint.args or {})
+    end
+    if not concrete_ok or not interface_ok then return false end
+    local implementation = types.generic_interface_implementation(
+        concrete_view, interface_view, {
+            visibility = validation.modname,
+        })
+    return implementation ~= false
+end
+
+function driver._validate_metadata_generic_application(
+        application, validation)
+    local nominal, owner = application.nominal, application.owner
+    local reconstructed, reconstruction_error = pcall(
+        types.substitute, owner, owner.scope, nominal.args or {})
+    if not reconstructed then
+        return nil, "generic application '" .. types.tostring(nominal) ..
+            "' is not canonical: " .. tostring(reconstruction_error)
+    end
+
+    for index, typeparam in ipairs(owner.typeparams or {}) do
+        if typeparam.constraint ~= false then
+            local closed, constraint = pcall(
+                types.substitute, typeparam.constraint,
+                owner.scope, nominal.args or {})
+            if not closed then
+                return nil, "generic constraint " .. index ..
+                    " could not be reconstructed: " .. tostring(constraint)
+            end
+            local satisfied =
+                driver._metadata_generic_constraint_satisfied(
+                    nominal.args[index], constraint, validation)
+            if satisfied == false then
+                return nil, "type argument " .. index .. " ('" ..
+                    types.tostring(nominal.args[index]) ..
+                    "') does not satisfy constraint '" ..
+                    types.tostring(constraint) .. "'"
+            end
+        end
     end
     return true
 end
@@ -1093,7 +1576,21 @@ validate_interface_type = function(typ, context, seen)
             or context.kind ~= "interface-type-member") then
         return nil,
             "Type.Interface is only valid as its owning module type member"
-    elseif tag == "Type.Field" or tag == "Type.Method"
+    elseif tag == "Type.FunctionScheme"
+       and (not context or context.kind ~= "module-member") then
+        return nil,
+            "Type.FunctionScheme is only valid as a module function declaration"
+    elseif tag == "Type.GenericAlias"
+       and (not context
+            or context.kind ~= "generic-alias-type-member") then
+        return nil,
+            "Type.GenericAlias is only valid as a module type member"
+    elseif tag == "Type.Parameter" then
+        -- Parameter legality depends on the enclosing binder environment, so
+        -- check it before the shared-graph memo just like declaration wrappers.
+        return validate_parameter_descriptor(typ, context, seen)
+    elseif tag == "Type.GenericScope" or tag == "Type.TypeParameter"
+           or tag == "Type.Field" or tag == "Type.Method"
            or tag == "Type.StaticMethod"
            or tag == "Type.ModuleMember"
            or tag == "Type.ModuleVariable" then
@@ -1102,30 +1599,65 @@ validate_interface_type = function(typ, context, seen)
         -- descriptor legal in a value-facing position.
         return nil, tag .. " is not valid in a value-facing type graph"
     end
-    if seen[typ] then return true end
-    seen[typ] = true
+    if mark_validation_seen(seen, typ, context) then return true end
     if tag == "Type.Nil" or tag == "Type.Boolean"
        or tag == "Type.Integer" or tag == "Type.Float"
        or tag == "Type.String" or tag == "Type.Value" then
         return true
     elseif tag == "Type.Nominal" then
-        return valid_qualified_nominal_name(typ.fqtn)
-            or nil, "nominal type has an invalid qualified name"
+        local argument_count = dense_plain_list_length(typ.args)
+        if not valid_qualified_nominal_name(typ.fqtn) then
+            return nil, "nominal type has an invalid qualified name"
+        elseif not argument_count then
+            return nil, "nominal type argument list is not dense"
+        end
+        local validation = context and context.validation
+        local owner = validation and validation.owners[typ.fqtn]
+        if owner then
+            local parameter_count = dense_plain_list_length(owner.typeparams)
+            local expected_arguments = parameter_count
+            if not parameter_count or argument_count ~= expected_arguments then
+                return nil, "nominal type has the wrong generic arity"
+            end
+        end
+        for index, argument in ipairs(typ.args) do
+            local ok, err = validate_interface_type(
+                argument, value_context(context), seen)
+            if not ok then return nil, err end
+            if not types.transient_roundtrip(argument) then
+                return nil, "nominal type argument " .. index ..
+                    " has no sound transient round trip"
+            end
+        end
+        if owner and argument_count > 0 then
+            validation.applications[#validation.applications + 1] = {
+                nominal = typ,
+                owner = owner,
+            }
+        end
+        return true
     elseif tag == "Type.Array" then
-        return validate_interface_type(typ.elem, { kind = "value" }, seen)
+        return validate_interface_type(
+            typ.elem, value_context(context), seen)
     elseif tag == "Type.Map" then
-        local ok, err =
-            validate_interface_type(typ.keys, { kind = "value" }, seen)
+        if type(typ.keys) ~= "table" or type(typ.values) ~= "table"
+           or typ.keys._tag == "Type.Nil"
+           or typ.keys._tag == "Type.Option" then
+            return nil, "map type has a noncanonical key shape"
+        end
+        local ok, err = validate_interface_type(
+            typ.keys, value_context(context), seen)
         if not ok then return nil, err end
         return validate_interface_type(
-            typ.values, { kind = "value" }, seen)
+            typ.values, value_context(context), seen)
     elseif tag == "Type.Option" then
         if type(typ.base) ~= "table"
            or typ.base._tag == "Type.Option"
            or typ.base._tag == "Type.Value" then
             return nil, "option type has an invalid schema"
         end
-        return validate_interface_type(typ.base, { kind = "value" }, seen)
+        return validate_interface_type(
+            typ.base, value_context(context), seen)
     elseif tag == "Type.Function" then
         local nparams = dense_plain_list_length(typ.params)
         local nreturns = dense_plain_list_length(typ.rettypes)
@@ -1133,26 +1665,36 @@ validate_interface_type = function(typ, context, seen)
            or typ.vararg ~= false then
             return nil, "function type has an invalid schema"
         end
+        local nested = value_context(context)
         for _, param in ipairs(typ.params) do
-            local ok, err =
-                validate_interface_type(param, { kind = "value" }, seen)
+            local ok, err = validate_interface_type(param, nested, seen)
             if not ok then return nil, err end
         end
         for _, rettype in ipairs(typ.rettypes) do
-            local ok, err =
-                validate_interface_type(rettype, { kind = "value" }, seen)
+            local ok, err = validate_interface_type(rettype, nested, seen)
             if not ok then return nil, err end
         end
         if typ.varargtype ~= false then
             local ok, err = validate_interface_type(
-                typ.varargtype, { kind = "value" }, seen)
+                typ.varargtype, nested, seen)
             if not ok then return nil, err end
+            if not types.valid_varg_element(typ.varargtype) then
+                return nil, "function variadic parameter has a noncanonical element type"
+            end
         end
         if typ.flexrettype ~= false then
-            return validate_interface_type(
-                typ.flexrettype, { kind = "value" }, seen)
+            local ok, err = validate_interface_type(
+                typ.flexrettype, nested, seen)
+            if not ok then return nil, err end
+            if not types.valid_varg_element(typ.flexrettype) then
+                return nil, "function flexible return has a noncanonical element type"
+            end
         end
         return true
+    elseif tag == "Type.FunctionScheme" then
+        return validate_function_scheme(typ, context, seen)
+    elseif tag == "Type.GenericAlias" then
+        return validate_generic_alias(typ, context, seen)
     elseif tag == "Type.Record" then
         return validate_record_interface(typ, context, seen)
     elseif tag == "Type.Union" then
@@ -1162,7 +1704,7 @@ validate_interface_type = function(typ, context, seen)
     elseif tag == "Type.Variant" then
         if typ.payload ~= false then
             return validate_interface_type(
-                typ.payload, { kind = "value" }, seen)
+                typ.payload, value_context(context), seen)
         end
         return true
     end
@@ -1217,6 +1759,38 @@ function driver.validate_module_interface(modtype, modname)
         return nil, "module member list is not dense"
     end
 
+    -- Index this module's public nominal and alias declarations before walking
+    -- signatures. Generic constraints and applications may reference later
+    -- declarations, just as the source checker reserves every owner first.
+    local validation = {
+        modname = modname,
+        owners = {},
+        aliases = {},
+        applications = {},
+        scope_bindings = {},
+    }
+    for index = 1, maximum_index do
+        local member = modtype.members[index]
+        local typ = type(member) == "table" and member.type or nil
+        if type(typ) == "table"
+           and (typ._tag == "Type.Record" or typ._tag == "Type.Union")
+           and type(member.name) == "string"
+           and typ.name == modname .. "." .. member.name then
+            validation.owners[typ.name] = typ
+        end
+    end
+    for name, typ in pairs(modtype.type_members) do
+        if type(name) == "string" and type(typ) == "table" then
+            local fqtn = modname .. "." .. name
+            if typ._tag == "Type.Interface" and typ.name == fqtn then
+                validation.owners[fqtn] = typ
+            elseif typ._tag == "Type.GenericAlias"
+               and typ.module == modname and typ.name == name then
+                validation.aliases[fqtn] = typ
+            end
+        end
+    end
+
     local names = {}
     for index = 1, maximum_index do
         local member = modtype.members[index]
@@ -1234,9 +1808,13 @@ function driver.validate_module_interface(modtype, modname)
                 member.name .. "'"
         end
         if member._tag == "Type.ModuleMember" then
-            if member.type._tag == "Type.Function" then
+            local signature = member.type
+            if signature._tag == "Type.FunctionScheme" then
+                signature = signature.signature
+            end
+            if signature._tag == "Type.Function" then
                 if not validate_name_list(
-                        member.paramnames, #member.type.params) then
+                        member.paramnames, #signature.params) then
                     return nil, "module function '" .. member.name ..
                         "' has invalid parameter-name metadata"
                 end
@@ -1255,6 +1833,8 @@ function driver.validate_module_interface(modtype, modname)
                 and "module-member" or "value",
             modname = modname,
             name = member.name,
+            scopes = {},
+            validation = validation,
         }, {})
         if not valid_type then
             return nil, "module member '" .. member.name ..
@@ -1262,6 +1842,7 @@ function driver.validate_module_interface(modtype, modname)
         end
         if member._tag == "Type.ModuleMember"
            and member.type._tag ~= "Type.Function"
+           and member.type._tag ~= "Type.FunctionScheme"
            and member.type._tag ~= "Type.Record"
            and member.type._tag ~= "Type.Union" then
             return nil, "module member '" .. member.name ..
@@ -1278,20 +1859,41 @@ function driver.validate_module_interface(modtype, modname)
         if not valid_source_identifier(name) or type(member) ~= "table" or
            type(member._tag) ~= "string" then
             return nil, "module type-member table has an invalid schema"
+        elseif member._tag == "Type.GenericAlias"
+           and (member.module ~= modname or member.name ~= name) then
+            return nil, "GenericAlias is published under a noncanonical name"
         end
-        local context = member._tag == "Type.Interface"
-            and {
-                kind = "interface-type-member",
-                modname = modname,
-                name = name,
-            }
-            or { kind = "value" }
+        local kind = member._tag == "Type.Interface"
+            and "interface-type-member"
+            or member._tag == "Type.GenericAlias"
+                and "generic-alias-type-member"
+                or "value"
+        local context = {
+            kind = kind,
+            modname = modname,
+            name = name,
+            scopes = {},
+            validation = validation,
+        }
         local valid_type, type_err =
             validate_interface_type(member, context, {})
         if not valid_type then
             return nil, "module type member '" .. name ..
                 "' has an invalid type graph: " .. type_err
         end
+    end
+
+    local resolving, validated = {}, {}
+    for _, alias in pairs(validation.aliases) do
+        local ok, alias_error = validate_local_alias_projection(
+            alias, validation, resolving, validated)
+        if not ok then return nil, alias_error end
+    end
+    for _, application in ipairs(validation.applications) do
+        local ok, application_error =
+            driver._validate_metadata_generic_application(
+                application, validation)
+        if not ok then return nil, application_error end
     end
 
     -- This is also the canonical recursive schema walk for all serializable
@@ -1739,7 +2341,8 @@ function driver.defaultloader(static_deps, options)
             local formatted, format_err
             if wrote then
                 formatted, format_err = driver.format_generated_file(
-                    checking_foreign_header, context.probe_verbose)
+                    checking_foreign_header, context.probe_verbose,
+                    context.pretty_print)
             end
             if not wrote or not formatted then
                 os.remove(checking_foreign_header)
@@ -2038,13 +2641,15 @@ function driver.finalize_resolver_context(context)
         table.sort(dynamic_order, util.bytewise_less)
         for _, name in ipairs(dynamic_order) do
             local mod = dynamic_names[name]
-            checker.register_module_interface(
-                name, mod.type, context.loader, {
-                    name = name,
-                    kind = "dynamic",
-                    type = mod.type,
-                    filename = mod.filename,
-                })
+            local registered, register_error =
+                checker.register_module_interface(
+                    name, mod.type, context.loader, {
+                        name = name,
+                        kind = "dynamic",
+                        type = mod.type,
+                        filename = mod.filename,
+                    })
+            if not registered then return nil, {register_error} end
         end
     end
 
@@ -2062,15 +2667,17 @@ function driver.finalize_resolver_context(context)
             end
             for _, name in ipairs(key_order) do
                 local entry = provider.entries[name]
-                checker.register_module_interface(
-                    name, entry.type, context.loader, {
-                        name = name,
-                        kind = "static",
-                        type = entry.type,
-                        filename = provider.archive,
-                        static_archive = provider.archive,
-                        static_provider = provider,
-                    })
+                local registered, register_error =
+                    checker.register_module_interface(
+                        name, entry.type, context.loader, {
+                            name = name,
+                            kind = "static",
+                            type = entry.type,
+                            filename = provider.archive,
+                            static_archive = provider.archive,
+                            static_provider = provider,
+                        })
+                if not registered then return nil, {register_error} end
             end
         end
     end
@@ -2567,23 +3174,28 @@ function driver.ast_has_foreign_functions(ast)
     return false
 end
 
-function driver.plan_foreign_header(modname, ast, sourcef)
+function driver.plan_foreign_header(modname, ast, sourcef, defer_render)
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
     local headername = driver.foreign_header_filename(sourcef)
     local has_foreign = driver.ast_has_foreign_functions(ast)
+    if not has_foreign then ast._foreign_header_include_keys = nil end
     local absolute_header = headername
     if absolute_header:sub(1, 1) ~= "/" then
         absolute_header = normalize_absolute_path(
             lfs.currentdir() .. "/" .. absolute_header)
     end
     ast._foreign_header_output = has_foreign and absolute_header or nil
-    local contents = has_foreign and coder.generate_foreign_header(
-        modname, ast, { module = modname }) or nil
+    local contents
+    if has_foreign and not defer_render then
+        contents = coder.generate_foreign_header(
+            modname, ast, { module = modname })
+    end
     return {
         modname = modname,
         ast = ast,
         filename = headername,
         absolute = absolute_header,
+        has_foreign = has_foreign,
         contents = contents,
     }
 end
@@ -2603,7 +3215,7 @@ function driver.validate_foreign_header_plan(plan)
     return true
 end
 
-function driver.write_foreign_header_plan(plan, verbose)
+function driver.write_foreign_header_plan(plan, verbose, pretty_print)
     local ok, err = driver.validate_foreign_header_plan(plan)
     if not ok then return nil, err end
     local parent_ok, parent_err = ensure_output_parent(plan.filename)
@@ -2625,7 +3237,7 @@ function driver.write_foreign_header_plan(plan, verbose)
             return nil, write_err
         end
         local format_ok, format_err =
-            driver.format_generated_file(temporary, verbose)
+            driver.format_generated_file(temporary, verbose, pretty_print)
         if not format_ok then
             os.remove(temporary)
             return nil, format_err
@@ -2639,6 +3251,7 @@ function driver.write_foreign_header_plan(plan, verbose)
         local removed, remove_err = os.remove(plan.filename)
         if not removed then return nil, remove_err end
     end
+    plan.ast._foreign_header_contents = plan.contents
     plan.ast._foreign_header_prepared = true
     return true
 end
@@ -2651,7 +3264,7 @@ function driver.plan_foreign_headers(names, imported)
         local mod = assert(imported[name])
         if mod.ast and not mod.compiled then
             local plan = driver.plan_foreign_header(
-                name, mod.ast, mod.native_output or mod.filename)
+                name, mod.ast, mod.native_output or mod.filename, true)
             local previous = occupied[plan.absolute]
             if previous and previous ~= name then
                 return nil, "generated foreign-header path '" .. plan.filename
@@ -2672,13 +3285,13 @@ function driver.plan_foreign_headers(names, imported)
             if not node._ignore and node._tag == "Ast.TopLevelImport"
                and node._source_import then
                 local dependency = by_name[node.modname]
-                node._foreign_header = dependency and dependency.contents
+                node._foreign_header = dependency and dependency.has_foreign
                     and dependency.absolute or nil
             end
         end
     end
     for _, plan in ipairs(plans) do
-        if plan.contents then
+        if plan.has_foreign then
             plan.contents = coder.generate_foreign_header(
                 plan.modname, plan.ast, { module = plan.modname })
         end
@@ -2688,18 +3301,20 @@ function driver.plan_foreign_headers(names, imported)
     return plans
 end
 
-function driver.write_foreign_header_plans(plans, verbose)
+function driver.write_foreign_header_plans(plans, verbose, pretty_print)
     for _, plan in ipairs(plans or {}) do
-        local ok, err = driver.write_foreign_header_plan(plan, verbose)
+        local ok, err = driver.write_foreign_header_plan(
+            plan, verbose, pretty_print)
         if not ok then return nil, err end
     end
     return true
 end
 
-function driver.prepare_foreign_headers(names, imported, verbose)
+function driver.prepare_foreign_headers(
+        names, imported, verbose, pretty_print)
     local plans, err = driver.plan_foreign_headers(names, imported)
     if not plans then return nil, err end
-    return driver.write_foreign_header_plans(plans, verbose)
+    return driver.write_foreign_header_plans(plans, verbose, pretty_print)
 end
 
 function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
@@ -2715,8 +3330,8 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
     local libname = sourcef:gsub("[.]titan$", "") .. ".o"
     if not ast._foreign_header_prepared then
         local header_plan = driver.plan_foreign_header(modname, ast, sourcef)
-        local header_ok, header_err =
-            driver.write_foreign_header_plan(header_plan, verbose)
+        local header_ok, header_err = driver.write_foreign_header_plan(
+            header_plan, verbose, options and options.pretty_print)
         if not header_ok then return nil, header_err end
     end
     local code, native_references =
@@ -2728,8 +3343,8 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
     os.remove(libname)
     local ok, err = util.set_file_contents(filename, code)
     if not ok then return nil, err end
-    local format_ok, format_err =
-        driver.format_generated_file(filename, verbose)
+    local format_ok, format_err = driver.format_generated_file(
+        filename, verbose, options and options.pretty_print)
     if not format_ok then return nil, format_err end
     local args, flags_err = driver.generated_compile_prefix()
     if not args then return nil, flags_err end
@@ -2976,8 +3591,8 @@ local function write_entrypoint(modname, entrypoint_c, program_name,
     })
     local wrote, write_err = util.set_file_contents(entrypoint_c, contents)
     if not wrote then return nil, write_err end
-    local formatted, format_err =
-        driver.format_generated_file(entrypoint_c, verbose)
+    local formatted, format_err = driver.format_generated_file(
+        entrypoint_c, verbose, options.pretty_print)
     if not formatted then return nil, format_err end
     return entrypoint_c
 end
@@ -4872,7 +5487,8 @@ end
 -- executable archive extraction (not whole-archive force loading).
 function driver.run_standalone_archive_probe(
         entries, module_names, libnames, static_archives,
-        link, verbose, extra_objects, validate_titan_support)
+        link, verbose, extra_objects, validate_titan_support, options)
+    options = options or {}
     if #module_names == 0 and not validate_titan_support then return true end
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
@@ -4894,8 +5510,8 @@ function driver.run_standalone_archive_probe(
         cleanup()
         return nil, write_err
     end
-    local formatted, format_err =
-        driver.format_generated_file(source, verbose)
+    local formatted, format_err = driver.format_generated_file(
+        source, verbose, options.pretty_print)
     if not formatted then
         cleanup()
         return nil, format_err

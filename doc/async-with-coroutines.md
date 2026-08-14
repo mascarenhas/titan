@@ -611,9 +611,9 @@ Build `titan/coroutine.titan` as the ordinary qualified logical Titan module
 `titan.coroutine`. The combined standard binary exports `titan_coroutine_init`,
 `titan_coroutine_abi`, `titan_coroutine_types`, and
 `luaopen_titan_coroutine`. Install the paired physical standard provider as
-`<root>/lib/titan/0.23/{titan.so,titan.a}` and the generated logical shim as
+`<root>/lib/titan/0.24/{titan.so,titan.a}` and the generated logical shim as
 `<root>/share/lua/5.5/titan/coroutine.lua`. Titan's configured module path
-contains `<root>/lib/titan/0.23`; the parser desugars `import "coroutine"` to
+contains `<root>/lib/titan/0.24`; the parser desugars `import "coroutine"` to
 that qualified identity and prefix lookup claims it from the preferred native
 form.
 `require "titan.coroutine"` uses the shim to promote/map that provider and

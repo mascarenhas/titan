@@ -139,8 +139,9 @@ omitted from the field lists for brevity.
 | Constructor | Fields | Produced by |
 | --- | --- | --- |
 | `TypeNil`, `TypeBoolean`, `TypeInteger`, `TypeFloat`, `TypeString`, `TypeValue` | — | the primitive type keywords |
-| `TypeName` | `name` | a bare name in type position (records) |
-| `TypeQualName` | `module`, `name` | `mod.Name` (both strings) |
+| `TypeParam` | `name`, `constraint` | declaration binder syntax; `constraint` is a named Interface type or `false` |
+| `TypeName` | `name`, `typeargs` | a bare or applied name in type position |
+| `TypeQualName` | `module`, `name`, `typeargs` | `mod.Name` or `mod.Name<...>` |
 | `TypeCPointer` | `subtype`, `const` | `*c.T` or `const *c.T`; `const` records the written pointee qualifier |
 | `TypeCArray` | `base`, `length` | fixed C array annotation `c.T[N]`; `length` is an integer expression node |
 | `TypeCOwned` | `subtype`, `count` | `owned *c.T` when `count == false`, or `owned c.T[]` when true |
@@ -153,14 +154,14 @@ omitted from the field lists for brevity.
 
 | Constructor | Fields | Notes |
 | --- | --- | --- |
-| `TopLevelFunc` | `islocal`, `name`, `params`, `rettypes`, `flexrettype`, `block` | fixed result list plus a separate optional output tail |
-| `TopLevelMethod` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block` | `function Class:name(...)`; parser decorates `islocal` |
-| `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block` | `function Class.name(...)`, synthesized record `Class.new`, and synthesized union variant constructors; parser decorates `islocal` and marks synthesized forms |
+| `TopLevelFunc` | `islocal`, `name`, `params`, `rettypes`, `flexrettype`, `block`, `typeparams` | fixed result list plus a separate optional output tail |
+| `TopLevelMethod` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block`, `typeparams` | `function Class:name(...)`; parser decorates `islocal` |
+| `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block`, `typeparams` | `function Class.name(...)`, synthesized record `Class.new`, and synthesized union variant constructors; parser decorates `islocal` and marks synthesized forms |
 | `TopLevelVar` | `islocal`, `decl`, `value` | module variable |
 | `TopLevelTypeAlias` | `islocal`, `name`, `type` | compile-time-only `[local] type Name = T` |
-| `TopLevelInterface` | `name`, `methods` | top-level, non-local, nonempty Interface declaration |
-| `TopLevelRecord` | `name`, `fields` | `fields` is a list of `Decl`; parser decorates `islocal` |
-| `TopLevelUnion` | `name`, `variants` | `variants` is a source-order list of `UnionVariant`; parser decorates `islocal` |
+| `TopLevelInterface` | `name`, `methods`, `typeparams` | top-level, non-local, nonempty Interface declaration |
+| `TopLevelRecord` | `name`, `fields`, `typeparams` | `fields` is a list of `Decl`; parser decorates `islocal` |
+| `TopLevelUnion` | `name`, `variants`, `typeparams` | `variants` is a source-order list of `UnionVariant`; parser decorates `islocal` |
 | `TopLevelImport` | `localname`, `modname` | `local m = import "x.y"` |
 | `TopLevelForeignImport` | `localname`, `headername` | `local c = foreign import "x.h"` |
 
@@ -255,7 +256,7 @@ to use it as an expression.
 | `ExpNil` | — | |
 | `ExpBool`, `ExpInteger`, `ExpFloat`, `ExpString` | `value` | literal values, already decoded by the lexer |
 | `ExpInitList` | `fields` | `{...}` constructors: arrays, maps, records |
-| `ExpCall` | `exp`, `args` | parser output may carry any of the four `Args*` forms below; successful named calls are normalized before codegen |
+| `ExpCall` | `exp`, `args`, `typeargs` | parser output may carry any of the four `Args*` forms below; successful named calls are normalized before codegen |
 | `ExpVar` | `var` | |
 | `ExpUnop` | `op`, `exp` | `op` ∈ `"not"`, `"#"`, `"-"`, `"~"` |
 | `ExpBinop` | `lhs`, `op`, `rhs` | `op` is the literal operator string (`"+"`, `"=="`, `"and"`, ...) |
@@ -266,6 +267,12 @@ to use it as an expression.
 | `ExpExtra` | `exp`, `index`, `_type` | synthesized by the checker only: the index-th (> 1) value of a multi-return call |
 | `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; the raw AST keeps an omitted result annotation as `rettypes = false`, distinct from explicit `: ()`; a matching expected Function may supply missing fixed/bare-variadic inputs and the complete result shape |
 | `ExpUnionInit` | `owner`, `variant`, `value` | parser-synthesized variant-constructor result; `value` is `false` for an empty variant |
+
+For `Owner<T>.member(...)`, the parser temporarily decorates the namespace
+`ExpVar` with `_nominal_typeargs` and `_nominal_typeargs_loc`. The checker
+resolves that owner application before selecting the member, and erased-core
+lowering removes both fields before coder entry. `ExpCall.typeargs` remains the
+callable-local list after a function or method name.
 
 Two of these never come from the programmer directly:
 
@@ -324,7 +331,7 @@ encodes three field forms:
 | `[keyexp] = exp` | the key *expression node* |
 
 At the semantic-type layer every Titan/Lua `Type.Function` shape carries a
-separate `flexrettype` and keeps its ABI-0.23 third constructor position as a
+separate `flexrettype` and keeps its ABI-0.24 third constructor position as a
 required reserved `false`; Titan input tails live in `varargtype`. A direct
 foreign module member instead retains the independent `Type.CFunction` shape,
 with C's single-result model and `vararg` bit, and a C function pointer is

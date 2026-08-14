@@ -1,17 +1,17 @@
 local type CancelAction = () -> ()
 
-union CancellationReason
+union CancellationReason<B>
   simple: string
-  complex: value
+  complex: B
 end
 
-union TaskStatus
+union TaskStatus<A, B>
   ready
   running
   waiting
-  succeeded: value
+  succeeded: A
   failed: Error
-  cancelled: CancellationReason
+  cancelled: CancellationReason<B>
 end
 
 function TaskStatus:as_string(): string
@@ -34,7 +34,7 @@ function TaskStatus:has_finished(): boolean
   end
 end
 
-function TaskStatus:has_succeeded(): (boolean, value?)
+function TaskStatus:has_succeeded(): (boolean, A?)
   case self
   when succeeded: result then return true, result
   else return false, nil
@@ -48,7 +48,7 @@ function TaskStatus:has_failed(): (boolean, Error?)
   end
 end
 
-function TaskStatus:has_cancelled(): (boolean, CancellationReason?)
+function TaskStatus:has_cancelled(): (boolean, CancellationReason<B>?)
   case self
   when cancelled: reason then return true, reason
   else return false, nil
@@ -167,16 +167,21 @@ local record uv_timer_t
   local root_index: integer
 end
 
-record Task
+local record TerminalRegistration<A, B>
+  local listener: (TaskStatus<A, B>) -> ()
+  local live: boolean
+end
+
+record Task<A, B>
   local root: coroutine.Coro
   local runtime: Runtime
-  local state: TaskStatus
-  local cancel_value: CancellationReason?
+  local state: TaskStatus<A, B>
+  local cancel_value: CancellationReason<B>?
   local cancel_action: CancelAction?
   local pending: value
   local root_index: integer
   local cleanup: boolean
-  local terminal_listeners: {(TaskStatus) -> ()}
+  local terminal_registrations: {TerminalRegistration<A, B>}
   -- Only async.suspend installs this resumable state. A pending zero-timer
   -- wake is coalesced so cancellation and terminal listeners cannot queue the
   -- same continuation twice.
@@ -191,36 +196,45 @@ local function terminal(state: TaskStatus): boolean
   return state:has_finished()
 end
 
-function Task:status(): TaskStatus
+function Task:status(): TaskStatus<A, B>
   return self.state
 end
 
-function Task:add_terminal_listener(listener: (TaskStatus) -> ())
-  if terminal(self.state) then return end
-  self.terminal_listeners[#self.terminal_listeners + 1] = listener
-end
+function Task:add_terminal_listener(
+    listener: (TaskStatus<A, B>) -> ()): () -> ()
+  if self.state:has_finished() then
+    return function () end
+  end
 
-function Task:remove_terminal_listener(listener: (TaskStatus) -> ())
-  local listeners = self.terminal_listeners
-  local count = #listeners
-  for index = 1, count do
-    if listeners[index] == listener then
-      for following = index, count - 1 do
-        listeners[following] = listeners[following + 1]
+  local registration = TerminalRegistration<A, B>.new(listener, true)
+  self.terminal_registrations[#self.terminal_registrations + 1] = registration
+  local task = self
+  return function ()
+    if not registration.live then return end
+    registration.live = false
+
+    local registrations = task.terminal_registrations
+    local count = #registrations
+    for index = 1, count do
+      if registrations[index] == registration then
+        for following = index, count - 1 do
+          registrations[following] = registrations[following + 1]
+        end
+        registrations[count] = nil
+        return
       end
-      listeners[count] = nil
-      return
     end
   end
 end
 
-function Task:cancel(reason: CancellationReason?)
-  if terminal(self.state) or self.cleanup or self.cancel_value then return end
+function Task:cancel(reason: CancellationReason<B>?)
+  if self.state:has_finished() or self.cleanup or
+     self.cancel_value then return end
   local actual? = reason
   if actual == nil then
     actual = CancellationReason.simple("cancelled")
   end
-  self.cancel_value = actual as CancellationReason
+  self.cancel_value = actual as CancellationReason<B>
   local action? = self.cancel_action
   if action and self.pending_cancellation_affected then
     (action as CancelAction)()
@@ -282,14 +296,17 @@ end
 
 local function notify_terminal(task: Task, state: TaskStatus)
   task.state = state
-  -- Detach the terminal snapshot before delivery. A listener may remove
-  -- itself or another listener, but that must not mutate this one terminal
-  -- traversal and skip a later registration.
-  local listeners = task.terminal_listeners
-  task.terminal_listeners = {}
-  for index = 1, #listeners do
+  -- Detach the terminal snapshot before delivery and release every
+  -- registration from live ownership. A remover called during delivery is
+  -- therefore a no-op and cannot shift this stable traversal.
+  local registrations = task.terminal_registrations
+  task.terminal_registrations = {}
+  for index = 1, #registrations do
+    registrations[index].live = false
+  end
+  for index = 1, #registrations do
     do
-      listeners[index](state)
+      registrations[index].listener(state)
     catch
     end
   end
@@ -297,11 +314,11 @@ end
 
 local function finish_cleanup_task(task: Task)
   task.runtime.cleanup_done = true
-  retire_task(task, TaskStatus.succeeded(nil))
+  retire_task(task, TaskStatus<value, value>.succeeded(nil))
 end
 
 local function fail_cleanup_task(task: Task, err: value, trace: string)
-  retire_task(task, TaskStatus.failed(Error.new(err, trace)))
+  retire_task(task, TaskStatus<value, value>.failed(Error.new(err, trace)))
   report_task_error(err, trace)
 end
 
@@ -325,10 +342,10 @@ end
 local function finish_user_failure(task: Task, err: value, trace: string)
   local cancellation? = task.cancel_value
   if cancellation then
-    finish_user_task(task, TaskStatus.cancelled(
-        cancellation as CancellationReason))
+    finish_user_task(task, TaskStatus<value, value>.cancelled(
+        cancellation as CancellationReason<value>))
   else
-    finish_user_task(task, TaskStatus.failed(Error.new(err, trace)))
+    finish_user_task(task, TaskStatus<value, value>.failed(Error.new(err, trace)))
   end
 end
 
@@ -357,7 +374,7 @@ local function advance_task(task: Task, failed: boolean, payload: value,
       next_payload = cancellation
     end
 
-    task.state = TaskStatus.running()
+    task.state = TaskStatus<value, value>.running()
     local yielded: value = nil
     do
       yielded = resume_root(task, next_failed, next_payload)
@@ -377,10 +394,10 @@ local function advance_task(task: Task, failed: boolean, payload: value,
       else
         local requested? = task.cancel_value
         if requested then
-          finish_user_task(task, TaskStatus.cancelled(
-              requested as CancellationReason))
+          finish_user_task(task, TaskStatus<value, value>.cancelled(
+              requested as CancellationReason<value>))
         else
-          finish_user_task(task, TaskStatus.succeeded(yielded))
+          finish_user_task(task, TaskStatus<value, value>.succeeded(yielded))
         end
       end
       return
@@ -402,7 +419,7 @@ local function advance_task(task: Task, failed: boolean, payload: value,
       -- not a completion that should itself be replaced before resumption.
       next_cancellation_affected = false
     else
-      task.state = TaskStatus.waiting()
+      task.state = TaskStatus<value, value>.waiting()
       next_cancellation_affected = call_cancellation_affected
       task.pending_cancellation_affected =
         call_cancellation_affected
@@ -534,7 +551,7 @@ end
 -- requests before that timer fires coalesce.
 function Task:resume()
   if not self.suspended or self.resume_pending or
-     terminal(self.state) then return end
+     self.state:has_finished() then return end
   self.resume_pending = true
   do
     start_timer(self, 0, false, nil)
@@ -658,22 +675,24 @@ end
 
 local function begin_shutdown(runtime: Runtime)
   runtime.closing = true
-  local root = coroutine.create(function (_arg: value): ()
+  local root = coroutine.create(function (_: value): ()
     cleanup_runtime(runtime)
   end, UV_TAG)
-  local task = Task.new(root, runtime, TaskStatus.ready(),
+  local task = Task<value, value>.new(
+      root, runtime, TaskStatus<value, value>.ready(),
                         nil, nil, nil, 0, true, {}, false, false, true)
   task.root_index = root_task(runtime, task)
   start_timer(task, 0, false, nil)
 end
 
-local function run_internal(func: () -> value): Task
+local function run_internal(func: () -> value): Task<value, value>
   local runtime = ensure_runtime()
   accepting_work(runtime, "start a Task")
-  local root = coroutine.create(function (_arg: value): value
+  local root = coroutine.create(function (_: value): value
     return func()
   end, UV_TAG)
-  local task = Task.new(root, runtime, TaskStatus.ready(),
+  local task = Task<value, value>.new(
+      root, runtime, TaskStatus<value, value>.ready(),
                         nil, nil, nil, 0, false, {}, false, false, true)
   task.root_index = root_task(runtime, task)
 
@@ -725,9 +744,10 @@ local function os_exit(code: integer)
   while index < runtime.next_task_root do
     local other? = runtime.task_roots[index]
     if other and not (other as Task).cleanup then
-      (other as Task):cancel(CancellationReason.simple("program exit"))
+      (other as Task):cancel(
+          CancellationReason.simple("program exit"))
     end
     index = index + 1
   end
-  raise task.cancel_value as CancellationReason
+  raise task.cancel_value as CancellationReason<value>
 end

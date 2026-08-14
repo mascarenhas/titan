@@ -250,7 +250,7 @@ end
 function test_join_arities_and_complete_status_payloads(context: test.Context)
   runtime_test.run(function ()
     context:log("BEGIN expected uncaught async Task diagnostics")
-    local timer_task = async.run(function (): value
+    local timer_task = async.run<value, value>(function (): value
       timer.sleep(2)
       return "joined-timer"
     end)
@@ -261,7 +261,7 @@ function test_join_arities_and_complete_status_payloads(context: test.Context)
     task_support.cleanup_task(cancelled_task, "join cancelled cleanup")
     local failed_task = support.failing("join-logged-failure")
     task_support.cleanup_task(failed_task, "join failure cleanup")
-    local operation_task = async.run(function (): value
+    local operation_task = async.run<value, value>(function (): value
       timer.sleep(-1)
       return nil
     end)
@@ -287,7 +287,7 @@ function test_join_arities_and_complete_status_payloads(context: test.Context)
     local marker: value = {}
     local complex_cancelled = support.sleeping(60000, "complex cancellation returned")
     task_support.cleanup_task(complex_cancelled, "complex cancellation cleanup")
-    complex_cancelled:cancel(async.CancellationReason.complex(marker))
+    complex_cancelled:cancel(async.CancellationReason<value>.complex(marker))
     local complex_status = async.join(complex_cancelled)
     local has_complex, complex_reason? = complex_status:has_cancelled()
     test.assert(has_complex and complex_reason ~= nil,
@@ -381,5 +381,76 @@ function test_join_arities_and_complete_status_payloads(context: test.Context)
           support.success_payload(five_fifth) == "join-live-five",
           "live join_five duplicate lost a positional status")
     context:log("END expected uncaught async Task diagnostics")
+  end)
+end
+
+function test_generic_all_and_join_operand_positions(context: test.Context)
+  runtime_test.run(function ()
+    local number = async.run<integer, string>(function (): integer
+      return 41
+    end)
+    task_support.cleanup_task(number, "generic all/join number cleanup")
+    local text = async.run<string, integer>(function (): string
+      return "typed"
+    end)
+    task_support.cleanup_task(text, "generic all/join text cleanup")
+    local flag = async.run<boolean, {string: integer}>(function (): boolean
+      return true
+    end)
+    task_support.cleanup_task(flag, "generic all/join flag cleanup")
+    local nothing = async.run<nil, boolean>(function ()
+    end)
+    task_support.cleanup_task(nothing, "generic all/join nil cleanup")
+    local decimal = async.run<float, string>(function (): float
+      return 2.5
+    end)
+    task_support.cleanup_task(decimal, "generic all/join float cleanup")
+
+    local number_status = async.join(number)
+    local number_ok, number_value? = number_status:has_succeeded()
+    test.assert(number_ok and (number_value as integer) + 1 == 42,
+          "generic join lost its result type")
+
+    local two_number, two_text = async.all_two(number, text)
+    test.assert(two_number + 1 == 42 and two_text == "typed",
+          "generic all_two lost operand result types")
+    local three_text, three_number, three_flag =
+      async.all_three(text, number, flag)
+    test.assert(three_text == "typed" and three_number + 1 == 42 and
+          three_flag, "generic all_three lost operand result types")
+    local four_flag, four_text, four_number, four_nil =
+      async.all_four(flag, text, number, nothing)
+    test.assert(four_flag and four_text == "typed" and
+          four_number + 1 == 42 and four_nil == nil,
+          "generic all_four lost operand result types")
+    local five_float, five_nil, five_flag, five_text, five_number =
+      async.all_five(decimal, nothing, flag, text, number)
+    test.assert(five_float == 2.5 and five_nil == nil and five_flag and
+          five_text == "typed" and five_number + 1 == 42,
+          "generic all_five lost operand result types")
+
+    local joined_two_number, joined_two_text = async.join_two(number, text)
+    local joined_three_text, joined_three_number, joined_three_flag =
+      async.join_three(text, number, flag)
+    local joined_four_flag, joined_four_text, joined_four_number,
+          joined_four_nil = async.join_four(flag, text, number, nothing)
+    local joined_five_float, joined_five_nil, joined_five_flag,
+          joined_five_text, joined_five_number =
+      async.join_five(decimal, nothing, flag, text, number)
+    test.assert(joined_two_number:has_succeeded() and
+          joined_two_text:has_succeeded() and
+          joined_three_text:has_succeeded() and
+          joined_three_number:has_succeeded() and
+          joined_three_flag:has_succeeded() and
+          joined_four_flag:has_succeeded() and
+          joined_four_text:has_succeeded() and
+          joined_four_number:has_succeeded() and
+          joined_four_nil:has_succeeded() and
+          joined_five_float:has_succeeded() and
+          joined_five_nil:has_succeeded() and
+          joined_five_flag:has_succeeded() and
+          joined_five_text:has_succeeded() and
+          joined_five_number:has_succeeded(),
+          "generic join arities lost exact TaskStatus results")
   end)
 end

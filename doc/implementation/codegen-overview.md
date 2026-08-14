@@ -25,7 +25,8 @@ this list. The coder therefore still observes the logical source order that
 defines interface members, module slots, module-variable initialization, and
 emission; it has no source-unit node or contributor context. The driver
 (`driver.compile`) writes the result next to the canonical flat source or
-folder main, invokes the configured `clang-format` in place, and then invokes
+folder main, performs required `#line` normalization, optionally invokes the
+configured `clang-format` when `--pretty-print` is selected, and then invokes
 the system C compiler
 ([driver and toolchain](driver.md)). One consequence of the checker's
 rewriting matters constantly here: every representation-changing implicit
@@ -62,16 +63,18 @@ passed. The coder passes it in exactly one place, `codethrow`, whose
 `$LINE` and `$COL` for an enclosing render to fill.
 
 Because there is no C AST, template output is raw but must already be valid C.
-The driver runs the configured `CLANG_FORMAT` command (default `clang-format`)
-on each generated `.c` and staged `.titan.h` before native compilation,
-consumer probing, or header publication. It passes an explicit LLVM-based
-four-space style with include sorting disabled; it never inherits an arbitrary
-project's `.clang-format`.
+The default driver persists that output without a presentation pass; it still
+removes blank physical lines after `#line` directives before native
+compilation, consumer probing, or header publication. `titanc --pretty-print`
+additionally runs the configured `CLANG_FORMAT` command (default
+`clang-format`) on every generated `.c` and staged `.titan.h`. It passes an
+explicit LLVM-based four-space style with include sorting disabled and never
+inherits an arbitrary project's `.clang-format`.
 Disabling sorting is semantic preservation rather than aesthetics, because the
 generator deliberately orders direct, supplemental, and source-foreign
-includes. A formatter failure is a compiler error; a public header remains
-untouched, while a generated `.c` remains available as a diagnostic artifact.
-See [Driver and toolchain](driver.md#clang-format-generated-source-formatting).
+includes. An opted-in formatter failure is a compiler error; a public header
+remains untouched, while a generated `.c` remains available as a diagnostic
+artifact. See [Driver and toolchain](driver.md#optional-clang-format-generated-source-formatting).
 
 ## Anatomy of a generated translation unit
 
@@ -370,8 +373,9 @@ It comes **immediately after `_mod` and before the method `self`**, and
 *every* Titan function takes it even when the body never reads it: the
 fast value-call path dispatches purely on the function-type tag, so all
 native entries of a given `Type.Function` must share one ABI. This type is
-exclusively a boxed Titan/Lua callable; its ABI-0.23 third constructor position
-is reserved `false`, not C variadicity. Its value at a call site depends on the
+exclusively a boxed Titan/Lua callable; its ABI-0.24 third constructor
+position remains reserved `false`, not C variadicity. Its value at a call site
+depends on the
 path:
 
 * **`NULL`** on a static direct call (`codecall`) — a top-level
@@ -819,7 +823,7 @@ Udata. Generated modules also reserve a per-state Array-metatable cache and
 use explicit internal-versus-boxed conversions. A 0.16 module would
 misinterpret Array values even when a serialized interface happens not to
 mention one, so the semantic/runtime boundary requires a full rebuild. See
-[Dense Arrays](dense-arrays.md#abi-017-020-021-022-and-023-boundaries).
+[Dense Arrays](dense-arrays.md#abi-017-020-021-022-023-and-024-boundaries).
 
 ABI **0.18** preserved those generated Array shapes and the ordinary module
 protocol, but made standard-library archive objects directly reference
@@ -853,16 +857,17 @@ added one fixed compiler-private, ABI-visible physical-provider identity slot so
 a direct source importer can reject canonical state installed by another
 provider. ABI 0.23 retains those layouts while source foreign callbacks and the
 injective module/nominal/member native-entry hierarchy change the native symbol
-contract.
-The active marker is `_0_23`, the search variable is `TITAN_PATH_0_23`, and the
-provider namespace is `lib/titan/0.23`; older providers are rejected before
-interface rehydration. Existing 0.22 artifacts remain separately versioned and
+contract. ABI 0.24 extends serialized interfaces for generic declarations while
+retaining the erased generated layouts and Lua contract.
+The active marker is `_0_24`, the search variable is `TITAN_PATH_0_24`, and the
+provider namespace is `lib/titan/0.24`; older providers are rejected before
+interface rehydration. Existing 0.23 artifacts remain separately versioned and
 are not migrated or cleaned up.
 
 Closure adjustment wrappers reuse the fixed CClosure header and `function_sig`
-shapes retained through ABI 0.23; their target adapters and strict relays are
+shapes retained through ABI 0.24; their target adapters and strict relays are
 private consumer artifacts, with no serialized field, provider symbol, or
-module-state slot. A consumer may therefore wrap an ordinary ABI-0.23
+module-state slot. A consumer may therefore wrap an ordinary ABI-0.24
 source/DSO/archive function. Any implementation that needed another fixed slot
 or signature would instead require a coordinated ABI advance.
 
@@ -1140,7 +1145,7 @@ bound-method closure and must copy a live exact tag into it. First-use private
 objects are filled by `init_data_from_other_modules` or the module
 initializer. Thus all private slots, beginning with the Array cache and fixed
 provider-identity token, come *after* the importer-visible public prefix. Their
-fixed header was introduced in ABI 0.22 and is retained in 0.23, while later
+fixed header was introduced in ABI 0.22 and is retained through 0.24, while later
 inventory/first-use slots remain
 coder-private and do not perturb the public importer slot math.
 

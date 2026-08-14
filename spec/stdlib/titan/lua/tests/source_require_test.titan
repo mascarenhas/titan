@@ -37,7 +37,7 @@ function test_lua_require_cooperates_caches_and_rejects_a_duplicate(
     runtime_test.cleanup(function () loaded[source_name] = nil end)
 
     local phase = 1
-    local observer = async.run(function (): value
+    local observer = async.run<value, value>(function (): value
       test.assert(phase == 1, "source require did not yield cooperatively")
       phase = 2
       return nil
@@ -61,14 +61,14 @@ function test_lua_require_cooperates_caches_and_rejects_a_duplicate(
     local first_started = false
     local first_loaded = false
     local duplicate_message = ""
-    local first = async.run(function (): value
+    local first = async.run<value, value>(function (): value
       first_started = true
       local module_value = tlua.require(concurrent_name) as {string: value}
       first_loaded = module_value["loaded"] == true
       return nil
     end)
     task_support.cleanup_task(first, "first source require cleanup")
-    local second = async.run(function (): value
+    local second = async.run<value, value>(function (): value
       while not first_started do timer.yield() end
       do
         tlua.require(concurrent_name)
@@ -92,7 +92,7 @@ function test_lua_reader_cancellation_stays_pending_after_translation(
   runtime_test.run(function ()
     local reader = BlockingReader.new("return { loaded = true }", 0, "idle")
     local transformed = false
-    local loading = async.run(function (): value
+    local loading = async.run<value, value>(function (): value
       do
         tlua.load_from_reader(reader, "=blocking-reader", nil)
       catch
@@ -138,7 +138,7 @@ function test_lua_source_open_cancellation_is_retryable(
     package_table["path"] = fifo
 
     local started = false
-    local loading = async.run(function (): value
+    local loading = async.run<value, value>(function (): value
       started = true
       tlua.require(modname)
       return nil

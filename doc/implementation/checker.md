@@ -873,12 +873,15 @@ case reachable. The same now applies to proven non-fallthrough literal-true
 unchecked — a type error placed there is not reported. The checker performs no
 dead-code analysis to flag or prune them.
 
-`checkfuncbody` consumes the result: if the body can fall through and the
-function's **first fixed** result exists and is not `Type.Nil`, it reports
-`function can return nil but return type is not nil`. Zero-return functions,
-nil-first functions, and flex-only functions may fall through; the last case
-produces an empty run. Functions declared without a return annotation default
-to **zero results** (`() -> ()`).
+`checkfuncbody` consumes the result. Zero-return and flex-only functions may
+fall through, as may a function whose complete fixed prefix is exactly one
+`Type.Nil`; a flexible tail on that last shape is independently empty. Every
+other fixed-result shape must be non-fallthrough. A single non-nil result uses
+`function can return nil but return type is not nil`; a multi-result shape uses
+`function can fall through but return type requires N fixed values`. The same
+one-fixed-`nil` predicate tells `adjust_explist` to synthesize an ordinary nil
+source for a bare `return`. It never nil-fills a multi-result prefix. Functions
+declared without a return annotation default to **zero results** (`() -> ()`).
 
 ## Imports and the loader protocol
 
@@ -946,7 +949,8 @@ Two real loaders exist in `driver.lua`:
   deterministically ordered map, so aliases rehydrate without becoming runtime
   members. Exported `ModuleMember`, `Method`, and `StaticMethod` descriptors
   likewise serialize callable tail shape and formal `paramnames`; names remain
-  absent from structural `Type.Function` values. In ABI 0.23 the five-position
+  absent from structural `Type.Function` values. In ABI 0.23 and 0.24 the
+  five-position
   `Function(params, rettypes, false, varargtype, flexrettype)` constructor keeps
   its third position as a required reserved-false sentinel; C variadicity never
   occupies it. The constructor schema includes `flexrettype`; ABI 0.14 gates

@@ -343,7 +343,7 @@ the original union Udata in user value 1; a written Interface-to-union cast
 checks that payload's exact union metatable. No union tag or payload is exposed
 through Interface dispatch. See [Interfaces](interfaces.md).
 
-## Serialized interfaces: ABI 0.19 origin and current 0.23 boundary
+## Serialized interfaces: ABI 0.19 origin and current 0.24 boundary
 
 `types.serialize` adds canonical schemas:
 
@@ -406,20 +406,22 @@ retained those Titan layouts while advancing the embedded Lua contract from
 source-local `titan.uv` surface/private-provider boundary changes that module's
 serialized public schema and reconstructible public module-state prefix, and
 every generated module gains the fixed physical-provider identity slot for
-source-private access. `TITAN_VER` is now `0.23`, its suffix is `_0_23`, the
-versioned search variable
-is `TITAN_PATH_0_23`, the installed provider namespace is
-`lib/titan/0.23`, and the generated standard-library support namespace is
-`stdlib_0_23`. ABI 0.23 retains that schema while changing the native callback
-contract and separating module, nominal owner, and member in every union
-constructor/static/method entry name. A 0.22 interface is rejected before type rehydration or native
-linking.
+source-private access. ABI 0.23 retains that schema while changing the native
+callback contract and separating module, nominal owner, and member in every
+union constructor/static/method entry name. ABI 0.24 extends serialized
+interfaces for generic binders, applied nominals, schemes, owners, methods, and
+constructor-preserving aliases while retaining the erased union representation.
+`TITAN_VER` is now `0.24`, its suffix is `_0_24`, the versioned search variable
+is `TITAN_PATH_0_24`, the installed provider namespace is `lib/titan/0.24`, and
+the generated standard-library support namespace is `stdlib_0_24`. A 0.23
+interface is rejected before type rehydration or native linking.
 
-ABI 0.23 is the current versioned prototype boundary, not a migration layer.
-Installed 0.18 through 0.22 trees remain separately versioned predecessors. Build preparation creates or replaces only exact known active-0.23
-Titan artifacts, establishes its ABI-keyed caches, and verifies that
-`package.cpath` selects 0.23 rather than 0.22. It does not migrate or clean up
-the preserved 0.22 state.
+ABI 0.24 is the current versioned prototype boundary, not a migration layer.
+Installed 0.18 through 0.23 trees remain separately versioned predecessors.
+Build preparation creates or replaces only exact known active-0.24 Titan
+artifacts, establishes its ABI-keyed caches, and verifies that `package.cpath`
+selects 0.24 rather than 0.23. It does not migrate or clean up the preserved
+0.23 state.
 
 ## Standard-library dogfooding
 

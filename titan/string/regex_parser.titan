@@ -525,7 +525,7 @@ local function regex_simple_quantifier(
 end
 
 local function regex_counted_quantifier(
-    _subject: string, after: integer,
+    _: string, after: integer,
     position: integer, minimum_text: string,
     maximum_text: string, comma: string,
     state: RegexParseState): (boolean, RegexQuantifier)
@@ -586,7 +586,7 @@ local function regex_finish_frame(frame: RegexParseFrame): RegexNode
 end
 
 local function regex_parse_start(
-    _subject: string, after: integer,
+    _: string, after: integer,
     state: RegexParseState): boolean
   state.anchored_start = true
   local frame = regex_current_frame(state)
@@ -596,7 +596,7 @@ local function regex_parse_start(
 end
 
 local function regex_parse_open_group(
-    _subject: string, after: integer,
+    _: string, after: integer,
     position: integer, marker: string,
     state: RegexParseState): boolean
   local capturing = marker == "c"
@@ -630,7 +630,7 @@ local function regex_parse_open_group(
 end
 
 local function regex_parse_alternative(
-    _subject: string, after: integer,
+    _: string, after: integer,
     state: RegexParseState): boolean
   local frame = regex_current_frame(state)
   regex_finish_branch(frame)
@@ -706,7 +706,7 @@ local function regex_parse_close_group(
 end
 
 local function regex_parse_end(
-    _subject: string, after: integer,
+    _: string, after: integer,
     state: RegexParseState): boolean
   if state.depth ~= 1 then
     raise_regex_diagnostic(
@@ -719,7 +719,7 @@ local function regex_parse_end(
 end
 
 local function regex_parse_tail(
-    _subject: string, after: integer,
+    _: string, after: integer,
     character: string, state: RegexParseState): boolean
   if character == "$" then
     local position = after
@@ -741,7 +741,7 @@ local function regex_parse_tail(
 end
 
 local function regex_parse_finish(
-    _subject: string, position: integer,
+    _: string, position: integer,
     state: RegexParseState): (boolean, ParsedRegex)
   if state.depth ~= 1 then
     raise_regex_diagnostic(

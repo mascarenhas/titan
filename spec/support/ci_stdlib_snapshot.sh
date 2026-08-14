@@ -31,10 +31,10 @@ case "$prefix" in
         ;;
 esac
 
-provider=$prefix_rel/lib/titan/0.23/titan.so
+provider=$prefix_rel/lib/titan/0.24/titan.so
 static_archive=${provider%.so}.a
 shim_dir=$prefix_rel/share/lua/5.5/titan
-test_source=$prefix_rel/share/titan/0.23/src/titan/test.titan
+test_source=$prefix_rel/share/titan/0.24/src/titan/test.titan
 
 artifacts=(
     titan-runtime/libtitan.a
@@ -48,7 +48,7 @@ artifacts=(
     "$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/os.lua"
     "$shim_dir/peg.lua" "$shim_dir/string.lua"
     "$shim_dir/math.lua" "$shim_dir/lua.lua"
-    "$shim_dir/iter.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"
+    "$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"
     "$test_source"
 )
 
@@ -119,7 +119,7 @@ remove_installed_artifacts() {
         "$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/os.lua" \
         "$shim_dir/peg.lua" "$shim_dir/string.lua" \
         "$shim_dir/math.lua" "$shim_dir/lua.lua" \
-        "$shim_dir/iter.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"
+        "$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"
     rm -f "$test_source"
 }
 

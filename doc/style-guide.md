@@ -27,6 +27,56 @@ Lua-boundary behavior. An Array's `#` is its highest present positive index,
 not an element count; code that permits interior holes must not iterate
 `1..#array` and silently assume every read is present.
 
+## Let precise inference speak
+
+Omit a local or generic-`for` type annotation when the initializer or iterator
+already infers the same precise type. This makes generic APIs visibly useful
+and avoids duplicating a type that can drift from its source:
+
+```titan
+local iteration = import "titan.iteration"
+
+function total(scores: {string: integer}): integer
+  local result = 0
+  for _, score in iteration.pairs(scores) do
+    result = result + score
+  end
+  return result
+end
+```
+
+A trailing `?` on an inferred name preserves an option without repeating its
+base type: write `local name?, score? = iteration.next(scores, nil)` or `for
+index, item? in iteration.ipairs(items) do`. Keep a complete annotation when it
+supplies information rather than merely restating it: for a public/API
+declaration, a `nil` or empty initializer, contextual generic or lambda
+instantiation, a flexible or dynamic result demand, an Interface or FFI
+conversion, an intentional widening or narrowing, or behavior under test.
+
+Name an intentionally unused local result or loop control `_`, not `_name` or
+`_item`. `_` is an ordinary Titan variable, but repeated `_` declarations in
+one local-result or loop list are allowed specifically for this convention:
+
+```titan
+function visit_holes(values: {value}): integer
+  local positions = 0
+  for _, _ in iteration.ipairs(values) do
+    positions = positions + 1
+  end
+  return positions
+end
+```
+
+Omit an unused `case` payload binding unless binding it deliberately exercises
+a checked payload projection, and delete an unused declaration when its
+initializer need not be evaluated. A private callable with one unused
+positional parameter may name it `_`, with its required type retained as in
+`function ignore(_: value)`. Function parameters remain annotated, participate
+in named-call surfaces, and must be unique: do not rename public parameters as
+cleanup, and retain distinct protocol names such as `_request` and `_response`
+when several parameters are unused. Retain a semantic name when the binding
+documents ownership or keeps a value alive even though it is never read later.
+
 ## Make absence visible where it is expected
 
 An indexed Array or Map read returns an option. An ordinary inferred local
@@ -72,7 +122,7 @@ local strings = import "string"
 
 function whole_match(expression: strings.Regex,
                      subject: string): string?
-  local found: strings.RegexMatch? = expression:match(subject)
+  local found? = expression:match(subject)
   if not found then return nil end
   return found:whole()
 end
@@ -272,8 +322,9 @@ next yielded operation, and returns; no callback or Task may re-enter `uv_run`.
 
 Use Task terminal listeners for bounded Task composition. Inspect initial
 statuses first, register a distinct listener directly on each still-relevant
-named Task, defer removal of every registration, then call `async.suspend()`
-once. A deciding listener calls `Task:resume()`, which synchronously installs a
+named Task, call every returned idempotent remover in `defer`, then call
+`async.suspend()` once. A deciding listener calls `Task:resume()`, which
+synchronously installs a
 coalesced target-owned zero timer and never resumes the target inline. That
 timer starts close from `timer_cb` and resumes only from `close_cb`; external
 cancellation of the suspended Task uses the same wake. Do not collect
@@ -345,13 +396,13 @@ local strings = require "titan.string"
 ```
 
 This keeps Lua's standard `io`, `os`, `string`, and other global/module names
-unchanged. The `titan.math`, `titan.iter`, `titan.gc`, and `titan.lua` modules
+unchanged. The `titan.math`, `titan.iteration`, `titan.gc`, and `titan.lua` modules
 have no compiler short-import sugar, so their qualified names are the canonical
 Titan spellings as well as their Lua load names:
 
 ```titan
 local math = import "titan.math"
-local iter = import "titan.iter"
+local iteration = import "titan.iteration"
 ```
 
 Do not publish or document an unqualified Lua replacement for a standard Lua

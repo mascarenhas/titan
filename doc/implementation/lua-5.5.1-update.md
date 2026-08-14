@@ -10,7 +10,8 @@ than only a public-API compatibility check. This chapter records the complete
 > reconstructible module prefix, and physical-provider identity slot. ABI 0.23
 > retains the same Lua 5.5.1 contract again; its boundary moves native callbacks
 > into source and separates module, nominal owner, and member in callable
-> symbols.
+> symbols. ABI 0.24 retains Lua 5.5.1 and those native layouts while extending
+> serialized interfaces for generic declarations.
 
 ## Scope and evidence
 

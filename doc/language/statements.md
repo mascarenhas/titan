@@ -364,7 +364,7 @@ end
 
 function sum_to(limit: integer): integer
     local sum = 0
-    for n: integer in step, limit, 0 do
+    for n in step, limit, 0 do
         sum = sum + n
     end
     return sum
@@ -464,7 +464,7 @@ function numbered_lines(filename: string):
     return next, file, 0, close
 end
 
-for line_no: integer, line: string in numbered_lines("input.txt") do
+for line_no, line in numbered_lines("input.txt") do
     process(line_no, line)
 end
 ```
@@ -478,7 +478,7 @@ function lines(filename: string): (() -> string?, nil, nil, () -> ())
     return file:read_lines, nil, nil, file:close
 end
 
-for line: string in lines("input.txt") do
+for line in lines("input.txt") do
     process_line(line)
 end
 ```
@@ -608,17 +608,20 @@ end
 
 `return` and `return nil` still describe different expression lists, but a
 zero-return function discards the latter's `nil` and exposes no values. In an
-explicit `: nil` function, either spelling supplies the one `nil` return. In
-option- or `value`-returning functions, write `return nil` explicitly. The
-explicit `: nil` annotation is how you ask for a function that returns a
-single `nil`.
+explicit `: nil` function, either spelling supplies the one `nil` return
+through ordinary return adjustment. This missing-result adjustment applies
+only when the complete fixed prefix is that one `nil`; a multi-result function
+must supply every fixed position explicitly. In option- or `value`-returning
+functions, write `return nil` explicitly. The explicit `: nil` annotation is
+how you ask for a function that returns a single `nil`.
 
-A function whose first fixed return exists and is not `nil` must provably
-avoid falling off the end on every control path; otherwise the compiler rejects
-it. A
-nil-returning function, a zero-return function, and a function with only a
-flexible tail may instead fall off the end; the last case produces an empty
-run. The analysis understands `if`/`elseif`/`else` chains and `case` statements.
+A function with fixed returns must provably avoid falling off the end on every
+control path unless its complete fixed prefix is exactly one `nil`; otherwise
+the compiler rejects it. In particular, a multi-result signature cannot fall
+through merely because its first result is `nil`. An exactly-one-`nil`
+function, a zero-return function, and a function with only a flexible tail may
+instead fall off the end; the last case produces an empty run. The analysis
+understands `if`/`elseif`/`else` chains and `case` statements.
 A case is non-fallthrough when every `when` arm is non-fallthrough and either
 the arms cover every variant of the statically known closed union or an
 explicit `else` is non-fallthrough. A redundant `else` after complete coverage

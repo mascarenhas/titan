@@ -61,7 +61,7 @@ a/b/c.so
 ```
 
 The exact historical location is therefore the final candidate. The compiler
-first expands the selected `TITAN_PATH_0_23`/`TITAN_PATH` with the runtime's
+first expands the selected `TITAN_PATH_0_24`/`TITAN_PATH` with the runtime's
 `;;` default-insertion semantics. It then searches **root-major**: all
 shallow-to-exact candidates in the first path root, then all candidates in the
 second root, and so on.
@@ -97,7 +97,7 @@ The states are deliberately strict:
 * an exact candidate with neither symbol retains the markerless-binary error
   instead of falling through to source.
 
-The ABI marker must return exactly one string equal to `0.23`. The types entry
+The ABI marker must return exactly one string equal to `0.24`. The types entry
 must return exactly one serialized `Type.Module` for the requested logical
 name, with a canonical public schema. The loader does not scan later images
 after a claim; visible duplicate providers are resolved by ordinary first
@@ -308,7 +308,7 @@ artifacts, or installed headers.
 
 `make titan` builds a distinct private bootstrap at
 `titan-runtime/bootstrap/titan.so`, linked only from `ltitanlib.o`. During a
-source-rock install it is staged at `<root>/lib/titan/0.23/titan.so` only when
+source-rock install it is staged at `<root>/lib/titan/0.24/titan.so` only when
 that pathname is absent. A usable existing bootstrap or full image is
 preserved, so a repeated build never replaces a full library with the smaller
 bootstrap. An incompatible existing image is an error and is not overwritten.
@@ -330,18 +330,18 @@ paired bundle with the DSO last. It recognizes bootstrap-only and current
 complete-pair predecessors in that same namespace. Injected failures restore
 the exact supported predecessor. After the DSO commit, backup cleanup is best
 effort and cannot turn the coherent install into a reported hook failure.
-Separately versioned 0.17, 0.18, 0.19, 0.20, and 0.21 artifacts are not purged,
-migrated, or cleaned up.
+Separately versioned 0.17 through 0.23 artifacts are not purged, migrated, or
+cleaned up.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
 dSYM), eighteen Lua shims, and the canonical test-support source:
 
 ```text
-<root>/lib/titan/0.23/titan.so
-<root>/lib/titan/0.23/titan.a
-<root>/lib/titan/0.23/titan.so.dSYM          # macOS only
-<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iter,gc,test}.lua
-<root>/share/titan/0.23/src/titan/test.titan
+<root>/lib/titan/0.24/titan.so
+<root>/lib/titan/0.24/titan.a
+<root>/lib/titan/0.24/titan.so.dSYM          # macOS only
+<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test}.lua
+<root>/share/titan/0.24/src/titan/test.titan
 ```
 
 These remain direct Titan artifacts outside the source-rock manifest. The
@@ -361,7 +361,7 @@ canonical compiler source around compiler groups; its system-libuv/system-OpenSS
 paired generation rather than one logical child, while the prepared artifact retains the
 bundled generation.
 
-## ABI 0.16 through 0.23 and test-only exact providers
+## ABI 0.16 through 0.24 and test-only exact providers
 
 ABI 0.16 changed neither per-module serialized type shapes nor Titan's native
 calling convention. It is nevertheless a mandatory compatibility boundary:
@@ -380,10 +380,9 @@ those pointers now denote private backing Tables paired one-to-one with
 canonical Lua proxy Udata. Every generated module also caches the per-state
 Array metatable. Since 0.16 code could expose or mutate a backing as an
 ordinary table, 0.16 and 0.17 providers must never be mixed. Current lookup
-uses `TITAN_PATH_0_23` and `lib/titan/0.23`; installed
-0.17/0.18/0.19/0.20/0.21 trees are preserved only as separately versioned
-predecessors. See
-[Dense Arrays](dense-arrays.md#abi-017-020-021-022-and-023-boundaries).
+uses `TITAN_PATH_0_24` and `lib/titan/0.24`; installed 0.17 through 0.23
+trees are preserved only as separately versioned predecessors. See
+[Dense Arrays](dense-arrays.md#abi-017-020-021-022-023-and-024-boundaries).
 
 ABI 0.18 preserved the provider model and Array protocol, but the generated
 standard-library archive objects now reference callback trampolines promoted
@@ -413,9 +412,11 @@ linking. ABI 0.23 retains that public schema and module-state layout but changes
 the native contract: generated standard objects now own the coroutine, libuv,
 and llhttp callback entries formerly supplied by runtime/adapter objects, and
 callable entry families use injective module/nominal/member UCN separators. Its
-marker rejects 0.22 before metadata decoding or native linking. The 0.23 publisher does not
-migrate, clean up, or otherwise consume the preserved 0.22 tree, and there is
-no retained historical cutover canary.
+marker rejects 0.22 before metadata decoding or native linking. ABI 0.24 extends
+serialized interfaces for generic declarations while retaining the erased
+provider layouts. Its marker rejects 0.23 before metadata decoding or native
+linking. The 0.24 publisher does not migrate, clean up, or otherwise consume the
+preserved 0.23 tree, and there is no retained historical cutover canary.
 
 Production, installed, and native standard-library behavior tests use the
 combined image; the uv redesign has no delayed-callback source variant,

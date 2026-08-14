@@ -57,7 +57,7 @@ function test_peg_roots_and_releases_titan_callback_patterns(
 
   -- Return from the exercising frame before collecting so no compiler local
   -- or native matching temporary can itself be the ownership path under test.
-  for _index = 1, 4 do gc.collect() end
+  for _ = 1, 4 do gc.collect() end
   test.assert(weak["pattern"] == nil,
               "released Pattern remained rooted")
   test.assert(weak["callback"] == nil,

@@ -56,7 +56,7 @@ existing tests before inventing a new pattern.
   `require`, and a module alias is a prefix rather than a first-class value.
   The canonical short set is `coroutine`, `uv`, `async`, `timer`, `io`, `fs`,
   `net`, `ssl`, `url`, `http`, `os`, `peg`, and `string`. Use qualified imports
-  for `titan.math`, `titan.lua`, `titan.iter`, and `titan.gc`.
+  for `titan.math`, `titan.lua`, `titan.iteration`, and `titan.gc`.
 - A direct source import may select the owner's `local` declarations through
   its alias; that permission is direct-only. Binary imports and Lua remain
   public-only, so do not rely on stale compiled providers for source collaboration.

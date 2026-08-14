@@ -5,7 +5,7 @@ Its syntax is intentionally familiar to Lua programmers, but its modules,
 records, containers, calls, and Lua boundaries all have statically checked
 types.
 
-This tour uses only APIs implemented by the ABI-0.23 compiler and standard
+This tour uses only APIs implemented by the ABI-0.24 compiler and standard
 library. It assumes that Titan has been installed as described in the
 [README](../README.md#install), and that the installation's `bin` directory is
 first on `PATH`. Run every `titanc` command from the directory that contains
@@ -101,7 +101,7 @@ local strings = import "string"
 
 function whole_match(expression: strings.Regex,
                      subject: string): string?
-  local found: strings.RegexMatch? = expression:match(subject)
+  local found? = expression:match(subject)
   if not found then return nil end
   return found:whole()
 end
@@ -271,11 +271,11 @@ local timer = import "timer"
 
 function main(args: {string}): integer
   local results: {string: string} = {}
-  async.run(function ()
+  async.run(function (): nil
     timer.sleep(5)
     results["left"] = "ready"
   end)
-  async.run(function ()
+  async.run(function (): nil
     async.yield()
     results["right"] = "ready"
   end)
@@ -347,7 +347,7 @@ function main(args: {string}): integer
 
   local words = strings.compile_regex("[A-Za-z_][A-Za-z0-9_]*")
   local count = 0
-  for match: strings.RegexMatch in words:gmatch(subject) do
+  for match in words:gmatch(subject) do
     if #match:whole() > 0 then count = count + 1 end
   end
 
@@ -428,7 +428,7 @@ process APIs target Titan's current Linux and macOS hosts.
 
 ## Math, collection iteration, GC, and dynamic Lua
 
-The newer `math`, `iter`, `gc`, and `lua` modules use qualified Titan names.
+The newer `math`, `iteration`, `gc`, and `lua` modules use qualified Titan names.
 They do not replace Lua's libraries and do not add compiler short-import
 sugar.
 
@@ -454,15 +454,15 @@ end
 a float. `titan.math` deliberately has no `type` operation: use Titan's static
 types or the ordinary `is`/`as` gradual checks at a `value` boundary.
 
-`titan.iter` supplies the familiar collection iterators without adding methods
+`titan.iteration` supplies the familiar collection iterators without adding methods
 to Array or Map types:
 
 ```titan
-local iter = import "titan.iter"
+local iteration = import "titan.iteration"
 
 function total(scores: {string: integer}): integer
   local result = 0
-  for _name: string, score: integer in iter.pairs(scores) do
+  for _, score in iteration.pairs(scores) do
     result = result + score
   end
   return result
@@ -470,7 +470,7 @@ end
 
 function visit_holes(values: {value}): integer
   local positions = 0
-  for _index, _item in iter.ipairs(values) do
+  for _, _ in iteration.ipairs(values) do
     positions = positions + 1
   end
   return positions
@@ -489,13 +489,13 @@ functions:
 ```titan
 local gc = import "titan.gc"
 
-local function finish_owner(_owner: value): ()
+local function finish_owner(_: {value: value}): ()
   -- Clear and release reachability-owned state here.
 end
 
 function configure_cache(cache: {value: value})
   gc.weak(cache)
-  gc.finalizable(cache, finish_owner)
+  gc.finalizable<{value: value}>(cache, finish_owner)
 
   gc.pause()             -- maps to collectgarbage("stop")
   if not gc.paused() then raise "collector did not pause" end
@@ -509,10 +509,11 @@ end
 `pause_percent` is the incremental collector's tuning accessor; `pause()` has
 side effects, while `paused()` only reports whether the collector is stopped.
 Weak and ephemeron configuration preserves an existing Map metatable and
-changes only its raw `__mode` field. `finalizable` likewise preserves that
-exact metatable while replacing raw `__gc`; its callback receives the
-finalized value. Cleanup should clear owned state before releasing it so the
-callback remains safe if cleanup is retried or partially completed.
+changes only its raw `__mode` field. Generic `finalizable<T>` likewise
+preserves that exact metatable while replacing raw `__gc`; its callback
+receives the finalized value at the same exact `T` selected by the caller.
+Cleanup should clear owned state before releasing it so the callback remains
+safe if cleanup is retried or partially completed.
 
 Finally, `titan.lua` is the audited dynamic boundary for compiling Lua chunks,
 executing Lua files, and loading modules. Flexible arguments and results,

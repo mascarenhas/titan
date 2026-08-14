@@ -58,12 +58,24 @@ record owns that reference in an `SSL_CTX *` field; as a record, the owner is
 already a full userdata with one unique nominal metatable. The owner is first
 rooted with a nil field; the configured context moves into that field only
 after default trust succeeds, leaving allocation and configuration failures
-with their exact local cleanup. `titan.gc.finalizable` installs the Titan
-finalizer on the existing record metatable. At Lua-state shutdown the
-idempotent finalizer clears the field and the module's borrowed fast-path
+with their exact local cleanup. The callback itself accepts
+`DefaultClientContextOwner`, reads its field directly, and contains no
+`value as DefaultClientContextOwner` recovery. The module calls
+`titan.gc.finalizable<DefaultClientContextOwner>` so the generic boundary
+statically pairs that exact local record with its callback; a callback over a
+different record would be rejected by the checker.
+
+The generic body and callback formal erase to `value` at run time. Titan's
+ordinary traced callable adjustment is stored as the record metatable's
+`__gc`, and Lua's finalizer invocation projects the same full userdata back to
+the exact owner parameter before entering the callback. This adds no second
+metatable or per-value finalizer slot: every `DefaultClientContextOwner` shares
+the nominal record metatable and its current raw callback. Per-value native
+state therefore remains in the record field. At Lua-state shutdown the
+idempotent callback clears that field and the module's borrowed fast-path
 pointer before calling `SSL_CTX_free`. A no-override `connect` takes a
-temporary context reference,
-which it releases after `SSL_new` has retained what the connection needs.
+temporary context reference, which it releases after `SSL_new` has retained
+what the connection needs.
 
 An explicit `ca_file` instead goes through `fs.read_file` before `net.connect`.
 The call allocates a private client context and adds every certificate decoded

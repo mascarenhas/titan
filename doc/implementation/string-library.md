@@ -72,7 +72,7 @@ titan.peg
 titan.string
 titan.math
 titan.lua
-titan.iter
+titan.iteration
 titan.gc
 titan.test
 ```

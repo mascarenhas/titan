@@ -62,6 +62,79 @@ local function canonical_interface_module()
     }), interface
 end
 
+local function canonical_generic_module()
+    local show_scope = types.GenericScope(
+        "sample", "sample.Show", false, "owner", "interface")
+    local show_parameter = types.Parameter(
+        show_scope, 1, "E", false)
+    local show = types.Interface("sample.Show", {
+        types.Method("sample.Show", "show", {show_parameter},
+            {types.String()}, false, false, {"value"}),
+    }, show_scope, {types.TypeParameter("E", false)})
+
+    local box_scope = types.GenericScope(
+        "sample", "sample.Box", false, "owner", "record")
+    local erased_show = types.Nominal(
+        "sample.Show", {types.String()})
+    local box_parameter = types.Parameter(
+        box_scope, 1, "T", erased_show)
+    local box_constraint = types.Nominal(
+        "sample.Show", {types.String()})
+    local box_nominal = types.Nominal(
+        "sample.Box", {box_parameter})
+
+    local method_scope = types.GenericScope(
+        "sample", "sample.Box", "convert", "method", "method")
+    local method_parameter = types.Parameter(
+        method_scope, 1, "U", types.Nominal("sample.Show", {
+            erased_show,
+        }))
+    local method = types.Method("sample.Box", "convert",
+        {method_parameter}, {box_nominal}, false, false, {"value"},
+        method_scope, {
+            types.TypeParameter("U",
+                types.Nominal("sample.Show", {box_parameter})),
+        })
+    local box = types.Record("sample.Box", {
+        types.Field("sample.Box", "item", box_parameter, 0),
+    }, {
+        new = types.StaticMethod("sample.Box", "new", {box_parameter},
+            {box_nominal}, false, false, {"item"}),
+    }, {
+        convert = method,
+    }, 1, box_scope, {
+        types.TypeParameter("T", box_constraint),
+    })
+
+    local function_scope = types.GenericScope(
+        "sample", false, "id", "function", "function")
+    local function_parameter = types.Parameter(
+        function_scope, 1, "V", false)
+    local scheme = types.FunctionScheme(function_scope, {
+        types.TypeParameter("V", false),
+    }, types.Function({function_parameter}, {function_parameter},
+        false, false, false))
+    local alias = types.GenericAlias(
+        "sample", "Crate", false, "sample.Box", false,
+        box_scope, {types.TypeParameter("T", box_constraint)})
+
+    local module = types.Module("sample", {
+        types.ModuleMember("sample", "Box", box, false),
+        types.ModuleMember("sample", "id", scheme, {"value"}),
+    }, {
+        Crate = alias,
+        Show = show,
+    })
+    return module, {
+        alias = alias,
+        box = box,
+        box_parameter = box_parameter,
+        method = method,
+        scheme = scheme,
+        show = show,
+    }
+end
+
 describe("union module interfaces", function()
     it("rejects compiler-only source views in recovered metadata", function()
         local fields = {
@@ -827,5 +900,161 @@ describe("union module interfaces", function()
                 driver.validate_module_interface(module, "sample")
             assert.truthy(ok, err)
         end)
+    end)
+end)
+
+
+describe("generic compiled module metadata", function()
+    it("accepts closed binders, applications, schemes, methods, and aliases",
+    function()
+        local module = canonical_generic_module()
+        local ok, err = driver.validate_module_interface(module, "sample")
+        assert.truthy(ok, err)
+
+        local rebuilt, decode_error = driver.decode_module_interface(
+            types.serialize(module), "sample", "generic-fixture")
+        assert.truthy(rebuilt, decode_error)
+        assert.is_true(types.alpha_equals(module, rebuilt))
+    end)
+
+    it("rejects free, out-of-range, sparse, and renamed Parameter metadata",
+    function()
+        local cases = {
+            {
+                pattern = "free scope reference",
+                mutate = function(parts)
+                    parts.box.fields[1].type = types.Parameter(
+                        types.GenericScope("sample", false, "other",
+                            "function", "function"),
+                        1, "T", false)
+                end,
+            },
+            {
+                pattern = "invalid binder index",
+                mutate = function(parts)
+                    parts.box.fields[1].type.index = 2
+                end,
+            },
+            {
+                pattern = "binder list is not dense",
+                mutate = function(parts)
+                    parts.box.typeparams[2] = parts.box.typeparams[1]
+                    parts.box.typeparams[1] = nil
+                end,
+            },
+            {
+                pattern = "noncanonical diagnostic name",
+                mutate = function(parts)
+                    parts.box.fields[1].type.diagnostic_name = "Renamed"
+                end,
+            },
+            {
+                pattern = "noncanonical erased constraint",
+                mutate = function(parts)
+                    parts.box.fields[1].type.erased_constraint = false
+                end,
+            },
+        }
+        for _, case in ipairs(cases) do
+            local module, parts = canonical_generic_module()
+            case.mutate(parts)
+            local ok, err =
+                driver.validate_module_interface(module, "sample")
+            assert.falsy(ok)
+            assert.match(case.pattern, err)
+        end
+    end)
+
+    it("rejects malformed constraints and applied nominal arity", function()
+        local module, parts = canonical_generic_module()
+        parts.box.typeparams[1].constraint = types.Nominal(
+            "sample.Box", {types.String()})
+        parts.box_parameter.erased_constraint =
+            types.Nominal("sample.Box", {types.String()})
+        local ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("constraint does not name an Interface", err)
+
+        module, parts = canonical_generic_module()
+        parts.method.rettypes[1] = types.Nominal("sample.Box", {})
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("wrong generic arity", err)
+
+        module, parts = canonical_generic_module()
+        parts.box.functions.new.rettypes[1] =
+            types.Nominal("sample.Box", {types.Value()})
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("constructor does not match its owner", err)
+    end)
+
+    it("rejects noncanonical owner, callable, and scheme scopes", function()
+        local module, parts = canonical_generic_module()
+        parts.box.scope.role = "function"
+        local ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("scope does not match its declaration", err)
+
+        module, parts = canonical_generic_module()
+        parts.method.scope.role = "static"
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("scope does not match its declaration", err)
+
+        module, parts = canonical_generic_module()
+        parts.scheme.scope.callable_name = "other"
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("scope does not match its declaration", err)
+
+        module, parts = canonical_generic_module()
+        parts.method.typeparams[1].name = "T"
+        parts.method.params[1].diagnostic_name = "T"
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("generic binder 1 has an invalid schema", err)
+    end)
+
+    it("rejects noncanonical and cyclic GenericAlias projections", function()
+        local module, parts = canonical_generic_module()
+        parts.alias.target_scope = types.GenericScope(
+            "sample", "sample.Box", false, "owner", "union")
+        parts.alias.typeparams = {types.TypeParameter("T", false)}
+        local ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("projection does not match its target owner", err)
+
+        module, parts = canonical_generic_module()
+        parts.alias.locality = true
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("GenericAlias has an invalid schema", err)
+
+        module, parts = canonical_generic_module()
+        module.type_members.Crate = nil
+        module.type_members.Wrong = parts.alias
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("published under a noncanonical name", err)
+
+        module, parts = canonical_generic_module()
+        local choice = types.GenericAlias(
+            "sample", "Choice", false, "sample.Box", "sample.Crate",
+            parts.box.scope, parts.alias.typeparams)
+        parts.alias.target_alias_fqtn = "sample.Choice"
+        module.type_members.Choice = choice
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("GenericAlias chain is cyclic", err)
+    end)
+
+    it("rejects hostile serialized generic metadata during decoding", function()
+        local module, parts = canonical_generic_module()
+        parts.scheme.scope.callable_name = "other"
+        local decoded, err = driver.decode_module_interface(
+            types.serialize(module), "sample", "hostile-generic")
+        assert.falsy(decoded)
+        assert.match("scope does not match its declaration", err)
     end)
 end)

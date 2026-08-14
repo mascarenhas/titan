@@ -124,8 +124,8 @@ a/b.so
 a/b/c.so
 ```
 
-The binary path comes from `TITAN_PATH_0_23` when set, otherwise `TITAN_PATH`,
-otherwise the default `.;<root>/lib/titan/0.23`. In an override, `;;` inserts
+The binary path comes from `TITAN_PATH_0_24` when set, otherwise `TITAN_PATH`,
+otherwise the default `.;<root>/lib/titan/0.24`. In an override, `;;` inserts
 that default at the same position. Search is **path-root first**: Titan walks
 all candidates in the first path root before moving to the second root. Once
 an earlier root contains a file at a relative candidate such as `a/b.so`, that
@@ -135,7 +135,7 @@ still advance to a deeper candidate such as `a/b/c.so`.
 
 A candidate claims `a.b.c` when it exports either member of the requested
 metadata pair, `a_b_c_abi` and `a_b_c_types`. Once claimed, validation is
-terminal: both entries must exist, the ABI marker must be `0.23`, and the type
+terminal: both entries must exist, the ABI marker must be `0.24`, and the type
 metadata must describe `a.b.c`. Broken, half-present, mismatched, or malformed
 metadata is an error rather than permission to skip to another file. An
 ancestor with neither entry is an unrelated nonclaim; an exact `a/b/c.so`
@@ -231,16 +231,18 @@ value/native-call layouts remain unchanged. Every generated module also gains
 a fixed physical-provider identity slot so direct source collaborators reject
 canonical private state installed by another provider. ABI 0.23 retains those
 value/module layouts but moves standard callback definitions from retired
-runtime/adapter objects into generated Titan modules and gives callable
-entries injective module/nominal/member native separators. The current marker,
-`TITAN_PATH_0_23`, and `lib/titan/0.23` namespace advance together. Conditional
-[closure adjustment wrappers](closure-adjustment-wrappers.md) reuse this fixed
-0.23 closure header and native signature: target adapters and strict relays are
-private to the consuming translation unit, so they add no provider
-symbol/schema/slot and require no further ABI bump. Ordinary DSO/archive
-metadata validation rejects 0.22 before either side can exchange a value; there
-is no compatibility adapter, migration, or cleanup path. A separately
-versioned 0.22 installation remains preserved prior-version state.
+runtime/adapter objects into generated Titan modules and gives callable entries
+injective module/nominal/member native separators. ABI 0.24 extends serialized
+interfaces for generic declarations while retaining the erased native layouts.
+The current marker, `TITAN_PATH_0_24`, and `lib/titan/0.24` namespace advance
+together. Conditional [closure adjustment wrappers](closure-adjustment-wrappers.md)
+reuse the fixed closure header and native signature retained through 0.24:
+target adapters and strict relays are private to the consuming translation unit,
+so they add no provider symbol/schema/slot and require no further native-layout
+bump. Ordinary DSO/archive metadata validation rejects 0.23 before either side
+can exchange a value; there is no compatibility adapter, migration, or cleanup
+path. A separately versioned 0.23 installation remains preserved prior-version
+state.
 
 ABI 0.19 introduced serialized union/variant schemas and made the module-state
 public prefix reconstruct public record and union static closures after
@@ -261,7 +263,7 @@ break changed what the existing native Array pointer slots mean, along with
 generated container code and Lua boundary checks, so 0.16 and 0.17 providers
 could not be mixed. ABI 0.18 and 0.19 preserved its one-user-value proxy;
 ABI 0.20 retained the canonical identity while adding the writer user value;
-ABI 0.21 retained that representation, and ABIs 0.22 and 0.23 retain it.
+ABI 0.21 retained that representation, and ABIs 0.22 through 0.24 retain it.
 
 Historically, ABI 0.16 introduced prefix-container discovery: a 0.15 consumer
 recorded only an imported module's exact child-DSO pathname and could not
@@ -291,14 +293,14 @@ model. One
 paired provider:
 
 ```text
-$ROCKS_TREE/lib/titan/0.23/titan.so
-$ROCKS_TREE/lib/titan/0.23/titan.a
+$ROCKS_TREE/lib/titan/0.24/titan.so
+$ROCKS_TREE/lib/titan/0.24/titan.a
 ```
 
 contains the native support entry plus the independent logical modules
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
 `titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.os`,
-`titan.peg`, `titan.string`, `titan.math`, `titan.lua`, `titan.iter`,
+`titan.peg`, `titan.string`, `titan.math`, `titan.lua`, `titan.iteration`,
 `titan.gc`, and `titan.test`. Their
 generated logical loaders live at:
 
@@ -318,13 +320,13 @@ $ROCKS_TREE/share/lua/5.5/titan/peg.lua
 $ROCKS_TREE/share/lua/5.5/titan/string.lua
 $ROCKS_TREE/share/lua/5.5/titan/math.lua
 $ROCKS_TREE/share/lua/5.5/titan/lua.lua
-$ROCKS_TREE/share/lua/5.5/titan/iter.lua
+$ROCKS_TREE/share/lua/5.5/titan/iteration.lua
 $ROCKS_TREE/share/lua/5.5/titan/gc.lua
 $ROCKS_TREE/share/lua/5.5/titan/test.lua
 ```
 
 The compiler also installs canonical test support source at
-`$ROCKS_TREE/share/titan/0.23/src/titan/test.titan`; it is compiler data for
+`$ROCKS_TREE/share/titan/0.24/src/titan/test.titan`; it is compiler data for
 `--test` private-source collaboration, not another logical provider.
 
 The DSO is also the installation's one complete dynamic libuv provider; in

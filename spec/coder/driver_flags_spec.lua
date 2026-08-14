@@ -114,6 +114,7 @@ describe("Titan driver generic build flags", function()
         local ok, output, why, code = titanc({
             CC = "env TITAN_DRIVER_CC_SENTINEL=present cc " ..
                 "-DTITAN_DRIVER_CC_HONORED=1",
+            CLANG_FORMAT = "sh -c 'exit 23' --",
             -- The prepared checkout runtime is shared Make-owned state. Keep
             -- this compiler-flags test from feeding its sentinel CC back into
             -- Make's dependency configuration stamps; the real compile and
@@ -201,18 +202,11 @@ describe("Titan driver generic build flags", function()
         end
     end)
 
-    it("prints the complete effective argv with shell-safe quoting", function()
-        local format_lines = command_lines(verbose_output,
-            "'clang-format' '-i'")
-        assert.equal(1, #format_lines, verbose_output)
-        assert.truthy(format_lines[1]:find(
-            "'--style={BasedOnStyle: LLVM, IndentWidth: 4, " ..
-                "SortIncludes: false}' '--' '" .. APPLICATION .. "/" ..
-                MODULE .. ".c'", 1, true), format_lines[1])
-        local format_at = assert(verbose_output:find(format_lines[1], 1, true))
-        local compile_at = assert(verbose_output:find(
-            "'-c' '" .. APPLICATION .. "/" .. MODULE .. ".c'", 1, true))
-        assert.is_true(format_at < compile_at, verbose_output)
+    it("prints the complete effective native argv without a formatter", function()
+        assert.equal(0, #command_lines(verbose_output, "clang-format"),
+            verbose_output)
+        assert.equal(0, #command_lines(verbose_output, "exit 23"),
+            verbose_output)
 
         assert.truthy(verbose_output:find("'--std=c99'", 1, true),
             verbose_output)
@@ -254,17 +248,52 @@ describe("Titan driver generic build flags", function()
     end)
 end)
 
-describe("Titan generated-source formatter failures", function()
+describe("Titan generated-source pretty-printing", function()
     after_each(clean)
 
-    it("stops before compiling a generated module C file", function()
-        local ok, output, why, code = titanc({
+    local function formatter_failure_args()
+        return {
             CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
             CLANG_FORMAT = "sh -c 'exit 23' --",
             MAKE = "true",
             TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
-        }, "-v", "--tree", APPLICATION, MODULE)
+        }
+    end
+
+    it("does not invoke a failing formatter by default", function()
+        local ok, output, why, code = titanc(formatter_failure_args(),
+            "-v", "--tree", APPLICATION, MODULE)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.falsy(output:find("exit 23", 1, true), output)
+        assert.truthy(output:find(
+            "'-c' '" .. APPLICATION .. "/" .. MODULE .. ".c'", 1, true),
+            output)
+    end)
+
+    it("uses the configured formatter when pretty-printing is requested",
+       function()
+        local arguments = formatter_failure_args()
+        arguments.CLANG_FORMAT = "true"
+        local ok, output, why, code = titanc(arguments,
+            "-v", "--pretty-print", "--tree", APPLICATION, MODULE)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        local format_lines = command_lines(output, "'true' '-i'")
+        assert.equal(1, #format_lines, output)
+        assert.truthy(format_lines[1]:find(
+            "'--style={BasedOnStyle: LLVM, IndentWidth: 4, " ..
+                "SortIncludes: false}' '--' '" .. APPLICATION .. "/" ..
+                MODULE .. ".c'", 1, true), format_lines[1])
+        assert.truthy(output:find(
+            "'-c' '" .. APPLICATION .. "/" .. MODULE .. ".c'", 1, true),
+            output)
+    end)
+
+    it("stops before compilation when opted-in formatting fails", function()
+        local ok, output, why, code = titanc(formatter_failure_args(),
+            "-v", "--pretty-print", "--tree", APPLICATION, MODULE)
         assert.falsy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         local cfile = APPLICATION .. "/" .. MODULE .. ".c"
@@ -284,7 +313,6 @@ describe("Titan driver malformed build flags", function()
     after_each(clean)
 
     for _, variable in ipairs({
-        "CLANG_FORMAT",
         "TITAN_EXTRA_CPPFLAGS",
         "TITAN_EXTRA_CFLAGS",
         "TITAN_EXTRA_LDFLAGS",
@@ -301,4 +329,26 @@ describe("Titan driver malformed build flags", function()
             assert.falsy(output:find("'-c'", 1, true), output)
         end)
     end
+
+    it("parses CLANG_FORMAT only when pretty-printing is requested", function()
+        local malformed = {
+            CLANG_FORMAT = "'unterminated",
+            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
+            MAKE = "true",
+            TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
+                "-DTITAN_DRIVER_CPP_BRANCH=37",
+        }
+        local ok, output = titanc(malformed,
+            "--tree", APPLICATION, MODULE)
+        assert.truthy(ok, output)
+
+        clean()
+        ok, output = titanc(malformed,
+            "--pretty-print", "--tree", APPLICATION, MODULE)
+        assert.falsy(ok, output)
+        assert.truthy(output:find(
+            "invalid CLANG_FORMAT: unterminated single quote in shell words",
+            1, true), output)
+        assert.falsy(output:find("'-c'", 1, true), output)
+    end)
 end)

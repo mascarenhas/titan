@@ -22,7 +22,7 @@ function test_ssl_combined_pem_and_binary_record_exchange(
     local server, port =
       support.listen_available(36000, certificate_bundle, nil)
     support.cleanup_server(context, server)
-    local peer = async.run(function (): value
+    local peer = async.run<value, value>(function (): value
       local connection = server:accept()
       defer connection:close()
       local channel: stream.ReaderWriterCloser = connection
@@ -74,7 +74,7 @@ function test_ssl_split_pem_accepts_are_lazy(context: test.Context)
     local first = server:accept()
     support.cleanup_connection(context, first)
 
-    local second_peer = async.run(function (): value
+    local second_peer = async.run<value, value>(function (): value
       local connection = server:accept()
       defer connection:close()
       connection:write("second")
@@ -104,7 +104,7 @@ function test_ssl_rejects_wrong_dns_identity(context: test.Context)
       support.listen_available(38000, support.WRONG_CERTIFICATE, support.PRIVATE_KEY)
     support.cleanup_server(context, server)
     local peer_failed = false
-    local peer = async.run(function (): value
+    local peer = async.run<value, value>(function (): value
       local connection = server:accept()
       defer connection:close()
       do
@@ -148,7 +148,7 @@ function test_ssl_distinguishes_truncated_transport_from_clean_eof(
       end
     end)
     local handshake_done = false
-    local peer = async.run(function (): value
+    local peer = async.run<value, value>(function (): value
       local connection = server:accept()
       accepted = connection
       connection:handshake()

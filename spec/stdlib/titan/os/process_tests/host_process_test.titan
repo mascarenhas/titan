@@ -141,12 +141,12 @@ function test_process_cancellation_waits_for_accepted_callbacks(
     test.assert(output:read_until("\n", true) == "READY",
                 "detached-wait child did not become ready")
 
-    local waiter = async.run(function (): value
+    local waiter = async.run<value, value>(function (): value
       process:wait()
       return nil
     end)
     task_support.cleanup_task(waiter, "detached process waiter cleanup")
-    local reader = async.run(function (): value
+    local reader = async.run<value, value>(function (): value
       output:read()
       return nil
     end)

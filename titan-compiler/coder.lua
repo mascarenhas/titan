@@ -6832,7 +6832,10 @@ function coder._codeis(ctx, node)
     if source_type._tag == "Type.Value" then
         local cast = assert(node._written_cast,
             "value type test is missing its checker written-cast plan")
-        if cast.op == "dynamic" then
+        if cast.op == "identity" then
+            predicate_stats = render("(void)($SOURCE);", { SOURCE = source })
+            predicate = "1"
+        elseif cast.op == "dynamic" then
             predicate_stats, predicate =
                 coder._code_dynamic_predicate(
                     ctx, assert(cast.dynamic,
@@ -17754,6 +17757,95 @@ function coder.generate_foreign_header(modname, ast, tlcontext)
     }, "\n")
 end
 
+-- Code generation consumes only the ordinary erased checker product. Detached
+-- generic surface graphs live exclusively in `_declared_type` metadata on the
+-- module and its declarations; following the checked AST recursively is not
+-- safe because declaration and type annotations contain cycles. Keep this walk
+-- iterative, identity-aware, and bounded so the entry assertion itself cannot
+-- overflow the Lua stack or chase an accidentally unbounded graph.
+function coder._assert_erased_boundary(ast)
+    local max_tables = 1000000
+
+    local function nonempty(value)
+        if value == nil or value == false then return false end
+        return type(value) ~= "table" or next(value) ~= nil
+    end
+
+    local function generic_reason(value)
+        local tag = rawget(value, "_tag")
+        if tag == "Type.GenericScope"
+           or tag == "Type.TypeParameter"
+           or tag == "Type.Parameter"
+           or tag == "Type.FunctionScheme"
+           or tag == "Type.GenericAlias" then
+            return "generic type form " .. tag
+        elseif tag == "Type.Nominal" and nonempty(rawget(value, "args")) then
+            return "generic type form " .. tag
+        elseif (tag == "Type.Record" or tag == "Type.Union"
+                or tag == "Type.Interface" or tag == "Type.Method"
+                or tag == "Type.StaticMethod")
+           and (nonempty(rawget(value, "scope"))
+                or nonempty(rawget(value, "typeparams"))) then
+            return "generic type form " .. tag
+        elseif tag == "Type.Inference" or tag == "Type.InferenceCell"
+            or tag == "Inference" or tag == "Inference.Cell" then
+            return "generic inference form " .. tag
+        elseif tag == "Ast.TypeParam" then
+            return "generic AST form " .. tag
+        elseif type(tag) == "string" and tag:sub(1, 4) == "Ast." then
+            for _, field in ipairs({
+                    "typeparams", "typeargs", "_nominal_typeargs" }) do
+                if nonempty(rawget(value, field)) then
+                    return "generic AST field '" .. field .. "' on " .. tag
+                end
+            end
+        elseif type(tag) == "string"
+           and (tag:find("Inference", 1, true)
+                or tag:find("TypeVariable", 1, true)) then
+            return "generic inference form " .. tag
+        end
+        return nil
+    end
+
+    local function walk(root_value, label, skip_declared_type)
+        local pending = {}
+        local seen = {}
+        local scheduled = 0
+
+        local function enqueue(value)
+            if type(value) ~= "table" or seen[value] then return end
+            seen[value] = true
+            scheduled = scheduled + 1
+            if scheduled > max_tables then
+                error("coder erased-boundary " .. label
+                    .. " exceeds its bounded graph budget", 3)
+            end
+            pending[#pending + 1] = value
+        end
+
+        enqueue(root_value)
+        while #pending > 0 do
+            local value = pending[#pending]
+            pending[#pending] = nil
+            local reason = generic_reason(value)
+            if reason then
+                error(reason .. " reached coder through " .. label, 3)
+            end
+            for key, child in next, value do
+                if not (skip_declared_type and
+                        (key == "_declared_type" or
+                         key == "_erased_registry")) then
+                    enqueue(key)
+                    enqueue(child)
+                end
+            end
+        end
+    end
+
+    walk(ast, "code-facing AST", true)
+    walk(types.registry, "active type registry", false)
+end
+
 function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     -- Omission preserves the historical default. Reset this before any
     -- validation that may fail so a previous invocation's policy never leaks
@@ -17764,6 +17856,10 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
     local staticmetadata = require "titan-compiler.staticmetadata"
     assert(staticmetadata.valid_module_name(modname),
         "coder.generate requires a valid logical module name")
+    if ast._erased_registry then
+        types.registry = ast._erased_registry
+    end
+    coder._assert_erased_boundary(ast)
     local tlcontext = {
         module = modname,
         prefix = mangle_qn(modname) .. "_",
@@ -18281,7 +18377,12 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         table.insert(initvars, "L->top.p = _base;")
     end
 
-    local serialized_type = types.serialize(ast._type)
+    -- The generic-aware checker freezes a detached declared graph before it
+    -- replaces every code-facing annotation and the active registry with their
+    -- erased forms. Preserve ordinary callers which have no separate graph.
+    local metadata_type = rawget(ast, "_declared_type")
+    if metadata_type == nil then metadata_type = ast._type end
+    local serialized_type = types.serialize(metadata_type)
     local metadata, metadata_err =
         staticmetadata.render(modname, abi, serialized_type)
     assert(metadata, metadata_err)
@@ -18500,15 +18601,18 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
         end
     end
 
-    local foreign_header = coder.generate_foreign_header(
-        modname, ast, tlcontext)
+    local foreign_header = ast._foreign_header_contents
+    if not ast._foreign_header_prepared then
+        foreign_header = coder.generate_foreign_header(
+            modname, ast, tlcontext)
+    end
     coder._ffi_include_collector = nil
     local source = preamble .. "\n\n" .. table.concat(code, "\n\n")
     -- A `#line` directive applies its number to the immediately following
     -- physical source line. Template substitutions can contribute blank
     -- lines after a standalone directive; remove every such semantic line
-    -- before clang-format so native frames retain the exact Titan location. The
-    -- formatter preserves this spelling, so one pass remains a fixed point.
+    -- before the driver persists the translation unit so native frames retain
+    -- the exact Titan location. Optional formatting preserves this spelling.
     local removed
     repeat
         source, removed = source:gsub(

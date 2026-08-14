@@ -495,7 +495,7 @@ function test_gsub_callback_and_maximum(context: test.Context)
   test.assert(#calls == 2 and calls[1] == "b" and calls[2] == "ab")
 
   output, count = strings.gsub(
-    "aaaa", "a", function(found: string): string return "X" end, 2)
+    "aaaa", "a", function(_: string): string return "X" end, 2)
   test.assert(output == "XXaa" and count == 2)
   local zero_calls = 0
   output, count = strings.gsub(
@@ -512,7 +512,7 @@ function test_gsub_callback_and_maximum(context: test.Context)
     end, nil)
   test.assert(output == "a-" and count == 2)
   test.assert(strings.gsub(
-    "a", "a", function(found: string): string return "%1" end, nil) ==
+    "a", "a", function(_: string): string return "%1" end, nil) ==
     "%1")
 
   local regex = strings.compile_regex("a+")
@@ -530,7 +530,7 @@ function test_gsub_callback_and_maximum(context: test.Context)
 
   support.expect_error(function()
     strings.gsub(
-      "a", "a", function(found: string): string
+      "a", "a", function(_: string): string
         raise "replacement exploded"
       end, nil)
   end, "replacement exploded")
@@ -546,7 +546,7 @@ function test_regex_gc_rooting(context: test.Context)
   local iterator: () -> strings.RegexMatch? =
     strings.compile_regex("((a|b)+)-\\1"):gmatch(
       "ab-ab xx b-b aa-aa", nil)
-  for pass = 1, 12 do support.collect_gc() end
+  for _ = 1, 12 do support.collect_gc() end
   local values: {string} = {}
   while true do
     support.collect_gc()
@@ -571,7 +571,7 @@ function test_regex_gc_rooting(context: test.Context)
   test.assert(callback_calls == 2)
 
   support.set_gc_mode("incremental")
-  for pass = 1, 12 do support.collect_gc() end
+  for _ = 1, 12 do support.collect_gc() end
   local found? = strings.match("zz-aa-aa", "((a)+)-\\1", nil)
   test.assert(found ~= nil and found:whole() == "aa-aa")
   test.assert(found:group(1) == "aa")
@@ -580,7 +580,7 @@ end
 function test_weak_cache_and_binary_matches_across_gc(context: test.Context)
   local previous_mode = support.set_gc_mode("generational")
   defer support.set_gc_mode(previous_mode)
-  for index = 1, 12 do
+  for _ = 1, 12 do
     local subject = "\0\xffA\0\xff"
     local found? = strings.match(subject, "[\0\xff]+", nil)
     test.assert(found ~= nil and found:whole() == "\0\xff")

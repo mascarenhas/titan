@@ -31,7 +31,7 @@ end
 describe("compiler installation discovery", function()
     it("uses the first literal Lua 5.5 C-module prefix", function()
         local cpath = table.concat({
-            "/first prefix/lib/titan/0.23/?.so",
+            "/first prefix/lib/titan/0.24/?.so",
             "/wrong/lib/lua/5.4/?.so",
             "/also-wrong/lib/lua/5.5/?.dylib",
             "/first prefix/lib/lua/5.5/?.so",
@@ -102,10 +102,10 @@ describe("compiler installation discovery", function()
             libtitan = "/opt/titan/lib/libtitan.a",
             libbacktrace = "/opt/titan/lib/libbacktrace.a",
             liblua = "/opt/titan/lib/liblua.a",
-            titan_bin = "/opt/titan/lib/titan/0.23",
-            lua_cpath = "/opt/titan/lib/titan/0.23/?.so",
+            titan_bin = "/opt/titan/lib/titan/0.24",
+            lua_cpath = "/opt/titan/lib/titan/0.24/?.so",
             test_source =
-                "/opt/titan/share/titan/0.23/src/titan/test.titan",
+                "/opt/titan/share/titan/0.24/src/titan/test.titan",
         }, paths)
 
         assert.same({
@@ -505,7 +505,18 @@ describe("generated C formatting", function()
         util.set_file_contents = original_set_file_contents
     end)
 
-    it("quotes configured argv and generated paths in verbose mode", function()
+    it("does not invoke the formatter by default", function()
+        os.execute = function() error("unexpected formatter execution") end
+        driver.CLANG_FORMAT = "'unterminated"
+        local path = os.tmpname() .. " generated module.c"
+        write_file(path, "int   value;\n")
+
+        assert.is_true(driver.format_generated_file(path, true))
+        assert.equal("int   value;\n", assert(util.get_file_contents(path)))
+        assert(os.remove(path))
+    end)
+
+    it("quotes configured argv and generated paths when opted in", function()
         local commands = {}
         local printed = {}
         os.execute = function(command)
@@ -517,7 +528,7 @@ describe("generated C formatting", function()
         local path = os.tmpname() .. " generated module.c"
         write_file(path, "int value;\n")
 
-        assert.is_true(driver.format_generated_file(path, true))
+        assert.is_true(driver.format_generated_file(path, true, true))
         assert.equal(1, #commands)
         assert.same(commands, printed)
         assert.matches("'/tools with spaces/clang%-format'", commands[1])
@@ -526,7 +537,7 @@ describe("generated C formatting", function()
         assert(os.remove(path))
     end)
 
-    it("removes every blank physical line after a line directive", function()
+    it("normalizes line directives without invoking the formatter", function()
         local path = os.tmpname() .. " generated.c"
         write_file(path, table.concat({
             '#line 7 "first.titan"',
@@ -538,8 +549,7 @@ describe("generated C formatting", function()
             'int second;',
             '',
         }, "\n"))
-        os.execute = function() return true, "exit", 0 end
-        driver.CLANG_FORMAT = "clang-format"
+        os.execute = function() error("unexpected formatter execution") end
 
         assert.is_true(driver.format_generated_file(path, false))
         local contents = assert(util.get_file_contents(path))
@@ -553,21 +563,14 @@ describe("generated C formatting", function()
         assert(os.remove(path))
     end)
 
-    it("reports post-format read and normalization write failures", function()
+    it("reports normalization read and write failures", function()
         local path = os.tmpname() .. " generated.c"
-        write_file(path, '#line 1 "test.titan"\n\nint value;\n')
-        driver.CLANG_FORMAT = "clang-format"
-        os.execute = function()
-            assert(os.remove(path))
-            return true, "exit", 0
-        end
         local ok, err = driver.format_generated_file(path, false)
         assert.is_nil(ok)
         assert.matches("failed to normalize", err, 1, true)
         assert.matches(path, err, 1, true)
 
         write_file(path, '#line 1 "test.titan"\n\nint value;\n')
-        os.execute = function() return true, "exit", 0 end
         util.set_file_contents = function(filename, contents)
             assert.equal(path, filename)
             assert.equal('#line 1 "test.titan"\nint value;\n', contents)
@@ -580,36 +583,35 @@ describe("generated C formatting", function()
         assert(os.remove(path))
     end)
 
-    it("reports formatter failures with the path and exit status", function()
+    it("reports opted-in formatter failures before normalization", function()
         local status = 23
         os.execute = function() return nil, "exit", status end
         driver.CLANG_FORMAT = "clang-format"
         local path = "/tmp/generated failure.c"
-        local ok, err = driver.format_generated_file(path, false)
+        local ok, err = driver.format_generated_file(path, false, true)
         assert.is_nil(ok)
         assert.matches("clang%-format", err)
         assert.matches(path, err, 1, true)
         assert.matches("exit 23", err, 1, true)
 
         status = 127 -- the ordinary shell status for a missing executable
-        ok, err = driver.format_generated_file(path, false)
+        ok, err = driver.format_generated_file(path, false, true)
         assert.is_nil(ok)
         assert.matches(path, err, 1, true)
         assert.matches("exit 127", err, 1, true)
     end)
 
-    it("reports malformed and empty formatter commands without executing",
-    function()
+    it("reports malformed and empty opted-in formatter commands", function()
         os.execute = function() error("unexpected formatter execution") end
         local path = "/tmp/generated malformed.c"
         driver.CLANG_FORMAT = "'unterminated"
-        local ok, err = driver.format_generated_file(path, false)
+        local ok, err = driver.format_generated_file(path, false, true)
         assert.is_nil(ok)
         assert.matches(path, err, 1, true)
         assert.matches("invalid CLANG_FORMAT", err, 1, true)
 
         driver.CLANG_FORMAT = ""
-        ok, err = driver.format_generated_file(path, false)
+        ok, err = driver.format_generated_file(path, false, true)
         assert.is_nil(ok)
         assert.matches(path, err, 1, true)
         assert.matches("CLANG_FORMAT command is empty", err, 1, true)
@@ -662,11 +664,13 @@ describe("generated C formatting", function()
             ast = {},
         }
         local calls = {}
-        driver.format_generated_file = function(path)
+        driver.format_generated_file = function(path, verbose, pretty_print)
+            assert.is_nil(verbose)
+            assert.is_true(pretty_print)
             calls[#calls + 1] = path
             return nil, "injected formatter failure"
         end
-        local ok, err = driver.write_foreign_header_plan(plan)
+        local ok, err = driver.write_foreign_header_plan(plan, nil, true)
         assert.is_nil(ok)
         assert.matches("injected formatter failure", err, 1, true)
         assert.equal(old, assert(util.get_file_contents(header)))
@@ -674,13 +678,15 @@ describe("generated C formatting", function()
         assert.equal(1, #calls)
         assert.is_nil(lfs.symlinkattributes(calls[1]))
 
-        driver.format_generated_file = function(path)
+        driver.format_generated_file = function(path, verbose, pretty_print)
+            assert.is_nil(verbose)
+            assert.is_true(pretty_print)
             local contents = assert(util.get_file_contents(path))
             assert(util.set_file_contents(path,
                 contents .. "/* formatted */\n"))
             return true
         end
-        assert.is_true(driver.write_foreign_header_plan(plan))
+        assert.is_true(driver.write_foreign_header_plan(plan, nil, true))
         assert.equal(new .. "/* formatted */\n",
             assert(util.get_file_contents(header)))
         assert.is_true(plan.ast._foreign_header_prepared)
@@ -724,7 +730,9 @@ describe("source foreign-header planning", function()
         }
 
         local original = coder.generate_foreign_header
+        local generated = {}
         coder.generate_foreign_header = function(name, ast)
+            generated[name] = (generated[name] or 0) + 1
             local dependency = ast[1] and ast[1]._foreign_header
             return driver.FOREIGN_HEADER_MARKER .. "\n/* " .. name .. " "
                 .. tostring(dependency) .. " */\n"
@@ -736,9 +744,14 @@ describe("source foreign-header planning", function()
         assert.truthy(ok, plans_or_err)
         local plans = plans_or_err
         assert.equal(2, #plans)
+        assert.same({ producer = 1, consumer = 1 }, generated)
         assert.equal(root .. "/producer.titan.h", import._foreign_header)
         assert.truthy(plans[2].contents:find(import._foreign_header, 1, true))
         assert.is_true(driver.write_foreign_header_plans(plans))
+        assert.equal(plans[1].contents,
+            producer_ast._foreign_header_contents)
+        assert.equal(plans[2].contents,
+            consumer_ast._foreign_header_contents)
         assert.equal("file", lfs.attributes(root .. "/producer.titan.h", "mode"))
         assert.equal("file", lfs.attributes(root .. "/consumer.titan.h", "mode"))
 

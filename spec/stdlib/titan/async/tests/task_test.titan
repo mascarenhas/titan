@@ -2,13 +2,13 @@ local function cancel_join_with_finalizable(
     operand: async.Task, callback: (value) -> ())
   local sentinel: {string: value} = {}
   support.mark_finalizable(sentinel, callback)
-  local joining = async.run(function (): value
+  local joining = async.run<value, value>(function (): value
     async.join(operand)
     return nil
   end)
   defer task_support.cancel_and_join_task(joining, "listener probe cleanup")
   support.wait_until_waiting(joining)
-  joining:cancel(async.CancellationReason.complex(sentinel))
+  joining:cancel(async.CancellationReason<value>.complex(sentinel))
   local status = async.join(joining)
   test.assert(status:has_cancelled(),
         "listener-retention probe did not cancel its combinator")
@@ -19,7 +19,7 @@ end
 function test_task_primitives_and_terminal_listeners(context: test.Context)
   runtime_test.run(function ()
     local self_task: async.Task? = nil
-    self_task = async.run(function (): value
+    self_task = async.run<value, value>(function (): value
       test.assert(async.running() == (self_task as async.Task),
             "async.running did not return the current Task")
 
@@ -35,16 +35,19 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
       local listener_status = ""
       local listener_ran_in_scheduler = false
       local removed_listener_ran = false
-      local removed_listener = function (_status: async.TaskStatus)
+      -- The bare all-value callback is adjusted independently at each precise
+      -- registration. Its remover must not rediscover that wrapper by identity.
+      local removed_listener = function (_: async.TaskStatus)
         removed_listener_ran = true
         listener_order = listener_order .. "removed"
       end
-      local target = async.run(function (): value
-        timer.sleep(2)
-        return "listener-result"
-      end)
+      local target = async.run<string, value>(function (): string
+          timer.sleep(2)
+          return "listener-result"
+        end)
       defer task_support.cancel_and_join_task(target, "listener target cleanup")
-      local first_listener = function (status: async.TaskStatus)
+      local first_listener = function (
+          status: async.TaskStatus<string, value>)
         listener_order = listener_order .. "1"
         listener_status = status:as_string()
         do
@@ -53,25 +56,55 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
           listener_ran_in_scheduler = true
         end
       end
-      target:add_terminal_listener(first_listener)
-      target:add_terminal_listener(removed_listener)
-      target:add_terminal_listener(function (_status: async.TaskStatus)
-        listener_order = listener_order .. "2"
-        -- Terminal delivery uses a detached snapshot. Removing an already-run
-        -- listener must not shift that snapshot and skip listener 3.
-        target:remove_terminal_listener(first_listener)
-        raise "swallowed-listener-error"
-      end)
-      target:add_terminal_listener(function (_status: async.TaskStatus)
-        listener_order = listener_order .. "3"
-      end)
-      target:remove_terminal_listener(removed_listener)
-      target:remove_terminal_listener(removed_listener)
+      local remove_first_listener =
+        target:add_terminal_listener(first_listener)
+      defer remove_first_listener()
+
+      local remove_removed_listener =
+        target:add_terminal_listener(removed_listener)
+      remove_removed_listener()
+      remove_removed_listener()
+
+      local duplicate_listener_count = 0
+      local duplicate_listener = function (_: async.TaskStatus)
+        duplicate_listener_count = duplicate_listener_count + 1
+        listener_order = listener_order .. "d"
+      end
+      local remove_duplicate_first =
+        target:add_terminal_listener(duplicate_listener)
+      local remove_duplicate_second =
+        target:add_terminal_listener(duplicate_listener)
+      defer remove_duplicate_second()
+      remove_duplicate_first()
+      remove_duplicate_first()
+
+      local remove_second_listener = target:add_terminal_listener(
+        function (_: async.TaskStatus<string, value>)
+          listener_order = listener_order .. "2"
+          -- Terminal delivery uses a detached snapshot. A remover for an
+          -- already-delivered registration must not shift it and skip 3.
+          remove_first_listener()
+          raise "swallowed-listener-error"
+        end)
+      defer remove_second_listener()
+      local remove_third_listener = target:add_terminal_listener(
+        function (_: async.TaskStatus<string, value>)
+          listener_order = listener_order .. "3"
+        end)
+      defer remove_third_listener()
+
       local target_status = async.join(target)
       test.assert(support.success_payload(target_status) == "listener-result",
             "terminal listener target lost its result")
-      test.assert(listener_order == "123",
+      local exact_succeeded, exact_result? =
+        target:status():has_succeeded()
+      test.assert(exact_succeeded and
+            (exact_result as string) == "listener-result",
+            "generic Task status lost its exact success payload")
+      test.assert(listener_order == "1d23",
             "terminal listeners were not called sequentially")
+      test.assert(duplicate_listener_count == 1,
+            "duplicate listener registrations did not remain distinct")
       test.assert(not removed_listener_ran,
             "removed terminal listener was invoked")
       test.assert(listener_status == "succeeded",
@@ -80,16 +113,19 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
             "terminal listener unexpectedly ran in a user Task")
 
       local late_listener_ran = false
-      target:add_terminal_listener(function (_status: async.TaskStatus)
-        late_listener_ran = true
-      end)
+      local remove_late_listener = target:add_terminal_listener(
+        function (_: async.TaskStatus<string, value>)
+          late_listener_ran = true
+        end)
+      remove_late_listener()
+      remove_late_listener()
       timer.yield()
       test.assert(not late_listener_ran,
             "terminal Task retained or reran a listener")
 
       local suspended_task: async.Task? = nil
       local resumed_count = 0
-      suspended_task = async.run(function (): value
+      suspended_task = async.run<value, value>(function (): value
         test.assert(async.running() == (suspended_task as async.Task),
               "async.running changed inside suspended Task")
         async.suspend()
@@ -122,6 +158,99 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
   end)
 end
 
+-- Generic Task views carry exact success and cancellation projections while
+-- the Runtime continues to own the same all-value Task userdata.
+function test_generic_task_payload_and_cancellation_views(context: test.Context)
+  runtime_test.run(function ()
+    local successful: async.Task<string, {string: integer}>? = nil
+    successful = async.run<string, {string: integer}>(function (): string
+      test.assert(async.running() ==
+            (successful as async.Task<string, {string: integer}>),
+            "monomorphic async.running lost generic Task identity")
+      timer.yield()
+      return "typed-success"
+    end)
+    local exact_successful =
+      successful as async.Task<string, {string: integer}>
+    defer task_support.cancel_and_join_task(exact_successful,
+                 "generic success Task cleanup")
+    async.join(exact_successful)
+    local did_succeed, success? =
+      exact_successful:status():has_succeeded()
+    test.assert(did_succeed and (success as string) == "typed-success",
+          "generic success projection lost its exact payload")
+
+    local cancellation_payload: {string: integer} = {
+      ["code"] = 42,
+    }
+    local cancelled = async.run<boolean, {string: integer}>(function (): boolean
+        timer.sleep(60000)
+        return false
+      end)
+    defer task_support.cancel_and_join_task(cancelled,
+                 "generic cancelled Task cleanup")
+    cancelled:cancel(
+      async.CancellationReason<{string: integer}>.complex(
+        cancellation_payload))
+    async.join(cancelled)
+    local was_cancelled, reason? = cancelled:status():has_cancelled()
+    test.assert(was_cancelled,
+          "generic cancellation did not publish a cancelled status")
+    local exact_reason =
+      reason as async.CancellationReason<{string: integer}>
+    local exact_code = 0
+    case exact_reason
+    when complex: payload then exact_code = payload["code"]
+    else
+    end
+    test.assert(exact_code == 42,
+          "generic cancellation projection lost its exact payload")
+
+    local raw_success = async.run<value, value>(function (): value
+      return "polluted-success"
+    end)
+    defer task_support.cancel_and_join_task(raw_success,
+                 "polluted success Task cleanup")
+    local integer_view = raw_success as async.Task<integer, value>
+    async.join(raw_success)
+    local success_projection_rejected = false
+    do
+      local _, _? = integer_view:status():has_succeeded()
+    catch
+      success_projection_rejected = true
+    end
+    test.assert(success_projection_rejected,
+          "generic success projection accepted a polluted Runtime payload")
+
+    local raw_cancelled = async.run<value, value>(function (): value
+      timer.sleep(60000)
+      return nil
+    end)
+    defer task_support.cancel_and_join_task(raw_cancelled,
+                 "polluted cancellation Task cleanup")
+    local integer_reason_view =
+      raw_cancelled as async.Task<value, integer>
+    raw_cancelled:cancel(
+      async.CancellationReason<value>.complex("polluted-reason"))
+    async.join(raw_cancelled)
+    local cancellation_projection_rejected = false
+    do
+      local _, polluted_reason? =
+        integer_reason_view:status():has_cancelled()
+      local exact =
+        polluted_reason as async.CancellationReason<integer>
+      case exact
+      when complex: _ then
+      else
+      end
+    catch
+      cancellation_projection_rejected = true
+    end
+    test.assert(cancellation_projection_rejected,
+          "generic cancellation projection accepted a polluted payload")
+  end)
+end
+
 -- Cancellation of a Task suspended inside a combinator wakes it through the
 -- same explicit resume path. Unwinding removes its operand listener before a
 -- later operand completion.
@@ -129,7 +258,7 @@ function test_cancelled_combinator_removes_its_listener(context: test.Context)
   runtime_test.run(function ()
     local operand = support.sleeping(60000, "cancelled operand returned")
     task_support.cleanup_task(operand, "operand cleanup")
-    local joining = async.run(function (): value
+    local joining = async.run<value, value>(function (): value
       async.join(operand)
       raise "cancelled combinator resumed user code"
       return nil
@@ -155,7 +284,7 @@ function test_self_cancelled_task_is_rejected_by_combinators(
     context: test.Context)
   runtime_test.run(function ()
     local candidate: async.Task? = nil
-    candidate = async.run(function (): value
+    candidate = async.run<value, value>(function (): value
       timer.yield()
       local current = candidate as async.Task
       current:cancel(async.CancellationReason.simple("self-cancelled"))
@@ -187,7 +316,7 @@ function test_cancelled_combinator_listener_is_not_retained(context: test.Contex
     local operand = support.sleeping(60000, "listener cleanup operand returned")
     task_support.cleanup_task(operand, "operand cleanup")
     cancel_join_with_finalizable(
-        operand, function (_candidate: value)
+        operand, function (_: value)
           listener_cleanup_finalized = true
         end)
     support.collect_garbage()

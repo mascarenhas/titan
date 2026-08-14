@@ -3,7 +3,7 @@
 Static compiled modules extend the compiled-module loader and native-output
 pipeline without giving archives a different logical interface or native
 calling convention from DSOs. The static-provider feature shipped within ABI
-0.16; current artifacts carry ABI 0.23. One checked interface can now come
+0.16; current artifacts carry ABI 0.24. One checked interface can now come
 from a DSO's callable metadata or from a canonical section embedded in an
 archive member.
 
@@ -68,7 +68,7 @@ feed the callable `_types` entry and:
 -- Titan archive module metadata v1
 return {
     ["pkg.left"] = {
-        abi = "0.23",
+        abi = "0.24",
         types = "Module('pkg.left', ...)",
     },
 }
@@ -350,15 +350,15 @@ removal. Titan never scans a directory and never removes an unrecognized Lua
 file.
 
 The canonical standard installation places `titan.so` and `titan.a` together
-under `lib/titan/0.23`. Post-install recognizes bootstrap-only and complete-pair
-predecessor states within that active namespace. Separately
-versioned 0.17, 0.18, 0.19, 0.20, and 0.21 installations are preserved, not
-migrated, cleaned up, or treated as active-layout predecessors.
+under `lib/titan/0.24`. Post-install recognizes bootstrap-only and complete-pair
+predecessor states within that active namespace. Separately versioned 0.17
+through 0.23 installations are preserved, not migrated, cleaned up, or treated
+as active-layout predecessors.
 
 ABI 0.17 keeps the serialized `Array(...)` text and exact `Table *` /
 `Table **` native shapes but changes the represented Array protocol, so
 embedded and callable metadata must reject 0.16 providers before linking them.
-See [Dense Arrays](dense-arrays.md#abi-017-020-021-022-and-023-boundaries).
+See [Dense Arrays](dense-arrays.md#abi-017-020-021-022-023-and-024-boundaries).
 
 ABI 0.18 preserved that Array protocol but changed the standard-library static
 runtime contract. Its logical archive objects directly reference promoted
@@ -386,7 +386,9 @@ boundary. ABI 0.23 still uses the same metadata container and retains the 0.22
 public schema/layout, but separates module, nominal owner, and member in generated
 callable names and moves the standard callback definitions out of retired
 runtime/adapter objects. A 0.22
-archive is rejected before those incompatible symbols can reach the link.
+archive is rejected before those incompatible symbols can reach the link. ABI
+0.24 extends the serialized interface payload for generic declarations without
+changing the metadata container; a 0.23 archive is rejected before decoding.
 
 Bundled libuv enters as shared `-X` provider payload and is present in both
 native forms. System libuv remains a repeated final-link setting and never

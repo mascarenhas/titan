@@ -160,7 +160,7 @@ function client(): value
 end
 
 function main(args: {string}): integer
-  async.run(client)
+  async.run<value, value>(client)
   return 0
 end
 ```
@@ -187,7 +187,7 @@ Typical packages are `libuv1-dev pkg-config` on Debian/Ubuntu,
 Homebrew on macOS. Applications importing the installed binary `net` module do
 not need libuv headers at compile time; all libuv and callback-shim linkage
 remains in the combined standard-library provider
-`$ROCKS_TREE/lib/titan/0.23/titan.so`. The supported installation currently
+`$ROCKS_TREE/lib/titan/0.24/titan.so`. The supported installation currently
 sets `ROCKS_TREE == PREFIX`; the former owns Titan's SDK/stdlib while the latter
 owns Lua and LuaRocks. Repository contributors can still use
 `make stdlib` for an in-checkout standard-library build.

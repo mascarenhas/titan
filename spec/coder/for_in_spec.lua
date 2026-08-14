@@ -146,6 +146,46 @@ describe("generic for loops", function()
         ]], 14)
     end)
 
+    it("runs computed record-field iterators and close functions", function()
+        h.run_coder([[
+            record H
+                iter: (value, value) -> integer?
+                close: (value) -> nil
+            end
+
+            local built: integer = 0
+            local calls: integer = 0
+            local closed: integer = 0
+
+            local function step(state: value, control: value): integer?
+                calls = calls + 1
+                local n = control as integer
+                if n >= 2 then return nil else return n + 1 end
+            end
+
+            local function finish(state: value): nil
+                closed = closed + (state as integer)
+                return nil
+            end
+
+            function hs(): {H}
+                built = built + 1
+                return {H.new(step, finish)}
+            end
+
+            function run(): integer
+                local sum = 0
+                for n: integer in
+                        hs()[1].iter, 3, 0, hs()[1].close do
+                    sum = sum + n
+                end
+                return sum + built * 10 + calls * 100 + closed * 1000
+            end
+        ]], [[
+            assert(test.run() == 3323)
+        ]])
+    end)
+
     it("runs zero-parameter close functions", function()
         h.run_coder_app([[
             closed: integer = 0

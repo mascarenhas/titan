@@ -298,6 +298,8 @@ one logical module. Their prototypes and eligible inline bodies enter the
 canonical main's single generated `*.titan.h`; out-of-line bodies enter its
 single C/object pair. The callback-symbol and UCN top-level-entry changes are
 native ABI reasons for 0.23, not contributor identities or new folder metadata.
+ABI 0.24 likewise leaves folder composition unchanged; its boundary is the
+extended generic declaration metadata, not contributor identity.
 
 ## `titan.uv` dogfooding
 
@@ -321,7 +323,7 @@ roots:
 titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
   titan.ssl titan.url titan.http titan.os \
   titan.peg titan.string \
-  titan.math titan.lua titan.iter titan.gc titan.test \
+  titan.math titan.lua titan.iteration titan.gc titan.test \
   -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
      openssl-build/libssl.a openssl-build/libcrypto.a  # bundled modes

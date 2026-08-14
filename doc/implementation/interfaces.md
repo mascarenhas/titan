@@ -425,7 +425,7 @@ The driver's closed validator requires:
 value-facing positions in recovered metadata. The value graph is closed:
 error-recovery/no-value markers, nested modules, C FFI descriptors, legacy
 wrappers, and unknown tags are rejected as well. A recovered Titan function
-type must carry the ABI-0.23 reserved `vararg=false` sentinel; typed variadics
+type must carry ABI 0.24's reserved `vararg=false` sentinel; typed variadics
 use `varargtype`, while C variadicity exists only on unexportable
 `Type.CFunction`. An Option cannot contain another Option or `value`, matching
 source canonicalization.
@@ -447,8 +447,9 @@ concrete method symbols.
 
 Static-provider and library preflight inventories the three exported bound
 method symbols from recovered Interface type members, in addition to ordinary
-module and nominal symbols. Interface artifacts follow the same ABI-0.23
-`<module>_\u2133_<owner>_\u2131_<member><role>` hierarchy as record and
+module and nominal symbols. Interface artifacts follow the native hierarchy
+introduced in ABI 0.23 and retained in ABI 0.24:
+`<module>_\u2133_<owner>_\u2131_<member><role>`, matching record and
 union callables. Pair arrays and adjustment entries are private to
 the translation unit that needs a concrete/Interface conversion and do not
 add serialized metadata or public symbols.
@@ -468,14 +469,16 @@ covers:
 ABI 0.20 also introduced the two-user-value Array proxy and strict generic
 function entry. ABI 0.21 retained those layouts while advancing the matched
 Lua runtime to 5.5.1. ABI 0.22 retains those layouts; ABI 0.23 also retains
-them while renaming the native bound and metatable entry families. The
+them while renaming the native bound and metatable entry families, and ABI 0.24
+retains their erased representation while extending generic metadata. The
 generalized callable
 action graph, `nil_fill_result`, and first-class closure wrappers add no
 Interface schema/payload slot or provider symbol. Target wrapper adapters and
 strict relays are consumer-private and use existing signatures, so there is no
-new ABI bump. A 0.21 provider is rejected before its metadata is decoded or any
-native value crosses the boundary; there is no compatibility adapter, migration,
-or cleanup path, and separately versioned 0.20 and 0.21 artifacts remain
+new native-layout bump. A 0.23 provider is rejected before its metadata is
+decoded or any native value crosses the ABI-0.24 boundary; there is no
+compatibility adapter, migration, or cleanup path, and separately versioned
+0.20 through 0.23 artifacts remain
 preserved.
 
 The wrapper, concrete module, and concrete value use stock Lua reachability.

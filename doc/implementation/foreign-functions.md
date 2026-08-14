@@ -248,10 +248,11 @@ main rule as generated C and object files. Contributors never own headers.
 6. all foreign prototypes in declaration order; and
 7. all eligible inline bodies, also in declaration order.
 
-Before any generated companion is consumed or published, the driver runs the
-configured `clang-format` with Titan's explicit style and include sorting
-disabled. The formatter therefore preserves the intentional direct,
-supplemental, and generated-source include sequence above.
+Before any generated companion is consumed or published, the driver applies
+required `#line` normalization. With `titanc --pretty-print` it additionally
+runs the configured `clang-format` with Titan's explicit style and include
+sorting disabled. Default builds do not invoke the formatter; either mode
+preserves the intentional include sequence above.
 
 Putting every prototype before every inline body supports calls among the
 module's foreign declarations. Include lines are normalized and deduplicated.
@@ -273,9 +274,10 @@ manufacture a canonical out-of-line identity.
 Recursive source checking happens before the final physical output graph is
 planned. When a checked dependency contains foreign declarations,
 `defaultloader` therefore renders a sibling temporary header such as the final
-path plus `.check.tmp.<unique>`, formats it in place, and only then returns
-that path in the trusted source loader result. A consumer can immediately
-process the formatted header in the exact header/probe context described above,
+path plus `.check.tmp.<unique>`, completes its normalization/optional-format
+boundary, and only then returns that path in the trusted source loader result. A
+consumer can immediately process the completed header in the exact header/probe
+context described above,
 even when final object compilation will sort the consumer before the producer.
 
 These files belong to the resolver context. `close_resolver_context` removes
@@ -288,18 +290,22 @@ CLI's close guard.
 
 After all source modules typecheck, `titanc` calls
 `driver.plan_foreign_headers` over the sorted invocation-wide source graph. It
-first derives every final absolute header identity, rejects two logical modules
-claiming one path, then rewrites each direct source edge from its temporary
-checking path to the finalized producer path and rerenders all dependent
-headers. Every plan is ownership-validated before any plan is written and is
-also included in the CLI's general output-path preflight.
+first derives every final absolute header identity without rendering content,
+rejects two logical modules claiming one path, then rewrites each direct source
+edge from its temporary checking path to the finalized producer path. It renders
+each required header exactly once from that finalized graph. The completed text
+is retained on the AST for the later module-code generation pass instead of
+walking the same decorated foreign-function bodies again. Every plan is
+ownership-validated before any plan is written and is also included in the
+CLI's general output-path preflight.
 
 A required path may be replaced only when its first bytes are
 `driver.FOREIGN_HEADER_MARKER`; a user file, symlink, directory, or other
 unowned object is refused. For a source module with no remaining foreign
 declaration, a banner-owned old companion is removed and an unowned same path is
-left alone. Each final companion is written to a sibling stage, formatted, and
-renamed over its owned destination only after formatting succeeds. All final
+left alone. Each final companion is written to a sibling stage, normalized and
+optionally formatted, then renamed over its owned destination only after the
+selected steps succeed. All final
 companions are published before any source object is compiled, and
 `driver.compile` retains a single-module fallback for direct programmatic
 callers.
@@ -530,7 +536,11 @@ to match.
 `TITAN_VER`, `_0_23`, `TITAN_PATH_0_23`, `lib/titan/0.23`,
 `share/titan/0.23`, and `stdlib_0_23` advance together. A separately versioned
 0.22 installation is preserved as prior state; there is no migration,
-active-layout predecessor, compatibility object, or cleanup path.
+active-layout predecessor, compatibility object, or cleanup path. ABI 0.24
+retains these native names and callback locations while extending serialized
+interfaces for generics; its marker, `_0_24`, `TITAN_PATH_0_24`,
+`lib/titan/0.24`, `share/titan/0.24`, and `stdlib_0_24` reject and preserve the
+0.23 provider without migration or cleanup.
 
 Foreign declarations, allocation plans, and generated headers remain
 compiler-local. They add no public type descriptor or module-state slot, so the
