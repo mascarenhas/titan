@@ -1,6 +1,6 @@
 local cpreamble = require "titan-compiler.cpreamble"
 local h = require "spec.support.helpers"
-local lfs = require "lfs"
+local source_inventory = require "spec.support.source_inventory"
 
 local function clean()
     for _, suffix in ipairs({
@@ -60,12 +60,10 @@ describe("generated Lua-stack capacity", function()
 
     it("has no generated raw reservation that ignores failure", function()
         local failures = {}
-        for name in lfs.dir("titan-compiler") do
-            if name:match("%.lua$") then
-                local path = "titan-compiler/" .. name
-                for _, failure in ipairs(unchecked_raw_calls(path)) do
-                    failures[#failures + 1] = failure
-                end
+        for _, path in ipairs(source_inventory.lua_files(
+                "titan-compiler")) do
+            for _, failure in ipairs(unchecked_raw_calls(path)) do
+                failures[#failures + 1] = failure
             end
         end
         assert.same({}, failures)

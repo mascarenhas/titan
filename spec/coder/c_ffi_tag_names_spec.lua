@@ -1,6 +1,8 @@
+require "titan-compiler.coder.core"
 local h = require "spec.support.helpers"
 local installed_prefix = require "spec.support.installed_prefix"
 local coder = require "titan-compiler.coder"
+local coder_names = require "titan-compiler.coder.names"
 
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
@@ -196,8 +198,8 @@ describe("named C tag code generation", function()
             for _, spelling in ipairs({
                 "AF_UNSPEC", "AF_INET", "AF_INET6", "SOCK_STREAM",
                 "IPPROTO_TCP", "AI_NUMERICSERV",
-                coder._foreign_func_name("test", "dns_callback"),
-                coder._foreign_func_name("test", "connect_callback"),
+                coder_names._foreign_func_name("test", "dns_callback"),
+                coder_names._foreign_func_name("test", "connect_callback"),
                 "uv_getaddrinfo(", "uv_tcp_connect(",
             }) do
                 assert.matches(spelling, csrc, 1, true)

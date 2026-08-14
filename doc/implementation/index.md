@@ -16,7 +16,8 @@ each flat P.titan or folder P/B.titan + immediate contributors
    ▼
 one dense AST per module       (plain tables, ast.lua / typedecl.lua; no
    │                            source-unit wrapper or per-file namespace)
-   │  checker.check            (checker.lua + types.lua + symtab.lua)
+   │  checker.check            (checker.lua facade + checker/* slices,
+   │                            types.lua + symtab.lua)
    ▼
 typed & elaborated ASTs        (decorated with _type/_decl… and checker-owned
    │                            adjustment/boundary plans; finite call
@@ -24,7 +25,7 @@ typed & elaborated ASTs        (decorated with _type/_decl… and checker-owned
    │                            sinks)
    │  driver header planning   (all optional source-foreign `*.titan.h`
    │                            companions are prepared before any object)
-   │  coder.generate           (coder.lua — C-source templates)
+   │  coder.generate           (coder.lua facade + coder/* template slices)
    ▼
 one C translation unit per logical module
    │  #line normalization      (always)

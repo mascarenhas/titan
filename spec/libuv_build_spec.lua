@@ -1,7 +1,9 @@
+require "titan-compiler.coder.core"
 local assert = require "luassert"
 local async_stdlib = require "spec.support.async_stdlib"
 local cdriver = require "c-parser.cdriver"
 local coder = require "titan-compiler.coder"
+local coder_names = require "titan-compiler.coder.names"
 local lfs = require "lfs"
 local parser = require "titan-compiler.parser"
 local staticmetadata = require "titan-compiler.staticmetadata"
@@ -887,8 +889,8 @@ describe("libuv Makefile configuration", function()
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             for _, callback in ipairs(UV_FOREIGN_CALLBACKS) do
-                local symbol = coder._linkage_symbol_name(
-                    coder._foreign_func_name("titan.uv", callback.name))
+                local symbol = coder_names._linkage_symbol_name(
+                    coder_names._foreign_func_name("titan.uv", callback.name))
                 assert.truthy(nm_has_symbol(output, symbol), symbol)
             end
 
@@ -2298,7 +2300,13 @@ exit 73
                 "$(LPEGLABEL_ARCHIVE)",
                 "STDLIB_NATIVE_IDENTITY_PREREQS := $(LPEGLABEL_ARCHIVE)",
                 "TITAN_COMPILER_LUA := " ..
-                "$(wildcard titan-compiler/*.lua c-parser/*.lua)",
+                "$(wildcard titan-compiler/*.lua \\\n\t" ..
+                "titan-compiler/checker/*.lua " ..
+                "titan-compiler/coder/*.lua c-parser/*.lua)",
+                "STDLIB_EMBEDDED_FORMAT_INPUTS := " ..
+                "titan-compiler/staticmetadata.lua \\\n\t" ..
+                "titan-compiler/coder.lua " ..
+                "$(wildcard titan-compiler/coder/*.lua)",
                 "$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES)",
                 "$(TITAN_COMPILER_LUA) Makefile $(STDLIB_CONFIG_STAMP)",
                 "$(STDLIB_CONFIG_STAMP): FORCE",

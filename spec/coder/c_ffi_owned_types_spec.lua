@@ -1,5 +1,7 @@
+require "titan-compiler.coder.core"
 local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
+local coder_names = require "titan-compiler.coder.names"
 local types = require "titan-compiler.types"
 
 local function with_header(contents, fn)
@@ -761,7 +763,7 @@ describe("source-written owned C type code generation", function()
             types.tostring(titan_integer),
             types.tostring(foreign_integer))
         assert.not_equal(
-            coder._function_type_tag_cache_key(titan_integer),
-            coder._function_type_tag_cache_key(foreign_integer))
+            coder_names._function_type_tag_cache_key(titan_integer),
+            coder_names._function_type_tag_cache_key(foreign_integer))
     end)
 end)

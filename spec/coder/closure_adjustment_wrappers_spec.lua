@@ -1,5 +1,7 @@
+require "titan-compiler.coder.core"
 local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
+local coder_values = require "titan-compiler.coder.values"
 local driver = require "titan-compiler.driver"
 local types = require "titan-compiler.types"
 
@@ -124,7 +126,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
         }
 
         assert.has_error(function()
-            coder._checked_callable_plan(
+            coder_values._checked_callable_plan(
                 plan, cfunc, titan, "C declaration isolation")
         end, "C declaration isolation has non-callable operand types")
     end)

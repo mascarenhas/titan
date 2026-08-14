@@ -1,6 +1,7 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
+local source_inventory = require "spec.support.source_inventory"
 
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
@@ -8,6 +9,14 @@ local STDLIB_MODULES = {
     "test",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
+local COMPILER_SLICE_PATHS = {}
+for _, owner in ipairs({ "checker", "coder" }) do
+    for _, path in ipairs(source_inventory.lua_files(
+            "titan-compiler/" .. owner)) do
+        COMPILER_SLICE_PATHS[#COMPILER_SLICE_PATHS + 1] = assert(
+            path:match("^titan%-compiler/(.+)$"))
+    end
+end
 
 local function quote(word)
     return assert(cdriver.shell_quote(word))
@@ -212,6 +221,18 @@ describe("standalone-prefix source installation", function()
         if workspace then remove_tree(workspace); workspace = nil end
     end)
 
+    it("maps every checker and coder slice into the compiler rock",
+    function()
+        local rockspec = read_file("titan-dev-1.rockspec")
+        for _, path in ipairs(COMPILER_SLICE_PATHS) do
+            local module = "titan-compiler." ..
+                path:gsub("/", "."):gsub("%.lua$", "")
+            local mapping = string.format('["%s"] = "titan-compiler/%s"',
+                module, path)
+            assert.truthy(rockspec:find(mapping, 1, true), mapping)
+        end
+    end)
+
     it("installs one matching Lua and Titan SDK before the standard images",
     function()
         for _, source in ipairs({
@@ -244,6 +265,9 @@ describe("standalone-prefix source installation", function()
             read_file(TEST_SUPPORT_SOURCE))
         assert_file(PREFIX ..
             "/share/lua/5.5/titan-compiler/staticmetadata.lua")
+        for _, path in ipairs(COMPILER_SLICE_PATHS) do
+            assert_file(PREFIX .. "/share/lua/5.5/titan-compiler/" .. path)
+        end
         assert_absent(PREFIX ..
             "/share/lua/5.5/titan-compiler/pretty.lua")
         for _, module in ipairs({
