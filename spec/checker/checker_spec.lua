@@ -893,6 +893,46 @@ describe("Titan type checker", function()
         end
     end)
 
+    it("synthesizes a missing result only for one fixed nil", function()
+        local ok, err, tree = run_checker([[
+            function fallthrough(): nil
+            end
+
+            function bare(): nil
+                return
+            end
+
+            function nil_and_flexible(): (nil, ...: integer)
+                return
+            end
+        ]])
+        assert.truthy(ok, err)
+        for _, index in ipairs({ 2, 3 }) do
+            local ret = tree[index].block.stats[1]
+            local synthesized = ret.exps[1]
+            assert.same("Ast.ExpNil", synthesized._tag)
+            assert.is_true(synthesized._missing_value)
+            assert.equal(synthesized, ret._result_adjustment.fixed[1])
+        end
+
+        ok, err = run_checker([[
+            function missing_pair(): (nil, integer)
+            end
+        ]])
+        assert.falsy(ok)
+        assert.match(
+            "function can fall through but return type requires 2 fixed values",
+            err, 1, true)
+
+        ok, err = run_checker([[
+            function bare_pair(): (nil, integer)
+                return
+            end
+        ]])
+        assert.falsy(ok)
+        assert.match("returned 0 value(s) but function expected 2", err, 1, true)
+    end)
+
     it("treats an unbreakable literal-true while as non-fallthrough", function()
         local ok, err, tree = run_checker([[
             function spin(): integer

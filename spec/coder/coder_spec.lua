@@ -79,13 +79,18 @@ describe("zero-return () functions (code generator)", function()
         ]])
     end)
 
-    it("an explicit : nil return still yields one nil value", function()
+    it("missing and bare : nil returns each yield one nil value", function()
         run_coder([[
-            function n(): nil
+            function fallthrough(): nil
+            end
+            function bare(): nil
+                return
             end
         ]], [[
-            assert(select('#', test.n()) == 1)
-            assert(test.n() == nil)
+            assert(select('#', test.fallthrough()) == 1)
+            assert(test.fallthrough() == nil)
+            assert(select('#', test.bare()) == 1)
+            assert(test.bare() == nil)
         ]])
     end)
 end)
@@ -817,7 +822,7 @@ describe("Titan code generator", function()
             "setnilvalue%s*%(%s*s2v%s*%(", 1), source)
     end)
 
-    it("accepts a bare return in a nil-returning function", function()
+    it("accepts a bare return in a zero-return function", function()
         run_coder([[
             function f(x: integer) if x > 0 then return end end
             function g(): integer f(1) f(-1) return 42 end

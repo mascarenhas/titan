@@ -7628,6 +7628,14 @@ local function copy_block(block)
     return copy
 end
 
+-- Falling through or writing a bare return can synthesize exactly one fixed
+-- nil result. A flexible tail, when present, is independently empty. Multiple
+-- fixed results must still be supplied explicitly, even when the first is nil.
+function checker._accepts_implicit_nil_result(signature)
+    return #signature.rettypes == 1
+        and signature.rettypes[1]._tag == "Type.Nil"
+end
+
 -- Typechecks a statement or declaration
 --   node: A DeclDecl or Stat_* AST node
 --   st: symbol table
@@ -8016,21 +8024,14 @@ local checkstat_visitor = util.make_visitor({
         local ftype = st:find_symbol("$function")._type
         local signature = assert(call_signature(ftype),
             "return statement lacks a callable signature")
-        if #node.exps == 0 and #signature.rettypes == 1
-           and signature.rettypes[1]._tag == "Type.Nil" then
-            -- A bare `return` in a nil-returning function means `return nil`.
-            local nilexp = ast.ExpNil(node.loc)
-            nilexp._type = types.Nil()
-            table.insert(node.exps, nilexp)
-        end
-
+        local implicit_nil = checker._accepts_implicit_nil_result(signature)
         local fixed = {}
         for i, typ in ipairs(signature.rettypes) do fixed[i] = typ end
         local adjusted = adjust_explist(node.exps,
             result_demand(fixed, signature.flexrettype, {
                 term = "return",
                 loc = node.loc,
-                missing = "error",
+                missing = implicit_nil and "nil" or "error",
                 explicit_surplus = "discard",
                 return_arity = true,
                 open_coerce = true,
@@ -13643,13 +13644,19 @@ function checkfuncbody(node, st, errors, opts)
     catch_depth, in_finally, finally_loop_floor, loop_depth =
         saved_catch, saved_in_finally, saved_floor, saved_loop
     loop_frames = saved_loop_frames
-    -- A zero-return `() -> ()` function (empty rettypes) may fall off the end,
-    -- exactly like a `nil`-returning one; only a function whose first declared
-    -- return type is some non-`nil` value must not fall off the end.
-    local firstret = signature.rettypes[1]
-    if not ret and firstret and firstret._tag ~= "Type.Nil" then
-        checker.typeerror(errors, node.loc,
-            "function can return nil but return type is not nil")
+    -- A zero-return `() -> ()` function may fall off the end. Otherwise only
+    -- the one-fixed-nil shape may synthesize its missing result; a flexible tail
+    -- on either shape is independently empty.
+    if not ret and #signature.rettypes > 0
+       and not checker._accepts_implicit_nil_result(signature) then
+        if #signature.rettypes == 1 then
+            checker.typeerror(errors, node.loc,
+                "function can return nil but return type is not nil")
+        else
+            checker.typeerror(errors, node.loc,
+                "function can fall through but return type requires %d fixed values",
+                #signature.rettypes)
+        end
     end
     table.remove(func_stack)
     return ret, frame

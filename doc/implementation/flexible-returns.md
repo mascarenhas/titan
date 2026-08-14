@@ -415,8 +415,8 @@ its own C frame and never replaces `_flexout->args`. Nested or forwarded runs
 are copied into the outer caller's buffer.
 
 Every exit initializes `_flexout->n_args`, including bare return,
-flexible-only fallthrough, a fallthrough whose fixed prefix accepts nil,
-and pending-return dispatch after `finally`. A producer still evaluates
+flexible-only fallthrough, a fallthrough whose fixed prefix is exactly one
+`nil`, and pending-return dispatch after `finally`. A producer still evaluates
 expressions beyond a finite `_flexwant`; it discards their values instead of
 materializing them in the output buffer.
 
