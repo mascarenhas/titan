@@ -281,6 +281,10 @@ end
 Here `42` closes `T` to `integer`, so `callback()` is checked as an integer
 result just as it is in `agree(42, callback())`. The source order still controls
 evaluation order; inference does not recheck or reevaluate either expression.
+This remains true when inference must inspect a computed field or index early to
+recognize a possible generic function value, including the iterator and close
+slots of a generic `for`: the written projection is checked once, reports each
+error once, and then receives the ordinary context of its eventual use.
 
 A context-only record initializer does not provide a second, contradictory owner
 for the context that made it meaningful. For example, if an expected result or

@@ -446,6 +446,19 @@ function checker._generic.checkvar_for_expression(
     st.generic_inference_expression_owner = prior_owner
     return table.unpack(result, 1, result.n)
 end
+
+-- Eligibility probes sometimes need the resolved Var before the ordinary
+-- ExpVar consumer can apply its contextual first-class/value rules. The probe
+-- owns the one descent through a computed VarDot/VarBracket, using any expected
+-- context already closed for context-sensitive C references, and transfers that
+-- completed child check to the later consumer instead of redispatching it.
+function checker._generic.precheckvar_for_expression(
+        exp, st, errors, context, mode)
+    assert(exp and exp._tag == "Ast.ExpVar")
+    if exp._generic_var_prechecked then return end
+    checker._generic.checkvar_for_expression(exp, st, errors, context, mode)
+    exp._generic_var_prechecked = true
+end
 local annotate_call_results
 local check_generic_result_limit
 
@@ -6295,7 +6308,7 @@ end
 
 local function check_forin_callable_exp(exp, st, errors, context, demand)
     if exp._tag == "Ast.ExpVar" and exp.var._tag == "Ast.VarDot" then
-        checker._generic.checkvar_for_expression(exp, st, errors)
+        checker._generic.precheckvar_for_expression(exp, st, errors)
         if exp.var._decl then exp.var._decl._used = true end
         local ftype = exp.var._type
         local cfunc = c_resolve(ftype)
@@ -10220,7 +10233,7 @@ function checker._generic.close_generic_adjusted_arguments(
 end
 
 function checker._generic.is_generic_first_class_expression(
-        exp, st, errors)
+        exp, st, errors, context)
     if exp._tag ~= "Ast.ExpVar" then return false end
     if exp.var._tag == "Ast.VarName" then
         local declaration = st:find_symbol(exp.var.name)
@@ -10229,14 +10242,13 @@ function checker._generic.is_generic_first_class_expression(
             return false
         end
     end
-    checker._generic.checkvar_for_expression(exp, st, errors)
+    checker._generic.precheckvar_for_expression(
+        exp, st, errors, context)
     if exp.var._decl then exp.var._decl._used = true end
     exp._type = exp.var._type
-    local generic = exp._type._tag == "Type.FunctionScheme"
+    return exp._type._tag == "Type.FunctionScheme"
         or (exp._type._tag == "Type.Function"
             and exp.var._generic_declaration ~= nil)
-    exp._generic_var_prechecked = generic and true or nil
-    return generic
 end
 
 function checker._generic.resolve_deferred_generic_arguments(
@@ -10267,10 +10279,13 @@ function checker._generic.infer_positional_call(context, signature, args,
     for index, exp in ipairs(args) do
         local pattern = checker._generic.generic_formal_pattern(
             signature, index)
+        local expected = pattern and
+            checker._generic.inference_expression_context(
+                context, pattern, exp) or nil
         if pattern and (exp._tag == "Ast.ExpFunction"
                 or exp._tag == "Ast.ExpMethodRef"
                 or checker._generic.is_generic_first_class_expression(
-                    exp, st, errors)) then
+                    exp, st, errors, expected)) then
             if exp._tag == "Ast.ExpFunction" then
                 checker._generic.prepare_lambda_inference(
                     exp, pattern, context, st, errors)
@@ -10380,10 +10395,12 @@ function checker._generic.infer_named_call(context, signature, fields,
             checkexp(field.exp, st, errors)
         else
             local pattern = signature.params[index]
+            local expected = checker._generic.inference_expression_context(
+                context, pattern, field.exp)
             if field.exp._tag == "Ast.ExpFunction"
                or field.exp._tag == "Ast.ExpMethodRef"
                or checker._generic.is_generic_first_class_expression(
-                    field.exp, st, errors) then
+                    field.exp, st, errors, expected) then
                 if field.exp._tag == "Ast.ExpFunction" then
                     checker._generic.prepare_lambda_inference(
                         field.exp, pattern, context, st, errors)
@@ -10393,8 +10410,6 @@ function checker._generic.infer_named_call(context, signature, fields,
                     pattern = pattern,
                 }
             else
-                local expected = checker._generic.inference_expression_context(
-                    context, pattern, field.exp)
                 local provisional = not expected and
                     checker._generic.substitute_inference(
                         context, pattern, false) or false
@@ -11235,6 +11250,9 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpVar"] = function(node, st, errors, context)
+        -- A generic/for-in eligibility probe may already own the Var descent.
+        -- Reuse its annotations, then continue with this consumer's contextual
+        -- first-class, foreign-function, and value handling below.
         if not node._generic_var_prechecked then
             checker._generic.checkvar_for_expression(node, st, errors, context)
         end

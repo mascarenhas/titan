@@ -80,6 +80,65 @@ describe("generic for loops (typechecker)", function()
         assert.truthy(ok, err)
     end)
 
+    it("accepts computed record fields in iterator and close slots", function()
+        local ok, err = run_checker([[
+            record H
+                iter: (value, value) -> integer?
+                close: (value) -> nil
+            end
+            function hs(): {H} return {} end
+
+            function run()
+                for n: integer in
+                        hs()[1].iter, nil, nil, hs()[1].close do
+                end
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("checks computed iterator and close eligibility exactly once", function()
+        local prelude = [[
+            record H
+                iter: (value, value) -> integer?
+                close: (value) -> nil
+            end
+            function hs(): {H} return {} end
+            function funcs(): {(value, value) -> integer?} return {} end
+            function step(state: value, control: value): integer?
+                return nil
+            end
+        ]]
+        local cases = {
+            {
+                name = "bracket iterator",
+                loop = [=[funcs()["bad"]]=],
+            },
+            {
+                name = "field iterator",
+                loop = [[hs()["bad"].iter]],
+            },
+            {
+                name = "close",
+                loop = [[step, nil, nil, hs()["bad"].close]],
+            },
+        }
+        for _, case in ipairs(cases) do
+            local source = prelude .. ([=[
+                function run()
+                    for n: integer in %s do end
+                end
+            ]=]):format(case.loop)
+            local result = table.pack(pcall(h.check_errs, source))
+            assert.truthy(result[1], result[2])
+            local errors = result[2]
+            assert.equal(1, #errors, case.name)
+            assert.truthy(errors[1]:find(
+                "types in array indexing do not match", 1, true),
+                case.name .. ": " .. errors[1])
+        end
+    end)
+
     it("projects a flex-only iterator result for the control variable", function()
         local ok, err, tree = run_checker([[
             function step(): (...: integer)

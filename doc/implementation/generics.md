@@ -324,9 +324,16 @@ protocol covers ordinary computed calls/methods, direct contextual calls through
 finite/open result projections, and Array, Map, or context-only record
 constructors. Syntax-directed direct-call and foreign-call paths that inspect an
 `ExpVar` through its `VarDot`/`VarBracket` child still install that `ExpVar` as
-the operation owner; an auto-forced computed callee or method receiver rebuilds
-only its checker-synthesized Option cast after the child closes. A dependent
-callable signature gathers argument and result evidence, while structural
+the operation owner. Generic-argument and generic-for eligibility probes that
+must resolve such a child before classifying it transfer the completed check to
+the eventual expression consumer regardless of the classification result. A
+closed expected context already available to a positional or named probe travels
+with that one check, preserving context-sensitive C function references. The
+consumer still applies its own contextual first-class, foreign-function, and
+`value` handling, but never redispatches the written receiver or index subtree.
+An auto-forced computed callee or method receiver rebuilds only its
+checker-synthesized Option cast after the child closes. A dependent callable
+signature gathers argument and result evidence, while structural
 projections and constructor components retain explicit equations without
 freezing adjustments against open cells.
 

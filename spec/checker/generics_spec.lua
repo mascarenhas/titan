@@ -1711,6 +1711,130 @@ describe("generic declarations and explicit calls", function()
         end
     end)
 
+    it("checks positional and named computed arguments exactly once",
+    function()
+        local cases = {
+            {
+                name = "positional",
+                call = [[agree(make()["bad"], 42)]],
+            },
+            {
+                name = "named",
+                call = [[agree { a = make()["bad"], b = 42 }]],
+            },
+        }
+        for _, case in ipairs(cases) do
+            local source = ([=[
+                function make<T>(): {T} return {} end
+                function agree<T>(a: T?, b: T): T return b end
+                function use(): integer return %s end
+            ]=]):format(case.call)
+            local operation_counts = {}
+            local original = checker._generic.with_inference_operation
+            checker._generic.with_inference_operation = function(node, ...)
+                operation_counts[node] = (operation_counts[node] or 0) + 1
+                return original(node, ...)
+            end
+            local result = table.pack(pcall(run_checker, source))
+            checker._generic.with_inference_operation = original
+            assert.truthy(result[1], result[2])
+
+            local ok, err, ast = table.unpack(result, 2, result.n)
+            assert.falsy(ok, case.name)
+            local _, mismatches = err:gsub(
+                "types in array indexing do not match", "")
+            assert.equal(1, mismatches, case.name .. ": " .. err)
+            assert.falsy(err:find("\n", 1, true),
+                case.name .. " produced an extra diagnostic: " .. err)
+
+            local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+            local call = use.block.stats[1].exps[1]
+            local computed = call.args.args[1]
+            assert.equal("Ast.ExpVar", computed._tag)
+            assert.equal("Ast.VarBracket", computed.var._tag)
+            assert.equal(1, operation_counts[computed.var], case.name)
+            assert.equal(1, operation_counts[computed.var.exp1], case.name)
+            types.assert_erased(computed._type)
+            types.assert_erased(computed.var._type)
+            types.assert_erased(computed.var.exp1._type)
+            assert.is_nil(computed._generic_inference_operation_use)
+            assert.is_nil(computed.var.exp1._generic_inference_operation_use)
+        end
+    end)
+
+    it("preserves computed argument context after generic eligibility probes",
+    function()
+        local operation_counts = {}
+        local original = checker._generic.with_inference_operation
+        checker._generic.with_inference_operation = function(node, ...)
+            operation_counts[node] = (operation_counts[node] or 0) + 1
+            return original(node, ...)
+        end
+        local result = table.pack(pcall(assert_check, [[
+            record Holder
+                callback: (integer) -> integer
+            end
+            function holders(): {Holder} return {} end
+            function callbacks(): {(integer) -> integer} return {} end
+            function apply<T>(callback: (T) -> T, item: T): T
+                return callback(item)
+            end
+
+            function use(): integer
+                local a = apply(holders()[1].callback, 1)
+                local b = apply(callbacks()[1], a)
+                local c = apply {
+                    callback = holders()[1].callback,
+                    item = b,
+                }
+                local d = apply {
+                    callback = callbacks()[1],
+                    item = c,
+                }
+                return d
+            end
+        ]]))
+        checker._generic.with_inference_operation = original
+        assert.truthy(result[1], result[2])
+        local ast = result[2]
+        for node, count in pairs(operation_counts) do
+            assert.equal(1, count,
+                "redispatched " .. tostring(node._tag) .. " operation")
+        end
+        assert_runtime_ast_erased(
+            toplevel(ast, "Ast.TopLevelFunc", "use").block)
+    end)
+
+    it("preserves C function references after generic eligibility probes",
+    function()
+        local header = os.tmpname() .. ".h"
+        local file = assert(io.open(header, "w"))
+        assert(file:write([[
+            typedef int ffi_int;
+            typedef enum ffi_wide {
+                FFI_WIDE = 18446744073709551615ULL
+            } ffi_wide;
+            typedef ffi_wide (*ffi_callback)(ffi_wide);
+            static ffi_wide ffi_identity(ffi_wide value) { return value; }
+            static ffi_int ffi_add1(ffi_int value) { return value + 1; }
+        ]]))
+        file:close()
+
+        local result = table.pack(pcall(assert_check, ([=[
+            local c = foreign import "%s"
+            local function keep<T>(callback: c.ffi_callback, item: T): T
+                return item
+            end
+            function contextual(): integer return keep(c.ffi_identity, 42) end
+            function contextual_named(): integer
+                return keep { callback = c.ffi_identity, item = 42 }
+            end
+            function direct(): integer return c.ffi_add1(41) as integer end
+        ]=]):format(header)))
+        os.remove(header)
+        assert.truthy(result[1], result[2])
+    end)
+
     it("keeps option-backed contextual record evidence order-independent",
     function()
         local ast = assert_check([[
