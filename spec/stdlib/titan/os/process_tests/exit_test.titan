@@ -28,7 +28,7 @@ local function with_exit_fixture(body: ExitFixtureCase)
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
-      local ok: boolean?, _why: string, code: integer =
+      local ok: boolean?, _: string, code: integer =
         command.execute({"rm", "-rf", workspace})
       test.assert(ok ~= nil and code == 0,
                   "could not remove os.exit fixture workspace")

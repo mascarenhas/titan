@@ -259,7 +259,7 @@ end
 function create(func: (value) -> value, default_tag: value): Coro
   local slot: **mco.mco_coro = lua.lua_newuserdatauv(
     L, ffi.titan_ffi_void_ptr.sizeof, TITAN_CORO_OWNER_USERVALUES)
-  local T = ffi.titan_newthread(L)
+  local _ = ffi.titan_newthread(L)
   lua.lua_setiuservalue(L, -2, 1)
   ffi.lua_pushtvalue(L, M)
   lua.lua_setiuservalue(L, -2, 2)

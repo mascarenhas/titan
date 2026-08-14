@@ -413,7 +413,7 @@ local function pointer_format_partial(
 end
 
 local function literal_format_partial(
-    prefix: string, _form: string): FormatPartial
+    prefix: string, _: string): FormatPartial
   return function(candidate: value): string
     return prefix .. render_literal(candidate)
   end
@@ -436,7 +436,7 @@ end
 
 local function invalid_specification_partial(
     _prefix: string, _form: string): FormatPartial
-  return function(_candidate: value): string
+  return function(_: value): string
     raise "invalid conversion specification"
     return ""
   end
@@ -444,7 +444,7 @@ end
 
 local function invalid_conversion_partial(
     _prefix: string, _form: string): FormatPartial
-  return function(_candidate: value): string
+  return function(_: value): string
     raise "invalid conversion to 'format'"
     return ""
   end
@@ -452,7 +452,7 @@ end
 
 local function invalid_literal_modifiers_partial(
     _prefix: string, _form: string): FormatPartial
-  return function(_candidate: value): string
+  return function(_: value): string
     raise "specifier '%q' cannot have modifiers"
     return ""
   end
@@ -460,7 +460,7 @@ end
 
 local function overlong_format_partial(
     _prefix: string, _form: string): FormatPartial
-  return function(_candidate: value): string
+  return function(_: value): string
     raise "invalid format (too long)"
     return ""
   end

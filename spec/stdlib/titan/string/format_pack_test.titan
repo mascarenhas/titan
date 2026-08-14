@@ -52,7 +52,6 @@ function test_format_lua_compatibility(context: test.Context)
   test.assert(previous_locale ~= nil, "could not select the C locale")
   defer support.restore_locale(previous_locale as string)
   local minimum = -9223372036854775807 - 1
-  local maximum = 9223372036854775807
   local infinity = 1.0 / 0.0
   local nan = 0.0 / 0.0
   local pointer_object: {string: string} = {["kind"] = "pointer"}

@@ -59,7 +59,7 @@ local function override_resume(): string
 end
 
 local function default_error(): string
-  local co = coroutine.create(function(_arg: value): value
+  local co = coroutine.create(function(_: value): value
     do
       coroutine.yield("ready", "default")
     catch
@@ -73,7 +73,7 @@ local function default_error(): string
 end
 
 local function override_error(): string
-  local co = coroutine.create(function(_arg: value): value
+  local co = coroutine.create(function(_: value): value
     do
       coroutine.yield("ready", "override")
     catch
@@ -99,12 +99,12 @@ end
 function test_reports_running_and_normal_statuses(_context: test.Context)
   local a: coroutine.Coro? = nil
   local b: coroutine.Coro? = nil
-  b = coroutine.create(function(_arg: value): value
+  b = coroutine.create(function(_: value): value
     test.assert((a as coroutine.Coro):status() == "normal")
     test.assert((b as coroutine.Coro):status() == "running")
     return "ok"
   end, "b")
-  a = coroutine.create(function(_arg: value): value
+  a = coroutine.create(function(_: value): value
     return (b as coroutine.Coro):resume(nil, "b")
   end, "a")
 
@@ -130,7 +130,7 @@ function test_raw_tag_mismatch_does_not_call_lua_eq(_context: test.Context)
   install_eq(resume_tag, calls)
   install_eq(yield_tag, calls)
 
-  local co = coroutine.create(function (_argument: value): value
+  local co = coroutine.create(function (_: value): value
     return coroutine.yield("unmatched", yield_tag)
   end, resume_tag)
   common.assert_raises(function ()

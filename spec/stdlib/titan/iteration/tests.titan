@@ -19,7 +19,7 @@ function test_iteration_tuple_and_next(context: test.Context)
   test.assert(context:name() == "iteration.tests.test_iteration_tuple_and_next")
 
   local empty: {string: integer} = {}
-  local empty_key: string?, empty_item: integer? =
+  local empty_key?, empty_item? =
     iteration.next<string, integer>(empty, nil)
   test.assert(empty_key == nil and empty_item == nil)
 
@@ -28,9 +28,9 @@ function test_iteration_tuple_and_next(context: test.Context)
     iteration.pairs<string, integer>(map)
   test.assert(state == map)
   test.assert(initial == nil and close == nil)
-  local key: string?, item: integer? = next_function(state, initial)
+  local key?, item? = next_function(state, initial)
   test.assert(key == "answer" and item == 42)
-  local exhausted_key: string?, exhausted_item: integer? =
+  local exhausted_key?, exhausted_item? =
     next_function(state, key)
   test.assert(exhausted_key == nil and exhausted_item == nil)
 
@@ -39,7 +39,7 @@ function test_iteration_tuple_and_next(context: test.Context)
   local arbitrary: {{value: value}: {value: value}} = {
     [object_key] = object_value,
   }
-  local actual_key: {value: value}?, actual_value: {value: value}? =
+  local actual_key?, actual_value? =
     iteration.next<{value: value}, {value: value}>(arbitrary, nil)
   test.assert(actual_key == object_key and actual_value == object_value)
 end
@@ -54,13 +54,13 @@ function test_iteration_infers_typed_maps_and_preserves_false(
 
   -- Generic-inference coverage: the Map argument closes K and V, while the
   -- declarations consume the precise option results without value casts.
-  local inferred_key: string?, inferred_item: integer? =
+  local inferred_key?, inferred_item? =
     iteration.next(map, nil)
   test.assert(inferred_key ~= nil and inferred_item ~= nil)
 
   local count = 0
   local sum = 0
-  for _key: string, item: integer in iteration.pairs(map) do
+  for _, item in iteration.pairs(map) do
     count = count + 1
     sum = sum + item
   end
@@ -72,8 +72,7 @@ function test_iteration_infers_typed_maps_and_preserves_false(
   }
   local saw_false = false
   count = 0
-  for candidate: boolean, _item: integer in
-      iteration.pairs<boolean, integer>(flags) do
+  for candidate, _ in iteration.pairs<boolean, integer>(flags) do
     count = count + 1
     if not candidate then saw_false = true end
   end
@@ -86,7 +85,7 @@ function test_iteration_arrays_include_holes(_context: test.Context)
 
   local step, state, initial, close = iteration.ipairs<string>(array)
   test.assert(state == array and initial == 0 and close == nil)
-  local first_index: integer?, first_item: string? = step(state, initial)
+  local first_index?, first_item? = step(state, initial)
   test.assert(first_index == 1 and first_item == "first")
 
   local count = 0
@@ -94,7 +93,7 @@ function test_iteration_arrays_include_holes(_context: test.Context)
   local saw_last = false
   -- Generic-inference coverage: the Array argument closes T. The optional item
   -- remains visible because a hole is an ordinary iteration result.
-  for index: integer, item: string? in iteration.ipairs(array) do
+  for index, item? in iteration.ipairs(array) do
     count = count + 1
     if index == 2 then middle_is_nil = item == nil end
     if index == 3 then saw_last = item == "third" end
@@ -106,7 +105,7 @@ function test_iteration_arrays_include_holes(_context: test.Context)
   local trailing: {string} = { "first", "second", "third" }
   trailing[3] = nil
   count = 0
-  for _index: integer, _item: string? in iteration.ipairs(trailing) do
+  for _, _ in iteration.ipairs(trailing) do
     count = count + 1
   end
   test.assert(#trailing == 2 and count == 2)
@@ -118,7 +117,7 @@ function test_iteration_contextually_instantiates_next(_context: test.Context)
   local concrete_next:
       ({string: integer}, string?) -> (string?, integer?) = iteration.next
   local map: {string: integer} = { ["answer"] = 42 }
-  local key: string?, item: integer? = concrete_next(map, nil)
+  local key?, item? = concrete_next(map, nil)
   test.assert(key == "answer" and item == 42)
 end
 
@@ -127,20 +126,20 @@ function test_iteration_polluted_container_projection_errors(
   local map: {string: integer} = {}
   pollute_map<string, integer>(map, "bad", "not an integer")
   support.assert_raises_contains(function()
-    local _key: string?, item: integer? =
+    local _, item? =
       iteration.next<string, integer>(map, nil)
-    local number: integer = item
+    local number = item
     test.assert(number == 0)
   end, "expected integer")
 
   local array: {integer} = {}
   pollute_array<integer>(array, 1, "not an integer")
   support.assert_raises_contains(function()
-    local polluted_step, polluted_state, polluted_initial, _close =
+    local polluted_step, polluted_state, polluted_initial, _ =
       iteration.ipairs<integer>(array)
-    local _index: integer?, item: integer? =
+    local _, item? =
       polluted_step(polluted_state, polluted_initial)
-    local number: integer = item
+    local number = item
     test.assert(number == 0)
   end, "expected integer")
 end
@@ -150,7 +149,7 @@ function test_iteration_invalid_control_key(_context: test.Context)
   support.assert_raises_contains(function()
     iteration.next<value, integer>(map, {})
   end, "invalid key to 'next'")
-  local key: value, item: integer? =
+  local key, item? =
     iteration.next<value, integer>(map, nil)
   test.assert(key == "answer" and item == 42)
 end

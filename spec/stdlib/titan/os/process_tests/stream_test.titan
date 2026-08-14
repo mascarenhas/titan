@@ -1,10 +1,10 @@
 local option_tail_called = false
 
-local function reject_option(_config: system.SpawnConfig): integer
+local function reject_option(_: system.SpawnConfig): integer
   return -1
 end
 
-local function forbidden_tail(_config: system.SpawnConfig): integer
+local function forbidden_tail(_: system.SpawnConfig): integer
   option_tail_called = true
   return 0
 end

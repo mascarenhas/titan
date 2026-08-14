@@ -48,7 +48,7 @@ local function listen_available(first_port: integer): (net.Server, integer)
   raise "could not find an available loopback port"
 end
 
-local function temporary_file(context: test.Context): string
+local function temporary_file(_: test.Context): string
   local path = fs.tmpname()
   runtime_test.cleanup(function ()
     fs.unlink(path)

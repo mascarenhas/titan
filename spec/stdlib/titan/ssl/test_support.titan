@@ -10,7 +10,7 @@ local WRONG_CERTIFICATE = "spec/fixtures/ssl/wrong-server.pem"
 local PRIVATE_KEY = "spec/fixtures/ssl/server-key.pem"
 local TRUST_ROOT = "spec/fixtures/ssl/ca.pem"
 
-local function cleanup_path(context: test.Context, path: string)
+local function cleanup_path(_: test.Context, path: string)
   runtime_test.cleanup(function ()
     do
       fs.unlink(path)
@@ -31,11 +31,11 @@ local function temporary_path(context: test.Context): string
   return path
 end
 
-local function cleanup_server(context: test.Context, server: ssl.Server)
+local function cleanup_server(_: test.Context, server: ssl.Server)
   runtime_test.cleanup(function () server:close() end)
 end
 
-local function cleanup_connection(context: test.Context,
+local function cleanup_connection(_: test.Context,
                                   connection: ssl.Connection)
   runtime_test.cleanup(function () connection:close() end)
 end
@@ -45,7 +45,7 @@ local function listen_available(first_port: integer,
                                 private_key: string?):
     (ssl.Server, integer)
   local port = first_port
-  for _index = 1, 100 do
+  for _ = 1, 100 do
     do
       if private_key == nil then
         return ssl.listen("127.0.0.1", port, certificate), port

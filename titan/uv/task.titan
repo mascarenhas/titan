@@ -675,7 +675,7 @@ end
 
 local function begin_shutdown(runtime: Runtime)
   runtime.closing = true
-  local root = coroutine.create(function (_arg: value): ()
+  local root = coroutine.create(function (_: value): ()
     cleanup_runtime(runtime)
   end, UV_TAG)
   local task = Task<value, value>.new(
@@ -688,7 +688,7 @@ end
 local function run_internal(func: () -> value): Task<value, value>
   local runtime = ensure_runtime()
   accepting_work(runtime, "start a Task")
-  local root = coroutine.create(function (_arg: value): value
+  local root = coroutine.create(function (_: value): value
     return func()
   end, UV_TAG)
   local task = Task<value, value>.new(

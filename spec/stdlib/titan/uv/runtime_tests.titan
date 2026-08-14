@@ -86,7 +86,7 @@ local function with_bootstrap_fixture(include_sync: boolean,
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
-      local ok: boolean?, _why: string, code: integer =
+      local ok: boolean?, _: string, code: integer =
         command.execute({"rm", "-rf", workspace})
       test.assert(ok ~= nil and code == 0,
                   "could not remove uv bootstrap fixture workspace")
@@ -193,7 +193,7 @@ local function with_stdio_fixture(body: StdioFixtureCase)
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
-      local ok: boolean?, _why: string, code: integer =
+      local ok: boolean?, _: string, code: integer =
         command.execute({"rm", "-rf", workspace})
       test.assert(ok ~= nil and code == 0,
                   "could not remove uv stdio fixture workspace")

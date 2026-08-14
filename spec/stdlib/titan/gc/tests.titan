@@ -160,14 +160,14 @@ end
 function test_gc_finalizes_tables_and_preserves_metatables(
     _context: test.Context)
   local first_callback_calls = 0
-  local first_callback: MapFinalizer = function(_candidate: FinalizableMap)
+  local first_callback: MapFinalizer = function(_: FinalizableMap)
     first_callback_calls = first_callback_calls + 1
   end
   local finalized: {FinalizableMap} = {}
   local current_callback: MapFinalizer = function(candidate: FinalizableMap)
     finalized[#finalized + 1] = candidate
   end
-  local metatable, _marker, protection, erased_callback =
+  local metatable, _, protection, erased_callback =
     prepare_shared_table_finalizers(first_callback, current_callback)
   local get_metatable = support.lua_helper([[
 return function(candidate) return getmetatable(candidate) end
@@ -203,7 +203,7 @@ return function(callback, candidate) callback(candidate) end
 
   local created_calls = 0
   local created_callback: MapFinalizer =
-      function(_candidate: FinalizableMap)
+      function(_: FinalizableMap)
     created_calls = created_calls + 1
   end
   local _created_metatable = prepare_plain_table_finalizer(created_callback)
@@ -268,7 +268,7 @@ end
   local metatable = metatable_maker(marker, protection)
   debug_set_metatable(candidate, metatable)
 
-  local first_callback: Finalizer = function(_value: value)
+  local first_callback: Finalizer = function(_: value)
     state.first_calls = state.first_calls + 1
   end
   test.assert(finalizable_stack_delta<value>(
@@ -276,7 +276,7 @@ end
 
   local weak_capture: {value: value} = {}
   gclib.weak(weak_capture)
-  local current_callback: Finalizer = function(_value: value) end
+  local current_callback: Finalizer = function(_: value) end
   do
     local captured = new_table()
     weak_capture[1] = captured
@@ -332,7 +332,7 @@ function test_gc_finalizes_userdata_and_preserves_metatables(
               "marker " .. support.error_text(finalized_marker))
 
   local state = UserdataFinalizerState.new(nil, nil, 0, 0)
-  local metatable, _marker, protection, weak_capture =
+  local metatable, _, protection, weak_capture =
     prepare_custom_userdata_finalizer(state)
   local get_metatable = support.lua_helper([[
 return function(candidate) return getmetatable(candidate) end
@@ -355,7 +355,7 @@ return function(candidate) return type(candidate) == "userdata" end
   state.finalized = nil
 
   local created_calls = 0
-  local created_callback: Finalizer = function(_candidate: value)
+  local created_callback: Finalizer = function(_: value)
     created_calls = created_calls + 1
   end
   local _created_metatable =
@@ -375,11 +375,11 @@ end
 function test_gc_rejects_noncollectable_finalizer_values(
     _context: test.Context)
   local integer_callback: IntegerFinalizer =
-      function(_candidate: integer) end
+      function(_: integer) end
   test.assert(rejected_stack_delta<integer>(17, integer_callback) == 0)
   assert_finalizable_rejected<integer>(17, integer_callback)
 
-  local callback: Finalizer = function(_candidate: value) end
+  local callback: Finalizer = function(_: value) end
   assert_finalizable_rejected<value>(nil, callback)
 
   local rejected: {value} = {

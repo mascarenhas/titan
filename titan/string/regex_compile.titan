@@ -128,7 +128,7 @@ end
 
 local function regex_word_start_capture(
     subject: string, position: integer,
-    _whole: string): value
+    _: string): value
   if position > #subject then return false end
   if not regex_is_word_at(subject, position) then return false end
   if regex_is_word_at(subject, position - 1) then
@@ -139,7 +139,7 @@ end
 
 local function regex_word_end_capture(
     subject: string, position: integer,
-    _whole: string): value
+    _: string): value
   if not regex_is_word_at(subject, position - 1) then
     return false
   end

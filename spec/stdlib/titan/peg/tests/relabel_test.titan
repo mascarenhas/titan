@@ -39,7 +39,7 @@ local function bracket(found: string): string
 end
 
 local function tag_table(
-    subject: value, position: value,
+    _: value, position: value,
     table_value: value, tag_name: value): (integer, value)
   local result = table_value as {value: value}
   result["tag"] = tag_name
@@ -323,7 +323,7 @@ function test_relabel_search_spans_captures_and_gsub(
   test.assert(pattern.match("abc", "'c'", 99) == nil)
 
   local nil_callback: (value, ...: value) -> (...: value) =
-    function(first, ...)
+    function(_, ...)
       return nil, "middle", nil
     end
   local nil_pattern = pattern.function_capture(
@@ -356,16 +356,16 @@ function test_relabel_search_spans_captures_and_gsub(
   test.assert(found.first == 2 and found.last == 2 and attempts == 2)
 
   local replace_x: (string) -> string =
-    function(found) return "x" end
+    function(_) return "x" end
   local replace_dot: (string) -> string =
-    function(found) return "." end
+    function(_) return "." end
   test.assert(pattern.gsub("alo alo", "[abc]", replace_x) == "xlo xlo")
   test.assert(pattern.gsub("alo alo", "%w+", replace_dot) == ". .")
   test.assert(pattern.gsub(
     "hi, how are you", "[aeiou]", upper_vowel) ==
     "hI, hOw ArE yOU")
   local capital_x: (string) -> string =
-    function(found) return "X" end
+    function(_) return "X" end
   test.assert(pattern.gsub(
     "abc", pattern.literal("b"), capital_x) == "aXc")
 

@@ -17,7 +17,7 @@ local function contains(subject: string, needle: string): boolean
   return false
 end
 
-local function absent_temporary_path(context: test.Context): string
+local function absent_temporary_path(_: test.Context): string
   local path = fs.tmpname()
   runtime_test.cleanup(function ()
     do

@@ -200,7 +200,7 @@ local function start_buffered_next_requests(first_port: integer): async.Task
   support.outcome = "running"
   return async.run<value, value>(function (): value
     local handled = 0
-    local handler: http.Handler = function (request: http.Request,
+    local handler: http.Handler = function (_: http.Request,
                                             response: http.Response)
       handled = handled + 1
       support.outcome = "buffered-handler-" .. str.tostring(handled)
@@ -478,7 +478,7 @@ local function start_cancelled_server_close(first_port: integer): async.Task
                                             _response: http.Response)
       raise "cancelled-close server unexpectedly accepted a request"
     end
-    local server, _port = support.http_listen(first_port, handler)
+    local server, _ = support.http_listen(first_port, handler)
     defer server:close()
     local serving = async.run<value, value>(function (): value
       server:serve()
@@ -646,7 +646,7 @@ local function start_idle_timeout_api(first_port: integer,
     test.assert(tls_rejected,
           "HTTPS listener read PEM input before timeout validation")
 
-    local default_server, _default_port =
+    local default_server, _ =
       support.http_listen(first_port + 101, handler, nil)
     defer default_server:close()
     test.assert(default_server:idle_timeout(nil) == 0,
@@ -668,7 +668,7 @@ local function start_idle_timeout_api(first_port: integer,
           "HTTP Server mutated its timeout after rejecting a value")
     default_server:close()
 
-    local configured, _configured_port =
+    local configured, _ =
       support.http_listen(first_port + 202, handler, 43)
     defer configured:close()
     test.assert(configured:idle_timeout(nil) == 43,

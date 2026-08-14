@@ -119,7 +119,7 @@ end
 
 function test_runtime_body_failure_precedes_cleanup_failure(
     _context: test.Context)
-  local failure, _failure_traceback = caught_runtime(function ()
+  local failure, _ = caught_runtime(function ()
     runtime_test.cleanup(function ()
       raise "cleanup-loses"
     end)
@@ -130,7 +130,7 @@ function test_runtime_body_failure_precedes_cleanup_failure(
 end
 
 function test_runtime_cleanup_rejects_skip(_context: test.Context)
-  local failure, _failure_traceback = caught_runtime(function ()
+  local failure, _ = caught_runtime(function ()
     runtime_test.cleanup(function ()
       test.skip("cleanup reason")
     end)
@@ -142,7 +142,7 @@ end
 
 function test_runtime_cleanup_is_lifo_and_attempts_all(_context: test.Context)
   local order = ""
-  local failure, _failure_traceback = caught_runtime(function ()
+  local failure, _ = caught_runtime(function ()
     runtime_test.cleanup(function () order = order .. "first;" end)
     runtime_test.cleanup(function ()
       order = order .. "second;"

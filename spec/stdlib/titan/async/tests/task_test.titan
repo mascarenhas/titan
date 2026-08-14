@@ -37,12 +37,11 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
       local removed_listener_ran = false
       -- The bare all-value callback is adjusted independently at each precise
       -- registration. Its remover must not rediscover that wrapper by identity.
-      local removed_listener = function (_status: async.TaskStatus)
+      local removed_listener = function (_: async.TaskStatus)
         removed_listener_ran = true
         listener_order = listener_order .. "removed"
       end
-      local target: async.Task<string, value> =
-        async.run<string, value>(function (): string
+      local target = async.run<string, value>(function (): string
           timer.sleep(2)
           return "listener-result"
         end)
@@ -67,7 +66,7 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
       remove_removed_listener()
 
       local duplicate_listener_count = 0
-      local duplicate_listener = function (_status: async.TaskStatus)
+      local duplicate_listener = function (_: async.TaskStatus)
         duplicate_listener_count = duplicate_listener_count + 1
         listener_order = listener_order .. "d"
       end
@@ -80,7 +79,7 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
       remove_duplicate_first()
 
       local remove_second_listener = target:add_terminal_listener(
-        function (_status: async.TaskStatus<string, value>)
+        function (_: async.TaskStatus<string, value>)
           listener_order = listener_order .. "2"
           -- Terminal delivery uses a detached snapshot. A remover for an
           -- already-delivered registration must not shift it and skip 3.
@@ -89,7 +88,7 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
         end)
       defer remove_second_listener()
       local remove_third_listener = target:add_terminal_listener(
-        function (_status: async.TaskStatus<string, value>)
+        function (_: async.TaskStatus<string, value>)
           listener_order = listener_order .. "3"
         end)
       defer remove_third_listener()
@@ -115,7 +114,7 @@ function test_task_primitives_and_terminal_listeners(context: test.Context)
 
       local late_listener_ran = false
       local remove_late_listener = target:add_terminal_listener(
-        function (_status: async.TaskStatus<string, value>)
+        function (_: async.TaskStatus<string, value>)
           late_listener_ran = true
         end)
       remove_late_listener()
@@ -184,8 +183,7 @@ function test_generic_task_payload_and_cancellation_views(context: test.Context)
     local cancellation_payload: {string: integer} = {
       ["code"] = 42,
     }
-    local cancelled: async.Task<boolean, {string: integer}> =
-      async.run<boolean, {string: integer}>(function (): boolean
+    local cancelled = async.run<boolean, {string: integer}>(function (): boolean
         timer.sleep(60000)
         return false
       end)
@@ -217,7 +215,7 @@ function test_generic_task_payload_and_cancellation_views(context: test.Context)
     async.join(raw_success)
     local success_projection_rejected = false
     do
-      local _succeeded, _payload? = integer_view:status():has_succeeded()
+      local _, _? = integer_view:status():has_succeeded()
     catch
       success_projection_rejected = true
     end
@@ -237,12 +235,12 @@ function test_generic_task_payload_and_cancellation_views(context: test.Context)
     async.join(raw_cancelled)
     local cancellation_projection_rejected = false
     do
-      local _cancelled, polluted_reason? =
+      local _, polluted_reason? =
         integer_reason_view:status():has_cancelled()
       local exact =
         polluted_reason as async.CancellationReason<integer>
       case exact
-      when complex: _payload then
+      when complex: _ then
       else
       end
     catch
@@ -318,7 +316,7 @@ function test_cancelled_combinator_listener_is_not_retained(context: test.Contex
     local operand = support.sleeping(60000, "listener cleanup operand returned")
     task_support.cleanup_task(operand, "operand cleanup")
     cancel_join_with_finalizable(
-        operand, function (_candidate: value)
+        operand, function (_: value)
           listener_cleanup_finalized = true
         end)
     support.collect_garbage()

@@ -127,7 +127,7 @@ function test_nested_user_coroutine_routes_single_uv_tag(
   runtime_test.run(function ()
     local nested_result = "running"
     local task = async.run<value, value>(function (): value
-      local child = coroutine.create(function (_argument: value): value
+      local child = coroutine.create(function (_: value): value
         timer.sleep(0)
         return "nested-timer-ok"
       end, "child")

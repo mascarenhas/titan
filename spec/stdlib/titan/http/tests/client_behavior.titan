@@ -306,7 +306,7 @@ local function start_header_validation(first_port: integer): async.Task
       return nil
     end)
     defer task_support.cancel_and_join_task(peer, "nested HTTP peer cleanup")
-    for index = 1, #forbidden_reasons do
+    for _ = 1, #forbidden_reasons do
       local reason_rejected = false
       do
         local response = http.get(

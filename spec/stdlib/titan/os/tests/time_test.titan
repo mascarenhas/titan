@@ -86,7 +86,7 @@ end
 function test_date_growth_and_invalid_inputs(_context: test.Context)
   local format = ""
   local expected = ""
-  for _index = 1, 1024 do
+  for _ = 1, 1024 do
     format = format .. "%Y"
     expected = expected .. "1970"
   end

@@ -309,7 +309,7 @@ local function start_idle_timeout_tls(first_port: integer): async.Task
   support.outcome = "running"
   return async.run<value, value>(function (): value
     local handled = 0
-    local handler: http.Handler = function (_request: http.Request,
+    local handler: http.Handler = function (_: http.Request,
                                             response: http.Response)
       handled = handled + 1
       response:set_header("Content-Length", "0")

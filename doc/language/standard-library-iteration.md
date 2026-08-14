@@ -35,13 +35,13 @@ local scores: {string: integer} = {
   ["bob"] = 20,
 }
 
-local name: string?, score: integer? = iteration.next(scores, nil)
+local name?, score? = iteration.next(scores, nil)
 ```
 
 A call may also give the complete explicit application:
 
 ```titan
-local name: string?, score: integer? =
+local name?, score? =
   iteration.next<string, integer>(scores, nil)
 ```
 
@@ -61,15 +61,15 @@ close function. `K` and `V` are inferred from `map` in the usual call, while
 `pairs<string, integer>(scores)` is the corresponding explicit application:
 
 ```titan
-for name: string, score: integer in iteration.pairs(scores) do
+for name, score in iteration.pairs(scores) do
   use_score(name, score)
 end
 ```
 
-The loop forces the nonnil first result into `name`. The annotated `score`
-likewise consumes the successful Map value as `integer`; exhaustion is decided
-only by the first result. A false key is an ordinary control value and does not
-stop the loop.
+The Map argument infers `K = string` and `V = integer`, so the loop needs no
+repeated control-variable annotations. It forces the nonnil first result into
+`name`; exhaustion is decided only by that result. A false key is an ordinary
+control value and does not stop the loop.
 
 ## First-class instantiation
 
@@ -80,7 +80,7 @@ monomorphic function context can instantiate `next`:
 local string_next:
     ({string: integer}, string?) -> (string?, integer?) = iteration.next
 
-local name: string?, score: integer? = string_next(scores, nil)
+local name?, score? = string_next(scores, nil)
 ```
 
 The resulting function is a normal first-class Titan callable. As with other
@@ -108,7 +108,7 @@ first iterator result:
 local items: {string} = { "first", "middle", "third" }
 items[2] = nil
 
-for index: integer, item: string? in iteration.ipairs(items) do
+for index, item? in iteration.ipairs(items) do
   -- Runs for indexes 1, 2, and 3; item is nil at index 2.
   consume(index, item)
 end
@@ -141,7 +141,7 @@ local scores: {string: integer} = {}
 replace<string, integer>(scores, "alice", "not an integer")
 
 -- The precise integer? result projection raises "expected integer".
-local name: string?, score: integer? =
+local name?, score? =
   iteration.next<string, integer>(scores, nil)
 ```
 

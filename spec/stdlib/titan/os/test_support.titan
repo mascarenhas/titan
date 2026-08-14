@@ -87,7 +87,7 @@ local function refresh_local_timezone()
   -- POSIX localtime behaves as though tzset had been called. Going through
   -- the public calendar operation keeps this setup portable across the two
   -- supported hosts without a feature-test-macro-only tzset declaration.
-  local ignored = system.date("%Y", 0)
+  system.date("%Y", 0)
 end
 
 local function install_test_timezone(): string?

@@ -47,7 +47,7 @@ local function caught_string(action: CheckedAction): string?
   return nil
 end
 
-local function temporary_file(context: test.Context,
+local function temporary_file(_: test.Context,
                               suffix: string?): string
   local temporary = fs.tmpname()
   local path = temporary
@@ -91,7 +91,7 @@ local function install_miss_search(path: string,
   while searchers[index] ~= nil do index = index + 1 end
 
   local custom: PackageSearcher =
-    function (_modname: string): (value, value)
+    function (_: string): (value, value)
       return diagnostic, nil
     end
   package_table["path"] = path
@@ -105,7 +105,7 @@ local function PackageSearchState:restore()
   self.package_table["path"] = self.saved_path
 end
 
-local function temporary_directory(context: test.Context): string
+local function temporary_directory(_: test.Context): string
   local root = fs.tmpname()
   fs.unlink(root)
   fs.mkdir(root)
@@ -113,7 +113,7 @@ local function temporary_directory(context: test.Context): string
   return root
 end
 
-local function owned_file(context: test.Context, path: string,
+local function owned_file(_: test.Context, path: string,
                           contents: string)
   runtime_test.cleanup(function () fs.unlink(path) end)
   fs.write_file(path, contents)

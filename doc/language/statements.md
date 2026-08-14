@@ -364,7 +364,7 @@ end
 
 function sum_to(limit: integer): integer
     local sum = 0
-    for n: integer in step, limit, 0 do
+    for n in step, limit, 0 do
         sum = sum + n
     end
     return sum
@@ -464,7 +464,7 @@ function numbered_lines(filename: string):
     return next, file, 0, close
 end
 
-for line_no: integer, line: string in numbered_lines("input.txt") do
+for line_no, line in numbered_lines("input.txt") do
     process(line_no, line)
 end
 ```
@@ -478,7 +478,7 @@ function lines(filename: string): (() -> string?, nil, nil, () -> ())
     return file:read_lines, nil, nil, file:close
 end
 
-for line: string in lines("input.txt") do
+for line in lines("input.txt") do
     process_line(line)
 end
 ```

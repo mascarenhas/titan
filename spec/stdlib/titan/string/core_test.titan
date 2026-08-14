@@ -217,7 +217,7 @@ function test_repeat_char_and_flexible_bounds(context: test.Context)
     index = index + 1
   end
   support.expect_error(function()
-    local too_many: {integer} = {
+    local _: {integer} = {
       strings.byte(strings.rep("x", 201), 1, 201)
     }
   end, "too many flexible return values")
