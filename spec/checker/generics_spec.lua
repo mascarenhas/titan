@@ -1139,6 +1139,141 @@ describe("generic declarations and explicit calls", function()
         end
     end)
 
+    it("rejects generic-for annotations that conflict with inferred results",
+    function()
+        assert_error(
+            "types in generic for variable score do not match, " ..
+            "expected string but found integer%?", [[
+                function next<K, V>(map: {K: V}, key: K?): (K?, V?)
+                    return nil, nil
+                end
+
+                function pairs<K, V>(map: {K: V}):
+                    (({K: V}, K?) -> (K?, V?), {K: V}, nil, nil)
+                    return next, map, nil, nil
+                end
+
+                function bad(scores: {string: integer})
+                    for _, score: string in pairs(scores) do
+                    end
+                end
+            ]])
+    end)
+
+    it("rejects transport between distinct rigid binders", function()
+        assert_error(
+            "types in return do not match, expected U but found T", [[
+                function bad<T, U>(item: T): U
+                    return item
+                end
+            ]])
+    end)
+
+    it("rejects an argument contradicted by expected-result inference",
+    function()
+        assert_error(
+            "types in argument 1 of call to 'id' do not match, " ..
+                "expected string but found integer", [[
+                    function id<T>(item: T): T return item end
+                    function bad(): string
+                        return id(42)
+                    end
+                ]])
+    end)
+
+    it("rejects a method argument contradicted by its applied receiver",
+    function()
+        assert_error(
+            "types in argument 1 of call to method 'test%.Box:replace' " ..
+                "do not match, expected integer but found string", [[
+                    record Box<T>
+                        item: T
+                    end
+                    function Box:replace(item: T)
+                        self.item = item
+                    end
+                    function bad(box: Box<integer>)
+                        box:replace("wrong")
+                    end
+                ]])
+    end)
+
+    it("rejects incompatible expected slots for one repeated result binder",
+    function()
+        assert_error(
+            "types in return do not match, expected string but found integer", [[
+                function duplicate<T>(item: T): (T, T)
+                    return item, item
+                end
+                function bad(): (integer, string)
+                    return duplicate(1)
+                end
+            ]])
+    end)
+
+    it("contextually supplies fixed nil results to generic callbacks", function()
+        local ast = assert_check([[
+            record Task<A, B>
+            end
+
+            function run<A, B>(callback: () -> A): Task<A, B>
+                return (nil as value) as Task<A, B>
+            end
+
+            function missing(): Task<nil, value>
+                return run<nil, value>(function () end)
+            end
+
+            function bare(): Task<nil, value>
+                return run<nil, value>(function () return end)
+            end
+
+            function inferred(): Task<nil, value>
+                return run(function () end)
+            end
+
+            function annotated()
+                local task = run(function (): nil end)
+                local _: Task<nil, value> = task
+            end
+
+            function no_results()
+            end
+
+            function pretyped()
+                local task = run(no_results)
+                local _: Task<value, value> = task
+            end
+        ]])
+
+        for _, name in ipairs({ "missing", "bare", "inferred" }) do
+            local fn = toplevel(ast, "Ast.TopLevelFunc", name)
+            assert_runtime_ast_erased(fn.block)
+            assert_nominal(declared_type(fn).rettypes[1],
+                "test.Task", { "nil", "value" })
+        end
+        local annotated = toplevel(ast, "Ast.TopLevelFunc", "annotated")
+        assert_runtime_ast_erased(annotated.block)
+        local pretyped = toplevel(ast, "Ast.TopLevelFunc", "pretyped")
+        assert_runtime_ast_erased(pretyped.block)
+    end)
+
+    it("does not infer nil from an unconstrained lambda fallthrough", function()
+        assert_error(
+            "function can return nil but return type is not nil", [[
+                record Task<A, B>
+                end
+
+                function run<A, B>(callback: () -> A): Task<A, B>
+                    return (nil as value) as Task<A, B>
+                end
+
+                function bad()
+                    local _ = run(function () end)
+                end
+            ]])
+    end)
+
     it("infers constructors, nominal functions, methods, and bound values",
     function()
         local ast = assert_check([[

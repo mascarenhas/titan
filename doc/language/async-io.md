@@ -30,8 +30,8 @@ function loop()
 function yield()
 function running(): Task -- exactly Task<value, value>
 function suspend()
-function channel(size: integer?):
-    ((value) -> (), () -> value, () -> ())
+function channel<T>(size: integer?):
+    ((T) -> (), () -> T, () -> ())
 function reader_writer_channel(size: integer?):
     (ChannelReader, ChannelWriter)
 function version(): string
@@ -166,19 +166,27 @@ delivery but does not promise one exact libuv iteration.
 
 ## Bounded channels
 
-`async.channel(size)` returns sending, receiving, and closing closures over one
-bounded FIFO channel:
+`async.channel<T>(size)` returns sending, receiving, and closing closures over
+one bounded FIFO channel:
 
 ```titan
-local send, receive, close = async.channel()
+local send, receive, close = async.channel<string>()
 send("message")
-local message = receive()
+local message = receive()       -- string, with no written cast
 close()
 ```
 
+`size` carries no payload evidence. State `T` explicitly as above, or provide
+an expected result shape for the returned callbacks. With neither, the final
+carrier rule closes `T` to `value`, so a bare `async.channel()` retains the old
+all-value surface. Like every erased generic application, `T` must satisfy the
+ordinary recursive eligibility rules; erasure does not make an otherwise
+ineligible FFI shape transferable.
+
 The default capacity is 1. An explicit size must be at least 1; zero or a
 negative value raises before the closures are returned. The channel retains at
-most that many values and preserves send order, including `nil` values.
+most that many values and preserves send order. It can carry `nil` when the
+chosen `T` admits nil, including `nil`, an option, or `value`.
 
 Sending to a full channel suspends the sender until a receive frees a slot.
 Receiving from an empty channel suspends the receiver until a send adds a
@@ -205,9 +213,11 @@ clears its registration through `defer` and raises that same error instead of
 completing its pending operation, unless an authoritative cancellation of its
 Task wins that unwind. Later calls to `close()` do nothing.
 
-The closures currently exchange `value`. A natural future generic API is
-`channel<T>`, where `T` replaces `value` in both closure types without changing
-the buffer, close, or suspension protocol.
+The implementation is one erased all-value body. A closed application returns
+ordinary traced callback wrappers: sending accepts its precise `T`, while
+receiving strictly projects the stored value back to `T`. No run-time type
+argument or per-application channel identity exists. A Lua caller sees and uses
+the erased value closure triple; Lua has no type-argument syntax.
 
 ## Channel-backed string streams
 
@@ -230,10 +240,10 @@ function ChannelWriter:close()
 
 Every record field is local, so neither generated constructor is public.
 `reader_writer_channel` is the public factory, and neither endpoint exposes
-the raw channel closures. This is a type-specialized communication choice
-rather than a lower- or higher-level channel API: use `channel` for arbitrary
-`value`s, and use this pair when communicating strings through
-ReaderCloser/WriterCloser method shapes. The ordinary `string.reader` and
+the raw channel closures. The factory closes `channel<string>` internally and
+stores exact `(string) -> ()` and `() -> string` callbacks. The records remain
+intentionally non-generic string ReaderCloser/WriterCloser adapters; use
+`channel<T>` itself for other typed payloads. The ordinary `string.reader` and
 `string.writer` remain synchronous in-memory values.
 
 The optional size has the same rules as `channel`: omission or nil gives
@@ -376,9 +386,8 @@ is released:
 local reading = async.run<string?, value>(function (): string?
   return connection:read()
 end)
-local deadline = async.run<nil, value>(function (): nil
+local deadline = async.run(function (): nil
   timer.sleep(5000)
-  return nil
 end)
 
 local result = async.any_two(reading, deadline)

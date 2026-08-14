@@ -338,8 +338,8 @@ function test_generic_any_and_race_operand_positions(context: test.Context)
       return true
     end)
     task_support.cleanup_task(flag, "generic any/race flag cleanup")
-    local nothing = async.run<nil, boolean>(function (): nil
-      return nil
+    local nothing = async.run<nil, boolean>(function ()
+      return
     end)
     task_support.cleanup_task(nothing, "generic any/race nil cleanup")
     local decimal = async.run<float, string>(function (): float

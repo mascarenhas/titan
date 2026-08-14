@@ -619,6 +619,11 @@ describe("libuv Makefile configuration", function()
         for _, contract in ipairs({
             "function run<A, B>(func: () -> A): Task<A, B>",
             "function running(): Task<value, value>",
+            "function channel<T>(size: integer?):",
+            "local transfer: {T} = {}",
+            "local send: (T) -> ()",
+            "local receive: () -> T",
+            "channel<string>(size)",
             "union AnyTwoResult<A1, A2>",
             "union AnyFiveResult<A1, A2, A3, A4, A5>",
             "union RaceTwoResult<A1, B1, A2, B2>",
@@ -647,7 +652,7 @@ describe("libuv Makefile configuration", function()
         assert.truthy(http:find(
             "async.run<Request?, value>(", 1, true), http)
         assert.truthy(http:find(
-            "async.run<nil, value>(", 1, true), http)
+            "async.run(function (): nil", 1, true), http)
     end)
 
     it("keeps the reviewed HTTP source list equal to the folder ensemble",

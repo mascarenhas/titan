@@ -342,15 +342,14 @@ local function handler(request: http.Request, response: http.Response)
   response:close()
 end
 
-local function run_server(): value
+local function run_server(): nil
   local server = http.listen("127.0.0.1", handler, 8080)
   defer server:close()
   server:serve()
-  return nil
 end
 
 function main(args: {string}): integer
-  async.run<value, value>(run_server)
+  async.run(run_server)
   return 0
 end
 ```

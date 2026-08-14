@@ -398,8 +398,7 @@ function test_generic_all_and_join_operand_positions(context: test.Context)
       return true
     end)
     task_support.cleanup_task(flag, "generic all/join flag cleanup")
-    local nothing = async.run<nil, boolean>(function (): nil
-      return nil
+    local nothing = async.run<nil, boolean>(function ()
     end)
     task_support.cleanup_task(nothing, "generic all/join nil cleanup")
     local decimal = async.run<float, string>(function (): float

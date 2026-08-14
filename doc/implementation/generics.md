@@ -786,9 +786,10 @@ source providers likewise expose one native owner/entry per declaration.
 
 ## Generic async implementation
 
-`titan.uv` owns the generic declarations, while `titan.async` exports
-constructor-preserving aliases of `CancellationReason`, `TaskStatus`, and
-`Task`. Their surface owners are:
+`titan.uv` owns the generic Task, status, cancellation, and listener
+declarations. `titan.async` exports constructor-preserving aliases of those
+owners and owns the public `run`, combinator, and `channel<T>` schemes. The
+provider-owned surface owners are:
 
 ```titan
 union CancellationReason<B>
@@ -852,12 +853,27 @@ local function run_internal(func: () -> value): Task<value, value>
 
 Public `async.run<A,B>(func: () -> A): Task<A,B>` adapts the callback to the
 real `() -> value` erased shape, calls `run_internal`, and returns the same Task
-userdata through the owner-erased view. The coroutine stores its raw result in
-`TaskStatus<value,value>.succeeded`; a later concrete success projection inserts
-the strict `A` guard. Complex cancellation likewise stores a raw `value` in
-`CancellationReason<value>.complex` and guards only at a concrete `B`
-projection. Scheduler inventory, coroutine dispatch, pending operations,
+userdata through the owner-erased view. A callback annotated `() -> nil`
+infers `A = nil`; a complete explicit application or surrounding result context
+can instead supply that application to an unannotated callback. Once the
+callback has the exact `() -> nil` shape, bare return or fallthrough supplies one
+nil by ordinary return adjustment; this is not a generic special case. The
+coroutine stores its raw result in `TaskStatus<value,value>.succeeded`; a later concrete success
+projection inserts the strict `A` guard. Complex cancellation likewise stores a
+raw `value` in `CancellationReason<value>.complex` and guards only at a concrete
+`B` projection. Scheduler inventory, coroutine dispatch, pending operations,
 cancellation actions, libuv callbacks, and cleanup helpers stay monomorphic.
+
+Public `async.channel<T>(size)` declares `{T}` storage and returns
+`((T) -> (), () -> T, () -> ())`. Because `size` provides no evidence for `T`,
+a result context, a complete explicit application, or final carrier closure
+selects the application. Erased-core lowering recursively maps the Array and
+callbacks to `{value}`, `(value) -> ()`, and `() -> value`, exactly the single
+pre-generic implementation shape. Closed callers receive ordinary traced
+callable wrappers: send boxes its accepted `T`, receive strictly projects its
+`T`, and close is unchanged. The string-only `ChannelReader` and
+`ChannelWriter` records are not generic owners; their factory closes
+`channel<string>` and stores those exact wrappers.
 
 The public fixed-arity combinators quantify interleaved `(A_i,B_i)` per operand.
 Their named listener-based algorithms remain expanded through arity five; they

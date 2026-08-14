@@ -229,8 +229,8 @@ constraints, and nominal namespace:
 type Either = Pair
 local type IntPair = Pair<integer, integer>
 
-local e: Either<string, integer> = Either<string, integer>.new("ok", 200)
-local p: IntPair = IntPair.new(1, 2)
+local e = Either<string, integer>.new("ok", 200)
+local p = IntPair.new(1, 2)
 ```
 
 `Either<A,B>` is exactly `Pair<A,B>` and creates no new run-time identity. Bare
@@ -760,7 +760,7 @@ Generics enter the compiled-module contract in ABI 0.24. An older provider is
 rejected before its type metadata is decoded; this is a clean rebuild boundary,
 not a compatibility or migration protocol.
 
-## Generic asynchronous Tasks
+## Generic asynchronous Tasks and channels
 
 The `async` facade exports constructor-preserving aliases of the owners in
 `titan.uv`, so the ordinary public spellings are applicable:
@@ -803,6 +803,8 @@ function Task:resume()
 
 function run<A, B>(func: () -> A): Task<A, B>
 function running(): Task
+function channel<T>(size: integer?):
+    ((T) -> (), () -> T, () -> ())
 ```
 
 `A` is the Task's success type and `B` is the payload of a complex
@@ -821,10 +823,26 @@ function start(): async.Task<string, value>
 end
 ```
 
-There is no partial explicit `async.run<string>` list. A zero-result callback
-gives no evidence for `A`, so the final carrier rule chooses `value`; callers
-that need a different result application must provide context or the complete
-list.
+There is no partial explicit `async.run<string>` list. A callback already typed
+with the zero-result list `()`, such as a named function whose body falls
+through, gives no result evidence for `A`; the final carrier rule chooses
+`value`, and ordinary callable adjustment supplies the missing value. An inline
+unannotated lambda is different because it is still waiting for context. If no
+other evidence binds `A`, `A` closes to `value`, the lambda receives a
+`() -> value` context, and its fallthrough is rejected because that result is
+not nil.
+
+A Task that succeeds without a data payload uses one fixed nil result, not the
+zero-result list `()`. Prefer `async.run(function (): nil end)`: the lambda
+annotation infers `A = nil`, and its fallthrough supplies that nil through
+ordinary return adjustment. A complete `run<nil, value>` application can
+provide the same context when needed.
+
+`channel<T>` has no payload-bearing argument, so `T` is likewise result-only.
+Write `channel<string>()`, or give the returned callback slots an expected
+shape, to select a precise application. A bare unconstrained `channel()` closes
+to the backward-compatible `value` application. The returned send and receive
+callbacks have exact `T` shapes even though they share one erased body.
 
 The fixed-arity combinators preserve each operand independently. Their
 one- and two-operand forms make the per-operand types explicit:
@@ -869,10 +887,11 @@ the coroutine stores a raw success `value`, and complex cancellation stores a
 raw `value`. A precise `succeeded`, `has_succeeded`, `complex`, or
 `has_cancelled` projection supplies the ordinary strict `A` or `B` guard.
 Inspecting status tags, `as_string`, `has_finished`, equality, scheduling, and
-resource ownership needs no hidden type-argument check. Channels and the
-scheduler's operational helpers retain their concrete all-`value` APIs; Task
-result/reason/status projections and the public combinator layer are the generic
-surface.
+resource ownership needs no hidden type-argument check. The scheduler's
+operational helpers retain their concrete all-`value` APIs. Public `channel<T>`
+likewise erases to one all-value buffer and callback triple, while closed uses
+receive ordinary precise callback wrappers; Task projections, combinators, and
+channels form the generic async surface.
 
 `add_terminal_listener` returns an idempotent no-argument remover. Each
 registration is distinct even if the same source callback is added twice, so

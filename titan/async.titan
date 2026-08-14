@@ -8,14 +8,14 @@ type TaskStatus = uv.TaskStatus
 type Task = uv.Task
 
 record ChannelReader
-  local receive: () -> value
+  local receive: () -> string
   local close_channel: () -> ()
   local excess: string?
   local closed: boolean
 end
 
 record ChannelWriter
-  local send: (value) -> ()
+  local send: (string) -> ()
   local close_channel: () -> ()
 end
 
@@ -128,15 +128,15 @@ function version(): string
   return uv.version()
 end
 
-function channel(size: integer?):
-    ((value) -> (), () -> value, () -> ())
+function channel<T>(size: integer?):
+    ((T) -> (), () -> T, () -> ())
   local capacity = 1
   if size ~= nil then capacity = size end
   if capacity < 1 then raise "channel size must be at least 1" end
 
   -- Count is authoritative because a channel may carry nil. The array slots
   -- only retain the live values in the bounded circular buffer.
-  local transfer: {value} = {}
+  local transfer: {T} = {}
   local first = 1
   local next = 1
   local count = 0
@@ -144,7 +144,7 @@ function channel(size: integer?):
   local receive_waiter: Task<value, value>? = nil
   local closed = false
 
-  local send: (value) -> () = function (item: value)
+  local send: (T) -> () = function (item: T)
     if closed then raise "channel is closed" end
     if send_waiter ~= nil then
       raise "channel already has a blocked sender"
@@ -170,7 +170,7 @@ function channel(size: integer?):
     if receive_waiter ~= nil then receive_waiter:resume() end
   end
 
-  local receive: () -> value = function (): value
+  local receive: () -> T = function (): T
     if closed then raise "channel is closed" end
     if receive_waiter ~= nil then
       raise "channel already has a blocked receiver"
@@ -218,7 +218,7 @@ function ChannelReader:read(): string?
     self.excess = nil
     return excess
   end
-  return self.receive() as string?
+  return self.receive()
 end
 
 function ChannelReader:read_until(delimiter: string,
@@ -287,7 +287,7 @@ end
 
 function reader_writer_channel(size: integer?):
     (ChannelReader, ChannelWriter)
-  local send, receive, close = channel(size)
+  local send, receive, close = channel<string>(size)
   return ChannelReader.new(receive, close, nil, false),
          ChannelWriter.new(send, close)
 end
@@ -331,7 +331,7 @@ function any_two<A1, B1, A2, B2>(
 
   if terminal_count == 2 then return AnyTwoResult<A1, A2>.none() end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local winner = 0
   local result: value = nil
@@ -426,7 +426,7 @@ function any_three<A1, B1, A2, B2, A3, B3>(
 
   if terminal_count == 3 then return AnyThreeResult<A1, A2, A3>.none() end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local winner = 0
   local result: value = nil
@@ -555,7 +555,7 @@ function any_four<A1, B1, A2, B2, A3, B3, A4, B4>(
 
   if terminal_count == 4 then return AnyFourResult<A1, A2, A3, A4>.none() end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local winner = 0
   local result: value = nil
@@ -719,7 +719,7 @@ function any_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
 
   if terminal_count == 5 then return AnyFiveResult<A1, A2, A3, A4, A5>.none() end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local winner = 0
   local result: value = nil
@@ -869,10 +869,10 @@ function race_two<A1, B1, A2, B2>(
     return RaceTwoResult<A1, B1, A2, B2>.second(second_status)
   end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local winner = 0
-  local result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local result = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or winner ~= 0 then return end
@@ -921,10 +921,10 @@ function race_three<A1, B1, A2, B2, A3, B3>(
     return RaceThreeResult<A1, B1, A2, B2, A3, B3>.third(third_status)
   end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local winner = 0
-  local result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local result = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or winner ~= 0 then return end
@@ -990,10 +990,10 @@ function race_four<A1, B1, A2, B2, A3, B3, A4, B4>(
     return RaceFourResult<A1, B1, A2, B2, A3, B3, A4, B4>.fourth(fourth_status)
   end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local winner = 0
-  local result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local result = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or winner ~= 0 then return end
@@ -1077,10 +1077,10 @@ function race_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
     return RaceFiveResult<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>.fifth(fifth_status)
   end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local winner = 0
-  local result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local result = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or winner ~= 0 then return end
@@ -1174,10 +1174,10 @@ function all_two<A1, B1, A2, B2>(
     return first_result as A1, second_result as A2
   end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local rejected = 0
-  local rejection: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local rejection = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or rejected ~= 0 then return end
@@ -1274,10 +1274,10 @@ function all_three<A1, B1, A2, B2, A3, B3>(
            third_result as A3
   end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local rejected = 0
-  local rejection: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local rejection = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or rejected ~= 0 then return end
@@ -1409,10 +1409,10 @@ function all_four<A1, B1, A2, B2, A3, B3, A4, B4>(
            third_result as A3, fourth_result as A4
   end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local rejected = 0
-  local rejection: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local rejection = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or rejected ~= 0 then return end
@@ -1580,10 +1580,10 @@ function all_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
            fifth_result as A5
   end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local rejected = 0
-  local rejection: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local rejection = TaskStatus<value, value>.ready()
 
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or rejected ~= 0 then return end
@@ -1712,9 +1712,9 @@ function join<A, B>(task: Task<A, B>): TaskStatus<A, B>
   local status = task:status()
   if status:has_finished() then return status end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
-  local result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local result = TaskStatus<value, value>.ready()
   local listener = function (terminal_status: TaskStatus<A, B>)
     if waiting == nil then return end
     result = terminal_status
@@ -1735,13 +1735,13 @@ function join_two<A1, B1, A2, B2>(
   reject_running(current, second)
 
   local completed = 0
-  local first_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local first_result = TaskStatus<value, value>.ready()
   local first_status = first:status()
   if first_status:has_finished() then
     first_result = first_status
     completed = completed + 1
   end
-  local second_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local second_result = TaskStatus<value, value>.ready()
   local second_status = second:status()
   if second_status:has_finished() then
     second_result = second_status
@@ -1751,7 +1751,7 @@ function join_two<A1, B1, A2, B2>(
     return first_result as TaskStatus<A1, B1>, second_result as TaskStatus<A2, B2>
   end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or first_result:has_finished() then return end
@@ -1785,19 +1785,19 @@ function join_three<A1, B1, A2, B2, A3, B3>(
   reject_running(current, third)
 
   local completed = 0
-  local first_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local first_result = TaskStatus<value, value>.ready()
   local first_status = first:status()
   if first_status:has_finished() then
     first_result = first_status
     completed = completed + 1
   end
-  local second_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local second_result = TaskStatus<value, value>.ready()
   local second_status = second:status()
   if second_status:has_finished() then
     second_result = second_status
     completed = completed + 1
   end
-  local third_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local third_result = TaskStatus<value, value>.ready()
   local third_status = third:status()
   if third_status:has_finished() then
     third_result = third_status
@@ -1808,7 +1808,7 @@ function join_three<A1, B1, A2, B2, A3, B3>(
            third_result as TaskStatus<A3, B3>
   end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or first_result:has_finished() then return end
@@ -1854,25 +1854,25 @@ function join_four<A1, B1, A2, B2, A3, B3, A4, B4>(
   reject_running(current, fourth)
 
   local completed = 0
-  local first_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local first_result = TaskStatus<value, value>.ready()
   local first_status = first:status()
   if first_status:has_finished() then
     first_result = first_status
     completed = completed + 1
   end
-  local second_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local second_result = TaskStatus<value, value>.ready()
   local second_status = second:status()
   if second_status:has_finished() then
     second_result = second_status
     completed = completed + 1
   end
-  local third_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local third_result = TaskStatus<value, value>.ready()
   local third_status = third:status()
   if third_status:has_finished() then
     third_result = third_status
     completed = completed + 1
   end
-  local fourth_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local fourth_result = TaskStatus<value, value>.ready()
   local fourth_status = fourth:status()
   if fourth_status:has_finished() then
     fourth_result = fourth_status
@@ -1883,7 +1883,7 @@ function join_four<A1, B1, A2, B2, A3, B3, A4, B4>(
            third_result as TaskStatus<A3, B3>, fourth_result as TaskStatus<A4, B4>
   end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or first_result:has_finished() then return end
@@ -1940,31 +1940,31 @@ function join_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
   reject_running(current, fifth)
 
   local completed = 0
-  local first_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local first_result = TaskStatus<value, value>.ready()
   local first_status = first:status()
   if first_status:has_finished() then
     first_result = first_status
     completed = completed + 1
   end
-  local second_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local second_result = TaskStatus<value, value>.ready()
   local second_status = second:status()
   if second_status:has_finished() then
     second_result = second_status
     completed = completed + 1
   end
-  local third_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local third_result = TaskStatus<value, value>.ready()
   local third_status = third:status()
   if third_status:has_finished() then
     third_result = third_status
     completed = completed + 1
   end
-  local fourth_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local fourth_result = TaskStatus<value, value>.ready()
   local fourth_status = fourth:status()
   if fourth_status:has_finished() then
     fourth_result = fourth_status
     completed = completed + 1
   end
-  local fifth_result: TaskStatus<value, value> = TaskStatus<value, value>.ready()
+  local fifth_result = TaskStatus<value, value>.ready()
   local fifth_status = fifth:status()
   if fifth_status:has_finished() then
     fifth_result = fifth_status
@@ -1976,7 +1976,7 @@ function join_five<A1, B1, A2, B2, A3, B3, A4, B4, A5, B5>(
            fifth_result as TaskStatus<A5, B5>
   end
 
-  local waiting: Task<value, value>? = current
+  local waiting? = current
   defer waiting = nil
   local first_listener = function (status: TaskStatus<A1, B1>)
     if waiting == nil or first_result:has_finished() then return end

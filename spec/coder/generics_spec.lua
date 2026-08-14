@@ -864,6 +864,33 @@ describe("generic erased core", function()
         ]])
     end)
 
+    it("runs missing and bare fixed-nil generic callback results", function()
+        h.run_coder([[
+            function invoke<A, B>(callback: () -> A): A
+                return callback()
+            end
+
+            function missing(): nil
+                return invoke<nil, value>(function () end)
+            end
+
+            function bare(): nil
+                return invoke<nil, value>(function () return end)
+            end
+
+            function adjusted_zero(): nil
+                return invoke<nil, value>(function (): () end)
+            end
+        ]], [[
+            assert(select("#", test.missing()) == 1)
+            assert(test.missing() == nil)
+            assert(select("#", test.bare()) == 1)
+            assert(test.bare() == nil)
+            assert(select("#", test.adjusted_zero()) == 1)
+            assert(test.adjusted_zero() == nil)
+        ]])
+    end)
+
     it("delays a polluted mutable field guard until its precise read", function()
         h.run_coder([[
             record Box<T>

@@ -115,16 +115,16 @@ iteration.
 
 ## High-level bounded channels
 
-`async.channel` is implemented entirely in `titan/async.titan` over
+`async.channel<T>` is implemented entirely in `titan/async.titan` over
 `async.running`, `async.suspend`, and `Task:resume`; it adds no `Call` variant,
-native handle, callback trampoline, or Runtime queue. It returns this closure
-triple over one bounded circular buffer:
+native handle, callback trampoline, or Runtime queue. Its one generic source
+body returns this closure triple over one bounded circular buffer:
 
 ```titan
-((value) -> (), () -> value, () -> ())
+((T) -> (), () -> T, () -> ())
 ```
 
-- `transfer: {value}` stores the live values;
+- the declared `transfer: {T}` stores the live payloads;
 - `first` selects the next receive slot;
 - `next` selects the next send slot;
 - `count` distinguishes empty/full state and is authoritative when a stored
@@ -144,8 +144,8 @@ writes at `next`, wraps the index, increments `count`, and calls `resume()` on
 an installed receiver. Receive waits while the channel is open and `count ==
 0`, then takes and clears `first`, wraps the index, decrements `count`, and
 resumes an installed sender. After either condition loop, the waiter clears its
-slot and raises `"channel is closed"` if close caused its wake. The value buffer
-is FIFO and never grows beyond `capacity`. A competing Task cancellation
+slot and raises `"channel is closed"` if close caused its wake. The payload
+buffer is FIFO and never grows beyond `capacity`. A competing Task cancellation
 remains authoritative over that operation error.
 
 There is at most one blocked Task in each direction. A second operation that
@@ -171,26 +171,32 @@ send/receive observes `closed` and raises the exact `"channel is closed"`
 error, unless an authoritative Task cancellation wins the same unwind; a
 repeated close returns immediately.
 
-The current closures exchange `value`. A future `channel<T>` substitutes `T`
-for those parameter and result positions while retaining the same storage and
-close/suspension structure.
+Generic lowering recursively erases `{T}` to `{value}` and both payload
+callbacks to their all-value carriers, preserving the former native prototype
+and one shared implementation. A closed use receives ordinary traced callback
+wrappers: the send wrapper boxes a statically accepted `T`, and the receive
+wrapper strictly projects the erased result to `T`. The wrappers may have fresh
+identity and are retained directly by their caller; they are not witnesses,
+Runtime state, or per-application channel objects. Lua invokes the erased
+closure triple directly.
 
 ## String-specialized channel adapters
 
 `async.reader_writer_channel` is also implemented in `titan/async.titan`. The
 module imports the public synchronous `string` facade; `string` has no reverse
-async dependency. The factory calls `channel(size)` once and wraps its three
-closures in two nominal records whose fields are all local:
+async dependency. The factory calls `channel<string>(size)` once and wraps its
+three adjusted closures in two nominal records whose fields are all local:
 
 - `ChannelReader` retains the receive and shared-close closures, an optional
   excess string, and its own `closed` flag;
 - `ChannelWriter` retains the send and same shared-close closures.
 
-Neither record exposes a constructor or a raw channel closure. The writer's
-`write` method passes its string through the channel's `value` send boundary.
-The reader's ordinary `read` first consumes `excess`, if present; otherwise it
-receives a value and casts it to `string?`. This confines the
-general-to-specialized type boundary to the adapter.
+Neither record exposes a constructor or a raw channel closure. The writer
+stores an exact `(string) -> ()` callback and the reader stores an exact
+`() -> string` callback; both are ordinary traced wrappers over the erased
+channel body. `read` first consumes `excess`, if present, and otherwise
+option-wraps the exact receive result without a written cast. The public
+records deliberately remain non-generic string stream adapters.
 
 `ChannelReader:read_until` uses `string.find` and `string.sub` across message
 boundaries. It keeps at most `#delimiter - 1` uncommitted tail bytes between

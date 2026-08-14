@@ -101,7 +101,7 @@ local strings = import "string"
 
 function whole_match(expression: strings.Regex,
                      subject: string): string?
-  local found: strings.RegexMatch? = expression:match(subject)
+  local found? = expression:match(subject)
   if not found then return nil end
   return found:whole()
 end
@@ -271,11 +271,11 @@ local timer = import "timer"
 
 function main(args: {string}): integer
   local results: {string: string} = {}
-  async.run<value, value>(function ()
+  async.run(function (): nil
     timer.sleep(5)
     results["left"] = "ready"
   end)
-  async.run<value, value>(function ()
+  async.run(function (): nil
     async.yield()
     results["right"] = "ready"
   end)
@@ -347,7 +347,7 @@ function main(args: {string}): integer
 
   local words = strings.compile_regex("[A-Za-z_][A-Za-z0-9_]*")
   local count = 0
-  for match: strings.RegexMatch in words:gmatch(subject) do
+  for match in words:gmatch(subject) do
     if #match:whole() > 0 then count = count + 1 end
   end
 
@@ -462,7 +462,7 @@ local iteration = import "titan.iteration"
 
 function total(scores: {string: integer}): integer
   local result = 0
-  for _name: string, score: integer in iteration.pairs(scores) do
+  for _, score in iteration.pairs(scores) do
     result = result + score
   end
   return result
@@ -470,7 +470,7 @@ end
 
 function visit_holes(values: {value}): integer
   local positions = 0
-  for _index, _item in iteration.ipairs(values) do
+  for _, _ in iteration.ipairs(values) do
     positions = positions + 1
   end
   return positions
@@ -489,7 +489,7 @@ functions:
 ```titan
 local gc = import "titan.gc"
 
-local function finish_owner(_owner: {value: value}): ()
+local function finish_owner(_: {value: value}): ()
   -- Clear and release reachability-owned state here.
 end
 
