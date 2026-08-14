@@ -2324,7 +2324,7 @@ local function rewrite_type(root, policy)
     return rewrite(root)
 end
 
-local function checked_arguments(arguments)
+local function substitution_arguments(arguments, require_roundtrip)
     local count, list_error = dense_list_length(arguments)
     if not count then error(list_error, 3) end
     local copy = {}
@@ -2333,8 +2333,7 @@ local function checked_arguments(arguments)
         if type(argument) ~= "table" or not argument._tag then
             error("type argument " .. index .. " is not a type", 3)
         end
-        local eligible = types.transient_roundtrip(argument)
-        if not eligible then
+        if require_roundtrip and not types.transient_roundtrip(argument) then
             error("type argument " .. index .. " ('" ..
                 types.tostring(argument) ..
                 "') has no sound transient round trip", 3)
@@ -2344,12 +2343,7 @@ local function checked_arguments(arguments)
     return copy
 end
 
--- Substitute one structural declaration scope. Repeated calls handle owner
--- and callable-local binders without conflating their identities.
-function types.substitute(typ, scope, arguments)
-    assert(type(scope) == "table" and scope._tag == "Type.GenericScope",
-        "substitution scope must be a GenericScope")
-    local args = checked_arguments(arguments)
+local function substitute_arguments(typ, scope, args)
     return rewrite_type(typ, {
         arguments = args,
         drop_generic = false,
@@ -2368,6 +2362,27 @@ function types.substitute(typ, scope, arguments)
             return replacement
         end,
     })
+end
+
+-- Substitute one structural declaration scope. Repeated calls handle owner
+-- and callable-local binders without conflating their identities.
+function types.substitute(typ, scope, arguments)
+    assert(type(scope) == "table" and scope._tag == "Type.GenericScope",
+        "substitution scope must be a GenericScope")
+    return substitute_arguments(
+        typ, scope, substitution_arguments(arguments, true))
+end
+
+-- Inference must retain the first selected surface type long enough to freeze
+-- ordinary later edges, even when that selection will be rejected as a generic
+-- type argument. This internal structural substitution validates density and
+-- type shape but deliberately leaves transient-roundtrip admission to the
+-- inference-context close, which reports it once before bounded recovery.
+function types.substitute_inference(typ, scope, arguments)
+    assert(type(scope) == "table" and scope._tag == "Type.GenericScope",
+        "substitution scope must be a GenericScope")
+    return substitute_arguments(
+        typ, scope, substitution_arguments(arguments, false))
 end
 
 function types.validate_type_arguments(typeparams, arguments)

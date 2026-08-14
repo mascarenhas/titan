@@ -706,39 +706,56 @@ access remains direct-only, while serialized interfaces remain public-only.
 
 ### Inference and surface checking
 
-Every inferred generic AST use allocates fresh checker-only inference cells,
-with occurrence scopes distinct from its declaration and from every other
-application of the same declaration. The outermost inferred use owns one
-AST-scoped ambient inference context. While its receiver, result, and argument
-subtree is checked, nested generic calls, constructors, methods, bound methods,
-and contextual first-class uses inherit that context, register child use
-records, and equate their distinct cells with outer cells where structural
-evidence connects them. An ordinary derived call or constructor registers a
-zero-binder operation use before descending whenever it may freeze annotations
-computed from an unresolved child type. A complete explicit type-argument list
-remains closed locally and contributes its ordinary result as evidence.
+Every inferred generic AST use allocates fresh checker-only occurrence cells.
+The outermost inferred use owns one AST-scoped ambient context; nested generic
+calls, constructors, methods, bound methods, and contextual first-class uses
+inherit it, register child uses, and retain occurs-checked cell/structural
+equations where their types connect. Complete explicit applications remain
+closed locally and contribute their ordinary type at their written position.
 
-Bind complete explicit lists when present. Otherwise gather receiver and
-expected-result evidence, then positional or named argument and declared
-constraint evidence, including contextual lambda parameter/result types.
-Unification is invariant structural evidence over Option, Array, Map, Function,
-and same-owner applications. It does not choose numeric conversions, Interface
-implementations, or common supertypes. Recursive equations are rejected before
-the union/find forest is mutated, so inference remains finite.
+Selection is ordered. Check the callee or method receiver first. The isolated
+static-result phase currently consumes available expected-result slots
+left-to-right before evaluated arguments. Then consume positional arguments
+left-to-right, named fields as written, every delivered fixed/open result in
+slot order, and constructor components in evaluation order (computed key then
+value; record fields as written). Generic `for/in` consumes written hidden-tuple
+producers once, then synthesized `...` projections and missing slots in delivered
+order before result closure. Eligibility checks run at that lexical slot, not in
+an up-front scan.
 
-Only the owning outer use closes the context. Constraint evidence propagates
-across cell-equivalence classes before each still-free class closes to its
-declared erased carrier (`value` or its fully substituted Interface
-application). Evidence always wins over this fallback. The checker then checks
-all constraints and `transient_roundtrip` and finalizes registered uses in
-postorder: deepest children before parents and left-to-right among siblings.
-Each written expression and contextual lambda body is checked exactly once;
-finalization substitutes closed types into already-checked results and refreshes
-checker-owned dependent annotations such as ordinary call/method signatures,
-Interface receiver plans, constructor field/container types, synthesized fixed
-extras, and open-result projections. It never reevaluates or rechecks the
-written expression. Parentheses and named-field order therefore cannot change
-inference.
+At every edge, smart-substitute pattern and producer. If both are closed with
+respect to the ambient context, do not raw-unify them: selection has already
+happened and phase-two ordinary assignment will freeze the directional
+adjustment or diagnostic. If either retains cells, invariant structural descent
+records equations and lets the first real evidence bind each still-open class.
+A later term cannot reselect a closed class. Recursive equations are rejected
+before mutating union/find state.
+
+Defer only genuinely context-only producers. Incompletely annotated lambdas,
+contextual `value` calls, ownerless/empty constructors, and constructor
+components whose syntax still needs a sink finish exactly once after a sibling,
+static result, ordinary constructor default, or final carrier supplies context.
+Call-through-`value` detection uses a transferred one-shot check of any callee,
+including fields, indices, and computed forms. Generic first-class functions and
+methods instead register their fresh open callable equations immediately. A
+direct nonempty positional constructor selects Array on its first completed
+component; it stays whole-shape pending only while all selecting components need
+context. Nested defaults settle postorder and feed their completed child type
+upward; only truly empty syntax invents the `{integer}` default. Computed syntax
+fixes Map shape. Evidence discoveries drain before constructor defaults; generic
+carrier closure follows both.
+
+Only the owning outer use closes the context. Declared-constraint equations use
+a dirty-root worklist whose dense records retain lexical registration order;
+smart substitution visits only occurrence scopes reachable from its input type.
+It then applies ordinary constructor defaults, closes genuinely free classes
+to `value` or their substituted Interface carrier, validates constraints and
+`transient_roundtrip`, and finalizes registered uses postorder. Finalization
+refreshes dependent annotations and applies existing ordinary
+`coerce_and_check`/open/result/constructor paths. It may add numeric, Option,
+gradual, Interface, or callable plans, but never rechecks or reevaluates written
+AST. Postorder is annotation dependency order; named/source evidence order
+remains lexical.
 
 Smart substitution uses Titan's canonical constructors: collapse
 `Option(value)` and nested Options, de-optionize Array/Map value positions,
@@ -747,7 +764,7 @@ varargs, flexible results, and type-argument eligibility. Apply this equally to
 explicit, inferred, bare, imported, and recovered applications. No temporary
 occurrence `Parameter` may survive surface closure or reach erasure, metadata,
 or code generation. There is no partial list, source-declared default argument,
-HM generalization, wildcard, heuristic candidate order, or inference cell in
+HM generalization, wildcard, common-type search, or inference cell in
 metadata/codegen.
 
 Rigid body checking exposes only the capabilities in the source contract:
@@ -1129,9 +1146,10 @@ returns, `for/in`, aliases, and recovered-interface specs. Cover:
 
 - generic records/unions/Interfaces, recursive headers, fields/payloads/cases,
   constructors, statics, methods, and exact `self`;
-- top-level calls, explicit full lists, result-context inference, nested calls,
-  conflicts, carrier-closed phantom/result-only parameters, constraints, and
-  repeat-use isolation;
+- top-level calls, explicit full lists, ordered result/argument/constructor
+  inference, ordinary later-term mismatches, recursive equations,
+  carrier-closed phantom/result-only parameters, constraints, and repeat-use
+  isolation;
 - the draft `Stack` and `foldl` examples;
 - contextual lambdas checked once, first-class declarations, bound methods,
   and no let/lambda polymorphism;

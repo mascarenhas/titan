@@ -537,7 +537,7 @@ describe("generic erased core", function()
         ]])
     end)
 
-    it("runs option-backed contextual records once in either order",
+    it("runs deferred option-backed contextual records once in either placement",
     function()
         h.run_coder([[
             record Plain
@@ -591,6 +591,122 @@ describe("generic erased core", function()
                 assert(test.count() == 2, name .. " count")
                 assert(test.ordered(), name .. " order")
             end
+        ]])
+    end)
+
+    it("runs ordinary later adjustments selected by first evidence",
+    function()
+        h.run_coder([[
+            function second<T>(left: T, right: T): T return right end
+            function value_first(item: value): value
+                local got = second(item, 42)
+                return got
+            end
+            function integer_first(item: value): integer
+                local got = second(42, item)
+                return got
+            end
+            function numeric_bad()
+                local got = second(1, 2.5)
+            end
+            function numeric_float(): float
+                local got = second(1.0, 2)
+                return got
+            end
+
+            interface Marker function marker(): integer end
+            record Mark number: integer end
+            function Mark:marker(): integer return self.number end
+            function marker(): Marker return Mark.new(41) end
+            function mark(): Mark return Mark.new(99) end
+            record Plain item: integer end
+            function maybe(present: boolean): Plain?
+                if present then return Plain.new(42) end
+                return nil
+            end
+            function same<T>(left: T, right: T): T return left end
+            function interface_first(): integer
+                local got = same(marker(), mark())
+                return got:marker()
+            end
+            function option_first(present: boolean): Plain?
+                local got? = same(maybe(present), Plain.new(42))
+                return got
+            end
+            function base_first(present: boolean): Plain
+                local got = same(Plain.new(42), maybe(present))
+                return got
+            end
+
+            record CallbackBox callback: (integer) -> integer end
+            function callback_box(): CallbackBox
+                return CallbackBox.new(
+                    function(x: integer): integer return x + 1 end)
+            end
+            function contextual_record(): integer
+                local got = same({callback = function(x)
+                    return x + 2
+                end}, callback_box())
+                return got.callback(40)
+            end
+            function string_witness(): {string} return {"witness"} end
+            function contextual_open(callback: value): {string}
+                local inferred = same({callback()}, string_witness())
+                return inferred
+            end
+            record DynamicBox callback: value end
+            function contextual_field(callback: value): {string}
+                local box = DynamicBox.new(callback)
+                local inferred = same({box.callback()}, string_witness())
+                return inferred
+            end
+        ]], [[
+            assert(test.value_first("bad") == 42)
+            assert(test.integer_first(7) == 7)
+            assert(not pcall(test.integer_first, "bad"))
+            assert(not pcall(test.numeric_bad))
+            local number = test.numeric_float()
+            assert(number == 2.0 and math.type(number) == "float")
+            assert(test.interface_first() == 41)
+            assert(test.option_first(false) == nil)
+            assert(not pcall(test.base_first, false))
+            assert(test.contextual_record() == 42)
+            local open = test.contextual_open(function()
+                return "first", "second", "third"
+            end)
+            assert(#open == 3)
+            assert(open[1] == "first" and open[2] == "second"
+                and open[3] == "third")
+            local field = test.contextual_field(function()
+                return "field-first", "field-second", "field-third"
+            end)
+            assert(#field == 3)
+            assert(field[1] == "field-first"
+                and field[2] == "field-second"
+                and field[3] == "field-third")
+        ]])
+    end)
+
+    it("runs a generic iterator with trailing generic tuple results", function()
+        h.run_coder([[
+            function step<T>(state: {T}, control: integer): (integer?, T?)
+                local next = control + 1
+                if next > #state then return nil, nil end
+                return next, state[next]
+            end
+            function supply<U>(state: {U}, control: integer): ({U}, integer)
+                return state, control
+            end
+            function iterate(): integer
+                local total = 0
+                for index: integer, item: string?
+                        in step, supply({"one", "two"}, 0) do
+                    total = total + index
+                end
+                return total
+            end
+        ]], [[
+            assert(test.iterate() == 3)
         ]])
     end)
 

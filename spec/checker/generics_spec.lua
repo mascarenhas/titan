@@ -869,7 +869,7 @@ describe("generic declarations and explicit calls", function()
         ]])
     end)
 
-    it("infers invariant structural evidence through every Titan shape",
+    it("binds first structural evidence through every Titan shape",
     function()
         local ast = assert_check([[
             record Box<T>
@@ -910,6 +910,163 @@ describe("generic declarations and explicit calls", function()
             assert.is_nil(exp._generic_type_arguments)
             types.assert_erased(exp._type)
         end
+    end)
+
+    it("binds each cell from its first evaluated scalar evidence",
+    function()
+        local ast = assert_check([[
+            interface Marker function marker(): integer end
+            record Mark number: integer end
+            function Mark:marker(): integer return self.number end
+            function marker(): Marker return Mark.new(1) end
+            function mark(): Mark return Mark.new(2) end
+            function same<T>(left: T, right: T): T return left end
+            function use(v: value)
+                local value_first = same(v, 42)
+                local integer_first = same(42, v)
+                local integer_numeric = same(1, 2.0)
+                local float_numeric = same(1.0, 2)
+                local contextual: integer = same(v, 42)
+                local interface_first = same(marker(), mark())
+            end
+        ]])
+
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        local expected = {
+            "value", "integer", "integer", "float", "integer",
+            "test.Marker",
+        }
+        local function peel(exp)
+            while exp._tag == "Ast.ExpCast" do exp = exp.exp end
+            return exp
+        end
+        local function coercion(exp)
+            while exp and exp._tag == "Ast.ExpCast" do
+                local adjustment = exp._adjustment
+                if adjustment and adjustment.kind == "direct_coercion" then
+                    return adjustment.coercion.op
+                end
+                exp = exp.exp
+            end
+        end
+        local calls = {}
+        for index, stat in ipairs(use.block.stats) do
+            assert.equal(expected[index],
+                types.tostring(declared_type(stat.decls[1])))
+            calls[index] = peel(stat.exps[1])
+        end
+
+        assert.equal("inject",
+            calls[1].args.args[2]._adjustment.op)
+        assert.equal("Ast.ExpVar", calls[2].args.args[2]._tag)
+        assert.equal("float_to_integer",
+            coercion(calls[3].args.args[2]))
+        assert.equal("integer_to_float",
+            coercion(calls[4].args.args[2]))
+
+        -- The current static precedence is deliberately isolated in
+        -- infer_static_result_context: expected result selects integer before
+        -- either evaluated argument.
+        assert.equal("Ast.ExpVar", calls[5].args.args[1]._tag)
+        assert.equal("inject", calls[5].args.args[2]._adjustment.op)
+        local interface_edge = calls[6].args.args[2]
+        while interface_edge._tag == "Ast.ExpCast"
+              and not interface_edge._interface_conversion do
+            interface_edge = interface_edge.exp
+        end
+        assert.equal("interface_conversion",
+            interface_edge._interface_conversion.kind)
+        assert_runtime_ast_erased(use.block)
+    end)
+
+    it("lets an independently typed bound method select before a later function",
+    function()
+        local errs = h.check_errs([[
+            record Box end
+            function Box:convert(item: integer): integer return item end
+            function float_function(item: float): float return item end
+            function same<T>(left: T, right: T): T return left end
+            function use(box: Box)
+                local got = same(box:convert, float_function)
+            end
+        ]])
+        assert.same(1, #errs)
+        assert.truthy(errs[1]:find(
+            "argument 2 of call to 'same'", 1, true), errs[1])
+        assert.truthy(errs[1]:find(
+            "expected (integer) -> integer but found (float) -> float",
+            1, true), errs[1])
+    end)
+
+    it("propagates constraint equations after each ordered evidence slot",
+    function()
+        local ast = assert_check([[
+            interface Carrier<T>
+                function get(): T
+            end
+            function choose<V, W: Carrier<V>>(owner: W, item: V): V
+                return item
+            end
+            function produce<V, W: Carrier<V>>(): (W, V)
+                return (nil as value) as W, (nil as value) as V
+            end
+            function choose_callback<V, W: Carrier<V>>(
+                    callback: (W) -> W, item: V): V
+                return item
+            end
+            record MethodBox<T> end
+            function MethodBox:convert<X>(item: T): T return item end
+            function argument_order<U: Carrier<integer>>(owner: U): integer
+                return choose(owner, 2.5)
+            end
+            function result_order<U: Carrier<integer>>(): (U, float)
+                return produce()
+            end
+            function lambda_order<U: Carrier<integer>>(): integer
+                return choose_callback(
+                    function(item: U): U return item end, 2.5)
+            end
+            function method_order<U: Carrier<integer>>(
+                    box: MethodBox<U>): integer
+                return choose_callback(box:convert, 2.5)
+            end
+        ]])
+
+        local function has_coercion(value, wanted, seen)
+            if type(value) ~= "table" or seen[value] then return false end
+            seen[value] = true
+            local adjustment = value._adjustment
+            if adjustment and adjustment.kind == "direct_coercion"
+               and adjustment.coercion.op == wanted then
+                return true
+            end
+            for key, child in pairs(value) do
+                if key ~= "_decl" and key ~= "_declared_type"
+                   and key ~= "_generic_scheme"
+                   and key ~= "_generic_declaration"
+                   and key ~= "_generic_owner"
+                   and has_coercion(child, wanted, seen) then
+                    return true
+                end
+            end
+            return false
+        end
+        local arguments = toplevel(ast, "Ast.TopLevelFunc", "argument_order")
+        local results = toplevel(ast, "Ast.TopLevelFunc", "result_order")
+        local lambda = toplevel(ast, "Ast.TopLevelFunc", "lambda_order")
+        local method = toplevel(ast, "Ast.TopLevelFunc", "method_order")
+        assert.is_true(has_coercion(
+            arguments.block, "float_to_integer", {}))
+        assert.is_true(has_coercion(
+            results.block, "integer_to_float", {}))
+        assert.is_true(has_coercion(
+            lambda.block, "float_to_integer", {}))
+        assert.is_true(has_coercion(
+            method.block, "float_to_integer", {}))
+        assert_runtime_ast_erased(arguments.block)
+        assert_runtime_ast_erased(results.block)
+        assert_runtime_ast_erased(lambda.block)
+        assert_runtime_ast_erased(method.block)
     end)
 
     it("uses fixed, flexible, and open expected-result evidence", function()
@@ -1142,6 +1299,162 @@ describe("generic declarations and explicit calls", function()
         types.assert_erased(many._type)
     end)
 
+    it("consumes constructor components in their written order",
+    function()
+        local ast = assert_check([[
+            record Pair<T>
+                first: T
+                second: T
+            end
+            function arrays<T>(items: {T}): {T} return items end
+            function symmetric<T>(items: {T: T}): {T: T} return items end
+            function pairs<T>(item: Pair<T>): Pair<T> return item end
+            function whole<T>(item: T): T return item end
+            function use()
+                local ai = arrays({1, 2.0})
+                local af = arrays({1.0, 2})
+                local key_first = symmetric({[2.5] = 1, [3] = 4})
+                local integer_key = symmetric({[1] = 2.0})
+                local pi = pairs({first = 1, second = 2.0})
+                local pf = pairs({second = 1.0, first = 2})
+                local nested = whole({{1}, {2.5}})
+                local omitted = pairs({})
+            end
+        ]])
+
+        local function peel(exp)
+            while exp._tag == "Ast.ExpCast" do exp = exp.exp end
+            return exp
+        end
+        local function coercion(exp)
+            while exp and exp._tag == "Ast.ExpCast" do
+                local adjustment = exp._adjustment
+                if adjustment and adjustment.kind == "direct_coercion" then
+                    return adjustment.coercion.op
+                end
+                exp = exp.exp
+            end
+        end
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        assert.same({
+            "{ integer }", "{ float }", "{ float : float }",
+            "{ integer : integer }", "test.Pair<integer>",
+            "test.Pair<float>", "{ { integer } }", "test.Pair<nil>",
+        }, (function()
+            local out = {}
+            for index, stat in ipairs(use.block.stats) do
+                out[index] = types.tostring(declared_type(stat.decls[1]))
+            end
+            return out
+        end)())
+
+        local constructors = {}
+        for index, stat in ipairs(use.block.stats) do
+            constructors[index] = peel(stat.exps[1]).args.args[1]
+        end
+        assert.equal("float_to_integer",
+            coercion(constructors[1].fields[2].exp))
+        assert.equal("integer_to_float",
+            coercion(constructors[2].fields[2].exp))
+
+        -- In a computed field, the key selects before its value; the next field
+        -- again contributes key then value.
+        assert.equal("integer_to_float",
+            coercion(constructors[3].fields[1].exp))
+        assert.equal("integer_to_float",
+            coercion(constructors[3].fields[2].name))
+        assert.equal("integer_to_float",
+            coercion(constructors[3].fields[2].exp))
+        assert.equal("float_to_integer",
+            coercion(constructors[4].fields[1].exp))
+
+        assert.equal("float_to_integer",
+            coercion(constructors[5].fields[2].exp))
+        assert.equal("second", constructors[6].fields[1].name)
+        assert.equal("first", constructors[6].fields[2].name)
+        assert.equal("integer_to_float",
+            coercion(constructors[6].fields[2].exp))
+        assert.equal("float_to_integer",
+            coercion(peel(peel(constructors[7]).fields[2].exp).fields[1].exp))
+        assert.same(2, #constructors[8].fields)
+        assert.same({ "first", "second" }, {
+            constructors[8].fields[1].name,
+            constructors[8].fields[2].name,
+        })
+        assert_runtime_ast_erased(use.block)
+    end)
+
+    it("uses written named order and delivered multi-result slot order",
+    function()
+        local ast = assert_check([[
+            function same<T>(left: T, right: T): T return left end
+            function named<T>(left: T, right: T): T return left end
+            function value_integer(v: value): (value, integer)
+                return v, 1
+            end
+            function integer_value(v: value): (integer, value)
+                return 1, v
+            end
+            function pair<T>(): (T, T)
+                return (nil as value) as T, (nil as value) as T
+            end
+            function results(): (integer, float) return pair() end
+            function use(v: value)
+                local named_float = named { right = 1.0, left = 2 }
+                local named_integer = named { right = 1, left = 2.0 }
+                local result_value = same(value_integer(v))
+                local result_integer = same(integer_value(v))
+            end
+        ]])
+
+        local function peel(exp)
+            while exp._tag == "Ast.ExpCast" do exp = exp.exp end
+            return exp
+        end
+        local function coercion(exp)
+            while exp and exp._tag == "Ast.ExpCast" do
+                local adjustment = exp._adjustment
+                if adjustment and adjustment.kind == "direct_coercion" then
+                    return adjustment.coercion.op
+                end
+                exp = exp.exp
+            end
+        end
+
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        assert.same({ "float", "integer", "value", "integer" }, {
+            types.tostring(declared_type(use.block.stats[1].decls[1])),
+            types.tostring(declared_type(use.block.stats[2].decls[1])),
+            types.tostring(declared_type(use.block.stats[3].decls[1])),
+            types.tostring(declared_type(use.block.stats[4].decls[1])),
+        })
+        local float_call = peel(use.block.stats[1].exps[1])
+        local integer_call = peel(use.block.stats[2].exps[1])
+        assert.same({ 2, 1 }, float_call._named_arg_order)
+        assert.same({ 2, 1 }, integer_call._named_arg_order)
+        assert.equal("integer_to_float",
+            coercion(float_call.args.args[1]))
+        assert.equal("float_to_integer",
+            coercion(integer_call.args.args[1]))
+
+        -- One written trailing call delivers its fixed results left-to-right.
+        -- The first slot selects T; the second is an ordinary later edge.
+        local value_call = peel(use.block.stats[3].exps[1])
+        local integer_result_call = peel(use.block.stats[4].exps[1])
+        assert.equal("inject",
+            value_call.args.args[2]._adjustment.op)
+        assert.equal("Ast.ExpExtra",
+            integer_result_call.args.args[2]._tag)
+
+        -- Static expected-result slots use the same left-to-right split: the
+        -- first selects integer and the second receives integer-to-float.
+        local results = toplevel(ast, "Ast.TopLevelFunc", "results")
+        local second = results.block.stats[1].exps[2]
+        assert.equal("integer_to_float", coercion(second))
+        assert_runtime_ast_erased(use.block)
+        assert_runtime_ast_erased(results.block)
+    end)
+
     it("uses hidden generic-for input, result, and close evidence", function()
         local ast = assert_check([[
             function step<T>(state: {T}, control: integer):
@@ -1157,6 +1470,35 @@ describe("generic declarations and explicit calls", function()
                         step, items, 0, close do
                 end
             end
+
+            record Box<T> item: T end
+            function make_box<U>(): Box<U>
+                return Box<U>.new((nil as value) as U)
+            end
+            function step_box<T>(state: Box<T>, control: integer):
+                    (integer?, Box<T>?)
+                return nil, nil
+            end
+            function nested()
+                for index: integer, item: Box<integer>? in
+                        step_box, make_box(), 0 do
+                end
+            end
+
+            function supply(): ({string}, integer)
+                return {"item"}, 0
+            end
+            function multi()
+                for index: integer, item: string? in step, supply() do
+                end
+            end
+            function step_dots<T>(state: T, control: T): T?
+                return nil
+            end
+            function dots(...: integer)
+                for item in step_dots, ... do
+                end
+            end
         ]])
 
         local use = toplevel(ast, "Ast.TopLevelFunc", "use")
@@ -1170,6 +1512,35 @@ describe("generic declarations and explicit calls", function()
         assert.is_truthy(loop._close_call)
         types.assert_erased(loop._init_call._type)
         types.assert_erased(loop._next_call._type)
+
+        local nested = toplevel(ast, "Ast.TopLevelFunc", "nested").block.stats[1]
+        assert.equal("test.Box<integer>?", types.tostring(
+            declared_type(nested._result_decls[2])))
+        local multi = toplevel(ast, "Ast.TopLevelFunc", "multi").block.stats[1]
+        assert.equal("integer", types.tostring(
+            multi._tuple_decls[3]._type))
+        local function has_generic_view(value, seen)
+            if type(value) ~= "table" or seen[value] then return false end
+            seen[value] = true
+            if value.generic_view then return true end
+            for key, child in pairs(value) do
+                if key ~= "_decl" and key ~= "_declared_type"
+                   and key ~= "_generic_scheme"
+                   and key ~= "_generic_declaration"
+                   and key ~= "_generic_owner"
+                   and has_generic_view(child, seen) then
+                    return true
+                end
+            end
+            return false
+        end
+        assert.falsy(has_generic_view(nested._tuple_adjustment, {}))
+        local dots = toplevel(ast, "Ast.TopLevelFunc", "dots").block.stats[1]
+        assert.equal("integer?", types.tostring(
+            declared_type(dots._result_decls[1])))
+        assert_runtime_ast_erased(nested)
+        assert_runtime_ast_erased(multi)
+        assert_runtime_ast_erased(dots)
     end)
 
     it("validates inferred constraints and transient eligibility", function()
@@ -1199,9 +1570,45 @@ describe("generic declarations and explicit calls", function()
                 local copy = id(pointer)
             end
         ]])
+
+
+        local ordered_errors = h.check_errs([[
+            local c = foreign import "stdint.h"
+            local function same<T>(left: T, right: T): T return left end
+            local function bad(pointer: *c.intptr_t)
+                local got = same(pointer, 42)
+            end
+        ]])
+        assert.same(2, #ordered_errors)
+        assert.match("inferred type argument 'intptr_t %*'.-no sound transient round trip",
+            ordered_errors[1])
+        assert.match("argument 2.-expected intptr_t %* but found integer",
+            ordered_errors[2])
+
+        local invalid_reconstructions = {
+            [[
+                function make<K>(key: K): {K: string}
+                    return {[key] = "x"}
+                end
+                function bad() local got = make(nil) end
+            ]],
+            [[
+                function consume<T>(...: T) end
+                function bad() consume(nil) end
+            ]],
+            [[
+                function produce<T>(item: T): (...: T) return item end
+                function bad() local got = produce(nil) end
+            ]],
+        }
+        for _, source in ipairs(invalid_reconstructions) do
+            local reconstruction_errors = h.check_errs(source)
+            assert.same(1, #reconstruction_errors)
+            assert.match("cannot close", reconstruction_errors[1])
+        end
     end)
 
-    it("keeps inference fresh, diagnoses conflicts, and closes free cells",
+    it("keeps inference fresh, ordinary-checks later mismatches, and closes free cells",
     function()
         assert_check([[
             function id<T>(item: T): T return item end
@@ -1210,10 +1617,29 @@ describe("generic declarations and explicit calls", function()
             end
         ]])
 
-        assert_error("conflicting type evidence for type parameter 'T'", [[
+        local mismatch_source = [[
             function same<T>(left: T, right: T): T return left end
             function bad(): integer return same(1, "one") end
-        ]])
+        ]]
+        local errs = h.check_errs(mismatch_source)
+        assert.same(1, #errs)
+        assert.match("argument 2.-expected integer but found string", errs[1])
+        assert.falsy(errs[1]:find("conflicting type evidence", 1, true))
+        local ok, _, mismatch_ast = run_checker(mismatch_source)
+        assert.falsy(ok)
+        local mismatch = toplevel(
+            mismatch_ast, "Ast.TopLevelFunc", "bad").block.stats[1].exps[1]
+        while mismatch._tag == "Ast.ExpCast" do mismatch = mismatch.exp end
+        assert.equal("integer", types.tostring(
+            mismatch._generic_type_arguments[1]))
+        assert.is_nil(mismatch._generic_inference_context)
+        assert.is_nil(mismatch._generic_inference_use)
+        assert.is_nil(mismatch._generic_inference_operation_use)
+        types.assert_erased(mismatch._type)
+        types.assert_erased(mismatch._callee_type)
+        for _, argument in ipairs(mismatch.args.args) do
+            types.assert_erased(argument._type)
+        end
 
         assert_check([[
             interface Container<T>
@@ -1711,6 +2137,281 @@ describe("generic declarations and explicit calls", function()
         end
     end)
 
+    it("settles nested constructor and generic-value defaults inside-out",
+    function()
+        local ast = assert_check([[
+            function id<T>(item: T): T return item end
+            record Receiver end
+            function Receiver:method<T>(item: T): T return item end
+            function use(receiver: Receiver)
+                local nested_empty = id({{}})
+                local generic_value = id({id})
+                local generic_method = id({receiver:method})
+                local computed_key = id({[id] = 1})
+                local computed_value = id({[1] = id})
+                local empty_key = id({[{}] = 1})
+                local empty_value = id({[1] = {}})
+                local nested_computed = id({{[id] = 1}})
+            end
+        ]])
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        local got = {}
+        for index, stat in ipairs(use.block.stats) do
+            got[index] = types.tostring(declared_type(stat.decls[1]))
+        end
+        assert.same({
+            "{ { integer } }",
+            "{ (value) -> value }",
+            "{ (value) -> value }",
+            "{ (value) -> value : integer }",
+            "{ integer : (value) -> value }",
+            "{ { integer } : integer }",
+            "{ integer : { integer } }",
+            "{ { (value) -> value : integer } }",
+        }, got)
+        assert_runtime_ast_erased(use.block)
+
+        local errs = h.check_errs([[
+            function id<T>(item: T): T return item end
+            function bad()
+                local got = id({function(item) return item end})
+            end
+        ]])
+        assert.same(1, #errs)
+        assert.match("cannot infer type of parameter 'item'", errs[1])
+
+        local computed_errors = h.check_errs([[
+            record Box end
+            function id<T>(item: T): T return item end
+            function bad(box: Box)
+                local got = id({{[box.missing] = 1}})
+            end
+        ]])
+        assert.same(1, #computed_errors)
+        assert.match("field 'missing' not found", computed_errors[1])
+    end)
+
+    it("preserves a deferred contextual call's complete open constructor run",
+    function()
+        local direct_open = 0
+        local original = checker._generic.check_direct_positional_constructor
+        checker._generic.check_direct_positional_constructor = function(node, ...)
+            if node.fields[1]
+               and node.fields[1].exp._tag == "Ast.ExpCall" then
+                direct_open = direct_open + 1
+            end
+            return original(node, ...)
+        end
+        local result = table.pack(pcall(assert_check, [[
+            function agree<T>(left: T, right: T): T return left end
+            function strings(): {string} return {"witness"} end
+            record CallbackBox
+                callback: value
+                callbacks: {value}
+            end
+            function callbacks(): {{(integer) -> integer}}
+                return {{function(x: integer): integer return x end}}
+            end
+            function use(callback: value): {string}
+                local inferred = agree({callback()}, strings())
+                return inferred
+            end
+            function field(box: CallbackBox): {string}
+                local inferred = agree({box.callback()}, strings())
+                return inferred
+            end
+            function indexed(box: CallbackBox): {string}
+                local inferred = agree({box.callbacks[1]()}, strings())
+                return inferred
+            end
+            function nested(): {{(integer) -> integer}}
+                return agree({{function(x) return x end}}, callbacks())
+            end
+        ]]))
+        checker._generic.check_direct_positional_constructor = original
+        assert.truthy(result[1], result[2])
+        local ast = result[2]
+        assert.equal(3, direct_open)
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        local seen = {}
+        local contextual
+        local function visit(value)
+            if type(value) ~= "table" or seen[value] then return end
+            seen[value] = true
+            if value._tag == "Ast.ExpCall"
+               and value._contextual_value_call then
+                contextual = value
+            end
+            for key, child in pairs(value) do
+                if key ~= "_decl" and key ~= "_declared_type"
+                   and key ~= "_generic_scheme"
+                   and key ~= "_generic_declaration"
+                   and key ~= "_generic_owner" then
+                    visit(child)
+                end
+            end
+        end
+        visit(use.block)
+        assert.truthy(contextual)
+        assert.truthy(contextual._open_results)
+        assert.equal("string", types.tostring(
+            contextual._open_results.source_type))
+        assert_runtime_ast_erased(use.block)
+        assert_runtime_ast_erased(
+            toplevel(ast, "Ast.TopLevelFunc", "field").block)
+        assert_runtime_ast_erased(
+            toplevel(ast, "Ast.TopLevelFunc", "indexed").block)
+        assert_runtime_ast_erased(
+            toplevel(ast, "Ast.TopLevelFunc", "nested").block)
+    end)
+
+    it("defers only context-only constructor work and closes it exactly once",
+    function()
+        local source = [[
+            function agree<T>(left: T, right: T): T return left end
+            function make<U>(): U return (nil as value) as U end
+            function integers(): {integer: string} return {[1] = "one"} end
+            function typed(item: integer): value return item end
+            function identity<T>(item: T): T return item end
+            record CallbackBox callback: (integer) -> integer end
+            function callback_box(): CallbackBox
+                return CallbackBox.new(
+                    function(x: integer): integer return x + 1 end)
+            end
+            type Callback = (integer) -> integer
+            function callback_map(): {Callback: integer}
+                return {[function(x: integer): integer return x end] = 1}
+            end
+            function left<T>(items: {T}, witness: T) end
+            function right<T>(witness: T, items: {T}) end
+            function use()
+                local empty_left = agree({}, integers())
+                local empty_right = agree(integers(), {})
+                local contextual = agree({make()}, integers())
+                local named_contextual = agree({callback = function(item)
+                    return item + 2
+                end}, callback_box())
+                local named_generic = agree({callback = identity},
+                    callback_box())
+                local computed_contextual = agree({[function(item)
+                    return item
+                end] = 1}, callback_map())
+                left({function(item): integer return item end}, typed)
+                right(typed, {function(item): integer return item end})
+            end
+        ]]
+        local operation_counts = {}
+        local original = checker._generic.with_inference_operation
+        checker._generic.with_inference_operation = function(node, ...)
+            operation_counts[node] = (operation_counts[node] or 0) + 1
+            return original(node, ...)
+        end
+        local result = table.pack(pcall(assert_check, source))
+        checker._generic.with_inference_operation = original
+        assert.truthy(result[1], result[2])
+        local ast = result[2]
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        for index = 1, 3 do
+            assert.equal("{ integer : string }", types.tostring(
+                declared_type(use.block.stats[index].decls[1])))
+        end
+        for index = 4, 5 do
+            assert_nominal(declared_type(use.block.stats[index].decls[1]),
+                "test.CallbackBox", {})
+        end
+        assert.equal("{ (integer) -> integer : integer }", types.tostring(
+            declared_type(use.block.stats[6].decls[1])))
+        for node, count in pairs(operation_counts) do
+            assert.equal(1, count,
+                "redispatched " .. tostring(node._tag) .. " operation")
+        end
+
+        local function callable_adjustment(value, seen)
+            if type(value) ~= "table" or seen[value] then return nil end
+            seen[value] = true
+            if value._adjustment
+               and value._adjustment.kind == "callable" then
+                return value
+            end
+            for key, child in pairs(value) do
+                if key ~= "_decl" and key ~= "_declared_type"
+                   and key ~= "_generic_scheme"
+                   and key ~= "_generic_declaration"
+                   and key ~= "_generic_owner" then
+                    local found = callable_adjustment(child, seen)
+                    if found then return found end
+                end
+            end
+        end
+        for index = 7, 8 do
+            local adjusted = callable_adjustment(use.block.stats[index], {})
+            assert.truthy(adjusted)
+            assert.truthy(adjusted._callable_adapter)
+        end
+        assert_runtime_ast_erased(use.block)
+
+        local errs = h.check_errs([[
+            function typed(item: integer): value return item end
+            function left<T>(items: {T}, witness: T) end
+            function right<T>(witness: T, items: {T}) end
+            function bad()
+                left({function(item): integer
+                    local number: integer = "bad"
+                    return item
+                end}, typed)
+                right(typed, {function(item): integer
+                    local number: integer = "bad"
+                    return item
+                end})
+            end
+        ]])
+        assert.same(2, #errs)
+        for _, err in ipairs(errs) do
+            assert.match("expected integer but found string", err)
+            assert.falsy(err:find("conflicting type evidence", 1, true))
+        end
+
+        local recovery_ok, recovery_error, recovery_ast = run_checker([[
+            record Plain item: integer end
+            function plain(): Plain return Plain.new(1) end
+            function make<U>(): U return (nil as value) as U end
+            function agree<T>(left: T, right: T): T return left end
+            function bad() local got = agree({make()}, plain()) end
+        ]])
+        assert.falsy(recovery_ok)
+        assert.match("missing field in initializer", recovery_error)
+        assert.match("field 'item'.-cannot be omitted", recovery_error)
+        local recovery = toplevel(
+            recovery_ast, "Ast.TopLevelFunc", "bad").block.stats[1].exps[1]
+        while recovery._tag == "Ast.ExpCast" do recovery = recovery.exp end
+        local constructor = recovery.args.args[1]
+        assert.equal("Ast.ExpInitList", constructor._tag)
+        assert_nominal(constructor._type, "test.Plain", {})
+        assert.is_nil(constructor._generic_inference_context)
+        assert.is_nil(constructor._generic_inference_use)
+        assert.is_nil(constructor._generic_inference_operation_use)
+        for _, field in ipairs(constructor.fields) do
+            types.assert_erased(field.exp._type)
+        end
+
+        local invalid_errors = h.check_errs([[
+            record Box item: integer end
+            function id<T>(item: T): T return item end
+            function bad(box: Box) local got = id({box.missing}) end
+        ]])
+        assert.same(1, #invalid_errors)
+        assert.match("field 'missing' not found", invalid_errors[1])
+        assert.falsy(invalid_errors[1]:find("array initializer", 1, true))
+
+        local ownerless_errors = h.check_errs([[
+            function id<T>(item: T): T return item end
+            function bad() local got = id({item = 1}) end
+        ]])
+        assert.same(1, #ownerless_errors)
+        assert.match("no context to provide type for record constructor",
+            ownerless_errors[1])
+    end)
+
     it("checks positional and named computed arguments exactly once",
     function()
         local cases = {
@@ -1835,7 +2536,7 @@ describe("generic declarations and explicit calls", function()
         assert.truthy(result[1], result[2])
     end)
 
-    it("keeps option-backed contextual record evidence order-independent",
+    it("defers option-backed contextual record initializers in either placement",
     function()
         local ast = assert_check([[
             record Plain
@@ -1895,27 +2596,80 @@ describe("generic declarations and explicit calls", function()
         end
     end)
 
-    it("keeps independent record and container evidence invariant",
+    it("ordinary-adjusts later Option evidence in the selected direction",
     function()
-        local errs = h.check_errs([[
+        local ast = assert_check([[
             record Plain item: integer end
-            function maybe_record(): Plain? return Plain.new(42) end
-            function maybe_array(): {integer}? return {42} end
-            function maybe_map(): {string: integer}?
-                return {["item"] = 42}
+            function maybe(present: boolean): Plain?
+                if present then return Plain.new(42) end
+                return nil
             end
-            function agree<T>(left: T, right: T): T return left end
-            function bad()
-                local record_value = agree(maybe_record(), Plain.new(42))
-                local array = agree(maybe_array(), {42})
-                local map = agree(maybe_map(), {["item"] = 42})
+            function same<T>(left: T, right: T): T return left end
+            function use()
+                local opt? = same(maybe(true), Plain.new(42))
+                local base = same(Plain.new(42), maybe(true))
             end
         ]])
-        assert.same(3, #errs)
-        assert.match("inferred 'test.Plain%?'.-found 'test.Plain'", errs[1])
-        assert.match("inferred '{ integer }%?'.-found '{ integer }'", errs[2])
-        assert.match("inferred '{ string : integer }%?'.-found '{ string : integer }'",
-            errs[3])
+        local function peel(exp)
+            while exp._tag == "Ast.ExpCast" do exp = exp.exp end
+            return exp
+        end
+        local function coercion(exp)
+            while exp and exp._tag == "Ast.ExpCast" do
+                local adjustment = exp._adjustment
+                if adjustment and adjustment.kind == "direct_coercion" then
+                    return adjustment.coercion.op
+                end
+                exp = exp.exp
+            end
+        end
+        local use = toplevel(ast, "Ast.TopLevelFunc", "use")
+        assert.equal("test.Plain?", types.tostring(
+            declared_type(use.block.stats[1].decls[1])))
+        assert.equal("test.Plain", types.tostring(
+            declared_type(use.block.stats[2].decls[1])))
+        assert.equal("option_wrap", coercion(
+            peel(use.block.stats[1].exps[1]).args.args[2]))
+        assert.equal("option_force", coercion(
+            peel(use.block.stats[2].exps[1]).args.args[2]))
+        assert_runtime_ast_erased(use.block)
+    end)
+
+    it("preserves invariance for independently built generic containers",
+    function()
+        local errs = h.check_errs([[
+            record Box<T> item: T end
+            function ia(): {integer} return {1} end
+            function fa(): {float} return {1.0} end
+            function im(): {string: integer} return {["x"] = 1} end
+            function fm(): {string: float} return {["x"] = 1.0} end
+            function ib(): Box<integer> return Box<integer>.new(1) end
+            function fb(): Box<float> return Box<float>.new(1.0) end
+            function array_pair<T>(left: {T}, right: {T}) end
+            function map_pair<T>(left: {string: T}, right: {string: T}) end
+            function box_pair<T>(left: Box<T>, right: Box<T>) end
+            function bad()
+                array_pair(ia(), fa()); array_pair(fa(), ia())
+                map_pair(im(), fm()); map_pair(fm(), im())
+                box_pair(ib(), fb()); box_pair(fb(), ib())
+            end
+        ]])
+        assert.same(6, #errs)
+        local directions = {
+            { "{ integer }", "{ float }" },
+            { "{ float }", "{ integer }" },
+            { "{ string : integer }", "{ string : float }" },
+            { "{ string : float }", "{ string : integer }" },
+            { "test.Box<integer>", "test.Box<float>" },
+            { "test.Box<float>", "test.Box<integer>" },
+        }
+        for index, direction in ipairs(directions) do
+            assert.truthy(errs[index]:find(
+                "expected " .. direction[1] .. " but found " .. direction[2],
+                1, true), errs[index])
+            assert.falsy(errs[index]:find(
+                "conflicting type evidence", 1, true))
+        end
     end)
 
     it("reports complete record diagnostics in deferred and closed paths",
@@ -1991,10 +2745,87 @@ describe("generic declarations and explicit calls", function()
         assert.is_nil(constructor._generic_inference_operation_use)
     end)
 
+    it("drains equated constraint records in lexical registration order",
+    function()
+        local declarations = [[
+            interface Carrier<T>
+                function marker(item: T): T
+            end
+            function scalar<V, W: Carrier<V>>(): (W) -> V
+                return function(owner: W): V
+                    return (nil as value) as V
+                end
+            end
+            function array<V, W: Carrier<{V}>>(): (W) -> V
+                return function(owner: W): V
+                    return (nil as value) as V
+                end
+            end
+            function combine<P, Q>(
+                    first: (P) -> Q, second: (P) -> Q, owner: P): Q
+                return first(owner)
+            end
+        ]]
+        local function diagnose(arguments)
+            local errs = h.check_errs(declarations .. ([=[
+                function ordered<Z: Carrier<{integer}>>(owner: Z)
+                    local got = combine(%s, owner)
+                end
+            ]=]):format(arguments))
+            assert.same(1, #errs)
+            return errs[1]
+        end
+        -- Both child W cells enter one equivalence class before `owner` binds
+        -- it. The first queued constraint selects their shared V cell; reversing
+        -- the written children must reverse which later constraint is rejected.
+        assert.match("call to 'array'.-Carrier<{ { integer } }>",
+            diagnose("scalar(), array()"))
+        assert.match("call to 'scalar'.-Carrier<integer>",
+            diagnose("array(), scalar()"))
+    end)
+
+    it("propagates constrained sibling evidence with bounded solver work",
+    function()
+        local count = 40
+        local params, args = {}, {}
+        for index = 1, count do
+            params[index] = "x" .. index .. ": T"
+            args[index] = "identity(x)"
+        end
+        local source = ([=[
+            interface Marker
+                function marker(): integer
+            end
+            function identity<U: Marker>(item: U): U return item end
+            function many<T: Marker>(%s): T return x1 end
+            function outer<X: Marker>(x: X): X
+                local inferred = many(%s)
+                return inferred
+            end
+        ]=]):format(table.concat(params, ", "), table.concat(args, ", "))
+
+        local substitutions = 0
+        local original = types.substitute_inference
+        types.substitute_inference = function(...)
+            substitutions = substitutions + 1
+            return original(...)
+        end
+        local result = table.pack(pcall(assert_check, source))
+        types.substitute_inference = original
+        assert.truthy(result[1], result[2])
+        -- A dirty-root constraint worklist and reachable-scope substitution are
+        -- linear in these independent siblings. The former global rescan grows
+        -- cubically and exceeds this bound by orders of magnitude.
+        assert.is_true(substitutions <= 25 * count,
+            ("expected at most %d substitutions, performed %d")
+                :format(25 * count, substitutions))
+        assert_runtime_ast_erased(result[2])
+    end)
+
     it("rejects recursive cross-use inference equations without expansion",
     function()
         local diagnostic = "cannot infer a recursive type for type parameter "
-            .. "'T' in call to 'take' from generic function argument"
+            .. "'T' in call to 'take' from argument 1"
 
         local function check(source, instruction_budget)
             local result

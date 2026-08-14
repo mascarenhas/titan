@@ -308,128 +308,141 @@ capability; binary recovery and transitive importers remain public-only.
 ## Local instantiation and inference
 
 An inferred outer generic AST use owns one checker-only inference context. Its
-fresh cells use occurrence scopes distinct from the declaration scopes and from
-every other application of the same declaration. While that owner's receiver,
-result, and argument subtree is being checked, a nested generic call,
-constructor, method, bound method, or contextual first-class use inherits the
-ambient context instead of closing a private one. A generic occurrence registers
-its own fresh scope entries and a child use record; direct cell-to-cell
-unification records an equation, so a nested cell can remain equal to an outer
-cell until later sibling evidence resolves either side.
+fresh cells use occurrence scopes distinct from declaration scopes and from
+every other application. Nested generic calls, constructors, methods, bound
+methods, and contextual first-class uses inherit that ambient context, register
+their own occurrence scopes and child use records, and may retain cell-to-cell
+or structural equations until a real term closes either side. Every equation is
+occurs-checked before a union/find class is joined or receives a structural
+binding.
 
-Any expression that derives checker-owned annotations from a child registers a
-zero-binder operation use before descending. This shared derived-operation
-protocol covers ordinary computed calls/methods, direct contextual calls through
-`value`, parentheses, record fields, Array/Map indexing, bound methods,
-finite/open result projections, and Array, Map, or context-only record
-constructors. Syntax-directed direct-call and foreign-call paths that inspect an
-`ExpVar` through its `VarDot`/`VarBracket` child still install that `ExpVar` as
-the operation owner. Generic-argument and generic-for eligibility probes that
-must resolve such a child before classifying it transfer the completed check to
-the eventual expression consumer regardless of the classification result. A
-closed expected context already available to a positional or named probe travels
-with that one check, preserving context-sensitive C function references. The
-consumer still applies its own contextual first-class, foreign-function, and
-`value` handling, but never redispatches the written receiver or index subtree.
-An auto-forced computed callee or method receiver rebuilds only its
-checker-synthesized Option cast after the child closes. A dependent callable
-signature gathers argument and result evidence, while structural
-projections and constructor components retain explicit equations without
-freezing adjustments against open cells.
+Inference has an explicit selection/checking split.
 
-Generic discovery keeps an unresolved scalar pattern nonsemantic for ordinary
-expressions but gives it provisionally to a contextual `value` call. The side
-channel follows the scalar's actual consumer position: a parenthesized call in
-an open constructor maps the tail pattern to its one fixed child result, and a
-dependent `VarBracket` carries its unresolved Map-key pattern to a contextual
-key call. That call checks its callee and discovers its input run once; its
-operation later closes the synthesized function type, argument edges, callee
-cast, fixed results, and flexible result tail without redispatching the written
-subtree.
+### Ordered selection
 
-A context-only record constructor whose expected type is still a direct
-inference cell cannot resolve its field descriptors immediately. It checks each
-written field expression exactly once in lexical order, registers its nested
-uses, and queues a one-shot discovery callback. Before carrier defaults, the
-owner repeatedly runs discovery and constraint propagation to a bounded fixed
-point. Once sibling or direct-result evidence identifies the record owner,
-discovery and finish both look through the same one outer Option and map the
-already checked expressions to the closed field patterns. If that contextual
-base differs from the preserved outer generic pattern by exactly one ordinary
-Option wrap or force, argument discovery retains the outer pattern as evidence;
-the postorder argument finalizer classifies the ordinary adjustment. This narrow
-rule applies to context-only record initializers, not independently typed record
-calls, Array/Map constructors, or other expressions, so invariant inference is
-unchanged.
+The call scheduler first checks the callee or receiver. The helper
+`infer_static_result_context` then applies the current static policy: available
+expected-result slots are consumed left-to-right before evaluated arguments.
+Keeping that policy behind one phase boundary makes it independent of the
+run-time-order machinery. Positional arguments are then consumed left-to-right;
+named fields in their written order; a final expression's fixed results in
+result order followed by its open tail; and synthesized omissions only after
+all written expressions.
 
-An invalid written-field mapping reports the unknown field and still runs the
-ordinary omission pass, which can also report every required field that was not
-supplied. The recovery constructor retains only fields with resolved descriptors
-and closes to its nominal owner (or `Invalid` when no owner closed), never to the
-fresh Parameter. Neither discovery nor omission redispatches a written field
-expression.
+A possible generic first-class expression is checked in its lexical callback.
+It never pre-scans later positional arguments: the fresh child occurrence joins
+the ambient context and publishes its possibly open callable equation
+immediately. Bound-method receivers and computed variable paths use the ordinary
+single descent, so neither the producer nor its receiver is replayed. Constructor
+classification likewise prechecks an arbitrary call callee once; any callee
+whose resolved static type is `value` remains contextual, including field,
+index, and computed forms. The later real call consumes that transferred callee
+check instead of descending again.
 
-After child uses close, reusable postorder annotation finalizers smart-substitute
-or rebuild the operation's `_type`, field/index guard, method/Interface,
-parenthesized, result-projection, writer, and adjustment annotations. Closing an
-adjusted argument run also refreshes every field of the call's copied
-`_open_args` descriptor after its producer, source/target types, and plan close.
-Named computed-function calls remain unavailable by the ordinary
-direct-declaration rule; a contextual `value` call inside a direct generic named
-argument and named methods use their surrounding operation plans.
-A generic use creates and owns a context only when there is no ambient owner. A
-complete explicit type-argument list remains closed locally and contributes its
-resulting ordinary type as evidence.
+`unify_inference` is the equation/first-selection operation. At entry it
+smart-substitutes both the declaration-side pattern and producer type. If both
+are now closed with respect to the ambient context, it succeeds without raw
+comparison: the cell was already selected and the owning finalizer will run the
+ordinary directional assignment check. If either side still contains an
+ambient cell, invariant structural descent continues, so a closed consumer can
+still bind cells owned by a nested producer. This small boundary is phase one;
+it neither inserts casts nor emits an ordinary later-term mismatch.
 
-The owning AST use closes the context only after the complete relevant subtree
-has contributed evidence. The checker then:
+Structural descent covers Option, Array, Map, Function, and same-owner nominal
+applications. It records only open-cell equations and first concrete bindings;
+it does not choose numeric conversions, Interface implementations, or common
+supertypes. A later independently built Array/Map/nominal application therefore
+reaches the ordinary invariant assignment relation after selection instead of
+being rebuilt component by component.
 
-1. gathers receiver and expected-result evidence, looking through one ordinary
-   outer Option wrap or force around a structured result while preserving a
-   direct `T` binding to the Option itself;
-2. gathers positional/named argument evidence and prepares contextual lambda
-   parameter and result types, registering nested applications without
-   finalizing them;
-3. invariantly unifies structural evidence and cross-use cell equations;
-4. alternates declared-constraint propagation with one-shot pre-close
-   discovery callbacks until no new owner-dependent equation can be contributed;
-5. after evidence is exhausted, closes each equivalence class to its declared
-   erased carrier, preferring any resolvable constrained Interface application
-   before the unconstrained `value` default;
-6. validates every declaration-local constraint and
-   `types.transient_roundtrip` against the closed class binding; and
-7. finalizes the registered application-and-operation tree in postorder: deepest
-   children before their parent, left-to-right among siblings. Finalization
-   smart-substitutes each closed application, refreshes every derived annotation
-   before its parent adjustment, freezes argument/result adjustments, and checks
-   each deferred contextual lambda body exactly once.
+Constructor consumers expose evaluated component edges in language order:
 
-The context is owned by the AST, while its temporary ambient pointer lives only
-in the current checker symbol-table state during recursive expression checking.
-It is neither process-global nor run-time state. Discovery and postorder
-finalization do not reevaluate or recheck written callees, receivers, fields,
-indices, or argument expressions; their original lexical checking and evaluation
-order remains authoritative. Operation markers and inference cells are removed
-before the code-facing AST is returned, so no `Type.Parameter` survives on a
-runtime-facing annotation.
+- positional Array/integer-Map values from left to right, including each fixed
+  result of the trailing producer before its open tail;
+- each computed Map key immediately before its value; and
+- record fields in written order, independent of declaration-slot order.
 
-Result evidence remains authoritative for empty union variants, phantom
-parameters, and result-only parameters such as the async Task cancellation
-type. The final carrier step is fixed by the declarations participating in the
-equation class and happens only after all evidence; there is no wildcard,
-partial explicit list, source-declared default, heuristic candidate scoring, or
-inference cell in metadata/codegen.
+Generic `for/in` treats its iterator plus hidden state/control inputs as one
+delivered tuple. Written producers contribute once at their source position;
+fixed multi-results are consumed in result order, while synthesized `...`
+projections and final missing-nil slots are consumed left-to-right without
+replaying their producer. Iterator result annotations and carrier closure happen
+only after those hidden inputs have supplied their evidence.
 
-Unification descends through Option, Array, Map, Function, and same-owner
-applications. It matches fixed, variadic, and flexible callable components but
-does not decide ordinary conversions, structural Interface implementation,
-numeric promotion, or a common supertype. Once cells close, the surface pass
-freezes admissibility, the closed application, boundary direction, and any
-ordinary source adjustment independent of erasure. It does **not** reclassify a
-`value` source directly against a substituted closed target such as `integer`:
-that would eagerly guard the selected raw unconstrained ingress. The later
-focused pass classifies only the ordinary erased endpoints while retaining the
-frozen surface direction.
+Once an element/field pattern closes, later components are left for ordinary
+constructor finalization, which may install scalar, Option, gradual, callable,
+or Interface adjustments. This is construction-time adaptation, not variance
+of existing containers.
+
+### Pending producers and defaults
+
+Only genuinely context-only producers are deferred. These include incompletely
+annotated lambdas, contextual calls through `value`, ownerless named record
+constructors, empty constructors, and nested constructor components whose
+syntax still needs a sink. A generic first-class function or method instead
+creates its fresh occurrence inside the ambient operation immediately and
+registers its open callable equation at the written edge; declaration
+constraints from that equation therefore drain before the next lexical edge.
+A pending record retains its written fields and resolves descriptors in source
+order after its owner appears. A direct open empty constructor retains no false
+Array evidence; a later whole context may select Array, integer-keyed Map, or
+record, while the constructor-default phase otherwise selects `{integer}`. A
+nonempty direct positional constructor selects Array as soon as its first
+completed component is available. It remains whole-shape pending only while
+every selecting component needs context, so a later exact integer-Map context
+may still select its shape. Default discovery is postorder: a nested empty
+constructor or computed key/value first completes its own default, and its
+completed type then becomes real evidence for the nonempty parent. The parent
+is marked invalid only when that ordinary component check actually failed.
+
+Discoveries have two finite phases. The `evidence` phase drains ready equations
+and context-ready producers to a fixed point. Only then may the `default` phase
+apply an ordinary constructor shape/default; evidence is drained again after
+each default round. Generic carrier closure runs after both phases. Deferred
+callbacks execute under their original AST-owned use, so any nested occurrence
+is registered at the correct postorder position. Each callback is one-shot.
+
+Constraint propagation is a dirty-root worklist, not a global fixed-point scan.
+Every constrained occurrence owns a dense record with a lexical sequence;
+unioned equivalence classes merge those records in sequence order, and a changed
+binding queues only that root's records. Smart substitution similarly visits
+only inference scopes reachable from the type being rewritten, using a direct
+scope-to-entry index. These two bounds preserve first-evidence/diagnostic order
+while keeping independent constrained siblings linear rather than repeatedly
+rescanning the entire ambient context.
+
+A derived operation use is registered before descending whenever an expression
+copies checker-owned annotations from an open child. This covers computed
+calls/methods, contextual `value` calls, parentheses, field/index projections,
+bound methods, fixed/open result projections, and constructors. Postorder
+finalization refreshes those annotations after child uses close; it is an
+annotation dependency order, never permission to reorder source evidence.
+
+Only the owning outer use closes the context. Closure performs:
+
+1. ordered callee/receiver, static-result, argument, result-slot, and constructor
+   selection while the written subtree is checked;
+2. evidence discovery and constraint-equation propagation;
+3. ordinary constructor defaults followed by another evidence drain;
+4. declared-carrier closure of genuinely free equivalence classes, preferring a
+   resolvable constrained Interface application over unconstrained `value`;
+5. validation of every declaration-local constraint and
+   `types.transient_roundtrip`; and
+6. postorder finalization of the application/operation tree.
+
+Finalization is phase two for stored surface edges. It smart-substitutes the
+resolved target and calls the existing `coerce_and_check`, open-run assignment,
+record-field, or result-adjustment path exactly once. Those paths freeze the
+ordinary plan/cast/guard/Interface or callable wrapper and report a mismatch at
+the later source term. Generic erasure subsequently inserts only the separate
+closed-surface-to-carrier boundary. It does not rediscover or reverse the
+surface decision.
+
+The context is AST-owned; its ambient pointer lives only in the current checker
+symbol table during descent. Finalizers do not reevaluate written expressions.
+Operation markers and occurrence Parameters are removed before the code-facing
+AST returns. Result-only/phantom cells and unresolved nested equations therefore
+close without leaving a wildcard, metadata cell, or run-time type argument.
 
 Smart substitution uses Titan's canonical constructors rather than replacing
 leaves in place. It:

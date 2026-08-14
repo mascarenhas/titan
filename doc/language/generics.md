@@ -241,34 +241,82 @@ interfaces; local aliases remain source-private.
 
 ## Instantiating calls and constructors
 
-Each generic use gets fresh inference variables. The checker closes all of them
-from argument types, expected result types, receiver types, and contextual
-lambda types before checking the use. One call never changes the declaration or
-another call.
+Each generic use gets fresh inference cells. A cell is selected by the first
+real evidence that reaches it in Titan's checking order; later terms do not
+compete to select a different argument. One use never changes the declaration
+or another use.
+
+The precedence for an inferred call is:
+
+1. an explicit complete type-argument list;
+2. owner arguments fixed by the already checked receiver;
+3. available expected-result slots, from left to right; and
+4. evaluated arguments in language order.
+
+Expected-result context is static: using it before evaluated arguments does not
+change run-time evaluation. For example, `local x: float = id(1)` selects
+`T = float` and checks the integer argument against `float`; the call elaborates
+like `id<float>(1)`. A receiver-selected owner remains earlier: if `box` is a
+`Box<integer>`, an expected `float` result from `box:get()` adjusts the integer
+result rather than changing the receiver's owner argument.
+
+Evaluated evidence is consumed exactly in source order: positional arguments
+left to right; named arguments in the order written (not formal order); each
+fixed result of a final multi-result expression left to right, then its open
+tail; and omitted arguments only after written arguments. Constructors consume
+positional values left to right, each computed Map key before its value, and
+record fields in written order.
+
+A generic `for ... in` use follows the same rule for its four-value iterator
+tuple. After the iterator is selected, written state/control producers are
+consumed in source and delivered-result order; projections synthesized from a
+final `...` and missing nil fills follow without replaying that producer. A
+contextual close callback participates at its written tuple slot. Only after
+those hidden inputs have supplied evidence do annotated loop variables supply
+iterator-result evidence. For example, the nil-fillable projections of `...`
+below select `T = integer` through the iterator's optional state/control inputs
+before the unannotated result is closed; the loop's first control value is then
+ordinarily forced to `integer`:
 
 ```titan
-function describe(numbers: {integer}): string
-    local text = foldl(
-        numbers,
-        function(x, suffix)
-            if x == 0 then
-                return "zero" .. suffix
-            end
-            return suffix
-        end,
-        ""
-    )
-    return text
+function step<T>(state: T?, control: T?): T? return nil end
+function consume(...: integer)
+    for item in step, ... do
+        -- item is the forced integer control value
+    end
 end
 ```
 
-Here `{integer}` binds `T`, `""` and the expected result bind `U` to `string`,
-and the lambda is checked once with type
-`(integer,string) -> string`. `text` is `string`.
+```titan
+function same<T>(left: T, right: T): T return left end
 
-Evidence is gathered across the complete application rather than committed
-left-to-right. In particular, a contextual call through `value` keeps its
-surrounding generic result slot open until the other arguments have contributed:
+local i = same(1, 2.5)  -- T is integer; argument 2 converts float -> integer
+local f = same(1.0, 2)  -- T is float; argument 2 converts integer -> float
+```
+
+Once the first argument has selected `T`, the second is checked by Titan's
+ordinary directional assignment rules. It may therefore receive a numeric,
+Option, gradual, callable, or Interface adjustment. An incompatible later term
+reports the ordinary error at that term; inference does not search for a common
+type and does not report later evidence as a competing inference candidate.
+
+This component adjustment applies while a constructor is building a value. It
+does not make an independently built generic application variant: after an
+existing `{integer}` selects `{T}`, a later existing `{float}` is an ordinary
+container mismatch rather than an element-wise conversion.
+
+Some producers have no independent type until their sink is known. An untyped
+lambda, a contextual call through `value`, an ownerless named record
+initializer, or a constructor whose component syntax itself needs context
+remains pending. It is checked exactly once when later evidence or final
+fallback closes its context; its written position and run-time evaluation do
+not move. “Call through `value`” is determined from the statically checked
+callee, so it includes record/module fields, indexed values, and other computed
+callees rather than only a bare local name. A generic first-class function or
+method is different: at its written position it registers a fresh open callable
+equation immediately. Later
+evidence may close that occurrence's local cells, but the value is not replayed
+or moved behind its siblings. Thus:
 
 ```titan
 function agree<T>(left: T, right: T): T return left end
@@ -278,39 +326,45 @@ function from_dynamic(callback: value): integer
 end
 ```
 
-Here `42` closes `T` to `integer`, so `callback()` is checked as an integer
-result just as it is in `agree(42, callback())`. The source order still controls
-evaluation order; inference does not recheck or reevaluate either expression.
-This remains true when inference must inspect a computed field or index early to
-recognize a possible generic function value, including the iterator and close
-slots of a generic `for`: the written projection is checked once, reports each
-error once, and then receives the ordinary context of its eventual use.
+`callback()` cannot synthesize its result type, so the later `42` selects
+`integer` and the earlier call is finished as `() -> integer`. This is not an
+order-independence rule for an already typed `value`: `agree(v, 42)` selects
+`value`, while `agree(42, v)` selects `integer` and checks `v` at that boundary.
 
-A context-only record initializer does not provide a second, contradictory owner
-for the context that made it meaningful. For example, if an expected result or
-another argument closes a direct `T` to `Plain?`, `{item = 42}` constructs a
-`Plain` and then takes the ordinary `Plain`-to-`Plain?` adjustment. This is the
-same in either argument order. An explicitly typed expression such as
-`Plain.new(42)` still contributes its own invariant type evidence; the rule is
-not an Option-wide common-type search.
+Brace syntax follows the same distinction. `{}` has no component evidence and
+may take a later Array, integer-keyed Map, or record context; without one it uses
+the ordinary `{integer}` default before generic carrier fallback. A nonempty
+positional constructor whose first usable component is independently typed
+selects Array at that source position. It remains shape-pending only while all
+of its potentially selecting components still require context.
+Computed syntax selects Map shape immediately, while named syntax still needs a
+nominal record owner. Nested defaults settle inside-out: in `id({{}})`, the
+inner empty syntax first defaults to `{integer}`, and that completed component
+selects the outer `{{integer}}`; a nonempty parent never invents the empty
+constructor's integer-element default for itself. The same postorder rule
+applies to computed Map keys and values. A context-only record constructor
+builds the selected record base and then takes any ordinary outer Option wrap
+or force.
 
-Inference is local and invariant. It unifies corresponding parts of Options,
-Arrays, Maps, function shapes, and applications of the same owner. It does not:
+Inference equations remain invariant structural equations over corresponding
+parts of Options, Arrays, Maps, function shapes, and applications of the same
+owner. They connect still-open cells, including cells owned by nested uses, and
+are subject to an occurs check. They do not:
 
 - search for a common supertype;
-- choose a numeric conversion;
-- use structural Interface satisfaction as a unification relation (after a
-  concrete argument is selected, its constraint is checked normally);
+- choose a conversion as evidence;
+- use structural Interface satisfaction as unification (a selected argument's
+  constraint is checked normally);
 - generalize a local binding in Hindley–Milner style; or
 - leave a wildcard or unresolved parameter in the result.
 
-Conflicting evidence is an error. After receiver, result, argument, lambda, and
-constraint evidence is exhausted, a still-free parameter closes to its declared
-erased carrier: `value` for an unconstrained parameter, or the recursively
-closed Interface application for a constrained parameter. Evidence always wins
-over this final carrier rule. It lets empty variants, phantom parameters, and
-result-only parameters remain ordinary closed calls without introducing a
-wildcard or a run-time type argument.
+After ordered evidence and ordinary constructor defaults are exhausted, a
+still-free equivalence class closes to its declared erased carrier: `value` for
+an unconstrained parameter, or the recursively closed Interface application for
+a constrained parameter. A pending producer is then finished once under that
+closed target. This lets empty variants, phantom parameters, and result-only
+parameters remain ordinary closed calls without introducing a wildcard or a
+run-time type argument.
 
 After every parameter closes, Titan reconstructs the application with its
 ordinary canonical type constructors. `value?` and nested Options collapse to
@@ -840,7 +894,8 @@ or application is malformed or cannot close. Common categories include:
 - duplicate, cyclic, shadowing, or non-Interface binders and constraints;
 - wrong owner arity, misplaced or partial explicit lists, or a constraint
   violation;
-- a conflict between argument, receiver, result, or lambda evidence;
+- an ordinary later argument/result incompatibility, or a recursive open-cell
+  inference equation;
 - use of an operation not provided by a rigid parameter;
 - an ineligible type argument, including a forbidden FFI shape hidden inside a
   larger type; and
