@@ -51,10 +51,20 @@ local function physical_absolute_filename(filename)
     local unresolved = {}
     local candidate = raw
     local seen = {}
+    local seen_links = {}
+    local link_hops = 0
     while candidate and candidate ~= "" and not seen[candidate] do
         seen[candidate] = true
         local attributes = lfs.symlinkattributes(candidate)
         if attributes and attributes.mode == "link" and attributes.target then
+            link_hops = link_hops + 1
+            local identity = attributes.dev ~= nil and
+                attributes.ino ~= nil and
+                (tostring(attributes.dev) .. ":" .. tostring(attributes.ino))
+            if link_hops > 40 or (identity and seen_links[identity]) then
+                break
+            end
+            if identity then seen_links[identity] = true end
             if attributes.target:sub(1, 1) == "/" then
                 candidate = attributes.target
             else
