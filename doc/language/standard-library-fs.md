@@ -10,6 +10,14 @@ pinned build and optional system-package mode on both platforms.
 ```titan
 record File
 record Stat
+record Watcher
+
+union WatcherEvent
+  created: string
+  deleted: string
+  modified: string
+  error: async.OperationError
+end
 
 function open(path: string, mode: string): File
 function read_file(path: string): string
@@ -22,8 +30,9 @@ function File:flush()
 function File:close()
 function File:is_closed(): boolean
 
-function stat(path: string): Stat
-function lstat(path: string): Stat
+function stat(path: string): Stat?
+function lstat(path: string): Stat?
+function realpath(path: string): string
 function tmpname(): string
 function tmpdir(): string
 function homedir(): string
@@ -34,6 +43,13 @@ function unlink(path: string)
 function rmdir(path: string)
 function rename(from: string, to: string)
 function list(path: string): {string}
+
+function watcher(): Watcher
+function Watcher:watch(path: string)
+function Watcher:stop(path: string)
+function Watcher:is_watching(path: string): boolean
+function Watcher:clear()
+function Watcher:poll(): {WatcherEvent}
 ```
 
 `File` structurally satisfies all seven
@@ -196,6 +212,21 @@ supplied by libuv; its numeric permission/type bits are host-specific. The two
 modification fields form one timestamp, with nanoseconds in the range 0
 through 999,999,999.
 
+If the requested path does not exist, `stat` and `lstat` return `nil`.
+Only libuv's `UV_ENOENT` result has that meaning; permission failures,
+invalid path components, and every other error still raise
+`async.OperationError`. A dangling symbolic link therefore returns `nil` from
+`stat`, while `lstat` returns the link's own `Stat` value.
+
+`realpath(path)` resolves symbolic links plus `.` and `..` components and
+returns the canonical absolute path. The complete path must exist. It rejects
+embedded NUL bytes and raises `async.OperationError` for a missing or otherwise
+unresolvable path. Like metadata operations, it runs inside the current Task.
+If the current Task is cancelled while the short native request is pending,
+its waiter is detached before the next-turn cancellation wake. The result is
+not delivered, but the accepted request still reaches its callback and
+cleanup.
+
 `mkdir(path)` requests mode `0777`, subject to the process umask. `unlink(path)`
 removes a file or symbolic link; it does not stand in for directory removal.
 `rmdir(path)` removes an empty directory. `rename(from, to)` uses libuv's
@@ -208,6 +239,65 @@ sort them in application code when order matters.
 Paths are text arguments. An embedded NUL is rejected instead of silently
 truncating it; libuv copies paths for accepted asynchronous filesystem
 requests. File contents remain unrestricted binary strings.
+
+## Watching filesystem changes
+
+`watcher()` creates a `Watcher` bound permanently to the current async Runtime
+and event loop. Creating or using one requires a running Task. After that
+Runtime stops, every operation on the Watcher raises; a Watcher is not reset
+for reuse by a later Runtime.
+
+`watch(path)` requires an existing file or directory. It calls `realpath` once
+and registers the resulting canonical absolute target. Repeating the call for
+the same target is idempotent, including through another symbolic link or an
+equivalent `.` or `..` spelling. A directory watch covers its immediate
+entries, not descendants of nested directories. A file watch reports only
+that file.
+
+`stop(path)` resolves the supplied spelling and stops its canonical
+registration. A missing or unwatched path is a no-op. `is_watching(path)` uses
+the same lookup and returns false for either case. The Watcher stores only
+canonical identities; it does not retain every spelling used by callers.
+`clear()` stops every registration. Both `stop` and `clear` wait until each
+native watcher handle has closed, and `clear` is idempotent after completion.
+While one clear is waiting for those closes, a new `poll` or second `clear`
+raises.
+
+`poll()` returns the currently buffered events. If none are buffered while a
+registration is active, it suspends the current Task until a callback arrives
+or the last registration is removed. If the Watcher has no registrations, it
+returns an empty Array immediately. Only one Task may poll a given Watcher at a
+time. Tasks that mutate one Watcher concurrently must coordinate those calls
+externally. Cancelling a blocked poll detaches only that Task's waiter. It does
+not discard buffered events or stop registrations that another Task may poll.
+
+```titan
+union WatcherEvent
+  created: string
+  deleted: string
+  modified: string
+  error: async.OperationError
+end
+```
+
+Every path payload is canonical and absolute. A directory callback's filename
+is joined to the watched directory; a file callback names the watched file.
+Each native notification maps to one `WatcherEvent`. A native rename flag is
+classified as `created` or `deleted` by calling `lstat` when `poll` drains the
+notification; if rename and change flags are both present, rename takes
+precedence. A change-only notification maps to `modified`. A direct file watch
+or watched directory retires when draining its own deletion event.
+
+A negative native status or an `async.OperationError` raised while classifying
+one notification maps to the `error` arm instead of making `poll` raise. Other
+Task errors, including cancellation or use outside the Watcher's Runtime,
+retain their ordinary behavior.
+
+Filesystem notifications are hints rather than a journal. The operating
+system or libuv may combine, duplicate, or omit changes, and the target may
+change again before drain-time classification. Applications must not assume
+one notification per filesystem operation, exact counts, or a total order.
+Events copied before `stop` or `clear` remain buffered for a final `poll`.
 
 ## Temporary files and working directory
 
@@ -242,8 +332,10 @@ change is temporary.
 
 Libuv failures raise [`async.OperationError`](async-io.md#errors-and-cancellation).
 Its `operation` identifies the failing action (for example, `fs.open` or
-`fs.rename`). The library does not print errors.
+`fs.rename`). Watcher notification and classification failures are the one
+result-valued exception: `poll` returns them as `WatcherEvent.error`. The
+library does not print errors.
 
 This module does not provide random-access reads/writes,
-permissions/ownership changes, links, filesystem watching, memory mapping, or
-synchronous file-content operations.
+permissions/ownership changes, link creation, recursive filesystem watching,
+memory mapping, or synchronous file-content operations.

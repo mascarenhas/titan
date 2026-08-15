@@ -24,12 +24,13 @@ cancellation reasons are spelled through `async`:
 type CancellationReason = uv.CancellationReason
 type TaskStatus = uv.TaskStatus
 type Task = uv.Task
+type SuspendCancelAction = () -> ()
 
 function run<A, B>(func: () -> A): Task<A, B>
 function loop()
 function yield()
 function running(): Task -- exactly Task<value, value>
-function suspend()
+function suspend(cancel_action: SuspendCancelAction?)
 function channel<T>(size: integer?):
     ((T) -> (), () -> T, () -> ())
 function reader_writer_channel(size: integer?):
@@ -150,14 +151,21 @@ resource. `timer.yield()` is a facade over the same operation. Calling either
 outside a Task raises.
 
 `async.running()` returns the current Task and raises when called outside one.
-`async.suspend()` suspends that Task without registering a native operation or
-an implicit waiter; it likewise raises outside a Task. It remains suspended
-until `Task:resume()` is called or someone cancels it. `resume()` does not
-enter the target Task inline. It synchronously requests a callback-deferred
-wake without yielding its caller, so it is valid from a terminal listener's
-main-thread context or another running Task. Repeated requests before the wake
-coalesce; calling it for a Task that is not explicitly suspended or is already
-terminal is a no-op.
+`async.suspend(cancel_action)` suspends that Task without registering a native
+operation or an implicit waiter; it likewise raises outside a Task. The
+optional zero-argument action runs synchronously in the Task that requests
+cancellation, before the suspended Task's next-turn wake is scheduled. It is
+for nonyielding, nonraising detachment of an exact waiter or similar ownership
+state; an
+ordinary `Task:resume()` does not call it. When omitted, `suspend()` retains its
+original behavior.
+
+The Task remains suspended until `Task:resume()` is called or someone cancels
+it. `resume()` does not enter the target Task inline. It synchronously requests
+a callback-deferred wake without yielding its caller, so it is valid from a
+terminal listener's main-thread context or another running Task. Repeated
+requests before the wake coalesce; calling it for a Task that is not explicitly
+suspended or is already terminal is a no-op.
 
 Every accepted wake request uses a zero-duration timer owned by the target
 Task. The timer callback initiates `uv_close`, and the close callback releases

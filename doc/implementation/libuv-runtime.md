@@ -97,10 +97,13 @@ notification consequently runs on the Lua main thread after the terminating
 coroutine is no longer the running Task.
 
 `async.suspend` yields a dedicated `SuspendCall`. Its dispatcher marks the
-current Task explicitly suspended and installs a cancellation action that asks
-that same Task to resume. It submits no native request and registers the Task
-on no persistent handle. The suspension remains inert until `Task:resume` or
-cancellation requests a wake.
+current Task explicitly suspended and installs a cancellation action. When the
+caller supplied an optional `SuspendCancelAction`, cancellation runs it
+synchronously first so an exact external waiter can detach while Titan still
+has control; the action must neither yield nor raise. The dispatcher then asks
+the same Task to resume on its ordinary next-turn timer. Suspend submits no native request
+and registers the Task on no persistent handle. The suspension remains inert
+until `Task:resume` or cancellation requests a wake.
 
 `Task:resume` is synchronous, does not yield its caller, and never enters the
 target coroutine inline. If the target is explicitly suspended, nonterminal,
@@ -381,6 +384,15 @@ through the close callback. Entries are cleared to holes after terminal
 callbacks. Neither Array is a parallel resource model or a source of shutdown
 handle discovery; libuv's loop remains authoritative through `uv_walk`.
 
+The shared `begin_close` checks `uv_is_closing` before it allocates a close
+owner or calls `uv_close`; this is libuv's authoritative duplicate-close
+protocol. Its boolean result lets a cancellation-insensitive
+`HandleCloseCall` complete immediately when another path already initiated
+close. Otherwise that Call remains suspended until `close_cb` releases the
+owner and resumes its Task. The high-level filesystem watcher uses this local
+Call when `stop` or `clear` must wait for closure, without adding a public
+`uv` API.
+
 Owned C objects and arrays provide stable native addresses. Automatic C
 aggregates are used only for synchronous calls whose pointers cannot escape.
 Stream and filesystem writes assign immutable Titan strings directly to
@@ -501,7 +513,8 @@ dispatchable while cancellation is pending; their callbacks deliver ordinary
 completion before a later sensitive boundary reinjects the reason. A waiter
 detached from a shared multi-shot handle cannot close that shared resource; it
 receives its own Task-owned one-shot timer and resumes from that timer's close
-callback. Cancellation of an explicitly suspended Task calls `resume`, which
+callback. Cancellation of an explicitly suspended Task first runs its optional
+nonyielding, nonraising waiter-detachment action and then calls `resume`, which
 coalesces with any already requested wake. Cancellation never resumes one Task
 synchronously inside another Task.
 
