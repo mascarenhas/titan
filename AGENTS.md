@@ -64,8 +64,13 @@ not add epicycles around what may be a misunderstood simpler design.
   standard `ubuntu-24.04` jobs with explicit 30-minute timeouts. Every workflow
   job exports `MAKEFLAGS=-j4` and `TITAN_JOBS=4`: Make may overlap independent
   native prerequisites, and each `titanc` process may overlap only generated-C
-  object compilations. Indirect LuaRocks/CMake recursive wrappers preserve the
-  Make jobserver through guarded recursive recipe lines, and `ltitanlib.o`
+  object compilations. The compiler launches larger generated units first and
+  receives actual child completions through one private POSIX FIFO, refilling a
+  slot immediately; diagnostics remain buffered and replay in request order.
+  Do not replace wait-any notification with launch-order `pclose`, which leaves
+  completed children occupying logical slots. Indirect LuaRocks/CMake recursive
+  wrappers preserve the Make jobserver through guarded recursive recipe lines,
+  and `ltitanlib.o`
   waits for the prefix Lua installation that owns its public headers. Busted
   2.3 has no shard option, and the compiler specs share checkout-root artifact
   names plus one LuaCov state file, so each Busted invocation remains unsharded.

@@ -1,0 +1,3 @@
+function answer(): integer
+  return 6
+end

@@ -408,8 +408,9 @@ titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
 * `-l/--link` adds extra C libraries to the link line (FFI use).
 * `-j/--jobs <jobs>` bounds concurrent generated-C object compilations. It
   defaults to the positive integer in `TITAN_JOBS`, or to `1` when that
-  variable is unset. Parsing, checking, C generation, generated-header work,
-  and final linking remain ordered in the compiler process.
+  variable is unset. Values above one require the standard POSIX `mkfifo`
+  utility. Parsing, checking, C generation, generated-header work, and final
+  linking remain ordered in the compiler process.
 * `--static` prefers self-describing Titan `.a` providers over `.so`
   providers for ordinary dependencies. It still permits DSO/source fallback
   and does not request a fully static system executable.

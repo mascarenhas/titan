@@ -430,12 +430,19 @@ quotes, and backslash escapes. Each command builder quotes every resulting word,
 so spaces and shell metacharacters remain part of one argument rather than being
 reinterpreted. A direct command ends in `os.execute`. For a parallel module
 batch, `io.popen` starts at most the requested number of those same rendered
-commands. Each compiler's stdout and stderr go to separate temporary files so a
-blocked pipe cannot deadlock the batch; Titan replays and removes those files
-when it reaps that compiler. Preparation failures do not launch a process, and
-native failures do not prevent already independent module objects from being
-attempted. Unterminated quotes, trailing escapes, NUL bytes, an empty configured
-command, and non-dense programmatic argument arrays produce configuration errors.
+commands. Titan launches larger generated translation units first, using their
+byte lengths as a deterministic compile-cost estimate. Each compiler's stdout
+and stderr go to separate temporary files so a blocked pipe cannot deadlock the
+batch. Parallel mode requires the standard POSIX `mkfifo` utility. Each child
+publishes its prepared-batch index to one mode-`0600` named FIFO after the
+compiler exits; the parent reaps whichever child completed and immediately
+refills that slot. Once every child has been reaped, Titan replays and removes
+the logs in logical request order. A completion-channel failure stops new
+launches, reaps active children, and fails the unlaunched requests rather than
+risking a deadlock. Preparation failures do not launch a process, and native
+failures do not prevent already independent module objects from being attempted.
+Unterminated quotes, trailing escapes, NUL bytes, an empty configured command,
+and non-dense programmatic argument arrays produce configuration errors.
 A malformed `CLANG_FORMAT` is therefore inert in the default mode. `-v` prints
 the same safely quoted compiler/linker commands—and any opted-in formatter
 command—that are executed.

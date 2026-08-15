@@ -1,3 +1,19 @@
-function answer(): integer
+local function padding_one(): integer
   return 1
+end
+local function padding_two(): integer
+  return 2
+end
+local function padding_three(): integer
+  return 3
+end
+local function padding_four(): integer
+  return 4
+end
+local function padding_five(): integer
+  return 5
+end
+
+function answer(): integer
+  return padding_one()
 end

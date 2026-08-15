@@ -1,0 +1,40 @@
+local function padding_1(): integer
+  return 1
+end
+local function padding_2(): integer
+  return 2
+end
+local function padding_3(): integer
+  return 3
+end
+local function padding_4(): integer
+  return 4
+end
+local function padding_5(): integer
+  return 5
+end
+local function padding_6(): integer
+  return 6
+end
+local function padding_7(): integer
+  return 7
+end
+local function padding_8(): integer
+  return 8
+end
+local function padding_9(): integer
+  return 9
+end
+local function padding_10(): integer
+  return 10
+end
+local function padding_11(): integer
+  return 11
+end
+local function padding_12(): integer
+  return 12
+end
+
+function answer(): integer
+  return padding_8()
+end

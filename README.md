@@ -382,7 +382,8 @@ $ titanc [--print-ast] [-j jobs] [--static] [--test] [--no-uv-bootstrap] \
 
 The compiler takes a list of module names that you want to compile. Use
 `-j/--jobs` (or `TITAN_JOBS`) to bound concurrent generated-C object
-compilations; the default is one. Pass `--static` to prefer self-describing
+compilations; the default is one, and values above one require the standard
+POSIX `mkfifo` utility. Pass `--static` to prefer self-describing
 Titan archives over shared providers for ordinary dependencies; it is a
 preference, not a system-linker `-static` request. Modules
 are looked up in the source tree (defaults to the current working directory,
