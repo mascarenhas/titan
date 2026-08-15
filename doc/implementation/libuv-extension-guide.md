@@ -390,7 +390,10 @@ when their callbacks own native lifetime completion.
 Explicit close uses libuv's active/closing queries, stops the watcher where
 the API requires it, settles any waiter on a later callback turn, clears
 buffered results that the public close discards, and transfers lifetime to the
-common asynchronous `close_handle` path. Do not add a close-waiter queue.
+common asynchronous `close_handle` path. `begin_close` checks
+`uv_is_closing` before every `uv_close`; never duplicate that protocol with a
+facade flag or submit an already-closing handle again. Do not add a
+close-waiter queue.
 
 Libuv already orders one-shot stream writes. Keep one `uv_write_t` owner per
 write and let libuv provide that queue; the persistent read buffer is not a

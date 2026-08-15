@@ -77,7 +77,7 @@ use the chapters below for the normative language reference.
 | [I/O standard library](standard-library-io.md) | The seven `Reader`/`Writer`/`Closer` Interface combinations, standard-output `print`, ownership-safe line iteration, and shell-command `popen` with merged output. |
 | [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
 | [Mathematical standard library](standard-library-math.md) | Typed C99 numeric operations, Lua 5.5-compatible xoshiro256** random sequences, and length-bounded numeric conversion. |
-| [Filesystem standard library](standard-library-fs.md) | Binary file reads and writes, explicit File concurrency and close, whole-file helpers, metadata, and path operations. |
+| [Filesystem standard library](standard-library-fs.md) | Binary file I/O, missing-aware metadata, canonical paths, path operations, and Runtime-bound filesystem watchers. |
 | [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads, libuv-ordered writes, shutdown, close, and cancellation. |
 | [TLS standard library](standard-library-ssl.md) | Verified TLS 1.2+ clients and certificate-backed servers composed over high-level TCP with memory BIOs, explicit trust overrides, authenticated shutdown, and serialized connection operations. |
 | [URL standard library](standard-library-url.md) | Nonthrowing parsing and normalization of absolute HTTP(S) URLs or separate request components, with structured labeled errors and public component records. |

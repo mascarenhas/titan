@@ -330,7 +330,9 @@ titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.
 ```
 
 Generated `titan/uv/uv.c`, `titan/uv/uv.o`, and the callback-bearing
-`titan/uv/uv.titan.h` are build artifacts and are removed by `make clean`. No
+`titan/uv/uv.titan.h` are build artifacts and are removed by `make clean`.
+The flat high-level `titan.fs` root likewise generates
+`titan/fs.titan.h` for its canonical-path and watcher callbacks. No
 contributor C/object/header, DSO, archive, or contributor shim is built or
 installed. The one logical `titan.uv` object, its one generated
 `titan/uv.lua` shim, and the remaining seventeen logical modules (eighteen in
@@ -344,10 +346,13 @@ copy it into `titan.a` (and omits `libuv-build/libuv.a` from the command).
 That setting may itself select a shared or static system library. Higher
 `async`/`timer`/`fs`/`net`/`os` modules still import
 the independent logical `titan.uv` protocol, but their calls are direct
-because all eighteen source roots are linked together. `titan.ssl` reaches
-that runtime only through public `titan.net`, and `titan.http` only through the
+because all eighteen source roots are linked together. The high-level
+`titan.fs` object additionally references the public libuv filesystem and
+watcher functions used by its canonical-path and watcher implementation,
+including its two source callbacks. `titan.ssl` reaches the
+runtime only through public `titan.net`, and `titan.http` only through the
 public net/SSL/I/O/async layers; `titan.url` is synchronous composition over
-`titan.peg` and `titan.string`. None adds a direct uv dependency.
+`titan.peg` and `titan.string`.
 
 `titan.http`, `titan.peg`, and `titan.string` apply the same folder-module
 rules: each has one canonical main, immediate contributors sharing
