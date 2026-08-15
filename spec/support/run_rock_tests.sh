@@ -23,6 +23,9 @@ if [[ ${TITAN_ROCK_TEST_INTERNAL:-0} == 1 ]]; then
     if [[ -n ${BUSTED_FILTER:-} ]]; then
         busted_args+=("--filter=$BUSTED_FILTER")
     fi
+    # Compiler specs intentionally reuse pathnames for different header worlds;
+    # exact-text success markers are production build state, not test fixtures.
+    export TITAN_PROBE_CACHE_DISABLE=1
     exec "${BUSTED:-busted}" "${busted_args[@]}"
 fi
 

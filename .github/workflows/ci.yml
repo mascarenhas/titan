@@ -12,6 +12,7 @@ on:
 env:
   MAKEFLAGS: "-j4"
   TITAN_JOBS: "4"
+  TITAN_ABI_VERSION: "0.25"
 
 jobs:
   # Build and install the regular Linux tree once, run every uncovered
@@ -27,7 +28,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
-      TITAN_ABI_VERSION: "0.25"
+      TITAN_PREFIX: ${{ github.workspace }}/.lua
       # Exercise the immutable/minimal-host path in the regular Linux build.
       READLINE_MODE: bundled
       LIBUV_VERSION: "1.52.1"
@@ -198,6 +199,19 @@ jobs:
           "$PREFIX/bin/lua" -v
           "$PREFIX/bin/luarocks" --version
 
+      - name: Select the regular Linux C-probe cache namespace
+        run: |
+          echo "TITAN_PROBE_CACHE_IDENTITY=gha-v3:linux-regular-v1:${{ runner.os }}:${{ runner.arch }}:abi-${TITAN_ABI_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Restore regular Linux C-probe success markers
+        uses: actions/cache@v5
+        with:
+          path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
+          key: titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-regular-v1-test-linux-stdlib-${{ github.sha }}
+          restore-keys: |
+            titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-regular-v1-test-linux-stdlib-
+            titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-regular-v1-
+
       - name: Build and install the rock
         # The dependency cache may contain the preceding commit's installed
         # titan dev-1. Force this checkout through both source-install phases.
@@ -261,7 +275,13 @@ jobs:
           tar \
             --exclude='./.git' \
             --exclude='./libbacktrace/.git' \
+            --exclude='./.lua/var/cache/titan-probes' \
             -czf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" .
+          if tar -tzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" |
+              grep -E '^\./\.lua/var/cache/titan-probes(/|$)' >/dev/null; then
+            echo "prepared tree contains the independent C-probe cache" >&2
+            exit 1
+          fi
 
       # Run retained host/runtime specs serially, then compile every native
       # standard-library root into one executable. The final short filtered run
@@ -304,7 +324,7 @@ jobs:
         run: |
           LIBUV_MODE=system OPENSSL_MODE=system TITAN_EXTRA_CFLAGS=-O0 \
             luarocks make --force
-          TITAN_EXPECT_LIBUV_MODE=system \
+          TITAN_EXPECT_LIBUV_MODE=system TITAN_PROBE_CACHE_DISABLE=1 \
             "$PREFIX/bin/busted" -o gtest -v spec/rockspec_spec.lua \
               --name='standalone-prefix source installation installs one matching Lua and Titan SDK before the standard images' \
               --name='standalone-prefix source installation loads direct libuv calls lazily for Titan and explicitly for Lua'
@@ -384,7 +404,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
-      TITAN_ABI_VERSION: "0.25"
+      TITAN_PREFIX: ${{ github.workspace }}/.lua
       # Keep the one complete cross-platform gate on the same fallback path.
       READLINE_MODE: bundled
       LIBUV_VERSION: "1.52.1"
@@ -495,6 +515,19 @@ jobs:
       - name: Verify vendored Lua is on PATH
         run: lua -v
 
+      - name: Select the macOS C-probe cache namespace
+        run: |
+          echo "TITAN_PROBE_CACHE_IDENTITY=gha-v3:macos-full-v1:${{ runner.os }}:${{ runner.arch }}:abi-${TITAN_ABI_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Restore macOS C-probe success markers
+        uses: actions/cache@v5
+        with:
+          path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
+          key: titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-macos-full-v1-test-macos-${{ github.sha }}
+          restore-keys: |
+            titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-macos-full-v1-test-macos-
+            titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-macos-full-v1-
+
       # Build and install the rock so the `titan` Lua support module (ltitanlib.c,
       # required by one coder spec via `require 'titan'`) is on the Lua path.
       # `luarocks test` does not build the rock-under-test, only its dependencies.
@@ -566,6 +599,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
+      TITAN_PREFIX: ${{ github.workspace }}/.lua
       # Retain one explicit system-provider lane alongside the bundled jobs.
       READLINE_MODE: system
       # Generated Titan translation units are large enough that combining
@@ -630,6 +664,19 @@ jobs:
             "$PREFIX/bin/luarocks" install busted 2.3.0-1
           echo "$PREFIX/bin" >> "$GITHUB_PATH"
 
+      - name: Select the sanitizer C-probe cache namespace
+        run: |
+          echo "TITAN_PROBE_CACHE_IDENTITY=gha-v3:linux-asan-ubsan-v1:${{ runner.os }}:${{ runner.arch }}:abi-${TITAN_ABI_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Restore sanitizer C-probe success markers
+        uses: actions/cache@v5
+        with:
+          path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
+          key: titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-asan-ubsan-v1-sanitizer-${{ github.sha }}
+          restore-keys: |
+            titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-asan-ubsan-v1-sanitizer-
+            titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-asan-ubsan-v1-
+
       - name: Build sanitizer-enabled Titan artifacts
         run: |
           bash spec/support/ci_sanitizer_capture.sh titan-artifacts \
@@ -669,7 +716,7 @@ jobs:
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
           bash spec/support/ci_sanitizer_capture.sh dense-array \
-            .lua/bin/busted -o gtest -v spec/dense_array_runtime_spec.lua
+            env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v spec/dense_array_runtime_spec.lua
 
       - name: Run native coroutine sanitizer gate
         run: |
@@ -692,7 +739,7 @@ jobs:
           MINICORO_TEST_CFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
           bash spec/support/ci_sanitizer_capture.sh core-uv \
-            .lua/bin/busted -o gtest -v spec/minicoro_spec.lua
+            env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v spec/minicoro_spec.lua
           bash spec/support/ci_sanitizer_capture.sh uv-task-tests \
             make titan-stdlib-test-run TITAN_FILTER='^uv%.task_tests%.'
           bash spec/support/ci_sanitizer_capture.sh uv-runtime-tests \

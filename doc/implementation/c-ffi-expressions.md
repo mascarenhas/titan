@@ -181,7 +181,7 @@ that profile. It records:
   precedence of `float`, `double`, and `long double`;
 * the actual `lua_Integer` and `lua_Number` spellings/types and their
   corresponding numeric traits;
-* a stable identity used in probe cache keys.
+* a stable identity used in resolver-local probe cache keys.
 
 The same effective compiler prefix and target-selecting flags used for
 generated objects feed macro discovery. `TITAN_EXTRA_CFLAGS`, architecture
@@ -198,7 +198,7 @@ participate in structural type identity or serialized module metadata.
 Unknown extension ranks/precision are rejected where a result type cannot be
 proven.
 
-## Session-scoped compile probes
+## Compile probes and successful-probe markers
 
 ### Ownership and lifetime
 
@@ -216,8 +216,9 @@ preamble.
 `titanc`, the filesystem loader, table loader, and child compiler paths thread
 the service through `checker.check`. A direct external `checker.check` without
 an injected service creates and closes a fresh one using the current
-`cdriver` configuration. There is no process-global result cache surviving
-`driver.configure_foreign_c`.
+`cdriver` configuration. Rich result tables remain resolver-local and do not
+survive `driver.configure_foreign_c`; a production service may additionally use
+the successful-probe markers below.
 
 The resolver closes the service on success, reported type errors, codegen
 errors, and exceptional exits. Tests inject both runner and workspace
@@ -307,6 +308,40 @@ Cache identities length-prefix every component and include the probe kind and
 direction, exact rendered declarations, operator spelling/operand
 conversions, ordered header context, compiler argv/flags/include roots, and
 arithmetic-profile identity.
+
+### Persistent successful-probe markers
+
+The in-memory caches above retain rich success and rejection results only for
+one resolver. A production service also checks a much simpler persistent cache
+around `Service:_run_source`. The entry key is exactly
+`SHA-256(probe C text)`, with no preprocessing or additional identity fields.
+An entry is an empty `<hash>.success` file, and the presence of that regular file
+is itself the complete cached-success verdict; readers never decode a payload.
+Rejections are never persisted and therefore run again in every fresh resolver.
+
+After an ordinary compiler invocation succeeds, Titan removes that probe's
+source and object and only then publishes the empty marker through a distinct
+same-directory temporary file and rename. Unstarted, interrupted, rejected, or
+cleanup-failed probes publish nothing. Cache lookup, directory creation, and
+publication failures fail open and merely run the ordinary probe.
+
+The default directory is
+`<prefix>/var/cache/titan-probes/<ABI>`, using nonempty `TITAN_PREFIX` before the
+supported prefix recovered from `package.cpath`. Stable local rebuilds normally
+reuse that directory, which is also cached in CI. A nonempty
+`TITAN_PROBE_CACHE_IDENTITY` selects a hashed subdirectory so either environment
+can separate build policies without placing arbitrary text in a pathname.
+
+This cache deliberately does not identify the compiler, flags, environment,
+headers, include search, or any other input besides the exact probe text. A
+stale success is therefore possible after those inputs change. The cache
+folder is trusted, configuration-scoped build state: deployments choose
+separate namespaces, clear it, or accept that a stale success can defer the
+failure to generated-C compilation. Compiler specs intentionally reuse paths
+for different header worlds and run with `TITAN_PROBE_CACHE_DISABLE=1`; that
+test-only switch leaves production caching enabled for the preceding build.
+This direct policy is intentional; do not turn the marker into a
+compiler-verdict record or dependency graph.
 
 The service creates a private `mktemp -d` workspace, writes deterministic
 collision-free sources, and invokes a non-linking compiler mode. Production

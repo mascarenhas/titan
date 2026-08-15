@@ -9,6 +9,7 @@ local cdeclarator = require "titan-compiler.cdeclarator"
 local csemantics = require "titan-compiler.csemantics"
 local cpreamble = require "titan-compiler.cpreamble"
 local types = require "titan-compiler.types"
+local sha256 = require "titan-compiler.sha256"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 
@@ -127,6 +128,19 @@ end
 local function absolute_path(path, base)
     if path:sub(1, 1) == "/" then return path end
     return path_join(base, path)
+end
+
+local function ensure_directory(path)
+    local mode = lfs.attributes(path, "mode")
+    if mode == "directory" then return true end
+    if mode ~= nil then return nil end
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent and parent ~= "" and parent ~= path then
+        if not ensure_directory(parent) then return nil end
+    end
+    local made = lfs.mkdir(path)
+    if made then return true end
+    return lfs.attributes(path, "mode") == "directory" or nil
 end
 
 local function first_diagnostic_line(diagnostic)
@@ -793,6 +807,45 @@ function Service:_emit(event)
     end
 end
 
+function Service:_persistent_success_location(source)
+    if not self.cache_directory then return nil end
+    local digest = sha256.hex(source)
+    return path_join(self.cache_directory, digest .. ".success"), digest
+end
+
+function Service:_persistent_success(source)
+    local path, digest = self:_persistent_success_location(source)
+    if not path then return nil end
+    local ok, mode = pcall(lfs.attributes, path, "mode")
+    if ok and mode == "file" then return true, path, digest end
+    return false, path, digest
+end
+
+function Service:_publish_persistent_success(path, digest, workspace)
+    if not path or not self.cache_directory then return nil end
+    if not ensure_directory(self.cache_directory) then return nil end
+    self.cache_publish_sequence = self.cache_publish_sequence + 1
+    local nonce = sha256.hex(table.concat({
+        tostring(self), tostring(workspace and workspace.root or ""),
+        tostring(self.cache_publish_sequence), digest,
+    }, "\0"))
+    local temporary = path .. ".tmp." .. nonce
+    local file = io.open(temporary, "wb")
+    if not file then return nil end
+    local closed = file:close()
+    if not closed then
+        os.remove(temporary)
+        return nil
+    end
+    local renamed = os.rename(temporary, path)
+    if not renamed then
+        os.remove(temporary)
+        local ok, mode = pcall(lfs.attributes, path, "mode")
+        return ok and mode == "file" or nil
+    end
+    return true
+end
+
 function Service:_ensure_workspace()
     if self.workspace then return self.workspace end
     if self.closed then return nil, "probe service is closed" end
@@ -882,6 +935,36 @@ local function infrastructure_run(stage, reason, run)
 end
 
 function Service:_run_source(stage, source, key, probe_label)
+    if self.closed then
+        return infrastructure_run(stage, "workspace", {
+            diagnostic = "probe service is closed",
+            source = source,
+        })
+    end
+    local persistent_hit, persistent_path, persistent_digest =
+        self:_persistent_success(source)
+    if persistent_path then
+        self:_emit({
+            kind = "cache",
+            cache = "persistent success",
+            hit = persistent_hit == true,
+            key = persistent_digest,
+            path = persistent_path,
+        })
+    end
+    if persistent_hit then
+        return {
+            started = true,
+            ok = true,
+            interrupted = false,
+            status = 0,
+            diagnostic = "",
+            source = source,
+            persistent_cached = true,
+            cache_path = persistent_path,
+        }
+    end
+
     local workspace, workspace_error = self:_ensure_workspace()
     if not workspace then
         return infrastructure_run(stage, "workspace",
@@ -1007,6 +1090,10 @@ function Service:_run_source(stage, source, key, probe_label)
         run.diagnostic = "could not clean probe artifacts: " ..
             table.concat(cleanup_errors, "; ")
         run.cleanup_error = true
+    elseif run.started and run.ok and not run.interrupted and persistent_path then
+        self:_publish_persistent_success(
+            persistent_path, persistent_digest, workspace)
+        run.cache_path = persistent_path
     end
     return run
 end
@@ -1061,7 +1148,8 @@ function Service:_ensure_baseline(module_context)
             accepted = true,
             stage = "baseline",
             key = key,
-            cached = false,
+            cached = run.persistent_cached == true,
+            persistent_cached = run.persistent_cached == true,
             diagnostic = run.diagnostic,
             summary = first_diagnostic_line(run.diagnostic),
             command = run.command,
@@ -1217,7 +1305,8 @@ local function declaration_compatibility_candidate_result(
         kind = "declaration_compatibility",
         key = entry.key,
         baseline_key = module_context.baseline_key,
-        cached = false,
+        cached = run.persistent_cached == true,
+        persistent_cached = run.persistent_cached == true,
         baseline_cached = baseline_cached,
         left_declaration = entry.rendered.left_declaration,
         right_declaration = entry.rendered.right_declaration,
@@ -1520,7 +1609,8 @@ function ModuleContext:probe_unsafe_object_pointer(source_type, target_type)
         kind = "unsafe_object_pointer",
         key = key,
         baseline_key = self.baseline_key,
-        cached = false,
+        cached = run.persistent_cached == true,
+        persistent_cached = run.persistent_cached == true,
         baseline_cached = baseline.cached,
         source_type = rendered.source_type,
         target_type = rendered.target_type,
@@ -1690,7 +1780,8 @@ function ModuleContext:probe_operator(trait)
         kind = "c_operator",
         key = key,
         baseline_key = self.baseline_key,
-        cached = false,
+        cached = run.persistent_cached == true,
+        persistent_cached = run.persistent_cached == true,
         baseline_cached = baseline.cached,
         operator_kind = rendered.kind,
         operator = rendered.cop,
@@ -2061,6 +2152,34 @@ function cprobe.new_service(options)
         return nil, "temp_provider must be callable"
     end
 
+    local cache_directory = option(
+        options, toolchain, "cache_directory", nil)
+    if cache_directory == "" then cache_directory = nil end
+    if cache_directory ~= nil then
+        if type(cache_directory) ~= "string"
+           or cache_directory:find("%z") then
+            return nil, "cache_directory must be a pathname string"
+        end
+        local cwd, cwd_error = lfs.currentdir()
+        if not cwd then
+            return nil, "cannot determine cache cwd: " .. tostring(cwd_error)
+        end
+        cache_directory = absolute_path(cache_directory, cwd)
+        if cache_directory ~= "/" then
+            cache_directory = cache_directory:gsub("/+$", "")
+        end
+        local cache_identity = option(
+            options, toolchain, "cache_identity", nil)
+        if cache_identity == "" then cache_identity = nil end
+        if cache_identity ~= nil then
+            if type(cache_identity) ~= "string" then
+                return nil, "cache_identity must be a string"
+            end
+            cache_directory = path_join(cache_directory,
+                "namespace-" .. sha256.hex(cache_identity))
+        end
+    end
+
     return setmetatable({
         compiler_argv = compiler_argv,
         compile_flags = compile_flags,
@@ -2075,6 +2194,8 @@ function cprobe.new_service(options)
         toolchain_key = keyed_fields(fields),
         runner = runner,
         temp_provider = temp_provider,
+        cache_directory = cache_directory,
+        cache_publish_sequence = 0,
         verbose = verbose,
         verbose_sink = verbose_sink,
         evidence = {},

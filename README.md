@@ -392,6 +392,16 @@ binary path, a semicolon-separated list of paths. By default this is the
 current directory plus `<root>/lib/titan/0.25`, where `<root>` is recovered
 from `package.cpath`; override it with `TITAN_PATH_0_25` or `TITAN_PATH`.
 
+Successful C-FFI compiler probes leave empty success markers under
+`<prefix>/var/cache/titan-probes/0.25`. A marker is named by the SHA-256 of the
+exact probe C text; its presence is the complete cached-success verdict. Failed
+probes are never persisted. A nonempty `TITAN_PREFIX` selects that cache prefix,
+otherwise Titan recovers the installed prefix from `package.cpath`.
+`TITAN_PROBE_CACHE_IDENTITY` optionally selects a separate hashed namespace.
+Stable local rebuilds reuse the same prefix cache just like CI builds. The cache
+deliberately does not identify compilers, flags, or headers: clear it or choose
+another namespace when those inputs need isolation.
+
 Compiled dependency lookup probes component-prefix providers. For logical
 `a.b.c`, the default first performs a complete shared pass at `a.so`,
 `a/b.so`, and `a/b/c.so` in each binary root, then repeats the same pass for
@@ -760,8 +770,10 @@ The complete macOS suite remains a manually dispatched pre-merge gate.
 
 `luarocks test` does **not** build the rock-under-test, only its test
 dependencies, so always run `luarocks make` first (as `make test` does). If you
-drive Busted directly, use the `busted` installed in `$PREFIX/bin`; the
-prefix-configured Lua paths find the canonical support provider. Once the Titan
+drive Busted directly, set `TITAN_PROBE_CACHE_DISABLE=1` and use the `busted`
+installed in `$PREFIX/bin`; compiler fixtures intentionally reuse header
+pathnames, while the prefix-configured Lua paths find the canonical support
+provider. Once the Titan
 rock is installed, Busted loads compiler modules from that installed snapshot,
 not from the checkout. Re-run `$PREFIX/bin/luarocks make` after editing compiler
 sources.

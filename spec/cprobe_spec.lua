@@ -1,6 +1,7 @@
 local cprobe = require "titan-compiler.cprobe"
 local cpreamble = require "titan-compiler.cpreamble"
 local csemantics = require "titan-compiler.csemantics"
+local sha256 = require "titan-compiler.sha256"
 local types = require "titan-compiler.types"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
@@ -1528,5 +1529,162 @@ struct titan_probe_target_s { int value; };
         os.remove(success_header)
         os.remove(rejection_header)
         assert(lfs.rmdir(root))
+    end)
+end)
+
+describe("persistent successful C probe markers", function()
+    local function entries(path)
+        local out = {}
+        local iterator, state = lfs.dir(path)
+        if not iterator then return out end
+        for name in iterator, state do
+            if name ~= "." and name ~= ".." then
+                out[#out + 1] = name
+            end
+        end
+        table.sort(out)
+        return out
+    end
+
+    it("uses exact probe text hashes and an empty marker as success evidence",
+    function()
+        local cache = temporary_directory()
+        local first, first_state = new_fake_service({
+            cache_directory = cache,
+        })
+        local source = "int titan_persistent_success;\n"
+        local run = first:_run_source("candidate", source, "first-key")
+        assert.is_true(run.ok)
+        assert.equal(1, #first_state.calls)
+        assert.is_true(first:close())
+
+        local names = entries(cache)
+        assert.equal(1, #names)
+        assert.equal(sha256.hex(source) .. ".success", names[1])
+        local marker = assert(io.open(cache .. "/" .. names[1], "rb"))
+        assert.equal("", assert(marker:read("a")))
+        assert.is_true(marker:close())
+        -- Presence is the complete contract; readers never decode payload.
+        write_file(cache .. "/" .. names[1], "ignored marker payload")
+
+        local second, second_state = new_fake_service({
+            cache_directory = cache,
+        }, function()
+            error("a persistent success must not invoke the compiler")
+        end)
+        local hit = second:_run_source(
+            "baseline", source, "a-different-semantic-key")
+        assert.is_true(hit.ok)
+        assert.is_true(hit.persistent_cached)
+        assert.equal(0, #second_state.calls)
+        assert.equal(0, second_state.created)
+        assert.is_true(second:close())
+        assert(os.remove(cache .. "/" .. names[1]))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("never stores compiler rejection or infrastructure failure", function()
+        local cache = temporary_directory()
+        local outcomes = {
+            { started = true, ok = false, status = 1,
+                diagnostic = "rejected" },
+            { started = false, ok = false, diagnostic = "not started" },
+            { started = true, ok = false, interrupted = true,
+                diagnostic = "interrupted" },
+        }
+        for index, outcome in ipairs(outcomes) do
+            local service = new_fake_service({
+                cache_directory = cache,
+            }, function()
+                return outcome
+            end)
+            local run = service:_run_source("candidate",
+                "int titan_failure_" .. index .. ";\n", "failure-key")
+            assert.is_false(run.ok)
+            assert.is_true(service:close())
+        end
+        assert.same({}, entries(cache))
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("partitions exact source bytes and optional cache namespaces", function()
+        local root = temporary_directory()
+        local source = "int titan_namespace;\n"
+        local first = new_fake_service({
+            cache_directory = root,
+            cache_identity = "first configuration",
+        })
+        assert.is_true(first:_run_source(
+            "candidate", source, "namespace-key").ok)
+        assert.is_true(first:close())
+
+        local changed, changed_state = new_fake_service({
+            cache_directory = root,
+            cache_identity = "first configuration",
+        })
+        assert.is_true(changed:_run_source("candidate",
+            source .. " ", "namespace-key").ok)
+        assert.equal(1, #changed_state.calls)
+        assert.is_true(changed:close())
+
+        local other, other_state = new_fake_service({
+            cache_directory = root,
+            cache_identity = "second configuration",
+        })
+        assert.is_true(other:_run_source(
+            "candidate", source, "namespace-key").ok)
+        assert.equal(1, #other_state.calls)
+        assert.is_true(other:close())
+
+        for _, namespace in ipairs(entries(root)) do
+            for _, name in ipairs(entries(root .. "/" .. namespace)) do
+                assert(os.remove(root .. "/" .. namespace .. "/" .. name))
+            end
+            assert(lfs.rmdir(root .. "/" .. namespace))
+        end
+        assert(lfs.rmdir(root))
+    end)
+
+    it("fails open when its cache path cannot be created", function()
+        local root = temporary_directory()
+        local blocked = root .. "/blocked"
+        write_file(blocked, "ordinary file")
+        local service, state = new_fake_service({
+            cache_directory = blocked .. "/cache",
+        })
+        local run = service:_run_source(
+            "candidate", "int titan_fail_open;\n", "fail-open-key")
+        assert.is_true(run.ok)
+        assert.equal(1, #state.calls)
+        assert.is_true(service:close())
+        assert(os.remove(blocked))
+        assert(lfs.rmdir(root))
+    end)
+
+    it("publishes only after successful per-probe cleanup", function()
+        local cache = temporary_directory()
+        local state, runner, provider = fake_environment()
+        local ordinary_provider = provider
+        provider = function()
+            local workspace = ordinary_provider()
+            workspace.remove = function()
+                return nil, "injected cleanup failure"
+            end
+            return workspace
+        end
+        local service = assert(cprobe.new_service({
+            cache_directory = cache,
+            runner = runner,
+            temp_provider = provider,
+        }))
+        local run = service:_run_source(
+            "candidate", "int titan_cleanup_failure;\n", "cleanup-key")
+        assert.is_false(run.ok)
+        assert.is_true(run.cleanup_error)
+        assert.same({}, entries(cache))
+        -- The injected provider cannot close cleanly; the semantic assertion is
+        -- that it still did not publish a success marker.
+        service:close()
+        assert(lfs.rmdir(cache))
     end)
 end)

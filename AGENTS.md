@@ -118,7 +118,19 @@ not add epicycles around what may be a misunderstood simpler design.
   consumer are the same OS, architecture, and object target; a prepared native
   tree must never cross one of those boundaries. Keep Linux dependency builds
   in the job that consumes their warm tree, and keep both production-mode
-  smokes in the producer instead of rebuilding them in a consumer.
+  smokes in the producer instead of rebuilding them in a consumer. The
+  prefix-owned `var/cache/titan-probes/<ABI>` directory is the deliberate
+  exception to that full-tree transfer: exclude it from the tar and snapshot it
+  independently in the regular producer, sanitizer, and macOS jobs with
+  `actions/cache@v5`. Those producing lanes have distinct OS/architecture keys
+  whose immutable primary ends in the commit SHA and whose stable restore
+  prefix omits it. Each selects its lane namespace with
+  `TITAN_PROBE_CACHE_IDENTITY` before its first Titan build. The prepared-tree
+  compiler consumer remains cache-free, and compiler specs explicitly disable
+  persistent markers because independent fixtures reuse header pathnames;
+  production builds and native aggregate compilation still benefit. A marker's
+  presence is trusted success evidence, so never restore cache entries from a
+  less-trusted writer.
 
   The regular producer's cache key includes the active ABI. After restore it
   reruns `make lua` and `make luarocks`, replaces only known active-0.25
@@ -336,9 +348,9 @@ make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]' # reuse that executabl
 luarocks make && bash spec/support/ci_test_groups.sh compiler  # complete covered compiler/language group
 make clean                                           # remove generated artifacts; `make distclean` also removes downloaded Lua/Readline/LuaRocks/libbacktrace/libuv/OpenSSL/llhttp trees
 
-busted                                              # full Busted tree — MUST run from repo root (all driver paths are relative)
-busted spec/parser_spec.lua                         # single spec file
-busted spec/coder/coder_spec.lua --filter='for loop' # single test (Lua pattern on test name)
+TITAN_PROBE_CACHE_DISABLE=1 busted                  # full Busted tree — MUST run from repo root (all driver paths are relative)
+TITAN_PROBE_CACHE_DISABLE=1 busted spec/parser_spec.lua  # single spec file
+TITAN_PROBE_CACHE_DISABLE=1 busted spec/coder/coder_spec.lua --filter='for loop' # single test
 
 ./titanc [--print-ast] [--pretty-print] [--test] [--no-uv-bootstrap] \
   [-v] [-j jobs] [--static] [--no-line-directives] \
@@ -786,7 +798,7 @@ lexer, location, parser, symtab, types, util); `spec/checker/`, `spec/coder/`,
 and
 `spec/stdlib/` need the full setup.
 
-**Gotcha — the installed rock shadows the working tree under busted.** The Busted launcher uses `luarocks.loader`, so once `$PREFIX/bin/luarocks make` has installed the `titan` rock, `require "titan-compiler.X"` inside specs resolves to the *installed snapshot* in `ROCKS_TREE` (currently the same directory as `PREFIX`), not your edited source files — edits silently do not take effect. Re-run `$PREFIX/bin/luarocks make` after changing compiler sources, before running Busted. (`make test` re-runs `luarocks make` for you each time, so it always tests current sources; `luarocks test` on its own does **not** rebuild the rock.) A bare `busted` without a preceding `luarocks make` can silently load a stale installed snapshot and pass or fail misleadingly.
+**Gotcha — the installed rock shadows the working tree under busted.** The Busted launcher uses `luarocks.loader`, so once `$PREFIX/bin/luarocks make` has installed the `titan` rock, `require "titan-compiler.X"` inside specs resolves to the *installed snapshot* in `ROCKS_TREE` (currently the same directory as `PREFIX`), not your edited source files — edits silently do not take effect. Re-run `$PREFIX/bin/luarocks make` after changing compiler sources, before running Busted. (`make test` re-runs `luarocks make` for you each time, so it always tests current sources; `luarocks test` on its own does **not** rebuild the rock.) A direct `TITAN_PROBE_CACHE_DISABLE=1 busted` invocation without a preceding `luarocks make` can silently load a stale installed snapshot and pass or fail misleadingly.
 
 When the active installation's `bin` directory is on `PATH`, plain
 `luarocks test` needs neither `PREFIX` nor `ROCKS_TREE`: child interpreters use
@@ -1380,7 +1392,7 @@ substitution, recursive; error on missing keys). Key facts:
 
 ### C FFI (`c-parser/`, `foreigntypes.lua`)
 
-`foreign import "header.h"` invokes a pure-Lua C toolchain: `cpp.lua` (full hand-written preprocessor; asks the configured `CC -std=c99` plus parsed `TITAN_EXTRA_CPPFLAGS` for system include paths and predefined macros), `c99.lua` (relabel C99 grammar; module-global typedef table, not reentrant), `ctypes.lua`/`cdefines.lua` (build a TypeList), and `cdriver.lua` (include resolution plus C type extraction). The checker passes the importing Titan source directory and the shared toolchain configuration to `cdriver`, which emits quoted `#include "..."` syntax only when the header is found by the quoted-include rules relative to that source; otherwise generated C uses angle brackets. `cdriver` also exposes `titan-runtime/titan/ffi.h`, which defines selected `titan_ffi_*` aliases for portable C primitive types. Contextual conversions and C operators use one resolver-owned, session-scoped `cprobe.Service`: its compile-only probes share the generated objects' exact parsed `CC`, C99/CPP/target flags, include ordering, and target arithmetic profile. Probe answers and caches do not survive that compilation session or enter the pure gradual-consistency/coercion relations or serialized module types.
+`foreign import "header.h"` invokes a pure-Lua C toolchain: `cpp.lua` (full hand-written preprocessor; asks the configured `CC -std=c99` plus parsed `TITAN_EXTRA_CPPFLAGS` for system include paths and predefined macros), `c99.lua` (relabel C99 grammar; module-global typedef table, not reentrant), `ctypes.lua`/`cdefines.lua` (build a TypeList), and `cdriver.lua` (include resolution plus C type extraction). The checker passes the importing Titan source directory and the shared toolchain configuration to `cdriver`, which emits quoted `#include "..."` syntax only when the header is found by the quoted-include rules relative to that source; otherwise generated C uses angle brackets. `cdriver` also exposes `titan-runtime/titan/ffi.h`, which defines selected `titan_ffi_*` aliases for portable C primitive types. Contextual conversions and C operators use one resolver-owned `cprobe.Service`: its compile-only probes share the generated objects' exact parsed `CC`, C99/CPP/target flags, include ordering, and target arithmetic profile. Rich answers remain session-scoped and never enter the pure gradual-consistency/coercion relations or serialized module types. Production services persist only successful probes as empty `<sha256(exact probe C)>.success` markers under the ABI-owned prefix cache; marker presence is the whole verdict and rejection is never persisted. This intentionally keys no compiler, flag, environment, or header state. Stable local rebuilds and CI reuse their selected trusted cache folder; change `TITAN_PROBE_CACHE_IDENTITY`, use another prefix, or clear the markers when build-policy isolation is required. Do not add dependency manifests, preprocessing, verdict payloads, or negative-result records.
 
 Recognized existing object-like integer/accessor expressions and fully expanded
 outer casts to C integer, floating, object-pointer, or function-pointer types

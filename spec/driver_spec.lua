@@ -62,6 +62,33 @@ describe("compiler installation discovery", function()
                 nil, "./discarded/../normalized//"))
     end)
 
+    it("derives the ABI-owned probe cache from an explicit prefix first",
+       function()
+        local cpath = "/installed/lib/lua/5.5/?.so"
+        assert.equal("/explicit/var/cache/titan-probes/0.25",
+            driver.probe_cache_directory(cpath, "/explicit", "0.25"))
+        assert.equal("/installed/var/cache/titan-probes/0.25",
+            driver.probe_cache_directory(cpath, "", "0.25"))
+        assert.equal("/var/cache/titan-probes/0.25",
+            driver.probe_cache_directory(
+                "/lib/lua/5.5/?.so", nil, "0.25"))
+        assert.is_nil(driver.probe_cache_directory(nil, nil, "0.25"))
+    end)
+
+    it("honors the test-only persistent-probe-cache disable switch",
+       function()
+        local lua = os.getenv("PREFIX") and os.getenv("PREFIX") .. "/bin/lua"
+            or "lua"
+        local script = [[
+local driver = require "titan-compiler.driver"
+assert(driver.PROBE_CACHE_DIRECTORY == nil)
+]]
+        local command = "TITAN_PROBE_CACHE_DISABLE=1 " ..
+            assert(driver.shell_quote(lua)) .. " -e " ..
+            assert(driver.shell_quote(script))
+        assert.is_true(os.execute(command))
+    end)
+
     it("preserves ordinary root spelling but resolves symlink parent traversal",
        function()
         local workspace = os.tmpname()

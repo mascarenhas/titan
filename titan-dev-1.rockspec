@@ -81,6 +81,7 @@ build = {
       ["titan-compiler.cpreamble"] = "titan-compiler/cpreamble.lua",
       ["titan-compiler.cprobe"] = "titan-compiler/cprobe.lua",
       ["titan-compiler.csemantics"] = "titan-compiler/csemantics.lua",
+      ["titan-compiler.sha256"] = "titan-compiler/sha256.lua",
       ["titan-compiler.checker"] = "titan-compiler/checker.lua",
       ["titan-compiler.checker.calls"] = "titan-compiler/checker/calls.lua",
       ["titan-compiler.checker.common"] = "titan-compiler/checker/common.lua",

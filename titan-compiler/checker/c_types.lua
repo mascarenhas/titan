@@ -65,6 +65,8 @@ function new_direct_probe_service()
         runner = foreign_c_options.probe_runner or
             cdriver.capture_command,
         verbose = foreign_c_options.verbose == true,
+        cache_directory = foreign_c_options.probe_cache_directory,
+        cache_identity = foreign_c_options.probe_cache_identity,
     })
 end
 

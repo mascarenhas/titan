@@ -91,9 +91,11 @@ The C-pipeline stages are:
 `cdeclarator.lua` then owns exact C spelling shared by generated code and
 compile probes; `csemantics.lua` owns target categories, constants, promotions,
 and result types; and one resolver-scoped `cprobe.lua` service owns the active
-toolchain profile, header-context baselines, candidate compilation, caches,
-temporary files, and cleanup. The checker decides which candidates are
-semantically eligible before asking that service to compile them.
+toolchain profile, header-context baselines, candidate compilation, in-memory
+caches, temporary files, and cleanup. Production services may also reuse the
+presence of an empty marker named by the exact probe text's SHA-256; only
+successful probes create markers. The checker decides which candidates are
+semantically eligible before asking that service to compile or recover them.
 
 The checker iterates the TypeList array part in declaration order. Each
 successful `foreigntypes.convert(st, ftype)` result is either a value member or
