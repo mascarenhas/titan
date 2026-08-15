@@ -187,6 +187,7 @@ describe("parallel generated-C compilation", function()
     local previous_stderr
     local previous_tmpname
     local previous_popen
+    local previous_open
     local diagnostic_stream
 
     before_each(function()
@@ -195,6 +196,7 @@ describe("parallel generated-C compilation", function()
         previous_stderr = io.stderr
         previous_tmpname = os.tmpname
         previous_popen = io.popen
+        previous_open = io.open
         prepare_workspace()
     end)
     after_each(function()
@@ -203,6 +205,7 @@ describe("parallel generated-C compilation", function()
         io.stderr = previous_stderr
         os.tmpname = previous_tmpname
         io.popen = previous_popen
+        io.open = previous_open
         if diagnostic_stream and io.type(diagnostic_stream) == "file" then
             diagnostic_stream:close()
         end
@@ -560,6 +563,39 @@ describe("parallel generated-C compilation", function()
                 "/batch/" .. leaf .. ".c", 1, true), output)
         end
         assert.equal("3\n", read_file(state_directory .. "/maximum"))
+        for _, path in ipairs(temporary_logs) do
+            assert.falsy(file_exists(path), path)
+        end
+    end)
+
+    it("reaps the batch when a replay log cannot be opened", function()
+        configure_counting_compiler()
+        local requests = checked_requests()
+        local temporary_logs = {}
+        local log_paths = {}
+        os.tmpname = function()
+            local path = previous_tmpname()
+            temporary_logs[#temporary_logs + 1] = path
+            log_paths[path] = true
+            return path
+        end
+        io.open = function(path, mode)
+            if mode == "rb" and log_paths[path] then
+                return nil, "injected log open failure"
+            end
+            return previous_open(path, mode)
+        end
+
+        local results = driver.compile_modules(requests, 4, false)
+        os.tmpname = previous_tmpname
+        io.open = previous_open
+        for _, result in ipairs(results) do
+            assert.falsy(result.ok)
+            assert.truthy(tostring(result.err):find(
+                "stdout: injected log open failure", 1, true),
+                tostring(result.err))
+        end
+        assert.equal("0\n", read_file(state_directory .. "/active"))
         for _, path in ipairs(temporary_logs) do
             assert.falsy(file_exists(path), path)
         end
