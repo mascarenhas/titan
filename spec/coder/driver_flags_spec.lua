@@ -42,6 +42,7 @@ local ENVIRONMENT_KEYS = {
     "TITAN_EXTRA_CPPFLAGS",
     "TITAN_EXTRA_CFLAGS",
     "TITAN_EXTRA_LDFLAGS",
+    "TITAN_JOBS",
 }
 
 local function titanc(overrides, ...)
@@ -53,6 +54,7 @@ local function titanc(overrides, ...)
         TITAN_EXTRA_CPPFLAGS = "",
         TITAN_EXTRA_CFLAGS = "",
         TITAN_EXTRA_LDFLAGS = "",
+        TITAN_JOBS = "1",
     }
     for name, value in pairs(overrides or {}) do
         environment[name] = value

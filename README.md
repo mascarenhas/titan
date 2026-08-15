@@ -372,15 +372,16 @@ runtime, ABI, and interoperation machinery.
 # Usage
 
 ```sh
-$ titanc [--print-ast] [--static] [--test] [--no-uv-bootstrap] \
+$ titanc [--print-ast] [-j jobs] [--static] [--test] [--no-uv-bootstrap] \
     [--no-line-directives] \
     [--lua <path>] [--tree <path>] <module> [<module>]
 ```
 
-The compiler takes a list of module names that you want to compile. Pass
-`--static` to prefer self-describing Titan archives over shared providers for
-ordinary dependencies; it is a preference, not a system-linker `-static`
-request. Modules
+The compiler takes a list of module names that you want to compile. Use
+`-j/--jobs` (or `TITAN_JOBS`) to bound concurrent generated-C object
+compilations; the default is one. Pass `--static` to prefer self-describing
+Titan archives over shared providers for ordinary dependencies; it is a
+preference, not a system-linker `-static` request. Modules
 are looked up in the source tree (defaults to the current working directory,
 but you can override this with the `--tree` option), as well as in the Titan
 binary path, a semicolon-separated list of paths. By default this is the
@@ -694,6 +695,8 @@ is:
 $ export PREFIX="/tmp/titan-$USER-test"
 $ export PATH="$PREFIX/bin:$PATH"
 $ make test
+# Or use four-way native build and generated-C compilation:
+$ TITAN_JOBS=4 make -j4 test
 ```
 
 `make test` runs `luarocks make --force` followed by `luarocks test`. The forced
@@ -701,6 +704,8 @@ build installs the current checkout, including the combined `titan.so` and
 `titan.a` support/standard-library providers. The rockspec's command backend
 enters `spec/support/run_rock_tests.sh`, which invokes `make rock-test`: the
 Busted tree runs first, followed by the same aggregate native executable.
+Busted 2.3 does not provide a shard option, so `-j4` does not split the Busted
+spec files; many compiler specs also share fixed checkout-root artifact names.
 `BUSTED_FILTER` and `TITAN_FILTER` are independent Lua-pattern selectors;
 filtering one domain does not skip the other, so use a leaf target when only one
 is wanted. A Titan filter changes execution only—the build still compiles all
@@ -795,6 +800,7 @@ when it is no longer needed.
         --test                            Build a native Titan test executable.
         --no-uv-bootstrap                 Call standalone main directly even if titan.uv installs its bootstrap hook.
         -v, --verbose                     Print safely quoted executed toolchain commands.
+        -j <jobs>, --jobs <jobs>          Bound concurrent generated-C object compilations.
         --static                          Prefer static Titan archive providers.
         --no-line-directives              Omit Titan source #line directives from generated C.
         --lua <path>                      Path to a Lua source/build tree (source checkouts only).
@@ -808,7 +814,9 @@ when it is no longer needed.
 ordinary dependencies; it does not request a system-linker static build and
 still permits DSO/source fallback. In library mode, `-X` object/archive
 payload enters both the shared and static output; in executable mode it keeps
-its established final-link role. `CC` selects the compiler. `--pretty-print`
+its established final-link role. `CC` selects the compiler. `-j/--jobs` accepts
+a positive integer, overrides `TITAN_JOBS`, and defaults to one; it overlaps
+only independent generated-module C object commands. `--pretty-print`
 selects the otherwise unused `CLANG_FORMAT` command; Titan appends its fixed
 in-place style arguments and does not consult an ambient project configuration.
 Without the option even a missing or malformed formatter command is inert.

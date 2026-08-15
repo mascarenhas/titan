@@ -14,6 +14,8 @@ p:argument('module', 'Names of the modules to compile.'):args("+")
 p:flag('--print-ast', 'Print the AST.')
 p:flag('--pretty-print', 'Format generated C and headers with clang-format.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
+p:option('-j --jobs',
+    'Maximum concurrent generated-C compilations (default: TITAN_JOBS or 1).')
 p:flag('--static', 'Prefer static Titan archive providers.')
 p:flag('--test', 'Build a native Titan test executable.')
 p:flag('--no-uv-bootstrap',
@@ -56,6 +58,16 @@ local function exit(msg)
 end
 
 if driver.TOOLCHAIN_ERROR then exit(driver.TOOLCHAIN_ERROR) end
+
+local jobs_text = args.jobs or os.getenv("TITAN_JOBS") or "1"
+if type(jobs_text) ~= "string" or
+   not jobs_text:match("^[1-9][0-9]*$") then
+    exit("--jobs and TITAN_JOBS require a positive integer")
+end
+local jobs = tonumber(jobs_text)
+if not jobs or jobs > math.maxinteger then
+    exit("--jobs and TITAN_JOBS require a positive integer")
+end
 
 local function link_failed(kind, modname, term, code)
     return string.format("failed to link %s '%s' (%s%s)",
@@ -394,20 +406,29 @@ local headers_ok, headers_err = driver.write_foreign_header_plans(
     header_plans, args.verbose, args.pretty_print)
 if not headers_ok then exit(headers_err) end
 
+local compile_requests = {}
 for _, name in ipairs(linked_names) do
     local mod = driver.imported[name]
-    local compile_options = {
-        pretty_print = args.pretty_print,
-        extra_compile_flags = test_modules[name]
-            and test_runner.TEST_COMPILE_FLAGS or nil,
+    compile_requests[#compile_requests + 1] = {
+        modname = name,
+        mod = mod,
+        static_deps = resolver_context.native_static_names,
+        options = {
+            pretty_print = args.pretty_print,
+            extra_compile_flags = test_modules[name]
+                and test_runner.TEST_COMPILE_FLAGS or nil,
+        },
     }
-    local ok, err, libname = driver.compile_module(
-        name, mod, resolver_context.native_static_names, args.verbose,
-        compile_options)
-    if not ok then
-        table.insert(errors, err)
+end
+local compile_results =
+    driver.compile_modules(compile_requests, jobs, args.verbose)
+for index, name in ipairs(linked_names) do
+    local result = compile_results[index]
+    local mod = driver.imported[name]
+    if not result.ok then
+        table.insert(errors, result.err)
     else
-        libnames[name] = libname
+        libnames[name] = result.libname
         for used_name in pairs(mod.native_references or {}) do
             used_native_names[used_name] = true
         end

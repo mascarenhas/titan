@@ -7,6 +7,12 @@ on:
     branches: ["**"]
   workflow_dispatch:  # Manual trigger to run the complete macOS suite
 
+# Use one reviewed four-way bound for Make's native dependency DAG and each
+# titanc invocation on the hosted targets.
+env:
+  MAKEFLAGS: "-j4"
+  TITAN_JOBS: "4"
+
 jobs:
   # Build and install the regular Linux tree once, run every uncovered
   # runtime/stdlib gate on that warm producer, and give the one compiler/LuaCov
@@ -183,7 +189,7 @@ jobs:
         run: make llhttp
 
       - name: Build the pinned bundled OpenSSL support
-        run: make -j2 openssl
+        run: make openssl
 
       - name: Activate the standalone Titan prefix
         run: |
@@ -471,7 +477,7 @@ jobs:
         run: make llhttp
 
       - name: Build the pinned bundled OpenSSL support
-        run: make -j2 openssl
+        run: make openssl
 
       - name: Install LuaRocks into the Titan prefix
         run: make luarocks
@@ -609,7 +615,7 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh native-libuv make libuv
           bash spec/support/ci_sanitizer_capture.sh native-llhttp make llhttp
           bash spec/support/ci_sanitizer_capture.sh native-openssl \
-            make -j2 openssl
+            make openssl
 
       - name: Install LuaRocks for the sanitizer Lua
         run: bash spec/support/ci_sanitizer_capture.sh luarocks make luarocks

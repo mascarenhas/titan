@@ -402,7 +402,12 @@ invocation-wide source-header plan when the CLI owns the compilation:
    receive generated C or object files.
 5. The object is compiled with the parsed `driver.CC`, then
    `TITAN_EXTRA_CPPFLAGS`, Titan's fixed `driver.CFLAGS`, and
-   `TITAN_EXTRA_CFLAGS`, in that order:
+   `TITAN_EXTRA_CFLAGS`, in that order. A direct `driver.compile` call runs this
+   command immediately. The CLI's default one-job path preserves that same
+   generate/format/compile sequence for each logical module. With a larger
+   bound, it prepares every source module through step 4 in logical-name order,
+   then `driver.compile_modules` runs only these independent object commands
+   concurrently, bounded by `--jobs`/`TITAN_JOBS`:
 
    ```sh
    cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -c foo/bar.c \
@@ -418,17 +423,30 @@ invocation-wide source-header plan when the CLI owns the compilation:
 The native-tool strings, and `CLANG_FORMAT` when `--pretty-print` actually
 selects it, are parsed into dense argument arrays with a small shell-word grammar
 supporting whitespace, single/double
-quotes, and backslash escapes. Each command builder quotes every resulting word
-before its final `os.execute`, so spaces and shell metacharacters remain part of
-one argument rather than being reinterpreted. Unterminated quotes, trailing
-escapes, NUL bytes, an empty configured command, and non-dense programmatic
-argument arrays produce configuration errors. A malformed `CLANG_FORMAT` is
-therefore inert in the default mode. `-v` prints the same safely quoted
-compiler/linker commands—and any opted-in formatter command—that are executed.
+quotes, and backslash escapes. Each command builder quotes every resulting word,
+so spaces and shell metacharacters remain part of one argument rather than being
+reinterpreted. A direct command ends in `os.execute`. For a parallel module
+batch, `io.popen` starts at most the requested number of those same rendered
+commands. Each compiler's stdout and stderr go to separate temporary files so a
+blocked pipe cannot deadlock the batch; Titan replays and removes those files
+when it reaps that compiler. Preparation failures do not launch a process, and
+native failures do not prevent already independent module objects from being
+attempted. Unterminated quotes, trailing escapes, NUL bytes, an empty configured
+command, and non-dense programmatic argument arrays produce configuration errors.
+A malformed `CLANG_FORMAT` is therefore inert in the default mode. `-v` prints
+the same safely quoted compiler/linker commands—and any opted-in formatter
+command—that are executed.
 
-`driver.compile_module(modname, mod, static_deps, verbose, options)` is the thin
-wrapper `titanc` uses: it skips modules whose cache entry says `compiled` (the binary
-case) and records the produced object filename in `mod.compiled`.
+`driver.compile_module(modname, mod, static_deps, verbose, options)` remains the
+single-module wrapper for programmatic callers. It skips a module whose cache
+entry says `compiled` and records the produced object filename. `titanc` instead
+passes its ordered, logical-module/output-deduplicated source set to
+`driver.compile_modules`; the batch API asserts that same ownership invariant.
+Object identity compares normalized absolute paths, filesystem-resolved parent
+paths, and existing device/inode pairs, so lexical, symlink, and hard-link
+aliases are rejected before preparation. A one-job batch uses the single-module
+wrapper in order, while a larger batch preserves the same cache mutation and
+per-module result order and overlaps only the final C object commands.
 
 ### Shared C preprocessor, compiler, and linker inputs
 
@@ -657,8 +675,8 @@ normal module-init protocol.
 
 ```sh
 ./titanc [--print-ast] [--pretty-print] [-v|--verbose] \
-  [-u|--lua <luasrc>] [--static] [--test] [--no-uv-bootstrap] \
-  [--no-line-directives] \
+  [-j|--jobs <jobs>] [-u|--lua <luasrc>] [--static] [--test] \
+  [--no-uv-bootstrap] [--no-line-directives] \
   [-t|--tree <srcroot>] [-l|--link lib1,lib2] \
   [-X|--extra-object obj.o...] <module>...
 ```
@@ -670,10 +688,14 @@ or more dot-separated module names. `--tree` overrides
 `liblua.a`, and `libtitan.a` remain a matched SDK. `--pretty-print` opts every
 emitted C/header boundary into the fixed `clang-format` pass; default builds do
 not invoke it. `-v` prints every native-tool command line plus any opted-in
-formatter command, `--print-ast` dumps each module's AST after checking,
-`--static` swaps the compiled-provider passes to prefer
-self-describing archives before DSOs, `--test` selects the native test pipeline
-described in [Native test runner](test-runner.md), and `--no-uv-bootstrap`
+formatter command, `--print-ast` dumps each module's AST after checking, and
+`-j`/`--jobs` sets the positive generated-C compilation bound. The command-line
+value overrides `TITAN_JOBS`; an unset environment defaults to one process.
+Neither setting parallelizes checking, code generation, formatting, provider
+validation, archiving, or linking. `--static` swaps the compiled-provider passes
+to prefer self-describing archives before DSOs, `--test` selects the native test
+pipeline described in [Native test runner](test-runner.md), and
+`--no-uv-bootstrap`
 threads one entrypoint-only option through `driver.compile_program`. The driver
 renders the bootstrap condition with a constant direct-path operand; module
 initialization, `TITAN_MAIN_ARGC_KEY`/`TITAN_MAIN_ARGV_KEY` publication,
@@ -1124,6 +1146,7 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 | `driver.INCLUDE_PATH` | `driver.lua` | `<root>/include` in installed mode | Titan SDK and bundled-libuv headers used by generated C and foreign imports; the non-Lua Titan set is `minicoro.h`, `titan.h` and `titan/ffi.h`. Generated source-foreign companions are source-build intermediates, not installed SDK headers. |
 | `driver.TITAN_RUNTIME_PATH` / `driver.LIBBACKTRACE_PATH` | `driver.lua` | `titan-runtime/` / `libbacktrace` | Checkout-only runtime source/archive/header and separate libbacktrace locations. |
 | `CC` / `driver.CC` | environment / `driver.lua` | `"cc"` | C compiler command, parsed as shell words and shared with foreign-import probing. |
+| `TITAN_JOBS` / `titanc --jobs` | environment / CLI | `1` | Positive bound for concurrent generated logical-module C object compilations. The CLI wins over the environment. It does not affect checker probes, code generation, formatting, entrypoints, linking, archiving, or provider validation. |
 | `CLANG_FORMAT` / `driver.CLANG_FORMAT` | environment / `driver.lua` | `"clang-format"` | Formatter command used only by `titanc --pretty-print`, then parsed as shell words. The driver appends its in-place operation, fixed explicit style with include sorting disabled, and generated-source path; default builds neither parse nor invoke it. |
 | `driver.CFLAGS` | `driver.lua` | `"--std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls"` | Flags for every compile and link step. |
 | `TITAN_EXTRA_CPPFLAGS` / `driver.EXTRA_CPPFLAGS` | environment / `driver.lua` | empty | Parsed `-I`/`-D` and other preprocessing inputs; used by foreign-import compiler probes and prepended to every Titan/runtime/entrypoint compilation. |

@@ -33,6 +33,45 @@ local function normalize_absolute_path(path)
     return "/" .. table.concat(components, "/")
 end
 
+local function absolute_filename(filename)
+    if filename:sub(1, 1) == "/" then return filename end
+    return lfs.currentdir() .. "/" .. filename
+end
+
+local function normalized_absolute_filename(filename)
+    return normalize_absolute_path(absolute_filename(filename))
+end
+
+-- Canonicalize an existing pathname's parent through the filesystem. This
+-- preserves POSIX symlink/.. resolution for alias and containment checks while
+-- still giving a stable destination path when the final leaf does not exist.
+local function physical_absolute_filename(filename)
+    local raw = absolute_filename(filename)
+    local mode = lfs.attributes(raw, "mode")
+    local previous = lfs.currentdir()
+    if mode == "directory" and lfs.chdir(raw) then
+        local resolved = lfs.currentdir()
+        assert(lfs.chdir(previous))
+        return resolved
+    end
+    local parent, leaf = raw:match("^(.*)/([^/]*)$")
+    if parent and leaf ~= "" and lfs.chdir(parent) then
+        local resolved_parent = lfs.currentdir()
+        assert(lfs.chdir(previous))
+        return (resolved_parent == "/" and "/" or
+            (resolved_parent .. "/")) .. leaf
+    end
+    return normalize_absolute_path(raw)
+end
+
+local function same_existing_file(left, right)
+    local left_attr = lfs.attributes(left)
+    local right_attr = lfs.attributes(right)
+    return left_attr and right_attr and
+        left_attr.dev ~= nil and left_attr.ino ~= nil and
+        left_attr.dev == right_attr.dev and left_attr.ino == right_attr.ino
+end
+
 -- Return the installation prefix encoded by the first canonical Lua C-module
 -- template. Deliberately do not accept a merely similar template: this is the
 -- one layout established by Titan's prefix-owned Lua installation.
@@ -3317,7 +3356,8 @@ function driver.prepare_foreign_headers(
     return driver.write_foreign_header_plans(plans, verbose, pretty_print)
 end
 
-function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
+local function prepare_compile(
+        modname, ast, sourcef, static_deps, verbose, options)
     if not staticmetadata.valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
             string.format("%q", modname)
@@ -3351,12 +3391,362 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
     append_argv(args, options and options.extra_compile_flags)
     append_argv(args, { static_flag(), filename })
     append_argv(args, { "-o", libname })
-    local ok, err = run_argv(args, verbose)
+    return {
+        args = args,
+        libname = libname,
+        native_references = native_references,
+    }
+end
+
+function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
+    local prepared, prepare_err = prepare_compile(
+        modname, ast, sourcef, static_deps, verbose, options)
+    if not prepared then return nil, prepare_err end
+    local ok, err = run_argv(prepared.args, verbose)
     if ok then
-        return ok, nil, libname, native_references
+        return ok, nil, prepared.libname, prepared.native_references
     else
         return nil, err
     end
+end
+
+local function protected_remove(path)
+    if not path then return true end
+    local called, removed, remove_err = pcall(os.remove, path)
+    if not called then return nil, removed end
+    return removed, remove_err
+end
+
+local function replay_compile_output(filename, stream)
+    local open_called, file, open_err = pcall(io.open, filename, "rb")
+    if not open_called then
+        protected_remove(filename)
+        return nil, file
+    end
+    if not file then
+        protected_remove(filename)
+        return nil, open_err
+    end
+
+    local errors = {}
+    local read_called, output, read_err = pcall(file.read, file, "*a")
+    if not read_called then
+        errors[#errors + 1] = "read: " .. tostring(output)
+        output = nil
+    elseif not output then
+        errors[#errors + 1] = "read: " .. tostring(read_err)
+    end
+    local close_called, closed, close_err = pcall(file.close, file)
+    if not close_called then
+        errors[#errors + 1] = "close: " .. tostring(closed)
+    elseif not closed then
+        errors[#errors + 1] = "close: " .. tostring(close_err)
+    end
+    local removed, remove_err = protected_remove(filename)
+    if not removed then
+        errors[#errors + 1] = "remove: " .. tostring(remove_err)
+    end
+
+    if output and output ~= "" then
+        local write_called, written, write_err =
+            pcall(stream.write, stream, output)
+        if not write_called then
+            errors[#errors + 1] = "write: " .. tostring(written)
+        elseif not written then
+            errors[#errors + 1] = "write: " .. tostring(write_err)
+        else
+            local flush_called, flushed, flush_err =
+                pcall(stream.flush, stream)
+            if not flush_called then
+                errors[#errors + 1] = "flush: " .. tostring(flushed)
+            elseif not flushed then
+                errors[#errors + 1] = "flush: " .. tostring(flush_err)
+            end
+        end
+    end
+    if #errors ~= 0 then return nil, table.concat(errors, "; ") end
+    return true
+end
+
+local function create_compile_log()
+    local called, path = pcall(os.tmpname)
+    if not called then return nil, path end
+    if not path then return nil, "os.tmpname returned no path" end
+    return path
+end
+
+local function show_parallel_command(command)
+    local write_called, written, write_err =
+        pcall(io.stdout.write, io.stdout, command .. "\n")
+    if not write_called then return nil, written end
+    if not written then return nil, write_err end
+    local flush_called, flushed, flush_err =
+        pcall(io.stdout.flush, io.stdout)
+    if not flush_called then return nil, flushed end
+    if not flushed then return nil, flush_err end
+    return true
+end
+
+local function launch_prepared_compile(prepared, verbose)
+    local command, command_err = command_argv(prepared.args)
+    if not command then return nil, command_err end
+
+    local stdout_path, stdout_err = create_compile_log()
+    if not stdout_path then return nil, stdout_err end
+    local stderr_path, stderr_err = create_compile_log()
+    if not stderr_path then
+        protected_remove(stdout_path)
+        return nil, stderr_err
+    end
+    local quoted_stdout, quote_err = cdriver.shell_quote(stdout_path)
+    if not quoted_stdout then
+        protected_remove(stdout_path)
+        protected_remove(stderr_path)
+        return nil, quote_err
+    end
+    local quoted_stderr
+    quoted_stderr, quote_err = cdriver.shell_quote(stderr_path)
+    if not quoted_stderr then
+        protected_remove(stdout_path)
+        protected_remove(stderr_path)
+        return nil, quote_err
+    end
+    if verbose then
+        local shown, show_err = show_parallel_command(command)
+        if not shown then
+            protected_remove(stdout_path)
+            protected_remove(stderr_path)
+            return nil, show_err
+        end
+    end
+    local popen_called, pipe, popen_err = pcall(io.popen,
+        command .. " >" .. quoted_stdout .. " 2>" .. quoted_stderr, "r")
+    if not popen_called then
+        protected_remove(stdout_path)
+        protected_remove(stderr_path)
+        return nil, pipe
+    end
+    if not pipe then
+        protected_remove(stdout_path)
+        protected_remove(stderr_path)
+        return nil, popen_err
+    end
+    return {
+        pipe = pipe,
+        stdout_path = stdout_path,
+        stderr_path = stderr_path,
+    }
+end
+
+local function protected_replay_compile_output(filename, stream)
+    local called, ok, err = pcall(replay_compile_output, filename, stream)
+    if not called then
+        protected_remove(filename)
+        return nil, ok
+    end
+    return ok, err
+end
+
+local function finish_prepared_compile(process)
+    local finish_errors = {}
+    local close_called, ok, term, code =
+        pcall(process.pipe.close, process.pipe)
+    if not close_called then
+        finish_errors[#finish_errors + 1] = "reap: " .. tostring(ok)
+        ok, term, code = nil, nil, nil
+    end
+
+    local stdout_ok, stdout_err = protected_replay_compile_output(
+        process.stdout_path, io.stdout)
+    if not stdout_ok then
+        finish_errors[#finish_errors + 1] =
+            "stdout: " .. tostring(stdout_err)
+    end
+    local stderr_ok, stderr_err = protected_replay_compile_output(
+        process.stderr_path, io.stderr)
+    if not stderr_ok then
+        finish_errors[#finish_errors + 1] =
+            "stderr: " .. tostring(stderr_err)
+    end
+    if #finish_errors ~= 0 then
+        return nil, "failed to finish parallel C compiler (" ..
+            table.concat(finish_errors, "; ") .. ")"
+    end
+    return ok, term, code
+end
+
+local function finish_prepared_compile_without_throw(process)
+    local called, ok, err, code = pcall(finish_prepared_compile, process)
+    if called then return ok, err, code end
+
+    -- A final guard for an unexpected Lua exception: reap the child and remove
+    -- both logs before allowing the rest of the independent batch to continue.
+    pcall(process.pipe.close, process.pipe)
+    protected_remove(process.stdout_path)
+    protected_remove(process.stderr_path)
+    return nil, "failed to finish parallel C compiler: " .. tostring(ok)
+end
+
+local function run_prepared_compiles(prepared, parallelism, verbose)
+    local results = {}
+    if parallelism == 1 or #prepared <= 1 then
+        for index, compilation in ipairs(prepared) do
+            local ok, err, code = run_argv(compilation.args, verbose)
+            results[index] = { ok = ok, err = err, code = code }
+        end
+        return results
+    end
+
+    local pending = {}
+    local next_index = 1
+    while next_index <= #prepared or #pending ~= 0 do
+        while #pending < parallelism and next_index <= #prepared do
+            local launch_called, process, launch_err = pcall(
+                launch_prepared_compile, prepared[next_index], verbose)
+            if not launch_called then
+                launch_err, process = process, nil
+            end
+            if process then
+                process.index = next_index
+                pending[#pending + 1] = process
+            else
+                results[next_index] = { err = launch_err }
+            end
+            next_index = next_index + 1
+        end
+        if #pending ~= 0 then
+            local process = table.remove(pending, 1)
+            local ok, err, code =
+                finish_prepared_compile_without_throw(process)
+            results[process.index] = { ok = ok, err = err, code = code }
+        end
+    end
+    return results
+end
+
+local function validate_compile_requests(requests)
+    local module_indices = {}
+    local outputs = {}
+    for index, request in ipairs(requests) do
+        assert(type(request) == "table", "each compilation request must be a table")
+        assert(type(request.modname) == "string",
+            "each compilation request needs a logical module name")
+        local previous_index = module_indices[request.modname]
+        assert(not previous_index,
+            string.format("duplicate compilation request for logical module %q " ..
+                "at indices %d and %d", request.modname, previous_index or 0,
+                index))
+        module_indices[request.modname] = index
+
+        local mod = assert(request.mod,
+            "each compilation request needs a module")
+        local libname = mod.compiled
+        if not libname then
+            local sourcef = mod.native_output or mod.filename or
+                request.modname:gsub("[.]", "/") .. ".titan"
+            assert(type(sourcef) == "string",
+                "each compilation request needs a source output path")
+            libname = sourcef:gsub("[.]titan$", "") .. ".o"
+        end
+        assert(type(libname) == "string",
+            "each compilation request needs an object output path")
+        local output = {
+            owner = request.modname,
+            raw = absolute_filename(libname),
+            normalized = normalized_absolute_filename(libname),
+            physical = physical_absolute_filename(libname),
+        }
+        for _, previous in ipairs(outputs) do
+            local aliases = output.normalized == previous.normalized or
+                output.physical == previous.physical or
+                same_existing_file(output.raw, previous.raw)
+            assert(not aliases,
+                string.format("compilation requests for logical modules %q " ..
+                    "and %q share object output %q", previous.owner,
+                    request.modname, output.normalized))
+        end
+        outputs[#outputs + 1] = output
+    end
+end
+
+-- With a bound above one, generate module C serially and then compile the
+-- independent translation units through at most `parallelism` compiler
+-- processes. The one-job path retains the historical per-module phase order.
+-- Only native object compilations ever overlap.
+function driver.compile_modules(requests, parallelism, verbose)
+    assert(type(requests) == "table", "requests must be a table")
+    assert(type(parallelism) == "number" and parallelism >= 1 and
+        parallelism % 1 == 0, "parallelism must be a positive integer")
+    validate_compile_requests(requests)
+
+    local results = {}
+    if parallelism == 1 then
+        for index, request in ipairs(requests) do
+            local mod = assert(request.mod)
+            if mod.compiled then
+                results[index] = {
+                    ok = true,
+                    libname = mod.compiled,
+                    native_references = mod.native_references or {},
+                }
+            else
+                local ok, err, libname = driver.compile_module(
+                    request.modname, mod, request.static_deps,
+                    verbose, request.options)
+                if ok then
+                    results[index] = {
+                        ok = true,
+                        libname = libname,
+                        native_references = mod.native_references or {},
+                    }
+                else
+                    results[index] = { err = err }
+                end
+            end
+        end
+        return results
+    end
+
+    local prepared = {}
+    for index, request in ipairs(requests) do
+        local mod = assert(request.mod)
+        if mod.compiled then
+            results[index] = {
+                ok = true,
+                libname = mod.compiled,
+                native_references = mod.native_references or {},
+            }
+        else
+            local compilation, prepare_err = prepare_compile(
+                request.modname, mod.ast, mod.native_output or mod.filename,
+                request.static_deps, verbose, request.options)
+            if not compilation then
+                results[index] = { err = prepare_err }
+            else
+                compilation.request_index = index
+                prepared[#prepared + 1] = compilation
+            end
+        end
+    end
+
+    local compiled = run_prepared_compiles(prepared, parallelism, verbose)
+    for prepared_index, compilation in ipairs(prepared) do
+        local result = compiled[prepared_index]
+        local request_index = compilation.request_index
+        if result.ok then
+            local request = requests[request_index]
+            request.mod.compiled = compilation.libname
+            request.mod.native_references = compilation.native_references or {}
+            results[request_index] = {
+                ok = true,
+                libname = compilation.libname,
+                native_references = request.mod.native_references,
+            }
+        else
+            results[request_index] = { err = result.err }
+        end
+    end
+    return results
 end
 
 local entrypoint_template = [[
@@ -4441,37 +4831,6 @@ function driver.publish_library(tempname, publicname)
     return true
 end
 
-local function absolute_filename(filename)
-    if filename:sub(1, 1) == "/" then return filename end
-    return lfs.currentdir() .. "/" .. filename
-end
-
-local function normalized_absolute_filename(filename)
-    return normalize_absolute_path(absolute_filename(filename))
-end
-
--- Canonicalize an existing pathname's parent through the filesystem. This
--- preserves POSIX symlink/.. resolution for alias and containment checks while
--- still giving a stable destination path when the final leaf does not exist.
-local function physical_absolute_filename(filename)
-    local raw = absolute_filename(filename)
-    local mode = lfs.attributes(raw, "mode")
-    local previous = lfs.currentdir()
-    if mode == "directory" and lfs.chdir(raw) then
-        local resolved = lfs.currentdir()
-        assert(lfs.chdir(previous))
-        return resolved
-    end
-    local parent, leaf = raw:match("^(.*)/([^/]*)$")
-    if parent and leaf ~= "" and lfs.chdir(parent) then
-        local resolved_parent = lfs.currentdir()
-        assert(lfs.chdir(previous))
-        return (resolved_parent == "/" and "/" or
-            (resolved_parent .. "/")) .. leaf
-    end
-    return normalize_absolute_path(raw)
-end
-
 -- Verify every logical protocol exported by a newly linked container before
 -- its public pathname is changed. Metadata functions are executed and decoded;
 -- init/Lua entry points are resolved but deliberately not called.
@@ -4732,14 +5091,6 @@ local function generated_shim_contents(provider, modname)
             ENTRY = string.format(
                 "%q", "luaopen_" .. driver.mangle_module_name(modname)),
         })
-end
-
-local function same_existing_file(left, right)
-    local left_attr = lfs.attributes(left)
-    local right_attr = lfs.attributes(right)
-    return left_attr and right_attr and
-        left_attr.dev ~= nil and left_attr.ino ~= nil and
-        left_attr.dev == right_attr.dev and left_attr.ino == right_attr.ino
 end
 
 local function same_file_contents(left, right)
