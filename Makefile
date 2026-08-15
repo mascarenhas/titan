@@ -494,8 +494,10 @@ lua: $(LUA_INSTALL_STAMP) ## Build and install Titan's prefix-configured Lua
 # configuration mtime when its result and inputs are unchanged. This keeps a
 # warm `make lua` quiet while noticing a host development package appearing or
 # disappearing. The system probe deliberately omits PREFIX: a previously
-# provisioned fallback is not misclassified as a host installation.
-$(READLINE_SELECTION_CONFIG):
+# provisioned fallback is not misclassified as a host installation. The
+# selection file lives inside the generated Lua tree, so extraction must finish
+# before a parallel build may create it.
+$(READLINE_SELECTION_CONFIG): $(LUA_EXTRACTED) FORCE
 	@set -e; \
 	mkdir -p "$(@D)"; \
 	base="$@.base"; probe="$@.probe"; probe_source="$@.probe.c"; \
@@ -781,7 +783,9 @@ $(READLINE_EXTRACTED): $(READLINE_TARBALL) $(READLINE_PATCH_FILE)
 
 # The fallback is a private Lua build input, not a discoverable SDK. Upstream's
 # pkg-config files capture the temporary stage paths, so discard them before
-# atomically publishing the validated include/library tree.
+# atomically publishing the validated include/library tree. Its ordinary build
+# is parallel-safe, but its install targets race while replacing libhistory.a;
+# keep only that staging pass serial.
 readline-bundled-install: check-readline-tools $(READLINE_EXTRACTED)
 	@set -e; \
 	echo "==> Building staged static GNU Readline $(READLINE_RELEASE) for $(PREFIX)"; \
@@ -816,7 +820,7 @@ readline-bundled-install: check-readline-tools $(READLINE_EXTRACTED)
 	    LDFLAGS=$(call make_shell_quote,$(READLINE_LDFLAGS)) \
 	    LIBS=$(call make_shell_quote,$(READLINE_SELECTED_TERMCAP_LIB)) ); \
 	$(MAKE) -C "$(READLINE_BUILD_DIR)"; \
-	$(MAKE) -C "$(READLINE_BUILD_DIR)" install; \
+	$(MAKE) -j1 -C "$(READLINE_BUILD_DIR)" install; \
 	rm -rf "$$stage/lib/pkgconfig"; \
 	mkdir -p "$$stage/share/licenses"; \
 	cmp -s "$(READLINE_DIR)/COPYING" "$(READLINE_LICENSE_SOURCE)" || { \

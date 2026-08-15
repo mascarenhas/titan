@@ -177,8 +177,12 @@ not add epicycles around what may be a misunderstood simpler design.
   same `PREFIX`, `LUA_CC`, `AR`, and `RANLIB`;
   `READLINE_MODE=system|bundled` can override automatic selection. Its
   checksum-bound repair path builds and validates a sibling stage before
-  replacing an existing private installation. `READLINE_HOST` supplies an
-  optional Autoconf cross-target triplet; the `READLINE_*FLAGS` inputs are
+  replacing an existing private installation. Under parallel Make, Lua source
+  extraction precedes the Readline-selection file that lives in that tree;
+  fallback compilation may overlap, but upstream Readline installation into
+  the private stage is serialized because its archive replacement rules race.
+  `READLINE_HOST` supplies an optional Autoconf cross-target triplet; the
+  `READLINE_*FLAGS` inputs are
   recorded alongside the native tools. Its configuration stamp cleans Lua
   objects whenever `PREFIX`, `LUA_PLATFORM`, `LUA_CC`, a native-build input,
   or the selected Readline provider changes.
