@@ -124,6 +124,7 @@ the fixed physical-provider identity slot used before source-private access.
 ABI 0.23 retains those layout rules while adding source-defined foreign
 collaboration and separating module, nominal owner, and member in native
 callable names. ABI 0.24 retains those visibility and native-layout rules while
-extending generic declaration metadata. A 0.23 binary remains public-only and
-is rejected by the 0.24 toolchain; older providers must be rebuilt and no
-migration is performed.
+extending generic declaration metadata. ABI 0.25 retains the same rules while
+changing the public `titan.fs` and `titan.async` signatures. A 0.24 binary
+remains public-only and is rejected by the 0.25 toolchain; older providers must
+be rebuilt and no migration is performed.

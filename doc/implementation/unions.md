@@ -343,7 +343,7 @@ the original union Udata in user value 1; a written Interface-to-union cast
 checks that payload's exact union metatable. No union tag or payload is exposed
 through Interface dispatch. See [Interfaces](interfaces.md).
 
-## Serialized interfaces: ABI 0.19 origin and current 0.24 boundary
+## Serialized interfaces: ABI 0.19 origin and current 0.25 boundary
 
 `types.serialize` adds canonical schemas:
 
@@ -411,17 +411,20 @@ callback contract and separating module, nominal owner, and member in every
 union constructor/static/method entry name. ABI 0.24 extends serialized
 interfaces for generic binders, applied nominals, schemes, owners, methods, and
 constructor-preserving aliases while retaining the erased union representation.
-`TITAN_VER` is now `0.24`, its suffix is `_0_24`, the versioned search variable
-is `TITAN_PATH_0_24`, the installed provider namespace is `lib/titan/0.24`, and
-the generated standard-library support namespace is `stdlib_0_24`. A 0.23
+ABI 0.25 retains that union representation and generic schema while changing
+the public `titan.fs.stat`/`lstat` option results and `titan.async.suspend`
+cancellation-action parameter, including their exact native signatures.
+`TITAN_VER` is now `0.25`, its suffix is `_0_25`, the versioned search variable
+is `TITAN_PATH_0_25`, the installed provider namespace is `lib/titan/0.25`, and
+the generated standard-library support namespace is `stdlib_0_25`. A 0.24
 interface is rejected before type rehydration or native linking.
 
-ABI 0.24 is the current versioned prototype boundary, not a migration layer.
-Installed 0.18 through 0.23 trees remain separately versioned predecessors.
-Build preparation creates or replaces only exact known active-0.24 Titan
+ABI 0.25 is the current versioned prototype boundary, not a migration layer.
+Installed 0.18 through 0.24 trees remain separately versioned predecessors.
+Build preparation creates or replaces only exact known active-0.25 Titan
 artifacts, establishes its ABI-keyed caches, and verifies that `package.cpath`
-selects 0.24 rather than 0.23. It does not migrate or clean up the preserved
-0.23 state.
+selects 0.25 rather than 0.24. It does not migrate or clean up the preserved
+0.24 state.
 
 ## Standard-library dogfooding
 

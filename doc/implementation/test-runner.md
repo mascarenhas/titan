@@ -36,7 +36,7 @@ adds generated `titan.test.runner` contents. It does not add the standard
 library checkout to the user's source path. Checkout mode locates
 `<checkout>/titan/test.titan` from `driver.lua`'s own provenance. Installed
 mode uses the transactionally published
-`<root>/share/titan/0.24/src/titan/test.titan`; a missing/nonregular file is an
+`<root>/share/titan/0.25/src/titan/test.titan`; a missing/nonregular file is an
 explicit test-mode diagnostic. This real direct source edge is what grants the
 runner access to private declarations. Binary metadata remains public-only.
 
@@ -270,6 +270,7 @@ state layout, or serialized schema, so it was published within ABI 0.22. During
 that release only, the immediately preceding canonical seventeen-key 0.22 pair
 was a bounded publication predecessor. ABI 0.23 started clean: its publisher
 accepted only its bootstrap/current state and did not treat an ABI-0.22 pair as
-an active-layout predecessor or migration source. ABI 0.24 is another clean
-boundary and likewise does not treat an ABI-0.23 pair as a predecessor or
+an active-layout predecessor or migration source. ABI 0.24 was another clean
+boundary and did not treat an ABI-0.23 pair as a predecessor or migration
+source. ABI 0.25 likewise does not treat an ABI-0.24 pair as a predecessor or
 migration source.

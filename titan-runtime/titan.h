@@ -158,9 +158,13 @@ typedef struct lua_longjmp {
    parameter references, applied nominal arguments, declaration schemes,
    generic owners and methods, and constructor-preserving aliases. Older
    compilers cannot decode the extended metadata, so 0.23 and 0.24 providers
-   must not be mixed. */
-#define TITAN_VER "0.24"
-#define TITAN_VER_SUFFIX "_0_24"
+   must not be mixed.
+   0.24 -> 0.25: titan.fs stat/lstat results become optional and titan.async
+   suspend gains an optional synchronous cancellation action. Their serialized
+   public interfaces and exact native call signatures change, so 0.24 and 0.25
+   standard providers must not be mixed. */
+#define TITAN_VER "0.25"
+#define TITAN_VER_SUFFIX "_0_25"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"

@@ -31,7 +31,7 @@ end
 describe("compiler installation discovery", function()
     it("uses the first literal Lua 5.5 C-module prefix", function()
         local cpath = table.concat({
-            "/first prefix/lib/titan/0.24/?.so",
+            "/first prefix/lib/titan/0.25/?.so",
             "/wrong/lib/lua/5.4/?.so",
             "/also-wrong/lib/lua/5.5/?.dylib",
             "/first prefix/lib/lua/5.5/?.so",
@@ -102,10 +102,10 @@ describe("compiler installation discovery", function()
             libtitan = "/opt/titan/lib/libtitan.a",
             libbacktrace = "/opt/titan/lib/libbacktrace.a",
             liblua = "/opt/titan/lib/liblua.a",
-            titan_bin = "/opt/titan/lib/titan/0.24",
-            lua_cpath = "/opt/titan/lib/titan/0.24/?.so",
+            titan_bin = "/opt/titan/lib/titan/0.25",
+            lua_cpath = "/opt/titan/lib/titan/0.25/?.so",
             test_source =
-                "/opt/titan/share/titan/0.24/src/titan/test.titan",
+                "/opt/titan/share/titan/0.25/src/titan/test.titan",
         }, paths)
 
         assert.same({
@@ -849,6 +849,52 @@ describe("standalone output ownership", function()
             { "generated.titan.h" })
         assert.is_nil(ok)
         assert.matches("aliases input", message, 1, true)
+
+        ok, message = driver.validate_program_output_paths({
+            {
+                modname = "portable.first",
+                output = "portable_first.titan",
+                foreign_header = "PortableCase.titan.h",
+            },
+            {
+                modname = "portable.second",
+                output = "portable_second.titan",
+                foreign_header = "portablecase.titan.h",
+            },
+        }, "portable_program", "portable_entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("aliases output", message, 1, true)
+
+        ok, message = driver.validate_program_output_paths({
+            {
+                modname = "portable.input",
+                output = "portable_input.titan",
+                foreign_header = "PortableInput.titan.h",
+            },
+        }, "portable_input_program", "portable_input_entrypoint.c",
+            { "portableinput.titan.h" })
+        assert.is_nil(ok)
+        assert.matches("aliases input", message, 1, true)
+
+        ok, message = driver.validate_program_output_paths({
+            {
+                modname = "portable.child",
+                output = "portabletree/child.titan",
+            },
+        }, "PortableTree", "portable_tree_entrypoint.c", {})
+        assert.is_nil(ok)
+        assert.matches("path hierarchy conflict", message, 1, true)
+
+        ok, message = driver.validate_program_output_paths({
+            {
+                modname = "portable.native",
+                output = "portable_native.titan",
+                foreign_header = "PortableNativeTree",
+            },
+        }, "portable_native_program", "portable_native_entrypoint.c",
+            { "portablenativetree/child.o" })
+        assert.is_nil(ok)
+        assert.matches("path hierarchy conflict", message, 1, true)
     end)
 
 

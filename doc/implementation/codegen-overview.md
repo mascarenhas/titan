@@ -381,7 +381,7 @@ It comes **immediately after `_mod` and before the method `self`**, and
 *every* Titan function takes it even when the body never reads it: the
 fast value-call path dispatches purely on the function-type tag, so all
 native entries of a given `Type.Function` must share one ABI. This type is
-exclusively a boxed Titan/Lua callable; its ABI-0.24 third constructor
+exclusively a boxed Titan/Lua callable; its ABI-0.25 third constructor
 position remains reserved `false`, not C variadicity. Its value at a call site
 depends on the
 path:
@@ -831,7 +831,7 @@ Udata. Generated modules also reserve a per-state Array-metatable cache and
 use explicit internal-versus-boxed conversions. A 0.16 module would
 misinterpret Array values even when a serialized interface happens not to
 mention one, so the semantic/runtime boundary requires a full rebuild. See
-[Dense Arrays](dense-arrays.md#abi-017-020-021-022-023-and-024-boundaries).
+[Dense Arrays](dense-arrays.md#abi-017-020-021-022-023-024-and-025-boundaries).
 
 ABI **0.18** preserved those generated Array shapes and the ordinary module
 protocol, but made standard-library archive objects directly reference
@@ -866,16 +866,21 @@ a direct source importer can reject canonical state installed by another
 provider. ABI 0.23 retains those layouts while source foreign callbacks and the
 injective module/nominal/member native-entry hierarchy change the native symbol
 contract. ABI 0.24 extends serialized interfaces for generic declarations while
-retaining the erased generated layouts and Lua contract.
-The active marker is `_0_24`, the search variable is `TITAN_PATH_0_24`, and the
-provider namespace is `lib/titan/0.24`; older providers are rejected before
-interface rehydration. Existing 0.23 artifacts remain separately versioned and
+retaining the erased generated layouts and Lua contract. ABI 0.25 changes the
+public standard-module interfaces and exact entries for `titan.fs.stat` and
+`titan.fs.lstat` from a `Udata *` result to a `TValue` option result, and adds a
+`TValue` optional cancellation-action parameter to `titan.async.suspend`. All
+other ABI-0.24 serialized layouts, generated layouts, and runtime contracts are
+retained.
+The active marker is `_0_25`, the search variable is `TITAN_PATH_0_25`, and the
+provider namespace is `lib/titan/0.25`; older providers are rejected before
+interface rehydration. Existing 0.24 artifacts remain separately versioned and
 are not migrated or cleaned up.
 
 Closure adjustment wrappers reuse the fixed CClosure header and `function_sig`
-shapes retained through ABI 0.24; their target adapters and strict relays are
+shapes retained through ABI 0.25; their target adapters and strict relays are
 private consumer artifacts, with no serialized field, provider symbol, or
-module-state slot. A consumer may therefore wrap an ordinary ABI-0.24
+module-state slot. A consumer may therefore wrap an ordinary ABI-0.25
 source/DSO/archive function. Any implementation that needed another fixed slot
 or signature would instead require a coordinated ABI advance.
 
@@ -1153,7 +1158,7 @@ bound-method closure and must copy a live exact tag into it. First-use private
 objects are filled by `init_data_from_other_modules` or the module
 initializer. Thus all private slots, beginning with the Array cache and fixed
 provider-identity token, come *after* the importer-visible public prefix. Their
-fixed header was introduced in ABI 0.22 and is retained through 0.24, while later
+fixed header was introduced in ABI 0.22 and is retained through 0.25, while later
 inventory/first-use slots remain
 coder-private and do not perturb the public importer slot math.
 

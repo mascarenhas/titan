@@ -111,4 +111,4 @@ Titan gradual injection. The implementation never imports `lua.h`, unwraps a
 `math.type` is intentionally not implemented: its raw integer-versus-float tag
 query is different from Titan's public numeric convertibility predicate and
 would violate that boundary. This is a library API choice, not new compiler or
-ABI machinery; the standard provider follows the current ABI 0.24 namespace.
+ABI machinery; the standard provider follows the current ABI 0.25 namespace.

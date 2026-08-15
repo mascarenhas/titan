@@ -697,8 +697,10 @@ ABI 0.21 retained that model while advancing the matched Lua runtime to
 5.5.1; ABI 0.23 retains the metadata and value layouts while renaming
 Interface bound and metatable entries into the separated nominal callable
 family. ABI 0.24 retains that representation while extending generic declaration
-metadata, including applied Interface constraints. Prior-ABI providers are
-rejected rather than adapted in place.
+metadata, including applied Interface constraints. ABI 0.25 retains that
+Interface representation while changing the public `titan.fs` and
+`titan.async` interfaces and exact signatures. Prior-ABI providers are rejected
+rather than adapted in place.
 
 ## Version-one boundaries
 

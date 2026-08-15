@@ -94,7 +94,7 @@ local function compiler_argv(workspace, source_root, ...)
     -- Opt-in formatting coverage must not make the ordinary test/CI lane
     -- depend on clang-format being installed.
     table.insert(argv, "CLANG_FORMAT=true")
-    table.insert(argv, "TITAN_PATH_0_24=" .. workspace)
+    table.insert(argv, "TITAN_PATH_0_25=" .. workspace)
     table.insert(argv, "TITAN_PATH=")
     if PREFIX then
         table.insert(argv, "PATH=" .. PREFIX .. "/bin:" ..
