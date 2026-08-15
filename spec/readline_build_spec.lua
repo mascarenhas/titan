@@ -153,6 +153,12 @@ describe("GNU Readline selection", function()
         prefix = workspace .. "/prefix"
         selection_config =
             workspace .. "/lua-5.5.1/.titan-readline-8.3-p3.config"
+        -- The real selection file belongs to the extracted Lua tree. Supply a
+        -- bounded fake extraction so these provider probes remain offline.
+        make_directory(workspace .. "/lua-5.5.1")
+        write_file(workspace .. "/lua-5.5.1.tar.gz", "test archive\n")
+        write_file(workspace .. "/lua-5.5.1/.titan-extracted-v2",
+            "test extraction\n")
     end)
 
     after_each(function()
@@ -333,5 +339,11 @@ void add_history(const char *line) { (void)line; }
             '$$lua_myldflags";', 1, true))
         assert.truthy(recipes:find(
             'rm -rf "$$stage/lib/pkgconfig";', 1, true))
+        assert.truthy(recipes:find(
+            '$(MAKE) -j1 -C "$(READLINE_BUILD_DIR)" install;',
+            1, true))
+        assert.truthy(makefile:find(
+            "$(READLINE_SELECTION_CONFIG): $(LUA_EXTRACTED) FORCE",
+            1, true))
     end)
 end)

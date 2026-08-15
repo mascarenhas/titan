@@ -60,9 +60,12 @@ package), the build verifies and unpacks the pinned GNU Readline 8.3 base
 archive, applies the checked-in combination of its first three official
 patches, configures it with the same `PREFIX`, and installs its headers, static
 archive, documentation, and license under a private prefix-local directory
-before building Lua. The applied patch and license are checksum-bound to the
-selection stamp, and repair builds validate a sibling stage before replacing
-an existing private installation. A system Readline development package is not
+before building Lua. Parallel Make completes Lua extraction before writing the
+selection file inside that tree; fallback compilation may remain parallel, but
+Readline's upstream install pass is serialized because its archive replacement
+rules race. The applied patch and license are checksum-bound to the selection
+stamp, and repair builds validate a sibling stage before replacing an existing
+private installation. A system Readline development package is not
 required, but the fallback still needs a linkable curses, `tinfo`, or `termcap`
 provider.
 If automatic terminal-library detection fails, install the platform's
