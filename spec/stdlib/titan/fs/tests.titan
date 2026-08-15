@@ -68,6 +68,13 @@ local function cleanup_watcher(watcher: fs.Watcher)
   end)
 end
 
+local function wait_for_watcher_subscription()
+  -- Darwin creates its FSEvents stream on a separate CF thread after
+  -- uv_fs_event_start returns. Match libuv's own portable test boundary before
+  -- performing the mutation whose notification a case is meant to observe.
+  timer.sleep(100)
+end
+
 function test_fs_binary_delimiters_and_close(context: test.Context)
   runtime_test.run(function ()
     local root = support.new_workspace(context)
@@ -412,6 +419,63 @@ function test_fs_independent_continuations(context: test.Context)
   end)
 end
 
+function test_fs_condition_waiter_resume_coalescing(context: test.Context)
+  runtime_test.run(function ()
+    local root = support.new_workspace(context)
+    local watcher_path = root .. "/watcher.dat"
+    support.cleanup_path(context, watcher_path)
+    local watcher = fs.watcher()
+    cleanup_watcher(watcher)
+    watcher:watch(root)
+    wait_for_watcher_subscription()
+
+    local watcher_phase = 0
+    local watcher_gate = false
+    local watcher_gate_seen = false
+    local watcher_events: {fs.WatcherEvent}? = nil
+    local watcher_task = async.run<value, value>(function (): value
+      watcher_phase = 1
+      async.suspend()
+      watcher_phase = 2
+      watcher_events = watcher:poll()
+      timer.sleep(50)
+      watcher_gate_seen = watcher_gate
+      return nil
+    end)
+    task_support.cleanup_task(
+        watcher_task, "coalesced watcher Task cleanup")
+    while watcher_phase == 0 do timer.yield() end
+    watcher_task:resume()
+    while watcher_phase < 2 do timer.yield() end
+    test.assert(watcher_events == nil,
+                "watcher poll did not remain pending for the race")
+
+    support.write_file_synchronously(watcher_path, "watcher")
+    watcher_task:resume()
+    timer.sleep(10)
+    watcher_gate = true
+    async.join(watcher_task)
+    test.assert(watcher_task:status():has_succeeded() and
+                watcher_gate_seen and watcher_events ~= nil,
+                "watcher callback duplicated an explicit resume")
+
+    local canonical = fs.realpath(watcher_path)
+    local found = false
+    local events = watcher_events as {fs.WatcherEvent}
+    for index = 1, #events do
+      if watcher_event_matches(events[index], "created", canonical, nil) then
+        found = true
+      end
+    end
+    test.assert(found, "coalesced watcher wake lost its event")
+
+    timer.sleep(60)
+    test.assert(watcher_task:status():has_succeeded(),
+                "a stale wake changed a terminal filesystem Task")
+    fs.unlink(watcher_path)
+  end)
+end
+
 function test_fs_watcher_directory_events_and_canonical_paths(context: test.Context)
   runtime_test.run(function ()
     local root = support.new_workspace(context)
@@ -443,6 +507,7 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
 
     watcher:watch(root)
     watcher:watch(root .. "/.")
+    wait_for_watcher_subscription()
     test.assert(watcher:is_watching(root) and
                 watcher:is_watching(root .. "/."),
                 "watcher did not recognize an equivalent canonical path")
@@ -486,6 +551,7 @@ function test_fs_watcher_directory_events_and_canonical_paths(context: test.Cont
     fs.mkdir(removed_directory)
     local canonical_removed = fs.realpath(removed_directory)
     watcher:watch(removed_directory)
+    wait_for_watcher_subscription()
     fs.rmdir(removed_directory)
     wait_for_watcher_event(
         watcher, "deleted", canonical_removed, canonical_nested)
@@ -516,6 +582,7 @@ function test_fs_watcher_file_scope(context: test.Context)
     local watcher = fs.watcher()
     cleanup_watcher(watcher)
     watcher:watch(watched_path)
+    wait_for_watcher_subscription()
 
     fs.write_file(sibling_path, "sibling-after")
     fs.write_file(watched_path, "after")
@@ -534,6 +601,7 @@ function test_fs_watcher_file_scope(context: test.Context)
     fs.write_file(watched_path, "rewatched")
     watcher:watch(watched_path)
     watcher:watch(sibling_path)
+    wait_for_watcher_subscription()
     watcher:stop(watched_path)
     test.assert(not watcher:is_watching(watched_path) and
                 watcher:is_watching(sibling_path),
@@ -556,6 +624,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
     local watcher = fs.watcher()
     cleanup_watcher(watcher)
     watcher:watch(root)
+    wait_for_watcher_subscription()
 
     local entered = false
     local first_result: {fs.WatcherEvent}? = nil
@@ -567,6 +636,11 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
     task_support.cleanup_task(first, "filesystem watcher first poll cleanup")
     while not entered do timer.yield() end
     timer.yield()
+
+    first:resume()
+    timer.sleep(10)
+    test.assert(first_result == nil and watcher:is_watching(root),
+                "an unrelated Task resume completed a blocked poll")
 
     expect_failure(function ()
       watcher:poll()

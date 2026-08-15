@@ -17,4 +17,14 @@ static inline int titan_spec_remove_if_present(const char *path)
     return -1;
 }
 
+static inline int titan_spec_write_file(
+    const char *path, const char *contents, size_t length)
+{
+    FILE *file = fopen(path, "wb");
+    if (file == NULL) return -1;
+    int failed = length != 0 && fwrite(contents, 1, length, file) != length;
+    if (fclose(file) != 0) failed = 1;
+    return failed ? -1 : 0;
+}
+
 #endif

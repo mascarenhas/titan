@@ -45,7 +45,9 @@ with `realpath`, follows symbolic links, and watches the resulting canonical
 absolute path. A directory watch observes its immediate entries but does not
 recurse. A file watch reports the canonical file path. Watching the same
 canonical target more than once is idempotent, including through another
-symlink or `.`/`..` spelling.
+symlink or `.`/`..` spelling. On Darwin, libuv activates its FSEvents stream
+asynchronously after accepting a registration, so portable tests let the
+Runtime settle before issuing the mutation whose event they observe.
 
 Event payloads are canonical absolute paths. `created` and `deleted` are
 best-effort classifications of a native rename/entry-change notification:
@@ -60,8 +62,9 @@ precedence when libuv sets both rename and change flags.
 look up the one canonical registration. An equivalent symlink or `.`/`..`
 spelling therefore names the same watch without retaining a parallel alias
 index. A missing or unwatched path is a no-op for `stop` and false for
-`is_watching`. A direct file watch retires when its deletion notification is
-drained.
+`is_watching`. A direct file notification checks the watched path even when
+libuv supplies only `UV_CHANGE`, because Darwin reports direct-file deletion
+that way; a missing file maps to `deleted` and retires the registration.
 
 `clear()` stops and closes every registration and is idempotent after it
 finishes. Each explicit stop uses `uv_fs_event_stop`, removes the registration
@@ -78,7 +81,9 @@ with the source-private `uv.suspend()`. If there are no registrations, it
 returns an empty Array immediately. At most one `poll` may be in progress for a Watcher.
 Cancelling a blocked poll detaches only that Task's callback waiter. It neither
 loses buffered notifications nor stops registrations that another Task may
-poll.
+poll. A wake requested through the public `Task:resume` method only causes the
+poll to recheck notifications and registrations; it suspends again rather than
+returning an empty Array while work remains to await.
 
 A negative native watcher callback status is copied like every other raw
 notification. Draining it closes that registration and produces a
@@ -104,6 +109,18 @@ Only `UV_ENOENT` returns `nil`. All other failures remain
 returns `nil` from both. Watcher classification uses `lstat`, so a newly
 created dangling symlink still counts as an existing entry.
 
+## ABI 0.25 boundary
+
+This feature advances the compiled-module ABI from 0.24 to 0.25. The optional
+`stat`/`lstat` result changes each raw native return carrier from `Udata *` to
+`TValue`, and the optional cancellation action adds a `TValue` parameter to
+`titan.async.suspend` and its source-private `titan.uv` entry. The new watcher
+and cancellation declarations also extend serialized standard-module
+interfaces. `TITAN_VER "0.25"`, suffix `_0_25`, `TITAN_PATH_0_25`,
+`lib/titan/0.25`, `share/titan/0.25`, and `stdlib_0_25` advance together. This
+is a clean-start prototype boundary: 0.24 providers and installation trees are
+rejected and preserved, not migrated, reconciled, or cleaned up.
+
 ## High-level implementation boundary
 
 This feature deliberately lives in `titan/fs.titan`, as requested. It uses the
@@ -127,15 +144,17 @@ string before `uv_fs_req_cleanup`.
 The accepted native request does not rely on the suspended Task stack for
 lifetime. A traced module-owned request-root Map keeps each accepted owner alive
 until its callback. The callback cleans the request exactly once, removes that
-root, records its result/error, and resumes the Task with
-`uv.resume_task_from_callback` only if its waiter remains attached. The caller
-waits with `uv.suspend` until the owner is complete. Its optional suspend
-cancellation action detaches the waiter synchronously before requesting the
-next-turn wake. Because Titan execution is cooperative, a libuv callback cannot
-interleave with that detach. The accepted short request is not passed to
-`uv_cancel`; its eventual callback performs cleanup without resuming the
-cancelled Task. An immediate negative submission performs cleanup, removes the
-root, and raises without suspending.
+root, records its result/error, and wakes only an attached waiter through
+`uv.resume_condition_waiter_from_callback`. That helper retains the ordinary
+direct callback path, but if a coalesced public `Task:resume` timer already owns
+the continuation, it leaves that timer as the sole wake; the caller reads the
+published request state after either route. The caller waits with `uv.suspend`
+until the owner is complete. Its optional suspend cancellation action detaches
+the waiter synchronously before requesting the next-turn wake. Because Titan
+execution is cooperative, a libuv callback cannot interleave with that detach.
+The accepted short request is not passed to `uv_cancel`; its eventual callback
+performs cleanup without resuming the cancelled Task. An immediate negative
+submission performs cleanup, removes the root, and raises without suspending.
 
 ### Watch handles
 
@@ -152,17 +171,24 @@ handle.
 
 The foreign fs-event callback copies the nullable filename while libuv owns
 it, records the integer event mask/status in a traced raw-notification Array,
-and wakes the one waiter. It never yields and never calls `stat`/`lstat`,
-because no async Task is current inside a libuv callback. A stored ordinary
-Titan handler contains every error before the foreign entry returns.
+and wakes the one waiter through the same condition-waiter helper. An already
+pending public-resume timer remains the sole continuation, so an event cannot
+advance the poller and leave that timer to resume a later suspension. The
+callback never yields or calls `stat`/`lstat`, because no async Task is current
+inside a libuv callback. A stored ordinary Titan handler contains every error
+before the foreign entry returns. If publication fails, it retires the exact
+waiter; any already-closing public-resume timer observes the terminal Task and
+returns without entering its coroutine again.
 
 `poll` detaches the currently buffered raw notifications while callbacks append
 to a fresh Array, then maps the detached records one-for-one in callback order.
 A directory filename is joined to the canonical watched directory; a missing
 filename is a coarse notification for the watched directory itself. A file notification
 always names the canonical watched file. For `UV_RENAME`, `poll` uses `lstat`
-to choose `created` versus `deleted`; if the watched root itself is gone, the
-root path is selected and the registration is retired. A conversion failure
+to choose `created` versus `deleted`; every direct-file notification performs
+the same existence check so Darwin's change-only deletion is classified. If
+the watched root itself is gone, the root path is selected and the registration
+is retired. A conversion failure
 maps that notification to `WatcherEvent.error` and mapping continues; there is
 no snapshot rollback or reset protocol.
 

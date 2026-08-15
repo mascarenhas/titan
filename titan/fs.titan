@@ -309,9 +309,7 @@ local function RealpathRequest:finish()
   self.payload = payload
   self.completed = true
   self:unroot()
-  if waiter then
-    uv.resume_task_from_callback(waiter, failed, payload)
-  end
+  if waiter then uv.resume_condition_waiter_from_callback(waiter) end
 end
 
 function realpath(path: string): string
@@ -377,7 +375,7 @@ local function Watcher:wake_from_callback()
   local waiter? = self.waiter
   if not waiter then return end
   self.waiter = nil
-  uv.resume_task_from_callback(waiter, false, nil)
+  uv.resume_condition_waiter_from_callback(waiter)
 end
 
 local function Watcher:fail_from_callback(failure: value,
@@ -598,7 +596,9 @@ local function Watcher:map_notification(
     end
 
     local path = registration:event_path(notification.filename)
-    if (notification.events & (libuv.UV_RENAME as integer)) ~= 0 then
+    local renamed =
+      (notification.events & (libuv.UV_RENAME as integer)) ~= 0
+    if renamed or not registration.directory then
       local exists = true
       if registration.directory and not lstat(registration.path) then
         path = registration.path
@@ -612,8 +612,8 @@ local function Watcher:map_notification(
         self:remove_registration(registration)
         registration:close(true)
       end
-      if exists then return WatcherEvent.created(path) end
-      return WatcherEvent.deleted(path)
+      if not exists then return WatcherEvent.deleted(path) end
+      if renamed then return WatcherEvent.created(path) end
     end
     return WatcherEvent.modified(path)
   catch
@@ -663,12 +663,14 @@ function Watcher:poll(): {WatcherEvent}
   end
   if #self.registrations == 0 then return {} end
 
-  self.waiter = task
   local cancel_action = function ()
     if self.waiter == task then self.waiter = nil end
   end
   defer cancel_action()
-  uv.suspend(cancel_action)
+  while #self.notifications == 0 and #self.registrations > 0 do
+    self.waiter = task
+    uv.suspend(cancel_action)
+  end
   if #self.notifications > 0 then
     return self:drain_notifications()
   end

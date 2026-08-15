@@ -472,6 +472,14 @@ local function resume_task_from_callback(task: Task, failed: boolean,
   end
 end
 
+-- Condition waiters publish their result through an owning request or queue.
+-- Preserve the direct callback path unless an explicit-resume timer already
+-- owns the continuation; that timer then remains the sole wake.
+local function resume_condition_waiter_from_callback(task: Task)
+  if task.resume_pending then return end
+  resume_task_from_callback(task, false, nil)
+end
+
 local function ticker_callback(ticker: uv_timer_t)
   local waiter? = ticker.waiting
   if waiter then
@@ -525,6 +533,10 @@ local function start_timer(task: Task, milliseconds: integer,
   local runtime = task.runtime
   local native: owned *libuv.uv_timer_t = libuv.uv_timer_t.new()
   local completion = function ()
+    if terminal(task.state) then
+      task.resume_pending = false
+      return
+    end
     do
       resume_task_from_callback(task, failed, payload)
     catch

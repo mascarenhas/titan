@@ -233,13 +233,13 @@ end
 local function installed_stdlib_container()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.24/" .. STDLIB_CONTAINER
+    return prefix .. "/lib/titan/0.25/" .. STDLIB_CONTAINER
 end
 
 local function installed_stdlib_archive()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.24/" .. STDLIB_STATIC_ARCHIVE
+    return prefix .. "/lib/titan/0.25/" .. STDLIB_STATIC_ARCHIVE
 end
 
 local function quote(word)
@@ -1000,6 +1000,11 @@ describe("libuv Makefile configuration", function()
             assert.truthy(body:find("lua.lua_settop(L, top)", 1, true), body)
         end
         assert.same(expected, declarations)
+        local _, condition_wakes = source:gsub(
+            "uv%.resume_condition_waiter_from_callback%(", "")
+        assert.equal(2, condition_wakes)
+        assert.falsy(source:find(
+            "uv.resume_task_from_callback", 1, true))
 
         local object = "titan/fs.o"
         assert.truthy(file_exists(object), object)
@@ -1160,6 +1165,19 @@ describe("libuv Makefile configuration", function()
 
     it("resumes one-shot timer Tasks only from close completion", function()
         local task_source = read_file("titan/uv/task.titan")
+        local condition_start = assert(task_source:find(
+            "local function resume_condition_waiter_from_callback(",
+            1, true))
+        local condition_stop = assert(task_source:find(
+            "\nend", condition_start, true))
+        local condition = task_source:sub(
+            condition_start, condition_stop - 1)
+        assert.matches("if task.resume_pending then return end",
+            condition, 1, true)
+        assert.matches(
+            "resume_task_from_callback(task, false, nil)",
+            condition, 1, true)
+
         local timer_start = assert(task_source:find(
             "local function start_timer(", 1, true))
         local timer_stop = assert(task_source:find(
@@ -1174,6 +1192,8 @@ describe("libuv Makefile configuration", function()
             completion_start, callback_start - 1)
         local timer_callback = timer_body:sub(callback_start)
 
+        assert.matches("if terminal(task.state) then", completion, 1, true)
+        assert.matches("task.resume_pending = false", completion, 1, true)
         assert.matches("resume_task_from_callback", completion, 1, true)
         assert.matches("begin_close", timer_callback, 1, true)
         assert.matches("owner.root_index, completion", timer_callback, 1,
@@ -2103,7 +2123,7 @@ esac
             local build_log = root .. "/build.log"
 
             local payload = assert(staticmetadata.render(
-                "fixture.module", "0.24", "{}"))
+                "fixture.module", "0.25", "{}"))
             local initializer = assert(staticmetadata.c_initializer(payload))
             write_file(source, string.format([[
 #if defined(__APPLE__)
@@ -2219,7 +2239,7 @@ printf 'build\n' >> %s
                     tostring(code) .. ")")
                 assert.equal("build\nbuild\nbuild\n", read_file(build_log))
                 assert.truthy(staticmetadata.scan_archive(static_archive, {
-                    expected_abi = "0.24",
+                    expected_abi = "0.25",
                 }))
 
                 assert.truthy(os.remove(provider))
@@ -2546,7 +2566,7 @@ exit 73
                 '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
                 '"$shim_dir/math.lua" "$shim_dir/lua.lua"',
                 '"$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"',
-                'test_source=$prefix_rel/share/titan/0.24/src/titan/test.titan',
+                'test_source=$prefix_rel/share/titan/0.25/src/titan/test.titan',
                 '"$test_source"',
                 'rm -f "$test_source"',
                 '"$shim_dir/io.lua"',
@@ -2974,7 +2994,7 @@ exit 73
                 "http os peg string math lua iteration gc test; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
-                "share/titan/0.24/src/titan/test.titan", 1, true), workflow)
+                "share/titan/0.25/src/titan/test.titan", 1, true), workflow)
 
             local groups = read_file("spec/support/ci_test_groups.sh")
             for _, retained in ipairs({

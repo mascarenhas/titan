@@ -105,6 +105,13 @@ the same Task to resume on its ordinary next-turn timer. Suspend submits no nati
 and registers the Task on no persistent handle. The suspension remains inert
 until `Task:resume` or cancellation requests a wake.
 
+This public change is part of compiled-module ABI 0.25. ABI 0.24 exposed no
+formal `suspend` parameter; ABI 0.25 publishes `SuspendCancelAction` and adds a
+`TValue` option parameter to the exact native entry, changing the serialized
+`titan.async` interface and exact signature. Every other ABI-0.24 layout and
+contract is retained. ABI-0.24 providers remain preserved prior-version state
+and are not migrated or cleaned up.
+
 `Task:resume` is synchronous, does not yield its caller, and never enters the
 target coroutine inline. If the target is explicitly suspended, nonterminal,
 and has no wake pending, it sets one coalescing bit and creates an ordinary
@@ -115,6 +122,16 @@ works identically from the main-thread terminal-notification path or another
 running Task. Repeated requests before close completion coalesce. This
 guarantees callback-deferred delivery without promising one exact libuv
 iteration.
+
+A source-private condition-waiter callback publishes completion through its
+request or queue, then calls `resume_condition_waiter_from_callback`. With no
+public wake pending, the helper retains the ordinary direct operation-callback
+continuation. If the Task's coalescing bit is already set, it leaves the
+Task-owned timer as the sole continuation instead. The callback can therefore
+neither duplicate that wake nor advance the Task into a later suspension that
+the older timer would incorrectly resume. If callback-boundary failure retires
+the Task while such a timer is closing, the timer completion clears the pending
+bit and returns without entering the terminal coroutine.
 
 ## High-level bounded channels
 

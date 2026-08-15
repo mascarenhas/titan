@@ -30,15 +30,18 @@ sequence: it recovers the owner through `uv_req_get_data`, reads the callback
 closure from the owner's second user value, obtains the main Lua state from the
 request loop, invokes the closure's exact native entry, and restores the Lua
 stack top. The ordinary Titan handler copies `uv_fs_get_ptr` to a Titan string
-before `uv_fs_req_cleanup`, removes the Map root, and records the result. It
-calls `resume_task_from_callback` only while the request still has a waiter.
-The optional action passed to `uv.suspend` detaches that waiter synchronously
-when cancellation is requested, before scheduling the next-turn wake. Titan's
-cooperative execution means no libuv callback can interleave with that state
-change. The short accepted request is not sent through `uv_cancel`; its
-eventual callback still performs cleanup without resuming the Task. A negative
-submission result cleans and unroots the request immediately because libuv will
-not call it back.
+before `uv_fs_req_cleanup`, removes the Map root, and records the result. While
+the request still has a waiter it calls the source-private
+`resume_condition_waiter_from_callback`. That helper directly advances the
+ordinary callback path, but returns without advancing when the Task already has
+a coalesced public-resume timer; that timer remains the sole continuation and
+the caller reads the published request state. The optional action passed to
+`uv.suspend` detaches that waiter synchronously when cancellation is requested,
+before scheduling the next-turn wake. Titan's cooperative execution means no
+libuv callback can interleave with that state change. The short accepted request
+is not sent through `uv_cancel`; its eventual callback still performs cleanup
+without resuming the Task. A negative submission result cleans and unroots the
+request immediately because libuv will not call it back.
 
 ## Watcher ownership
 
@@ -62,18 +65,30 @@ The complete registration is placed in `Runtime.handle_roots` before
 `uv_fs_event_init`, so the native handle and everything its callback reads stay
 reachable. An init rejection removes that root because libuv never accepted
 the handle. A start rejection transfers it to ordinary asynchronous close
-ownership.
+ownership. Acceptance from `uv_fs_event_start` is not a backend-readiness
+callback: on Darwin, libuv creates the FSEvents stream asynchronously on its CF
+thread. Native watcher cases therefore let the Runtime settle after registration
+before issuing the mutation under test; the facade does not claim replay of an
+event that predates native subscription.
 
 `fs_watcher_event_cb` recovers the registration from handle data and the main
 Lua state from the handle's loop. Its Titan handler copies the nullable
 filename while libuv owns it and appends one `WatcherNotification` containing
 the registration, copied filename, event mask, and status. It then clears and
-resumes an installed poller with `resume_task_from_callback`. The callback does
-not perform filesystem I/O and does not synchronously block the event loop. A
-suspend cancellation action removes only its exact Task waiter before requesting
-the next-turn wake; the scope defer repeats that idempotent detach on every
-other exit. Shared registrations and every buffered notification remain
-available to the next polling Task.
+wakes an installed poller through the same condition-waiter helper. If a public
+resume is already pending, its Task-owned timer remains the sole continuation;
+the callback cannot advance the poller and leave that timer to resume a later
+suspension. The callback does not perform filesystem I/O and does not
+synchronously block the event loop. If copying or queue publication raises, the
+outer handler retires the exact waiter; an already-closing public-resume timer
+observes that terminal state and returns without entering the coroutine again.
+A suspend cancellation action removes only its exact Task waiter before
+requesting the next-turn wake; the scope defer
+repeats that idempotent detach on every other exit. A wake requested through the
+public `Task:resume` API does not end the poll: after every suspension, the poll
+rechecks both the notification queue and registration set and suspends again
+while it still has work to await. Shared registrations and every buffered
+notification remain available to the next polling Task.
 
 ## One-to-one drain mapping
 
@@ -84,16 +99,19 @@ next batch. It allocates an equally indexed `{WatcherEvent}` and maps every
 
 - a negative native status closes the registration and becomes `error`;
 - `UV_RENAME` takes precedence and an asynchronous facade `lstat` chooses
-  `created` or `deleted`; and
-- every other ordinary notification becomes `modified`.
+  `created` or `deleted`;
+- every direct-file notification also checks the watched path, because Darwin
+  reports deletion of that file as `UV_CHANGE`; and
+- every other ordinary directory notification becomes `modified`.
 
 Directory filenames are joined to the canonical directory. A missing filename
 or a direct file notification names the registration path itself. Before
 classifying a directory child, the mapper checks whether the watched root still
 exists. A deleted watched root is selected as the event path and its
-registration is retired. The same retirement happens for a directly watched
-file. An `OperationError` raised by one mapping becomes that notification's
-`WatcherEvent.error`; there is no raw-batch rollback or watcher reset.
+registration is retired. A missing directly watched file is likewise emitted
+as `deleted` and retired regardless of its native event bit. An `OperationError`
+raised by one mapping becomes that notification's `WatcherEvent.error`; there
+is no raw-batch rollback or watcher reset.
 
 ## Stopping and closing handles
 
@@ -139,3 +157,12 @@ native aggregate outside LuaCov. Build-boundary coverage in
 symbols, direct libuv references, close guard, and combined-provider ownership.
 The serialized standard-library fixture pins the appended public
 `titan.fs` interface.
+
+These changes advance the compiled-module ABI from 0.24 to 0.25. In particular,
+`stat` and `lstat` now return `Stat?`, changing their exact raw C return carrier
+from `Udata *` to `TValue`, while the cancellation protocol adds an optional
+action parameter to `titan.async.suspend` and its source-private `titan.uv`
+entry. Both the serialized public interfaces and native signatures therefore
+require the 0.25 marker; every other ABI-0.24 layout and contract is retained.
+A 0.24 provider is rejected before either boundary is used and remains
+preserved rather than migrated or cleaned up.
