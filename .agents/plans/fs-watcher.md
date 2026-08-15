@@ -15,6 +15,7 @@ union WatcherEvent
   created: string
   deleted: string
   modified: string
+  error: async.OperationError
 end
 
 function watcher(): Watcher
@@ -51,41 +52,42 @@ best-effort classifications of a native rename/entry-change notification:
 `poll` checks `lstat` when it processes the notification. The target may have
 changed again by then, and libuv or the operating system may coalesce,
 duplicate, or omit detail. The stream is a change hint, not a durable journal,
-and no total ordering or one-event-per-operation contract is promised. A
-native notification with both `UV_RENAME` and `UV_CHANGE` contributes the
-rename classification first and `modified` second.
+and no total ordering or one-event-per-operation contract is promised. Each
+native notification maps to exactly one `WatcherEvent`; `UV_RENAME` takes
+precedence when libuv sets both rename and change flags.
 
-`stop(path)` stops the one canonical registration, regardless of which stored
-alias names it, and is a no-op for an unwatched or now-missing path.
-`is_watching(path)` uses the same identity rule. The Watcher retains stable
-absolute alias keys as well as the canonical key so the original spelling can
-still stop/query a registration after the target has been deleted and a fresh
-`realpath` is impossible. Stopping one alias is not reference counting: the
-canonical registration and all of its aliases become inactive.
+`stop(path)` and `is_watching(path)` resolve the supplied spelling again and
+look up the one canonical registration. An equivalent symlink or `.`/`..`
+spelling therefore names the same watch without retaining a parallel alias
+index. A missing or unwatched path is a no-op for `stop` and false for
+`is_watching`. A direct file watch retires when its deletion notification is
+drained.
 
-`clear()` logically stops every registration and is idempotent. It calls
-`uv_fs_event_stop` before scheduling each handle's asynchronous `uv_close`, so
-no new event callbacks begin after `clear` returns. Notifications already
-copied into the Watcher remain buffered; callers may use one final `poll()` to
-drain them. `stop`, `clear`, a registration error, and direct-target deletion
-wake a blocked poll when they remove the final live registration.
+`clear()` stops and closes every registration and is idempotent after it
+finishes. Each explicit stop uses `uv_fs_event_stop`, removes the registration
+from the Watcher's live identity state, transfers the rooted handle to the
+ordinary asynchronous `uv_close` owner, and waits for close completion. While
+that clear is active, a new `poll` or second `clear` raises. Notifications
+already copied into the Watcher remain buffered; callers may use one final
+`poll()` to drain them. `stop`, `clear`, a registration error, and direct-target
+deletion wake a blocked poll when they remove the final live registration.
 
 `poll()` drains the notifications that are currently buffered. If none are
 buffered while at least one registration is active, it blocks the current Task
-with `async.suspend()`. If there are no registrations, it returns an empty
-Array immediately. At most one `poll` may be in progress for a Watcher. The
-predicate is checked in a loop because `Task:resume()` is public and wakes are
-coalesced. Cancelling a blocked poll detaches only its waiter; it neither loses
-buffered notifications nor stops shared registrations.
+with the source-private `uv.suspend()`. If there are no registrations, it
+returns an empty Array immediately. At most one `poll` may be in progress for a Watcher.
+Cancelling a blocked poll detaches only that Task's callback waiter. It neither
+loses buffered notifications nor stops registrations that another Task may
+poll.
 
-A negative native watcher callback status is contained inside the callback,
-retires that registration, wakes the waiter, and makes the next `poll` raise an
-`async.OperationError`. No Titan error may unwind through libuv.
+A negative native watcher callback status is copied like every other raw
+notification. Draining it closes that registration and produces a
+`WatcherEvent.error(async.OperationError)` value; `poll` does not raise for an
+ordinary event-conversion failure. No Titan error may unwind through libuv.
 
-A Watcher with live registrations belongs to their async Runtime. Once all
-registrations are stopped it may be reused. If a forgotten registration is
-closed by Runtime shutdown, the facade discards that stale generation before
-it starts work in a later Runtime.
+`watcher()` permanently binds the new Watcher to the active async Runtime and
+its loop. Every later operation requires that same Runtime to remain active;
+a Watcher is not reset or reused by another Runtime after shutdown.
 
 ## Metadata correction
 
@@ -107,7 +109,11 @@ created dangling symlink still counts as an existing entry.
 This feature deliberately lives in `titan/fs.titan`, as requested. It uses the
 public libuv FFI plus the existing direct-source access to `titan.uv`'s current
 Runtime, error conversion, callback-entry types, and handle-root/close helpers.
-It does not add a scheduler operation or a new `titan.uv` public API.
+Waiting close adds one local, cancellation-insensitive `HandleCloseCall` to the
+private scheduler protocol; it does not add a public `titan.uv` API. The
+existing suspend protocol gains an optional nonyielding, nonraising cancellation
+action, exposed as `async.SuspendCancelAction?`, so owner-specific code can
+detach its waiter before the ordinary next-turn wake.
 
 ### `realpath`
 
@@ -118,21 +124,26 @@ closure, the loop gives the main Lua state, and the closure gives `_mod` and
 its exact native entry. The callback copies `uv_fs_get_ptr(req)` to a Titan
 string before `uv_fs_req_cleanup`.
 
-A direct `async.suspend` is cancellation-sensitive, unlike a normal
-`titan.uv` filesystem `Call`, so the accepted native request must not rely on
-the suspended Task stack for lifetime. A traced module-owned request-root Array
-keeps every accepted owner alive until its callback, including after Task
-cancellation or an unrelated public `Task:resume`. The callback cleans the
-request exactly once, removes that root, records its result/error, and resumes
-the Task. The caller loops on `suspend` until the owner is complete. An
-immediate negative submission performs cleanup/removes the root and raises
-without suspending.
+The accepted native request does not rely on the suspended Task stack for
+lifetime. A traced module-owned request-root Map keeps each accepted owner alive
+until its callback. The callback cleans the request exactly once, removes that
+root, records its result/error, and resumes the Task with
+`uv.resume_task_from_callback` only if its waiter remains attached. The caller
+waits with `uv.suspend` until the owner is complete. Its optional suspend
+cancellation action detaches the waiter synchronously before requesting the
+next-turn wake. Because Titan execution is cooperative, a libuv callback cannot
+interleave with that detach. The accepted short request is not passed to
+`uv_cancel`; its eventual callback performs cleanup without resuming the
+cancelled Task. An immediate negative submission performs cleanup, removes the
+root, and raises without suspending.
 
 ### Watch handles
 
 Each canonical registration owns exactly one `owned *uv_fs_event_t`, one exact
 callback closure, its Runtime/root index, canonical path, directory/file flag,
-stable aliases, and dense Watcher index. The owner is placed in
+and dense Watcher index. One integer Watcher operation state distinguishes
+idle, polling, clearing, and their supported poll-plus-clear overlap; it is not
+a collection of independent lifecycle flags. The owner is placed in
 `Runtime.handle_roots` before `uv_fs_event_init`. Init rejection unroots it;
 start rejection transfers the initialized handle through the ordinary
 asynchronous close owner. Successful stop uses `uv_fs_event_stop` and then the
@@ -145,15 +156,15 @@ and wakes the one waiter. It never yields and never calls `stat`/`lstat`,
 because no async Task is current inside a libuv callback. A stored ordinary
 Titan handler contains every error before the foreign entry returns.
 
-`poll` detaches one raw snapshot while leaving callbacks free to append a newer
-snapshot. It translates the detached records in callback order. A directory
-filename is joined to the canonical watched directory; a missing filename is a
-coarse notification for the watched directory itself. A file notification
+`poll` detaches the currently buffered raw notifications while callbacks append
+to a fresh Array, then maps the detached records one-for-one in callback order.
+A directory filename is joined to the canonical watched directory; a missing
+filename is a coarse notification for the watched directory itself. A file notification
 always names the canonical watched file. For `UV_RENAME`, `poll` uses `lstat`
 to choose `created` versus `deleted`; if the watched root itself is gone, the
-root path is selected and the registration is retired. If classification is
-cancelled or raises, the complete detached raw snapshot is restored ahead of
-newer notifications so no accepted notification is lost.
+root path is selected and the registration is retired. A conversion failure
+maps that notification to `WatcherEvent.error` and mapping continues; there is
+no snapshot rollback or reset protocol.
 
 ## Validation and documentation
 
@@ -164,9 +175,9 @@ Behavioral coverage belongs only in the native Titan standard-library suite at
   non-`ENOENT` error;
 - `realpath` canonicalization, symlinks, missing paths, NUL rejection,
   independent concurrent requests, and cancellation-safe completion;
-- empty and buffered polls, a blocked poll, external resume, cancellation,
+- empty and buffered polls, a blocked poll, cancellation,
   second-poller rejection, and last-stop/clear wakeup;
-- idempotent aliases, multiple watched paths, stop/clear/re-watch, and final
+- idempotent canonical paths, multiple watched paths, stop/clear/re-watch, and final
   draining;
 - directory create/delete/modify hints, direct file watching, canonical
   payloads, and nonrecursive directory scope without assuming exact counts or
