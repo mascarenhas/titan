@@ -1661,6 +1661,7 @@ describe("libuv Makefile configuration", function()
                 "LUA_RANLIB=$(LUA_RANLIB)",
                 "$(RUNTIME_BUILD_CONFIG) | $(TITAN_RUNTIME_LUA_LIB) " ..
                 "$(LIBBT_LIB)",
+                "$(LTITANLIB_BUILD_CONFIG) $(LUA_INSTALL_STAMP)",
                 "LIBUV_PROVIDER_LDFLAGS=$(LIBUV_PROVIDER_LDFLAGS)",
                 "MEMBERS=$(notdir $(TITAN_RUNTIME_OBJECTS))",
                 "STDLIB_NATIVE_PREREQS := $(TITAN_RUNTIME_OBJECTS)",
@@ -1721,6 +1722,7 @@ describe("libuv Makefile configuration", function()
             local ok, output, why, code = run_argv({
                 "make", "--no-print-directory", "-Bn",
                 "HOST_OS=Darwin", "TITAN_EXTRA_LDFLAGS=",
+                "LUA_INSTALL_STAMP=/dev/null", "--old-file=/dev/null",
                 "titan-runtime/bootstrap/titan.so",
             })
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
@@ -1816,6 +1818,10 @@ exit 64
         assert.falsy(makefile:find(
                 "$(LIBUV_LIB): $(LIBUV_EXTRACTED) Makefile", 1, true),
             makefile)
+        assert.truthy(makefile:find(
+            '\n\t+$(RECURSIVE_WRAPPER_GUARD) cmake --build ' ..
+                '"$(LIBUV_BUILD_DIR)" --target uv_a',
+            1, true), makefile)
         for _, input in ipairs({
             "LIBUV_VERSION=$(LIBUV_VERSION)",
             "LIBUV_BUILD_PROFILE=$(LIBUV_BUILD_PROFILE)",
@@ -2412,6 +2418,9 @@ exit 73
                 "RANLIB=$(call make_shell_quote,$(RANLIB))",
                 "CLANG_FORMAT ?= clang-format",
                 "TITAN_NO_LINE_DIRECTIVES ?=",
+                "RECURSIVE_WRAPPER_GUARD = flags=$${MAKEFLAGS%% *}; " ..
+                    'case "$$flags" in -*) ;; *q*) exit 1 ;; ' ..
+                    "*n*|*t*) exit 0 ;; esac;",
                 "export CLANG_FORMAT TITAN_EXTRA_CPPFLAGS " ..
                 "TITAN_EXTRA_CFLAGS \\\n\t" ..
                 "TITAN_EXTRA_LDFLAGS TITAN_NO_LINE_DIRECTIVES",
@@ -2451,6 +2460,11 @@ exit 73
             }) do
                 assert.truthy(makefile:find(contract, 1, true), contract)
             end
+            local _, recursive_test_count = makefile:gsub(
+                "\n\t%+%$%(RECURSIVE_WRAPPER_GUARD%) unset LUA_PATH " ..
+                    "LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5",
+                "")
+            assert.equal(2, recursive_test_count, makefile)
             local stdlib_config_start = assert(makefile:find(
                 "$(STDLIB_CONFIG_STAMP): FORCE", 1, true))
             local stdlib_config_end = assert(makefile:find(
@@ -2929,7 +2943,7 @@ exit 73
                 "openssl-${{ env.OPENSSL_VERSION }}.tar.gz",
                 "Build the pinned private llhttp support",
                 "Build the pinned bundled OpenSSL support",
-                "run: make -j2 openssl",
+                "run: make openssl",
                 "Canary source-rock installation with system libuv and OpenSSL",
                 "LIBUV_MODE=system OPENSSL_MODE=system",
                 "OPENSSL_MODE=system",
@@ -2940,6 +2954,10 @@ exit 73
                 assert.truthy(workflow:find(contract, 1, true), contract)
             end
             assert.equal(0, count_literal(workflow, "clang-format"), workflow)
+            assert.equal(1, count_literal(workflow,
+                'MAKEFLAGS: "-j4"'), workflow)
+            assert.equal(1, count_literal(workflow,
+                'TITAN_JOBS: "4"'), workflow)
             assert.equal(2, select(2, workflow:gsub(
                 'TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE=' ..
                 '"%$GITHUB_WORKSPACE/libuv%-build/libuv[.]a"', "")))
@@ -3072,7 +3090,7 @@ exit 73
                     "Build sanitizer-enabled native dependencies",
                     {
                         "make lua", "make libbacktrace", "make libuv",
-                        "make llhttp", "make -j2 openssl",
+                        "make llhttp", "make openssl",
                     },
                 },
                 {

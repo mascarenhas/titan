@@ -61,7 +61,15 @@ not add epicycles around what may be a misunderstood simpler design.
   dispatch.** Use `workflow_dispatch` as the **pre-merge check** with
   `gh workflow run ci.yml --ref <branch>`. Linux jobs are push-only and are not
   repeated by that macOS dispatch. The regular push graph has exactly three
-  standard `ubuntu-24.04` jobs with explicit 30-minute timeouts:
+  standard `ubuntu-24.04` jobs with explicit 30-minute timeouts. Every workflow
+  job exports `MAKEFLAGS=-j4` and `TITAN_JOBS=4`: Make may overlap independent
+  native prerequisites, and each `titanc` process may overlap only generated-C
+  object compilations. Indirect LuaRocks/CMake recursive wrappers preserve the
+  Make jobserver through guarded recursive recipe lines, and `ltitanlib.o`
+  waits for the prefix Lua installation that owns its public headers. Busted
+  2.3 has no shard option, and the compiler specs share checkout-root artifact
+  names plus one LuaCov state file, so each Busted invocation remains unsharded.
+  The aggregate native Titan suite also remains one fast executable.
 
   1. `test-linux-stdlib` is the prepared-tree producer. It prepares a clean
      ABI-0.24 prefix, builds and installs the optimized bundled provider, and
@@ -308,6 +316,7 @@ erase these explicit build-policy inputs.
 
 ```sh
 make test                                           # prepare/install the rock, then run the complete mixed suite
+TITAN_JOBS=4 make -j4 test                           # supported four-way build/compiler variant
 luarocks test                                       # test an already current install; PREFIX/ROCKS_TREE are not required when its bin is on PATH
 make rock-test BUSTED_FILTER='parser' TITAN_FILTER='^http[.]tests[.]'  # independent domain filters
 make stdlib-test                                    # complete retained stdlib/runtime category without coverage
@@ -323,7 +332,7 @@ busted spec/parser_spec.lua                         # single spec file
 busted spec/coder/coder_spec.lua --filter='for loop' # single test (Lua pattern on test name)
 
 ./titanc [--print-ast] [--pretty-print] [--test] [--no-uv-bootstrap] \
-  [-v] [--static] [--no-line-directives] \
+  [-v] [-j jobs] [--static] [--no-line-directives] \
   [--lua <luasrc>] [--tree <srcroot>] \
   [-l lib1,lib2] [-X object...] <module>...
 ```

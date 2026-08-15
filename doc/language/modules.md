@@ -391,7 +391,7 @@ The compiler driver is invoked with dot-separated *module names*, not
 file paths:
 
 ```sh
-titanc [--print-ast] [--pretty-print] [-v] [--static] [--test] \
+titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
   [--no-uv-bootstrap] [--no-line-directives] [--lua <luasrc>] \
   [--tree <srcroot>] [-l lib1,lib2] [-X object...] <module>...
 ```
@@ -406,6 +406,10 @@ titanc [--print-ast] [--pretty-print] [-v] [--static] [--test] \
   uses its matched `<root>/src/lua-5.5.1` headers, `liblua.a`, and
   `libtitan.a`.
 * `-l/--link` adds extra C libraries to the link line (FFI use).
+* `-j/--jobs <jobs>` bounds concurrent generated-C object compilations. It
+  defaults to the positive integer in `TITAN_JOBS`, or to `1` when that
+  variable is unset. Parsing, checking, C generation, generated-header work,
+  and final linking remain ordered in the compiler process.
 * `--static` prefers self-describing Titan `.a` providers over `.so`
   providers for ordinary dependencies. It still permits DSO/source fallback
   and does not request a fully static system executable.

@@ -440,6 +440,11 @@ LTITANLIB_BUILD_CONFIG := titan-runtime/.titan-ltitanlib-build-config
 STDLIB_CONFIG_STAMP := titan-runtime/.titan-stdlib-build-config
 STDLIB_COMPLETION_STAMP := titan-runtime/.titan-stdlib-complete
 
+# These wrappers indirectly launch recursive Make processes. The `+` recipe
+# marker preserves the parent jobserver; this guard keeps that marker from
+# turning Make's dry-run, query, or touch modes into real wrapper execution.
+RECURSIVE_WRAPPER_GUARD = flags=$${MAKEFLAGS%% *}; case "$$flags" in -*) ;; *q*) exit 1 ;; *n*|*t*) exit 0 ;; esac;
+
 .PHONY: all help lua readline readline-bundled-install \
 	check-readline-tools luarocks libbacktrace libuv libuv-config llhttp \
 	check-llhttp-tools openssl openssl-config check-openssl-tools \
@@ -1197,7 +1202,7 @@ $(LIBUV_LIB): $(LIBUV_EXTRACTED) $(LIBUV_BUILD_CONFIG)
 		$(LIBUV_CMAKE_FLAGS) \
 		$(if $(strip $(LIBUV_BUILD_CFLAGS)),-DCMAKE_C_FLAGS=$(call make_shell_quote,$(LIBUV_BUILD_CFLAGS)))
 	@echo "==> Building libuv $(LIBUV_VERSION)"
-	cmake --build "$(LIBUV_BUILD_DIR)" --target uv_a
+	+$(RECURSIVE_WRAPPER_GUARD) cmake --build "$(LIBUV_BUILD_DIR)" --target uv_a
 	@test -f "$(LIBUV_LIB)" || { \
 	  echo "ERROR: libuv build completed without producing $(LIBUV_LIB)." >&2; exit 1; \
 	}
@@ -1754,7 +1759,7 @@ $(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS) $(RUNTIME_ARCHIVE_CONFIG)
 	$(AR) rcs "$@" $(TITAN_RUNTIME_OBJECTS)
 	$(RANLIB) "$@"
 
-$(LTITANLIB_O): titan-runtime/ltitanlib.c $(LTITANLIB_BUILD_CONFIG)
+$(LTITANLIB_O): titan-runtime/ltitanlib.c $(LTITANLIB_BUILD_CONFIG) $(LUA_INSTALL_STAMP)
 	$(CC) $(ROCK_CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-I"$(ROCK_LUA_INCDIR)" -c "$<" -o "$@"
 
@@ -2221,10 +2226,10 @@ rock-test: busted-test ## Run retained Busted specs, then native Titan stdlib te
 	$(MAKE) titan-stdlib-test
 
 test: lua luarocks ## Build/install the rock and run the suite via `luarocks test`
-	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	+$(RECURSIVE_WRAPPER_GUARD) unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	  PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
 	  "$(PREFIX)/bin/luarocks" make --force
-	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	+$(RECURSIVE_WRAPPER_GUARD) unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 		PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
 		EXTRA_TEST_FLAGS=$(call make_shell_quote,$(strip $(EXTRA_TEST_FLAGS))) \
 		BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
