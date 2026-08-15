@@ -1,5 +1,8 @@
 local uv = import "uv"
 local str = import "string"
+local libuv = foreign import "uv.h"
+local lua = foreign import "lua.h"
+local ffi = foreign import "titan/ffi.h"
 
 local READ_CHUNK_BYTES = 64 * 1024
 
@@ -16,13 +19,81 @@ record Stat
   modified_nanoseconds: integer
 end
 
+local type FsNoargCallbackEntry =
+  foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata) -> ()
+local type FsEventCallbackEntry =
+  foreign (*lua.lua_State, *ffi.Udata, *ffi.CClosure, *ffi.Udata,
+           const *ffi.titan_ffi_char, lua.lua_Integer,
+           lua.lua_Integer) -> ()
+
+local record RealpathRequest
+  local handle: owned *libuv.uv_fs_t
+  local callback: (RealpathRequest) -> ()
+  local waiter: uv.Task?
+  local completed: boolean
+  local failed: boolean
+  local payload: value
+end
+
+local record WatchRegistration
+  local handle: owned *libuv.uv_fs_event_t
+  local callback: (WatchRegistration, const *ffi.titan_ffi_char,
+                   integer, integer) -> ()
+  local runtime: uv.Runtime
+  local path: string
+  local directory: boolean
+  local index: integer
+  -- Slot in Runtime.handle_roots; zero after ownership moves to close_cb.
+  local runtime_root_index: integer
+end
+
+local record WatcherNotification
+  local registration: WatchRegistration
+  local filename: string?
+  local events: integer
+  local status: integer
+end
+
+local realpath_roots: {RealpathRequest: boolean} = {}
+
+foreign function fs_realpath_cb(request: *libuv.uv_fs_t)
+  local owner = libuv.uv_req_get_data(
+      request as *libuv.uv_req_t) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local L = libuv.uv_loop_get_data(request.loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as FsNoargCallbackEntry
+  local top = lua.lua_gettop(L)
+  entry(L, module, callback, owner)
+  lua.lua_settop(L, top)
+end
+
+foreign function fs_watcher_event_cb(handle: *libuv.uv_fs_event_t,
+                                      filename: const *ffi.titan_ffi_char,
+                                      events: ffi.titan_ffi_int,
+                                      status: ffi.titan_ffi_int)
+  local native_handle = handle as *libuv.uv_handle_t
+  local owner = libuv.uv_handle_get_data(native_handle) as *ffi.Udata
+  local callback = ffi.lmacro_clCvalue(owner.uv[1].uv)
+  local loop = libuv.uv_handle_get_loop(native_handle)
+  local L = libuv.uv_loop_get_data(loop) as *lua.lua_State
+  local module = ffi.lmacro_uvalue(callback.upvalue[0])
+  local entry = ffi.lmacro_pvalue(
+      callback.upvalue[2]) as FsEventCallbackEntry
+  local top = lua.lua_gettop(L)
+  entry(L, module, callback, owner, filename,
+        events as lua.lua_Integer, status as lua.lua_Integer)
+  lua.lua_settop(L, top)
+end
+
 function open(path: string, mode: string): File
   return File.new(uv.fs_open(path, mode), "")
 end
 
 function File:read(max_bytes: integer?): string?
   local requested = READ_CHUNK_BYTES
-  if max_bytes then requested = max_bytes as integer end
+  if max_bytes then requested = max_bytes end
   if requested <= 0 then
     raise "file read size must be positive"
   end
@@ -57,7 +128,7 @@ function File:read_until(delimiter: string,
     if #tail > 0 then boundary = tail .. chunk end
     local match: integer? = str.find(boundary, delimiter)
     if match then
-      local match_first = match as integer
+      local match_first = match
       local match_end = match_first + #delimiter - 1
       local result_end = match_end
       if chop then result_end = match_first - 1 end
@@ -135,16 +206,34 @@ function write_file(path: string, data: string)
   file:write(data)
 end
 
-function stat(path: string): Stat
-  local size, kind, mode, modified_seconds, modified_nanoseconds =
-    uv.fs_stat(path)
-  return Stat.new(size, kind, mode, modified_seconds, modified_nanoseconds)
+local function missing_path(failure: value): boolean
+  if failure is uv.OperationError then
+    local operation = failure as uv.OperationError
+    return operation.code == (libuv.UV_ENOENT as integer)
+  end
+  return false
 end
 
-function lstat(path: string): Stat
-  local size, kind, mode, modified_seconds, modified_nanoseconds =
-    uv.fs_lstat(path)
-  return Stat.new(size, kind, mode, modified_seconds, modified_nanoseconds)
+function stat(path: string): Stat?
+  do
+    local size, kind, mode, modified_seconds, modified_nanoseconds =
+      uv.fs_stat(path)
+    return Stat.new(size, kind, mode, modified_seconds, modified_nanoseconds)
+  catch
+    if missing_path(error) then return nil end
+    raise
+  end
+end
+
+function lstat(path: string): Stat?
+  do
+    local size, kind, mode, modified_seconds, modified_nanoseconds =
+      uv.fs_lstat(path)
+    return Stat.new(size, kind, mode, modified_seconds, modified_nanoseconds)
+  catch
+    if missing_path(error) then return nil end
+    raise
+  end
 end
 
 function tmpname(): string
@@ -185,4 +274,403 @@ end
 
 function list(path: string): {string}
   return uv.fs_list(path)
+end
+
+local function RealpathRequest:root()
+  realpath_roots[self] = true
+end
+
+local function RealpathRequest:unroot()
+  realpath_roots[self] = nil
+end
+
+local function RealpathRequest:finish()
+  local waiter? = self.waiter
+  self.waiter = nil
+  local failed = false
+  local payload: value = nil
+  do
+    defer libuv.uv_fs_req_cleanup(self.handle)
+    local result = libuv.uv_fs_get_result(self.handle) as integer
+    if result < 0 then
+      failed = true
+      payload = uv.make_error(result, "fs.realpath")
+    else
+      local resolved = libuv.uv_fs_get_ptr(
+          self.handle) as const *ffi.titan_ffi_char
+      payload = resolved as string
+    end
+  catch
+    failed = true
+    payload = error
+  end
+
+  self.failed = failed
+  self.payload = payload
+  self.completed = true
+  self:unroot()
+  if waiter then
+    uv.resume_task_from_callback(waiter, failed, payload)
+  end
+end
+
+function realpath(path: string): string
+  local task = uv.running_task()
+  local runtime = task.runtime
+  uv.accepting_work(runtime, "resolve a filesystem path")
+  local checked = uv.checked_text(path, "fs.realpath")
+  local native: owned *libuv.uv_fs_t = libuv.uv_fs_t.new()
+  local callback = function (request: RealpathRequest)
+    request:finish()
+  end
+  local request = RealpathRequest.new(
+      native, callback, task, false, false, nil)
+  request:root()
+  libuv.uv_req_set_data((native as *libuv.uv_fs_t) as *libuv.uv_req_t,
+                        request as ffi.titan_ffi_void_ptr)
+  local status = libuv.uv_fs_realpath(
+      runtime.loop, native, checked, fs_realpath_cb)
+  if status < 0 then
+    libuv.uv_fs_req_cleanup(native)
+    request:unroot()
+    raise uv.make_error(status, "fs.realpath")
+  end
+
+  local cancel_action = function ()
+    if request.waiter == task then request.waiter = nil end
+  end
+  defer cancel_action()
+  while not request.completed do uv.suspend(cancel_action) end
+  if request.failed then raise request.payload end
+  return request.payload as string
+end
+
+local WATCHER_IDLE = 0
+local WATCHER_POLLING = 1
+local WATCHER_CLEARING = 2
+local WATCHER_POLLING_CLEARING = 3
+
+record Watcher
+  local runtime: uv.Runtime
+  local registrations: {WatchRegistration}
+  local paths: {string: WatchRegistration}
+  local notifications: {WatcherNotification}
+  local waiter: uv.Task?
+  local operation_state: integer
+end
+
+union WatcherEvent
+  created: string
+  deleted: string
+  modified: string
+  error: uv.OperationError
+end
+
+local function Watcher:wake()
+  local waiter? = self.waiter
+  if not waiter then return end
+  self.waiter = nil
+  waiter:resume()
+end
+
+local function Watcher:wake_from_callback()
+  local waiter? = self.waiter
+  if not waiter then return end
+  self.waiter = nil
+  uv.resume_task_from_callback(waiter, false, nil)
+end
+
+local function Watcher:fail_from_callback(failure: value,
+                                            trace: string)
+  local waiter? = self.waiter
+  if waiter then
+    self.waiter = nil
+    uv.fail_task_at_callback_boundary(waiter, failure, trace)
+  else
+    uv.report_task_error(failure, trace)
+  end
+end
+
+local function Watcher:require_active_runtime()
+  local active? = uv.active_runtime
+  if not active or active ~= self.runtime then
+    raise "Watcher Runtime is not active"
+  end
+  uv.accepting_work(self.runtime, "use a filesystem watcher")
+end
+
+local function Watcher:require_running_task(): uv.Task
+  self:require_active_runtime()
+  return uv.running_task()
+end
+
+local function Watcher:remove_registration(
+    registration: WatchRegistration)
+  if registration.index == 0 then return end
+  self.paths[registration.path] = nil
+  local index = registration.index
+  local last_index = #self.registrations
+  local last = self.registrations[last_index]
+  self.registrations[index] = last
+  last.index = index
+  self.registrations[last_index] = nil
+  registration.index = 0
+  if #self.registrations == 0 then self:wake() end
+end
+
+local function WatchRegistration:stop()
+  local status = libuv.uv_fs_event_stop(self.handle)
+  if status < 0 then raise uv.make_error(status, "fs.watcher.stop") end
+end
+
+local function WatchRegistration:close(wait: boolean)
+  local handle =
+    (self.handle as *libuv.uv_fs_event_t) as *libuv.uv_handle_t
+  if wait then
+    uv.wait_handle_close(self.runtime, handle, self,
+                         self.runtime_root_index)
+  else
+    uv.close_handle(self.runtime, handle, self,
+                    self.runtime_root_index, nil, nil)
+  end
+  self.runtime_root_index = 0
+end
+
+local function Watcher:receive_event(
+    registration: WatchRegistration,
+    filename: const *ffi.titan_ffi_char,
+    events: integer, status: integer)
+  local copied: string? = nil
+  if filename then copied = filename as string end
+  self.notifications[#self.notifications + 1] =
+    WatcherNotification.new(registration, copied, events, status)
+  self:wake_from_callback()
+end
+
+local function Watcher:new_registration(
+    path: string, directory: boolean): WatchRegistration
+  local runtime = self.runtime
+  local native: owned *libuv.uv_fs_event_t = libuv.uv_fs_event_t.new()
+  local callback = function (registration: WatchRegistration,
+                             filename: const *ffi.titan_ffi_char,
+                             events: integer, status: integer)
+    do
+      self:receive_event(registration, filename, events, status)
+    catch
+      self:fail_from_callback(error, traceback)
+    end
+  end
+  local registration = WatchRegistration.new {
+    handle = native,
+    callback = callback,
+    runtime = runtime,
+    path = path,
+    directory = directory,
+    index = 0,
+    runtime_root_index = 0,
+  }
+  registration.runtime_root_index = uv.root_handle(runtime, registration)
+  local init_status = libuv.uv_fs_event_init(runtime.loop, native)
+  if init_status < 0 then
+    uv.unroot_handle(runtime, registration.runtime_root_index)
+    registration.runtime_root_index = 0
+    raise uv.make_error(init_status, "fs.watcher.init")
+  end
+  local handle = (native as *libuv.uv_fs_event_t) as *libuv.uv_handle_t
+  libuv.uv_handle_set_data(
+      handle, registration as ffi.titan_ffi_void_ptr)
+  local start_status = libuv.uv_fs_event_start(
+      native, fs_watcher_event_cb, path, 0)
+  if start_status < 0 then
+    registration:close(false)
+    raise uv.make_error(start_status, "fs.watcher.watch")
+  end
+  return registration
+end
+
+local function optional_realpath(path: string): string?
+  do
+    return realpath(path)
+  catch
+    if missing_path(error) then return nil end
+    raise
+  end
+end
+
+local function Watcher:find_registration(
+    path: string): WatchRegistration?
+  local canonical? = optional_realpath(path)
+  if not canonical then return nil end
+  return self.paths[canonical]
+end
+
+function watcher(): Watcher
+  local task = uv.running_task()
+  uv.accepting_work(task.runtime, "create a filesystem watcher")
+  return Watcher.new(task.runtime, {}, {}, {}, nil, WATCHER_IDLE)
+end
+
+function Watcher:watch(path: string)
+  self:require_running_task()
+  local canonical = realpath(path)
+  local existing? = self.paths[canonical]
+  if existing then return end
+
+  local info? = stat(canonical)
+  if not info then
+    raise uv.make_error(libuv.UV_ENOENT as integer,
+                        "fs.watcher.watch")
+  end
+  local registration = self:new_registration(
+      canonical, info.kind == "directory")
+  registration.index = #self.registrations + 1
+  self.registrations[registration.index] = registration
+  self.paths[canonical] = registration
+end
+
+function Watcher:stop(path: string)
+  self:require_running_task()
+  if #self.registrations == 0 then return end
+  local registration? = self:find_registration(path)
+  if not registration then return end
+  registration:stop()
+  self:remove_registration(registration)
+  registration:close(true)
+end
+
+function Watcher:is_watching(path: string): boolean
+  self:require_running_task()
+  if #self.registrations == 0 then return false end
+  local registration? = self:find_registration(path)
+  return registration ~= nil
+end
+
+local function Watcher:begin_clear()
+  if self.operation_state == WATCHER_CLEARING or
+     self.operation_state == WATCHER_POLLING_CLEARING then
+    raise "Watcher already has an active clear"
+  end
+  if self.operation_state == WATCHER_POLLING then
+    self.operation_state = WATCHER_POLLING_CLEARING
+  else
+    self.operation_state = WATCHER_CLEARING
+  end
+end
+
+local function Watcher:finish_clear()
+  if self.operation_state == WATCHER_POLLING_CLEARING then
+    self.operation_state = WATCHER_POLLING
+  else
+    self.operation_state = WATCHER_IDLE
+  end
+end
+
+function Watcher:clear()
+  self:require_running_task()
+  self:begin_clear()
+  defer self:finish_clear()
+  while #self.registrations > 0 do
+    local registration = self.registrations[#self.registrations]
+    registration:stop()
+    self:remove_registration(registration)
+    registration:close(true)
+  end
+end
+
+local function WatchRegistration:event_path(
+    filename: string?): string
+  if not self.directory or not filename then return self.path end
+  if self.path == "/" then return "/" .. filename end
+  return self.path .. "/" .. filename
+end
+
+local function Watcher:map_notification(
+    notification: WatcherNotification): WatcherEvent
+  do
+    local registration = notification.registration
+    if notification.status < 0 then
+      if registration.index > 0 then
+        self:remove_registration(registration)
+        registration:close(true)
+      end
+      return WatcherEvent.error(
+          uv.make_error(notification.status, "fs.watcher"))
+    end
+
+    local path = registration:event_path(notification.filename)
+    if (notification.events & (libuv.UV_RENAME as integer)) ~= 0 then
+      local exists = true
+      if registration.directory and not lstat(registration.path) then
+        path = registration.path
+        exists = false
+      else
+        exists = lstat(path) ~= nil
+      end
+      if not exists and path == registration.path and
+         registration.index > 0 then
+        registration:stop()
+        self:remove_registration(registration)
+        registration:close(true)
+      end
+      if exists then return WatcherEvent.created(path) end
+      return WatcherEvent.deleted(path)
+    end
+    return WatcherEvent.modified(path)
+  catch
+    if error is uv.OperationError then
+      return WatcherEvent.error(error as uv.OperationError)
+    end
+    raise
+  end
+end
+
+local function Watcher:drain_notifications(): {WatcherEvent}
+  local notifications = self.notifications
+  self.notifications = {}
+  local events: {WatcherEvent} = {}
+  for index = 1, #notifications do
+    events[index] = self:map_notification(notifications[index])
+  end
+  return events
+end
+
+local function Watcher:begin_poll()
+  if self.operation_state == WATCHER_CLEARING or
+     self.operation_state == WATCHER_POLLING_CLEARING then
+    raise "Watcher already has an active clear"
+  end
+  if self.operation_state == WATCHER_POLLING then
+    raise "Watcher already has an active poll"
+  end
+  self.operation_state = WATCHER_POLLING
+end
+
+local function Watcher:finish_poll()
+  if self.operation_state == WATCHER_POLLING_CLEARING then
+    self.operation_state = WATCHER_CLEARING
+  else
+    self.operation_state = WATCHER_IDLE
+  end
+end
+
+function Watcher:poll(): {WatcherEvent}
+  local task = self:require_running_task()
+  self:begin_poll()
+  defer self:finish_poll()
+
+  if #self.notifications > 0 then
+    return self:drain_notifications()
+  end
+  if #self.registrations == 0 then return {} end
+
+  self.waiter = task
+  local cancel_action = function ()
+    if self.waiter == task then self.waiter = nil end
+  end
+  defer cancel_action()
+  uv.suspend(cancel_action)
+  if #self.notifications > 0 then
+    return self:drain_notifications()
+  end
+  return {}
 end

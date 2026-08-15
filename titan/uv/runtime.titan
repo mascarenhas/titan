@@ -22,6 +22,13 @@ local record Runtime
   local exit_code: integer?
 end
 
+local record HandleCloseCall
+  local runtime: Runtime
+  local handle: *libuv.uv_handle_t
+  local keepalive: value
+  local root_index: integer
+end
+
 -- The callback closure retains the native owner and optional suspended Task.
 -- The record itself contains only the root slot and the callback in reviewed
 -- zero-based Udata slot 1 used by uv_close_cb.
@@ -333,7 +340,8 @@ end
 
 local function begin_close(runtime: Runtime, handle: *libuv.uv_handle_t,
                            keepalive: value, old_root_index: integer,
-                           completion: () -> ())
+                           completion: () -> ()): boolean
+  if libuv.uv_is_closing(handle) ~= 0 then return false end
   local callback = function (owner: CloseOwner)
     -- Capturing the native owner keeps its FFI handle alive through close_cb.
     local _keepalive = keepalive
@@ -345,24 +353,41 @@ local function begin_close(runtime: Runtime, handle: *libuv.uv_handle_t,
   if old_root_index > 0 then unroot_handle(runtime, old_root_index) end
   libuv.uv_handle_set_data(handle, owner as ffi.titan_ffi_void_ptr)
   libuv.uv_close(handle, uv_close_cb)
+  return true
 end
 
 local function close_handle(runtime: Runtime, handle: *libuv.uv_handle_t,
                             keepalive: value, old_root_index: integer,
-                            task: Task?, payload: value)
+                            task: Task?, payload: value): boolean
   local completion = function ()
     if task then
       do
-        resume_task_from_callback(task as Task, false, payload)
+        resume_task_from_callback(task, false, payload)
       catch
-        fail_task_at_callback_boundary(task as Task, error, traceback)
+        fail_task_at_callback_boundary(task, error, traceback)
       end
     end
   end
-  if task then
-    (task as Task).cancel_action = nil
+  local submitted = begin_close(
+      runtime, handle, keepalive, old_root_index, completion)
+  if submitted and task then task.cancel_action = nil end
+  return submitted
+end
+
+local function HandleCloseCall:dispatch(task: Task): Immediate?
+  if close_handle(self.runtime, self.handle, self.keepalive,
+                  self.root_index, task, nil) then
+    return nil
   end
-  begin_close(runtime, handle, keepalive, old_root_index, completion)
+  return Immediate.new(false, nil)
+end
+
+local function wait_handle_close(runtime: Runtime,
+                                 handle: *libuv.uv_handle_t,
+                                 keepalive: value,
+                                 root_index: integer)
+  await(Call.handle_close(HandleCloseCall.new(
+      runtime, handle, keepalive, root_index)))
 end
 
 local function walk_callback(owner: WalkOwner,

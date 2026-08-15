@@ -6,6 +6,7 @@ type OperationError = uv.OperationError
 type CancellationReason = uv.CancellationReason
 type TaskStatus = uv.TaskStatus
 type Task = uv.Task
+type SuspendCancelAction = () -> ()
 
 record ChannelReader
   local receive: () -> string
@@ -120,8 +121,8 @@ function running(): Task<value, value>
   return uv.running_task()
 end
 
-function suspend()
-  uv.suspend()
+function suspend(cancel_action: SuspendCancelAction?)
+  uv.suspend(cancel_action)
 end
 
 function version(): string
