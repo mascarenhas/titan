@@ -361,7 +361,7 @@ therefore not itself a stack-relocation hazard.
 
 ## ABI and search path
 
-The current compiled-module ABI is `0.24`. The error-handling control-flow
+The current compiled-module ABI is `0.25`. The error-handling control-flow
 machinery did not by itself require an ABI bump. The earlier ABI-0.10 change
 changed the `TitanVargX` structs from inline flexible-array backing
 objects to descriptor structs with an `args` pointer. That layout change
@@ -418,17 +418,20 @@ the source-local `titan.uv` schema/module prefix and adding the fixed physical-
 provider identity slot. ABI 0.23 retained all of this error machinery while
 moving callbacks into source and separating the module/nominal/member native-name
 contract. ABI 0.24 retains the machinery again while extending serialized
-interfaces for generic declarations. Errors raised by an Interface adapter,
+interfaces for generic declarations. ABI 0.25 retains all of this error
+machinery while changing the public `titan.fs.stat`/`lstat` results and
+`titan.async.suspend` parameter in serialized metadata and exact native
+signatures. Errors raised by an Interface adapter,
 strict guard, dynamic conversion, or failed exact downcast still use the same
 Titan error handler; all wrapper and adapter roots are ordinary Lua-traced
 values, so unwinding requires no resource-specific cleanup path.
 
 The compiler and runtime therefore agree on:
 
-* `TITAN_VER "0.24"`
-* `TITAN_VER_SUFFIX "_0_24"`
-* versioned binary path variable `TITAN_PATH_0_24`
-* default binary path `.;<root>/lib/titan/0.24`, with `<root>` recovered from
+* `TITAN_VER "0.25"`
+* `TITAN_VER_SUFFIX "_0_25"`
+* versioned binary path variable `TITAN_PATH_0_25`
+* default binary path `.;<root>/lib/titan/0.25`, with `<root>` recovered from
   the Lua `PREFIX`'s `package.cpath` in the currently supported layout where
   that path also names the equal Titan `ROCKS_TREE`
 

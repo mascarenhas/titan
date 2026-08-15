@@ -494,6 +494,6 @@ for the backing/proxy protocol, GC barriers, and lowering details.
 The second proxy user value was an ABI change in Titan 0.20. Providers from ABI
 0.17 through 0.19 use the earlier one-user-value Array layout. ABI 0.21
 retained the two-user-value layout while advancing the matched Lua runtime to
-5.5.1, and ABIs 0.22 through 0.24 retain it. The ordinary
+5.5.1, and ABIs 0.22 through 0.25 retain it. The ordinary
 compiled-provider ABI check rejects every prior ABI before either side
 exchanges an Array; Titan does not attempt an in-place compatibility shim.

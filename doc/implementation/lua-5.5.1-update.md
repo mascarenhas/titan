@@ -11,7 +11,10 @@ than only a public-API compatibility check. This chapter records the complete
 > retains the same Lua 5.5.1 contract again; its boundary moves native callbacks
 > into source and separates module, nominal owner, and member in callable
 > symbols. ABI 0.24 retains Lua 5.5.1 and those native layouts while extending
-> serialized interfaces for generic declarations.
+> serialized interfaces for generic declarations. ABI 0.25 retains the Lua
+> contract and every other ABI-0.24 layout while changing the serialized and
+> exact native signatures of `titan.fs.stat`/`lstat` and
+> `titan.async.suspend`.
 
 ## Scope and evidence
 

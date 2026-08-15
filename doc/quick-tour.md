@@ -5,7 +5,7 @@ Its syntax is intentionally familiar to Lua programmers, but its modules,
 records, containers, calls, and Lua boundaries all have statically checked
 types.
 
-This tour uses only APIs implemented by the ABI-0.24 compiler and standard
+This tour uses only APIs implemented by the ABI-0.25 compiler and standard
 library. It assumes that Titan has been installed as described in the
 [README](../README.md#install), and that the installation's `bin` directory is
 first on `PATH`. Run every `titanc` command from the directory that contains

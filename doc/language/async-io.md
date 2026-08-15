@@ -160,6 +160,13 @@ state; an
 ordinary `Task:resume()` does not call it. When omitted, `suspend()` retains its
 original behavior.
 
+The `SuspendCancelAction` alias and nil-accepting parameter enter the public
+compiled-module contract in ABI 0.25. ABI 0.24 exposed `suspend()` with no
+formal parameter; ABI 0.25 changes both serialized `titan.async` metadata and
+the exact native signature. The fixed-call nil-fill rule keeps an omitted
+argument equivalent to explicit nil. An ABI-0.24 provider remains preserved
+prior-version state and is rejected rather than migrated or adapted.
+
 The Task remains suspended until `Task:resume()` is called or someone cancels
 it. `resume()` does not enter the target Task inline. It synchronously requests
 a callback-deferred wake without yielding its caller, so it is valid from a

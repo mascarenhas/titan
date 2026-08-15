@@ -258,7 +258,10 @@ are part of the ABI-0.23 clean boundary. ABI-0.22 providers and objects must be
 rebuilt rather than mixed with an ABI-0.23 compiler/runtime. ABI 0.24 retains
 these native names but extends serialized interfaces for generics, so ABI-0.23
 providers likewise remain preserved prior-version state and cannot be mixed
-with the active compiler/runtime.
+with the active compiler/runtime. ABI 0.25 retains the native FFI naming while
+changing the public `titan.fs` and `titan.async` interfaces and exact native
+signatures; ABI-0.24 providers are preserved and rejected before metadata is
+decoded.
 
 ## Related chapters
 

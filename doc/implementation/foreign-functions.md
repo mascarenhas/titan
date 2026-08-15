@@ -540,7 +540,11 @@ active-layout predecessor, compatibility object, or cleanup path. ABI 0.24
 retains these native names and callback locations while extending serialized
 interfaces for generics; its marker, `_0_24`, `TITAN_PATH_0_24`,
 `lib/titan/0.24`, `share/titan/0.24`, and `stdlib_0_24` reject and preserve the
-0.23 provider without migration or cleanup.
+0.23 provider without migration or cleanup. ABI 0.25 retains those native
+names, callback locations, and generic layouts while changing the public
+`titan.fs` and `titan.async` interfaces and exact signatures; `_0_25`,
+`TITAN_PATH_0_25`, `lib/titan/0.25`, `share/titan/0.25`, and `stdlib_0_25`
+reject and preserve the 0.24 provider without migration or cleanup.
 
 Foreign declarations, allocation plans, and generated headers remain
 compiler-local. They add no public type descriptor or module-state slot, so the

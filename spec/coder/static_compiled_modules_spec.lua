@@ -973,6 +973,52 @@ end
             })
         assert.falsy(ok)
         assert.match("aliases output", err, 1, true)
+
+        ok, err = driver.validate_provider_output_paths(
+            workspace .. "/portable.so", {}, {
+                {
+                    path = workspace .. "/PortableCase.titan.h",
+                    owner = "uppercase header",
+                },
+                {
+                    path = workspace .. "/portablecase.titan.h",
+                    owner = "lowercase header",
+                },
+            })
+        assert.falsy(ok)
+        assert.match("aliases output", err, 1, true)
+
+        ok, err = driver.validate_provider_output_paths(
+            workspace .. "/portable-input.so",
+            { workspace .. "/portableinput.titan.h" }, {
+                {
+                    path = workspace .. "/PortableInput.titan.h",
+                    owner = "portable input header",
+                },
+            })
+        assert.falsy(ok)
+        assert.match("aliases input", err, 1, true)
+
+        ok, err = driver.validate_provider_output_paths(
+            workspace .. "/PortableTree.so", {}, {
+                {
+                    path = workspace .. "/portabletree.so/child",
+                    owner = "portable child output",
+                },
+            })
+        assert.falsy(ok)
+        assert.match("path hierarchy conflict", err, 1, true)
+
+        ok, err = driver.validate_provider_output_paths(
+            workspace .. "/portable-native.so",
+            { workspace .. "/portablenativetree/child.o" }, {
+                {
+                    path = workspace .. "/PortableNativeTree",
+                    owner = "portable native tree",
+                },
+            })
+        assert.falsy(ok)
+        assert.match("path hierarchy conflict", err, 1, true)
     end)
 
     it("rechecks planned shim ownership at publication", function()

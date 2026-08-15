@@ -776,8 +776,11 @@ During recovery, referenced external generic owners and alias targets are loaded
 before their arity and constraints are reconciled. DSO callable metadata,
 embedded archive metadata, and prefix-container recovery validate the same
 schema. An ABI-0.23 provider is rejected by its ABI entry before 0.24 types are
-decoded. Prior-version state is preserved; generics add no cross-ABI migration,
-cleanup, or compatibility provider.
+decoded. ABI 0.25 retains this generic schema and erased implementation; its
+boundary instead changes the public `titan.fs` and `titan.async` interfaces and
+exact signatures, so an ABI-0.24 provider is rejected before current metadata
+is decoded. Prior-version state is preserved; generics add no cross-ABI
+migration, cleanup, or compatibility provider.
 
 Metadata retains precise declared applications while native provenance remains
 owner-level. Selecting a static provider still records its physical archive as

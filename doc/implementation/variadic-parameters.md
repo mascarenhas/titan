@@ -141,7 +141,7 @@ symbol, and — its central job — turns every spread into either synthesized
 `types.lua` adds `varargtype` to `Type.Function`
 (`{"params","rettypes","vararg","varargtype","flexrettype"}`) and to
 `Type.Method` / `Type.StaticMethod` (whose declaration descriptors also carry
-`paramnames`). In the current ABI-0.24 `Type.Function`, the third positional
+`paramnames`). In the current ABI-0.25 `Type.Function`, the third positional
 `vararg` field is a required **reserved `false` sentinel** retained only to keep
 serialized constructor arity stable; it has no C or Titan variadic meaning. A
 Titan variadic sets `varargtype = T`. A direct foreign declaration instead has
@@ -599,7 +599,7 @@ flexible-array object (`lu_byte n_args; T args[]`) to a descriptor
 the struct layout did not; mixing 0.9 and 0.10 modules would misread the bytes
 after `n_args`, so they must live under different `TITAN_PATH` directories.
 
-The current ABI is **0.24**, newer than this variadic change. Flexible outputs
+The current ABI is **0.25**, newer than this variadic change. Flexible outputs
 reuse these descriptors but add `flexrettype` to serialized callable shapes and
 `_flexout`/`_flexwant` to native signatures. They shipped as ABI 0.14 rather
 than accepting both layouts under one marker. ABI 0.17 introduced the current
@@ -608,9 +608,9 @@ elements remain internal backing Tables, while generic/Lua-visible runs box
 them as proxies. ABI 0.18 and 0.19 preserved that descriptor contract; ABI
 0.20 kept it while adding the Array writer user value and callable
 strict-entry trailer; 0.21 retained those descriptors while advancing the
-embedded Lua contract to 5.5.1, and ABIs 0.22 through 0.24 retain them. ABI
-0.24 also retains the historical third `Function` constructor position as
-`false`; separating
+embedded Lua contract to 5.5.1, and ABIs 0.22 through 0.25 retain them. ABIs
+0.24 and 0.25 also retain the historical third `Function` constructor position
+as `false`; separating
 direct `CFunction` declarations is checker-internal and does not alter that
 schema or native convention. Closure adjustment wrappers reuse the same
 descriptor/native signature and add only private

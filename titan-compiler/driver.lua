@@ -15,8 +15,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.24"
-driver.TITAN_VER_SUFFIX = "_0_24"
+driver.TITAN_VER = "0.25"
+driver.TITAN_VER_SUFFIX = "_0_25"
 driver.LUA_VERSION = "5.5"
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
@@ -5314,9 +5314,11 @@ function driver.validate_program_output_paths(
             normalized = normalized_absolute_filename(path),
             physical = physical_absolute_filename(path),
         }
+        output.portable = output.physical:lower()
         for _, previous in ipairs(outputs) do
             if output.normalized == previous.normalized or
                output.physical == previous.physical or
+               output.portable == previous.portable or
                same_existing_file(output.raw, previous.raw) then
                 return nil, "program output '" .. output.normalized ..
                     "' for " .. owner .. " aliases output for " ..
@@ -5325,7 +5327,9 @@ function driver.validate_program_output_paths(
             if below(output.normalized, previous.normalized) or
                below(previous.normalized, output.normalized) or
                below(output.physical, previous.physical) or
-               below(previous.physical, output.physical) then
+               below(previous.physical, output.physical) or
+               below(output.portable, previous.portable) or
+               below(previous.portable, output.portable) then
                 return nil, "program output '" .. output.normalized ..
                     "' for " .. owner ..
                     " has a path hierarchy conflict with output '" ..
@@ -5371,9 +5375,11 @@ function driver.validate_program_output_paths(
             local raw_input = absolute_filename(path)
             local normalized_input = normalized_absolute_filename(path)
             local physical_input = physical_absolute_filename(path)
+            local portable_input = physical_input:lower()
             for _, output in ipairs(outputs) do
                 if normalized_input == output.normalized or
                    physical_input == output.physical or
+                   portable_input == output.portable or
                    same_existing_file(raw_input, output.raw) then
                     return nil, "program output '" .. output.normalized ..
                         "' for " .. output.owner .. " aliases input '" ..
@@ -5382,7 +5388,9 @@ function driver.validate_program_output_paths(
                 if below(normalized_input, output.normalized) or
                    below(output.normalized, normalized_input) or
                    below(physical_input, output.physical) or
-                   below(output.physical, physical_input) then
+                   below(output.physical, physical_input) or
+                   below(portable_input, output.portable) or
+                   below(output.portable, portable_input) then
                     return nil, "program output '" .. output.normalized ..
                         "' for " .. output.owner ..
                         " has a path hierarchy conflict with input '" ..
@@ -5425,9 +5433,11 @@ function driver.validate_provider_output_paths(
             owner = owner,
             mode = mode,
         }
+        output.portable = output.physical:lower()
         for _, previous in ipairs(outputs) do
             if output.normalized == previous.normalized
                or output.physical == previous.physical
+               or output.portable == previous.portable
                or same_existing_file(output.raw, previous.raw) then
                 return nil, "native provider output '" .. output.normalized ..
                     "' for " .. owner .. " aliases output for " ..
@@ -5436,7 +5446,9 @@ function driver.validate_provider_output_paths(
             if below(output.normalized, previous.normalized)
                or below(previous.normalized, output.normalized)
                or below(output.physical, previous.physical)
-               or below(previous.physical, output.physical) then
+               or below(previous.physical, output.physical)
+               or below(output.portable, previous.portable)
+               or below(previous.portable, output.portable) then
                 return nil, "native provider output '" .. output.normalized ..
                     "' for " .. owner ..
                     " has a path hierarchy conflict with output '" ..
@@ -5468,9 +5480,11 @@ function driver.validate_provider_output_paths(
             local raw_input = absolute_filename(path)
             local normalized_input = normalized_absolute_filename(path)
             local physical_input = physical_absolute_filename(path)
+            local portable_input = physical_input:lower()
             for _, output in ipairs(outputs) do
                 if normalized_input == output.normalized
                    or physical_input == output.physical
+                   or portable_input == output.portable
                    or same_existing_file(raw_input, output.raw) then
                     return nil, "native provider output '" ..
                         output.normalized .. "' for " .. output.owner ..
@@ -5479,7 +5493,9 @@ function driver.validate_provider_output_paths(
                 if below(normalized_input, output.normalized)
                    or below(output.normalized, normalized_input)
                    or below(physical_input, output.physical)
-                   or below(output.physical, physical_input) then
+                   or below(output.physical, physical_input)
+                   or below(portable_input, output.portable)
+                   or below(output.portable, portable_input) then
                     return nil, "native provider output '" ..
                         output.normalized .. "' for " .. output.owner ..
                         " has a path hierarchy conflict with input '" ..

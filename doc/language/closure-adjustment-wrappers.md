@@ -193,7 +193,7 @@ Closure adjustment wrappers do **not** add:
   analysis; or
 * a new Lua-facing target entry or a new provider ABI.
 
-The fixed Titan closure header and native function signatures are retained through ABI 0.24.
+The fixed Titan closure header and native function signatures are retained through ABI 0.25.
 Debug-library or C-API mutation of Titan's private closure upvalues opts out of
 these guarantees, exactly as it does for ordinary function closures.
 

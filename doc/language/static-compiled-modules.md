@@ -116,7 +116,7 @@ module key:
 ```lua
 return {
     ["geometry.shape"] = {
-        abi = "0.24",
+        abi = "0.25",
         types = "Module(...)",
     },
 }
@@ -225,13 +225,13 @@ behavior, not a hidden dependency manifest.
 The canonical installed ABI directory contains:
 
 ```text
-$ROCKS_TREE/lib/titan/0.24/titan.so
-$ROCKS_TREE/lib/titan/0.24/titan.a
+$ROCKS_TREE/lib/titan/0.25/titan.so
+$ROCKS_TREE/lib/titan/0.25/titan.a
 ```
 
 Both contain the eighteen `titan.*` logical standard modules, including
 `titan.io`, `titan.ssl`, `titan.url`, `titan.http`, and `titan.test`, under
-ABI 0.24. The DSO also
+ABI 0.25. The DSO also
 contains bare native `require "titan"` support, and the archive carries that
 support object without inventing a logical module named `titan`.
 
