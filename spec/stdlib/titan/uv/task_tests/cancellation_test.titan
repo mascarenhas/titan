@@ -127,3 +127,46 @@ function test_cancellation_crosses_close_callback(
                 "cancellation interrupted ownership-retiring close completion")
   end)
 end
+
+function test_suspend_cancellation_action_is_synchronous_and_specific(
+    context: test.Context)
+  runtime_test.run(function ()
+    local cancel_entered = false
+    local cancel_actions = 0
+    local cancelled = async.run<value, value>(function (): value
+      cancel_entered = true
+      async.suspend(function ()
+        cancel_actions = cancel_actions + 1
+      end)
+      return nil
+    end)
+    task_support.cleanup_task(cancelled,
+                              "suspend cancellation-action cleanup")
+    while not cancel_entered do timer.yield() end
+    cancelled:cancel(async.CancellationReason.simple(
+        "cancel explicit suspend"))
+    test.assert(cancel_actions == 1,
+                "suspend cancellation action was not synchronous")
+    async.join(cancelled)
+    test.assert(cancelled:status():has_cancelled() and
+                cancel_actions == 1,
+                "suspend cancellation action ran more than once")
+
+    local resume_entered = false
+    local resume_actions = 0
+    local resumed = async.run<value, value>(function (): value
+      resume_entered = true
+      async.suspend(function ()
+        resume_actions = resume_actions + 1
+      end)
+      return nil
+    end)
+    task_support.cleanup_task(resumed, "suspend resume cleanup")
+    while not resume_entered do timer.yield() end
+    resumed:resume()
+    async.join(resumed)
+    test.assert(resumed:status():has_succeeded() and
+                resume_actions == 0,
+                "ordinary resume ran the suspend cancellation action")
+  end)
+end

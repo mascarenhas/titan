@@ -94,6 +94,28 @@ local UV_FOREIGN_CALLBACKS = {
     { name = "uv_connection_cb", source = "titan/uv/tcp.titan", slot = 3,
       call = "entry(L, module, callback, owner, status as lua.lua_Integer)" },
 }
+local FS_FOREIGN_CALLBACKS = {
+    { name = "fs_realpath_cb", slot = 1,
+      call = "entry(L, module, callback, owner)" },
+    { name = "fs_watcher_event_cb", slot = 1,
+      call = "entry(L, module, callback, owner, filename, " ..
+          "events as lua.lua_Integer, status as lua.lua_Integer)" },
+}
+local FS_DIRECT_LIBUV_CALLS = {
+    "uv_fs_event_init",
+    "uv_fs_event_start",
+    "uv_fs_event_stop",
+    "uv_fs_get_ptr",
+    "uv_fs_get_result",
+    "uv_fs_realpath",
+    "uv_fs_req_cleanup",
+    "uv_handle_get_data",
+    "uv_handle_get_loop",
+    "uv_handle_set_data",
+    "uv_loop_get_data",
+    "uv_req_get_data",
+    "uv_req_set_data",
+}
 local LEGACY_UV_CALLBACKS = {
     "titan_uvshim_signal_cb",
     "titan_uvshim_process_exit_cb",
@@ -609,6 +631,9 @@ describe("libuv Makefile configuration", function()
             "record Task<A, B>",
             "local record TerminalRegistration<A, B>",
             "listener: (TaskStatus<A, B>) -> ()): () -> ()",
+            "local record SuspendCall",
+            "local cancel_action: CancelAction?",
+            "local function suspend(cancel_action: CancelAction?)",
             "local function run_internal(func: () -> value): " ..
                 "Task<value, value>",
             "Task<value, value>.new(",
@@ -621,6 +646,8 @@ describe("libuv Makefile configuration", function()
         for _, contract in ipairs({
             "function run<A, B>(func: () -> A): Task<A, B>",
             "function running(): Task<value, value>",
+            "type SuspendCancelAction = () -> ()",
+            "function suspend(cancel_action: SuspendCancelAction?)",
             "function channel<T>(size: integer?):",
             "local transfer: {T} = {}",
             "local send: (T) -> ()",
@@ -945,6 +972,58 @@ describe("libuv Makefile configuration", function()
             end
         end)
 
+    it("defines the filesystem callbacks in the high-level module", function()
+        local source_path = "titan/fs.titan"
+        local source = read_file(source_path)
+        local ast, parse_error = parser.parse(source_path, source)
+        assert.truthy(ast, parse_error and
+            parser.error_to_string(parse_error))
+        local declarations = {}
+        for _, node in ipairs(ast) do
+            if node._tag == "Ast.TopLevelForeignFunc" then
+                declarations[#declarations + 1] = node.name
+            end
+        end
+        local expected = {}
+        for _, callback in ipairs(FS_FOREIGN_CALLBACKS) do
+            expected[#expected + 1] = callback.name
+            local marker = "foreign function " .. callback.name .. "("
+            local first = assert(source:find(marker, 1, true), marker)
+            local last = assert(source:find("\nend", first, true), marker)
+            local body = source:sub(first, last):gsub("%s+", " ")
+            assert.truthy(body:find(
+                "owner.uv[" .. callback.slot .. "].uv", 1, true), body)
+            assert.truthy(body:find("callback.upvalue[0]", 1, true), body)
+            assert.truthy(body:find("callback.upvalue[2]", 1, true), body)
+            assert.truthy(body:find("libuv.uv_loop_get_data", 1, true), body)
+            assert.truthy(body:find(callback.call, 1, true), body)
+            assert.truthy(body:find("lua.lua_settop(L, top)", 1, true), body)
+        end
+        assert.same(expected, declarations)
+
+        local object = "titan/fs.o"
+        assert.truthy(file_exists(object), object)
+        local ok, output, why, code = run_argv(tool_argv("NM", "nm", object))
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        for _, callback in ipairs(FS_FOREIGN_CALLBACKS) do
+            local symbol = coder_names._linkage_symbol_name(
+                coder_names._foreign_func_name("titan.fs", callback.name))
+            assert.truthy(nm_has_symbol(output, symbol), symbol)
+        end
+
+        ok, output, why, code = run_argv(tool_argv("NM", "nm", "-u", object))
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        for _, function_name in ipairs(FS_DIRECT_LIBUV_CALLS) do
+            assert.truthy(nm_has_symbol(output, function_name),
+                object .. ": " .. function_name)
+        end
+
+        local makefile = read_file("Makefile")
+        assert.truthy(makefile:find("titan/fs.titan.h", 1, true))
+    end)
+
     it("keeps the reviewed standard-library roots, sources, and shims exact",
         function()
             assert.same(STDLIB_MODULES, makefile_words("STDLIB_MODULES"))
@@ -1108,11 +1187,16 @@ describe("libuv Makefile configuration", function()
         local close_stop = assert(runtime_source:find(
             "\nlocal function close_handle(", close_start, true))
         local close_body = runtime_source:sub(close_start, close_stop - 1)
+        local closing = assert(close_body:find(
+            "libuv.uv_is_closing(handle)", 1, true))
+        local root = assert(close_body:find(
+            "root_handle(runtime, owner)", 1, true))
         local unroot = assert(close_body:find(
             "unroot_handle(runtime, owner.root_index)", 1, true))
         local complete = assert(close_body:find("completion()", 1, true))
         local submit = assert(close_body:find(
             "libuv.uv_close(handle, uv_close_cb)", 1, true))
+        assert.is_true(closing < root)
         assert.is_true(unroot < complete)
         assert.is_true(complete < submit)
     end)
@@ -1399,9 +1483,18 @@ describe("libuv Makefile configuration", function()
                 "File:close", "File:is_closed", "read_file",
                 "write_file", "stat", "lstat", "tmpname", "tmpdir",
                 "homedir", "pwd", "chdir", "mkdir", "unlink", "rmdir",
-                "rename", "list",
+                "rename", "list", "realpath", "Watcher", "WatcherEvent",
+                "WatcherEvent.created", "WatcherEvent.deleted",
+                "WatcherEvent.modified", "WatcherEvent.error", "watcher",
+                "Watcher:watch", "Watcher:stop", "Watcher:is_watching",
+                "Watcher:clear", "Watcher:poll",
             }, public_declarations(path))
-            assert_ordered(read_file(path),
+            local source = read_file(path)
+            assert.truthy(source:find(
+                "function stat(path: string): Stat?", 1, true))
+            assert.truthy(source:find(
+                "function lstat(path: string): Stat?", 1, true))
+            assert_ordered(source,
                 "function tmpname(): string",
                 "return uv.fs_tmpname()",
                 "function tmpdir(): string",

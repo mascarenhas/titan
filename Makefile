@@ -358,7 +358,7 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/math.titan titan/lua.titan titan/iteration.titan titan/gc.titan \
 	titan/test.titan
 STDLIB_GENERATED_FOREIGN_HEADERS := titan/coroutine.titan.h \
-	titan/uv/uv.titan.h titan/http/http.titan.h
+	titan/fs.titan.h titan/uv/uv.titan.h titan/http/http.titan.h
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
 	titan/url.lua titan/http.lua titan/os.lua \

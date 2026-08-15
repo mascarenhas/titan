@@ -59,6 +59,7 @@ local record TurnCall
 end
 
 local record SuspendCall
+  local cancel_action: CancelAction?
 end
 
 local record SleepCall
@@ -86,6 +87,7 @@ local union Call
   sleep: SleepCall
   ticker_tick: TickerTickCall
   ticker_close: TickerCloseCall
+  handle_close: HandleCloseCall
 
   fs_open: FsOpenCall
   fs_read: FsReadCall
@@ -126,6 +128,7 @@ end
 local function Call:is_cancellation_affected(): boolean
   case self
   when ticker_close then return false
+  when handle_close then return false
   when fs_close then return false
   when tcp_close then return false
   when stream_close then return false
@@ -253,6 +256,7 @@ local function dispatch_call(task: Task, call: Call): Immediate?
   when sleep: operation then return operation:dispatch(task)
   when ticker_tick: operation then return operation:dispatch(task)
   when ticker_close: operation then return operation:dispatch(task)
+  when handle_close: operation then return operation:dispatch(task)
 
   when fs_open: operation then return operation:dispatch(task)
   when fs_read: operation then return operation:dispatch(task)
@@ -590,7 +594,9 @@ end
 local function SuspendCall:dispatch(task: Task): Immediate?
   task.suspended = true
   task.resume_pending = false
+  local requested? = self.cancel_action
   task.cancel_action = function ()
+    if requested then requested() end
     task:resume()
   end
   return nil
@@ -709,8 +715,8 @@ local function yield()
   await(Call.turn(TurnCall.new()))
 end
 
-local function suspend()
-  await(Call.suspend(SuspendCall.new()))
+local function suspend(cancel_action: CancelAction?)
+  await(Call.suspend(SuspendCall.new(cancel_action)))
 end
 
 local function sleep(milliseconds: integer)

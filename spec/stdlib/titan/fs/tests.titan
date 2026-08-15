@@ -9,7 +9,7 @@ local task_support = import "support.async"
 
 local function contains_entry(entries: {string}, wanted: string): boolean
   for index = 1, #entries do
-    if entries[index] as string == wanted then return true end
+    if entries[index] == wanted then return true end
   end
   return false
 end
@@ -22,6 +22,50 @@ local function expect_failure(action: () -> (), message: string)
     failed = true
   end
   test.assert(failed, message)
+end
+
+local function watcher_event_matches(event: fs.WatcherEvent,
+                                      kind: string,
+                                      path: string,
+                                      forbidden: string?): boolean
+  local actual = ""
+  local matches = false
+  case event
+  when created: found then
+    actual = found
+    matches = kind == "created" and found == path
+  when deleted: found then
+    actual = found
+    matches = kind == "deleted" and found == path
+  when modified: found then
+    actual = found
+    matches = kind == "modified" and found == path
+  when error: failure then raise failure
+  end
+  test.assert(forbidden == nil or actual ~= forbidden,
+              "watcher reported an out-of-scope path")
+  return matches
+end
+
+local function wait_for_watcher_event(watcher: fs.Watcher,
+                                      kind: string,
+                                      path: string,
+                                      forbidden: string?)
+  while true do
+    local events = watcher:poll()
+    for index = 1, #events do
+      if watcher_event_matches(events[index], kind, path, forbidden) then
+        return
+      end
+    end
+  end
+end
+
+local function cleanup_watcher(watcher: fs.Watcher)
+  runtime_test.cleanup(function ()
+    watcher:clear()
+    watcher:poll()
+  end)
 end
 
 function test_fs_binary_delimiters_and_close(context: test.Context)
@@ -41,7 +85,7 @@ function test_fs_binary_delimiters_and_close(context: test.Context)
       file:read_until("")
     end, "File accepted an empty delimiter")
     local selected: string? = file:read_until("\0Y", true)
-    test.assert(selected ~= nil and #(selected as string) == 65535,
+    test.assert(selected ~= nil and #selected == 65535,
                 "delimiter spanning native reads returned the wrong prefix")
     test.assert(file:read() == "tail",
                 "delimiter read lost retained excess")
@@ -105,18 +149,18 @@ function test_fs_modes_interfaces_and_validation(context: test.Context)
       "r", "rb", "r+", "r+b", "rb+", "a", "ab", "a+", "a+b", "ab+"
     }
     for index = 1, #valid_modes do
-      local opened = fs.open(modes_path, valid_modes[index] as string)
+      local opened = fs.open(modes_path, valid_modes[index])
       opened:close()
     end
     local truncating_modes = {"w", "wb", "w+", "w+b", "wb+"}
     for index = 1, #truncating_modes do
-      local opened = fs.open(modes_path, truncating_modes[index] as string)
+      local opened = fs.open(modes_path, truncating_modes[index])
       opened:close()
     end
 
     local invalid_modes = {"", "x", "rr", "br", "r++"}
     for index = 1, #invalid_modes do
-      local mode = invalid_modes[index] as string
+      local mode = invalid_modes[index]
       expect_failure(function ()
         fs.open(modes_path, mode)
       end, "invalid mode was accepted: " .. mode)
@@ -162,6 +206,23 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
     support.make_symlink(context, actual_root, root)
     support.set_fixture_environment(context, "HOME", root)
     support.set_fixture_environment(context, "TMPDIR", root)
+
+    local canonical_root = fs.realpath(actual_root)
+    test.assert(fs.realpath(root .. "/.") == canonical_root,
+                "realpath did not resolve a symlink and dot component")
+    local realpath_missing = false
+    do
+      fs.realpath(root .. "/missing-realpath")
+    catch
+      local failure = error as async.OperationError
+      test.assert(failure.operation == "fs.realpath",
+                  "missing realpath reported the wrong operation")
+      realpath_missing = true
+    end
+    test.assert(realpath_missing, "realpath accepted a missing path")
+    expect_failure(function ()
+      fs.realpath(root .. "/bad\0path")
+    end, "realpath accepted an embedded-NUL path")
 
     local target = root .. "/target.dat"
     local link = root .. "/target-link"
@@ -219,18 +280,43 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
       fs.unlink(sub)
     end, "unlink removed a directory")
 
-    local missing_error = false
-    do
-      fs.stat(root .. "/missing")
-    catch
-      local failure = error as async.OperationError
-      test.assert(failure.operation == "fs.stat",
-                  "missing stat reported the wrong operation")
-      missing_error = true
-    end
-    test.assert(missing_error, "stat accepted a missing path")
+    local missing = root .. "/missing"
+    test.assert(fs.stat(missing) == nil and fs.lstat(missing) == nil,
+                "missing metadata did not return nil")
+    test.assert(fs.stat(missing .. "/child") == nil and
+                fs.lstat(missing .. "/child") == nil,
+                "missing metadata parent did not return nil")
+
+    local dangling = root .. "/dangling-link"
+    support.make_symlink(context, missing, dangling)
+    test.assert(fs.stat(dangling) == nil,
+                "stat did not treat a dangling symlink as missing")
+    local dangling_info? = fs.lstat(dangling)
+    test.assert(dangling_info ~= nil and
+                dangling_info.kind == "symlink",
+                "lstat did not preserve a dangling symlink")
+
+    local expect_metadata_error: (() -> (), string) -> () =
+      function (action: () -> (), operation: string)
+        local failed = false
+        do
+          action()
+        catch
+          local failure = error as async.OperationError
+          test.assert(failure.operation == operation,
+                      "metadata failure reported the wrong operation")
+          failed = true
+        end
+        test.assert(failed, "metadata swallowed a non-ENOENT failure")
+      end
+    expect_metadata_error(function ()
+      fs.stat(target .. "/child")
+    end, "fs.stat")
+    expect_metadata_error(function ()
+      fs.lstat(target .. "/child")
+    end, "fs.lstat")
     expect_failure(function ()
-      fs.list(root .. "/missing")
+      fs.list(missing)
     end, "list accepted a missing path")
 
     test.assert(fs.tmpdir() == root and fs.homedir() == root,
@@ -271,13 +357,17 @@ function test_fs_independent_continuations(context: test.Context)
     support.cleanup_path(context, first_path)
     support.cleanup_path(context, second_path)
 
+    local first_realpath: string? = nil
+    local second_realpath: string? = nil
     local first = async.run<value, value>(function (): value
       fs.write_file(first_path, "first")
+      first_realpath = fs.realpath(first_path)
       return nil
     end)
     task_support.cleanup_task(first, "first filesystem Task cleanup")
     local second = async.run<value, value>(function (): value
       fs.write_file(second_path, "second")
+      second_realpath = fs.realpath(second_path)
       return nil
     end)
     task_support.cleanup_task(second, "second filesystem Task cleanup")
@@ -290,9 +380,265 @@ function test_fs_independent_continuations(context: test.Context)
                 second:status():as_string() == "succeeded",
                 "independent filesystem Tasks did not succeed")
     test.assert(fs.read_file(first_path) == "first" and
-                fs.read_file(second_path) == "second",
+                fs.read_file(second_path) == "second" and
+                first_realpath == fs.realpath(first_path) and
+                second_realpath == fs.realpath(second_path),
                 "independent filesystem results changed")
+
+    local cancellation_started = false
+    local cancelled_realpath: string? = nil
+    local cancelled = async.run<value, value>(function (): value
+      local held = fs.open(first_path, "r")
+      defer held:close()
+      cancellation_started = true
+      cancelled_realpath = fs.realpath(first_path)
+      return nil
+    end)
+    task_support.cleanup_task(cancelled,
+                              "cancelled realpath Task cleanup")
+    while not cancellation_started do timer.yield() end
+    cancelled:cancel(async.CancellationReason.simple(
+        "cancel pending realpath"))
+    async.join(cancelled)
+    test.assert(cancelled:status():has_cancelled() and
+                cancelled_realpath == nil,
+                "realpath delivered a result after Task cancellation")
+    timer.yield()
+    test.assert(fs.realpath(first_path) == first_realpath,
+                "realpath cancellation damaged later requests")
+
     fs.unlink(first_path)
     fs.unlink(second_path)
+  end)
+end
+
+function test_fs_watcher_directory_events_and_canonical_paths(context: test.Context)
+  runtime_test.run(function ()
+    local root = support.new_workspace(context)
+    local modify_path = root .. "/modify.dat"
+    local delete_path = root .. "/delete.dat"
+    local create_path = root .. "/create.dat"
+    local nested_dir = root .. "/nested"
+    local nested_path = nested_dir .. "/nested.dat"
+    local sentinel_path = root .. "/sentinel.dat"
+    support.cleanup_path(context, modify_path)
+    support.cleanup_path(context, delete_path)
+    support.cleanup_path(context, create_path)
+    support.cleanup_path(context, nested_dir)
+    support.cleanup_path(context, nested_path)
+    support.cleanup_path(context, sentinel_path)
+    fs.write_file(modify_path, "before")
+    fs.write_file(delete_path, "delete")
+    fs.mkdir(nested_dir)
+    fs.write_file(nested_path, "nested-before")
+
+    local canonical_root = fs.realpath(root)
+    local canonical_modify = fs.realpath(modify_path)
+    local canonical_delete = fs.realpath(delete_path)
+    local canonical_nested = fs.realpath(nested_path)
+    local watcher = fs.watcher()
+    cleanup_watcher(watcher)
+    test.assert(#watcher:poll() == 0,
+                "empty watcher poll did not return immediately")
+
+    watcher:watch(root)
+    watcher:watch(root .. "/.")
+    test.assert(watcher:is_watching(root) and
+                watcher:is_watching(root .. "/."),
+                "watcher did not recognize an equivalent canonical path")
+
+    fs.write_file(modify_path, "after")
+    wait_for_watcher_event(
+        watcher, "modified", canonical_modify, canonical_nested)
+
+    fs.write_file(create_path, "created")
+    local canonical_create = fs.realpath(create_path)
+    wait_for_watcher_event(
+        watcher, "created", canonical_create, canonical_nested)
+
+    fs.unlink(delete_path)
+    wait_for_watcher_event(
+        watcher, "deleted", canonical_delete, canonical_nested)
+
+    fs.write_file(nested_path, "nested-after")
+    fs.write_file(sentinel_path, "sentinel")
+    local canonical_sentinel = fs.realpath(sentinel_path)
+    wait_for_watcher_event(
+        watcher, "created", canonical_sentinel, canonical_nested)
+
+    watcher:stop(root .. "/.")
+    test.assert(not watcher:is_watching(root),
+                "stopping an equivalent path left its canonical watch active")
+    watcher:stop(root)
+    watcher:clear()
+    watcher:clear()
+    watcher:poll()
+    test.assert(#watcher:poll() == 0,
+                "stopped watcher did not become empty")
+
+    watcher:watch(root)
+    test.assert(watcher:is_watching(canonical_root),
+                "watcher could not rewatch a stopped path")
+    watcher:clear()
+
+    local removed_directory = root .. "/removed-directory"
+    support.cleanup_path(context, removed_directory)
+    fs.mkdir(removed_directory)
+    local canonical_removed = fs.realpath(removed_directory)
+    watcher:watch(removed_directory)
+    fs.rmdir(removed_directory)
+    wait_for_watcher_event(
+        watcher, "deleted", canonical_removed, canonical_nested)
+    test.assert(not watcher:is_watching(removed_directory) and
+                #watcher:poll() == 0,
+                "deleted directory watch did not retire its registration")
+
+    fs.unlink(modify_path)
+    fs.unlink(create_path)
+    fs.unlink(nested_path)
+    fs.unlink(sentinel_path)
+    fs.rmdir(nested_dir)
+  end)
+end
+
+function test_fs_watcher_file_scope(context: test.Context)
+  runtime_test.run(function ()
+    local root = support.new_workspace(context)
+    local watched_path = root .. "/watched.dat"
+    local sibling_path = root .. "/watched.dat.other"
+    support.cleanup_path(context, watched_path)
+    support.cleanup_path(context, sibling_path)
+    fs.write_file(watched_path, "before")
+    fs.write_file(sibling_path, "sibling-before")
+
+    local canonical_watched = fs.realpath(watched_path)
+    local canonical_sibling = fs.realpath(sibling_path)
+    local watcher = fs.watcher()
+    cleanup_watcher(watcher)
+    watcher:watch(watched_path)
+
+    fs.write_file(sibling_path, "sibling-after")
+    fs.write_file(watched_path, "after")
+    wait_for_watcher_event(
+        watcher, "modified", canonical_watched, canonical_sibling)
+
+    fs.unlink(watched_path)
+    wait_for_watcher_event(
+        watcher, "deleted", canonical_watched, canonical_sibling)
+    test.assert(not watcher:is_watching(watched_path),
+                "deleted file watch remained active")
+    watcher:stop(watched_path)
+    test.assert(#watcher:poll() == 0,
+                "deleted file watch did not retire its registration")
+
+    fs.write_file(watched_path, "rewatched")
+    watcher:watch(watched_path)
+    watcher:watch(sibling_path)
+    watcher:stop(watched_path)
+    test.assert(not watcher:is_watching(watched_path) and
+                watcher:is_watching(sibling_path),
+                "stopping one file watch changed another registration")
+    fs.write_file(sibling_path, "sibling-final")
+    wait_for_watcher_event(
+        watcher, "modified", canonical_sibling, canonical_watched)
+    watcher:clear()
+
+    fs.unlink(watched_path)
+    fs.unlink(sibling_path)
+  end)
+end
+
+function test_fs_watcher_poll_waiter_protocol(context: test.Context)
+  runtime_test.run(function ()
+    local root = support.new_workspace(context)
+    local path = root .. "/wake.dat"
+    support.cleanup_path(context, path)
+    local watcher = fs.watcher()
+    cleanup_watcher(watcher)
+    watcher:watch(root)
+
+    local entered = false
+    local first_result: {fs.WatcherEvent}? = nil
+    local first = async.run<value, value>(function (): value
+      entered = true
+      first_result = watcher:poll()
+      return nil
+    end)
+    task_support.cleanup_task(first, "filesystem watcher first poll cleanup")
+    while not entered do timer.yield() end
+    timer.yield()
+
+    expect_failure(function ()
+      watcher:poll()
+    end, "watcher accepted a second concurrent poll")
+
+    first:cancel(async.CancellationReason.simple("cancel blocked poll"))
+    fs.write_file(path, "wake")
+    local canonical = fs.realpath(path)
+    async.join(first)
+    test.assert(first:status():as_string() == "cancelled" and
+                first_result == nil and watcher:is_watching(root),
+                "poll cancellation changed watcher ownership")
+
+    wait_for_watcher_event(watcher, "created", canonical, nil)
+    watcher:clear()
+    watcher:poll()
+
+    watcher:watch(root)
+    local clear_poll_entered = false
+    local cleared_result: {fs.WatcherEvent}? = nil
+    local cleared = async.run<value, value>(function (): value
+      clear_poll_entered = true
+      cleared_result = watcher:poll()
+      return nil
+    end)
+    task_support.cleanup_task(cleared,
+                              "filesystem watcher clear poll cleanup")
+    while not clear_poll_entered do timer.yield() end
+    watcher:clear()
+    async.join(cleared)
+    test.assert(cleared:status():has_succeeded() and
+                cleared_result ~= nil and
+                #cleared_result == 0,
+                "clear did not wake an empty blocked poll")
+
+    watcher:watch(root)
+    watcher:watch(path)
+    local clear_entered = false
+    local concurrent_clear = async.run<value, value>(function (): value
+      clear_entered = true
+      watcher:clear()
+      return nil
+    end)
+    task_support.cleanup_task(concurrent_clear,
+                              "filesystem watcher concurrent clear cleanup")
+    while not clear_entered do timer.yield() end
+    expect_failure(function ()
+      watcher:poll()
+    end, "watcher accepted a poll during clear")
+    expect_failure(function ()
+      watcher:clear()
+    end, "watcher accepted a second concurrent clear")
+    async.join(concurrent_clear)
+    test.assert(concurrent_clear:status():has_succeeded() and
+                #watcher:poll() == 0,
+                "watcher did not leave clear state after completion")
+
+    fs.unlink(path)
+  end)
+end
+
+function test_fs_watcher_runtime_ownership(context: test.Context)
+  local root = support.new_workspace(context)
+  local stale: fs.Watcher? = nil
+  runtime_test.run(function ()
+    stale = fs.watcher()
+    stale:watch(root)
+  end)
+
+  runtime_test.run(function ()
+    expect_failure(function ()
+      stale:poll()
+    end, "watcher remained usable after its Runtime stopped")
   end)
 end
