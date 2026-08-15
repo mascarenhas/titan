@@ -122,10 +122,12 @@ describe("compiled-module ABI version", function()
         assert.match("TITAN_PATH_0_25", makefile)
         assert.match("TITAN_PATH_0_25", workflow)
         assert.not_match("TITAN_PATH_0_24", makefile)
-        assert.equal(2, count_plain(
+        assert.equal(1, count_plain(
             workflow, 'TITAN_ABI_VERSION: "0.25"'))
         local cache_abi = "abi-${{ env.TITAN_ABI_VERSION }}"
-        assert.equal(4, count_plain(workflow, cache_abi))
+        assert.equal(13, count_plain(workflow, cache_abi))
+        assert.equal(3, count_plain(workflow,
+            ".lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}"))
         assert.truthy(workflow:find(
             "Prepare the ABI-0.25 standalone prefix", 1, true))
         assert.truthy(workflow:find(

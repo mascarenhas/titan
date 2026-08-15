@@ -273,7 +273,7 @@ describe("standalone-prefix source installation", function()
             "/share/lua/5.5/titan-compiler/pretty.lua")
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
-            "csemantics.lua", "test_runner.lua",
+            "csemantics.lua", "sha256.lua", "test_runner.lua",
         }) do
             assert_file(PREFIX ..
                 "/share/lua/5.5/titan-compiler/" .. module)
@@ -411,7 +411,7 @@ describe("standalone-prefix source installation", function()
             '["staticmetadata.lua"]', 1, true), manifest)
         for _, module in ipairs({
             "cdeclarator.lua", "cpreamble.lua", "cprobe.lua",
-            "csemantics.lua", "test_runner.lua",
+            "csemantics.lua", "sha256.lua", "test_runner.lua",
         }) do
             assert.truthy(manifest:find(
                 '["' .. module .. '"]', 1, true), manifest)

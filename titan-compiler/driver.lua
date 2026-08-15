@@ -142,6 +142,13 @@ local function root_join(root, suffix)
     return root .. "/" .. suffix
 end
 
+function driver.probe_cache_directory(cpath, override, abi)
+    local root = driver.resolve_installation_root(cpath, override)
+    if not root then return nil end
+    return root_join(root, "var/cache/titan-probes/" ..
+        tostring(abi or driver.TITAN_VER))
+end
+
 function driver.installed_paths(root)
     root = normalize_root(root)
     if not root then return nil end
@@ -195,6 +202,15 @@ local internal_root = os.getenv("TITAN_ROCKS_ROOT")
 if internal_root == "" then internal_root = nil end
 driver.TITAN_ROOT = driver.resolve_installation_root(
     package.cpath, internal_root)
+local probe_prefix = os.getenv("TITAN_PREFIX")
+if probe_prefix == "" then probe_prefix = nil end
+local probe_cache_disabled = os.getenv("TITAN_PROBE_CACHE_DISABLE") == "1"
+driver.PROBE_CACHE_DIRECTORY = not probe_cache_disabled
+    and driver.probe_cache_directory(
+        package.cpath, probe_prefix, driver.TITAN_VER) or nil
+local probe_cache_identity = os.getenv("TITAN_PROBE_CACHE_IDENTITY")
+if probe_cache_identity == "" then probe_cache_identity = nil end
+driver.PROBE_CACHE_IDENTITY = probe_cache_identity
 driver.SOURCE_CHECKOUT_ROOT = not internal_root and source_checkout_root() or nil
 driver.SOURCE_CHECKOUT = driver.SOURCE_CHECKOUT_ROOT ~= nil
 driver.INSTALLED = not driver.SOURCE_CHECKOUT
@@ -297,6 +313,8 @@ function driver.configure_foreign_c()
         compiler_include_dirs = driver.foreign_include_dirs(),
         toolchain = toolchain,
         probe_runner = cdriver.capture_command,
+        probe_cache_directory = driver.PROBE_CACHE_DIRECTORY,
+        probe_cache_identity = driver.PROBE_CACHE_IDENTITY,
     }
     if toolchain then options.language_flag = false end
 
@@ -547,6 +565,8 @@ function driver.get_probe_service(context)
         toolchain = toolchain,
         runner = cdriver.capture_command,
         verbose = context.probe_verbose,
+        cache_directory = driver.PROBE_CACHE_DIRECTORY,
+        cache_identity = driver.PROBE_CACHE_IDENTITY,
     })
     if not service then
         context.probe_service_error = err

@@ -61,6 +61,11 @@ while IFS= read -r test_file; do
     esac
 done < <(find spec -type f -name '*_spec.lua' -print | LC_ALL=C sort)
 
+# These specs deliberately reuse source/header pathnames across independent
+# compiler worlds, so production exact-text success markers must not cross
+# their test boundaries.
+export TITAN_PROBE_CACHE_DISABLE=1
+
 run_isolated_compiler_coverage() {
     local test_file
     local status=0

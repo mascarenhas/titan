@@ -2882,6 +2882,52 @@ exit 73
                 "--exclude='./.git'", 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
                 "--exclude='./libbacktrace/.git'", 1, true), stdlib_job)
+            assert.truthy(stdlib_job:find(
+                "--exclude='./.lua/var/cache/titan-probes'", 1, true),
+                stdlib_job)
+            assert.truthy(stdlib_job:find(
+                "prepared tree contains the independent C-probe cache",
+                1, true), stdlib_job)
+            assert.falsy(stdlib_job:find("grep -Eq", 1, true), stdlib_job)
+            assert.truthy(stdlib_job:find(
+                "grep -E '^\\./\\.lua/var/cache/titan-probes(/|$)' " ..
+                    ">/dev/null", 1, true), stdlib_job)
+
+            assert.equal(11, count_literal(workflow,
+                "uses: actions/cache@v5"), workflow)
+            assert.equal(3, count_literal(workflow,
+                "path: .lua/var/cache/titan-probes/" ..
+                    "${{ env.TITAN_ABI_VERSION }}"), workflow)
+            assert.equal(3, count_literal(workflow,
+                "TITAN_PROBE_CACHE_IDENTITY=gha-v3:"), workflow)
+            assert.equal(3, count_literal(workflow,
+                "TITAN_PREFIX: ${{ github.workspace }}/.lua"), workflow)
+            assert.falsy(workflow:find(
+                "ci_probe_cache_identity.sh", 1, true), workflow)
+            assert.truthy(stdlib_job:find("linux-regular-v1", 1, true))
+            assert.falsy(compiler_job:find("linux-regular-v1", 1, true))
+            assert.falsy(sanitizer_job:find("linux-regular-v1", 1, true))
+            assert.truthy(sanitizer_job:find(
+                "linux-asan-ubsan-v1", 1, true))
+            assert.truthy(macos_job:find("macos-full-v1", 1, true))
+            assert.equal(3, count_literal(workflow,
+                "-${{ github.sha }}"), workflow)
+            assert.equal(3, count_literal(workflow,
+                "          key: titan-probe-success-v1-"), workflow)
+
+            local regular_cache_step = named_step(
+                stdlib_job, "Restore regular Linux C-probe success markers")
+            assert.falsy(regular_cache_step:find(
+                "-test-linux-compiler-", 1, true))
+            assert.truthy(regular_cache_step:find(
+                "-test-linux-stdlib-", 1, true))
+            local regular_cache_index = assert(stdlib_job:find(
+                "- name: Restore regular Linux C-probe success markers", 1, true))
+            local regular_build_index = assert(stdlib_job:find(
+                "- name: Build and install the rock", regular_cache_index,
+                true))
+            assert.is_true(regular_cache_index < regular_build_index,
+                stdlib_job)
 
             local pack_index = assert(stdlib_job:find(
                 "- name: Pack prepared Linux tree", 1, true))
@@ -2920,6 +2966,20 @@ exit 73
                 'TITAN_EXTRA_CFLAGS: "-O0"'), compiler_job)
             assert.falsy(compiler_job:find(
                 "ci_stdlib_snapshot.sh", 1, true), compiler_job)
+            local compiler_unpack_index = assert(compiler_job:find(
+                "- name: Restore prepared Linux tree and environment",
+                1, true))
+            local compiler_tests_index = assert(compiler_job:find(
+                "- name: Run complete compiler and language tests with coverage",
+                compiler_unpack_index, true))
+            assert.is_true(compiler_unpack_index < compiler_tests_index)
+            assert.falsy(compiler_job:find(
+                "C-probe success markers", 1, true))
+            assert.truthy(read_file(
+                "spec/support/ci_test_groups.sh"):find(
+                    "TITAN_PROBE_CACHE_DISABLE=1", 1, true))
+            assert.equal(3, count_literal(workflow,
+                "TITAN_PROBE_CACHE_DISABLE=1"), workflow)
             assert_codecov_job(compiler_job, "compiler")
 
             assert.equal(1, count_literal(macos_job,
@@ -2953,6 +3013,22 @@ exit 73
                 "luarocks make --force"), macos_job)
             assert.equal(1, count_literal(macos_job,
                 "luarocks test --prepare"), macos_job)
+            local macos_cache_index = assert(macos_job:find(
+                "- name: Restore macOS C-probe success markers", 1, true))
+            local macos_build_index = assert(macos_job:find(
+                "- name: Build and install the rock", macos_cache_index,
+                true))
+            local macos_tests_index = assert(macos_job:find(
+                "- name: Run complete macOS tests without coverage",
+                macos_build_index, true))
+            assert.is_true(macos_cache_index < macos_build_index)
+            assert.is_true(macos_build_index < macos_tests_index)
+            local sanitizer_cache_index = assert(sanitizer_job:find(
+                "- name: Restore sanitizer C-probe success markers", 1, true))
+            local sanitizer_build_index = assert(sanitizer_job:find(
+                "- name: Build sanitizer-enabled Titan artifacts",
+                sanitizer_cache_index, true))
+            assert.is_true(sanitizer_cache_index < sanitizer_build_index)
 
             for _, contract in ipairs({
                 'LLHTTP_VERSION: "9.4.3"',
