@@ -55,6 +55,12 @@ local function set_fixture_environment(context: test.Context,
   test.assert(status == 0, "could not set native environment fixture")
 end
 
+local function write_file_synchronously(path: string, contents: string)
+  local status = native.titan_spec_write_file(
+      path, contents, #contents as cstring.size_t)
+  test.assert(status == 0, "could not write native fixture file")
+end
+
 local function make_boundary_payload(): string
   local prefix_length = 65535
   local length = prefix_length + 6

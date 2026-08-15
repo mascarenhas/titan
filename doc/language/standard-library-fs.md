@@ -218,6 +218,12 @@ invalid path components, and every other error still raise
 `async.OperationError`. A dangling symbolic link therefore returns `nil` from
 `stat`, while `lstat` returns the link's own `Stat` value.
 
+These optional results are part of the ABI-0.25 boundary. ABI 0.24 declared
+both functions with an exact `Stat` result; changing them to `Stat?` changes the
+serialized public `titan.fs` interface and each exact native result signature.
+An ABI-0.24 provider remains preserved prior-version state and is rejected
+rather than migrated or adapted.
+
 `realpath(path)` resolves symbolic links plus `.` and `..` components and
 returns the canonical absolute path. The complete path must exist. It rejects
 embedded NUL bytes and raises `async.OperationError` for a missing or otherwise
@@ -252,7 +258,10 @@ and registers the resulting canonical absolute target. Repeating the call for
 the same target is idempotent, including through another symbolic link or an
 equivalent `.` or `..` spelling. A directory watch covers its immediate
 entries, not descendants of nested directories. A file watch reports only
-that file.
+that file. `watch` returns after libuv accepts the registration. On Darwin,
+libuv activates the underlying FSEvents stream asynchronously, so a mutation
+issued immediately afterward may predate the native subscription; let the event
+loop settle before relying on a subsequent mutation.
 
 `stop(path)` resolves the supplied spelling and stops its canonical
 registration. A missing or unwatched path is a no-op. `is_watching(path)` uses
@@ -270,6 +279,9 @@ returns an empty Array immediately. Only one Task may poll a given Watcher at a
 time. Tasks that mutate one Watcher concurrently must coordinate those calls
 externally. Cancelling a blocked poll detaches only that Task's waiter. It does
 not discard buffered events or stop registrations that another Task may poll.
+An unrelated call to the blocked Task's public `resume` method merely causes
+`poll` to recheck its state; while registrations remain and no event is
+buffered, it suspends again instead of returning an empty Array.
 
 ```titan
 union WatcherEvent
@@ -285,8 +297,11 @@ is joined to the watched directory; a file callback names the watched file.
 Each native notification maps to one `WatcherEvent`. A native rename flag is
 classified as `created` or `deleted` by calling `lstat` when `poll` drains the
 notification; if rename and change flags are both present, rename takes
-precedence. A change-only notification maps to `modified`. A direct file watch
-or watched directory retires when draining its own deletion event.
+precedence. An ordinary directory change maps to `modified`. Every direct-file
+notification checks the watched path as well, because Darwin may report that
+file's deletion with only a change flag: a missing path maps to `deleted` and
+retires the registration, while an existing change maps to `modified`. A
+watched directory likewise retires when draining its own deletion event.
 
 A negative native status or an `async.OperationError` raised while classifying
 one notification maps to the `error` arm instead of making `poll` raise. Other
