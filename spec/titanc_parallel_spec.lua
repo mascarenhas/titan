@@ -73,10 +73,17 @@ local function run_titanc(arguments, environment_jobs)
         observed.verbose = verbose
         local results = {}
         for index, request in ipairs(requests) do
-            results[index] = {
-                ok = false,
-                err = "compile failure for " .. request.modname,
-            }
+            if request.modname == "pkg.two" then
+                results[index] = {
+                    ok = true,
+                    libname = "pkg/two.o",
+                }
+            else
+                results[index] = {
+                    ok = false,
+                    err = "compile failure for " .. request.modname,
+                }
+            end
         end
         return results
     end
@@ -153,35 +160,13 @@ end
 
 local function ordinary_arguments(jobs)
     return {
-        module = { "pkg.two", "pkg.one" },
+        module = { "pkg.three", "pkg.two", "pkg.one" },
         jobs = jobs,
         extra_object = {},
     }
 end
 
 describe("titanc generated-C parallelism dispatch", function()
-    it("uses TITAN_JOBS and preserves sorted batch diagnostics", function()
-        local diagnostics, observed = run_titanc(ordinary_arguments(nil), "4")
-        assert.equal(4, observed.jobs)
-        assert.same({ "pkg.one", "pkg.two" }, {
-            observed.requests[1].modname,
-            observed.requests[2].modname,
-        })
-        assert.equal(
-            "compile failure for pkg.one\ncompile failure for pkg.two\n",
-            diagnostics)
-    end)
-
-    it("lets the command-line jobs bound override the environment", function()
-        local _, observed = run_titanc(ordinary_arguments("2"), "invalid")
-        assert.equal(2, observed.jobs)
-    end)
-
-    it("defaults to one generated-C compilation", function()
-        local _, observed = run_titanc(ordinary_arguments(nil), nil)
-        assert.equal(1, observed.jobs)
-    end)
-
     it("rejects malformed and overflowing bounds before resolution", function()
         local malformed, malformed_observed =
             run_titanc(ordinary_arguments(nil), "0")
@@ -196,5 +181,28 @@ describe("titanc generated-C parallelism dispatch", function()
         assert.equal(
             "--jobs and TITAN_JOBS require a positive integer\n",
             overflowing)
+    end)
+
+    it("lets the command-line jobs bound override the environment", function()
+        local _, observed = run_titanc(ordinary_arguments("2"), "invalid")
+        assert.equal(2, observed.jobs)
+    end)
+
+    it("defaults to one generated-C compilation", function()
+        local _, observed = run_titanc(ordinary_arguments(nil), nil)
+        assert.equal(1, observed.jobs)
+    end)
+
+    it("uses TITAN_JOBS and preserves sorted batch diagnostics", function()
+        local diagnostics, observed = run_titanc(ordinary_arguments(nil), "4")
+        assert.equal(4, observed.jobs)
+        assert.same({ "pkg.one", "pkg.three", "pkg.two" }, {
+            observed.requests[1].modname,
+            observed.requests[2].modname,
+            observed.requests[3].modname,
+        })
+        assert.equal(
+            "compile failure for pkg.one\ncompile failure for pkg.three\n",
+            diagnostics)
     end)
 end)
