@@ -393,6 +393,16 @@ describe("parallel generated-C compilation", function()
         assert.falsy(file_exists(state_directory .. "/commands"))
     end)
 
+    it("bounds a self-referential object-output symlink", function()
+        local request = checked_requests()[1]
+        request.mod.filename = source_root .. "/loop.titan"
+        assert(lfs.link("./loop.o", source_root .. "/loop.o", true))
+
+        local results = driver.compile_modules({ request }, 4, false)
+        assert.truthy(results[1].ok, results[1].err)
+        assert.truthy(file_exists(source_root .. "/loop.o"))
+    end)
+
     it("reaps an active batch when creating a later log fails", function()
         configure_counting_compiler(nil, nil, 3)
         local temporary_logs = {}
