@@ -3420,6 +3420,7 @@ local function prepare_compile(
         args = args,
         libname = libname,
         native_references = native_references,
+        generated_bytes = #code,
     }
 end
 
@@ -3500,6 +3501,66 @@ local function create_compile_log()
     return path
 end
 
+local function create_compile_notification()
+    local path, path_err = create_compile_log()
+    if not path then return nil, path_err end
+    local removed, remove_err = protected_remove(path)
+    if not removed then
+        return nil, "failed to prepare parallel compiler completion FIFO: " ..
+            tostring(remove_err)
+    end
+    local made, term, code = run_argv({ "mkfifo", "-m", "600", path }, false)
+    if not made then
+        protected_remove(path)
+        return nil, "failed to create parallel compiler completion FIFO" ..
+            (code ~= nil and " (" .. tostring(term) .. ", exit " ..
+                tostring(code) .. ")" or ": " .. tostring(term))
+    end
+    -- Linux and Darwin both define a read/write FIFO open to return without a
+    -- peer. Keeping that descriptor's writer alive avoids blocking before the
+    -- first worker and prevents a transient EOF while a slot is refilled.
+    local open_called, file, open_err = pcall(io.open, path, "r+")
+    if not open_called then
+        protected_remove(path)
+        return nil, file
+    end
+    if not file then
+        protected_remove(path)
+        return nil, open_err
+    end
+    local quoted_path, quote_err = cdriver.shell_quote(path)
+    if not quoted_path then
+        pcall(file.close, file)
+        protected_remove(path)
+        return nil, quote_err
+    end
+    return {
+        file = file,
+        path = path,
+        quoted_path = quoted_path,
+    }
+end
+
+local function close_compile_notification(notification)
+    local errors = {}
+    local close_called, closed, close_err =
+        pcall(notification.file.close, notification.file)
+    if not close_called then
+        errors[#errors + 1] = "close: " .. tostring(closed)
+    elseif not closed then
+        errors[#errors + 1] = "close: " .. tostring(close_err)
+    end
+    local removed, remove_err = protected_remove(notification.path)
+    if not removed then
+        errors[#errors + 1] = "remove: " .. tostring(remove_err)
+    end
+    if #errors ~= 0 then
+        return nil, "failed to clean parallel compiler completion FIFO (" ..
+            table.concat(errors, "; ") .. ")"
+    end
+    return true
+end
+
 local function show_parallel_command(command)
     local write_called, written, write_err =
         pcall(io.stdout.write, io.stdout, command .. "\n")
@@ -3512,7 +3573,8 @@ local function show_parallel_command(command)
     return true
 end
 
-local function launch_prepared_compile(prepared, verbose)
+local function launch_prepared_compile(
+        prepared, verbose, notification, completion_index)
     local command, command_err = command_argv(prepared.args)
     if not command then return nil, command_err end
 
@@ -3536,6 +3598,13 @@ local function launch_prepared_compile(prepared, verbose)
         protected_remove(stderr_path)
         return nil, quote_err
     end
+    local quoted_index
+    quoted_index, quote_err = cdriver.shell_quote(tostring(completion_index))
+    if not quoted_index then
+        protected_remove(stdout_path)
+        protected_remove(stderr_path)
+        return nil, quote_err
+    end
     if verbose then
         local shown, show_err = show_parallel_command(command)
         if not shown then
@@ -3544,8 +3613,13 @@ local function launch_prepared_compile(prepared, verbose)
             return nil, show_err
         end
     end
-    local popen_called, pipe, popen_err = pcall(io.popen,
-        command .. " >" .. quoted_stdout .. " 2>" .. quoted_stderr, "r")
+    local notified_command = "(" .. command .. ") >" .. quoted_stdout ..
+        " 2>" .. quoted_stderr ..
+        "; _titan_compile_status=$?; printf '%s\\n' " .. quoted_index ..
+        " >" .. notification.quoted_path ..
+        "; exit $_titan_compile_status"
+    local popen_called, pipe, popen_err =
+        pcall(io.popen, notified_command, "r")
     if not popen_called then
         protected_remove(stdout_path)
         protected_remove(stderr_path)
@@ -3572,14 +3646,36 @@ local function protected_replay_compile_output(filename, stream)
     return ok, err
 end
 
-local function finish_prepared_compile(process)
-    local finish_errors = {}
+local function reap_prepared_compile(process)
+    process.finish_errors = {}
     local close_called, ok, term, code =
         pcall(process.pipe.close, process.pipe)
     if not close_called then
-        finish_errors[#finish_errors + 1] = "reap: " .. tostring(ok)
+        process.finish_errors[#process.finish_errors + 1] =
+            "reap: " .. tostring(ok)
+        pcall(process.pipe.close, process.pipe)
         ok, term, code = nil, nil, nil
     end
+    process.ok = ok
+    process.term = term
+    process.code = code
+    process.reaped = true
+end
+
+local function reap_prepared_compile_without_throw(process)
+    local called, err = pcall(reap_prepared_compile, process)
+    if called then return end
+    pcall(process.pipe.close, process.pipe)
+    process.finish_errors = {
+        "reap: failed to finish parallel C compiler: " .. tostring(err),
+    }
+    process.ok, process.term, process.code = nil, nil, nil
+    process.reaped = true
+end
+
+local function finish_prepared_compile(process)
+    if not process.reaped then reap_prepared_compile(process) end
+    local finish_errors = process.finish_errors
 
     local stdout_ok, stdout_err = protected_replay_compile_output(
         process.stdout_path, io.stdout)
@@ -3597,7 +3693,7 @@ local function finish_prepared_compile(process)
         return nil, "failed to finish parallel C compiler (" ..
             table.concat(finish_errors, "; ") .. ")"
     end
-    return ok, term, code
+    return process.ok, process.term, process.code
 end
 
 local function finish_prepared_compile_without_throw(process)
@@ -3606,10 +3702,16 @@ local function finish_prepared_compile_without_throw(process)
 
     -- A final guard for an unexpected Lua exception: reap the child and remove
     -- both logs before allowing the rest of the independent batch to continue.
-    pcall(process.pipe.close, process.pipe)
+    if not process.reaped then pcall(process.pipe.close, process.pipe) end
     protected_remove(process.stdout_path)
     protected_remove(process.stderr_path)
     return nil, "failed to finish parallel C compiler: " .. tostring(ok)
+end
+
+local function oldest_pending_process(pending, count)
+    for index = 1, count do
+        if pending[index] then return index, pending[index] end
+    end
 end
 
 local function run_prepared_compiles(prepared, parallelism, verbose)
@@ -3622,28 +3724,106 @@ local function run_prepared_compiles(prepared, parallelism, verbose)
         return results
     end
 
+    local notification, notification_err = create_compile_notification()
+    if not notification then
+        for index = 1, #prepared do
+            results[index] = { err = notification_err }
+        end
+        return results
+    end
+
+    local schedule = {}
+    for index, compilation in ipairs(prepared) do
+        schedule[index] = {
+            index = index,
+            compilation = compilation,
+        }
+    end
+    table.sort(schedule, function(left, right)
+        local left_bytes = left.compilation.generated_bytes or 0
+        local right_bytes = right.compilation.generated_bytes or 0
+        if left_bytes ~= right_bytes then return left_bytes > right_bytes end
+        return left.index < right.index
+    end)
+
     local pending = {}
-    local next_index = 1
-    while next_index <= #prepared or #pending ~= 0 do
-        while #pending < parallelism and next_index <= #prepared do
+    local processes = {}
+    local pending_count = 0
+    local next_schedule = 1
+    local completion_err
+    while (not completion_err and next_schedule <= #schedule) or
+            pending_count ~= 0 do
+        while not completion_err and pending_count < parallelism and
+                next_schedule <= #schedule do
+            local entry = schedule[next_schedule]
+            local index = entry.index
             local launch_called, process, launch_err = pcall(
-                launch_prepared_compile, prepared[next_index], verbose)
+                launch_prepared_compile, entry.compilation, verbose,
+                notification, index)
             if not launch_called then
                 launch_err, process = process, nil
             end
             if process then
-                process.index = next_index
-                pending[#pending + 1] = process
+                process.index = index
+                pending[index] = process
+                processes[index] = process
+                pending_count = pending_count + 1
             else
-                results[next_index] = { err = launch_err }
+                results[index] = { err = launch_err }
             end
-            next_index = next_index + 1
+            next_schedule = next_schedule + 1
         end
-        if #pending ~= 0 then
-            local process = table.remove(pending, 1)
+        if pending_count ~= 0 then
+            local completed_index, process
+            if not completion_err then
+                local read_called, line, read_err =
+                    pcall(notification.file.read, notification.file, "*l")
+                if read_called then
+                    completed_index = tonumber(line)
+                    process = completed_index and pending[completed_index]
+                end
+                if not process then
+                    completion_err = "failed to receive parallel C compiler " ..
+                        "completion: " .. tostring(read_called and
+                            (read_err or line) or line)
+                end
+            end
+            if completion_err then
+                completed_index, process =
+                    oldest_pending_process(pending, #prepared)
+            end
+            pending[completed_index] = nil
+            pending_count = pending_count - 1
+            reap_prepared_compile_without_throw(process)
+        end
+    end
+
+    local notification_ok, cleanup_err =
+        close_compile_notification(notification)
+    if not notification_ok then
+        completion_err = completion_err and
+            (completion_err .. "; " .. cleanup_err) or cleanup_err
+    end
+    if completion_err then
+        for schedule_index = next_schedule, #schedule do
+            local index = schedule[schedule_index].index
+            results[index] = { err = completion_err }
+        end
+    end
+
+    -- Reaping follows actual completion so a free slot is refilled promptly,
+    -- but diagnostics remain deterministic in the original request order.
+    for index = 1, #prepared do
+        local process = processes[index]
+        if process then
             local ok, err, code =
                 finish_prepared_compile_without_throw(process)
-            results[process.index] = { ok = ok, err = err, code = code }
+            if completion_err then
+                ok = nil
+                err = err and (tostring(err) .. "; " .. completion_err) or
+                    completion_err
+            end
+            results[index] = { ok = ok, err = err, code = code }
         end
     end
     return results
@@ -3697,10 +3877,10 @@ local function validate_compile_requests(requests)
     end
 end
 
--- With a bound above one, generate module C serially and then compile the
--- independent translation units through at most `parallelism` compiler
--- processes. The one-job path retains the historical per-module phase order.
--- Only native object compilations ever overlap.
+-- With a bound above one, generate module C serially, launch larger units
+-- first, and keep at most `parallelism` compiler processes busy by consuming
+-- actual completion notifications. The one-job path retains the historical
+-- per-module phase order. Only native object compilations ever overlap.
 function driver.compile_modules(requests, parallelism, verbose)
     assert(type(requests) == "table", "requests must be a table")
     assert(type(parallelism) == "number" and parallelism >= 1 and

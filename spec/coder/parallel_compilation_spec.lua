@@ -11,6 +11,9 @@ local FIXTURE = ROOT .. "/spec/fixtures/parallel_compilation"
 local FIXTURE_SOURCE_ROOT = FIXTURE .. "/src"
 local WRAPPER = FIXTURE .. "/counting_cc.sh"
 local LEAVES = { "one", "two", "three", "four" }
+local REFILL_LEAVES = {
+    "one", "two", "three", "four", "five", "six", "seven", "eight",
+}
 local MODULES = { "batch.one", "batch.two", "batch.three", "batch.four" }
 
 local PREFIX = os.getenv("PREFIX")
@@ -89,14 +92,15 @@ local function prepare_workspace()
     assert(lfs.mkdir(source_root))
     assert(lfs.mkdir(source_root .. "/batch"))
     assert(lfs.mkdir(state_directory))
-    for _, leaf in ipairs(LEAVES) do
+    for _, leaf in ipairs(REFILL_LEAVES) do
         copy_file(FIXTURE_SOURCE_ROOT .. "/batch/" .. leaf .. ".titan",
             source_root .. "/batch/" .. leaf .. ".titan")
     end
 end
 
 local function titanc(
-        environment_jobs, cli_jobs, failing_module, diagnostics)
+        environment_jobs, cli_jobs, failing_module, diagnostics,
+        compiler, bounded)
     local local_path = ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;"
     local argv = { "env" }
     if environment_jobs then
@@ -106,7 +110,7 @@ local function titanc(
         argv[#argv + 1] = "TITAN_JOBS"
     end
     for _, argument in ipairs({
-        "CC=" .. WRAPPER,
+        "CC=" .. (compiler or WRAPPER),
         "MAKE=true",
         "TITAN_EXTRA_CPPFLAGS=",
         "TITAN_EXTRA_CFLAGS=",
@@ -135,13 +139,22 @@ local function titanc(
     argv[#argv + 1] = "--tree"
     argv[#argv + 1] = source_root
     for _, module in ipairs(MODULES) do argv[#argv + 1] = module end
+    if bounded then
+        local bounded_argv = {
+            ROOT .. "/spec/support/run_with_timeout.sh", "10",
+        }
+        for _, argument in ipairs(argv) do
+            bounded_argv[#bounded_argv + 1] = argument
+        end
+        argv = bounded_argv
+    end
     return run(argv, workspace_directory)
 end
 
-local function checked_requests()
+local function checked_requests(leaves)
     types.registry = {}
     local requests = {}
-    for _, leaf in ipairs(LEAVES) do
+    for _, leaf in ipairs(leaves or LEAVES) do
         local modname = "batch." .. leaf
         local filename = source_root .. "/batch/" .. leaf .. ".titan"
         local source = read_file(filename)
@@ -159,7 +172,7 @@ local function checked_requests()
 end
 
 local function configure_counting_compiler(
-        diagnostics, failing_module, expected)
+        diagnostics, failing_module, expected, mode)
     driver.CC = shell_command({
         "env",
         "TITAN_PARALLEL_TEST_STATE=" .. state_directory,
@@ -167,6 +180,7 @@ local function configure_counting_compiler(
         "TITAN_PARALLEL_TEST_EXPECTED=" .. tostring(expected or 4),
         "TITAN_PARALLEL_TEST_DIAGNOSTICS=" .. (diagnostics or ""),
         "TITAN_PARALLEL_TEST_FAIL=" .. (failing_module or ""),
+        "TITAN_PARALLEL_TEST_MODE=" .. (mode or ""),
         WRAPPER,
     })
 end
@@ -186,6 +200,7 @@ describe("parallel generated-C compilation", function()
     local previous_stdout
     local previous_stderr
     local previous_tmpname
+    local previous_execute
     local previous_popen
     local previous_open
     local diagnostic_stream
@@ -195,6 +210,7 @@ describe("parallel generated-C compilation", function()
         previous_stdout = io.stdout
         previous_stderr = io.stderr
         previous_tmpname = os.tmpname
+        previous_execute = os.execute
         previous_popen = io.popen
         previous_open = io.open
         prepare_workspace()
@@ -204,6 +220,7 @@ describe("parallel generated-C compilation", function()
         io.stdout = previous_stdout
         io.stderr = previous_stderr
         os.tmpname = previous_tmpname
+        os.execute = previous_execute
         io.popen = previous_popen
         io.open = previous_open
         if diagnostic_stream and io.type(diagnostic_stream) == "file" then
@@ -254,6 +271,54 @@ describe("parallel generated-C compilation", function()
             assert.equal(results[index].libname, result.libname)
         end
         assert.equal(commands, read_file(state_directory .. "/commands"))
+    end)
+
+    it("launches larger generated units first", function()
+        configure_counting_compiler()
+        local launched = {}
+        io.popen = function(command, mode)
+            launched[#launched + 1] = command
+            return previous_popen(command, mode)
+        end
+        local results = driver.compile_modules(
+            checked_requests(REFILL_LEAVES), 4, false)
+        io.popen = previous_popen
+        for _, result in ipairs(results) do
+            assert.truthy(result.ok, result.err)
+        end
+        assert.truthy(launched[1]:find("/batch/eight.c", 1, true),
+            table.concat(launched, "\n"))
+    end)
+
+    it("refills a slot as soon as any compiler finishes", function()
+        configure_counting_compiler(nil, nil, 4, "refill")
+        local launched = {}
+        io.popen = function(command, mode)
+            launched[#launched + 1] = command
+            return previous_popen(command, mode)
+        end
+        local results = driver.compile_modules(
+            checked_requests(REFILL_LEAVES), 4, false)
+        io.popen = previous_popen
+        local slow_was_initial = false
+        for index = 1, 4 do
+            if launched[index]:find("/batch/one.c", 1, true) then
+                slow_was_initial = true
+            end
+        end
+        assert.is_true(slow_was_initial, table.concat(launched, "\n"))
+        for _, result in ipairs(results) do
+            assert.truthy(result.ok, result.err)
+            assert.is_true(file_exists(result.libname))
+        end
+        assert.equal("4\n", read_file(state_directory .. "/maximum"))
+        assert.equal("0\n", read_file(state_directory .. "/active"))
+        assert.is_true(file_exists(
+            state_directory .. "/refilled-before-slow-finished"))
+        local commands = read_file(state_directory .. "/commands")
+        local count = 0
+        for _ in commands:gmatch("[^\n]+") do count = count + 1 end
+        assert.equal(#REFILL_LEAVES, count, commands)
     end)
 
     it("keeps the driver one-job path serial", function()
@@ -406,13 +471,140 @@ describe("parallel generated-C compilation", function()
         assert.truthy(file_exists(source_root .. "/loop.o"))
     end)
 
+    it("reports completion FIFO creation failures without launching", function()
+        configure_counting_compiler()
+        local requests = checked_requests()
+        local temporary_path
+        os.tmpname = function()
+            temporary_path = previous_tmpname()
+            return temporary_path
+        end
+        local fifo_command
+        os.execute = function(command)
+            if command:find("mkfifo", 1, true) then
+                fifo_command = command
+                return nil, "exit", 91
+            end
+            return previous_execute(command)
+        end
+
+        local results = driver.compile_modules(requests, 4, false)
+        os.tmpname = previous_tmpname
+        os.execute = previous_execute
+        for _, result in ipairs(results) do
+            assert.falsy(result.ok)
+            assert.truthy(tostring(result.err):find(
+                "failed to create parallel compiler completion FIFO",
+                1, true), tostring(result.err))
+        end
+        assert.truthy(fifo_command:find(
+            "'mkfifo' '-m' '600' ", 1, true), fifo_command)
+        assert.falsy(file_exists(temporary_path))
+        assert.falsy(file_exists(state_directory .. "/commands"))
+    end)
+
+    it("reports completion FIFO open failures without launching", function()
+        configure_counting_compiler()
+        local temporary_path
+        os.tmpname = function()
+            temporary_path = previous_tmpname()
+            return temporary_path
+        end
+        io.open = function(path, mode)
+            if mode == "r+" then
+                return nil, "injected completion open failure"
+            end
+            return previous_open(path, mode)
+        end
+
+        local results = driver.compile_modules(checked_requests(), 4, false)
+        os.tmpname = previous_tmpname
+        io.open = previous_open
+        for _, result in ipairs(results) do
+            assert.falsy(result.ok)
+            assert.truthy(tostring(result.err):find(
+                "injected completion open failure", 1, true),
+                tostring(result.err))
+        end
+        assert.falsy(file_exists(temporary_path))
+        assert.falsy(file_exists(state_directory .. "/commands"))
+    end)
+
+    it("reaps every compiler after a completion FIFO read failure", function()
+        configure_counting_compiler()
+        local temporary_logs = {}
+        os.tmpname = function()
+            local path = previous_tmpname()
+            temporary_logs[#temporary_logs + 1] = path
+            return path
+        end
+        io.open = function(path, mode)
+            local file, open_err = previous_open(path, mode)
+            if mode ~= "r+" or not file then return file, open_err end
+            return {
+                read = function()
+                    return nil, "injected completion read failure"
+                end,
+                close = function()
+                    return file:close()
+                end,
+            }
+        end
+
+        local results = driver.compile_modules(
+            checked_requests(REFILL_LEAVES), 4, false)
+        os.tmpname = previous_tmpname
+        io.open = previous_open
+        for _, result in ipairs(results) do
+            assert.falsy(result.ok)
+            assert.truthy(tostring(result.err):find(
+                "injected completion read failure", 1, true),
+                tostring(result.err))
+        end
+        assert.equal("0\n", read_file(state_directory .. "/active"))
+        local commands = read_file(state_directory .. "/commands")
+        local count = 0
+        for _ in commands:gmatch("[^\n]+") do count = count + 1 end
+        assert.equal(4, count, commands)
+        for _, path in ipairs(temporary_logs) do
+            assert.falsy(file_exists(path), path)
+        end
+    end)
+
+    it("reports completion FIFO cleanup failures after reaping", function()
+        configure_counting_compiler()
+        io.open = function(path, mode)
+            local file, open_err = previous_open(path, mode)
+            if mode ~= "r+" or not file then return file, open_err end
+            return {
+                read = function(_, pattern)
+                    return file:read(pattern)
+                end,
+                close = function()
+                    assert(file:close())
+                    return nil, "injected completion close failure"
+                end,
+            }
+        end
+
+        local results = driver.compile_modules(checked_requests(), 4, false)
+        io.open = previous_open
+        for _, result in ipairs(results) do
+            assert.falsy(result.ok)
+            assert.truthy(tostring(result.err):find(
+                "injected completion close failure", 1, true),
+                tostring(result.err))
+        end
+        assert.equal("0\n", read_file(state_directory .. "/active"))
+    end)
+
     it("reaps an active batch when creating a later log fails", function()
         configure_counting_compiler(nil, nil, 3)
         local temporary_logs = {}
         local calls = 0
         os.tmpname = function()
             calls = calls + 1
-            if calls == 3 then error("injected tmpname failure", 0) end
+            if calls == 4 then error("injected tmpname failure", 0) end
             local path = previous_tmpname()
             temporary_logs[#temporary_logs + 1] = path
             return path
@@ -420,12 +612,18 @@ describe("parallel generated-C compilation", function()
 
         local results = driver.compile_modules(checked_requests(), 4, false)
         os.tmpname = previous_tmpname
-        assert.truthy(results[1].ok, results[1].err)
-        assert.falsy(results[2].ok)
-        assert.truthy(tostring(results[2].err):find(
-            "injected tmpname failure", 1, true), tostring(results[2].err))
-        assert.truthy(results[3].ok, results[3].err)
-        assert.truthy(results[4].ok, results[4].err)
+        local failed = 0
+        for _, result in ipairs(results) do
+            if result.ok then
+                assert.truthy(result.ok, result.err)
+            else
+                failed = failed + 1
+                assert.truthy(tostring(result.err):find(
+                    "injected tmpname failure", 1, true),
+                    tostring(result.err))
+            end
+        end
+        assert.equal(1, failed)
         assert.equal("3\n", read_file(state_directory .. "/maximum"))
         for _, path in ipairs(temporary_logs) do
             assert.falsy(file_exists(path), path)
@@ -438,7 +636,7 @@ describe("parallel generated-C compilation", function()
         local calls = 0
         os.tmpname = function()
             calls = calls + 1
-            if calls == 2 then return nil end
+            if calls == 3 then return nil end
             local path = previous_tmpname()
             temporary_logs[#temporary_logs + 1] = path
             return path
@@ -533,7 +731,7 @@ describe("parallel generated-C compilation", function()
         local calls = 0
         os.tmpname = function()
             calls = calls + 1
-            if calls == 1 then error("injected tmpname failure", 0) end
+            if calls == 2 then error("injected tmpname failure", 0) end
             local path = previous_tmpname()
             temporary_logs[#temporary_logs + 1] = path
             return path
@@ -635,6 +833,14 @@ describe("parallel generated-C compilation", function()
         assert.equal("1\n", read_file(state_directory .. "/maximum"), output)
         assert.is_true(file_exists(workspace_directory .. "/batch.so"))
         assert.is_true(file_exists(workspace_directory .. "/batch.a"))
+    end)
+
+    it("preserves completion notification for an exec compiler prefix", function()
+        local ok, output, why, code = titanc(
+            "4", nil, nil, nil, "exec " .. WRAPPER, true)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert_four_overlapping_compiles(output)
     end)
 
     it("uses TITAN_JOBS as the concurrency bound", function()
