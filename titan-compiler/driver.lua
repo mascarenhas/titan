@@ -42,24 +42,39 @@ local function normalized_absolute_filename(filename)
     return normalize_absolute_path(absolute_filename(filename))
 end
 
--- Canonicalize an existing pathname's parent through the filesystem. This
--- preserves POSIX symlink/.. resolution for alias and containment checks while
--- still giving a stable destination path when the final leaf does not exist.
+-- Canonicalize the longest existing pathname prefix through the filesystem.
+-- This preserves POSIX symlink/.. resolution for alias and containment checks
+-- while retaining every not-yet-created destination component.
 local function physical_absolute_filename(filename)
     local raw = absolute_filename(filename)
-    local mode = lfs.attributes(raw, "mode")
     local previous = lfs.currentdir()
-    if mode == "directory" and lfs.chdir(raw) then
-        local resolved = lfs.currentdir()
-        assert(lfs.chdir(previous))
-        return resolved
-    end
-    local parent, leaf = raw:match("^(.*)/([^/]*)$")
-    if parent and leaf ~= "" and lfs.chdir(parent) then
-        local resolved_parent = lfs.currentdir()
-        assert(lfs.chdir(previous))
-        return (resolved_parent == "/" and "/" or
-            (resolved_parent .. "/")) .. leaf
+    local unresolved = {}
+    local candidate = raw
+    local seen = {}
+    while candidate and candidate ~= "" and not seen[candidate] do
+        seen[candidate] = true
+        local attributes = lfs.symlinkattributes(candidate)
+        if attributes and attributes.mode == "link" and attributes.target then
+            if attributes.target:sub(1, 1) == "/" then
+                candidate = attributes.target
+            else
+                local parent = candidate:match("^(.*)/[^/]*$") or "."
+                candidate = parent .. "/" .. attributes.target
+            end
+        elseif lfs.chdir(candidate) then
+            local resolved = lfs.currentdir()
+            assert(lfs.chdir(previous))
+            for _, component in ipairs(unresolved) do
+                resolved = (resolved == "/" and "/" or
+                    (resolved .. "/")) .. component
+            end
+            return normalize_absolute_path(resolved)
+        else
+            local parent, leaf = candidate:match("^(.*)/([^/]*)$")
+            if not parent then break end
+            table.insert(unresolved, 1, leaf)
+            candidate = parent == "" and "/" or parent
+        end
     end
     return normalize_absolute_path(raw)
 end
@@ -3656,9 +3671,12 @@ local function validate_compile_requests(requests)
             normalized = normalized_absolute_filename(libname),
             physical = physical_absolute_filename(libname),
         }
+        -- Reject a batch that is safe only on a case-sensitive checkout.
+        output.portable = output.physical:lower()
         for _, previous in ipairs(outputs) do
             local aliases = output.normalized == previous.normalized or
                 output.physical == previous.physical or
+                output.portable == previous.portable or
                 same_existing_file(output.raw, previous.raw)
             assert(not aliases,
                 string.format("compilation requests for logical modules %q " ..

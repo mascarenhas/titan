@@ -186,6 +186,7 @@ describe("parallel generated-C compilation", function()
     local previous_stdout
     local previous_stderr
     local previous_tmpname
+    local previous_popen
     local diagnostic_stream
 
     before_each(function()
@@ -193,6 +194,7 @@ describe("parallel generated-C compilation", function()
         previous_stdout = io.stdout
         previous_stderr = io.stderr
         previous_tmpname = os.tmpname
+        previous_popen = io.popen
         prepare_workspace()
     end)
     after_each(function()
@@ -200,6 +202,7 @@ describe("parallel generated-C compilation", function()
         io.stdout = previous_stdout
         io.stderr = previous_stderr
         os.tmpname = previous_tmpname
+        io.popen = previous_popen
         if diagnostic_stream and io.type(diagnostic_stream) == "file" then
             diagnostic_stream:close()
         end
@@ -263,6 +266,34 @@ describe("parallel generated-C compilation", function()
         assert.equal("1\n", read_file(state_directory .. "/maximum"))
     end)
 
+    it("handles serial cache hits and preparation failures", function()
+        local cached_request = checked_requests()[1]
+        cached_request.mod.compiled = source_root .. "/cached.o"
+        cached_request.mod.native_references = { dependency = true }
+        local cached = driver.compile_modules({ cached_request }, 1, false)
+        assert.truthy(cached[1].ok, cached[1].err)
+        assert.equal(cached_request.mod.compiled, cached[1].libname)
+        assert.same({ dependency = true }, cached[1].native_references)
+
+        local invalid = {
+            modname = "not a logical module",
+            mod = { ast = checked_requests()[1].mod.ast },
+            static_deps = {},
+        }
+        local serial = driver.compile_modules({ invalid }, 1, false)
+        assert.falsy(serial[1].ok)
+        assert.truthy(tostring(serial[1].err):find(
+            "invalid logical Titan module name", 1, true),
+            tostring(serial[1].err))
+
+        local parallel = driver.compile_modules({ invalid }, 4, false)
+        assert.falsy(parallel[1].ok)
+        assert.truthy(tostring(parallel[1].err):find(
+            "invalid logical Titan module name", 1, true),
+            tostring(parallel[1].err))
+        assert.falsy(file_exists(state_directory .. "/commands"))
+    end)
+
     it("retains successful peer objects after a driver child fails", function()
         configure_counting_compiler(nil, "three")
         local diagnostic_path = workspace_directory .. "/diagnostics"
@@ -312,7 +343,39 @@ describe("parallel generated-C compilation", function()
         requests[2].mod.filename = alias .. "/one.titan"
         ok, failure = pcall(driver.compile_modules,
             { requests[1], requests[2] }, 4, false)
+        assert.falsy(ok)
+        assert.truthy(tostring(failure):find(
+            "share object output", 1, true), tostring(failure))
+
+        requests = checked_requests()
+        requests[1].mod.filename = source_root ..
+            "/batch/new/shared.titan"
+        requests[2].mod.filename = alias .. "/new/shared.titan"
+        ok, failure = pcall(driver.compile_modules,
+            { requests[1], requests[2] }, 4, false)
+        assert.falsy(ok)
+        assert.truthy(tostring(failure):find(
+            "share object output", 1, true), tostring(failure))
+
+        local dangling_output = source_root .. "/aliased-output.o"
+        assert(lfs.link("batch/new/shared.o", dangling_output, true))
+        requests = checked_requests()
+        requests[1].mod.filename = source_root ..
+            "/batch/new/shared.titan"
+        requests[2].mod.filename = source_root .. "/aliased-output.titan"
+        ok, failure = pcall(driver.compile_modules,
+            { requests[1], requests[2] }, 4, false)
+        assert(os.remove(dangling_output))
         assert(os.remove(alias))
+        assert.falsy(ok)
+        assert.truthy(tostring(failure):find(
+            "share object output", 1, true), tostring(failure))
+
+        requests = checked_requests()
+        requests[1].mod.filename = source_root .. "/Case.titan"
+        requests[2].mod.filename = source_root .. "/case.titan"
+        ok, failure = pcall(driver.compile_modules,
+            { requests[1], requests[2] }, 4, false)
         assert.falsy(ok)
         assert.truthy(tostring(failure):find(
             "share object output", 1, true), tostring(failure))
@@ -353,6 +416,101 @@ describe("parallel generated-C compilation", function()
         assert.equal("3\n", read_file(state_directory .. "/maximum"))
         for _, path in ipairs(temporary_logs) do
             assert.falsy(file_exists(path), path)
+        end
+    end)
+
+    it("cleans the first log when creating the second log fails", function()
+        configure_counting_compiler(nil, nil, 3)
+        local temporary_logs = {}
+        local calls = 0
+        os.tmpname = function()
+            calls = calls + 1
+            if calls == 2 then return nil end
+            local path = previous_tmpname()
+            temporary_logs[#temporary_logs + 1] = path
+            return path
+        end
+
+        local results = driver.compile_modules(checked_requests(), 4, false)
+        os.tmpname = previous_tmpname
+        assert.falsy(results[1].ok)
+        assert.truthy(tostring(results[1].err):find(
+            "os.tmpname returned no path", 1, true), tostring(results[1].err))
+        for index = 2, 4 do
+            assert.truthy(results[index].ok, results[index].err)
+        end
+        for _, path in ipairs(temporary_logs) do
+            assert.falsy(file_exists(path), path)
+        end
+    end)
+
+    it("reports command-stream and process-launch failures", function()
+        configure_counting_compiler()
+        local temporary_logs = {}
+        os.tmpname = function()
+            local path = previous_tmpname()
+            temporary_logs[#temporary_logs + 1] = path
+            return path
+        end
+        io.stdout = {
+            write = function() return nil, "injected command write failure" end,
+            flush = function() return true end,
+        }
+        local results = driver.compile_modules(checked_requests(), 4, true)
+        io.stdout = previous_stdout
+        for _, result in ipairs(results) do
+            assert.falsy(result.ok)
+            assert.truthy(tostring(result.err):find(
+                "injected command write failure", 1, true),
+                tostring(result.err))
+        end
+
+        io.popen = function() error("injected popen exception", 0) end
+        results = driver.compile_modules(checked_requests(), 4, false)
+        for _, result in ipairs(results) do
+            assert.falsy(result.ok)
+            assert.truthy(tostring(result.err):find(
+                "injected popen exception", 1, true), tostring(result.err))
+        end
+
+        io.popen = function() return nil, "injected unavailable popen" end
+        results = driver.compile_modules(checked_requests(), 4, false)
+        io.popen = previous_popen
+        os.tmpname = previous_tmpname
+        for _, result in ipairs(results) do
+            assert.falsy(result.ok)
+            assert.truthy(tostring(result.err):find(
+                "injected unavailable popen", 1, true), tostring(result.err))
+        end
+        for _, path in ipairs(temporary_logs) do
+            assert.falsy(file_exists(path), path)
+        end
+        assert.falsy(file_exists(state_directory .. "/commands"))
+    end)
+
+    it("reports nonthrowing diagnostic-stream failures", function()
+        configure_counting_compiler("diagnostics")
+        io.stderr = {
+            write = function() return nil, "injected false write" end,
+            flush = function() return true end,
+        }
+        local results = driver.compile_modules(checked_requests(), 4, false)
+        for _, result in ipairs(results) do
+            assert.falsy(result.ok)
+            assert.truthy(tostring(result.err):find(
+                "injected false write", 1, true), tostring(result.err))
+        end
+
+        io.stderr = {
+            write = function() return true end,
+            flush = function() return nil, "injected false flush" end,
+        }
+        results = driver.compile_modules(checked_requests(), 4, false)
+        io.stderr = previous_stderr
+        for _, result in ipairs(results) do
+            assert.falsy(result.ok)
+            assert.truthy(tostring(result.err):find(
+                "injected false flush", 1, true), tostring(result.err))
         end
     end)
 

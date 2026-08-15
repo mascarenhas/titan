@@ -364,8 +364,8 @@ instead of covering the library integration suite.
 **Spec layout.** Pure, layer-level specs live at `spec/` root (`abi_spec`,
 `cdriver_spec`, `cpp_spec`, `ctypes_spec`, `driver_spec`,
 `foreigntypes_spec`, `lexer_spec`, `location_spec`, `parser_spec`,
-`staticmetadata_spec`, `symtab_spec`, `types_spec`, `util_spec`); serial
-native-build and packaging
+`staticmetadata_spec`, `symtab_spec`, `titanc_parallel_spec`, `types_spec`,
+`util_spec`); serial native-build and packaging
 gates also live there (`libuv_build_spec`, `rockspec_spec`,
 `stdlib_installer_spec`). Compiler and
 language specs are split by layer:
