@@ -44,10 +44,12 @@ while IFS= read -r test_file; do
         spec/union_interface_spec.lua | \
         spec/checker/static_compiled_modules_spec.lua | \
         spec/coder/multi_module_libraries_spec.lua | \
+        spec/coder/parallel_compilation_spec.lua | \
         spec/coder/static_compiled_modules_spec.lua | \
         spec/coder/static_dynamic_facade_spec.lua | \
         spec/coder/static_protocol_mismatch_spec.lua | \
-        spec/staticmetadata_spec.lua)
+        spec/staticmetadata_spec.lua | \
+        spec/titanc_parallel_spec.lua)
             # LuaCov keeps only the last loaded compiler prototype's line table
             # inside one process. Exercise these direct prototypes in isolated
             # Busted processes after the complete main compiler set.
