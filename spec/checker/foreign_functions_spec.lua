@@ -258,6 +258,7 @@ describe("foreign functions (checker)", function()
                     kind = "source",
                     foreign_header = header,
                     foreign_header_for_check = true,
+                    foreign_header_probe_identity = header .. ".public",
                 }
             end
             types.registry = {}
@@ -267,6 +268,8 @@ describe("foreign functions (checker)", function()
             assert.equal(0, #errors, table.concat(errors, "\n"))
             assert.equal("Type.Integer", ast[3].block.stats[1].exps[1]._type._tag)
             assert.is_true(ast[1]._foreign_header_for_check)
+            assert.equal(header .. ".public",
+                ast[1]._foreign_header_probe_identity)
         end)
     end)
 

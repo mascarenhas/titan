@@ -1047,6 +1047,99 @@ describe("compiler module loader", function()
         remove_tree(root)
     end)
 
+    it("keeps unique source checking headers behind one public probe identity",
+    function()
+        write_file(source .. "/provider.h", "typedef int provider_int;\n")
+        write_file(source .. "/provider.titan", [[
+            local c = foreign import "provider.h"
+            foreign function identity(input: c.provider_int): c.provider_int
+                return input
+            end
+        ]])
+
+        local function load_once()
+            local loader = driver.defaultloader({}, {
+                source_roots = { provider = true },
+            })
+            local ok, modtype, errors, info = loader("provider")
+            assert.truthy(ok)
+            assert.equal("Type.Module", modtype._tag)
+            assert.equal(0, #errors)
+            assert.equal(source .. "/provider.titan.h",
+                info.foreign_header_probe_identity)
+            assert.not_equal(info.foreign_header_probe_identity,
+                info.foreign_header)
+            assert.matches("provider[.]titan[.]h[.]check[.]tmp[.]",
+                info.foreign_header)
+            assert.equal("file", lfs.attributes(info.foreign_header, "mode"))
+            local cached_ok, _, cached_errors, cached_info = loader("provider")
+            assert.truthy(cached_ok)
+            assert.equal(0, #cached_errors)
+            assert.equal(info.foreign_header, cached_info.foreign_header)
+            assert.equal(info.foreign_header_probe_identity,
+                cached_info.foreign_header_probe_identity)
+            assert.is_true(driver.close_loader(loader))
+            assert.is_nil(lfs.symlinkattributes(info.foreign_header))
+            return info.foreign_header
+        end
+
+        local first = load_once()
+        driver.imported = {}
+        types.registry = {}
+        local second = load_once()
+        assert.not_equal(first, second)
+    end)
+
+    it("absolutizes source checking headers from a relative cross-directory root",
+    function()
+        local cwd = assert(lfs.currentdir())
+        local temporary_name = assert(os.tmpname())
+        local suffix = assert(temporary_name:match("([^/]+)$"))
+        assert(os.remove(temporary_name))
+        local relative_root = ".driver-relative-" .. suffix
+        assert(lfs.mkdir(relative_root))
+        assert(lfs.mkdir(relative_root .. "/a"))
+        assert(lfs.mkdir(relative_root .. "/b"))
+        write_file(relative_root .. "/a/provider.h",
+            "typedef int provider_int;\n")
+        write_file(relative_root .. "/a/provider.titan", [[
+            local c = foreign import "provider.h"
+            foreign function identity(input: c.provider_int): c.provider_int
+                return input
+            end
+        ]])
+        write_file(relative_root .. "/b/consumer.titan", [[
+            local provider = import "a.provider"
+            function read(): integer return 1 end
+        ]])
+
+        local loader
+        local ran, failure = pcall(function()
+            driver.TITAN_SOURCE_PATH = relative_root
+            loader = driver.defaultloader({}, {
+                source_roots = { ["b.consumer"] = true },
+            })
+            local ok, _, errors = loader("b.consumer")
+            assert.truthy(ok)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            local provider = assert(driver.imported["a.provider"])
+            local physical = assert(provider.checking_foreign_header)
+            assert.equal("/", physical:sub(1, 1))
+            assert.equal("file", lfs.attributes(physical, "mode"))
+            local import = driver.imported["b.consumer"].ast[1]
+            assert.equal(physical, import._foreign_header)
+            assert.equal(cwd .. "/" .. relative_root ..
+                "/a/provider.titan.h",
+                import._foreign_header_probe_identity)
+            assert.is_true(driver.close_loader(loader))
+            loader = nil
+            assert.is_nil(lfs.symlinkattributes(physical))
+        end)
+        if loader then driver.close_loader(loader) end
+        remove_tree(relative_root)
+        assert.truthy(ran, failure)
+    end)
+
     it("uses binaries for dependencies and source for explicit roots", function()
         assert(lfs.mkdir(source .. "/titan/timer"))
         write_file(source .. "/titan/timer/timer.titan", [[

@@ -1462,8 +1462,10 @@ exit 0
             saw_source.source)
         assert.is_true(saw_complete_diagnostic)
         assert.is_true(saw_cache_hit)
-        assert.same(events, service.evidence)
         assert.is_true(service:close())
+        assert.same(events, service.evidence)
+        assert.equal("cleanup", events[#events].kind)
+        assert.is_true(events[#events].ok)
     end)
 
     it("uses probe-private identifiers through the real C compiler",
@@ -1760,5 +1762,200 @@ describe("persistent successful C probe markers", function()
         -- that it still did not publish a success marker.
         service:close()
         assert(lfs.rmdir(cache))
+    end)
+
+    it("stabilizes randomized source-foreign headers before cache lookup",
+    function()
+        local cache = temporary_directory()
+        local function alias_for(physical)
+            local include = assert(cprobe.normalize_include_descriptor({
+                include_kind = "quote",
+                include_name = physical,
+            }, { source_dir = "." }))
+            return assert(cprobe.source_foreign_include_alias(
+                include, "provider.module", "/project/provider.titan.h"))
+        end
+
+        local first, first_state = new_fake_service({
+            cache_directory = cache,
+        })
+        local first_module = assert(first:module_context({
+            includes = { alias_for("/tmp/provider-check-one.h") },
+        }))
+        local first_source = cprobe.render_baseline_source(first_module)
+        local first_header_key = first_module.header_key
+        local first_baseline_key = first_module.baseline_key
+        local first_result = first_module:validate_baseline()
+        assert.equal("success", first_result.status, first_result.message)
+        local first_pointer = first_module:probe_unsafe_object_pointer(
+            cpointer("source_s"), cpointer("target_s"))
+        assert.equal("success", first_pointer.status, first_pointer.message)
+        assert.equal(1, first_state.created)
+        assert.equal(2, #first_state.calls)
+        local wrapper_name = next(first_module.probe_wrappers)
+        assert.matches("^titan%-source%-foreign%-[0-9a-f]+%.h$",
+            wrapper_name)
+        assert.equal('#include "/tmp/provider-check-one.h"\n',
+            first_module.probe_wrappers[wrapper_name])
+        assert.is_true(first:close())
+        assert.same({}, first_state.files)
+
+        local second, second_state = new_fake_service({
+            cache_directory = cache,
+        })
+        local second_module = assert(second:module_context({
+            includes = { alias_for("/tmp/provider-check-two.h") },
+        }))
+        assert.equal(first_source,
+            cprobe.render_baseline_source(second_module))
+        assert.equal(first_header_key, second_module.header_key)
+        assert.equal(first_baseline_key, second_module.baseline_key)
+        local second_result = second_module:validate_baseline()
+        assert.equal("success", second_result.status, second_result.message)
+        assert.is_true(second_result.persistent_cached)
+        local second_pointer = second_module:probe_unsafe_object_pointer(
+            cpointer("source_s"), cpointer("target_s"))
+        assert.equal("success", second_pointer.status, second_pointer.message)
+        assert.is_true(second_pointer.persistent_cached)
+        assert.equal(first_pointer.key, second_pointer.key)
+        assert.equal(0, second_state.created)
+        assert.equal(0, #second_state.calls)
+        assert.same({}, second_state.writes)
+        assert.is_true(second:close())
+
+        for _, name in ipairs(entries(cache)) do
+            assert(os.remove(cache .. "/" .. name))
+        end
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("rejects conflicting bindings for one stable probe-header wrapper",
+    function()
+        local physical = assert(cprobe.normalize_include_descriptor({
+            include_kind = "quote",
+            include_name = "/tmp/provider-check.h",
+        }, { source_dir = "." }))
+        local invalid, invalid_error = cprobe.source_foreign_include_alias(
+            {}, "provider", "/project/provider.titan.h")
+        assert.is_nil(invalid)
+        assert.matches("requires a normalized include", invalid_error)
+        local angle = assert(cprobe.normalize_include_descriptor({
+            include_kind = "angle",
+            include_name = "provider-check.h",
+        }))
+        invalid, invalid_error = cprobe.source_foreign_include_alias(
+            angle, "provider", "/project/provider.titan.h")
+        assert.is_nil(invalid)
+        assert.matches("requires an absolute quoted physical include",
+            invalid_error)
+        invalid, invalid_error = cprobe.source_foreign_include_alias(
+            physical, "", "/project/provider.titan.h")
+        assert.is_nil(invalid)
+        assert.matches("requires a module name", invalid_error)
+        invalid, invalid_error = cprobe.source_foreign_include_alias(
+            physical, "provider", "")
+        assert.is_nil(invalid)
+        assert.matches("requires an absolute public header path",
+            invalid_error)
+
+        local unsafe, unsafe_error = cprobe.normalize_include_descriptor({
+            original = "provider",
+            resolved = "/project/provider.titan.h",
+            include_kind = "quote",
+            include_name = "../outside.h",
+            probe_wrapper = {
+                name = "../outside.h",
+                contents = '#include "/tmp/provider-check.h"\n',
+            },
+        })
+        assert.is_nil(unsafe)
+        assert.matches("invalid private probe%-header wrapper descriptor",
+            unsafe_error)
+
+        local service = new_fake_service()
+        local function alias_for(physical)
+            local include = assert(cprobe.normalize_include_descriptor({
+                include_kind = "quote",
+                include_name = physical,
+            }, { source_dir = "." }))
+            return assert(cprobe.source_foreign_include_alias(
+                include, "provider", "/project/provider.titan.h"))
+        end
+        assert(service:module_context({
+            includes = { alias_for("/tmp/provider-check-one.h") },
+        }))
+        local conflicting, err = service:module_context({
+            includes = { alias_for("/tmp/provider-check-two.h") },
+        })
+        assert.is_nil(conflicting)
+        assert.matches("conflicting private probe%-header wrapper", err)
+        assert.is_true(service:close())
+    end)
+
+    it("treats probe-header wrapper creation failures as infrastructure",
+    function()
+        local cache = temporary_directory()
+        local state, runner, ordinary_provider = fake_environment()
+        local service = assert(cprobe.new_service({
+            cache_directory = cache,
+            runner = runner,
+            temp_provider = function()
+                local workspace = ordinary_provider()
+                local ordinary_write = workspace.write
+                function workspace:write(name, contents)
+                    if name:match("^titan%-source%-foreign%-") then
+                        return nil, "injected wrapper failure"
+                    end
+                    return ordinary_write(self, name, contents)
+                end
+                return workspace
+            end,
+        }))
+        local physical = assert(cprobe.normalize_include_descriptor({
+            include_kind = "quote",
+            include_name = "/tmp/provider-check.h",
+        }, { source_dir = "." }))
+        local alias = assert(cprobe.source_foreign_include_alias(
+            physical, "provider", "/project/provider.titan.h"))
+        local module = assert(service:module_context({ includes = { alias } }))
+        local result = module:validate_baseline()
+        assert.equal("infrastructure_failure", result.status)
+        assert.matches("private probe%-header wrapper", result.message)
+        assert.equal(0, #state.calls)
+        assert.same({}, entries(cache))
+        assert.is_true(service:close())
+        assert(lfs.rmdir(cache))
+    end)
+
+    it("preserves quoted-include origin through a private wrapper", function()
+        local root = temporary_directory()
+        local origin = root .. "/origin"
+        assert(lfs.mkdir(origin))
+        local nested = origin .. "/nested.h"
+        local physical = origin .. "/provider-check.h"
+        write_file(nested, "struct titan_wrapper_origin { int member; };\n")
+        write_file(physical, '#include "nested.h"\n')
+        local include = assert(cprobe.normalize_include_descriptor({
+            include_kind = "quote",
+            include_name = physical,
+        }, { source_dir = root }))
+        local alias = assert(cprobe.source_foreign_include_alias(
+            include, "provider", root .. "/provider.titan.h"))
+        local service = assert(cprobe.new_service({
+            compiler_argv = lfs.attributes("/usr/bin/cc", "mode")
+                and { "/usr/bin/cc" } or (os.getenv("CC") or "cc"),
+            cflags = { "-Wall", "-Werror" },
+        }))
+        local module = assert(service:module_context({
+            source_dir = root,
+            includes = { alias },
+        }))
+        local result = module:validate_baseline()
+        assert.equal("success", result.status, result.message)
+        assert.is_true(service:close())
+        assert(os.remove(physical))
+        assert(os.remove(nested))
+        assert(lfs.rmdir(origin))
+        assert(lfs.rmdir(root))
     end)
 end)

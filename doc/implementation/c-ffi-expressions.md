@@ -228,11 +228,29 @@ providers to prove lifecycle and cleanup without depending on a real compiler.
 
 Angle headers keep their angle spelling. A source-relative quoted header is
 rendered as its resolved absolute quoted path before the probe source moves
-under `/tmp`. `cpreamble.fixed_includes` supplies the same preceding standard,
-Lua, and Titan headers used by generated module C. Ordered duplicate behavior
-within the foreign-header block, fixed include directories, language mode,
-parsed compiler command, and target flags therefore match generated
-compilation.
+under `/tmp`. A direct source import is the exception to exposing that physical
+spelling: its generated checking header deliberately has a unique randomized
+sibling name, so the checker replaces it in the probe context with a private
+hash-named wrapper derived from the logical module and eventual public-header
+path. The probe includes the stable wrapper name, and the wrapper includes the
+unique physical header by its absolute quoted spelling. Thus nested quoted
+includes still begin at the physical header's directory, while the rendered
+probe text and every descriptor field used by `header_context_key` remain
+stable across rebuilds. One service rejects conflicting bindings for the same
+wrapper identity. The forwarding wrapper is necessarily one additional C
+preprocessor include level; extension macros such as `__INCLUDE_LEVEL__` can
+observe that level even though ordinary quoted-header origin is preserved.
+
+Alias construction fails closed unless both the physical descriptor and public
+identity are absolute and the physical include is quoted. The persistent marker
+lookup occurs before Titan creates the probe workspace or materializes any
+wrappers. On a miss, wrappers live only in that private
+workspace and are removed when the resolver closes; a wrapper-write failure is
+infrastructure failure and cannot publish a marker. `cpreamble.fixed_includes`
+supplies the same preceding standard, Lua, and Titan headers used by generated
+module C. Ordered duplicate behavior within the foreign-header block, fixed
+include directories, language mode, parsed compiler command, and target flags
+therefore match generated compilation.
 
 Every candidate probe first compiles a baseline translation unit. In
 addition, every module with at least one successful foreign import validates

@@ -2436,6 +2436,10 @@ function driver.defaultloader(static_deps, options)
                         "no generated contents"))
                 checking_foreign_header = nil
             else
+                if checking_foreign_header:sub(1, 1) ~= "/" then
+                    checking_foreign_header = normalize_absolute_path(
+                        lfs.currentdir() .. "/" .. checking_foreign_header)
+                end
                 context.source_foreign_header_temporaries =
                     context.source_foreign_header_temporaries or {}
                 context.source_foreign_header_temporaries[#context.source_foreign_header_temporaries + 1] =
@@ -2464,6 +2468,7 @@ function driver.defaultloader(static_deps, options)
             filename = source.main,
             foreign_header = checking_foreign_header,
             foreign_header_for_check = checking_foreign_header ~= nil,
+            foreign_header_probe_identity = foreign_header,
         }
     end
 
@@ -2618,10 +2623,16 @@ function driver.defaultloader(static_deps, options)
                     foreign_header = normalize_absolute_path(
                         lfs.currentdir() .. "/" .. foreign_header)
                 end
+                local probe_identity = mod.foreign_header
+                if probe_identity and probe_identity:sub(1, 1) ~= "/" then
+                    probe_identity = normalize_absolute_path(
+                        lfs.currentdir() .. "/" .. probe_identity)
+                end
                 info.filename = mod.filename
                 info.foreign_header = foreign_header
                 info.foreign_header_for_check =
                     mod.checking_foreign_header ~= nil
+                info.foreign_header_probe_identity = probe_identity
             end
             return true, mod.type, {}, info
         end

@@ -183,6 +183,7 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
         or descriptor.original
     local original = descriptor.original or name
     local resolved = descriptor.resolved
+    local probe_wrapper = descriptor.probe_wrapper
     if kind ~= "angle" and kind ~= "quote" then
         return nil, "C include descriptor kind must be 'angle' or 'quote'"
     elseif type(name) ~= "string" or name == "" then
@@ -195,7 +196,32 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
 
     local rendered
     local effective_resolved = resolved or ""
-    if kind == "quote" then
+    if probe_wrapper ~= nil then
+        local wrapper_digest = type(name) == "string" and name:match(
+            "^titan%-source%-foreign%-([0-9a-f]+)%.h$")
+        if kind ~= "quote" or type(probe_wrapper) ~= "table" or
+           type(probe_wrapper.name) ~= "string" or
+           probe_wrapper.name ~= name or not wrapper_digest or
+           #wrapper_digest ~= 64 or
+           type(probe_wrapper.contents) ~= "string" or
+           type(resolved) ~= "string" or resolved == "" then
+            return nil, "invalid private probe-header wrapper descriptor"
+        end
+        local err
+        rendered, err = quote_header_name(name)
+        if not rendered then return nil, err end
+        return {
+            original = original,
+            resolved = resolved,
+            include_kind = kind,
+            include_name = name,
+            rendered = rendered,
+            probe_wrapper = {
+                name = probe_wrapper.name,
+                contents = probe_wrapper.contents,
+            },
+        }
+    elseif kind == "quote" then
         -- cdriver descriptors are resolved relative to the importing process,
         -- not relative to a future probe directory. Make that interpretation
         -- explicit before the source moves under /tmp. When no resolved path
@@ -220,6 +246,44 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
         include_kind = kind,
         include_name = name,
         rendered = rendered,
+    }
+end
+
+local function source_foreign_include_alias(
+        descriptor, modname, public_header)
+    if type(descriptor) ~= "table" or
+       type(descriptor.rendered) ~= "string" or
+       descriptor.rendered == "" then
+        return nil, "source-foreign probe alias requires a normalized include"
+    elseif descriptor.include_kind ~= "quote" or
+           type(descriptor.resolved) ~= "string" or
+           descriptor.resolved:sub(1, 1) ~= "/" or
+           descriptor.rendered ~= quote_header_name(descriptor.resolved) then
+        return nil, "source-foreign probe alias requires an absolute quoted physical include"
+    elseif type(modname) ~= "string" or modname == "" then
+        return nil, "source-foreign probe alias requires a module name"
+    elseif type(public_header) ~= "string" or
+           public_header:sub(1, 1) ~= "/" then
+        return nil, "source-foreign probe alias requires an absolute public header path"
+    end
+    local identity = keyed_fields({
+        { "alias_version", "source-foreign-v1" },
+        { "module", modname },
+        { "public_header", public_header },
+    })
+    local name = "titan-source-foreign-" .. sha256.hex(identity) .. ".h"
+    local rendered, rendered_error = quote_header_name(name)
+    if not rendered then return nil, rendered_error end
+    return {
+        original = modname,
+        resolved = public_header,
+        include_kind = "quote",
+        include_name = name,
+        rendered = rendered,
+        probe_wrapper = {
+            name = name,
+            contents = "#include " .. descriptor.rendered .. "\n",
+        },
     }
 end
 
@@ -887,6 +951,22 @@ local function call_workspace(workspace, method, ...)
     return true
 end
 
+function Service:_materialize_probe_wrappers(workspace, wrappers)
+    if not wrappers then return true end
+    local names = {}
+    for name in pairs(wrappers) do names[#names + 1] = name end
+    table.sort(names)
+    for _, name in ipairs(names) do
+        if not self.materialized_probe_wrappers[name] then
+            local wrote, err = call_workspace(
+                workspace, "write", name, wrappers[name])
+            if not wrote then return nil, err end
+            self.materialized_probe_wrappers[name] = true
+        end
+    end
+    return true
+end
+
 function Service:_compile_argv(source_path, object_path)
     local argv = copy_array(self.compiler_argv)
     append_all(argv, self.compile_flags)
@@ -934,7 +1014,7 @@ local function infrastructure_run(stage, reason, run)
     }
 end
 
-function Service:_run_source(stage, source, key, probe_label)
+function Service:_run_source(stage, source, key, probe_label, wrappers)
     if self.closed then
         return infrastructure_run(stage, "workspace", {
             diagnostic = "probe service is closed",
@@ -969,6 +1049,15 @@ function Service:_run_source(stage, source, key, probe_label)
     if not workspace then
         return infrastructure_run(stage, "workspace",
             { diagnostic = workspace_error, source = source })
+    end
+    local wrappers_ok, wrappers_error =
+        self:_materialize_probe_wrappers(workspace, wrappers)
+    if not wrappers_ok then
+        return infrastructure_run(stage, "workspace", {
+            diagnostic = "could not prepare private probe-header wrapper: " ..
+                tostring(wrappers_error),
+            source = source,
+        })
     end
 
     self.sequence = self.sequence + 1
@@ -1139,7 +1228,8 @@ function Service:_ensure_baseline(module_context)
     end
 
     local source = render_baseline_source(module_context)
-    local run = self:_run_source("baseline", source, key)
+    local run = self:_run_source(
+        "baseline", source, key, nil, module_context.probe_wrappers)
     local result
     if run.started and not run.interrupted and run.ok then
         result = {
@@ -1393,7 +1483,8 @@ local function validate_declaration_compatibility_batch(
     local key = declaration_compatibility_batch_key(
         service, module_context, entries)
     local run = service:_run_source(
-        "candidate", source, key, "declaration-compatibility-batch")
+        "candidate", source, key, "declaration-compatibility-batch",
+        module_context.probe_wrappers)
 
     if not run.started or run.interrupted or run.cleanup_error then
         for _, entry in ipairs(entries) do
@@ -1604,7 +1695,8 @@ function ModuleContext:probe_unsafe_object_pointer(source_type, target_type)
         }
     end
 
-    local run = service:_run_source("candidate", source, key)
+    local run = service:_run_source(
+        "candidate", source, key, nil, self.probe_wrappers)
     local result = {
         kind = "unsafe_object_pointer",
         key = key,
@@ -1775,7 +1867,7 @@ function ModuleContext:probe_operator(trait)
     end
 
     local run = service:_run_source(
-        "candidate", source, key, "c-operator")
+        "candidate", source, key, "c-operator", self.probe_wrappers)
     local result = {
         kind = "c_operator",
         key = key,
@@ -1883,12 +1975,30 @@ function Service:module_context(options)
         end
     end
 
+    local probe_wrappers = {}
+    for _, include in ipairs(includes) do
+        local wrapper = include.probe_wrapper
+        if wrapper then
+            local existing = probe_wrappers[wrapper.name] or
+                self.probe_wrapper_bindings[wrapper.name]
+            if existing and existing ~= wrapper.contents then
+                return nil, "conflicting private probe-header wrapper '" ..
+                    wrapper.name .. "'"
+            end
+            probe_wrappers[wrapper.name] = wrapper.contents
+        end
+    end
+    for name, contents in pairs(probe_wrappers) do
+        self.probe_wrapper_bindings[name] = contents
+    end
+
     local header_key = header_context_key(source_dir, includes)
     local context = setmetatable({
         service = self,
         source_dir = source_dir,
         includes = includes,
         header_preamble = render_header_preamble(includes),
+        probe_wrappers = probe_wrappers,
         header_key = header_key,
         baseline_key = keyed_fields({
             { "toolchain", self.toolchain_key },
@@ -1948,17 +2058,33 @@ function Service:close()
 
     local workspace = self.workspace
     self.workspace = nil
+    local wrapper_names = {}
+    for name in pairs(self.materialized_probe_wrappers) do
+        wrapper_names[#wrapper_names + 1] = name
+    end
+    table.sort(wrapper_names)
+    local wrapper_error
+    for _, name in ipairs(wrapper_names) do
+        local removed, remove_error =
+            call_workspace(workspace, "remove", name)
+        if not removed and not wrapper_error then
+            wrapper_error = remove_error
+        end
+    end
+    self.materialized_probe_wrappers = {}
     local cleaned, cleanup_error =
         call_workspace(workspace, "cleanup")
+    local close_error = wrapper_error
+    if not cleaned and not close_error then close_error = cleanup_error end
     self:_emit({
         kind = "cleanup",
         scope = "session workspace",
-        ok = cleaned == true,
-        error = cleaned and nil or cleanup_error,
+        ok = close_error == nil,
+        error = close_error,
     })
-    if not cleaned then
-        self.close_error = cleanup_error
-        return nil, cleanup_error
+    if close_error then
+        self.close_error = close_error
+        return nil, close_error
     end
     return true
 end
@@ -2201,11 +2327,15 @@ function cprobe.new_service(options)
         evidence = {},
         baseline_cache = {},
         result_cache = {},
+        probe_wrapper_bindings = {},
+        materialized_probe_wrappers = {},
         sequence = 0,
         workspace = nil,
         closed = false,
     }, Service)
 end
+
+cprobe.source_foreign_include_alias = source_foreign_include_alias
 
 function cprobe.normalize_include_descriptor(descriptor, options)
     options = options or {}

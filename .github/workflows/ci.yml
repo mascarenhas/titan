@@ -204,7 +204,8 @@ jobs:
           echo "TITAN_PROBE_CACHE_IDENTITY=gha-v3:linux-regular-v1:${{ runner.os }}:${{ runner.arch }}:abi-${TITAN_ABI_VERSION}" >> "$GITHUB_ENV"
 
       - name: Restore regular Linux C-probe success markers
-        uses: actions/cache@v5
+        id: regular-probe-cache
+        uses: actions/cache/restore@v5
         with:
           path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
           key: titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-regular-v1-test-linux-stdlib-${{ github.sha }}
@@ -313,6 +314,12 @@ jobs:
         # runner.
         run: bash spec/support/ci_libuv_mode_smoke.sh bundled
 
+      - name: Save regular Linux C-probe success markers
+        uses: actions/cache/save@v5
+        with:
+          path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
+          key: ${{ steps.regular-probe-cache.outputs.cache-primary-key }}
+
       # The prepared artifact was packed before the source-mode smoke, so this
       # can mutate the producer's live prefix without changing the bundled tree
       # restored by the Linux compiler consumer. Exercise only the installed
@@ -372,12 +379,14 @@ jobs:
           echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
           .lua/bin/lua -v
 
-      # This disposable restored tree has no later production-image consumer,
-      # so legacy compiler cleanup needs no snapshot/restore round trip.
-      - name: Run complete compiler and language tests with coverage
+      # Each worker gets a private copy of the prepared checkout, so legacy
+      # compiler cleanup and checkout-root fixture names cannot race. They share
+      # only the prepared installed prefix, and their LuaCov stats are merged
+      # after all four deterministic shards pass.
+      - name: Run four isolated compiler and language shards with coverage
         env:
           TITAN_EXTRA_CFLAGS: "-O0"
-        run: bash spec/support/ci_test_groups.sh compiler
+        run: bash spec/support/ci_parallel_compiler_tests.sh
 
       - name: Generate compiler coverage report
         run: |
