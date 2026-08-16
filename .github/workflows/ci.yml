@@ -21,7 +21,7 @@ jobs:
   test-linux-stdlib:
     name: stdlib (ubuntu-24.04, build+all-no-coverage)
     if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
+    runs-on: ubicloud-standard-2
     timeout-minutes: 30
     permissions:
       contents: read
@@ -50,7 +50,7 @@ jobs:
       # safely. The private Readline root is deliberately omitted so this
       # bundled-provider lane must exercise source verification and staging.
       - name: Cache standalone-prefix LuaRocks dependencies
-        uses: actions/cache@v5
+        uses: ubicloud/cache@v4
         with:
           path: |
             .lua/bin/busted
@@ -68,7 +68,7 @@ jobs:
             ubuntu-24.04-${{ runner.arch }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
 
       - name: Cache bundled libuv source and static build
-        uses: actions/cache@v5
+        uses: ubicloud/cache@v4
         with:
           path: |
             libuv-v${{ env.LIBUV_VERSION }}
@@ -79,7 +79,7 @@ jobs:
             ubuntu-24.04-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
 
       - name: Cache bundled llhttp source and static build
-        uses: actions/cache@v5
+        uses: ubicloud/cache@v4
         with:
           path: |
             llhttp-release-v${{ env.LLHTTP_VERSION }}
@@ -90,7 +90,7 @@ jobs:
             ubuntu-24.04-${{ runner.arch }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
 
       - name: Cache bundled OpenSSL source and static build
-        uses: actions/cache@v5
+        uses: ubicloud/cache@v4
         with:
           path: |
             openssl-${{ env.OPENSSL_VERSION }}
@@ -205,7 +205,7 @@ jobs:
 
       - name: Restore regular Linux C-probe success markers
         id: regular-probe-cache
-        uses: actions/cache/restore@v5
+        uses: ubicloud/cache/restore@v4
         with:
           path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
           key: titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-regular-v1-test-linux-stdlib-${{ github.sha }}
@@ -315,7 +315,7 @@ jobs:
         run: bash spec/support/ci_libuv_mode_smoke.sh bundled
 
       - name: Save regular Linux C-probe success markers
-        uses: actions/cache/save@v5
+        uses: ubicloud/cache/save@v4
         with:
           path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
           key: ${{ steps.regular-probe-cache.outputs.cache-primary-key }}
@@ -353,7 +353,7 @@ jobs:
     name: compiler/language (ubuntu-24.04, LuaCov)
     needs: test-linux-stdlib
     if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
+    runs-on: ubicloud-standard-2
     timeout-minutes: 30
     permissions:
       contents: read
@@ -532,7 +532,7 @@ jobs:
           echo "TITAN_PROBE_CACHE_IDENTITY=gha-v3:macos-full-v1:${{ runner.os }}:${{ runner.arch }}:abi-${TITAN_ABI_VERSION}" >> "$GITHUB_ENV"
 
       - name: Restore macOS C-probe success markers
-        uses: actions/cache@v5
+        uses: ubicloud/cache@v4
         with:
           path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
           key: titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-macos-full-v1-test-macos-${{ github.sha }}
@@ -606,7 +606,7 @@ jobs:
   sanitizer:
     name: sanitizer (ubuntu-24.04, ASan+UBSan)
     if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
+    runs-on: ubicloud-standard-2
     timeout-minutes: 35
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -735,7 +735,7 @@ jobs:
 
       - name: Restore sanitizer native dependencies
         id: sanitizer-native-cache
-        uses: actions/cache/restore@v5
+        uses: ubicloud/cache/restore@v4
         with:
           path: |
             .lua
@@ -781,7 +781,7 @@ jobs:
 
       - name: Save sanitizer native dependencies
         if: steps.sanitizer-native-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
+        uses: ubicloud/cache/save@v4
         with:
           path: |
             .lua
@@ -815,7 +815,7 @@ jobs:
           echo "TITAN_PROBE_CACHE_IDENTITY=gha-v3:linux-asan-ubsan-v1:${{ runner.os }}:${{ runner.arch }}:abi-${TITAN_ABI_VERSION}" >> "$GITHUB_ENV"
 
       - name: Restore sanitizer C-probe success markers
-        uses: actions/cache@v5
+        uses: ubicloud/cache@v4
         with:
           path: .lua/var/cache/titan-probes/${{ env.TITAN_ABI_VERSION }}
           key: titan-probe-success-v1-${{ runner.os }}-${{ runner.arch }}-abi-${{ env.TITAN_ABI_VERSION }}-linux-asan-ubsan-v1-sanitizer-${{ github.sha }}

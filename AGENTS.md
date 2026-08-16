@@ -172,7 +172,7 @@ not add epicycles around what may be a misunderstood simpler design.
   prefix-owned `var/cache/titan-probes/<ABI>` directory is the deliberate
   exception to that full-tree transfer: exclude it from the tar and snapshot it
   independently in the regular producer, sanitizer, and macOS jobs with
-  `actions/cache@v5`. The regular producer uses explicit restore/save actions
+  `ubicloud/cache@v4`. The regular producer uses explicit restore/save actions
   and saves after the bundled tests and smoke but before the system-libuv/OpenSSL
   canary can add markers from another provider configuration. The other lanes
   save at job end. Those producing lanes have distinct OS/architecture keys

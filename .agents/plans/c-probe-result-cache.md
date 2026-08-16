@@ -35,7 +35,7 @@ from `package.cpath` is the fallback. A nonempty
 probe-content hash regardless of namespace.
 
 CI keeps this directory out of the prepared full-tree tar and snapshots it
-independently with `actions/cache@v5`. The regular Linux producer, macOS, and
+independently with `ubicloud/cache@v4`. The regular Linux producer, macOS, and
 sanitizer jobs use distinct lane namespaces and keys. The regular lane restores
 before its first build and explicitly saves after bundled tests/smoke but before
 the system-libuv/OpenSSL canary can add markers from another provider
