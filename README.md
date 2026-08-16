@@ -774,10 +774,10 @@ complete covered compiler/language set. That consumer extracts four isolated
 workers from the prepared archive, runs at most two concurrently with tagged
 output, and emits the sole merged Codecov report. Linux build/compiler bounds
 are two to match the private runner; the manual macOS job overrides them to
-three. The ASan+UBSan job builds its own
-instrumented tree and reuses one aggregate native build for focused filters; it
-does not consume the regular
-artifact.
+three. The ASan+UBSan job restores its separately fingerprinted native
+Lua/libbacktrace/libuv/llhttp/OpenSSL tree before LuaRocks/Titan work, saves only
+that clean dependency boundary, and reuses one aggregate native build for
+focused filters; it does not consume the regular artifact.
 The complete macOS suite remains a manually dispatched pre-merge gate and is
 run only with explicit maintainer authorization.
 
