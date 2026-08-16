@@ -2984,7 +2984,7 @@ exit 73
                 "grep -E '^\\./\\.lua/var/cache/titan-probes(/|$)' " ..
                 ">/dev/null", 1, true), stdlib_job)
 
-            assert.equal(10, count_literal(workflow,
+            assert.equal(6, count_literal(workflow,
                 "uses: ubicloud/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
                 "uses: ubicloud/cache/restore@v4"), workflow)
