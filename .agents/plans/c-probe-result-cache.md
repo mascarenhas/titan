@@ -36,11 +36,23 @@ probe-content hash regardless of namespace.
 
 CI keeps this directory out of the prepared full-tree tar and snapshots it
 independently with `actions/cache@v5`. The regular Linux producer, macOS, and
-sanitizer jobs use distinct lane namespaces and keys. Compiler specs disable the
-persistent cache because independent fixtures intentionally reuse header
-pathnames; the preceding production build still benefits. Primary keys end in
-the commit SHA while stable restore prefixes permit reuse. Cache entries must
-come only from a trusted writer because their presence is authoritative.
+sanitizer jobs use distinct lane namespaces and keys. The regular lane restores
+before its first build and explicitly saves after bundled tests/smoke but before
+the system-libuv/OpenSSL canary can add markers from another provider
+configuration. Compiler specs disable the persistent cache because independent
+fixtures intentionally reuse header pathnames; the preceding production build
+still benefits. Primary keys end in the commit SHA while stable restore prefixes
+permit reuse. Cache entries must come only from a trusted writer because their
+presence is authoritative.
+
+Direct source imports retain unique randomized physical checking headers for
+concurrency, cleanup, and transactional safety. Probes do not render those
+names. The checker derives a stable private wrapper name from the logical module
+and eventual public-header path; the wrapper includes the unique physical file
+by absolute quoted spelling, preserving nested quoted-include origin. Every
+probe descriptor field is stable, cache lookup precedes workspace/wrapper
+creation, conflicting bindings fail, and wrapper creation failure is
+infrastructure rather than a cacheable verdict.
 
 ## Validation
 
@@ -48,6 +60,12 @@ come only from a trusted writer because their presence is authoritative.
 - A cold successful probe creates one empty hash-named marker; a fresh service
   hits it before workspace creation even when the semantic call-site key differs.
 - Exact source-byte and namespace changes miss.
+- Two randomized checking-header paths behind one stable wrapper produce the
+  same header key, baseline key, and probe C; the second service hits before
+  workspace creation. Conflicting bindings and wrapper-write failures fail, and
+  a real nested quoted include retains its physical origin. A relative source
+  root with a cross-directory source import proves that the unique checking path
+  is absolutized and cleaned before wrapper construction.
 - Rejected, unstarted, interrupted, and cleanup-failed probes create no marker.
 - Unwritable or structurally blocked cache roots fail open.
 - Focused cprobe/driver/workflow specs, full compiler coverage, mixed suite, and
@@ -60,8 +78,9 @@ A controlled bundled-provider rebuild with an empty namespace completed in
 markers. Repeating the same build in the same prefix completed in 150.2 seconds
 and launched 945 compiler processes: 105 exact-text successful probes were
 recovered without invoking the compiler, a 10% process reduction and 2.1% wall
-reduction. Some generated private-header path spellings are intentionally exact
-and therefore miss across builds; the cache makes no attempt to normalize them.
+reduction. That measurement preceded the stable source-foreign wrapper above;
+those probes now retain exact generated C while no longer changing merely
+because a safe physical checking-header nonce changed.
 
 A separate compile-only profile used Clang with the CI ASan+UBSan flags for 400
 distinct successful probe texts. The cold run took 11.7 seconds, launched 400

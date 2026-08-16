@@ -64,7 +64,12 @@ not add epicycles around what may be a misunderstood simpler design.
   standard `ubuntu-24.04` jobs with explicit 30-minute timeouts. Every workflow
   job exports `MAKEFLAGS=-j4` and `TITAN_JOBS=4`: Make may overlap independent
   native prerequisites, and each `titanc` process may overlap only generated-C
-  object compilations. The compiler launches larger generated units first and
+  object compilations. The four external Linux compiler-test workers override
+  `TITAN_JOBS=1`, so ordinary compiler-test invocations consume at most four
+  generated-C slots in aggregate. Dedicated parallel specs still pass their
+  explicit bounds and may temporarily exceed that aggregate; production/provider
+  builds retain four-way compilation.
+  The compiler launches larger generated units first and
   receives actual child completions through one private POSIX FIFO, refilling a
   slot immediately; diagnostics remain buffered and replay in request order.
   Do not replace wait-any notification with launch-order `pclose`, which leaves
@@ -72,9 +77,13 @@ not add epicycles around what may be a misunderstood simpler design.
   wrappers preserve the Make jobserver through guarded recursive recipe lines,
   and `ltitanlib.o`
   waits for the prefix Lua installation that owns its public headers. Busted
-  2.3 has no shard option, and the compiler specs share checkout-root artifact
-  names plus one LuaCov state file, so each Busted invocation remains unsharded.
-  The aggregate native Titan suite also remains one fast executable.
+  2.3 has no native shard option. Local Busted invocations remain serial, while
+  the Linux compiler consumer externally partitions its complete file set into
+  four measured longest-first groups. Each group runs in a private extraction of
+  the prepared checkout, because compiler specs share checkout-root artifact
+  names; each also owns one LuaCov stats file, and the job merges all four only
+  after every worker passes. The installed prefix is shared read-only. The
+  aggregate native Titan suite also remains one fast executable.
 
   1. `test-linux-stdlib` is the prepared-tree producer. It prepares a clean
      ABI-0.25 prefix, builds and installs the optimized bundled provider, and
@@ -94,9 +103,15 @@ not add epicycles around what may be a misunderstood simpler design.
      provider modes pass. Never repack the live system-linked tree.
   2. `test-linux-compiler` is the sole regular-artifact consumer. It needs the
      stdlib producer, restores that full tree on the same x86_64 Ubuntu target,
-     and runs the complete `spec/support/ci_test_groups.sh compiler` set with
-     LuaCov and ordinary Busted auto-insulation. Disposable generated fixtures
-     use `TITAN_EXTRA_CFLAGS=-O0`. The job emits one filtered report and makes
+     and extracts four cache-free worker copies without their `.lua` trees. The
+     measured `ci_compiler_test_groups.txt` manifest is exhaustive and assigns
+     each compiler spec to one worker; ordinary files run once per group, while
+     the retained unit/fresh-prototype cases keep their separate Busted process
+     boundaries. Workers own private checkout roots and `TMPDIR`s, share only the
+     prepared installed prefix read-only, buffer logs independently, and write
+     distinct LuaCov stats. The job sums them before reporting. Disposable
+     generated fixtures use
+     `TITAN_EXTRA_CFLAGS=-O0`. The job emits one filtered report and makes
      one failing-on-error OIDC Codecov upload named `compiler`; it is the only
      job with `id-token: write`. Its restored checkout is disposable and has no
      later production-image consumer, so it does not snapshot and restore the
@@ -122,7 +137,10 @@ not add epicycles around what may be a misunderstood simpler design.
   prefix-owned `var/cache/titan-probes/<ABI>` directory is the deliberate
   exception to that full-tree transfer: exclude it from the tar and snapshot it
   independently in the regular producer, sanitizer, and macOS jobs with
-  `actions/cache@v5`. Those producing lanes have distinct OS/architecture keys
+  `actions/cache@v5`. The regular producer uses explicit restore/save actions
+  and saves after the bundled tests and smoke but before the system-libuv/OpenSSL
+  canary can add markers from another provider configuration. The other lanes
+  save at job end. Those producing lanes have distinct OS/architecture keys
   whose immutable primary ends in the commit SHA and whose stable restore
   prefix omits it. Each selects its lane namespace with
   `TITAN_PROBE_CACHE_IDENTITY` before its first Titan build. The prepared-tree
@@ -1392,7 +1410,7 @@ substitution, recursive; error on missing keys). Key facts:
 
 ### C FFI (`c-parser/`, `foreigntypes.lua`)
 
-`foreign import "header.h"` invokes a pure-Lua C toolchain: `cpp.lua` (full hand-written preprocessor; asks the configured `CC -std=c99` plus parsed `TITAN_EXTRA_CPPFLAGS` for system include paths and predefined macros), `c99.lua` (relabel C99 grammar; module-global typedef table, not reentrant), `ctypes.lua`/`cdefines.lua` (build a TypeList), and `cdriver.lua` (include resolution plus C type extraction). The checker passes the importing Titan source directory and the shared toolchain configuration to `cdriver`, which emits quoted `#include "..."` syntax only when the header is found by the quoted-include rules relative to that source; otherwise generated C uses angle brackets. `cdriver` also exposes `titan-runtime/titan/ffi.h`, which defines selected `titan_ffi_*` aliases for portable C primitive types. Contextual conversions and C operators use one resolver-owned `cprobe.Service`: its compile-only probes share the generated objects' exact parsed `CC`, C99/CPP/target flags, include ordering, and target arithmetic profile. Rich answers remain session-scoped and never enter the pure gradual-consistency/coercion relations or serialized module types. Production services persist only successful probes as empty `<sha256(exact probe C)>.success` markers under the ABI-owned prefix cache; marker presence is the whole verdict and rejection is never persisted. This intentionally keys no compiler, flag, environment, or header state. Stable local rebuilds and CI reuse their selected trusted cache folder; change `TITAN_PROBE_CACHE_IDENTITY`, use another prefix, or clear the markers when build-policy isolation is required. Do not add dependency manifests, preprocessing, verdict payloads, or negative-result records.
+`foreign import "header.h"` invokes a pure-Lua C toolchain: `cpp.lua` (full hand-written preprocessor; asks the configured `CC -std=c99` plus parsed `TITAN_EXTRA_CPPFLAGS` for system include paths and predefined macros), `c99.lua` (relabel C99 grammar; module-global typedef table, not reentrant), `ctypes.lua`/`cdefines.lua` (build a TypeList), and `cdriver.lua` (include resolution plus C type extraction). The checker passes the importing Titan source directory and the shared toolchain configuration to `cdriver`, which emits quoted `#include "..."` syntax only when the header is found by the quoted-include rules relative to that source; otherwise generated C uses angle brackets. `cdriver` also exposes `titan-runtime/titan/ffi.h`, which defines selected `titan_ffi_*` aliases for portable C primitive types. Contextual conversions and C operators use one resolver-owned `cprobe.Service`: its compile-only probes share the generated objects' exact parsed `CC`, C99/CPP/target flags, include ordering, and target arithmetic profile. Rich answers remain session-scoped and never enter the pure gradual-consistency/coercion relations or serialized module types. Production services persist only successful probes as empty `<sha256(exact probe C)>.success` markers under the ABI-owned prefix cache; marker presence is the whole verdict and rejection is never persisted. This intentionally keys no compiler, flag, environment, or header state. Stable local rebuilds and CI reuse their selected trusted cache folder; change `TITAN_PROBE_CACHE_IDENTITY`, use another prefix, or clear the markers when build-policy isolation is required. A direct source import keeps its unique randomized physical checking header, but probes include a stable private-workspace wrapper keyed by logical module/absolute eventual public-header identity; that wrapper includes the physical file by absolute quoted spelling, preserving nested quoted origin. Keep every header-context descriptor field stable, perform marker lookup before creating the workspace/wrapper, reject conflicting bindings, and treat wrapper failures as infrastructure. Do not add dependency manifests, preprocessing, verdict payloads, or negative-result records.
 
 Recognized existing object-like integer/accessor expressions and fully expanded
 outer casts to C integer, floating, object-pointer, or function-pointer types

@@ -2893,9 +2893,13 @@ exit 73
                 "grep -E '^\\./\\.lua/var/cache/titan-probes(/|$)' " ..
                     ">/dev/null", 1, true), stdlib_job)
 
-            assert.equal(11, count_literal(workflow,
+            assert.equal(10, count_literal(workflow,
                 "uses: actions/cache@v5"), workflow)
-            assert.equal(3, count_literal(workflow,
+            assert.equal(1, count_literal(workflow,
+                "uses: actions/cache/restore@v5"), workflow)
+            assert.equal(1, count_literal(workflow,
+                "uses: actions/cache/save@v5"), workflow)
+            assert.equal(4, count_literal(workflow,
                 "path: .lua/var/cache/titan-probes/" ..
                     "${{ env.TITAN_ABI_VERSION }}"), workflow)
             assert.equal(3, count_literal(workflow,
@@ -2923,6 +2927,10 @@ exit 73
                 "-test-linux-stdlib-", 1, true))
             local regular_cache_index = assert(stdlib_job:find(
                 "- name: Restore regular Linux C-probe success markers", 1, true))
+            assert.truthy(regular_cache_step:find(
+                "id: regular-probe-cache", 1, true))
+            assert.truthy(regular_cache_step:find(
+                "uses: actions/cache/restore@v5", 1, true))
             local regular_build_index = assert(stdlib_job:find(
                 "- name: Build and install the rock", regular_cache_index,
                 true))
@@ -2937,14 +2945,25 @@ exit 73
             local bundled_index = assert(stdlib_job:find(
                 "- name: Smoke-test bundled libuv source image",
                 tests_index, true))
+            local regular_save_index = assert(stdlib_job:find(
+                "- name: Save regular Linux C-probe success markers",
+                bundled_index, true))
+            local regular_save_step = named_step(
+                stdlib_job, "Save regular Linux C-probe success markers")
+            assert.truthy(regular_save_step:find(
+                "uses: actions/cache/save@v5", 1, true))
+            assert.truthy(regular_save_step:find(
+                "${{ steps.regular-probe-cache.outputs.cache-primary-key }}",
+                1, true))
             local system_index = assert(stdlib_job:find(
                 "- name: Canary source-rock installation with system " ..
-                    "libuv and OpenSSL", bundled_index, true))
+                    "libuv and OpenSSL", regular_save_index, true))
             local upload_index = assert(stdlib_job:find(
                 "- name: Upload prepared Linux tree", system_index, true))
             assert.is_true(pack_index < tests_index, stdlib_job)
             assert.is_true(tests_index < bundled_index, stdlib_job)
-            assert.is_true(bundled_index < system_index, stdlib_job)
+            assert.is_true(bundled_index < regular_save_index, stdlib_job)
+            assert.is_true(regular_save_index < system_index, stdlib_job)
             assert.is_true(system_index < upload_index, stdlib_job)
 
             assert.equal(1, count_literal(compiler_job,
@@ -2961,7 +2980,9 @@ exit 73
             assert.equal(1, count_literal(compiler_job,
                 "name: titan-linux-prepared.tar.gz"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
-                "ci_test_groups.sh compiler"), compiler_job)
+                "ci_parallel_compiler_tests.sh"), compiler_job)
+            assert.falsy(compiler_job:find(
+                "ci_test_groups.sh compiler", 1, true), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 'TITAN_EXTRA_CFLAGS: "-O0"'), compiler_job)
             assert.falsy(compiler_job:find(
@@ -2970,8 +2991,8 @@ exit 73
                 "- name: Restore prepared Linux tree and environment",
                 1, true))
             local compiler_tests_index = assert(compiler_job:find(
-                "- name: Run complete compiler and language tests with coverage",
-                compiler_unpack_index, true))
+                "- name: Run four isolated compiler and language shards " ..
+                    "with coverage", compiler_unpack_index, true))
             assert.is_true(compiler_unpack_index < compiler_tests_index)
             assert.falsy(compiler_job:find(
                 "C-probe success markers", 1, true))
@@ -3087,9 +3108,10 @@ exit 73
                 "spec/stdlib_installer_spec.lua",
                 "run_isolated_compiler_coverage",
                 '"$BUSTED" -c -o gtest -v "$test_file"',
-                "compiler)",
+                "compiler | compiler-shard-[1-4])",
                 "compiler-uncovered)",
-                "usage: $0 {compiler|compiler-uncovered}",
+                "compiler-shard-{1..4}",
+                "ci_compiler_test_groups.txt",
             }) do
                 assert.truthy(groups:find(retained, 1, true), retained)
             end
@@ -3100,15 +3122,56 @@ exit 73
                 "run_library_group", "run_titan_stdlib_test_groups.sh",
                 "compiler-core", "compiler-heavy", "library-serial",
                 "library-uv-fs", "library-net-os", "library-peg-string",
-                "libraries)", "Library ", "worker", "awk",
+                "libraries)", "Library ", "worker", "awk", "declare -A",
                 "spec/*_boundary_spec.lua",
             }) do
                 assert.falsy(groups:find(removed, 1, true), removed)
             end
             local uncovered_group = assert(groups:match(
-                "\n    compiler%-uncovered%)(.-)\n    %*%)"))
+                "\n    compiler%-uncovered%)(.-)\n        ;;"))
             assert.falsy(uncovered_group:find(" -c ", 1, true),
                 uncovered_group)
+
+            local parallel_compiler = read_file(
+                "spec/support/ci_parallel_compiler_tests.sh")
+            for _, required in ipairs({
+                "xargs -r -n1 -P4",
+                'mktemp -d "$runner_temp/titan-compiler-workers.XXXXXX"',
+                'tar --exclude="./.lua" --exclude="./.git"',
+                'cd "$worker" || exit 1',
+                'rm -f luacov.stats.out luacov.report.out || exit 1',
+                'mkdir -p .tmp || exit 1',
+                'export TMPDIR="$PWD/.tmp"',
+                'unset LUACOV_CONFIG',
+                'TITAN_JOBS=1',
+                '"compiler-shard-$shard"',
+                "merge_luacov_stats.lua",
+                "luacov.stats.out",
+            }) do
+                assert.truthy(parallel_compiler:find(required, 1, true),
+                    required)
+            end
+
+            local partition = read_file(
+                "spec/support/ci_compiler_test_groups.txt")
+            local assigned = {}
+            local assigned_count = 0
+            local shard_counts = { 0, 0, 0, 0 }
+            for line in partition:gmatch("[^\n]+") do
+                if line:sub(1, 1) ~= "#" then
+                    local shard, filename, seconds = line:match(
+                        "^([1-4]) (spec/.+_spec[.]lua) ([0-9.]+)$")
+                    assert.truthy(shard, line)
+                    assert.falsy(assigned[filename], filename)
+                    assigned[filename] = true
+                    assigned_count = assigned_count + 1
+                    shard = tonumber(shard)
+                    shard_counts[shard] = shard_counts[shard] + 1
+                    assert.is_true(tonumber(seconds) >= 0)
+                end
+            end
+            assert.same({ 27, 26, 26, 27 }, shard_counts)
+            assert.equal(106, assigned_count)
 
             assert.equal(1, count_literal(sanitizer_job,
                 "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),

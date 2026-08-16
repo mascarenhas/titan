@@ -275,10 +275,17 @@ Recursive source checking happens before the final physical output graph is
 planned. When a checked dependency contains foreign declarations,
 `defaultloader` therefore renders a sibling temporary header such as the final
 path plus `.check.tmp.<unique>`, completes its normalization/optional-format
-boundary, and only then returns that path in the trusted source loader result. A
-consumer can immediately process the completed header in the exact header/probe
-context described above,
-even when final object compilation will sort the consumer before the producer.
+boundary, converts the completed checking path to an absolute pathname, and only
+then returns it in the trusted source loader result. A consumer can immediately
+process the completed header in the exact header/probe
+context described above, even when final object compilation will sort the
+consumer before the producer. The C registrar reads that unique physical file,
+but probe rendering uses a hash-named wrapper keyed by the logical producer and
+its eventual public companion path. The wrapper contains an absolute quoted
+include of the physical file, preserving that file's nested quoted-include
+origin without placing its randomized name in probe text or header-context
+identity. It is materialized only after a persistent-cache miss inside the
+probe service's private workspace.
 
 These files belong to the resolver context. `close_resolver_context` removes
 every recorded temporary and closes the shared C-probe service on ordinary,

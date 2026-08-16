@@ -587,6 +587,8 @@ toplevel_visitor = util.make_visitor({
                         node._foreign_header = import_info.foreign_header
                         node._foreign_header_for_check =
                             import_info.foreign_header_for_check == true
+                        node._foreign_header_probe_identity =
+                            import_info.foreign_header_probe_identity
                         break
                     end
                 end
@@ -1412,6 +1414,11 @@ function apply_source_foreign_headers(ast, st, errors)
                 normalized, err = cprobe.normalize_include_descriptor(include, {
                     source_dir = st.source_dir,
                 })
+                if normalized and node._foreign_header_probe_identity then
+                    normalized, err = cprobe.source_foreign_include_alias(
+                        normalized, node.modname,
+                        node._foreign_header_probe_identity)
+                end
                 if normalized then include = normalized else ftypes = nil end
             end
             if not ftypes then

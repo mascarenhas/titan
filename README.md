@@ -398,9 +398,11 @@ exact probe C text; its presence is the complete cached-success verdict. Failed
 probes are never persisted. A nonempty `TITAN_PREFIX` selects that cache prefix,
 otherwise Titan recovers the installed prefix from `package.cpath`.
 `TITAN_PROBE_CACHE_IDENTITY` optionally selects a separate hashed namespace.
-Stable local rebuilds reuse the same prefix cache just like CI builds. The cache
-deliberately does not identify compilers, flags, or headers: clear it or choose
-another namespace when those inputs need isolation.
+Stable local rebuilds reuse the same prefix cache just like CI builds. Unique
+source-foreign checking headers are hidden behind stable private probe wrappers;
+this preserves nested quoted-include origin without making a safety nonce part
+of the probe text. The cache deliberately does not identify compilers, flags, or
+headers: clear it or choose another namespace when those inputs need isolation.
 
 Compiled dependency lookup probes component-prefix providers. For logical
 `a.b.c`, the default first performs a complete shared pass at `a.so`,
@@ -722,8 +724,12 @@ build installs the current checkout, including the combined `titan.so` and
 `titan.a` support/standard-library providers. The rockspec's command backend
 enters `spec/support/run_rock_tests.sh`, which invokes `make rock-test`: the
 Busted tree runs first, followed by the same aggregate native executable.
-Busted 2.3 does not provide a shard option, so `-j4` does not split the Busted
-spec files; many compiler specs also share fixed checkout-root artifact names.
+Busted 2.3 does not provide a shard option, so local `-j4` does not split the
+Busted spec files; many compiler specs also share fixed checkout-root artifact
+names. The Linux compiler CI job supplies the missing isolation externally: it
+runs four measured file groups in private prepared-tree copies, caps nested
+`titanc` compilation at one slot per worker, then merges their separate LuaCov
+stats. Individual Busted invocations and the native aggregate remain unsharded.
 `BUSTED_FILTER` and `TITAN_FILTER` are independent Lua-pattern selectors;
 filtering one domain does not skip the other, so use a leaf target when only one
 is wanted. A Titan filter changes execution only—the build still compiles all
@@ -762,9 +768,11 @@ $ bash spec/support/ci_test_groups.sh compiler  # complete compiler/language set
 
 Linux CI has one uncovered stdlib producer, which also prepares and validates
 the bundled/system production images, and one standard-runner consumer for the
-complete covered compiler/language set. That consumer emits the sole Codecov
-report. The ASan+UBSan job builds its own instrumented tree and reuses one
-aggregate native build for focused filters; it does not consume the regular
+complete covered compiler/language set. That consumer extracts four isolated
+workers from the prepared archive, runs the exhaustive checked-in partition,
+and emits the sole merged Codecov report. The ASan+UBSan job builds its own
+instrumented tree and reuses one aggregate native build for focused filters; it
+does not consume the regular
 artifact.
 The complete macOS suite remains a manually dispatched pre-merge gate.
 
