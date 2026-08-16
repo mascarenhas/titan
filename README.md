@@ -401,8 +401,10 @@ otherwise Titan recovers the installed prefix from `package.cpath`.
 Stable local rebuilds reuse the same prefix cache just like CI builds. Unique
 source-foreign checking headers are hidden behind stable private probe wrappers;
 this preserves nested quoted-include origin without making a safety nonce part
-of the probe text. The cache deliberately does not identify compilers, flags, or
-headers: clear it or choose another namespace when those inputs need isolation.
+of the probe text. Macro-derived declarations use deterministic bytewise name
+order so fresh compiler processes render the same successful batch source. The
+cache deliberately does not identify compilers, flags, or headers: clear it or
+choose another namespace when those inputs need isolation.
 
 Compiled dependency lookup probes component-prefix providers. For logical
 `a.b.c`, the default first performs a complete shared pass at `a.so`,

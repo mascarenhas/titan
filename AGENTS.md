@@ -1442,6 +1442,11 @@ preprocessing precedes field lookup, a live projection wins over a same-named
 physical field, and an invalid path or active unsupported object macro is
 terminal rather than falling back to that field. Other object-like forms are
 not generally supported, and all function-like macros remain unsupported.
+The preprocessor's final object-like definition set is an unordered map:
+`cdefines` projects its supported members into the TypeList in
+`util.bytewise_less` order. Do not use process-random `pairs` order or
+locale-sensitive ordinary string sorting there, because that makes otherwise
+identical declaration-batch probe C miss exact-source success markers.
 Declaration extraction still preprocesses each foreign header independently,
 while probes and generated C see the cumulative ordered header block, so
 conditional macro coupling and later changes to scalar macros typed by an

@@ -54,6 +54,35 @@ local LL = { "long_long", false, "long long" }
 local ULL = { "long_long", true, "unsigned long long" }
 
 describe("C object-like macro metadata", function()
+    it("registers a final macro map in deterministic byte order", function()
+        local definitions = {
+            zeta = { "4" },
+            alpha = { "3" },
+            _upper = { "2" },
+            Alpha = { "1" },
+        }
+        setmetatable(definitions, {
+            __pairs = function(map)
+                local order = { "zeta", "alpha", "_upper", "Alpha" }
+                local index = 0
+                return function()
+                    index = index + 1
+                    local name = order[index]
+                    if name then return name, rawget(map, name) end
+                end
+            end,
+        })
+
+        local types = {}
+        cdefines.register_defines(types, definitions)
+        assert.same({ "Alpha", "_upper", "alpha", "zeta" }, {
+            types[1].name,
+            types[2].name,
+            types[3].name,
+            types[4].name,
+        })
+    end)
+
     it("publishes outer casts with their declared C target type", function()
         local types = cast_type_list()
 

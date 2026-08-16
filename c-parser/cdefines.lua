@@ -5,6 +5,7 @@ local c99 = require("c-parser.c99")
 local cpp = require("c-parser.cpp")
 local ctypes = require("c-parser.ctypes")
 local typed = require("c-parser.typed")
+local util = require("titan-compiler.util")
 
 local function add_type(lst, name, typ)
     lst[name] = typ
@@ -511,7 +512,16 @@ function cdefines.register_define(lst, name, text, _)
 end
 
 function cdefines.register_defines(lst, define_set)
-    for name, def in pairs(define_set) do
+    -- The final preprocessor definition set is a map and no longer carries
+    -- source order. Fresh Lua processes randomize table traversal, so walking
+    -- it directly would make the TypeList, declaration-redeclaration batches,
+    -- and their exact probe C change across otherwise identical builds.
+    local names = {}
+    for name in pairs(define_set) do names[#names + 1] = name end
+    table.sort(names, util.bytewise_less)
+
+    for _, name in ipairs(names) do
+        local def = define_set[name]
         if #def == 0 then
             goto continue
         end
