@@ -7,7 +7,6 @@ local cunistd = foreign import "unistd.h"
 local csignal = foreign import "signal.h"
 local cerrno = foreign import "errno.h"
 local type Sigaction = csignal.sigaction
-local type Sigset = csignal.sigset_t
 local coroutine = import "coroutine"
 
 -- Exact native entries carried by the Titan closures stored in callback-owner
@@ -96,14 +95,8 @@ local function ignore_sigpipe_if_default(): integer
   end
   if current.sa_handler ~= csignal.SIG_DFL then return 0 end
 
-  local ignore = Sigaction.new()
-  ignore.sa_handler = csignal.SIG_IGN
-  local mask = Sigset.new()
-  if csignal.sigemptyset(mask) ~= 0 then
-    return libuv.uv_translate_sys_error(cerrno.errno)
-  end
-  ignore.sa_mask = mask
-  if csignal.sigaction(csignal.SIGPIPE, ignore, nil) ~= 0 then
+  current.sa_handler = csignal.SIG_IGN
+  if csignal.sigaction(csignal.SIGPIPE, current, nil) ~= 0 then
     return libuv.uv_translate_sys_error(cerrno.errno)
   end
   return 0

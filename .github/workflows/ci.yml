@@ -7,17 +7,17 @@ on:
     branches: ["**"]
   workflow_dispatch:  # Manual trigger to run the complete macOS suite
 
-# Use one reviewed four-way bound for Make's native dependency DAG and each
-# titanc invocation on the hosted targets.
+# Match the two CPUs on standard private-repository hosted runners for Make's
+# native dependency DAG and each titanc invocation.
 env:
-  MAKEFLAGS: "-j4"
-  TITAN_JOBS: "4"
+  MAKEFLAGS: "-j2"
+  TITAN_JOBS: "2"
   TITAN_ABI_VERSION: "0.25"
 
 jobs:
   # Build and install the regular Linux tree once, run every uncovered
-  # runtime/stdlib gate on that warm producer, and give every compiler/LuaCov
-  # matrix leg a pristine copy of the optimized bundled tree.
+  # runtime/stdlib gate on that warm producer, and give the one compiler/LuaCov
+  # consumer a pristine copy of the optimized bundled tree.
   test-linux-stdlib:
     name: stdlib (ubuntu-24.04, build+all-no-coverage)
     if: github.event_name == 'push'
@@ -350,64 +350,11 @@ jobs:
           overwrite: true
 
   test-linux-compiler:
-    name: compiler/language shard ${{ matrix.shard }} (ubuntu-24.04, LuaCov)
+    name: compiler/language (ubuntu-24.04, LuaCov)
     needs: test-linux-stdlib
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    permissions:
-      contents: read
-
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Download prepared Linux tree
-        uses: actions/download-artifact@v8
-        with:
-          name: titan-linux-prepared.tar.gz
-          path: ${{ runner.temp }}
-
-      - name: Restore prepared Linux tree and environment
-        run: |
-          tar -xzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" \
-            -C "$GITHUB_WORKSPACE"
-          test "$(cat .ci-prepared-workspace)" = "$GITHUB_WORKSPACE"
-          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
-          .lua/bin/lua -v
-
-      # A matrix runner owns its complete checkout and temporary directory, so
-      # fixed compiler-fixture names and broad legacy cleanup cannot race. Keep
-      # ordinary Busted output live in the owning shard's Actions log.
-      - name: Run compiler and language shard ${{ matrix.shard }} with coverage
-        env:
-          TITAN_EXTRA_CFLAGS: "-O0"
-        run: |
-          rm -f luacov.stats.out luacov.report.out
-          bash spec/support/ci_test_groups.sh \
-            "compiler-shard-${{ matrix.shard }}"
-
-      - name: Upload shard ${{ matrix.shard }} LuaCov stats
-        uses: actions/upload-artifact@v7
-        with:
-          name: titan-compiler-coverage-shard-${{ matrix.shard }}
-          path: luacov.stats.out
-          if-no-files-found: error
-          retention-days: 1
-          overwrite: true
-
-  test-linux-compiler-report:
-    name: compiler/language coverage report (ubuntu-24.04)
-    needs: [test-linux-stdlib, test-linux-compiler]
-    if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
@@ -432,24 +379,14 @@ jobs:
           echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
           .lua/bin/lua -v
 
-      - name: Download all compiler coverage shards
-        uses: actions/download-artifact@v8
-        with:
-          pattern: titan-compiler-coverage-shard-*
-          path: ${{ runner.temp }}/titan-compiler-coverage
-          merge-multiple: false
-
-      - name: Merge compiler coverage shards
-        run: |
-          stats=()
-          for shard in 1 2 3 4; do
-            file="$RUNNER_TEMP/titan-compiler-coverage/titan-compiler-coverage-shard-$shard/luacov.stats.out"
-            test -s "$file"
-            stats+=("$file")
-          done
-          rm -f luacov.stats.out luacov.report.out
-          .lua/bin/lua spec/support/merge_luacov_stats.lua \
-            luacov.stats.out "${stats[@]}"
+      # Each worker gets a private copy of the prepared checkout, so legacy
+      # compiler cleanup and checkout-root fixture names cannot race. They share
+      # only the prepared installed prefix, and their LuaCov stats are merged
+      # after all four deterministic shards pass.
+      - name: Run four isolated compiler and language shards two at a time with coverage
+        env:
+          TITAN_EXTRA_CFLAGS: "-O0"
+        run: bash spec/support/ci_parallel_compiler_tests.sh
 
       - name: Generate compiler coverage report
         run: |
@@ -477,6 +414,9 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
+      # Standard macOS hosted runners expose three CPUs.
+      MAKEFLAGS: "-j3"
+      TITAN_JOBS: "3"
       # Keep the one complete cross-platform gate on the same fallback path.
       READLINE_MODE: bundled
       LIBUV_VERSION: "1.52.1"
