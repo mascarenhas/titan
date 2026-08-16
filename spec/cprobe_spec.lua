@@ -1546,6 +1546,80 @@ describe("persistent successful C probe markers", function()
         return out
     end
 
+    it("rejects invalid persistent cache configuration", function()
+        local rejected, err = cprobe.new_service({
+            cache_directory = false,
+        })
+        assert.is_nil(rejected)
+        assert.matches("cache_directory must be a pathname string",
+            err, 1, true)
+
+        local previous_currentdir = lfs.currentdir
+        lfs.currentdir = function()
+            return nil, "injected cwd failure"
+        end
+        local ok, relative, relative_err = pcall(cprobe.new_service, {
+            cache_directory = "relative-cache",
+        })
+        lfs.currentdir = previous_currentdir
+        assert.is_true(ok)
+        assert.is_nil(relative)
+        assert.matches("cannot determine cache cwd", relative_err, 1, true)
+
+        rejected, err = cprobe.new_service({
+            cache_directory = "/tmp/titan-cprobe-validation-only",
+            cache_identity = {},
+        })
+        assert.is_nil(rejected)
+        assert.matches("cache_identity must be a string", err, 1, true)
+    end)
+
+    it("fails open when marker close or rename fails", function()
+        local cache = temporary_directory()
+        local service = new_fake_service({ cache_directory = cache })
+        local source = "int titan_marker_publication_failure;\n"
+        local path, digest = service:_persistent_success_location(source)
+
+        local previous_open = io.open
+        io.open = function(name, mode)
+            if name:find(".tmp.", 1, true) then
+                return { close = function() return nil end }
+            end
+            return previous_open(name, mode)
+        end
+        local close_ok, close_result = pcall(
+            service._publish_persistent_success,
+            service, path, digest, { root = "/fake/workspace" })
+        io.open = previous_open
+        assert.is_true(close_ok)
+        assert.is_nil(close_result)
+        assert.same({}, entries(cache))
+
+        local previous_rename = os.rename
+        os.rename = function()
+            return nil, "injected rename failure"
+        end
+        local rename_ok, rename_result = pcall(
+            service._publish_persistent_success,
+            service, path, digest, { root = "/fake/workspace" })
+        assert.is_true(rename_ok)
+        assert.is_nil(rename_result)
+        assert.same({}, entries(cache))
+
+        write_file(path, "")
+        local race_ok, race_result = pcall(
+            service._publish_persistent_success,
+            service, path, digest, { root = "/fake/workspace" })
+        os.rename = previous_rename
+        assert.is_true(race_ok)
+        assert.is_true(race_result)
+        assert.same({ path:match("([^/]+)$") }, entries(cache))
+
+        assert.is_true(service:close())
+        assert(os.remove(path))
+        assert(lfs.rmdir(cache))
+    end)
+
     it("uses exact probe text hashes and an empty marker as success evidence",
     function()
         local cache = temporary_directory()

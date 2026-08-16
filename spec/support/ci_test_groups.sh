@@ -41,6 +41,8 @@ while IFS= read -r test_file; do
             # insulation and compiler modules loaded by earlier specs.
             compiler_unit_tests+=("$test_file")
             ;;
+        spec/cprobe_spec.lua | \
+        spec/sha256_spec.lua | \
         spec/union_interface_spec.lua | \
         spec/checker/static_compiled_modules_spec.lua | \
         spec/coder/multi_module_libraries_spec.lua | \
