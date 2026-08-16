@@ -3211,7 +3211,7 @@ exit 73
             assert.equal(1, count_literal(sanitizer_job,
                 "runs-on: ubuntu-24.04"), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                "timeout-minutes: 30"), sanitizer_job)
+                "timeout-minutes: 35"), sanitizer_job)
             assert.falsy(sanitizer_job:find("id-token: write", 1, true),
                 sanitizer_job)
             assert.falsy(sanitizer_job:find(

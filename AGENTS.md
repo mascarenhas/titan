@@ -62,9 +62,12 @@ not add epicycles around what may be a misunderstood simpler design.
   trigger that costly run without the maintainer's express authorization. Once
   authorized, use `gh workflow run ci.yml --ref <branch>`. Linux jobs are
   push-only and are not repeated by that macOS dispatch. The regular push graph
-  has exactly three standard `ubuntu-24.04` jobs with explicit 30-minute
-  timeouts. Linux jobs export `MAKEFLAGS=-j2` and `TITAN_JOBS=2`, matching the
-  two CPUs on standard private-repository hosted runners; the macOS job
+  has exactly three standard `ubuntu-24.04` jobs. The stdlib producer and
+  compiler consumer retain explicit 30-minute timeouts; the independent
+  sanitizer has 35 minutes so a cold native-dependency cache miss remains a
+  valid build under the same two-CPU bound. Linux jobs export `MAKEFLAGS=-j2`
+  and `TITAN_JOBS=2`, matching the two CPUs on standard private-repository
+  hosted runners; the macOS job
   overrides both bounds to three for its three CPUs. Make may overlap independent
   native prerequisites, and each `titanc` process may overlap only generated-C
   object compilations. The compiler suite schedules four external groups at
