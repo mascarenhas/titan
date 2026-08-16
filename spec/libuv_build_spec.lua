@@ -46,60 +46,136 @@ local HTTP_SSL_BUNDLED_PAYLOAD = table.concat({
 }, " ")
 local HTTP_SSL_SYSTEM_PAYLOAD = "llhttp-build/libtitan-llhttp.a"
 local HTTP_FOREIGN_CALLBACKS = {
-    { name = "llhttp_url_cb", slot = 3, setting = "on_url" },
+    { name = "llhttp_url_cb",    slot = 3, setting = "on_url" },
     { name = "llhttp_status_cb", slot = 4, setting = "on_status" },
-    { name = "llhttp_header_field_cb", slot = 5,
-        setting = "on_header_field" },
-    { name = "llhttp_header_value_cb", slot = 6,
-        setting = "on_header_value" },
-    { name = "llhttp_header_value_complete_cb", slot = 7,
-        setting = "on_header_value_complete", no_data = true },
-    { name = "llhttp_headers_complete_cb", slot = 8,
-        setting = "on_headers_complete", no_data = true },
+    {
+        name = "llhttp_header_field_cb",
+        slot = 5,
+        setting = "on_header_field"
+    },
+    {
+        name = "llhttp_header_value_cb",
+        slot = 6,
+        setting = "on_header_value"
+    },
+    {
+        name = "llhttp_header_value_complete_cb",
+        slot = 7,
+        setting = "on_header_value_complete",
+        no_data = true
+    },
+    {
+        name = "llhttp_headers_complete_cb",
+        slot = 8,
+        setting = "on_headers_complete",
+        no_data = true
+    },
     { name = "llhttp_body_cb", slot = 9, setting = "on_body" },
-    { name = "llhttp_message_complete_cb", slot = 10,
-        setting = "on_message_complete", no_data = true },
+    {
+        name = "llhttp_message_complete_cb",
+        slot = 10,
+        setting = "on_message_complete",
+        no_data = true
+    },
 }
 local STDLIB_CONTAINER = "titan.so"
 local STDLIB_STATIC_ARCHIVE = "titan.a"
 local UV_FOREIGN_CALLBACKS = {
-    { name = "uv_fs_cb", source = "titan/uv/file.titan", slot = 1,
-      call = "entry(L, module, callback, owner)" },
-    { name = "uv_signal_cb", source = "titan/uv/os.titan", slot = 1,
-      call = "entry(L, module, callback, owner, signum as lua.lua_Integer)" },
-    { name = "uv_process_exit_cb", source = "titan/uv/process.titan", slot = 1,
-      call = "entry(L, module, callback, owner, " ..
-          "exit_status as lua.lua_Integer, term_signal as lua.lua_Integer)" },
-    { name = "uv_write_cb", source = "titan/uv/runtime.titan", slot = 1,
-      call = "entry(L, module, callback, owner, status as lua.lua_Integer)" },
-    { name = "uv_alloc_cb", source = "titan/uv/runtime.titan", slot = 1,
-      call = "entry(L, module, callback, owner, suggested_size, " ..
-          "buf as ffi.titan_ffi_void_ptr)" },
-    { name = "uv_read_cb", source = "titan/uv/runtime.titan", slot = 2,
-      call = "entry(L, module, callback, owner, nread as lua.lua_Integer)" },
-    { name = "uv_close_cb", source = "titan/uv/runtime.titan", slot = 1,
-      call = "entry(L, module, callback, owner)" },
-    { name = "uv_walk_cb", source = "titan/uv/runtime.titan", slot = 1,
-      call = "entry(L, module, callback, owner, " ..
-          "handle as ffi.titan_ffi_void_ptr)" },
-    { name = "uv_timer_cb", source = "titan/uv/task.titan", slot = 1,
-      call = "entry(L, module, callback, owner)" },
-    { name = "uv_getaddrinfo_cb", source = "titan/uv/tcp.titan", slot = 1,
-      call = "entry(L, module, callback, owner, status as lua.lua_Integer, " ..
-          "result as ffi.titan_ffi_void_ptr)" },
-    { name = "uv_connect_cb", source = "titan/uv/tcp.titan", slot = 1,
-      call = "entry(L, module, callback, owner, status as lua.lua_Integer)" },
-    { name = "uv_shutdown_cb", source = "titan/uv/tcp.titan", slot = 1,
-      call = "entry(L, module, callback, owner, status as lua.lua_Integer)" },
-    { name = "uv_connection_cb", source = "titan/uv/tcp.titan", slot = 3,
-      call = "entry(L, module, callback, owner, status as lua.lua_Integer)" },
+    {
+        name = "uv_fs_cb",
+        source = "titan/uv/file.titan",
+        slot = 1,
+        call = "entry(L, module, callback, owner)"
+    },
+    {
+        name = "uv_signal_cb",
+        source = "titan/uv/os.titan",
+        slot = 1,
+        call = "entry(L, module, callback, owner, signum as lua.lua_Integer)"
+    },
+    {
+        name = "uv_process_exit_cb",
+        source = "titan/uv/process.titan",
+        slot = 1,
+        call = "entry(L, module, callback, owner, " ..
+            "exit_status as lua.lua_Integer, term_signal as lua.lua_Integer)"
+    },
+    {
+        name = "uv_write_cb",
+        source = "titan/uv/runtime.titan",
+        slot = 1,
+        call = "entry(L, module, callback, owner, status as lua.lua_Integer)"
+    },
+    {
+        name = "uv_alloc_cb",
+        source = "titan/uv/runtime.titan",
+        slot = 1,
+        call = "entry(L, module, callback, owner, suggested_size, " ..
+            "buf as ffi.titan_ffi_void_ptr)"
+    },
+    {
+        name = "uv_read_cb",
+        source = "titan/uv/runtime.titan",
+        slot = 2,
+        call = "entry(L, module, callback, owner, nread as lua.lua_Integer)"
+    },
+    {
+        name = "uv_close_cb",
+        source = "titan/uv/runtime.titan",
+        slot = 1,
+        call = "entry(L, module, callback, owner)"
+    },
+    {
+        name = "uv_walk_cb",
+        source = "titan/uv/runtime.titan",
+        slot = 1,
+        call = "entry(L, module, callback, owner, " ..
+            "handle as ffi.titan_ffi_void_ptr)"
+    },
+    {
+        name = "uv_timer_cb",
+        source = "titan/uv/task.titan",
+        slot = 1,
+        call = "entry(L, module, callback, owner)"
+    },
+    {
+        name = "uv_getaddrinfo_cb",
+        source = "titan/uv/tcp.titan",
+        slot = 1,
+        call = "entry(L, module, callback, owner, status as lua.lua_Integer, " ..
+            "result as ffi.titan_ffi_void_ptr)"
+    },
+    {
+        name = "uv_connect_cb",
+        source = "titan/uv/tcp.titan",
+        slot = 1,
+        call = "entry(L, module, callback, owner, status as lua.lua_Integer)"
+    },
+    {
+        name = "uv_shutdown_cb",
+        source = "titan/uv/tcp.titan",
+        slot = 1,
+        call = "entry(L, module, callback, owner, status as lua.lua_Integer)"
+    },
+    {
+        name = "uv_connection_cb",
+        source = "titan/uv/tcp.titan",
+        slot = 3,
+        call = "entry(L, module, callback, owner, status as lua.lua_Integer)"
+    },
 }
 local FS_FOREIGN_CALLBACKS = {
-    { name = "fs_realpath_cb", slot = 1,
-      call = "entry(L, module, callback, owner)" },
-    { name = "fs_watcher_event_cb", slot = 1,
-      call = "entry(L, module, callback, owner, filename, " ..
-          "events as lua.lua_Integer, status as lua.lua_Integer)" },
+    {
+        name = "fs_realpath_cb",
+        slot = 1,
+        call = "entry(L, module, callback, owner)"
+    },
+    {
+        name = "fs_watcher_event_cb",
+        slot = 1,
+        call = "entry(L, module, callback, owner, filename, " ..
+            "events as lua.lua_Integer, status as lua.lua_Integer)"
+    },
 }
 local FS_DIRECT_LIBUV_CALLS = {
     "uv_fs_event_init",
@@ -567,10 +643,10 @@ describe("libuv Makefile configuration", function()
                 local libuv_archive =
                     lfs.currentdir() .. "/libuv-build/libuv.a"
                 assert.truthy(command:find(
-                    "--old-file=" .. quote(libbacktrace_archive), 1, true),
+                        "--old-file=" .. quote(libbacktrace_archive), 1, true),
                     command)
                 assert.truthy(command:find(
-                    "--old-file=" .. quote(libuv_archive), 1, true),
+                        "--old-file=" .. quote(libuv_archive), 1, true),
                     command)
 
                 local ok, _, output = async_stdlib.run(command, workspace)
@@ -650,7 +726,7 @@ describe("libuv Makefile configuration", function()
             "local cancel_action: CancelAction?",
             "local function suspend(cancel_action: CancelAction?)",
             "local function run_internal(func: () -> value): " ..
-                "Task<value, value>",
+            "Task<value, value>",
             "Task<value, value>.new(",
         }) do
             assert.truthy(task:find(contract, 1, true), contract)
@@ -672,22 +748,22 @@ describe("libuv Makefile configuration", function()
             "union AnyFiveResult<A1, A2, A3, A4, A5>",
             "union RaceTwoResult<A1, B1, A2, B2>",
             "union RaceFiveResult<A1, B1, A2, B2, A3, B3, " ..
-                "A4, B4, A5, B5>",
+            "A4, B4, A5, B5>",
             "union AllTwoError<A1, B1, A2, B2>",
             "union AllFiveError<A1, B1, A2, B2, A3, B3, " ..
-                "A4, B4, A5, B5>",
+            "A4, B4, A5, B5>",
             "function any_two<A1, B1, A2, B2>(",
             "function any_five<A1, B1, A2, B2, A3, B3, " ..
-                "A4, B4, A5, B5>(",
+            "A4, B4, A5, B5>(",
             "function race_two<A1, B1, A2, B2>(",
             "function race_five<A1, B1, A2, B2, A3, B3, " ..
-                "A4, B4, A5, B5>(",
+            "A4, B4, A5, B5>(",
             "function all_two<A1, B1, A2, B2>(",
             "function all_five<A1, B1, A2, B2, A3, B3, " ..
-                "A4, B4, A5, B5>(",
+            "A4, B4, A5, B5>(",
             "function join<A, B>(task: Task<A, B>): TaskStatus<A, B>",
             "function join_five<A1, B1, A2, B2, A3, B3, " ..
-                "A4, B4, A5, B5>(",
+            "A4, B4, A5, B5>(",
         }) do
             assert.truthy(async:find(contract, 1, true), contract)
         end
@@ -742,20 +818,20 @@ describe("libuv Makefile configuration", function()
         for _, contract in ipairs({
             "llhttp: $(LLHTTP_ARCHIVE)",
             "$(LLHTTP_ARCHIVE): FORCE $(LLHTTP_OBJECTS) " ..
-                "$(LLHTTP_ARCHIVE_CONFIG)",
+            "$(LLHTTP_ARCHIVE_CONFIG)",
             "expected=\"$$(printf '%s\\n' $(notdir " ..
-                "$(LLHTTP_OBJECTS)))\"",
+            "$(LLHTTP_OBJECTS)))\"",
             "LLHTTP_BUILD_CFLAGS=$(LLHTTP_BUILD_CFLAGS)",
             "$(LLHTTP_CFLAGS) $(TITAN_EXTRA_CFLAGS) " ..
-                "$(LLHTTP_BUILD_CFLAGS)",
+            "$(LLHTTP_BUILD_CFLAGS)",
             "openssl: $(OPENSSL_LIBS)",
             "$(OPENSSL_PKG_CONFIG) --atleast-version=" ..
-                "\"$(OPENSSL_MIN_VERSION)\" openssl",
+            "\"$(OPENSSL_MIN_VERSION)\" openssl",
             "CFLAGS=$(call make_shell_quote,$(OPENSSL_REQUIRED_CFLAGS) " ..
-                "$(OPENSSL_BUILD_CFLAGS))",
+            "$(OPENSSL_BUILD_CFLAGS))",
             "OPENSSL_CONFIGURE_FLAGS=$(OPENSSL_CONFIGURE_FLAGS)",
             "rock-post-install: scripts/stdlib_installer.lua " ..
-                "$(STDLIB_EXTRA_OBJECTS) openssl",
+            "$(STDLIB_EXTRA_OBJECTS) openssl",
             "clean-llhttp:", "clean-openssl:",
             "clean-libuv clean-llhttp clean-openssl",
         }) do
@@ -862,7 +938,7 @@ describe("libuv Makefile configuration", function()
     end)
 
     it("defines the exact libuv callbacks in generated Titan code",
-    function()
+        function()
             local declarations = {}
             local contents = {}
             local seen_sources = {}
@@ -1121,7 +1197,7 @@ describe("libuv Makefile configuration", function()
             local callers = {}
             for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
                 if source ~= "$(UV_TITAN_SOURCES)" and
-                   source ~= "$(STDLIB_HTTP_SOURCES)" then
+                    source ~= "$(STDLIB_HTTP_SOURCES)" then
                     if read_file(source):find(
                             "lua.lua_setmetatable", 1, true) then
                         callers[#callers + 1] = source
@@ -1132,51 +1208,51 @@ describe("libuv Makefile configuration", function()
         end)
 
     it("keeps parser-sugared standard-library imports short",
-    function()
-        local short = {
-            "coroutine", "uv", "async", "timer", "io", "fs", "net",
-            "ssl", "url", "http", "os", "peg", "string", "test",
-        }
-        for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
-            if source ~= "$(UV_TITAN_SOURCES)" and
-               source ~= "$(STDLIB_HTTP_SOURCES)" then
-                local contents = read_file(source)
-                for _, module in ipairs(short) do
-                    local long = 'import "titan.' .. module .. '"'
-                    assert.falsy(contents:find(long, 1, true),
-                        source .. " uses " .. long)
+        function()
+            local short = {
+                "coroutine", "uv", "async", "timer", "io", "fs", "net",
+                "ssl", "url", "http", "os", "peg", "string", "test",
+            }
+            for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
+                if source ~= "$(UV_TITAN_SOURCES)" and
+                    source ~= "$(STDLIB_HTTP_SOURCES)" then
+                    local contents = read_file(source)
+                    for _, module in ipairs(short) do
+                        local long = 'import "titan.' .. module .. '"'
+                        assert.falsy(contents:find(long, 1, true),
+                            source .. " uses " .. long)
+                    end
                 end
             end
-        end
 
-        local ssl = read_file("titan/ssl.titan")
-        for _, dependency in ipairs({ "async", "fs", "net", "string" }) do
-            assert.truthy(ssl:find(
-                'import "' .. dependency .. '"', 1, true), dependency)
-            assert.falsy(ssl:find(
-                'import "titan.' .. dependency .. '"', 1, true), dependency)
-        end
-        local http = read_file("titan/http/http.titan")
-        for _, dependency in ipairs({
-            "async", "io", "net", "ssl", "string", "url",
-        }) do
-            assert.truthy(http:find(
-                'import "' .. dependency .. '"', 1, true), dependency)
-            assert.falsy(http:find(
-                'import "titan.' .. dependency .. '"', 1, true), dependency)
-        end
-        for _, dependency in ipairs({ "titan.math" }) do
-            assert.truthy(http:find(
-                'import "' .. dependency .. '"', 1, true), dependency)
-        end
-        local url = read_file("titan/url.titan")
-        for _, dependency in ipairs({ "peg", "string" }) do
-            assert.truthy(url:find(
-                'import "' .. dependency .. '"', 1, true), dependency)
-            assert.falsy(url:find(
-                'import "titan.' .. dependency .. '"', 1, true), dependency)
-        end
-    end)
+            local ssl = read_file("titan/ssl.titan")
+            for _, dependency in ipairs({ "async", "fs", "net", "string" }) do
+                assert.truthy(ssl:find(
+                    'import "' .. dependency .. '"', 1, true), dependency)
+                assert.falsy(ssl:find(
+                    'import "titan.' .. dependency .. '"', 1, true), dependency)
+            end
+            local http = read_file("titan/http/http.titan")
+            for _, dependency in ipairs({
+                "async", "io", "net", "ssl", "string", "url",
+            }) do
+                assert.truthy(http:find(
+                    'import "' .. dependency .. '"', 1, true), dependency)
+                assert.falsy(http:find(
+                    'import "titan.' .. dependency .. '"', 1, true), dependency)
+            end
+            for _, dependency in ipairs({ "titan.math" }) do
+                assert.truthy(http:find(
+                    'import "' .. dependency .. '"', 1, true), dependency)
+            end
+            local url = read_file("titan/url.titan")
+            for _, dependency in ipairs({ "peg", "string" }) do
+                assert.truthy(url:find(
+                    'import "' .. dependency .. '"', 1, true), dependency)
+                assert.falsy(url:find(
+                    'import "titan.' .. dependency .. '"', 1, true), dependency)
+            end
+        end)
 
     it("resumes one-shot timer Tasks only from close completion", function()
         local task_source = read_file("titan/uv/task.titan")
@@ -1240,7 +1316,7 @@ describe("libuv Makefile configuration", function()
         local ssl = read_file("titan/ssl.titan")
         local openssl_headers = {}
         for header in ssl:gmatch(
-                'foreign import "openssl/([^"]+)"') do
+            'foreign import "openssl/([^"]+)"') do
             openssl_headers[#openssl_headers + 1] = header
         end
         assert.same({ "err.h", "x509v3.h", "pem.h", "ssl.h" },
@@ -1252,22 +1328,22 @@ describe("libuv Makefile configuration", function()
         assert.truthy(ssl:find(
             "private_key_data = fs.read_file", 1, true), ssl)
         assert.truthy(ssl:find(
-            "local default_client_context: *openssl.SSL_CTX", 1, true),
+                "local default_client_context: *openssl.SSL_CTX", 1, true),
             ssl)
         assert.truthy(ssl:find(
             "local default_client_context_owner: " ..
-                "DefaultClientContextOwner?", 1, true), ssl)
+            "DefaultClientContextOwner?", 1, true), ssl)
         assert.truthy(ssl:find(
             "local function finalize_default_client_context(" ..
-                "\n    owner: DefaultClientContextOwner)", 1, true), ssl)
+            "\n    owner: DefaultClientContextOwner)", 1, true), ssl)
         assert.truthy(ssl:find(
             "gc.finalizable<DefaultClientContextOwner>(" ..
-                "\n      owner, finalize_default_client_context)",
+            "\n      owner, finalize_default_client_context)",
             1, true), ssl)
         assert.falsy(ssl:find(
             "as DefaultClientContextOwner", 1, true), ssl)
         assert.truthy(ssl:find(
-            "openssl.SSL_CTX_set_default_verify_paths(context)", 1, true),
+                "openssl.SSL_CTX_set_default_verify_paths(context)", 1, true),
             ssl)
         assert.truthy(ssl:find(
             "openssl.SSL_CTX_up_ref(context)", 1, true), ssl)
@@ -1304,7 +1380,7 @@ describe("libuv Makefile configuration", function()
 
         local ssl = read_file("titan/ssl.titan")
         assert.truthy(ssl:find(
-            "local actual_private_key_file = certificate_file", 1, true),
+                "local actual_private_key_file = certificate_file", 1, true),
             ssl)
 
         local http = read_file("titan/http/server.titan")
@@ -1422,13 +1498,13 @@ describe("libuv Makefile configuration", function()
             }) do
                 local qualified = "titan.async." .. record_name
                 assert.truthy(expected.async:find(
-                    "Record('" .. qualified .. "',{},{},{", 1, true),
+                        "Record('" .. qualified .. "',{},{},{", 1, true),
                     record_name .. " is missing from async metadata")
                 assert.falsy(expected.async:find(
-                    "Field('" .. qualified .. "'", 1, true),
+                        "Field('" .. qualified .. "'", 1, true),
                     record_name .. " exposed a local field")
                 assert.falsy(expected.async:find(
-                    "StaticMethod('" .. qualified .. "', 'new'", 1, true),
+                        "StaticMethod('" .. qualified .. "', 'new'", 1, true),
                     record_name .. " exposed its local constructor")
             end
 
@@ -1855,7 +1931,7 @@ exit 64
             makefile)
         assert.truthy(makefile:find(
             '\n\t+$(RECURSIVE_WRAPPER_GUARD) cmake --build ' ..
-                '"$(LIBUV_BUILD_DIR)" --target uv_a',
+            '"$(LIBUV_BUILD_DIR)" --target uv_a',
             1, true), makefile)
         for _, input in ipairs({
             "LIBUV_VERSION=$(LIBUV_VERSION)",
@@ -2067,7 +2143,7 @@ esac
                 "-DOPENSSL_API_COMPAT=30000 " ..
                 "-Ilibuv-v1.52.1/include -D_GNU_SOURCE'", 1, true), command)
             assert.equal(1, count_plain(command,
-                [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -lpthread -lrt -L/opt/openssl/lib -lssl -lcrypto']]),
+                    [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -lpthread -lrt -L/opt/openssl/lib -lssl -lcrypto']]),
                 command)
         end, debug.traceback)
         remove_tree(root)
@@ -2454,8 +2530,8 @@ exit 73
                 "CLANG_FORMAT ?= clang-format",
                 "TITAN_NO_LINE_DIRECTIVES ?=",
                 "RECURSIVE_WRAPPER_GUARD = flags=$${MAKEFLAGS%% *}; " ..
-                    'case "$$flags" in -*) ;; *q*) exit 1 ;; ' ..
-                    "*n*|*t*) exit 0 ;; esac;",
+                'case "$$flags" in -*) ;; *q*) exit 1 ;; ' ..
+                "*n*|*t*) exit 0 ;; esac;",
                 "export CLANG_FORMAT TITAN_EXTRA_CPPFLAGS " ..
                 "TITAN_EXTRA_CFLAGS \\\n\t" ..
                 "TITAN_EXTRA_LDFLAGS TITAN_NO_LINE_DIRECTIVES",
@@ -2482,9 +2558,9 @@ exit 73
                 "TITAN_STDLIB_TEST_PROGRAM_ROOT := test.tests",
                 "TITAN_STDLIB_TEST_PROGRAM_OUTPUT := test/tests",
                 "TITAN_STDLIB_TEST_ROOTS := " ..
-                    "$(TITAN_STDLIB_TEST_PROGRAM_ROOT)",
+                "$(TITAN_STDLIB_TEST_PROGRAM_ROOT)",
                 "TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/" ..
-                    "$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)",
+                "$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)",
                 "\nbusted-test:",
                 "\nstdlib-busted-test:",
                 "\ntitan-stdlib-test-build:",
@@ -2497,7 +2573,7 @@ exit 73
             end
             local _, recursive_test_count = makefile:gsub(
                 "\n\t%+%$%(RECURSIVE_WRAPPER_GUARD%) unset LUA_PATH " ..
-                    "LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5",
+                "LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5",
                 "")
             assert.equal(2, recursive_test_count, makefile)
             local stdlib_config_start = assert(makefile:find(
@@ -2520,14 +2596,14 @@ exit 73
                 rock_post_install_start, rock_post_install_end - 1)
             for _, contract in ipairs({
                 "if test -n $(call make_shell_quote,$(strip " ..
-                    "$(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))); then",
+                "$(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))); then",
                 '"$(CURDIR)/spec/support/' ..
-                    'ci_asan_generated_c_context.lua"',
+                'ci_asan_generated_c_context.lua"',
                 "snapshot",
                 "$(call make_shell_quote,$(strip " ..
-                    "$(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT)))",
+                "$(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT)))",
                 '"$$stage/titan.so" "$(CURDIR)/titan" ' ..
-                    '"$$abi_dir/titan.so"',
+                '"$$abi_dir/titan.so"',
                 '"$(CURDIR)/titan"',
             }) do
                 assert.truthy(rock_post_install:find(contract, 1, true),
@@ -2535,10 +2611,10 @@ exit 73
             end
             local diagnostic_snapshot = assert(rock_post_install:find(
                 '"$(CURDIR)/spec/support/' ..
-                    'ci_asan_generated_c_context.lua"', 1, true))
+                'ci_asan_generated_c_context.lua"', 1, true))
             local publication = assert(rock_post_install:find(
                 '"$(ROCK_LUA)" -E "$(CURDIR)/scripts/' ..
-                    'stdlib_installer.lua"', diagnostic_snapshot, true))
+                'stdlib_installer.lua"', diagnostic_snapshot, true))
             assert.is_true(diagnostic_snapshot < publication,
                 "diagnostic snapshot must preserve the private stage " ..
                 "before publication")
@@ -2623,13 +2699,13 @@ exit 73
                 "static-process-stdoutstatic-process-stderr",
                 "local process = system.spawn(",
                 "system.with_stdin, system.with_stdout, " ..
-                    "system.with_stderr",
+                "system.with_stderr",
                 "local process_input? = process.stdin",
                 "local process_output? = process.stdout",
                 "local process_diagnostics? = process.stderr",
                 "local writer: titan_io.WriterCloser =",
                 "local reader: titan_io.Reader = process_output as " ..
-                    "system.InputStream",
+                "system.InputStream",
                 "process:is_running()",
                 'writer:write(process_payload .. "\\n")',
                 'reader:read_until("\\n", true) == process_payload',
@@ -2717,7 +2793,7 @@ exit 73
                 local marker = "\n      - name: " .. name
                 local first = assert(job:find(marker, 1, true), name)
                 local finish = job:find(
-                    "\n      - name:", first + #marker, true)
+                        "\n      - name:", first + #marker, true)
                     or (#job + 1)
                 return job:sub(first, finish - 1)
             end
@@ -2779,10 +2855,10 @@ exit 73
             assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
 
             assert.equal(1, count_literal(stdlib_job,
-                "name: stdlib (ubuntu-24.04, build+all-no-coverage)"),
+                    "name: stdlib (ubuntu-24.04, build+all-no-coverage)"),
                 stdlib_job)
             assert.equal(1, count_literal(stdlib_job,
-                "runs-on: ubuntu-24.04"), stdlib_job)
+                "runs-on: ubicloud-standard-2"), stdlib_job)
             assert.equal(1, count_literal(stdlib_job,
                 "timeout-minutes: 30"), stdlib_job)
             assert.equal(1, count_literal(stdlib_job,
@@ -2802,10 +2878,10 @@ exit 73
             assert.equal(1, count_literal(stdlib_job,
                 "TITAN_TEST_TIMEOUT=15"), stdlib_job)
             assert.equal(1, count_literal(stdlib_job,
-                "test_runtime_shutdown_closes_native_handles_but_not_files$"),
+                    "test_runtime_shutdown_closes_native_handles_but_not_files$"),
                 stdlib_job)
             assert.falsy(makefile:find(
-                "$(sort $(wildcard spec/stdlib/*_spec.lua))", 1, true),
+                    "$(sort $(wildcard spec/stdlib/*_spec.lua))", 1, true),
                 makefile)
             assert.falsy(makefile:find("STDLIB_BOUNDARY_TESTS", 1, true),
                 makefile)
@@ -2846,7 +2922,7 @@ exit 73
             end
             assert.falsy(read_file(
                 "spec/stdlib/titan/uv/runtime_tests.titan"):find(
-                    "${CC:-cc}", 1, true))
+                "${CC:-cc}", 1, true))
             assert.falsy(read_file(
                 "spec/stdlib/titan/os/process_tests/" ..
                 "host_process_test.titan"):find("${CC:-cc}", 1, true))
@@ -2898,7 +2974,7 @@ exit 73
             assert.truthy(stdlib_job:find(
                 "--exclude='./libbacktrace/.git'", 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
-                "--exclude='./.lua/var/cache/titan-probes'", 1, true),
+                    "--exclude='./.lua/var/cache/titan-probes'", 1, true),
                 stdlib_job)
             assert.truthy(stdlib_job:find(
                 "prepared tree contains the independent C-probe cache",
@@ -2906,17 +2982,17 @@ exit 73
             assert.falsy(stdlib_job:find("grep -Eq", 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
                 "grep -E '^\\./\\.lua/var/cache/titan-probes(/|$)' " ..
-                    ">/dev/null", 1, true), stdlib_job)
+                ">/dev/null", 1, true), stdlib_job)
 
-            assert.equal(10, count_literal(workflow,
-                "uses: actions/cache@v5"), workflow)
+            assert.equal(6, count_literal(workflow,
+                "uses: ubicloud/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
-                "uses: actions/cache/restore@v5"), workflow)
+                "uses: ubicloud/cache/restore@v4"), workflow)
             assert.equal(2, count_literal(workflow,
-                "uses: actions/cache/save@v5"), workflow)
+                "uses: ubicloud/cache/save@v4"), workflow)
             assert.equal(4, count_literal(workflow,
                 "path: .lua/var/cache/titan-probes/" ..
-                    "${{ env.TITAN_ABI_VERSION }}"), workflow)
+                "${{ env.TITAN_ABI_VERSION }}"), workflow)
             assert.equal(3, count_literal(workflow,
                 "TITAN_PROBE_CACHE_IDENTITY=gha-v3:"), workflow)
             assert.equal(3, count_literal(workflow,
@@ -2945,7 +3021,7 @@ exit 73
             assert.truthy(regular_cache_step:find(
                 "id: regular-probe-cache", 1, true))
             assert.truthy(regular_cache_step:find(
-                "uses: actions/cache/restore@v5", 1, true))
+                "uses: ubicloud/cache/restore@v4", 1, true))
             local regular_build_index = assert(stdlib_job:find(
                 "- name: Build and install the rock", regular_cache_index,
                 true))
@@ -2966,13 +3042,13 @@ exit 73
             local regular_save_step = named_step(
                 stdlib_job, "Save regular Linux C-probe success markers")
             assert.truthy(regular_save_step:find(
-                "uses: actions/cache/save@v5", 1, true))
+                "uses: ubicloud/cache/save@v4", 1, true))
             assert.truthy(regular_save_step:find(
                 "${{ steps.regular-probe-cache.outputs.cache-primary-key }}",
                 1, true))
             local system_index = assert(stdlib_job:find(
                 "- name: Canary source-rock installation with system " ..
-                    "libuv and OpenSSL", regular_save_index, true))
+                "libuv and OpenSSL", regular_save_index, true))
             local upload_index = assert(stdlib_job:find(
                 "- name: Upload prepared Linux tree", system_index, true))
             assert.is_true(pack_index < tests_index, stdlib_job)
@@ -2982,12 +3058,12 @@ exit 73
             assert.is_true(system_index < upload_index, stdlib_job)
 
             assert.equal(1, count_literal(compiler_job,
-                "name: compiler/language (ubuntu-24.04, LuaCov)"),
+                    "name: compiler/language (ubuntu-24.04, LuaCov)"),
                 compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "needs: test-linux-stdlib"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
-                "runs-on: ubuntu-24.04"), compiler_job)
+                "runs-on: ubicloud-standard-2"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "timeout-minutes: 30"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
@@ -3007,14 +3083,14 @@ exit 73
                 1, true))
             local compiler_tests_index = assert(compiler_job:find(
                 "- name: Run four isolated compiler and language shards " ..
-                    "two at a time with coverage",
+                "two at a time with coverage",
                 compiler_unpack_index, true))
             assert.is_true(compiler_unpack_index < compiler_tests_index)
             assert.falsy(compiler_job:find(
                 "C-probe success markers", 1, true))
             assert.truthy(read_file(
                 "spec/support/ci_test_groups.sh"):find(
-                    "TITAN_PROBE_CACHE_DISABLE=1", 1, true))
+                "TITAN_PROBE_CACHE_DISABLE=1", 1, true))
             assert.equal(3, count_literal(workflow,
                 "TITAN_PROBE_CACHE_DISABLE=1"), workflow)
             assert_codecov_job(compiler_job, "compiler")
@@ -3181,7 +3257,7 @@ exit 73
             assert.falsy(parallel_compiler:find(
                 "xargs -r -n1 -P4", 1, true), parallel_compiler)
             assert.falsy(parallel_compiler:find(
-                'cat "$worker_root/shard-$shard.log"', 1, true),
+                    'cat "$worker_root/shard-$shard.log"', 1, true),
                 parallel_compiler)
 
             local partition = read_file(
@@ -3206,10 +3282,10 @@ exit 73
             assert.equal(106, assigned_count)
 
             assert.equal(1, count_literal(sanitizer_job,
-                "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),
+                    "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),
                 sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                "runs-on: ubuntu-24.04"), sanitizer_job)
+                "runs-on: ubicloud-standard-2"), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 "timeout-minutes: 35"), sanitizer_job)
             assert.falsy(sanitizer_job:find("id-token: write", 1, true),
@@ -3221,7 +3297,7 @@ exit 73
             assert.falsy(sanitizer_job:find("\n    needs:", 1, true),
                 sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                'SANITIZER_FLAGS: "-O0 -g -fsanitize=address,undefined'),
+                    'SANITIZER_FLAGS: "-O0 -g -fsanitize=address,undefined'),
                 sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 'TITAN_EXTRA_CFLAGS: "-O0 -g ' ..
@@ -3235,15 +3311,15 @@ exit 73
                 'SANITIZER_LUA_VERSION: "5.5.1"',
                 'SANITIZER_LIBUV_VERSION: "1.52.1"',
                 'SANITIZER_LIBUV_SHA256: "66d511b9e6e334c0e62279eb234fbfb2b' ..
-                    '3110b1479c09b95b44c7afca8cff9e7"',
+                '3110b1479c09b95b44c7afca8cff9e7"',
                 'LIBUV_BUILD_PROFILE: "static-pic-debug-tests-off-' ..
-                    'asan-ubsan-v1"',
+                'asan-ubsan-v1"',
                 'SANITIZER_LLHTTP_VERSION: "9.4.3"',
                 'SANITIZER_LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f007' ..
-                    '46720f5e7e29c79b42c02cb69f36c39"',
+                '46720f5e7e29c79b42c02cb69f36c39"',
                 'SANITIZER_OPENSSL_VERSION: "3.5.7"',
                 'SANITIZER_OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd2' ..
-                    '1984552a3c8e4aa11a24aa31aeac98e8"',
+                '1984552a3c8e4aa11a24aa31aeac98e8"',
                 "id: sanitizer-native-cache-key",
                 "git ls-remote",
                 "libbacktrace.git HEAD",
@@ -3251,7 +3327,7 @@ exit 73
                 'cc_version="$(cc -dumpfullversion -dumpversion)"',
                 'system_packages="$(dpkg-query',
                 "id: sanitizer-native-cache",
-                "uses: actions/cache/restore@v5",
+                "uses: ubicloud/cache/restore@v4",
                 "path: |",
                 "lua-${{ env.SANITIZER_LUA_VERSION }}",
                 "lua-${{ env.SANITIZER_LUA_VERSION }}.tar.gz",
@@ -3262,7 +3338,7 @@ exit 73
                 "llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}.tar.gz",
                 "openssl-${{ env.SANITIZER_OPENSSL_VERSION }}",
                 "openssl-${{ env.SANITIZER_OPENSSL_VERSION }}.tar.gz",
-                "uses: actions/cache/save@v5",
+                "uses: ubicloud/cache/save@v4",
                 "steps.sanitizer-native-cache.outputs.cache-primary-key",
                 "steps.sanitizer-native-cache.outputs.cache-hit != 'true'",
                 'test ! -e "$PREFIX/bin/luarocks"',
@@ -3291,9 +3367,9 @@ exit 73
                 sanitizer_native_save_paths)
             assert.truthy(sanitizer_native_restore_step:find(
                 "titan%-sanitizer%-native%-%${{ env%." ..
-                    "SANITIZER_NATIVE_CACHE_SCHEMA }}%-%${{ runner%.os }}" ..
-                    "%-%${{ runner%.arch }}%-%${{ steps%." ..
-                    "sanitizer%-native%-cache%-key%.outputs%.digest }}"))
+                "SANITIZER_NATIVE_CACHE_SCHEMA }}%-%${{ runner%.os }}" ..
+                "%-%${{ runner%.arch }}%-%${{ steps%." ..
+                "sanitizer%-native%-cache%-key%.outputs%.digest }}"))
             for _, fingerprint in ipairs({
                 "titan_abi=$TITAN_ABI_VERSION",
                 "libuv_profile=$LIBUV_BUILD_PROFILE",
@@ -3358,14 +3434,14 @@ exit 73
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
-                    "payloads_and_tags_across_gc$'",
+                "payloads_and_tags_across_gc$'",
                 "TITAN_FILTER='test_timer_'",
                 "TITAN_FILTER='test_fs_'",
                 "TITAN_FILTER='^uv%.task_tests%.'",
                 "TITAN_FILTER='^uv%.runtime_tests%.'",
                 "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",
                 "TITAN_FILTER='test_peg_roots_and_releases_" ..
-                    "titan_callback_patterns$'",
+                "titan_callback_patterns$'",
                 "TITAN_FILTER='test_regex_gc_rooting$'",
             }) do
                 assert.equal(1, count_literal(sanitizer_job, filter), filter)
@@ -3390,15 +3466,15 @@ exit 73
                 "stack_trace_format='    #%n %p %F %S (%m+%o) %b'",
                 1, true), asan_options)
             assert.truthy(sanitizer_job:find(
-                "TITAN_SANITIZER_LOG_DIR=$RUNNER_TEMP/", 1, true),
+                    "TITAN_SANITIZER_LOG_DIR=$RUNNER_TEMP/", 1, true),
                 sanitizer_job)
             assert.truthy(sanitizer_job:find(
-                "TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT=$RUNNER_TEMP/", 1, true),
+                    "TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT=$RUNNER_TEMP/", 1, true),
                 sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
                 'cmp "$snapshot_provider" "$provider"'), sanitizer_job)
             local capture_script =
-                "bash spec/support/ci_sanitizer_capture.sh"
+            "bash spec/support/ci_sanitizer_capture.sh"
             for _, contract in ipairs({
                 {
                     "Build sanitizer-enabled native dependencies",
@@ -3447,7 +3523,7 @@ exit 73
                     {
                         "make titan-stdlib-test-run",
                         "bash spec/support/ci_peg_string_" ..
-                            "sanitizer_smoke.sh",
+                        "sanitizer_smoke.sh",
                     },
                 },
                 {
@@ -3504,18 +3580,18 @@ exit 73
                 local files = {
                     ["spec/native_fixture.c"] = "author written\n",
                     ["spec/generated_fixture.titan"] =
-                        "module generated_fixture\n",
+                    "module generated_fixture\n",
                     ["spec/generated_fixture.c"] = "generated C\n",
                     ["spec/generated_fixture.o"] = "generated object\n",
                     ["future/deep/suite"] = "executable\n",
                     ["future/deep/suite__test_support.c"] = "generated C\n",
                     ["future/deep/suite__test_runner.o"] =
-                        "generated object\n",
+                    "generated object\n",
                     ["future/deep/suite__test_entrypoint.titan"] =
-                        "collision fixture\n",
+                    "collision fixture\n",
                     ["future/deep/suite.dSYM/marker"] = "dSYM\n",
                     ["test_runner_future_case/source.titan"] =
-                        "interrupted fixture\n",
+                    "interrupted fixture\n",
                     [".titan-tests/keep"] = "owned output\n",
                 }
                 for path, contents in pairs(files) do
