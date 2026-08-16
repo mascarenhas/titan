@@ -2725,21 +2725,24 @@ exit 73
                 "\n  test%-linux%-stdlib:(.-)" ..
                 "\n  test%-linux%-compiler:"))
             local compiler_job = assert(workflow:match(
-                "\n  test%-linux%-compiler:(.-)\n  # macOS"))
+                "\n  test%-linux%-compiler:(.-)" ..
+                "\n  test%-linux%-compiler%-report:"))
+            local compiler_report_job = assert(workflow:match(
+                "\n  test%-linux%-compiler%-report:(.-)\n  # macOS"))
             local macos_job = assert(workflow:match(
                 "\n  test%-macos:(.-)\n  sanitizer:"))
             local sanitizer_job = assert(workflow:match(
                 "\n  sanitizer:(.*)"))
 
-            assert.equal(3, count_literal(workflow,
+            assert.equal(4, count_literal(workflow,
                 "if: github.event_name == 'push'"), workflow)
             assert.equal(1, count_literal(workflow,
                 "if: github.event_name == 'workflow_dispatch'"), workflow)
-            assert.equal(4, count_literal(workflow, "\n    runs-on:"),
+            assert.equal(5, count_literal(workflow, "\n    runs-on:"),
                 workflow)
             for _, job_name in ipairs({
-                "test-linux-stdlib", "test-linux-compiler", "test-macos",
-                "sanitizer",
+                "test-linux-stdlib", "test-linux-compiler",
+                "test-linux-compiler-report", "test-macos", "sanitizer",
             }) do
                 assert.equal(1, count_literal(workflow,
                     "\n  " .. job_name .. ":"), job_name)
@@ -2967,8 +2970,8 @@ exit 73
             assert.is_true(system_index < upload_index, stdlib_job)
 
             assert.equal(1, count_literal(compiler_job,
-                "name: compiler/language (ubuntu-24.04, LuaCov)"),
-                compiler_job)
+                "name: compiler/language shard ${{ matrix.shard }} " ..
+                    "(ubuntu-24.04, LuaCov)"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "needs: test-linux-stdlib"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
@@ -2976,32 +2979,78 @@ exit 73
             assert.equal(1, count_literal(compiler_job,
                 "timeout-minutes: 30"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
+                "fail-fast: false"), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                "shard: [1, 2, 3, 4]"), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
                 "actions/download-artifact@v8"), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                "actions/upload-artifact@v7"), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                "overwrite: true"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "name: titan-linux-prepared.tar.gz"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
-                "ci_parallel_compiler_tests.sh"), compiler_job)
+                "name: titan-compiler-coverage-shard-${{ matrix.shard }}"),
+                compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                '"compiler-shard-${{ matrix.shard }}"'), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
+                "rm -f luacov.stats.out luacov.report.out"), compiler_job)
             assert.falsy(compiler_job:find(
-                "ci_test_groups.sh compiler", 1, true), compiler_job)
+                "ci_parallel_compiler_tests.sh", 1, true), compiler_job)
+            assert.falsy(compiler_job:find("TITAN_JOBS=1", 1, true),
+                compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 'TITAN_EXTRA_CFLAGS: "-O0"'), compiler_job)
             assert.falsy(compiler_job:find(
                 "ci_stdlib_snapshot.sh", 1, true), compiler_job)
+            assert.falsy(compiler_job:find(
+                "codecov/codecov-action", 1, true), compiler_job)
             local compiler_unpack_index = assert(compiler_job:find(
                 "- name: Restore prepared Linux tree and environment",
                 1, true))
             local compiler_tests_index = assert(compiler_job:find(
-                "- name: Run four isolated compiler and language shards " ..
-                    "with coverage", compiler_unpack_index, true))
+                "- name: Run compiler and language shard " ..
+                    "${{ matrix.shard }} with coverage",
+                compiler_unpack_index, true))
+            local compiler_upload_index = assert(compiler_job:find(
+                "- name: Upload shard ${{ matrix.shard }} LuaCov stats",
+                compiler_tests_index, true))
             assert.is_true(compiler_unpack_index < compiler_tests_index)
+            assert.is_true(compiler_tests_index < compiler_upload_index)
             assert.falsy(compiler_job:find(
                 "C-probe success markers", 1, true))
+
+            assert.equal(1, count_literal(compiler_report_job,
+                "name: compiler/language coverage report (ubuntu-24.04)"),
+                compiler_report_job)
+            assert.equal(1, count_literal(compiler_report_job,
+                "needs: [test-linux-stdlib, test-linux-compiler]"),
+                compiler_report_job)
+            assert.equal(1, count_literal(compiler_report_job,
+                "runs-on: ubuntu-24.04"), compiler_report_job)
+            assert.equal(1, count_literal(compiler_report_job,
+                "timeout-minutes: 10"), compiler_report_job)
+            assert.equal(2, count_literal(compiler_report_job,
+                "actions/download-artifact@v8"), compiler_report_job)
+            assert.equal(1, count_literal(compiler_report_job,
+                "pattern: titan-compiler-coverage-shard-*"),
+                compiler_report_job)
+            assert.equal(1, count_literal(compiler_report_job,
+                "merge-multiple: false"), compiler_report_job)
+            assert.equal(1, count_literal(compiler_report_job,
+                "merge_luacov_stats.lua"), compiler_report_job)
+            assert.equal(1, count_literal(compiler_report_job,
+                "for shard in 1 2 3 4; do"), compiler_report_job)
+            assert.falsy(compiler_report_job:find(
+                "ci_test_groups.sh", 1, true), compiler_report_job)
             assert.truthy(read_file(
                 "spec/support/ci_test_groups.sh"):find(
                     "TITAN_PROBE_CACHE_DISABLE=1", 1, true))
             assert.equal(3, count_literal(workflow,
                 "TITAN_PROBE_CACHE_DISABLE=1"), workflow)
-            assert_codecov_job(compiler_job, "compiler")
+            assert_codecov_job(compiler_report_job, "compiler")
 
             assert.equal(1, count_literal(macos_job,
                 "if: github.event_name == 'workflow_dispatch'"), macos_job)
@@ -3131,26 +3180,6 @@ exit 73
                 "\n    compiler%-uncovered%)(.-)\n        ;;"))
             assert.falsy(uncovered_group:find(" -c ", 1, true),
                 uncovered_group)
-
-            local parallel_compiler = read_file(
-                "spec/support/ci_parallel_compiler_tests.sh")
-            for _, required in ipairs({
-                "xargs -r -n1 -P4",
-                'mktemp -d "$runner_temp/titan-compiler-workers.XXXXXX"',
-                'tar --exclude="./.lua" --exclude="./.git"',
-                'cd "$worker" || exit 1',
-                'rm -f luacov.stats.out luacov.report.out || exit 1',
-                'mkdir -p .tmp || exit 1',
-                'export TMPDIR="$PWD/.tmp"',
-                'unset LUACOV_CONFIG',
-                'TITAN_JOBS=1',
-                '"compiler-shard-$shard"',
-                "merge_luacov_stats.lua",
-                "luacov.stats.out",
-            }) do
-                assert.truthy(parallel_compiler:find(required, 1, true),
-                    required)
-            end
 
             local partition = read_file(
                 "spec/support/ci_compiler_test_groups.txt")

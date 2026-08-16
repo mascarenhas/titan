@@ -726,10 +726,11 @@ enters `spec/support/run_rock_tests.sh`, which invokes `make rock-test`: the
 Busted tree runs first, followed by the same aggregate native executable.
 Busted 2.3 does not provide a shard option, so local `-j4` does not split the
 Busted spec files; many compiler specs also share fixed checkout-root artifact
-names. The Linux compiler CI job supplies the missing isolation externally: it
-runs four measured file groups in private prepared-tree copies, caps nested
-`titanc` compilation at one slot per worker, then merges their separate LuaCov
-stats. Individual Busted invocations and the native aggregate remain unsharded.
+names. Linux CI supplies the missing isolation externally: four matrix runners
+restore the prepared tree and run one measured file group apiece with ordinary
+`TITAN_JOBS=4`, streaming each shard's output independently. A fifth job merges
+their separate LuaCov stats. Individual Busted invocations and the native
+aggregate remain unsharded.
 `BUSTED_FILTER` and `TITAN_FILTER` are independent Lua-pattern selectors;
 filtering one domain does not skip the other, so use a leaf target when only one
 is wanted. A Titan filter changes execution only—the build still compiles all
@@ -767,10 +768,10 @@ $ bash spec/support/ci_test_groups.sh compiler  # complete compiler/language set
 ```
 
 Linux CI has one uncovered stdlib producer, which also prepares and validates
-the bundled/system production images, and one standard-runner consumer for the
-complete covered compiler/language set. That consumer extracts four isolated
-workers from the prepared archive, runs the exhaustive checked-in partition,
-and emits the sole merged Codecov report. The ASan+UBSan job builds its own
+the bundled/system production images, and four matrix consumers for the complete
+covered compiler/language set. Each runs its checked-in partition in a separate
+hosted checkout and uploads private LuaCov stats; one dependent report job merges
+them and emits the sole Codecov report. The ASan+UBSan job builds its own
 instrumented tree and reuses one aggregate native build for focused filters; it
 does not consume the regular
 artifact.

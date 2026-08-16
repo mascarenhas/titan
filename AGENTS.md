@@ -60,15 +60,13 @@ not add epicycles around what may be a misunderstood simpler design.
 - **CI runs Linux on every push and the complete macOS suite only on manual
   dispatch.** Use `workflow_dispatch` as the **pre-merge check** with
   `gh workflow run ci.yml --ref <branch>`. Linux jobs are push-only and are not
-  repeated by that macOS dispatch. The regular push graph has exactly three
-  standard `ubuntu-24.04` jobs with explicit 30-minute timeouts. Every workflow
-  job exports `MAKEFLAGS=-j4` and `TITAN_JOBS=4`: Make may overlap independent
-  native prerequisites, and each `titanc` process may overlap only generated-C
-  object compilations. The four external Linux compiler-test workers override
-  `TITAN_JOBS=1`, so ordinary compiler-test invocations consume at most four
-  generated-C slots in aggregate. Dedicated parallel specs still pass their
-  explicit bounds and may temporarily exceed that aggregate; production/provider
-  builds retain four-way compilation.
+  repeated by that macOS dispatch. The regular push graph has one stdlib
+  producer, four `ubuntu-24.04` compiler matrix legs, one compiler-report job,
+  and one sanitizer job, all with explicit timeouts. Every workflow job exports
+  `MAKEFLAGS=-j4` and `TITAN_JOBS=4`: Make may overlap independent native
+  prerequisites, and each `titanc` process may overlap only generated-C object
+  compilations. Each compiler shard owns a separate hosted runner, so it retains
+  this ordinary four-way bound without competing with the other shards.
   The compiler launches larger generated units first and
   receives actual child completions through one private POSIX FIFO, refilling a
   slot immediately; diagnostics remain buffered and replay in request order.
@@ -78,12 +76,12 @@ not add epicycles around what may be a misunderstood simpler design.
   and `ltitanlib.o`
   waits for the prefix Lua installation that owns its public headers. Busted
   2.3 has no native shard option. Local Busted invocations remain serial, while
-  the Linux compiler consumer externally partitions its complete file set into
-  four measured longest-first groups. Each group runs in a private extraction of
-  the prepared checkout, because compiler specs share checkout-root artifact
-  names; each also owns one LuaCov stats file, and the job merges all four only
-  after every worker passes. The installed prefix is shared read-only. The
-  aggregate native Titan suite also remains one fast executable.
+  Linux CI externally partitions the complete compiler file set into four
+  measured longest-first matrix legs. Each leg restores the prepared tree in its
+  own runner checkout because compiler specs share checkout-root artifact names,
+  streams its ordinary Busted output, and uploads one private LuaCov stats file.
+  A fifth job merges those files only after all four legs pass, then emits the
+  sole report. The aggregate native Titan suite also remains one fast executable.
 
   1. `test-linux-stdlib` is the prepared-tree producer. It prepares a clean
      ABI-0.25 prefix, builds and installs the optimized bundled provider, and
@@ -101,21 +99,19 @@ not add epicycles around what may be a misunderstood simpler design.
      optimized consumers. The bundled smoke and packed canonical provider also
      remain optimized. It uploads the already packed artifact only after both
      provider modes pass. Never repack the live system-linked tree.
-  2. `test-linux-compiler` is the sole regular-artifact consumer. It needs the
-     stdlib producer, restores that full tree on the same x86_64 Ubuntu target,
-     and extracts four cache-free worker copies without their `.lua` trees. The
+  2. `test-linux-compiler` is a four-leg matrix of regular-artifact consumers.
+     Every leg needs the stdlib producer, restores that full tree on the same
+     x86_64 Ubuntu target, and owns an independent checkout/prefix image. The
      measured `ci_compiler_test_groups.txt` manifest is exhaustive and assigns
-     each compiler spec to one worker; ordinary files run once per group, while
-     the retained unit/fresh-prototype cases keep their separate Busted process
-     boundaries. Workers own private checkout roots and `TMPDIR`s, share only the
-     prepared installed prefix read-only, buffer logs independently, and write
-     distinct LuaCov stats. The job sums them before reporting. Disposable
-     generated fixtures use
-     `TITAN_EXTRA_CFLAGS=-O0`. The job emits one filtered report and makes
-     one failing-on-error OIDC Codecov upload named `compiler`; it is the only
-     job with `id-token: write`. Its restored checkout is disposable and has no
-     later production-image consumer, so it does not snapshot and restore the
-     canonical image around compiler tests.
+     each compiler spec to one leg; ordinary files run once per group, while the
+     retained unit/fresh-prototype cases keep their separate Busted process
+     boundaries. Each leg streams output and uploads one LuaCov stats artifact.
+     `test-linux-compiler-report` restores the same prepared image, requires all
+     four legs, sums their stats, emits one filtered report, and makes the one
+     failing-on-error OIDC Codecov upload named `compiler`; it is the only job
+     with `id-token: write`. Disposable generated fixtures use
+     `TITAN_EXTRA_CFLAGS=-O0`. These checkouts have no later production-image
+     consumer, so compiler tests need no canonical-image snapshot/restore.
   3. `sanitizer` independently builds its own ASan+UBSan-instrumented Lua,
      libbacktrace, libuv, llhttp, OpenSSL, and Titan tree; it never consumes the
      regular artifact. It builds the same aggregate native test executable once
@@ -130,10 +126,10 @@ not add epicycles around what may be a misunderstood simpler design.
   source/output timestamp ordering, prepared Lua files, executable bits, and
   standard-library images. Pack it before tests and before system publication,
   but upload it only after the bundled and system gates pass. The producer and
-  consumer are the same OS, architecture, and object target; a prepared native
+  consumers are the same OS, architecture, and object target; a prepared native
   tree must never cross one of those boundaries. Keep Linux dependency builds
-  in the job that consumes their warm tree, and keep both production-mode
-  smokes in the producer instead of rebuilding them in a consumer. The
+  in the producer that owns their warm tree, and keep both production-mode
+  smokes there instead of rebuilding them in a consumer. The
   prefix-owned `var/cache/titan-probes/<ABI>` directory is the deliberate
   exception to that full-tree transfer: exclude it from the tar and snapshot it
   independently in the regular producer, sanitizer, and macOS jobs with
@@ -144,7 +140,7 @@ not add epicycles around what may be a misunderstood simpler design.
   whose immutable primary ends in the commit SHA and whose stable restore
   prefix omits it. Each selects its lane namespace with
   `TITAN_PROBE_CACHE_IDENTITY` before its first Titan build. The prepared-tree
-  compiler consumer remains cache-free, and compiler specs explicitly disable
+  compiler matrix remains cache-free, and compiler specs explicitly disable
   persistent markers because independent fixtures reuse header pathnames;
   production builds and native aggregate compilation still benefit. A marker's
   presence is trusted success evidence, so never restore cache entries from a
@@ -388,9 +384,9 @@ run library API/runtime tests under LuaCov when their purpose is to test the
 library rather than a compiler or language feature. LuaCov measures the Lua
 compiler, not Titan or C library implementations, and its debug hook can make
 repeated checks of large library sources disproportionately slow. Linux CI has
-one uncovered stdlib producer and one consumer that runs the complete
-`spec/support/ci_test_groups.sh compiler` set with coverage and emits the sole
-LuaCov/Codecov report. The producer runs retained host/build boundaries plus
+one uncovered stdlib producer, four compiler matrix legs that partition the
+complete covered set, and one merger that emits the sole LuaCov/Codecov report.
+The producer runs retained host/build boundaries plus
 the aggregate native suite without coverage; the independent sanitizer selects
 only focused native-memory cases and does not publish coverage. This includes
 both async-I/O and coroutine behavior, which must still run in full in the
