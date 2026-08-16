@@ -48,17 +48,19 @@ input never raises. The two positions are mutually exclusive:
 ```titan
 local url = import "url"
 
-function endpoint(source: string): string?
+function endpoint(source: string): (string?, string?)
   local parsed?, problem? = url.parse(source)
   if problem then
-    local exact = problem as url.Error
-    print(exact.message)
-    return nil
+    return nil, problem.message
   end
-  local exact = parsed as url.Url
-  return exact.host .. ":" .. exact.port
+  return parsed.host .. ":" .. parsed.port, nil
 end
 ```
+
+The condition does not flow-narrow either option. Field access is already a
+bare-value context, so Titan inserts the checked option force for `problem` and
+`parsed`; explicit `as url.Error`/`as url.Url` casts would only restate that
+ordinary conversion.
 
 The `Error` field is named `kind`, rather than `type`, because `type` is a
 Titan keyword. `position` is the one-based byte position at which parsing or a

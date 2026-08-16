@@ -204,8 +204,8 @@ function defs.simpleblock(pos, stats)
 end
 
 -- Mark the parser-owned role explicitly: a root initializer may be either the
--- plain StatBlock or the StatTry produced when its block has catch/finally
--- trailers. Its diagnostic location is the `do` keyword rather than the first
+-- plain StatBlock or the StatTry produced by a catch trailer or defer lowering.
+-- Its diagnostic location is the `do` keyword rather than the first
 -- token in the block, so filesystem assembly can reject the construct in a
 -- contributor without guessing from the statement tag.
 function defs.moduleinit(pos, block)

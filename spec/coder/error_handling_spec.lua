@@ -794,6 +794,21 @@ end)
 describe("catch", function()
     after_each(clean)
 
+    it("generates a value-returning function-level catch", function()
+        local out = compile_and_run([[
+            function quotient(n: integer): integer?
+                return 10 // n
+            catch
+                return nil
+            end
+        ]], [==[
+            assert(test.quotient(2) == 5, "function catch changed success")
+            assert(test.quotient(0) == nil, "function catch missed error")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("catches a body error and continues after the try", function()
         local out = compile_and_run([[
             function run(): integer

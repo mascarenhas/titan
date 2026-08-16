@@ -138,7 +138,7 @@ C declaration supplies a `lua_State *`.
 
 The following Titan facilities are unavailable in a foreign body:
 
-* `raise`, `catch`, `finally`, and `defer`;
+* `raise`, `catch`, and `defer`;
 * generic `for ... in` and `case`;
 * lambdas, bound methods, and Titan record/union/Array/Map constructors;
 * `...`, flexible results, `is`, concatenation, and Titan `and`/`or`/`not`;

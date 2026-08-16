@@ -14,10 +14,14 @@ function is_terminator(node)
     return node._tag == "Ast.StatBreak" or node._always_returns == true
 end
 
--- The last statement that control can reach in a block's `stats` (the first
--- terminator, or the final statement if none terminates). Mirrors codestats'
--- dead-code stop, so it reflects exactly what the coder emitted.
+-- The last statement that control can reach in a function body (the first
+-- terminator, or the final statement if none terminates). A function-level
+-- `catch` is represented directly by StatTry rather than an outer StatBlock;
+-- that whole protected statement is the reachable tail. For an ordinary block,
+-- mirror codestats' dead-code stop so this reflects exactly what the coder
+-- emitted.
 function last_reachable_stat(block)
+    if block._tag ~= "Ast.StatBlock" then return block end
     local last
     for _, s in ipairs(block.stats) do
         last = s

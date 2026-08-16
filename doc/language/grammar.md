@@ -33,9 +33,10 @@ not       or      owned    raise     record  repeat  return  string  then
 true      type    union    until     value   when    while
 ```
 
-`in` is used by the generic `for ... in` statement. `goto` is still
-reserved but unused, and `::` is recognized by the lexer but used by no
-grammar rule — there are no labels. (`break` *is* a statement — see
+`in` is used by the generic `for ... in` statement. `goto` and `finally` are
+reserved but unused by surface grammar; cleanup is written with `defer`, and
+there are no user-written `finally` blocks. `::` is recognized by the lexer but
+used by no grammar rule — there are no labels. (`break` *is* a statement — see
 [statements](statements.md#break-no-goto).) The type keywords `boolean`,
 `float`, `integer`, `nil`, `string`, and `value` are reserved too, so
 they cannot name variables, functions, or fields (`local integer:
