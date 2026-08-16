@@ -2910,9 +2910,9 @@ exit 73
 
             assert.equal(10, count_literal(workflow,
                 "uses: actions/cache@v5"), workflow)
-            assert.equal(1, count_literal(workflow,
+            assert.equal(2, count_literal(workflow,
                 "uses: actions/cache/restore@v5"), workflow)
-            assert.equal(1, count_literal(workflow,
+            assert.equal(2, count_literal(workflow,
                 "uses: actions/cache/save@v5"), workflow)
             assert.equal(4, count_literal(workflow,
                 "path: .lua/var/cache/titan-probes/" ..
@@ -3229,6 +3229,129 @@ exit 73
             assert.equal(1, count_literal(sanitizer_job,
                 'LUA_MYCFLAGS: "-fPIC -O1 -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
+            for _, contract in ipairs({
+                'SANITIZER_NATIVE_CACHE_SCHEMA: "v1"',
+                "CC: cc", "AR: ar", "RANLIB: ranlib",
+                'SANITIZER_LUA_VERSION: "5.5.1"',
+                'SANITIZER_LIBUV_VERSION: "1.52.1"',
+                'SANITIZER_LIBUV_SHA256: "66d511b9e6e334c0e62279eb234fbfb2b' ..
+                    '3110b1479c09b95b44c7afca8cff9e7"',
+                'LIBUV_BUILD_PROFILE: "static-pic-debug-tests-off-' ..
+                    'asan-ubsan-v1"',
+                'SANITIZER_LLHTTP_VERSION: "9.4.3"',
+                'SANITIZER_LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f007' ..
+                    '46720f5e7e29c79b42c02cb69f36c39"',
+                'SANITIZER_OPENSSL_VERSION: "3.5.7"',
+                'SANITIZER_OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd2' ..
+                    '1984552a3c8e4aa11a24aa31aeac98e8"',
+                "id: sanitizer-native-cache-key",
+                "git ls-remote",
+                "libbacktrace.git HEAD",
+                'cc_target="$(cc -dumpmachine)"',
+                'cc_version="$(cc -dumpfullversion -dumpversion)"',
+                'system_packages="$(dpkg-query',
+                "id: sanitizer-native-cache",
+                "uses: actions/cache/restore@v5",
+                "path: |",
+                "lua-${{ env.SANITIZER_LUA_VERSION }}",
+                "lua-${{ env.SANITIZER_LUA_VERSION }}.tar.gz",
+                "libbacktrace",
+                "libuv-v${{ env.SANITIZER_LIBUV_VERSION }}",
+                "libuv-v${{ env.SANITIZER_LIBUV_VERSION }}.tar.gz",
+                "llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}",
+                "llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}.tar.gz",
+                "openssl-${{ env.SANITIZER_OPENSSL_VERSION }}",
+                "openssl-${{ env.SANITIZER_OPENSSL_VERSION }}.tar.gz",
+                "uses: actions/cache/save@v5",
+                "steps.sanitizer-native-cache.outputs.cache-primary-key",
+                "steps.sanitizer-native-cache.outputs.cache-hit != 'true'",
+                'test ! -e "$PREFIX/bin/luarocks"',
+                'test ! -e "$PREFIX/lib/titan"',
+                'test ! -e "$PREFIX/var/cache/titan-probes"',
+            }) do
+                assert.truthy(sanitizer_job:find(contract, 1, true), contract)
+            end
+            local sanitizer_native_restore_step = named_step(sanitizer_job,
+                "Restore sanitizer native dependencies")
+            local sanitizer_native_save_step = named_step(sanitizer_job,
+                "Save sanitizer native dependencies")
+            for _, forbidden in ipairs({
+                "restore-keys:", "github.sha", "hashFiles(",
+            }) do
+                assert.falsy(sanitizer_native_restore_step:find(
+                    forbidden, 1, true), sanitizer_native_restore_step)
+            end
+            local sanitizer_native_restore_paths = assert(
+                sanitizer_native_restore_step:match(
+                    "\n%s+path: |(.-)\n%s+key:"))
+            local sanitizer_native_save_paths = assert(
+                sanitizer_native_save_step:match(
+                    "\n%s+path: |(.-)\n%s+key:"))
+            assert.equal(sanitizer_native_restore_paths,
+                sanitizer_native_save_paths)
+            assert.truthy(sanitizer_native_restore_step:find(
+                "titan%-sanitizer%-native%-%${{ env%." ..
+                    "SANITIZER_NATIVE_CACHE_SCHEMA }}%-%${{ runner%.os }}" ..
+                    "%-%${{ runner%.arch }}%-%${{ steps%." ..
+                    "sanitizer%-native%-cache%-key%.outputs%.digest }}"))
+            for _, fingerprint in ipairs({
+                "titan_abi=$TITAN_ABI_VERSION",
+                "libuv_profile=$LIBUV_BUILD_PROFILE",
+                "rock_cflags=${ROCK_CFLAGS:--O2 -fPIC}",
+                "titan_cppflags=${TITAN_EXTRA_CPPFLAGS:-}",
+                "titan_cflags=$TITAN_EXTRA_CFLAGS",
+                "ld_version=$ld_version",
+                "make_version=$make_version",
+                "system_packages=$system_packages",
+            }) do
+                assert.truthy(sanitizer_job:find(fingerprint, 1, true),
+                    fingerprint)
+            end
+
+            local sanitizer_install_index = assert(sanitizer_job:find(
+                "- name: Install sanitizer build dependencies", 1, true))
+            local sanitizer_identify_index = assert(sanitizer_job:find(
+                "- name: Identify sanitizer native dependency cache",
+                sanitizer_install_index, true))
+            local sanitizer_restore_index = assert(sanitizer_job:find(
+                "- name: Restore sanitizer native dependencies",
+                sanitizer_identify_index, true))
+            local sanitizer_native_build_index = assert(sanitizer_job:find(
+                "- name: Build sanitizer-enabled native dependencies",
+                sanitizer_restore_index, true))
+            local sanitizer_native_validate_index = assert(sanitizer_job:find(
+                "- name: Validate sanitizer native dependency boundary",
+                sanitizer_native_build_index, true))
+            local sanitizer_native_save_index = assert(sanitizer_job:find(
+                "- name: Save sanitizer native dependencies",
+                sanitizer_native_validate_index, true))
+            local sanitizer_luarocks_index = assert(sanitizer_job:find(
+                "- name: Install LuaRocks for the sanitizer Lua",
+                sanitizer_native_save_index, true))
+            assert.is_true(sanitizer_install_index < sanitizer_identify_index)
+            assert.is_true(sanitizer_identify_index < sanitizer_restore_index)
+            assert.is_true(sanitizer_restore_index <
+                sanitizer_native_build_index)
+            assert.is_true(sanitizer_native_build_index <
+                sanitizer_native_validate_index)
+            assert.is_true(sanitizer_native_validate_index <
+                sanitizer_native_save_index)
+            assert.is_true(sanitizer_native_save_index <
+                sanitizer_luarocks_index)
+            local sanitizer_native_build_step = named_step(sanitizer_job,
+                "Build sanitizer-enabled native dependencies")
+            assert.equal(1, count_literal(sanitizer_native_build_step,
+                "make openssl lua libuv libbacktrace llhttp"))
+            assert.equal(1, count_literal(sanitizer_native_build_step,
+                "grep -qx 'provider=system'"))
+            for _, serial_capture in ipairs({
+                "native-lua", "native-libbacktrace", "native-libuv",
+                "native-llhttp", "native-openssl",
+            }) do
+                assert.falsy(sanitizer_native_build_step:find(
+                    serial_capture, 1, true), sanitizer_native_build_step)
+            end
+
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
             assert.equal(8, count_literal(sanitizer_job,
@@ -3280,8 +3403,7 @@ exit 73
                 {
                     "Build sanitizer-enabled native dependencies",
                     {
-                        "make lua", "make libbacktrace", "make libuv",
-                        "make llhttp", "make openssl",
+                        "make openssl lua libuv libbacktrace llhttp",
                     },
                 },
                 {

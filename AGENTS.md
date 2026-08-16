@@ -122,9 +122,16 @@ not add epicycles around what may be a misunderstood simpler design.
      job with `id-token: write`. Its restored checkout is disposable and has no
      later production-image consumer, so it does not snapshot and restore the
      canonical image around compiler tests.
-  3. `sanitizer` independently builds its own ASan+UBSan-instrumented Lua,
+  3. `sanitizer` independently owns its ASan+UBSan-instrumented Lua,
      libbacktrace, libuv, llhttp, OpenSSL, and Titan tree; it never consumes the
-     regular artifact. It builds the same aggregate native test executable once
+     regular artifact. Before any LuaRocks or Titan installation, it restores a
+     native-dependency cache keyed by pinned dependency identities, the current
+     libbacktrace revision, sanitizer flags, system Readline/toolchain identity,
+     OS/architecture, and an explicit recipe schema. It always reruns the native
+     targets as one two-slot jobserver DAG to validate/repair the restored tree,
+     then saves a miss at that clean boundary; the cached prefix must contain
+     neither LuaRocks/Titan state
+     nor C-probe markers. It builds the same aggregate native test executable once
      and uses `TITAN_FILTER` with repeated `make titan-stdlib-test-run`
      invocations when a fresh process is useful. Filters select focused lifetime
      cases; they are not group names and never trigger recompilation. Keep the retained

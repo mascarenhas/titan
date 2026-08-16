@@ -614,6 +614,19 @@ jobs:
       TITAN_PREFIX: ${{ github.workspace }}/.lua
       # Retain one explicit system-provider lane alongside the bundled jobs.
       READLINE_MODE: system
+      # Native dependency caches stop at the pre-LuaRocks boundary. Bump the
+      # schema when their build recipes or cached layout change.
+      SANITIZER_NATIVE_CACHE_SCHEMA: "v1"
+      CC: cc
+      AR: ar
+      RANLIB: ranlib
+      SANITIZER_LUA_VERSION: "5.5.1"
+      SANITIZER_LIBUV_VERSION: "1.52.1"
+      SANITIZER_LIBUV_SHA256: "66d511b9e6e334c0e62279eb234fbfb2b3110b1479c09b95b44c7afca8cff9e7"
+      SANITIZER_LLHTTP_VERSION: "9.4.3"
+      SANITIZER_LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
+      SANITIZER_OPENSSL_VERSION: "3.5.7"
+      SANITIZER_OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8"
       # Generated Titan translation units are large enough that combining
       # optimization with sanitizer instrumentation can exhaust this job's
       # budget. O0 retains the complete ASan/UBSan instrumentation;
@@ -627,6 +640,7 @@ jobs:
       LUA_MYLDFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LUA_MYLIBS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LIBBT_CFLAGS: "-fPIC -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LIBUV_BUILD_PROFILE: "static-pic-debug-tests-off-asan-ubsan-v1"
       LIBUV_BUILD_TYPE: Debug
       LIBUV_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LLHTTP_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
@@ -653,17 +667,137 @@ jobs:
       - name: Install sanitizer build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev perl
 
+      - name: Identify sanitizer native dependency cache
+        id: sanitizer-native-cache-key
+        run: |
+          libbacktrace_line="$(git ls-remote \
+            https://github.com/ianlancetaylor/libbacktrace.git HEAD)"
+          read -r libbacktrace_rev libbacktrace_ref <<< "$libbacktrace_line"
+          [[ $libbacktrace_rev =~ ^[0-9a-f]{40}$ ]]
+          test "$libbacktrace_ref" = HEAD
+          cc_target="$(cc -dumpmachine)"
+          cc_version="$(cc -dumpfullversion -dumpversion)"
+          ar_version="$(ar --version | sed -n '1p')"
+          ranlib_version="$(ranlib --version | sed -n '1p')"
+          ld_version="$(ld --version | sed -n '1p')"
+          make_version="$(make --version | sed -n '1p')"
+          cmake_version="$(cmake --version | sed -n '1p')"
+          perl_version="$(perl -V:version)"
+          system_packages="$(dpkg-query -W -f='${Package}=${Version}\n' \
+            libc6-dev libreadline-dev | LC_ALL=C sort)"
+          for value in "$cc_target" "$cc_version" "$ar_version" \
+            "$ranlib_version" "$ld_version" "$make_version" \
+            "$cmake_version" "$perl_version" "$system_packages"; do
+            test -n "$value"
+          done
+          inputs="$RUNNER_TEMP/titan-sanitizer-native-cache-inputs"
+          {
+            printf '%s\n' \
+              "schema=$SANITIZER_NATIVE_CACHE_SCHEMA" \
+              "titan_abi=$TITAN_ABI_VERSION" \
+              "lua=$SANITIZER_LUA_VERSION" \
+              "libbacktrace=$libbacktrace_rev" \
+              "libuv=$SANITIZER_LIBUV_VERSION:$SANITIZER_LIBUV_SHA256" \
+              "llhttp=$SANITIZER_LLHTTP_VERSION:$SANITIZER_LLHTTP_SHA256" \
+              "openssl=$SANITIZER_OPENSSL_VERSION:$SANITIZER_OPENSSL_SHA256" \
+              "readline_mode=$READLINE_MODE" \
+              "lua_cflags=$LUA_MYCFLAGS" \
+              "lua_ldflags=$LUA_MYLDFLAGS" \
+              "lua_libs=$LUA_MYLIBS" \
+              "libbacktrace_cflags=$LIBBT_CFLAGS" \
+              "libuv_profile=$LIBUV_BUILD_PROFILE" \
+              "libuv_type=$LIBUV_BUILD_TYPE" \
+              "libuv_cflags=$LIBUV_BUILD_CFLAGS" \
+              "rock_cflags=${ROCK_CFLAGS:--O2 -fPIC}" \
+              "titan_cppflags=${TITAN_EXTRA_CPPFLAGS:-}" \
+              "titan_cflags=$TITAN_EXTRA_CFLAGS" \
+              "llhttp_cflags=$LLHTTP_BUILD_CFLAGS" \
+              "openssl_cflags=$OPENSSL_BUILD_CFLAGS" \
+              "openssl_configure=$OPENSSL_EXTRA_CONFIGURE_FLAGS" \
+              "cc_command=${CC:-cc}" \
+              "ar_command=${AR:-ar}" \
+              "ranlib_command=${RANLIB:-ranlib}" \
+              "cc_target=$cc_target" \
+              "cc_version=$cc_version" \
+              "ar_version=$ar_version" \
+              "ranlib_version=$ranlib_version" \
+              "ld_version=$ld_version" \
+              "make_version=$make_version" \
+              "cmake_version=$cmake_version" \
+              "perl_version=$perl_version" \
+              "system_packages=$system_packages"
+          } > "$inputs"
+          digest="$(sha256sum "$inputs" | cut -d' ' -f1)"
+          [[ $digest =~ ^[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "SANITIZER_LIBBACKTRACE_REV=$libbacktrace_rev" >> "$GITHUB_ENV"
+          cat "$inputs"
+
+      - name: Restore sanitizer native dependencies
+        id: sanitizer-native-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            .lua
+            lua-${{ env.SANITIZER_LUA_VERSION }}
+            lua-${{ env.SANITIZER_LUA_VERSION }}.tar.gz
+            libbacktrace
+            libuv-v${{ env.SANITIZER_LIBUV_VERSION }}
+            libuv-v${{ env.SANITIZER_LIBUV_VERSION }}.tar.gz
+            libuv-build
+            llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}
+            llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}.tar.gz
+            llhttp-build
+            openssl-${{ env.SANITIZER_OPENSSL_VERSION }}
+            openssl-${{ env.SANITIZER_OPENSSL_VERSION }}.tar.gz
+            openssl-build
+          key: titan-sanitizer-native-${{ env.SANITIZER_NATIVE_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.sanitizer-native-cache-key.outputs.digest }}
+
       - name: Build sanitizer-enabled native dependencies
         run: |
-          bash spec/support/ci_sanitizer_capture.sh native-lua make lua
+          # Start the long OpenSSL and Lua builds first. The shared Make
+          # jobserver keeps the complete independent native DAG within two
+          # CPU slots while overlapping configuration, download, and compile
+          # work on a cold cache miss.
+          bash spec/support/ci_sanitizer_capture.sh native-dependencies \
+            make openssl lua libuv libbacktrace llhttp
           grep -qx 'provider=system' \
             "lua-5.5.1/.titan-readline-8.3-p3.config"
-          bash spec/support/ci_sanitizer_capture.sh native-libbacktrace \
-            make libbacktrace
-          bash spec/support/ci_sanitizer_capture.sh native-libuv make libuv
-          bash spec/support/ci_sanitizer_capture.sh native-llhttp make llhttp
-          bash spec/support/ci_sanitizer_capture.sh native-openssl \
-            make openssl
+
+      - name: Validate sanitizer native dependency boundary
+        run: |
+          test -x "$PREFIX/bin/lua"
+          test -f "$PREFIX/lib/liblua.a"
+          test "$(git -C libbacktrace rev-parse HEAD)" = \
+            "$SANITIZER_LIBBACKTRACE_REV"
+          test -f libbacktrace/.libs/libbacktrace.a
+          test -f libuv-build/libuv.a
+          test -f llhttp-build/libtitan-llhttp.a
+          test -f openssl-build/libssl.a
+          test -f openssl-build/libcrypto.a
+          test ! -e "$PREFIX/bin/luarocks"
+          test ! -e "$PREFIX/lib/titan"
+          test ! -e "$PREFIX/var/cache/titan-probes"
+
+      - name: Save sanitizer native dependencies
+        if: steps.sanitizer-native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            .lua
+            lua-${{ env.SANITIZER_LUA_VERSION }}
+            lua-${{ env.SANITIZER_LUA_VERSION }}.tar.gz
+            libbacktrace
+            libuv-v${{ env.SANITIZER_LIBUV_VERSION }}
+            libuv-v${{ env.SANITIZER_LIBUV_VERSION }}.tar.gz
+            libuv-build
+            llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}
+            llhttp-release-v${{ env.SANITIZER_LLHTTP_VERSION }}.tar.gz
+            llhttp-build
+            openssl-${{ env.SANITIZER_OPENSSL_VERSION }}
+            openssl-${{ env.SANITIZER_OPENSSL_VERSION }}.tar.gz
+            openssl-build
+          key: ${{ steps.sanitizer-native-cache.outputs.cache-primary-key }}
 
       - name: Install LuaRocks for the sanitizer Lua
         run: bash spec/support/ci_sanitizer_capture.sh luarocks make luarocks
