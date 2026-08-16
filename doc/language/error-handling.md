@@ -38,7 +38,7 @@ marks a run-time type error.
 Titan type; it is coerced to `value`, so strings, numbers, records, unions,
 arrays, maps, `nil`, and arbitrary Lua values can all be raised:
 
-```lua
+```titan
 function fail(name: string)
     raise "unknown user: " .. name
 end
@@ -60,7 +60,7 @@ A bare `raise` is a re-raise. It is legal only inside a `catch` block and
 raises the original caught value again, preserving the original traceback
 rather than replacing it with the shallower catch-site stack:
 
-```lua
+```titan
 function checked_open(path: string): value
     return raw_open(path)
 catch
@@ -73,20 +73,24 @@ Using bare `raise` anywhere else is a compile-time error.
 
 ## `catch`
 
-Titan does not have a `try` keyword. Instead, `catch` attaches to a block. A `do ... end` block is the most explicit spelling:
+Titan does not have a `try` keyword. Instead, `catch` attaches to a block.
+When the whole function is protected, attach it directly to the existing
+function body:
 
 ```titan
-do
-    risky()
+function quotient(a: integer, b: integer): integer?
+    return a // b
 catch
-    handle(error, traceback)
+    return nil
 end
 ```
 
 The same trailer may appear on any construct whose body is a block:
 function bodies, `while` bodies, `repeat` bodies, numeric `for` bodies,
 `if`/`elseif`/`else` arms, union `when` arms and their `else`, anonymous
-function bodies, and nested `do ... end` blocks.
+function bodies, and nested `do ... end` blocks. Use an extra `do` only when
+its narrower protected region or local scope is intentional; it is not required
+to gain a `catch`.
 
 ```titan
 function parse(s: string): integer

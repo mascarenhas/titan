@@ -280,8 +280,10 @@ Allowed conversions include:
 * C pointers, including C function pointers, to `boolean`, with `nil` as the
   null pointer;
 * C arrays and counted owned C arrays to compatible C pointers;
-* any non-function C pointer to `void *`;
-* a C function pointer to C `void *` with a written cast;
+* any non-function C object pointer to compatible `void *`;
+* qualification-preserving `void *` to a compatible non-character object
+  pointer directly, and to a character pointer with a written cast;
+* a C function pointer to or from C `void *` with a written portability cast;
 * a Titan Array, Map, record, union, Interface, or function value to C
   `void *` with a written identity cast;
 * non-pointer by-value C object expressions to compatible `const *T` pointers,
@@ -355,10 +357,16 @@ predicate is reused recursively through Option conversions.
 
 By-value C structs and unions cannot cross through `value` in v1. C function
 pointers are callable and nullable, but they are not C object pointers: they
-cannot cross through `value`. A written `as` cast may erase a C function
-pointer to `void *`; Titan uses its toolchain portability cast rather than
-pretending that this is an ordinary C object-pointer coercion. The reverse
-`void *`-to-function-pointer cast is not part of this rule.
+cannot cross through `value`. A written `as` cast may convert a C function
+pointer to or from `void *`; Titan uses its toolchain portability cast rather
+than pretending that either direction is an ordinary C object-pointer coercion.
+Direct object-pointer/function-pointer conversions remain rejected.
+
+Ordinary C object-pointer compatibility is separate. A qualification-preserving
+`void *` converts directly to a compatible non-character object pointer; a
+character-pointer target requires an explicit written cast. Neither rule
+establishes a global structural pointer relation or verifies the pointed-to
+object at run time.
 
 The explicit GC-identity cast exposes the native object address:
 
@@ -542,9 +550,17 @@ result run. These strict boundaries are intentionally separate from
 ## Strings And Pointers
 
 Passing a Titan `string` to C as `char *` or `void *` passes a pointer to the
-string's internal immutable byte buffer. No copy is made. The pointer is valid
-only while the Titan string is alive and anchored for the call; a C function
-must not store it, mutate it, free it, or reallocate it.
+string's internal immutable byte buffer. No copy is made. The public conversion
+contract anchors the pointer only for the call; ordinary application code must
+not let C store, mutate, free, or reallocate it. Make a native copy or give the
+operation explicit native-owned storage when bytes must outlive the call.
+
+A few trusted standard-library bindings use a narrower reviewed native contract
+that is not inferred from this conversion: an API is known to borrow immutable,
+stable bytes asynchronously, and the binding keeps the exact original string in
+a traced callback owner through the one terminal callback. This is internal
+ownership machinery, not a general promise attached to `const char *` and not an
+application FFI pattern.
 
 Casting a C `char *` or `void *` to `string` copies bytes up to the first
 `\0` into a fresh Titan string:

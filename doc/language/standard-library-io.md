@@ -9,9 +9,13 @@ local io = import "io"
 
 function copy_one(reader: io.Reader, writer: io.Writer)
     local bytes = reader:read()
-    if bytes then writer:write(bytes as string) end
+    if bytes then writer:write(bytes) end
 end
 ```
+
+The condition tests presence but does not flow-narrow `bytes`. The `write`
+argument is a bare `string` context, so Titan performs the checked option force
+automatically; an explicit `bytes as string` is redundant.
 
 The qualified Lua module is `titan.io`. Interfaces exist only in Titan's type
 namespace and are not fields of the returned module userdata; the runtime

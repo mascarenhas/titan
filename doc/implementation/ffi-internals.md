@@ -327,16 +327,18 @@ numeric lowering validates representability before casting or mutating a
 usual-arithmetic integer conversions retain ordinary C semantics; potentially
 out-of-range integer-to-floating operator conversions remain checked.
 
-Written-only conversions include C-function-pointer erasure to `void *`, GC
-identity erasure from a Titan Array, Map, nominal record/union, or function to
-C `void *`, counted-character-owner to `string`, and the explicitly unsafe
-raw object-pointer cases. These are recorded in `WrittenCastPlan` and never
-participate in recursive Array/Map/Option/function consistency.
+Written-only conversions include both directions between a C function pointer
+and `void *`, GC identity erasure from a Titan Array, Map, nominal record/union,
+or function to C `void *`, counted-character-owner to `string`, the character-
+pointer case of `void *` recovery, and the explicitly unsafe raw object-pointer
+cases. These are recorded in `WrittenCastPlan` and never participate in
+recursive Array/Map/Option/function consistency.
 
-Owner-to-pointer adjustment constructs the same qualified pointer view used by
-ordinary pointer/array compatibility. It may add qualification and perform
-legal object-pointer-to-`void *` adjustment, but it never discards
-typedef-carried `const` or `volatile`.
+Ordinary object-pointer adjustment constructs one qualified pointer view. It
+may add qualification, convert an object pointer to `void *`, or convert
+`void *` to a qualification-preserving non-character object pointer. A
+character-pointer target requires the written plan above. Owner adjustment uses
+the same rules, and no path discards typedef-carried `const` or `volatile`.
 
 `types.dynamic_coercion(target)` covers Lua-boundary and written-`value`
 conversion for C integers, C floats, `COwned`, and C `TValue`. It deliberately
@@ -755,13 +757,15 @@ erasure to C `void *`. A written `value as Function` instead uses the
 canonical dynamic function plan, preserving the boxed value and deferring
 callability/type verification to invocation.
 
-The checker accepts the written C-function-pointer-to-`void *` case before
+The checker accepts both written C-function-pointer/`void *` directions before
 `_unsafe_c_pointer_conversion` diagnoses cross-category object/function
-reinterpretations. Implicit and contextual function/object pointer
-conversions remain rejected. The coder emits
-`titan_cast_func(target_type, source)` for this explicit erasure, preserving
-the compiler-specific portability handling already used by dynamic symbol
-loading.
+reinterpretations. Implicit and contextual function/object pointer conversions
+remain rejected. The coder emits `titan_cast_func(target_type, source)` for
+either explicit direction, preserving the compiler-specific portability
+handling already used by dynamic symbol loading. Ordinary `void *` recovery to
+a non-function object pointer instead uses its separately validated C-pointer
+plan; the implicit form excludes character targets, while the written form may
+select one.
 
 Materializing a GC-identity source protects it through subsequent expression
 and call-argument setup, but the resulting raw pointer carries no ownership.

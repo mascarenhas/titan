@@ -144,7 +144,7 @@ end
 
 Construct these values with `Lookup.found("Titan")` and `Lookup.missing()`.
 Union constructors are positional, and each `when` arm is a full block with
-ordinary `defer`, `catch`, and `finally` behavior.
+ordinary `defer` and `catch` behavior.
 
 ## Functions and result lists
 
@@ -223,8 +223,8 @@ ordering rules.
 ## Errors and deterministic cleanup
 
 Run-time errors are ordinary Lua error values. Raise one explicitly with
-`raise`, and attach `catch` or `finally` directly to any block—there is no
-`try` keyword.
+`raise`, attach `catch` directly to an existing block, and schedule deterministic
+cleanup with `defer`. There is no `try` keyword or user-written `finally` block.
 
 The most common cleanup pattern is to defer a close immediately after a
 resource has been acquired:
@@ -254,7 +254,7 @@ end
 
 `defer` runs on fallthrough, return, break, and error. Several defers in one
 block run last-in-first-out. A cleanup error replaces the pending return or
-error, just as an error in `finally` does. Every structural `io.Closer`
+error. Every structural `io.Closer`
 accepts repeated `close()` calls safely; consult the concrete resource for
 its post-close read/write and cancellation behavior.
 

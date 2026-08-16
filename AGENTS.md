@@ -2,6 +2,25 @@
 
 This file provides guidance to a coding agent when working with code in this repository.
 
+## Titan skill startup
+
+Before writing, editing, or reviewing any `.titan` source, read the project-local
+`.agents/skills/titan-programmer/SKILL.md`. It is the mandatory, self-contained
+Titan basics cartridge; do not reconstruct Titan from memories of Lua, TypeScript,
+Go, or C. Load the relevant peer cartridge as well:
+
+- `titan-tester` for native tests, test-layer placement, filtering, and fixtures;
+- `titan-async` for Tasks, timers, cancellation, libuv callbacks, and native
+  ownership;
+- `titan-networking` for URL, TCP, TLS, and HTTP code;
+- `titan-ffi` for C imports, callbacks, Lua interop, and `titan.lua`;
+- `titan-pegs` for PEG/relabel parsers and combinators.
+
+Load every applicable peer for cross-cutting work (for example, async networking
+behavior tests need the programmer, tester, async, and networking cartridges).
+The cartridges are the operational default; consult their linked manuals, source,
+and focused tests when changing a contract or resolving an edge case.
+
 ## What this is
 
 Titan is a statically-typed, ahead-of-time-compiled sister language to Lua.
@@ -1513,16 +1532,19 @@ to its corresponding raw object pointer where C code borrows it. Casting an
 character pointer cast retains NUL-terminated C-string semantics. Do not
 manufacture an intermediate Lua stack value, parallel `value` storage field,
 or duplicate length record for capabilities already carried by an owner.
-Function-local complete non-pointer C structs, unions, and fixed arrays may
-also be declared without a right-hand side as zero-initialized automatic
-objects. Their lifetime is the generated C block, no escape analysis is
+Every function-local C object still requires an initializer. `.new()` and
+`.new_array(...)` request zeroed storage; at their direct local declaration sink
+a complete non-pointer struct/union or positive-literal fixed array may select
+automatic storage. Its lifetime is the generated C block, no escape analysis is
 attempted, and aggregate values are spilled through volatile byte storage
 around catchable Titan calls so normal-return mutation commits while a caught
 longjmp reloads the last Titan-visible state. Owned allocation rejects `void`,
-incomplete aggregates, C array typedefs, and structs/unions with flexible array
-members. Automatic storage accepts complete fixed arrays, including imported
-array-typedef and nested-array shapes, but rejects void, incomplete,
-flexible-array-member, and GC-bearing objects. Imported/static C functions can
+incomplete aggregates, direct functions, nested owners, and C array-typedef
+payloads. A complete struct with one flexible-array member instead uses
+`T.new(count)` as a scalar owner (or automatic object for a nonnegative literal);
+arrays of variably extended objects remain unsupported. Automatic fixed storage
+accepts imported array-typedef and nested-array shapes but rejects void,
+incomplete, and GC-bearing objects. Imported/static C functions can
 be converted to compatible C function pointers and called through them;
 adapting a Titan function to a C callback ABI remains a parked follow-up
 alongside `CAdopted` lifetimes and stronger Lua C API coverage. Generated

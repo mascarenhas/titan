@@ -189,9 +189,15 @@ descriptor rather than a libuv loop handle; async Runtime shutdown does not
 close it on the application's behalf.
 
 Use `catch` to recover or add behavior. Use bare `raise` when the original
-error and traceback should continue. Remember that an error in `finally` or a
-deferred statement replaces the pending return, break, or error; cleanup is
-not an error-suppression mechanism.
+error and traceback should continue. Remember that an error in a deferred
+statement replaces the pending return, break, or error; cleanup is not an
+error-suppression mechanism.
+
+A function body, loop body, and existing `do` body are already blocks. Attach a
+whole-function `catch` directly to the function body, and let `defer` use the
+current body. Do not add a ceremonial `do ... end` merely to gain either
+feature. Add a nested block only when its narrower protected region, local
+scope, or cleanup lifetime is intentional.
 
 ## Return generic iterators in tuple order
 
@@ -272,6 +278,57 @@ Use those names directly in the closure; do not create a `rooted_subject`,
 The closure environment is already a GC root. Introduce an alias only when it
 represents a real snapshot or a different narrowed value, and name that
 semantic distinction rather than the rooting mechanism.
+
+## Put behavior and state on their real owner
+
+When a private helper's first argument is one nominal record and the operation
+exists to read or mutate that record, write a local method on the record:
+
+```titan
+local record Pending
+  number: integer
+end
+
+local record Event
+  number: integer
+end
+
+local record Watcher
+  pending: {Pending}
+end
+
+local function Watcher:map(item: Pending): Event
+  return Event.new(item.number)
+end
+
+local function Watcher:drain(): {Event}
+  local pending = self.pending
+  self.pending = {}
+  local events: {Event} = {}
+  for index = 1, #pending do
+    events[index] = self:map(pending[index])
+  end
+  return events
+end
+```
+
+This keeps the receiver, private behavior, and state transition together.
+Retain a free helper when it genuinely coordinates several owners, is a typed
+adapter reused as a value, or represents another operation whose owner is not
+the first record argument.
+
+Use the existing owner and its narrow helper directly. Do not add a facade
+alias, forwarding wrapper, duplicate validity check, shadow index, generation,
+rollback snapshot, or parallel close flag merely to make that direct
+collaboration look indirect. If an API requires callers to serialize all
+mutations, do not partially harden one imagined overlap and thereby imply a
+broader guarantee. First establish the supported trust and concurrency model;
+add state only for a documented operation that the model actually permits.
+
+For a dense one-input/one-output transformation, allocate one result, write
+`output[index] = transform(input[index])`, and return it. Do not pass a caller's
+output Array into the mapper or manufacture extra public events merely to
+encode intermediate implementation phases.
 
 ## Use finalizers only for reachability ownership
 
@@ -471,9 +528,14 @@ must not let a borrowed Lua pointer outlive its stack/rooting contract. Keep
 weak-Map policy behind `titan.gc.weak` and `titan.gc.ephemeron`; even stdlib
 modules with other audited Lua calls should not duplicate `__mode` metatable
 setup. Keep dynamic Lua execution and conversion centralized rather than
-scattering `lua_*` calls through otherwise typed modules. A boundary that can allocate,
-raise, yield, invoke user code, or run a callback deserves explicit review of
-its roots and cleanup behavior.
+scattering `lua_*` calls through otherwise typed modules. The public
+`titan.lua` loader is an escape hatch as powerful as the C FFI for bypassing
+static program structure: use it only when run-time Lua compilation or module
+discovery is the actual requirement, isolate the returned `value`, and recover
+precise Titan types immediately. An explicit Lua environment chooses upvalues;
+it is not a security sandbox for untrusted source or bytecode. A boundary that
+can allocate, raise, yield, invoke user code, or run a callback deserves
+explicit review of its roots and cleanup behavior.
 
 Do not expose a private bundled native dependency as part of an application
 ABI. In particular, the bundled libuv and LPegLabel payloads belong to the

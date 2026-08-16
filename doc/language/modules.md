@@ -378,12 +378,15 @@ import is more like `#include`/`-l`. ... Let's just call it `import`,
 make it an evident keyword, and make a clear distinction between the
 static `import` and the dynamic `require`."
 
-There is consequently no way to `require` a Lua module from Titan code
-today: `import` loads Titan modules and `foreign import` loads C
-headers (see [the C FFI](ffi.md)). Lua callables can still enter Titan
-as function-typed values — for example, as an argument from Lua — and
-Titan can call them normally (see
-[Lua interoperability](lua-interop.md#calling-lua-from-titan)).
+Ordinary Titan dependencies therefore use `import`, while `foreign import`
+loads C headers (see [the C FFI](ffi.md)). When run-time Lua/Titan/C-module
+discovery is the actual requirement, the [`titan.lua` standard
+module](standard-library-lua.md) exposes a deliberately dynamic
+`lua.require(name): value` escape hatch. It does not create a static namespace
+or replace `import`; isolate the returned `value` and recover a precise Titan
+type at that boundary. Lua callables can also enter Titan as function-typed
+values — for example, as an argument from Lua — and Titan can call them
+normally (see [Lua interoperability](lua-interop.md#calling-lua-from-titan)).
 
 ## Compiling modules: `titanc`
 

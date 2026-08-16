@@ -667,12 +667,17 @@ and raising if the pointer is `NULL`). Lua-internal `Udata *` crosses the
 pointer. A written `value as <raw C pointer>` is an explicitly unsafe
 lightuserdata/nil assertion: Titan cannot establish the pointee type, so the
 same edge is unavailable to implicit projection, typed container reads, and
-generic calls. A written cast can also erase a C function pointer to C `void *`, or
-expose the native GC identity of an Array, Map, record, union, Interface, or function value as C
-`void *`. The function identity cast raises when its boxed value is not
-collectable; the other GC-identity cases are total. These are borrowed
-internal addresses, not ownership transfers. There is no separate FFI cast
-form.
+generic calls. A written cast can also convert a C function pointer to or from C
+`void *` through Titan's portability helper, or expose the native GC identity
+of an Array, Map, record, union, Interface, or function value as C `void *`.
+Direct
+object-pointer/function-pointer conversion remains rejected. Separately,
+qualification-preserving C object-pointer rules admit `void *` to a compatible
+non-character object pointer directly and require a written cast for a
+character-pointer target. The function identity cast raises when its boxed
+value is not collectable; the other GC-identity cases are total. These are
+borrowed internal addresses, not ownership transfers. There is no separate FFI
+cast form.
 These numeric casts are checked against the selected C target and Titan's
 configured numeric carriers before any narrowing cast or boxed store.
 Written C-integer-to-C-integer casts are the deliberate exception: they retain
