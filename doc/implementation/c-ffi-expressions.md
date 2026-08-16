@@ -265,6 +265,14 @@ verdict. Candidate acceptance and rejection are both cached, and the same
 final-context baseline cache entry serves declaration, conversion, and operator
 probes.
 
+The preprocessor's final object-like definition set is an unordered map. When
+`cdefines` projects supported definitions into the ordered TypeList, it visits
+macro names with `util.bytewise_less`; ordinary Lua string ordering is
+locale-dependent, and direct table traversal is randomized between processes.
+This canonicalizes only map-origin macro projections, not syntactic C
+source declarations, and keeps otherwise identical declaration-batch probe C
+byte-for-byte stable across compiler processes.
+
 Ordinary redeclarations are compared from their isolated TypeLists, but their
 shared canonical composite is not committed until the final baseline and that
 pair's compatibility probe succeed. The pure declaration relation resolves

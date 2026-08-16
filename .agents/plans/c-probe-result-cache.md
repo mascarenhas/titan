@@ -68,19 +68,24 @@ infrastructure rather than a cacheable verdict.
   is absolutized and cleaned before wrapper construction.
 - Rejected, unstarted, interrupted, and cleanup-failed probes create no marker.
 - Unwritable or structurally blocked cache roots fail open.
-- Focused cprobe/driver/workflow specs, full compiler coverage, mixed suite, and
-  local cold/warm profiles report process counts and wall time.
+- Focused cdefines/cprobe/driver/workflow specs, full compiler coverage, mixed
+  suite, and local cold/warm profiles report process counts and wall time.
+- A production cold/warm acceptance profile compares the complete sorted marker
+  basename set and requires the repeat to add no marker.
 
 ## Local profile
 
 A controlled bundled-provider rebuild with an empty namespace completed in
-153.5 seconds and launched 1,050 compiler processes, creating 244 success
-markers. Repeating the same build in the same prefix completed in 150.2 seconds
-and launched 945 compiler processes: 105 exact-text successful probes were
-recovered without invoking the compiler, a 10% process reduction and 2.1% wall
-reduction. That measurement preceded the stable source-foreign wrapper above;
-those probes now retain exact generated C while no longer changing merely
-because a safe physical checking-header nonce changed.
+159.4 seconds and launched 1,050 compiler processes, creating 244 success
+markers. Repeating the identical build in the same prefix completed in 145.4
+seconds and launched 806 compiler processes: all 244 exact-text successful
+probes were recovered without invoking the compiler, a 23.2% process reduction
+and 8.8% wall reduction. The complete sorted marker basename set was unchanged
+on the repeat. Rejected probes intentionally ran again and published nothing.
+This final profile includes both stable source-foreign wrappers and bytewise
+projection of the preprocessor's unordered final macro map, so randomized
+checking-header nonces and process-local Lua table order no longer perturb the
+successful declaration-batch source.
 
 A separate compile-only profile used Clang with the CI ASan+UBSan flags for 400
 distinct successful probe texts. The cold run took 11.7 seconds, launched 400
