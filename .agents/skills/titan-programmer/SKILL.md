@@ -1288,38 +1288,38 @@ ordinary edit. When a rule is uncertain, an API is changing, or source and prose
 disagree, resolve it at the narrow owner:
 
 - language overview and runnable examples:
-  [`doc/language/index.md`](../../../../doc/language/index.md) and
-  [`doc/quick-tour.md`](../../../../doc/quick-tour.md);
+  [`doc/language/index.md`](../../../doc/language/index.md) and
+  [`doc/quick-tour.md`](../../../doc/quick-tour.md);
 - type relations, automatic conversion, Options, and dynamic boundaries:
-  [`types.md`](../../../../doc/language/types.md),
-  [`option-types.md`](../../../../doc/language/option-types.md), and
-  [`expressions.md`](../../../../doc/language/expressions.md);
+  [`types.md`](../../../doc/language/types.md),
+  [`option-types.md`](../../../doc/language/option-types.md), and
+  [`expressions.md`](../../../doc/language/expressions.md);
 - declarations and data modeling:
-  [`functions.md`](../../../../doc/language/functions.md),
-  [`closures.md`](../../../../doc/language/closures.md),
-  [`generics.md`](../../../../doc/language/generics.md),
-  [`arrays-maps.md`](../../../../doc/language/arrays-maps.md),
-  [`records.md`](../../../../doc/language/records.md),
-  [`unions.md`](../../../../doc/language/unions.md), and
-  [`interfaces.md`](../../../../doc/language/interfaces.md);
+  [`functions.md`](../../../doc/language/functions.md),
+  [`closures.md`](../../../doc/language/closures.md),
+  [`generics.md`](../../../doc/language/generics.md),
+  [`arrays-maps.md`](../../../doc/language/arrays-maps.md),
+  [`records.md`](../../../doc/language/records.md),
+  [`unions.md`](../../../doc/language/unions.md), and
+  [`interfaces.md`](../../../doc/language/interfaces.md);
 - module visibility and physical source shape:
-  [`modules.md`](../../../../doc/language/modules.md),
-  [`source-import-visibility.md`](../../../../doc/language/source-import-visibility.md),
-  and [`folder-modules.md`](../../../../doc/language/folder-modules.md);
+  [`modules.md`](../../../doc/language/modules.md),
+  [`source-import-visibility.md`](../../../doc/language/source-import-visibility.md),
+  and [`folder-modules.md`](../../../doc/language/folder-modules.md);
 - errors, cleanup, and project idiom:
-  [`error-handling.md`](../../../../doc/language/error-handling.md),
-  [`defer.md`](../../../../doc/language/defer.md), and
-  [`doc/style-guide.md`](../../../../doc/style-guide.md);
+  [`error-handling.md`](../../../doc/language/error-handling.md),
+  [`defer.md`](../../../doc/language/defer.md), and
+  [`doc/style-guide.md`](../../../doc/style-guide.md);
 - core libraries:
-  [`string`](../../../../doc/language/standard-library-string.md),
-  [`math`](../../../../doc/language/standard-library-math.md),
-  [`iteration`](../../../../doc/language/standard-library-iteration.md),
-  [`io`](../../../../doc/language/standard-library-io.md),
-  [`fs`](../../../../doc/language/standard-library-fs.md), and
-  [`os`](../../../../doc/language/standard-library-os.md).
+  [`string`](../../../doc/language/standard-library-string.md),
+  [`math`](../../../doc/language/standard-library-math.md),
+  [`iteration`](../../../doc/language/standard-library-iteration.md),
+  [`io`](../../../doc/language/standard-library-io.md),
+  [`fs`](../../../doc/language/standard-library-fs.md), and
+  [`os`](../../../doc/language/standard-library-os.md).
 
 For a public feature change, the language manual defines user behavior and the
-matching chapter under [`doc/implementation/`](../../../../doc/implementation/index.md)
+matching chapter under [`doc/implementation/`](../../../doc/implementation/index.md)
 defines compiler/runtime mechanics. Inspect the owning source and focused tests
 as executable evidence, then update both manuals with the code. Changes to this
 skill tree should rerun the lightweight cartridge and routing matrix in

@@ -178,10 +178,10 @@ explicitly paired runnable Titan fences and measure as follows with
 
 | Cartridge | Approx. tokens |
 | --- | ---: |
-| `titan-programmer` | 12,079 |
+| `titan-programmer` | 12,054 |
 | `titan-tester` | 13,591 |
 | `titan-async` | 13,261 |
-| `titan-networking` | 13,934 |
+| `titan-networking` | 13,891 |
 | `titan-ffi` | 19,064 |
 | `titan-pegs` | 12,528 |
 

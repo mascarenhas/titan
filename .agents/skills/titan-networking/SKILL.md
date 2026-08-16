@@ -40,18 +40,18 @@ Do not infer an API from a sketch. The API inventories below are the boundary.
 
 | Work | Read first | Then inspect |
 | --- | --- | --- |
-| TCP/DNS/byte streams | [`doc/language/standard-library-net.md`](../../../../doc/language/standard-library-net.md) | [`titan/net.titan`](../../../../titan/net.titan), [`spec/stdlib/titan/net/tests.titan`](../../../../spec/stdlib/titan/net/tests.titan), [`doc/implementation/libuv-networking.md`](../../../../doc/implementation/libuv-networking.md) |
-| TLS/trust/certificates | [`doc/language/standard-library-ssl.md`](../../../../doc/language/standard-library-ssl.md) | [`titan/ssl.titan`](../../../../titan/ssl.titan), [`spec/stdlib/titan/ssl/tests.titan`](../../../../spec/stdlib/titan/ssl/tests.titan), [`doc/implementation/ssl-library.md`](../../../../doc/implementation/ssl-library.md) |
-| HTTP client/server | [`doc/language/standard-library-http.md`](../../../../doc/language/standard-library-http.md) | [`titan/http/`](../../../../titan/http), [`spec/stdlib/titan/http/tests/`](../../../../spec/stdlib/titan/http/tests), [`doc/implementation/http-library.md`](../../../../doc/implementation/http-library.md) |
-| URL validation/normalization | [`doc/language/standard-library-url.md`](../../../../doc/language/standard-library-url.md) | [`titan/url.titan`](../../../../titan/url.titan), [`spec/stdlib/titan/url/tests.titan`](../../../../spec/stdlib/titan/url/tests.titan), [`doc/implementation/url-library.md`](../../../../doc/implementation/url-library.md) |
-| Stream abstraction | [`doc/language/standard-library-io.md`](../../../../doc/language/standard-library-io.md) | [`titan/io.titan`](../../../../titan/io.titan), [`doc/language/interfaces.md`](../../../../doc/language/interfaces.md) |
-| Tasks, deadlines, cancellation | [`doc/language/async-io.md`](../../../../doc/language/async-io.md) | [`doc/implementation/libuv-runtime.md`](../../../../doc/implementation/libuv-runtime.md), [`titan/async.titan`](../../../../titan/async.titan) |
-| Cleanup/error/option spelling | [`doc/style-guide.md`](../../../../doc/style-guide.md), [`doc/language/defer.md`](../../../../doc/language/defer.md), [`doc/language/error-handling.md`](../../../../doc/language/error-handling.md), [`doc/language/option-types.md`](../../../../doc/language/option-types.md) | Adjacent code and tests |
-| Native tests | [`doc/language/standard-library-test.md`](../../../../doc/language/standard-library-test.md) | Existing owner under [`spec/stdlib/titan/`](../../../../spec/stdlib/titan), repository commands in [`AGENTS.md`](../../../../AGENTS.md) |
+| TCP/DNS/byte streams | [`doc/language/standard-library-net.md`](../../../doc/language/standard-library-net.md) | [`titan/net.titan`](../../../titan/net.titan), [`spec/stdlib/titan/net/tests.titan`](../../../spec/stdlib/titan/net/tests.titan), [`doc/implementation/libuv-networking.md`](../../../doc/implementation/libuv-networking.md) |
+| TLS/trust/certificates | [`doc/language/standard-library-ssl.md`](../../../doc/language/standard-library-ssl.md) | [`titan/ssl.titan`](../../../titan/ssl.titan), [`spec/stdlib/titan/ssl/tests.titan`](../../../spec/stdlib/titan/ssl/tests.titan), [`doc/implementation/ssl-library.md`](../../../doc/implementation/ssl-library.md) |
+| HTTP client/server | [`doc/language/standard-library-http.md`](../../../doc/language/standard-library-http.md) | [`titan/http/`](../../../titan/http), [`spec/stdlib/titan/http/tests/`](../../../spec/stdlib/titan/http/tests), [`doc/implementation/http-library.md`](../../../doc/implementation/http-library.md) |
+| URL validation/normalization | [`doc/language/standard-library-url.md`](../../../doc/language/standard-library-url.md) | [`titan/url.titan`](../../../titan/url.titan), [`spec/stdlib/titan/url/tests.titan`](../../../spec/stdlib/titan/url/tests.titan), [`doc/implementation/url-library.md`](../../../doc/implementation/url-library.md) |
+| Stream abstraction | [`doc/language/standard-library-io.md`](../../../doc/language/standard-library-io.md) | [`titan/io.titan`](../../../titan/io.titan), [`doc/language/interfaces.md`](../../../doc/language/interfaces.md) |
+| Tasks, deadlines, cancellation | [`doc/language/async-io.md`](../../../doc/language/async-io.md) | [`doc/implementation/libuv-runtime.md`](../../../doc/implementation/libuv-runtime.md), [`titan/async.titan`](../../../titan/async.titan) |
+| Cleanup/error/option spelling | [`doc/style-guide.md`](../../../doc/style-guide.md), [`doc/language/defer.md`](../../../doc/language/defer.md), [`doc/language/error-handling.md`](../../../doc/language/error-handling.md), [`doc/language/option-types.md`](../../../doc/language/option-types.md) | Adjacent code and tests |
+| Native tests | [`doc/language/standard-library-test.md`](../../../doc/language/standard-library-test.md) | Existing owner under [`spec/stdlib/titan/`](../../../spec/stdlib/titan), repository commands in [`AGENTS.md`](../../../AGENTS.md) |
 
 The public language chapters define behavior. Source confirms declarations and
 layering; the mechanically extracted current provider schema in
-[`spec/fixtures/stdlib/titan_stdlib_types.lua`](../../../../spec/fixtures/stdlib/titan_stdlib_types.lua)
+[`spec/fixtures/stdlib/titan_stdlib_types.lua`](../../../spec/fixtures/stdlib/titan_stdlib_types.lua)
 confirms which fields, generated constructors, methods, functions, and aliases
 are actually public. Tests show supported use and ownership. Implementation
 chapters are authority for private callback/lifetime invariants, not permission
@@ -84,8 +84,8 @@ to use private names in application code.
    `async.yield()`/`timer.yield()`.
 
 These are verified by
-[`doc/language/async-io.md`](../../../../doc/language/async-io.md) and
-[`doc/implementation/libuv-runtime.md`](../../../../doc/implementation/libuv-runtime.md).
+[`doc/language/async-io.md`](../../../doc/language/async-io.md) and
+[`doc/implementation/libuv-runtime.md`](../../../doc/implementation/libuv-runtime.md).
 Reject designs that add locks, generations, callback fences, ready queues, or
 snapshot rollback to defend against imagined same-thread callback preemption.
 Tasks can interleave only at real suspension boundaries; ownership still must
@@ -571,7 +571,7 @@ size limit for untrusted input rather than collecting without bound.
   right site.
 
 **REPOSITORY-VERIFIED — manual TCP client**
-([`doc/language/standard-library-net.md`](../../../../doc/language/standard-library-net.md)):
+([`doc/language/standard-library-net.md`](../../../doc/language/standard-library-net.md)):
 
 ```titan
 local net = import "net"
@@ -676,7 +676,7 @@ make `net.Server:close()` promise to join clients—it does not.
   accepted Connections retain their TLS state and remain independently owned.
 
 **REPOSITORY-VERIFIED — manual verified TLS client**
-([`doc/language/standard-library-ssl.md`](../../../../doc/language/standard-library-ssl.md)):
+([`doc/language/standard-library-ssl.md`](../../../doc/language/standard-library-ssl.md)):
 
 ```titan
 local async = import "async"
@@ -699,7 +699,7 @@ end
 For local TLS tests, the repository's supported pattern is a checked-in CA,
 leaf certificate, and unencrypted key, an explicit `ca_file` on the client, and
 loopback connections. It does not disable verification; see
-[`spec/stdlib/titan/ssl/tests.titan`](../../../../spec/stdlib/titan/ssl/tests.titan).
+[`spec/stdlib/titan/ssl/tests.titan`](../../../spec/stdlib/titan/ssl/tests.titan).
 
 ## URLs: validate once and use the right field
 
@@ -868,7 +868,7 @@ For HTTPS with a pinned/test trust bundle, pass it as the third `get` argument:
   Unsupported/repeated expectations receive 417 without invoking the handler.
 
 **REPOSITORY-VERIFIED — manual HTTP server**
-([`doc/language/standard-library-http.md`](../../../../doc/language/standard-library-http.md)):
+([`doc/language/standard-library-http.md`](../../../doc/language/standard-library-http.md)):
 
 ```titan
 local async = import "async"
@@ -1007,7 +1007,7 @@ Busted layer.
   whole runner is already one Task. Test bodies, subtests, and cleanup may call
   network operations directly. Never call `async.loop` recursively.
 - The repository aggregate deliberately uses `--no-uv-bootstrap`. Its
-  source-only [`spec/stdlib/titan/support/runtime.titan`](../../../../spec/stdlib/titan/support/runtime.titan)
+  source-only [`spec/stdlib/titan/support/runtime.titan`](../../../spec/stdlib/titan/support/runtime.titan)
   starts one supervisor Task and performs Runtime-bound LIFO cleanup before the
   loop returns. That helper is repository test infrastructure, not a public
   application API. Do not defer socket cleanup to later `Context:cleanup` after
@@ -1028,7 +1028,7 @@ bounded loopback range and retry **only** `async.OperationError.name ==
 ranges when possible.
 
 **REPOSITORY-VERIFIED pattern** from
-[`spec/stdlib/titan/net/test_support.titan`](../../../../spec/stdlib/titan/net/test_support.titan),
+[`spec/stdlib/titan/net/test_support.titan`](../../../spec/stdlib/titan/net/test_support.titan),
 shown with the current preferred bare re-raise:
 
 ```titan
@@ -1149,11 +1149,11 @@ not an invitation for application code to import private `uv`.
   URL is pure Titan PEG/string code and synchronous.
 
 Authority:
-[`doc/implementation/libuv-runtime.md`](../../../../doc/implementation/libuv-runtime.md),
-[`doc/implementation/libuv-networking.md`](../../../../doc/implementation/libuv-networking.md),
-[`doc/implementation/ssl-library.md`](../../../../doc/implementation/ssl-library.md),
-[`doc/implementation/http-library.md`](../../../../doc/implementation/http-library.md), and
-[`doc/implementation/url-library.md`](../../../../doc/implementation/url-library.md).
+[`doc/implementation/libuv-runtime.md`](../../../doc/implementation/libuv-runtime.md),
+[`doc/implementation/libuv-networking.md`](../../../doc/implementation/libuv-networking.md),
+[`doc/implementation/ssl-library.md`](../../../doc/implementation/ssl-library.md),
+[`doc/implementation/http-library.md`](../../../doc/implementation/http-library.md), and
+[`doc/implementation/url-library.md`](../../../doc/implementation/url-library.md).
 
 ## Hallucination and review traps
 

@@ -5,7 +5,7 @@ This file provides guidance to a coding agent when working with code in this rep
 ## Titan skill startup
 
 Before writing, editing, or reviewing any `.titan` source, read the project-local
-`.prime/agent/skills/titan-programmer/SKILL.md`. It is the mandatory, self-contained
+`.agents/skills/titan-programmer/SKILL.md`. It is the mandatory, self-contained
 Titan basics cartridge; do not reconstruct Titan from memories of Lua, TypeScript,
 Go, or C. Load the relevant peer cartridge as well:
 
