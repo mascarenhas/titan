@@ -777,7 +777,8 @@ are two to match the private runner; the manual macOS job overrides them to
 three. The ASan+UBSan job restores its separately fingerprinted native
 Lua/libbacktrace/libuv/llhttp/OpenSSL tree before LuaRocks/Titan work, saves only
 that clean dependency boundary, and reuses one aggregate native build for
-focused filters; it does not consume the regular artifact.
+focused filters; it does not consume the regular artifact. Its 35-minute bound
+also admits the infrequent cold-cache rebuild under the two-CPU policy.
 The complete macOS suite remains a manually dispatched pre-merge gate and is
 run only with explicit maintainer authorization.
 
