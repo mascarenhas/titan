@@ -890,6 +890,52 @@ function coder._code_c_binary_operator(ctx, node)
     return lstats .. "\n" .. rstats, expression
 end
 
+-- Exact integer-keyed Maps retain luaH_getn as the likely raw fast path, but
+-- an attached __len follows Lua's ordinary table length semantics. The VM
+-- helper writes an unconstrained TValue, so preserve Titan's static integer
+-- result with the same exact-tag discipline as other strict observations.
+local function code_map_length(ctx, node, operand_stats, operand)
+    local mapstats, map = materialize_code(
+        ctx, node.exp._type, operand_stats, operand)
+    local resultdecl, result = newtmp(ctx, types.Integer())
+    local value_depth = reserveslot(ctx)
+    local value = slotat(value_depth)
+    local value_stack = stackslotat(value_depth)
+    return render([[
+        $RESULTDECL
+        {
+            $MAPSTATS
+            if (TITAN_LIKELY(checknoTM($MAP->metatable, TM_LEN))) {
+                $RESULT = l_castU2S(luaH_getn(L, $MAP));
+            } else {
+                TValue _map_length_table;
+                sethvalue(L, &_map_length_table, $MAP);
+                luaV_objlen(L, $VALUESTACK, &_map_length_table);
+                _base = restorestack(L, _base_off);
+                if (TITAN_LIKELY(ttisinteger($VALUE))) {
+                    $RESULT = ivalue($VALUE);
+                } else {
+                    $THROW
+                }
+            }
+        }
+    ]], {
+        RESULTDECL = resultdecl,
+        RESULT = result,
+        MAPSTATS = mapstats,
+        MAP = map,
+        VALUE = value,
+        VALUESTACK = value_stack,
+        FILE = c_string_literal(node.loc.filename),
+        LINE = c_integer_literal(node.loc.line),
+        COL = c_integer_literal(node.loc.col),
+        THROW = codethrow(node.loc,
+            "%s:%d:%d: type error, expected integer tag but found %s",
+            { "$FILE", "$LINE", "$COL",
+              "lua_typename(L, ttype($VALUE))" }),
+    }), result
+end
+
 function codeunaryop(ctx, node, iscondition)
     if node._c_operator then
         return coder._code_c_unary_operator(ctx, node)
@@ -923,7 +969,7 @@ function codeunaryop(ctx, node, iscondition)
             return estats, "((lua_Integer)titan_array_length(" .. ecode .. "))"
         elseif node.exp._type._tag == "Type.Map" then
             assert(types.equals(node.exp._type.keys, types.Integer()))
-            return estats, "l_castU2S(luaH_getn(L, " .. ecode .. "))"
+            return code_map_length(ctx, node, estats, ecode)
         elseif etype._tag == "Type.CArray" then
             return estats, c_integer_literal(etype.len)
         elseif etype._tag == "Type.COwned" and etype.count then

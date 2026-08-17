@@ -356,10 +356,13 @@ cannot fit in a Titan/Lua string raises `string length overflow`.
 `integer`. On a string it is the length in bytes. On an Array it is
 deterministically the highest present positive index, so deleting a middle
 element does not shorten it while deleting the last present element does. On
-an exact `{integer: V}` Map it uses Lua's ordinary table-border result; for a
-holed Map any valid border may be selected. See
-[arrays and maps](arrays-maps.md). Other Map key types and other values are
-compile-time errors.
+an exact `{integer: V}` Map it follows Lua table length: `__len` is invoked
+when present, while the no-metamethod case uses the ordinary table border and
+may select any valid border for a holed Map. A Map `__len` result must be an
+exact Lua integer; Titan does not convert an integral float or another dynamic
+value to satisfy the static result type. See [arrays and maps](arrays-maps.md).
+Other Map key types and other values are compile-time errors even if their
+run-time metatable has `__len`.
 
 ```lua
 function total_len(words: {string}): integer

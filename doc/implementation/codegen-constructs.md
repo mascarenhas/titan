@@ -443,8 +443,25 @@ barrier. Constructors therefore do not pay a metatable check or partial-set
 cost. An all-positional constructor is accepted only for an exact integer key
 type; it consumes the same `_positional_adjustment` as Array construction,
 pre-sizes the ordinary table's array part, and stores positions 1 through N.
-`#m` for such a Map uses `luaH_getn`, so holed Maps retain Lua's unspecified
-valid-border semantics and do not invoke `__len`.
+
+### Length (`code_map_length`)
+
+The checker admits `#m` only for an exact integer-keyed Map, preserving the
+surface result type `integer`. `code_map_length` materializes and roots the Map
+operand once. The likely `checknoTM(map->metatable, TM_LEN)` branch calls
+`l_castU2S(luaH_getn(L, map))` inline, so a no-metatable or cached-no-`__len`
+Map retains Lua's ordinary valid-border semantics without a public `lua_len`
+call.
+
+When `__len` may exist, the coder boxes that same `Table *`, reserves a real
+Lua `StkId` result slot, and calls
+`luaV_objlen(L, result_stack, &boxed_map)`. This delegates callable metamethod
+dispatch and Lua result production to the VM. The call can relocate the stack,
+so `_base` is restored immediately and the result slot address is recomputed
+from its saved offset. The coder then requires `ttisinteger(result)` before
+using `ivalue(result)`; an integral float or any other tag raises
+`expected integer tag but found ...` rather than crossing a dynamic conversion
+boundary. Arrays keep their separate authoritative `lenhint` path.
 
 ### Equality (`codebinaryop`)
 

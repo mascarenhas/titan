@@ -296,8 +296,8 @@ local names: {integer: string} = {"Ada", "Grace", "Edsger"}
 This path uses the same left-to-right and final-open-expression adjustment as
 an Array constructor, converting each produced value to `V`. A nil accepted
 by `V` consumes its position but stores no entry. The result remains an
-ordinary Map: it has Lua table-border length semantics, no Array proxy, and no
-reserved key.
+ordinary Map: it has Lua table-length semantics (an ordinary border unless a
+later metatable supplies `__len`), no Array proxy, and no reserved key.
 
 Classification is intentionally strict:
 
@@ -384,7 +384,7 @@ tables, so it never invokes `__eq`.
 ### Integer-Map length
 
 `#m` is accepted only when the resolved Map key type is exactly Titan
-`integer`. It returns a valid Lua table border:
+`integer`. With no `__len` metamethod, it returns a valid Lua table border:
 
 ```titan
 local m: {integer: string} = {"a", "b", "c"}
@@ -393,11 +393,16 @@ m[2] = nil
 local border = #m  -- a valid Lua border; which one is unspecified
 ```
 
-For a holed integer Map, the selected border has Lua's usual unspecified
-semantics. This is different from deterministic Array length. Maps keyed by
-`float`, `value`, strings, records, foreign integers, or any other type do not
-support `#`, even when some run-time keys happen to be integers. Titan uses the
-raw table-border operation; a Map's `__len` metamethod is not invoked.
+For a holed integer Map without `__len`, the selected border has Lua's usual
+unspecified semantics. If a metatable supplies `__len`, Titan follows Lua and
+uses that metamethod instead. Its result must have the exact Lua integer tag
+promised by Titan's surface result type: an integral float such as `7.0`, a
+string, or any other value raises a type error rather than being converted.
+
+This is different from deterministic Array length. Maps keyed by `float`,
+`value`, strings, records, foreign integers, or any other type do not support
+`#`, even when some run-time keys happen to be integers. The metatable does not
+broaden that static rule.
 
 ## Lua representation and interoperation
 
@@ -521,8 +526,10 @@ partial-set fast path so an existing entry is still updated inline, and enter
 the VM finish path only for the unresolved case. Map constructors remain raw
 stores into a fresh table. Equality keeps its identity/raw fast checks and
 calls Lua's metamethod-aware equality only for the narrow Map cases described
-above. These paths do not replace the whole operation with public
-`lua_gettable` or `lua_settable` calls.
+above. Integer-Map length likewise uses the raw table-border path when cached
+metamethod lookup proves `__len` absent and enters Lua's VM path only when it
+may be present. These paths do not replace the whole operation with public
+`lua_gettable`, `lua_settable`, or `lua_len` calls.
 
 Positional integer-Map construction preallocates the ordinary table array
 part, but it does not acquire deterministic Array semantics.

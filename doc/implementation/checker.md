@@ -757,7 +757,10 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   `Type.Integer`. Other Map key types receive the dedicated
   “not an integer-keyed map” diagnostic. This is exact resolved-type
   classification, not `types.compatible`; code generation gives Arrays their
-  maintained length and integer Maps Lua's ordinary border.
+  maintained length and gives integer Maps Lua table length: an inline ordinary
+  border when `__len` is absent, or metamethod dispatch followed by an exact
+  integer result guard when it is present. The metatable behavior changes no
+  checker type or admissibility rule.
 * **Record constructor omissions.** In a Nominal record context, explicit
   visible fields are checked in source order. Each absent field then gets the
   same `nil_can_adjust_to` test as an omitted named formal; an accepted field is

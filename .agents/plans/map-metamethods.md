@@ -5,9 +5,9 @@ compiler lowering, Lua 5.5.1 sources/manual, and the existing coder tests.
 
 ## Objective
 
-Make Titan Map reads, writes, equality, and inequality follow the applicable
-Lua table metamethod rules without changing parsing, checking, surface types,
-or Map representation.
+Make Titan Map reads, writes, equality, inequality, and exact integer-keyed Map
+length follow the applicable Lua table metamethod rules without changing
+parsing, checking, surface types, or Map representation.
 
 The generated code must keep Titan's existing inlined/specialized table access
 as its fast path. It must not replace Map access with `lua_gettable`,
@@ -36,6 +36,10 @@ integer/float/nominal tags.
   `luaV_rawequalobj`. Its validated `ComparisonPlan.left/right` retain the
   original static types even after the checker boxes the Map operand for a
   Map/`value` comparison.
+- `titan-compiler/coder/expressions.lua:codeunaryop` accepts `#` only for an
+  exact integer-keyed Map and currently emits `luaH_getn` directly; the
+  checker and result type stay unchanged when the later `__len` clarification
+  is implemented.
 
 Lua 5.5.1 supplies the exact slow paths to reuse:
 
@@ -119,6 +123,27 @@ operand C types.
 This delegates left-versus-right `__eq` selection, callable metamethods, and
 truthiness to Lua while retaining Titan's current raw and identity fast paths.
 
+### 5. Honor `__len` for exact integer-keyed Maps
+
+The maintainer clarified this scope after the initial implementation and
+before the follow-up implementation began: the already-supported `#m` for an
+exact `{integer: V}` Map must also follow Lua's table `__len` behavior.
+
+1. Evaluate and root the Map operand exactly once.
+2. Keep `luaH_getn(L, map)` inline behind a likely cached
+   `checknoTM(map->metatable, TM_LEN)` fast branch, preserving ordinary Lua
+   border semantics and avoiding a public `lua_len` call for the whole
+   operation.
+3. Only when `__len` may exist, box the same backing table and call internal
+   `luaV_objlen` with a real reserved `StkId` result slot.
+4. Restore `_base` after the potentially relocating call.
+5. Preserve the existing surface result type `integer` by applying an exact
+   integer-tag guard to the metamethod result before unboxing it. Do not accept
+   an integral Lua float or another coercible value.
+
+The checker continues to reject `#` for every non-integer Map key type. Arrays
+keep their separate authoritative-length representation and behavior.
+
 ## Regression tests
 
 Add a topical Busted coder spec at
@@ -141,6 +166,9 @@ The spec will cover:
 - equality/inequality: identity bypass, distinct Map/Map, left precedence,
   right fallback, Lua-truthy results, callable metamethod, both Map/`value`
   orientations, non-table `value`, and unchanged raw `value`/`value` behavior;
+- integer-Map length: generated-C raw/VM ordering, no public `lua_len`, raw
+  border behavior, function and callable `__len`, exact result-tag failures,
+  once-only operand evaluation, and stack relocation/root preservation;
 - once-only left-to-right evaluation for reads, writes, and equality; and
 - a metamethod that grows/uses the Lua stack followed by use of rooted Titan
   locals, exercising `_base` restoration.
@@ -154,12 +182,12 @@ This is a code-generation-only change, but existing manuals explicitly state
 the old raw semantics. Update the owning text rather than add new chapters:
 
 - `doc/language/arrays-maps.md`: missing-key `__index`/`__newindex`, chained
-  Lua behavior, strict result guard, Map equality, and revised performance
-  description;
+  Lua behavior, strict result guards, Map equality and integer-Map `__len`,
+  and revised performance description;
 - `doc/language/types.md`: retain raw `value`/`value` equality while documenting
   the Map/`value` exception;
 - `doc/implementation/codegen-constructs.md`: exact raw/partial/finish lowering,
-  rooting/rebasing, barriers, and equality dispatch;
+  rooting/rebasing, barriers, equality dispatch, and integer-Map length;
 - `doc/implementation/lua-5.5.1-update.md` and
   `doc/implementation/index.md`: remove current statements that Titan never
   reproduces the Map metamethod slow path.

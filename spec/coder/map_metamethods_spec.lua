@@ -101,6 +101,10 @@ local fixture = [[
         return { ["one"] = 1 }
     end
 
+    function map_length(map: {integer: value}): integer
+        return #map
+    end
+
     function maps_equal(
         left: {string: integer}, right: {string: integer}
     ): boolean
@@ -218,6 +222,19 @@ local fixture = [[
         end
     end
 
+    local function length_map_operand(
+        map: {integer: value}
+    ): {integer: value}
+        mark(1)
+        return map
+    end
+
+    function ordered_length(map: {integer: value}): integer
+        order = 0
+        local size = #length_map_operand(map)
+        return order + size - size
+    end
+
     function stack_read(map: {string: string}, keep: string): string
         local item = map["missing"]
         return keep .. ":" .. item .. ":" .. keep
@@ -226,6 +243,11 @@ local fixture = [[
     function stack_write(map: {string: string}, keep: string): string
         map["missing"] = keep
         return keep .. ":" .. keep
+    end
+
+    function stack_length(map: {integer: value}, keep: string): string
+        local size = #map
+        return keep .. ":" .. size .. ":" .. keep
     end
 
     function stack_equal(
@@ -267,6 +289,8 @@ describe("Map metamethod-aware code generation", function()
             csrc, "test_\\u2133_write_value_titan(lua_State *L")
         local construct = generated_function(
             csrc, "test_\\u2133_construct_titan(lua_State *L")
+        local map_length = generated_function(
+            csrc, "test_\\u2133_map_length_titan(lua_State *L")
 
         assert.match("luaH_getshortstr", read_string)
         assert.match("luaH_getint", read_integer)
@@ -320,6 +344,21 @@ describe("Map metamethod-aware code generation", function()
         assert.not_match("luaH_fastseti", construct)
         assert.not_match("luaV_finishset", construct)
         assert.falsy(construct:find("lua_settable", 1, true))
+
+        local no_length_metamethod = assert(
+            map_length:find("checknoTM", 1, true))
+        local raw_length = assert(map_length:find("luaH_getn", 1, true))
+        local metamethod_length = assert(
+            map_length:find("luaV_objlen", raw_length, true))
+        assert.is_true(no_length_metamethod < raw_length)
+        assert.is_true(raw_length < metamethod_length)
+        assert.truthy(map_length:find("TM_LEN", 1, true))
+        assert.truthy(map_length:find(
+            "ttisinteger", metamethod_length, true))
+        assert.truthy(map_length:find(
+            "_base = restorestack", metamethod_length, true))
+        assert.falsy(map_length:find("lua_len", 1, true))
+        assert.falsy(map_length:find("lua_rawlen", 1, true))
     end)
 
     it("follows __index functions, tables, recursive values, and key paths",
@@ -768,6 +807,65 @@ describe("Map metamethod-aware code generation", function()
         assert.is_true(no_metamethod < slow_equal)
     end)
 
+    it("uses __len for integer-keyed Maps and strictly checks its result",
+    function()
+        local ok, err = h.call("test", [[
+            local plain = { 10, 20, 30 }
+            assert(test.map_length(plain) == 3)
+
+            local calls = 0
+            local with_len
+            with_len = setmetatable({ 10, 20 }, {
+                __len = function(object)
+                    calls = calls + 1
+                    assert(rawequal(object, with_len))
+                    return 999, "ignored"
+                end,
+            })
+            assert(test.map_length(with_len) == 999)
+            assert(calls == 1)
+
+            local cached_absence = setmetatable({ 10, 20 }, {})
+            assert(test.map_length(cached_absence) == 2)
+            assert(test.map_length(cached_absence) == 2)
+
+            local callable_calls = 0
+            local callable_map
+            local callable = setmetatable({}, {
+                __call = function(_, object)
+                    callable_calls = callable_calls + 1
+                    assert(rawequal(object, callable_map))
+                    return 77
+                end,
+            })
+            callable_map = setmetatable({ 10 }, { __len = callable })
+            assert(test.map_length(callable_map) == 77)
+            assert(callable_calls == 1)
+
+            local bad_float = setmetatable({}, {
+                __len = function() return 7.0 end,
+            })
+            local success, message = pcall(test.map_length, bad_float)
+            assert(not success and message:find(
+                "expected integer tag but found number", 1, true))
+
+            local bad_string = setmetatable({}, {
+                __len = function() return "seven" end,
+            })
+            success, message = pcall(test.map_length, bad_string)
+            assert(not success and message:find(
+                "expected integer tag but found string", 1, true))
+
+            local bad = setmetatable({}, {
+                __len = function() error("length metamethod exploded") end,
+            })
+            success, message = pcall(test.map_length, bad)
+            assert(not success and message:find(
+                "length metamethod exploded", 1, true))
+        ]])
+        assert.truthy(ok, err)
+    end)
+
     it("evaluates operands once in order and restores relocated stack roots",
     function()
         local ok, err = h.call("test", [[
@@ -794,6 +892,14 @@ describe("Map metamethod-aware code generation", function()
                 end,
             })
             assert(test.ordered_equal(left, {}) == 123)
+
+            local length = setmetatable({}, {
+                __len = function()
+                    test.mark(2)
+                    return 7
+                end,
+            })
+            assert(test.ordered_length(length) == 12)
 
             local names, values = {}, {}
             for i = 1, 190 do
@@ -833,6 +939,15 @@ describe("Map metamethod-aware code generation", function()
             })
             assert(test.stack_equal(equal_grow, {}, "rooted") ==
                 "rooted:equal:rooted")
+
+            local length_grow = setmetatable({}, {
+                __len = function()
+                    assert(grow() == 190)
+                    return 17
+                end,
+            })
+            assert(test.stack_length(length_grow, "rooted") ==
+                "rooted:17:rooted")
         ]])
         assert.truthy(ok, err)
     end)
