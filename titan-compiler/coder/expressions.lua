@@ -676,7 +676,8 @@ function codemap(ctx, node, target)
                 $STORE
             }
         ]], {
-            STORE = set_table_entry(node._type.keys, tmpname, slot.k, slot.v),
+            STORE = set_table_entry_raw(
+                node._type.keys, tmpname, slot.k, slot.v),
         }))
         if types.is_gc(node._type.values) then
             table.insert(stats, render([[
@@ -1165,6 +1166,107 @@ ordered_binary_operands = function(ctx, node)
     }), lname, rcode
 end
 
+local function map_comparison_kind(comparison)
+    if not comparison then return nil end
+    local left = assert(types.normalize(comparison.left))
+    local right = assert(types.normalize(comparison.right))
+    local leftmap = left._tag == "Type.Map"
+    local rightmap = right._tag == "Type.Map"
+    if leftmap and rightmap then return "map_map" end
+    if (leftmap and right._tag == "Type.Value")
+       or (rightmap and left._tag == "Type.Value") then
+        return "map_value"
+    end
+    return nil
+end
+
+-- Map equality keeps primitive identity/raw equality inline and enters Lua's
+-- __eq machinery only for the distinct-table slow case. The ComparisonPlan
+-- supplies the original static types, so this path can include Map/value while
+-- leaving the otherwise-raw value/value operation unchanged.
+local function code_map_equality(ctx, node, op, kind)
+    local stats, lcode, rcode = ordered_binary_operands(ctx, node)
+    local resultdecl, result = newtmp(ctx, types.Boolean())
+    local code
+    ctx.uses_base_off = true
+    if kind == "map_map" then
+        local leftdecl, left = newtmp(ctx, node.lhs._type)
+        local rightdecl, right = newtmp(ctx, node.rhs._type)
+        code = render([[
+            $STATS
+            $LEFTDECL
+            $LEFT = $LCODE;
+            $RIGHTDECL
+            $RIGHT = $RCODE;
+            $RESULTDECL
+            if ($LEFT == $RIGHT) {
+                $RESULT = 1;
+            } else if (TITAN_LIKELY(
+                    checknoTM($LEFT->metatable, TM_EQ) &&
+                    checknoTM($RIGHT->metatable, TM_EQ))) {
+                $RESULT = 0;
+            } else {
+                TValue _left;
+                TValue _right;
+                sethvalue(L, &_left, $LEFT);
+                sethvalue(L, &_right, $RIGHT);
+                $RESULT = luaV_equalobj(L, &_left, &_right);
+                _base = restorestack(L, _base_off);
+            }
+        ]], {
+            STATS = stats,
+            LEFTDECL = leftdecl,
+            LEFT = left,
+            LCODE = lcode,
+            RIGHTDECL = rightdecl,
+            RIGHT = right,
+            RCODE = rcode,
+            RESULTDECL = resultdecl,
+            RESULT = result,
+        })
+    else
+        assert(kind == "map_value")
+        local leftdecl, left, leftslot =
+            newtmp(ctx, types.Value(), true)
+        local rightdecl, right, rightslot =
+            newtmp(ctx, types.Value(), true)
+        code = render([[
+            $STATS
+            $LEFTDECL
+            $LEFT = $LCODE;
+            $ANCHORLEFT
+            $RIGHTDECL
+            $RIGHT = $RCODE;
+            $ANCHORRIGHT
+            $RESULTDECL
+            $RESULT = luaV_rawequalobj(&$LEFT, &$RIGHT);
+            if (!$RESULT && ttistable(&$LEFT) && ttistable(&$RIGHT)) {
+                Table *_left_table = hvalue(&$LEFT);
+                Table *_right_table = hvalue(&$RIGHT);
+                if (TITAN_UNLIKELY(
+                        !checknoTM(_left_table->metatable, TM_EQ) ||
+                        !checknoTM(_right_table->metatable, TM_EQ))) {
+                    $RESULT = luaV_equalobj(L, &$LEFT, &$RIGHT);
+                    _base = restorestack(L, _base_off);
+                }
+            }
+        ]], {
+            STATS = stats,
+            LEFTDECL = leftdecl,
+            LEFT = left,
+            LCODE = lcode,
+            ANCHORLEFT = setslot(types.Value(), leftslot, left),
+            RIGHTDECL = rightdecl,
+            RIGHT = right,
+            RCODE = rcode,
+            ANCHORRIGHT = setslot(types.Value(), rightslot, right),
+            RESULTDECL = resultdecl,
+            RESULT = result,
+        })
+    end
+    return code, op == "!=" and "(!" .. result .. ")" or result
+end
+
 function codebinaryop(ctx, node, _)
     if node._c_operator then
         return coder._code_c_binary_operator(ctx, node)
@@ -1172,6 +1274,7 @@ function codebinaryop(ctx, node, _)
     local op = node.op
     if op == "~=" then op = "!=" end
     local comparison
+    local mapcomparison
     if op == "==" or op == "!=" then
         local plan = node._comparison
         local function original_operand_type(exp, adjustment, side)
@@ -1198,6 +1301,7 @@ function codebinaryop(ctx, node, _)
             original_operand_type(
                 node.rhs, plan and plan.right_adjustment, "right"),
             "equality comparison")
+        mapcomparison = map_comparison_kind(comparison)
     end
     if op == "and" then
         if node._type._tag == "Type.Boolean" then
@@ -1415,6 +1519,8 @@ function codebinaryop(ctx, node, _)
             end
             return cstats, cmp
         end
+    elseif (op == "==" or op == "!=") and mapcomparison then
+        return code_map_equality(ctx, node, op, mapcomparison)
     elseif (op == "==" or op == "!=") and
             coder._raw_ctype(node.lhs._type) == "TValue" and
             coder._raw_ctype(node.rhs._type) == "TValue" then
@@ -1535,7 +1641,8 @@ function codeindexmap(ctx, node)
         cset = setslot(typ, tmpslot, tmpname)
     end
     local ktyp = node.exp2._type
-    local ctmpk, tmpkname, tmpkslot = newtmp(ctx, ktyp, true)
+    local ctmpk, tmpkname, tmpkslot, tmpkstack =
+        newtmp(ctx, ktyp, true)
     local stats = render([[
         $CTMP
         {
@@ -1558,7 +1665,8 @@ function codeindexmap(ctx, node)
         TMPKNAME = tmpkname,
         CKEXP = ckexp,
         SETSLOTK = setboxed(ctx, ktyp, tmpkslot, tmpkname),
-        CTABLEKEY = get_table_key(ktyp, "_t", tmpkslot, "_s"),
+        CTABLEKEY = get_table_key(
+            ctx, ktyp, "_t", tmpkslot, tmpkstack, "_s"),
         CCHECK = ccheck,
         CSET = cset,
     })

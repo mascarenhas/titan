@@ -409,13 +409,16 @@ an Option into that Option through the named `option_nil` coercion, so the
 classifier sees two same-representation option operands. When exactly one
 comparable operand is `value`, the same plan also carries the required gradual
 injection so both operands reach the boxed
-raw-equality representation. The checker classifies the original pair before
+equality representation. The checker classifies the original pair before
 applying that recorded injection. Ordering retains its separate numeric/string
 rules. Equality does not reuse directional callable assignment and therefore
 cannot depend on operand order. Code generation validates the stored
 `ComparisonPlan` (and any recorded one-sided injection) before choosing raw,
-numeric, or Option comparison lowering; it does not rediscover comparability
-from the adjusted operand tags.
+numeric, Option, or scoped Map-metamethod comparison lowering; it does not
+rediscover comparability from the adjusted operand tags. In particular,
+Map/`value` uses the plan's original types to add table `__eq` after raw
+inequality, while `value`/`value` stays raw despite having the same boxed C
+representation.
 
 ## Failure contract and FFI boundary
 

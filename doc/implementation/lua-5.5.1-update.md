@@ -210,16 +210,21 @@ The remaining close analogues were checked explicitly:
 * `lua_gc(L, LUA_GCSTEP, size)` avoids debt subtraction overflow. `titan.gc`
   passes a checked non-negative `size_t`, so it inherits the corrected Lua
   implementation without reproducing the debt calculation.
-* Titan's raw Map and Array stores call `luaH_set` or `luaH_setint`; they
-  inherit `ltable.c`'s normalized-float-key fix. Titan does not call the
-  private `luaH_newkey` implementation.
+* Titan's Array stores and fresh-Map constructor stores call `luaH_set` or
+  `luaH_setint`; Map assignment keeps those calls as its
+  no-metatable/no-`__newindex` fast path. When `__newindex` may exist, Map
+  assignment uses `luaH_fastseti` or `luaH_pset` before delegating an unresolved
+  location to `luaV_finishset`. All of these paths inherit `ltable.c`'s
+  normalized-float-key fix. Titan does not call the private `luaH_newkey`
+  implementation or `luaH_psetint`.
 * Titan uses `gco2u`, `obj2gco`, and CallInfo fields, but the 5.5.1
   GC-object conversion macros retain their names and type meanings, and the
   CallInfo result encoding used by flexible calls is unchanged. Recompilation
   against the matched headers is sufficient.
 * `luaV_finishset` now saves the table identity across a possibly relocating
-  `__newindex` lookup. Titan does not reproduce that metamethod loop; public
-  Lua writes inherit the VM fix.
+  `__newindex` lookup. Generated Titan Map assignment delegates its unresolved
+  partial-set case to that VM helper and restores `_base` afterward, rather
+  than copying the metamethod loop; public Lua writes use the same fixed helper.
 
 ### Public header parsing
 

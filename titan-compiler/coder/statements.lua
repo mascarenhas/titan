@@ -450,75 +450,71 @@ function codefor(ctx, node)
     end
 end
 
--- Reads the entry for key $K (a boxed TValue*) of table $T into a local
--- TValue holder and points $SLOT at it. Lua 5.5's luaH_get* functions
--- copy the value out and return its tag (leaving the holder untouched
--- when the key is absent), so the holder is set to nil on a miss.
-function get_table_key(keytype, t, k, slot)
+-- Reads the entry for key $K (a boxed TValue*) of table $T and points $SLOT
+-- at the result. Lua 5.5's luaH_get* functions leave their output untouched
+-- on a miss, so the rooted key slot can also be the result slot, as it is in
+-- lua_gettable. A raw miss takes luaV_finishget only when __index may exist;
+-- its result then flows through the caller's ordinary typed Map-read guard.
+function get_table_key(ctx, keytype, t, k, kstack, slot)
+    ctx.uses_base_off = true
     local tgetkey
     if keytype._tag == "Type.String" then
         tgetkey = [[
-            TValue ${SLOT}_v;
             lu_byte ${SLOT}_tag;
             if (ttypetag($K) == LUA_VSHRSTR) {
-                ${SLOT}_tag = luaH_getshortstr($T, tsvalue($K), &${SLOT}_v);
+                ${SLOT}_tag = luaH_getshortstr($T, tsvalue($K), $K);
             } else {
-                ${SLOT}_tag = luaH_get($T, $K, &${SLOT}_v);
+                ${SLOT}_tag = luaH_get($T, $K, $K);
             }
-            if (tagisempty(${SLOT}_tag)) {
-                setnilvalue(&${SLOT}_v);
-            }
-            $SLOT = &${SLOT}_v;
         ]]
     elseif keytype._tag == "Type.Integer" then
         tgetkey = [[
-            TValue ${SLOT}_v;
-            lu_byte ${SLOT}_tag = luaH_getint($T, ivalue($K), &${SLOT}_v);
-            if (tagisempty(${SLOT}_tag)) {
-                setnilvalue(&${SLOT}_v);
-            }
-            $SLOT = &${SLOT}_v;
+            lu_byte ${SLOT}_tag = luaH_getint($T, ivalue($K), $K);
         ]]
     elseif keytype._tag == "Type.Float" then
         tgetkey = [[
-            TValue ${SLOT}_v;
             lu_byte ${SLOT}_tag;
             {
                 lua_Integer _ik;
                 if (luaV_tointeger($K, &_ik, F2Ieq)) {
-                    ${SLOT}_tag = luaH_getint($T, _ik, &${SLOT}_v);
+                    ${SLOT}_tag = luaH_getint($T, _ik, $K);
                 } else {
-                    ${SLOT}_tag = luaH_get($T, $K, &${SLOT}_v);
+                    ${SLOT}_tag = luaH_get($T, $K, $K);
                 }
             }
-            if (tagisempty(${SLOT}_tag)) {
-                setnilvalue(&${SLOT}_v);
-            }
-            $SLOT = &${SLOT}_v;
         ]]
     else
         tgetkey = [[
-            TValue ${SLOT}_v;
-            lu_byte ${SLOT}_tag = luaH_get($T, $K, &${SLOT}_v);
-            if (tagisempty(${SLOT}_tag)) {
-                setnilvalue(&${SLOT}_v);
-            }
-            $SLOT = &${SLOT}_v;
+            lu_byte ${SLOT}_tag = luaH_get($T, $K, $K);
         ]]
     end
-    return render(tgetkey, {
+    return render(tgetkey .. [[
+        if (tagisempty(${SLOT}_tag)) {
+            if (TITAN_LIKELY(checknoTM($T->metatable, TM_INDEX))) {
+                setnilvalue($K);
+            } else {
+                TValue ${SLOT}_table;
+                sethvalue(L, &${SLOT}_table, $T);
+                ${SLOT}_tag = luaV_finishget(
+                    L, &${SLOT}_table, $K, $KSTACK, ${SLOT}_tag);
+                _base = restorestack(L, _base_off);
+            }
+        }
+        $SLOT = $K;
+    ]], {
         SLOT = slot,
         T = t,
         K = k,
+        KSTACK = kstack,
     })
 end
 
--- Stores the TValue $V into table $T at key $K (a boxed TValue*).
+-- Stores the TValue $V directly into table $T at key $K (a boxed TValue*).
 -- Lua 5.5 removed the "get a writable slot" API (luaH_newkey is gone);
 -- raw stores go through luaH_set/luaH_setint, which take the value.
 -- The GC barrier for the stored value is the caller's responsibility;
 -- new keys are barriered internally by the insertion code.
-function set_table_entry(keytype, t, k, v)
+function set_table_entry_raw(keytype, t, k, v)
     local tsetkey
     if keytype._tag == "Type.Integer" then
         tsetkey = [[
@@ -545,6 +541,56 @@ function set_table_entry(keytype, t, k, v)
         T = t,
         K = k,
         V = v,
+    })
+end
+
+-- Stores through ordinary Lua table-assignment semantics while retaining the
+-- raw setter above as the likely no-metamethod path. When __newindex may be
+-- present, Lua's partial setters update an existing slot in place and return a
+-- location code for a missing slot; only that latter case enters
+-- luaV_finishset and its function/table/value metamethod chain.
+function set_table_entry(ctx, keytype, t, k, v)
+    ctx.uses_base_off = true
+    local pset
+    if keytype._tag == "Type.Integer" then
+        pset = [[
+            luaH_fastseti($T, ivalue($K), $V, _hres);
+        ]]
+    elseif keytype._tag == "Type.Float" then
+        pset = [[
+            {
+                lua_Integer _ik;
+                if (luaV_tointeger($K, &_ik, F2Ieq)) {
+                    luaH_fastseti($T, _ik, $V, _hres);
+                } else {
+                    _hres = luaH_pset($T, $K, $V);
+                }
+            }
+        ]]
+    else
+        pset = [[
+            _hres = luaH_pset($T, $K, $V);
+        ]]
+    end
+    return render([[
+        if (TITAN_LIKELY(checknoTM($T->metatable, TM_NEWINDEX))) {
+            $RAWSET
+        } else {
+            int _hres;
+            $PSET
+            if (_hres != HOK) {
+                TValue _table;
+                sethvalue(L, &_table, $T);
+                luaV_finishset(L, &_table, $K, $V, _hres);
+                _base = restorestack(L, _base_off);
+            }
+        }
+    ]], {
+        T = t,
+        K = k,
+        V = v,
+        RAWSET = set_table_entry_raw(keytype, t, k, v),
+        PSET = render(pset, { T = t, K = k, V = v }),
     })
 end
 
@@ -1040,7 +1086,8 @@ function codeassignment(ctx, var, cexp, etype, lvalue)
                 CMEXP = cmexp,
                 KEYPREP = keyprep,
                 SETVV = setboxed(ctx, etype, "&_vv", cexp),
-                STORE = set_table_entry(key._type, "_t", tmpkslot, "&_vv"),
+                STORE = set_table_entry(
+                    ctx, key._type, "_t", tmpkslot, "&_vv"),
                 BARRIER = types.is_gc(map._type.values)
                           and "luaC_barrierback(L, obj2gco(_t), &_vv);" or ""
             })

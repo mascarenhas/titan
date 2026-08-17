@@ -297,7 +297,7 @@ back to this matrix rather than defining competing conversion rules.
 | Ordinary typed Titan declaration, assignment, argument, return, or constructor slot | Exact identity, one direct outer coercion, a gradual view, or a directional callable adjustment must exist. Ordinary coercions never lift through an Array, Map, Function, or nominal member. | The checker-selected direct conversion is performed; a same-representation Array/Map gradual view preserves the object. An exact Function edge preserves its source closure; a non-exact one follows the conditional wrapper row below. |
 | Statically known non-exact Function `A -> B` adjustment (implicit or written `as`) | One checker-frozen directional `CallablePlan`, including only its named argument/result/tail actions and strict component operations. | Evaluate the operand once. An exact branded Titan `A` closure with upvalue room becomes a fresh target-`B` wrapper; other values stay unchanged for generic dispatch. No cache or equality unwrapping is used. |
 | Implicit `value -> T` in a typed Titan context | Strict gradual projection; `T` must be guardable. This is not the broad dynamic coercion used by written casts or Lua. | The exact tag, shape, or nominal identity required for `T` is checked. No integral-float narrowing, integer-to-float conversion, truthiness, Option introduction/force, or pointer assertion is added by the guard. A Function target preserves the boxed value and creates no static adjustment wrapper. |
-| Typed Titan Array element or Map value read | Strict target guard, regardless of which static view was used to write the slot or whether a Map value came from Lua. The checker rejects a read whose optional result type is not guardable. | An accepted read either produces the requested value or raises before Titan uses it. Array reads never invoke the Array's Lua writer. Map reads do not track write provenance. |
+| Typed Titan Array element or Map value read | Strict target guard, regardless of which static view was used to write the slot or whether a Map value came from a raw entry, Lua, or `__index`. The checker rejects a read whose optional result type is not guardable. | An accepted read either produces the requested value or raises before Titan uses it. Array reads never invoke the Array's Lua writer. Map reads do not track write provenance, and an `__index` result receives the same exact guard rather than dynamic conversion. |
 | Written `v as T` / `v is T` with `v: value` | Shared dynamic coercion, except for the explicitly unsafe raw-C-pointer rule below. | `as` converts or raises; `is` tests acceptance without returning the converted value or raising for a mismatch. Both evaluate `v` once. A Function target remains unwrapped and defers callability. |
 | Genuine Lua function argument, exported module-variable write, public record-field write, non-nil Array-element write, or result from a non-Titan Lua callable entering Titan | The same dynamic coercion as the preceding row. | Equal target types accept, reject, and convert the same values at all of these boundaries. |
 | Lua writes `nil` to an Array proxy | Deletion is recognized before element conversion. | The position is removed; the writer is not called, and an out-of-capacity deletion does not allocate. |
@@ -581,13 +581,17 @@ What you **can** do with a `value`, beyond converting it:
 * **Store it and pass it along** — in variables, arrays, maps, record fields,
   union payloads of type `value`, arguments, and returns.
 * **Compare it with `==` and `~=`.** When `value` and the other operand are
-  comparable, the other side is boxed and the comparison is Lua's *raw*
-  equality — `__eq` metamethods are not consulted. Equality checks the
-  symmetric comparable relation first; it does not box a type such as a raw C
-  pointer merely because that type has a separate conversion to `value`. (An earlier
-  version of this manual claimed casting and passing along were the only
-  available operations; equality has been supported since the type was
-  introduced.)
+  comparable, the other side is boxed. Comparison is Lua's *raw* equality
+  unless that other operand is statically a Map. Map/`value` and
+  `value`/Map first perform the same raw check, then use Lua table `__eq` only
+  when the raw-unequal dynamic value is also a table; see
+  [Map equality](arrays-maps.md#equality). A `value`/`value` comparison remains
+  raw even when both values happen to contain tables, so `__eq` is not
+  consulted. Equality checks the symmetric comparable relation first; it does
+  not box a type such as a raw C pointer merely because that type has a
+  separate conversion to `value`. (An earlier version of this manual claimed
+  casting and passing along were the only available operations; equality has
+  been supported since the type was introduced.)
 * **Test it.** A `value` can be a condition and an operand of `and`,
   `or` and `not`; its truthiness is Lua's (only `nil` and `false` are
   false). These operators have no metamethods in Lua, so their raw

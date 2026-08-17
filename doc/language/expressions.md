@@ -201,27 +201,33 @@ enumerated symmetric type pairs:
   any comparison with NaN is false, so `x ~= x` is true when `x` is NaN.
 * **Strings** compare by content (lexicographically for the relational
   operators), exactly as in Lua.
-* **Arrays, maps, records, unions, Interfaces, and function-typed values**
-  compare by identity. Consistent non-exact Array/Map views share the same
-  boxed object; nominal records, unions, and Interfaces require their exact
-  type. An exact Function edge likewise preserves its source closure, but an
-  eligible non-exact callable edge may realize a fresh target wrapper. That
-  wrapper is unequal to its source and to a separately realized wrapper; an
-  ineligible fallback preserves the boxed identity.
-  Arrays use canonical proxy identities, nominal values compare their userdata
-  identities, and maps use ordinary table identities. A referenced Titan
-  declaration has its stable canonical **source** `CClosure`, while a non-Titan
-  Lua function, C function, or `__call` value retains its own boxed identity.
-  Metamethods and wrapper unwrapping are never involved.
+* **Arrays, records, unions, Interfaces, and function-typed values** compare by
+  identity. Consistent non-exact Array views share the same boxed object;
+  nominal records, unions, and Interfaces require their exact type. An exact
+  Function edge likewise preserves its source closure, but an eligible
+  non-exact callable edge may realize a fresh target wrapper. That wrapper is
+  unequal to its source and to a separately realized wrapper; an ineligible
+  fallback preserves the boxed identity.
+  Arrays use canonical proxy identities and nominal values compare their
+  userdata identities. A referenced Titan declaration has its stable canonical
+  **source** `CClosure`, while a non-Titan Lua function, C function, or `__call`
+  value retains its own boxed identity. Metamethods and wrapper unwrapping are
+  never involved on these paths.
   Each record/union-to-Interface conversion makes a fresh wrapper, so wrapper
   equality is the identity of that conversion result. An Interface and its
   concrete implementer are incomparable, as are two distinct nominal
   Interfaces, even when their method sets match.
-* **Two `value`s** (or a `value` and a guardable type gradually consistent
-  with it) compare with Lua's *raw* equality — `__eq` metamethods on tables
-  that arrived from Lua are not consulted. Equality does not infer a separate
-  directional coercion merely because one exists; for example, explicitly
-  box a raw C pointer as `value` before comparing it with another `value`.
+* **Maps** use ordinary Lua table equality. Identity is the fast result, but
+  distinct Map/Map operands can invoke the left table's `__eq`, or the right
+  table's when the left has none. The result follows Lua truthiness; see
+  [Map equality](arrays-maps.md#equality).
+* **Two `value`s** compare with Lua's *raw* equality, even when both happen to
+  contain tables with `__eq`. A `value` and a guardable type gradually
+  consistent with it also compare raw, except for the specific Map/`value`
+  case: after raw inequality, table `__eq` is available only when the dynamic
+  `value` is itself a table. Equality does not infer a separate directional
+  coercion merely because one exists; for example, explicitly box a raw C
+  pointer as `value` before comparing it with another `value`.
 * **An option and its base type** can be compared: `s1 == s2` works for
   `s1: string?`, `s2: string`, and is false when `s1` is nil. See
   [option types](option-types.md).

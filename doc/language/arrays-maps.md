@@ -312,10 +312,28 @@ not by a keyed Map or record constructor.
 
 ### Reads, writes, and deletion
 
-Map indexing converts the query key to `K` and returns `V?`. Every present
-value is checked with the same strict target guard as an Array element before
-Titan uses it. Writing from typed Titan code adjusts both the key and value;
-writing nil deletes the entry:
+Map indexing converts the query key to `K` and returns `V?`. It first looks for
+the key in the Map itself. A present entry is returned without consulting
+`__index`; on a miss, an attached metatable's `__index` follows Lua's ordinary
+table-indexing rules. The metamethod may be a function or another indexing
+target, and redirections can continue through the usual chained lookup until
+they produce a value, find no metamethod, raise, or reach Lua's chain-loop
+limit.
+
+Every result is checked with the same strict target guard as an Array element
+before Titan uses it, whether it came from the Map's raw slot or from
+`__index`. In particular, an `__index` result does not cross a dynamic
+conversion boundary: an `integer` value still requires an actual Lua integer,
+a `float` requires an actual Lua float, and nominal values require their exact
+tag. A final nil remains the ordinary absent `V?` result.
+
+Writing from typed Titan code adjusts both the key and value. A present entry
+is updated directly without consulting `__newindex`. For an absent key,
+`__newindex` follows Lua's ordinary assignment rules: a function can intercept
+the assignment, or another target can continue the assignment chain. With no
+applicable metamethod, the value is stored in the Map itself. Thus writing nil
+deletes a present entry, while an absent-key nil assignment can still be
+observed by `__newindex`:
 
 ```titan
 function bump(m: {string: integer}, key: string): integer
@@ -328,25 +346,40 @@ function forget(m: {string: integer}, key: string)
 end
 ```
 
-Maps use raw Lua table operations. A metatable attached by Lua does not make
-Titan Map indexing dispatch `__index` or `__newindex`.
-
-Because the Map is the ordinary table, raw Lua code can mutate it without an
-intercepting writer. Titan does not add an origin bit, a proxy, or provenance
-tracking. A later typed read is therefore strict regardless of whether the
-slot came from exact Titan code, a Titan `{value}` view, or Lua. For example,
-a Lua float `2.0` stored into a `{string: integer}` Map raises when Titan reads
-it as `integer`; the read does not apply the integral-float dynamic coercion.
-Likewise, a bare record stored by Lua in a Map whose value view is an Interface
-raises on the later typed read rather than being wrapped.
+Because the Map is the ordinary table, Lua's raw table operations can mutate
+it without an intercepting Titan writer. A user-supplied `__newindex` is also
+arbitrary Lua policy, not a Titan value converter. Titan does not add an origin
+bit, a proxy, or provenance tracking. A later typed read is therefore strict
+regardless of whether the observed value came from exact Titan code, a Titan
+`{value}` view, raw Lua mutation, or `__index`. For example, a Lua float `2.0`
+stored in or returned for a `{string: integer}` Map raises when Titan reads it
+as `integer`; the read does not apply the integral-float dynamic coercion.
+Likewise, a bare record supplied for a Map whose value view is an Interface
+raises on the typed read rather than being wrapped.
 This asymmetry is deliberate: genuine-Lua function arguments and intercepted
-Array writes are dynamic boundaries, while raw Map mutation is followed only
-by a strict typed observation.
+Array writes are dynamic boundaries, while observing a Map value performs only
+the strict typed guard.
 
 As with Arrays, an unguardable value type makes the indexing expression a
 compile-time error. A `{string: *c.T}` Map may be constructed or written from
 statically typed Titan code, but `m[key]` through that raw-pointer value view is
 rejected because lightuserdata cannot prove the pointee type.
+
+### Equality
+
+Map equality follows Lua table equality for the combinations whose static
+comparison includes a Map. Two references to the same Map are equal without
+calling `__eq`. For distinct Map/Map operands, Lua selects the left Map's
+`__eq`, or the right Map's when the left has none; with neither metamethod the
+result is false. A metamethod result uses Lua truthiness, and `~=` negates the
+same result.
+
+The same rule applies to Map/`value` and `value`/Map comparisons when the
+`value` actually contains a table. The raw equality check still happens first,
+and a non-table `value` cannot trigger table equality. This exception is
+deliberately tied to the statically known Map operand: `value`/`value`
+comparison remains raw equality even when both dynamic values happen to hold
+tables, so it never invokes `__eq`.
 
 ### Integer-Map length
 
@@ -479,9 +512,20 @@ holes. The Array's one private hash entry, proxy, second user-value slot, and
 GC edge to the writer (and through it, when needed, the constructing module)
 add a fixed per-Array ownership cost.
 
-Map operations use Lua's specialized raw table paths selected from the static
-key type. Positional integer-Map construction preallocates the ordinary table
-array part, but it does not acquire deterministic Array semantics.
+Map reads keep Lua's specialized raw table paths selected from the static key
+type. A hit returns immediately; a miss normally ends after a cached
+no-metatable/no-`__index` check, and only a possible metamethod enters Lua's VM
+finish path. Map assignments likewise retain the direct raw store when there
+is no metatable or no `__newindex`; with a possible metamethod they use Lua's
+partial-set fast path so an existing entry is still updated inline, and enter
+the VM finish path only for the unresolved case. Map constructors remain raw
+stores into a fresh table. Equality keeps its identity/raw fast checks and
+calls Lua's metamethod-aware equality only for the narrow Map cases described
+above. These paths do not replace the whole operation with public
+`lua_gettable` or `lua_settable` calls.
+
+Positional integer-Map construction preallocates the ordinary table array
+part, but it does not acquire deterministic Array semantics.
 
 Exact Titan-to-Titan Array calls pass the private native identity directly.
 An Array stored as a union payload likewise stays in Titan's internal

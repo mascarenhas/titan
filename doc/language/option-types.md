@@ -360,8 +360,9 @@ At run time, comparing options compares the underlying Lua values, "like
 comparing two `value`s" (PR #255): nil equals only nil, and non-nil values
 compare with Lua's primitive (raw) equality — which still equates the Lua
 integer and floating representations, so `1` held in an `integer?` equals
-`1.0` held in a `float?`. (`__eq` metamethods are never involved; no Titan
-type has them.)
+`1.0` held in a `float?`. `__eq` metamethods are never involved on this option
+path, including when a present option payload is a Map. The metamethod-aware
+exception requires a non-option static Map/Map or Map/`value` comparison.
 
 Otherwise the two sides must be comparable types — `integer? == string` is
 the usual **compile-time error**

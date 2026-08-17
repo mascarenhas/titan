@@ -603,7 +603,10 @@ option value instead of constructing an incomparable `nil?`. The checker then
 calls the symmetric `types.comparable` classifier on the adjusted pair. A
 successful ComparisonPlan may carry a gradual injection when exactly one
 comparable operand is Value; only
-then is the other operand boxed for raw equality. The checker never uses a
+then is the other operand boxed into the common equality representation. Code
+generation normally compares that representation raw, but retains the plan's
+original operand types so a Map/`value` pair can add Lua table `__eq` after a
+failed raw check. A `value`/`value` pair remains raw. The checker never uses a
 directional assignment or coercion to make any other incomparable original
 pair comparable. Numbers are **not** promoted: a mixed Integer/Float pair (either
 order, and likewise two options over Integer/Float) is compared by
