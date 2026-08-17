@@ -628,8 +628,24 @@ local function Watcher:drain_notifications(): {WatcherEvent}
   local notifications = self.notifications
   self.notifications = {}
   local events: {WatcherEvent} = {}
-  for index = 1, #notifications do
-    events[index] = self:map_notification(notifications[index])
+  while #notifications > 0 do
+    for index = 1, #notifications do
+      events[#events + 1] = self:map_notification(notifications[index])
+    end
+
+    local crosses_retirement = false
+    for index = 1, #self.notifications do
+      if self.notifications[index].registration.index == 0 then
+        crosses_retirement = true
+        break
+      end
+    end
+    if not crosses_retirement then return events end
+
+    -- Preserve callback order by pulling the whole follow-on batch into this
+    -- poll when any notification crossed a registration's retirement.
+    notifications = self.notifications
+    self.notifications = {}
   end
   return events
 end

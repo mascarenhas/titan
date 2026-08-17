@@ -71,14 +71,21 @@ finishes. Each explicit stop uses `uv_fs_event_stop`, removes the registration
 from the Watcher's live identity state, transfers the rooted handle to the
 ordinary asynchronous `uv_close` owner, and waits for close completion. While
 that clear is active, a new `poll` or second `clear` raises. Notifications
-already copied into the Watcher remain buffered; callers may use one final
-`poll()` to drain them. `stop`, `clear`, a registration error, and direct-target
-deletion wake a blocked poll when they remove the final live registration.
+already copied into the Watcher remain observable; unless a poll already
+crossed and drained their registration's retirement batch, callers may use one
+final `poll()` to drain them. `stop`, `clear`, a registration error, and
+direct-target deletion wake a blocked poll when they remove the final live
+registration.
 
-`poll()` drains the notifications that are currently buffered. If none are
-buffered while at least one registration is active, it blocks the current Task
-with the source-private `uv.suspend()`. If there are no registrations, it
-returns an empty Array immediately. At most one `poll` may be in progress for a Watcher.
+`poll()` drains the notifications that are currently buffered. If mapping
+retires a registration after callbacks for it entered the fresh queue, the same
+poll drains that complete follow-on callback batch in order before returning.
+This preserves one raw notification per public event while preventing a later
+poll from observing an already-copied notification for a retired registration.
+If none are buffered while at least one registration is active, it blocks the
+current Task with the source-private `uv.suspend()`. If there are no
+registrations, it returns an empty Array immediately. At most one `poll` may be
+in progress for a Watcher.
 Cancelling a blocked poll detaches only that Task's callback waiter. It neither
 loses buffered notifications nor stops registrations that another Task may
 poll. A wake requested through the public `Task:resume` method only causes the
@@ -182,6 +189,12 @@ returns without entering its coroutine again.
 
 `poll` detaches the currently buffered raw notifications while callbacks append
 to a fresh Array, then maps the detached records one-for-one in callback order.
+After each detached batch, it scans the fresh Array. If any record belongs to a
+registration retired during mapping, it detaches and maps that entire follow-on
+batch before returning; taking the whole batch preserves callback order across
+registrations. A batch containing only live registrations remains for the next
+poll. Stopping and waiting for close before a retirement mapping returns makes
+this extension finite without a generation, lifecycle flag, or event drop.
 A directory filename is joined to the canonical watched directory; a missing
 filename is a coarse notification for the watched directory itself. A file notification
 always names the canonical watched file. For `UV_RENAME`, `poll` uses `lstat`
