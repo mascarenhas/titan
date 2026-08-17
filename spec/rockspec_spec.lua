@@ -642,6 +642,7 @@ describe("standalone-prefix source installation", function()
             "spec/fixtures/test_runner/titan/test/runner/user.titan",
             "spec/fixtures/test_runner/titan/test/user.titan",
             "spec/support/run_rock_tests.sh",
+            "spec/support/run_parallel_compiler_tests.sh",
             "spec/support/run_with_timeout.sh",
             "spec/support/clean_generated_test_artifacts.sh",
             "spec/fixtures/stdlib/native/os_process_child.c",

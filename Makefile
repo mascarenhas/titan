@@ -2170,6 +2170,7 @@ STDLIB_BUSTED_TESTS := \
 busted-test: ## Run retained Busted specs, optionally with BUSTED_FILTER
 	BUSTED=$(call make_shell_quote_value,BUSTED) \
 		BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
+		TITAN_ROCK_TEST_STDLIB_SPECS=$(call make_shell_quote_value,STDLIB_BUSTED_TESTS) \
 		TITAN_ROCK_TEST_INTERNAL=1 \
 		bash spec/support/run_rock_tests.sh $(EXTRA_TEST_FLAGS)
 

@@ -23,8 +23,13 @@ case "$group" in
     compiler-shard-[1-4])
         requested_shard=${group##*-}
         ;;
+    compiler-uncovered-shard-[1-4])
+        requested_shard=${group##*-}
+        ;;
     *)
-        echo "usage: $0 {compiler|compiler-uncovered|compiler-shard-{1..4}}" >&2
+        usage="usage: $0 {compiler|compiler-uncovered|compiler-shard-{1..4}|"
+        usage+="compiler-uncovered-shard-{1..4}}"
+        echo "$usage" >&2
         exit 2
         ;;
 esac
@@ -180,11 +185,12 @@ case "$group" in
     compiler | compiler-shard-[1-4])
         run_compiler_coverage
         ;;
-    compiler-uncovered)
+    compiler-uncovered | compiler-uncovered-shard-[1-4])
         compiler_count=$((${#compiler_tests[@]} +
             ${#compiler_unit_tests[@]} +
             ${#compiler_isolated_coverage_tests[@]}))
-        echo "Running $compiler_count compiler/language spec files" \
+        label=${requested_shard:+ shard $requested_shard}
+        echo "Running $compiler_count compiler/language spec files${label}" \
             "without LuaCov"
         "$BUSTED" -o gtest -v \
             "${compiler_tests[@]}" "${compiler_unit_tests[@]}" \
