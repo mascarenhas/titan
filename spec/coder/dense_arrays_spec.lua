@@ -812,7 +812,7 @@ describe("dense Array code generation and boundaries", function()
                 __len = function() return 999 end,
             })
             assert(#with_len == 999)
-            assert(test.length(with_len) == 2)
+            assert(test.length(with_len) == 999)
 
             local holed = { [1] = "first", [3] = "third" }
             local border = test.length(holed)

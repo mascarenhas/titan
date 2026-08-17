@@ -2472,6 +2472,556 @@ exit 73
             if not tested then error(test_error, 0) end
         end)
 
+    it("shards only the exact unfiltered Busted invocation", function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local workspace = root .. "/workspace"
+            local support = workspace .. "/spec/support"
+            local bin = root .. "/bin"
+            local mkdir_ok, mkdir_output = run_argv({
+                "mkdir", "-p", support, bin,
+            })
+            assert.truthy(mkdir_ok, mkdir_output)
+            write_file(support .. "/run_rock_tests.sh",
+                read_file("spec/support/run_rock_tests.sh"))
+
+            local fake_busted = bin .. "/busted"
+            write_file(fake_busted, [==[#!/usr/bin/env bash
+set -eu
+: "${TITAN_ROUTING_ARGV_LOG:?}"
+printf '%s\0' "$@" > "$TITAN_ROUTING_ARGV_LOG"
+]==])
+            write_file(support .. "/run_parallel_compiler_tests.sh", [==[
+#!/usr/bin/env bash
+set -eu
+: "${TITAN_ROUTING_SHARD_LOG:?}"
+printf 'sharded\n' > "$TITAN_ROUTING_SHARD_LOG"
+]==])
+            local chmod_ok, chmod_output = run_argv({
+                "chmod", "+x", fake_busted,
+                support .. "/run_rock_tests.sh",
+                support .. "/run_parallel_compiler_tests.sh",
+            })
+            assert.truthy(chmod_ok, chmod_output)
+
+            local function decoded_argv(path)
+                local encoded = read_file(path)
+                local argv = {}
+                local offset = 1
+                while offset <= #encoded do
+                    local finish = assert(encoded:find("\0", offset, true))
+                    argv[#argv + 1] = encoded:sub(offset, finish - 1)
+                    offset = finish + 1
+                end
+                return argv
+            end
+
+            local stdlib_specs = {
+                "retained-one", "retained-two", "retained-three",
+                "retained-four", "retained-five", "retained-six",
+                "retained-seven", "retained-eight",
+            }
+            local argv_log = root .. "/argv"
+            local shard_log = root .. "/shard"
+            local function run_case(environment, arguments)
+                os.remove(argv_log)
+                os.remove(shard_log)
+                local argv = {
+                    "bash", "-c",
+                    'cd "$1" && shift && exec "$@"',
+                    "titan-routing-test", workspace,
+                    "env",
+                    "-u", "BUSTED_FILTER",
+                    "-u", "TITAN_FILTER",
+                    "-u", "TITAN_ROCK_TEST_FORWARDED",
+                    "-u", "TITAN_ROCK_TEST_ARGC",
+                    "-u", "TITAN_ROCK_TEST_ARG_0",
+                    "-u", "TITAN_ROCK_TEST_ARG_1",
+                    "BUSTED=" .. fake_busted,
+                    "TITAN_ROCK_TEST_INTERNAL=1",
+                    "TITAN_ROCK_TEST_STDLIB_SPECS=" ..
+                        table.concat(stdlib_specs, " "),
+                    "TITAN_ROUTING_ARGV_LOG=" .. argv_log,
+                    "TITAN_ROUTING_SHARD_LOG=" .. shard_log,
+                }
+                for _, assignment in ipairs(environment or {}) do
+                    argv[#argv + 1] = assignment
+                end
+                argv[#argv + 1] = "bash"
+                argv[#argv + 1] = "spec/support/run_rock_tests.sh"
+                for _, argument in ipairs(arguments or {}) do
+                    argv[#argv + 1] = argument
+                end
+                return run_argv(argv)
+            end
+
+            local ok, output = run_case()
+            assert.truthy(ok, output)
+            assert.same(stdlib_specs, decoded_argv(argv_log))
+            assert.equal("sharded\n", read_file(shard_log))
+
+            ok, output = run_case({ "TITAN_FILTER=native$tail" })
+            assert.truthy(ok, output)
+            assert.same(stdlib_specs, decoded_argv(argv_log))
+            assert.equal("sharded\n", read_file(shard_log))
+
+            ok, output = run_case({ "BUSTED_FILTER=focus$tail" })
+            assert.truthy(ok, output)
+            assert.same({ "--filter=focus$tail" }, decoded_argv(argv_log))
+            assert.falsy(lfs.attributes(shard_log))
+
+            local direct = { "--name=cost$bill", "line one\nline two", "" }
+            ok, output = run_case(nil, direct)
+            assert.truthy(ok, output)
+            assert.same(direct, decoded_argv(argv_log))
+            assert.falsy(lfs.attributes(shard_log))
+
+            local forwarded = { "spaced sentinel", "--literal=two words" }
+            ok, output = run_case({
+                "TITAN_ROCK_TEST_FORWARDED=1",
+                "TITAN_ROCK_TEST_ARGC=2",
+                "TITAN_ROCK_TEST_ARG_0=" .. forwarded[1],
+                "TITAN_ROCK_TEST_ARG_1=" .. forwarded[2],
+            })
+            assert.truthy(ok, output)
+            assert.same(forwarded, decoded_argv(argv_log))
+            assert.falsy(lfs.attributes(shard_log))
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
+    it("selects every uncovered compiler shard exactly once without LuaCov",
+        function()
+            local root = make_temp_dir()
+            local tested, test_error = xpcall(function()
+                local fake_busted = root .. "/busted"
+                write_file(fake_busted, [==[#!/usr/bin/env bash
+set -eu
+: "${TITAN_SELECTOR_ARGV_LOG:?}"
+printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
+]==])
+                local chmod_ok, chmod_output = run_argv({
+                    "chmod", "+x", fake_busted,
+                })
+                assert.truthy(chmod_ok, chmod_output)
+
+                local expected = { {}, {}, {}, {} }
+                for line in read_file(
+                    "spec/support/ci_compiler_test_groups.txt"):
+                    gmatch("[^\r\n]+") do
+                    local shard, path = line:match("^([1-4])%s+(%S+)")
+                    if shard then
+                        local paths = expected[tonumber(shard)]
+                        paths[#paths + 1] = path
+                    end
+                end
+
+                local seen = {}
+                local total = 0
+                for shard = 1, 4 do
+                    local log = root .. "/shard-" .. shard
+                    local ok, output = run_argv({
+                        "env",
+                        "BUSTED=" .. fake_busted,
+                        "TITAN_SELECTOR_ARGV_LOG=" .. log,
+                        "bash", "spec/support/ci_test_groups.sh",
+                        "compiler-uncovered-shard-" .. shard,
+                    })
+                    assert.truthy(ok, output)
+                    assert.truthy(output:find(
+                        "without LuaCov", 1, true), output)
+
+                    local encoded = read_file(log)
+                    local argv = {}
+                    local offset = 1
+                    while offset <= #encoded do
+                        local finish = assert(encoded:find(
+                            "\0", offset, true))
+                        argv[#argv + 1] = encoded:sub(offset, finish - 1)
+                        offset = finish + 1
+                    end
+                    assert.same({ "-o", "gtest", "-v" },
+                        { argv[1], argv[2], argv[3] })
+                    for _, argument in ipairs(argv) do
+                        assert.not_equal("-c", argument)
+                    end
+
+                    local actual = {}
+                    for index = 4, #argv do
+                        local path = argv[index]
+                        assert.falsy(seen[path], path)
+                        seen[path] = true
+                        actual[#actual + 1] = path
+                        total = total + 1
+                    end
+                    table.sort(actual)
+                    table.sort(expected[shard])
+                    assert.same(expected[shard], actual)
+                end
+                local expected_total = 0
+                for shard = 1, 4 do
+                    expected_total = expected_total + #expected[shard]
+                end
+                assert.equal(expected_total, total)
+            end, debug.traceback)
+            remove_tree(root)
+            if not tested then error(test_error, 0) end
+        end)
+
+    it("isolates and bounds all four local compiler workers", function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local workspace = root .. "/workspace"
+            local support = workspace .. "/spec/support"
+            local bin = root .. "/bin"
+            local temporary_base = root .. "/runner-tmp"
+            local state = root .. "/state"
+            local mkdir_ok, mkdir_output = run_argv({
+                "mkdir", "-p", support, bin, temporary_base, state,
+                workspace .. "/.git", workspace .. "/.lua",
+            })
+            assert.truthy(mkdir_ok, mkdir_output)
+            write_file(workspace .. "/Makefile", "all:\n\t@true\n")
+            write_file(workspace .. "/ordinary", "original\n")
+            write_file(workspace .. "/.git/excluded", "git\n")
+            write_file(workspace .. "/.lua/excluded", "lua\n")
+            write_file(support .. "/run_parallel_compiler_tests.sh",
+                read_file("spec/support/run_parallel_compiler_tests.sh"))
+
+            local fake_busted = bin .. "/busted"
+            write_file(fake_busted, [==[#!/usr/bin/env bash
+exit 0
+]==])
+            write_file(support .. "/ci_test_groups.sh", [==[#!/usr/bin/env bash
+set -u
+
+state=${TITAN_FIXTURE_STATE:?}
+expected_max=${TITAN_FIXTURE_EXPECTED_MAX:?}
+group=${1:-}
+case "$group" in
+    compiler-uncovered-shard-[1-4]) shard=${group##*-} ;;
+    *) echo "unexpected fixture group: $group" >&2; exit 71 ;;
+esac
+
+[[ $PWD != "$TITAN_FIXTURE_ORIGINAL" ]] || exit 72
+[[ ! -e .git && ! -e .lua ]] || exit 73
+[[ $(cat ordinary) == original ]] || exit 74
+[[ $MAKEFLAGS == -j1 && $TITAN_JOBS == 1 ]] || exit 75
+case "$BUSTED" in /*) ;; *) exit 76 ;; esac
+[[ -d $TMPDIR ]] || exit 77
+[[ $CCACHE_TEMPDIR == "$TMPDIR/ccache" &&
+   -d $CCACHE_TEMPDIR ]] || exit 78
+
+acquire_lock() {
+    while ! mkdir "$state/lock" 2>/dev/null; do sleep 0.01; done
+}
+release_lock() {
+    rmdir "$state/lock"
+}
+
+acquire_lock
+active=$(cat "$state/active")
+active=$((active + 1))
+printf '%s\n' "$active" > "$state/active"
+maximum=$(cat "$state/maximum")
+if [[ $active -gt $maximum ]]; then
+    printf '%s\n' "$active" > "$state/maximum"
+fi
+printf '%s\t%s\t%s\t%s\n' "$shard" "$PWD" "$TMPDIR" "$BUSTED" \
+    >> "$state/observations"
+release_lock
+
+# Hold the first wave until every permitted slot is occupied, making the
+# concurrency observation deterministic even on a heavily loaded host.
+barrier_deadline=$((SECONDS + 5))
+while [[ $(cat "$state/maximum") -lt $expected_max ]]; do
+    if [[ $SECONDS -ge $barrier_deadline ]]; then
+        echo "fixture concurrency barrier timed out" >&2
+        exit 78
+    fi
+    sleep 0.01
+done
+
+if [[ ${TITAN_FIXTURE_KILL_WRAPPER_SHARD:-} == "$shard" ]]; then
+    # The launcher makes the worker wrapper the process-group leader. Kill
+    # only that leader so it cannot send its ordinary FIFO completion record;
+    # leave this selector alive for the parent's dead-worker cleanup path.
+    wrapper=$(ps -o pgid= -p $$ | tr -d ' ')
+    [[ $wrapper =~ ^[0-9]+$ ]] || exit 79
+    printf '%s\n' "$wrapper" > "$state/killed-wrapper"
+    kill -KILL "$wrapper"
+    sleep 30
+    exit 80
+fi
+
+if [[ ${TITAN_FIXTURE_HANG_SHARD:-} == "$shard" ]]; then
+    (
+        trap '' TERM
+        while :; do sleep 1; done
+    ) &
+    descendant=$!
+    printf '%s\n' "$descendant" > "$state/term-ignoring-descendant"
+    wait "$descendant"
+    exit 81
+fi
+
+printf 'fixture-output-%s\n' "$shard"
+touch "worker-mutated-$shard"
+sleep 0.1
+
+acquire_lock
+active=$(cat "$state/active")
+printf '%s\n' "$((active - 1))" > "$state/active"
+printf '%s\n' "$shard" >> "$state/finished"
+release_lock
+
+if [[ ${TITAN_FIXTURE_FAIL_SHARD:-} == "$shard" ]]; then exit 23; fi
+]==])
+            local chmod_ok, chmod_output = run_argv({
+                "chmod", "+x", fake_busted,
+                support .. "/run_parallel_compiler_tests.sh",
+                support .. "/ci_test_groups.sh",
+            })
+            assert.truthy(chmod_ok, chmod_output)
+
+            local function reset_state()
+                for _, name in ipairs({
+                    "active", "maximum", "observations", "finished",
+                    "killed-wrapper", "term-ignoring-descendant",
+                }) do
+                    os.remove(state .. "/" .. name)
+                end
+                write_file(state .. "/active", "0\n")
+                write_file(state .. "/maximum", "0\n")
+                write_file(state .. "/observations", "")
+                write_file(state .. "/finished", "")
+            end
+
+            local function run_case(jobs, fail_shard, extra_environment,
+                bounded)
+                reset_state()
+                local argv = {}
+                if bounded then
+                    argv[#argv + 1] = "bash"
+                    argv[#argv + 1] = lfs.currentdir() ..
+                        "/spec/support/run_with_timeout.sh"
+                    argv[#argv + 1] = "8"
+                end
+                for _, argument in ipairs({
+                    "bash", "-c",
+                    'cd "$1" && shift && exec "$@"',
+                    "titan-parallel-test", workspace,
+                    "env", "-u", "TITAN_ROCK_TEST_JOBS",
+                    "-u", "TITAN_FIXTURE_KILL_WRAPPER_SHARD",
+                    "-u", "TITAN_FIXTURE_HANG_SHARD",
+                    "PATH=" .. bin .. ":" .. assert(os.getenv("PATH")),
+                    "BUSTED=busted",
+                    "TMPDIR=" .. temporary_base,
+                    "TITAN_FIXTURE_STATE=" .. state,
+                    "TITAN_FIXTURE_ORIGINAL=" .. workspace,
+                    "TITAN_FIXTURE_EXPECTED_MAX=" .. tostring(jobs or 4),
+                }) do
+                    argv[#argv + 1] = argument
+                end
+                if jobs then
+                    argv[#argv + 1] =
+                        "TITAN_ROCK_TEST_JOBS=" .. tostring(jobs)
+                end
+                if fail_shard then
+                    argv[#argv + 1] =
+                        "TITAN_FIXTURE_FAIL_SHARD=" .. tostring(fail_shard)
+                else
+                    argv[#argv + 1] = "TITAN_FIXTURE_FAIL_SHARD="
+                end
+                for _, assignment in ipairs(extra_environment or {}) do
+                    argv[#argv + 1] = assignment
+                end
+                argv[#argv + 1] = "bash"
+                argv[#argv + 1] =
+                    "spec/support/run_parallel_compiler_tests.sh"
+                return run_argv(argv)
+            end
+
+            local function assert_temporary_base_empty()
+                for entry in lfs.dir(temporary_base) do
+                    assert.truthy(entry == "." or entry == "..", entry)
+                end
+            end
+
+            local function assert_complete_run(expected_max, output)
+                assert.equal(tostring(expected_max) .. "\n",
+                    read_file(state .. "/maximum"))
+                local roots = {}
+                local temporary_directories = {}
+                local observed_shards = {}
+                for line in read_file(state .. "/observations"):
+                    gmatch("[^\r\n]+") do
+                    local shard, worker, tmpdir, busted =
+                        line:match("^(%d)\t([^\t]+)\t([^\t]+)\t([^\t]+)$")
+                    assert.truthy(shard, line)
+                    assert.falsy(observed_shards[shard], line)
+                    assert.falsy(roots[worker], line)
+                    assert.falsy(temporary_directories[tmpdir], line)
+                    observed_shards[shard] = true
+                    roots[worker] = true
+                    temporary_directories[tmpdir] = true
+                    assert.not_equal(workspace, worker)
+                    assert.equal(fake_busted, busted)
+                end
+                local finished = {}
+                for shard in read_file(state .. "/finished"):
+                    gmatch("[^\r\n]+") do
+                    finished[shard] = true
+                end
+                for shard = 1, 4 do
+                    local label = tostring(shard)
+                    assert.truthy(observed_shards[label], label)
+                    assert.truthy(finished[label], label)
+                    assert.truthy(output:find(
+                        "[compiler shard " .. label .. "] " ..
+                        "fixture-output-" .. label, 1, true), output)
+                    assert.truthy(output:find(
+                        "===== finished compiler shard " .. label ..
+                        ": status=", 1, true), output)
+                    assert.falsy(lfs.attributes(
+                        workspace .. "/worker-mutated-" .. label))
+                end
+                assert.equal(4, (function()
+                    local count = 0
+                    for _ in pairs(roots) do count = count + 1 end
+                    return count
+                end)())
+                assert.equal(4, (function()
+                    local count = 0
+                    for _ in pairs(temporary_directories) do
+                        count = count + 1
+                    end
+                    return count
+                end)())
+                assert.equal("original\n", read_file(
+                    workspace .. "/ordinary"))
+                assert_temporary_base_empty()
+            end
+
+            local function run_interruption_case()
+                reset_state()
+                return run_argv({
+                    "bash", lfs.currentdir() ..
+                        "/spec/support/run_with_timeout.sh", "10",
+                    "bash", "-c", [==[
+workspace=$1
+state=$2
+temporary_base=$3
+bin=$4
+cd "$workspace" || exit 90
+env PATH="$bin:$PATH" \
+    BUSTED=busted \
+    TMPDIR="$temporary_base" \
+    TITAN_ROCK_TEST_JOBS=1 \
+    TITAN_FIXTURE_STATE="$state" \
+    TITAN_FIXTURE_ORIGINAL="$workspace" \
+    TITAN_FIXTURE_EXPECTED_MAX=1 \
+    TITAN_FIXTURE_FAIL_SHARD= \
+    TITAN_FIXTURE_HANG_SHARD=1 \
+    bash spec/support/run_parallel_compiler_tests.sh &
+runner=$!
+deadline=$((SECONDS + 5))
+while [[ ! -s $state/term-ignoring-descendant ]]; do
+    if ! kill -0 "$runner" 2>/dev/null; then
+        wait "$runner" || true
+        echo "parallel launcher exited before starting descendant" >&2
+        exit 91
+    fi
+    if [[ $SECONDS -ge $deadline ]]; then
+        kill -TERM "$runner" 2>/dev/null || true
+        wait "$runner" || true
+        echo "timed out waiting for TERM fixture descendant" >&2
+        exit 92
+    fi
+    sleep 0.01
+done
+descendant=$(cat "$state/term-ignoring-descendant")
+kill -TERM "$runner"
+runner_status=0
+wait "$runner" || runner_status=$?
+if [[ $runner_status -ne 143 ]]; then
+    echo "parallel launcher TERM status was $runner_status" >&2
+    exit 93
+fi
+deadline=$((SECONDS + 4))
+while kill -0 "$descendant" 2>/dev/null; do
+    if [[ $SECONDS -ge $deadline ]]; then
+        echo "TERM-ignoring descendant survived launcher cleanup" >&2
+        exit 94
+    fi
+    sleep 0.01
+done
+]==], "titan-parallel-interruption", workspace, state,
+                    temporary_base, bin,
+                })
+            end
+
+            local ok, output = run_case()
+            assert.truthy(ok, output)
+            assert_complete_run(4, output)
+            assert.truthy(output:find(
+                "All four compiler shards passed", 1, true), output)
+
+            ok, output = run_case(2)
+            assert.truthy(ok, output)
+            assert_complete_run(2, output)
+
+            local why, code
+            ok, output, why, code = run_case(nil, 2)
+            assert.falsy(ok, output)
+            assert.equal("exit", why)
+            assert.equal(1, code)
+            assert_complete_run(4, output)
+            assert.truthy(output:find(
+                "compiler shard 2 failed: 23", 1, true), output)
+
+            local started = os.time()
+            ok, output, why, code = run_case(1, nil, {
+                "TITAN_FIXTURE_KILL_WRAPPER_SHARD=1",
+            }, true)
+            assert.falsy(ok, output)
+            assert.equal("exit", why)
+            assert.equal(1, code)
+            assert.is_true(os.time() - started < 8, output)
+            assert.truthy(lfs.attributes(
+                state .. "/killed-wrapper", "mode"), output)
+            assert.truthy(output:find(
+                "compiler shard 1", 1, true), output)
+            assert_temporary_base_empty()
+
+            ok, output, why, code = run_interruption_case()
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            assert.truthy(lfs.attributes(
+                state .. "/term-ignoring-descendant", "mode"), output)
+            assert_temporary_base_empty()
+
+            for _, invalid in ipairs({ "0", "5", "invalid" }) do
+                ok, output, why, code = run_argv({
+                    "bash", "-c",
+                    'cd "$1" && shift && exec "$@"',
+                    "titan-parallel-validation", workspace,
+                    "env",
+                    "TITAN_ROCK_TEST_JOBS=" .. invalid,
+                    "bash", "spec/support/run_parallel_compiler_tests.sh",
+                })
+                assert.falsy(ok, output)
+                assert.equal("exit", why)
+                assert.equal(2, code)
+                assert.truthy(output:find(
+                    "must be an integer from 1 through 4", 1, true), output)
+            end
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
     it("bounds TERM-ignoring descendants for every command exit path",
         function()
             local function run_case(command, expected_ok, expected_code)
@@ -3205,8 +3755,9 @@ exit 73
                 "run_isolated_compiler_coverage",
                 '"$BUSTED" -c -o gtest -v "$test_file"',
                 "compiler | compiler-shard-[1-4])",
-                "compiler-uncovered)",
+                "compiler-uncovered | compiler-uncovered-shard-[1-4])",
                 "compiler-shard-{1..4}",
+                "compiler-uncovered-shard-{1..4}",
                 "ci_compiler_test_groups.txt",
             }) do
                 assert.truthy(groups:find(retained, 1, true), retained)
@@ -3223,10 +3774,48 @@ exit 73
             }) do
                 assert.falsy(groups:find(removed, 1, true), removed)
             end
-            local uncovered_group = assert(groups:match(
-                "\n    compiler%-uncovered%)(.-)\n        ;;"))
+            local uncovered_start = assert(groups:find(
+                "compiler-uncovered | compiler-uncovered-shard-[1-4])",
+                1, true))
+            local uncovered_finish = assert(groups:find(
+                "\n        ;;", uncovered_start, true))
+            local uncovered_group = groups:sub(
+                uncovered_start, uncovered_finish - 1)
             assert.falsy(uncovered_group:find(" -c ", 1, true),
                 uncovered_group)
+
+            local local_parallel_compiler = read_file(
+                "spec/support/run_parallel_compiler_tests.sh")
+            for _, required in ipairs({
+                "jobs=${TITAN_ROCK_TEST_JOBS:-4}",
+                "[[ ! $jobs =~ ^[1-4]$ ]]",
+                "tar --exclude='./.git'",
+                "--exclude='./.lua'",
+                'mkfifo "$completion_fifo"',
+                'MAKEFLAGS=-j1',
+                'TITAN_JOBS=1',
+                'CCACHE_TEMPDIR="$worker_root/tmp-$shard/ccache"',
+                '"compiler-uncovered-shard-$shard"',
+                'printf \'[compiler shard %s] %s\\n\'',
+                "trap 'handle_signal 143' TERM",
+                'kill -TERM -- "-$pid"',
+                'kill -KILL -- "-$pid"',
+                '"$temporary_base"/titan-rock-compiler-workers.*)',
+            }) do
+                assert.truthy(local_parallel_compiler:find(
+                    required, 1, true), required)
+            end
+            for line in local_parallel_compiler:gmatch("[^\r\n]+") do
+                local command = line:match("^%s*(.-)%s*$")
+                if command:sub(1, 1) ~= "#" then
+                    for _, unsupported in ipairs({
+                        "wait -n", "declare -A", "mapfile", "readarray",
+                    }) do
+                        assert.falsy(command:find(
+                            unsupported, 1, true), line)
+                    end
+                end
+            end
 
             local parallel_compiler = read_file(
                 "spec/support/ci_parallel_compiler_tests.sh")
@@ -3278,8 +3867,8 @@ exit 73
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 27, 26, 26, 27 }, shard_counts)
-            assert.equal(106, assigned_count)
+            assert.same({ 27, 26, 27, 27 }, shard_counts)
+            assert.equal(107, assigned_count)
 
             assert.equal(1, count_literal(sanitizer_job,
                     "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),

@@ -338,64 +338,159 @@ Writer failure leaves length, capacity, and contents unchanged.
 
 ## Maps
 
-Map access dispatches on the **static key type**; the key is boxed into
-an anchored temp slot and passed as a `TValue*`.
+Map access dispatches on the **static key type**; the key is boxed into an
+anchored temporary stack slot and passed as a `TValue *`. Reads and assignments
+keep that specialized inline work as the common path. They use the VM finish
+helpers only after the relevant metatable check says a metamethod may exist;
+they do not lower the whole operation to `lua_gettable` or `lua_settable`.
 
 ### Read (`codeindexmap` + `get_table_key`)
 
-**String** keys test for the interned-short-string fast path; **integer**
-keys call `luaH_getint(t, ivalue(k), ...)`; **float** keys are first
-normalized with `luaV_tointeger(k, &ik, F2Ieq)` so `m[1.0]` and `m[1]`
-hit the same entry; anything else takes plain `luaH_get`. All variants
-normalize an empty tag to nil and finish with the same strict guard (or
-option-nil shortcut) as arrays. Real output for `m: {string:integer}`:
+**String** keys test for the interned-short-string fast path; **integer** keys
+call `luaH_getint(t, ivalue(k), ...)`; **float** keys are first normalized with
+`luaV_tointeger(k, &ik, F2Ieq)` so `m[1.0]` and `m[1]` hit the same entry;
+anything else takes plain `luaH_get`. These raw getters write into the already
+rooted key slot and leave it untouched on a miss, allowing that one real stack
+slot to become the result slot just as it does in Lua's `lua_gettable` path.
+The generated shape for a string-keyed Map is:
 
 ```c
-_tmp_2 = _param_k;
-setsvalue(L, _tmp_2_slot, _tmp_2);         /* anchored key slot */
-TValue _s_v;
 lu_byte _s_tag;
-if (ttypetag(_tmp_2_slot) == LUA_VSHRSTR) {
-    _s_tag = luaH_getshortstr(_t, tsvalue(_tmp_2_slot), &_s_v);
+if (ttypetag(_key_slot) == LUA_VSHRSTR) {
+    _s_tag = luaH_getshortstr(_t, tsvalue(_key_slot), _key_slot);
 } else {
-    _s_tag = luaH_get(_t, _tmp_2_slot, &_s_v);
+    _s_tag = luaH_get(_t, _key_slot, _key_slot);
 }
 if (tagisempty(_s_tag)) {
-    setnilvalue(&_s_v);
+    if (TITAN_LIKELY(checknoTM(_t->metatable, TM_INDEX))) {
+        setnilvalue(_key_slot);
+    } else {
+        TValue _table;
+        sethvalue(L, &_table, _t);
+        _s_tag = luaV_finishget(L, &_table, _key_slot,
+                               _key_stack, _s_tag);
+        _base = restorestack(L, _base_off);
+    }
+}
+_s = _key_slot;
+```
+
+`checknoTM` covers both no metatable and the cached absence of `__index`; that
+likely branch preserves the old miss-to-nil behavior without a VM call. When
+`__index` may exist, the original `Table *` is boxed for `luaV_finishget`. Its
+`StkId` result argument is the reserved key stack entry, never a local
+`TValue *`; this lets the VM implement function, table, and recursively
+metamethod-aware chains using its own loop bound. Because that call can grow or
+relocate the Lua stack, generated code restores `_base` from `_base_off` before
+using any stack-derived pointer.
+
+The caller then points `_s` at the result slot and applies the unchanged strict
+`GuardPlan` (or option-nil shortcut). A wrong value therefore surfaces as the
+same deferred run-time error, e.g. `expected integer but found string`, whether
+it came from a raw entry or `__index`. Maps carry no write provenance channel,
+and an integral float returned by a metamethod does not become an integer on a
+typed Map read.
+
+### Assignment (`set_table_entry`) and constructor (`codemap`)
+
+Assignments box raw-visible values with `setboxed` into a local `TValue _vv`.
+The likely `checknoTM(t->metatable, TM_NEWINDEX)` branch uses the original raw
+setter verbatim: integer keys call `luaH_setint`; float keys normalize via
+`luaV_tointeger(..., F2Ieq)` and use `luaH_setint` or `luaH_set`; all other keys
+— including strings, because the read-side short-string split has no write
+analogue — call `luaH_set` and invalidate the metamethod cache:
+
+```c
+if (TITAN_LIKELY(checknoTM(_t->metatable, TM_NEWINDEX))) {
+    luaH_set(L, _t, _key_slot, &_vv);
+    invalidateTMcache(_t);
+} else {
+    int _hres = luaH_pset(_t, _key_slot, &_vv);
+    if (_hres != HOK) {
+        TValue _table;
+        sethvalue(L, &_table, _t);
+        luaV_finishset(L, &_table, _key_slot, &_vv, _hres);
+        _base = restorestack(L, _base_off);
+    }
 }
 ```
 
-A wrong stored value surfaces here as a deferred run-time error, e.g.
-`expected integer but found string`. The guard does not depend on whether
-Titan or raw Lua performed the write: Maps are ordinary Tables and carry no
-write-interception or provenance channel. An integral float therefore does not
-become an integer on a typed Map read.
+When `__newindex` may exist, the coder first uses Lua's partial-set protocol.
+Integer and integral-float keys use `luaH_fastseti`, not `luaH_psetint`, because
+the key may name an array-part slot; other keys use `luaH_pset`. `HOK` means an
+existing entry was updated in place, correctly bypassing `__newindex`. Any
+other result describes the unresolved location and is passed, with the boxed
+original table, to `luaV_finishset`, which implements the function/table/value
+metamethod chain, its loop bound, insertion, cache invalidation, and barriers
+for the actual target. The call can relocate the stack, so `_base` is restored
+immediately afterward. The Map and key were already frozen and rooted by
+`_materialize_assignment_lvalue` before the right-hand side was evaluated;
+dispatch therefore preserves Map, key, RHS, store order and cannot retain a
+stack-derived pointer across the VM call.
 
-### Write (`set_table_entry`) and constructor (`codemap`)
+The caller still emits its existing
+`luaC_barrierback(L, obj2gco(_t), &_vv);` after the helper for a GC-able Map
+value. That is the original table's barrier for a raw or `HOK` update;
+`luaV_finishset` supplies the required barrier for the actual target when the
+assignment is redirected through a chain. The generic raw setter's
+`invalidateTMcache` also remains: a store under a string key can shadow a
+metamethod name.
 
-Writes box raw-visible values with `setboxed` into a local `TValue _vv`, then:
-integer keys use `luaH_setint`; float keys normalize via
-`luaV_tointeger(..., F2Ieq)` then `luaH_setint` or `luaH_set`; all other
-keys — including strings; the read-side short-string split has no write
-analogue — take the generic path:
+`codemap` is deliberately separate. It allocates a fresh `luaH_new` table with
+no metatable, anchors it immediately, evaluates every key and value into its
+own anchored slot, then uses `set_table_entry_raw` plus the caller's back
+barrier. Constructors therefore do not pay a metatable check or partial-set
+cost. An all-positional constructor is accepted only for an exact integer key
+type; it consumes the same `_positional_adjustment` as Array construction,
+pre-sizes the ordinary table's array part, and stores positions 1 through N.
 
-```c
-luaH_set(L, _t, _tmp_2_slot, &_vv);
-invalidateTMcache(_t);
-```
+### Length (`code_map_length`)
 
-The `invalidateTMcache` on generic stores mirrors Lua's own API split: a
-raw store under a string key could shadow a metamethod name, so
-`lua_rawset` flushes the table's metamethod-absence cache while
-`lua_rawseti` does not, and the coder reproduces exactly that. The
-caller emits `luaC_barrierback(L, obj2gco(_t), &_vv);` when the map's
-*value* type is GC-able. `codemap` builds constructors like arrays —
-`luaH_new` anchored immediately, every key and value in its own anchored
-slot, `set_table_entry` per entry plus the back barrier. An all-positional
-constructor is accepted only for an exact integer key type; it consumes the
-same `_positional_adjustment` as Array construction, pre-sizes the ordinary
-table's array part, and stores positions 1 through N. `#m` for such a Map uses
-`luaH_getn`, so holed Maps retain Lua's unspecified valid-border semantics.
+The checker admits `#m` only for an exact integer-keyed Map, preserving the
+surface result type `integer`. `code_map_length` materializes and roots the Map
+operand once. The likely `checknoTM(map->metatable, TM_LEN)` branch calls
+`l_castU2S(luaH_getn(L, map))` inline, so a no-metatable or cached-no-`__len`
+Map retains Lua's ordinary valid-border semantics without a public `lua_len`
+call.
+
+When `__len` may exist, the coder boxes that same `Table *`, reserves a real
+Lua `StkId` result slot, and calls
+`luaV_objlen(L, result_stack, &boxed_map)`. This delegates callable metamethod
+dispatch and Lua result production to the VM. The call can relocate the stack,
+so `_base` is restored immediately and the result slot address is recomputed
+from its saved offset. The coder then requires `ttisinteger(result)` before
+using `ivalue(result)`; an integral float or any other tag raises
+`expected integer tag but found ...` rather than crossing a dynamic conversion
+boundary. Arrays keep their separate authoritative `lenhint` path.
+
+### Equality (`codebinaryop`)
+
+Metamethod-aware equality is selected from the checker's original
+`ComparisonPlan.left` and `.right` types, not merely from the operands' final C
+representations. This distinction matters because comparison adjustment boxes
+the Map side of Map/`value`, while an unrelated `value`/`value` comparison has
+the same pair of `TValue` carriers and must remain raw.
+
+Map/Map evaluates and materializes the left operand, then the right, exactly
+once. Pointer identity resolves equality immediately. For distinct tables,
+paired `checknoTM(..., TM_EQ)` tests resolve false inline when both sides have
+no metatable or cached absence of `__eq`. Only the remaining
+possible-metamethod case boxes both tables and calls
+`luaV_equalobj(L, &left, &right)`. The VM keeps primitive identity first,
+selects the left `__eq` or falls back to the right one, calls callable
+metamethod values, and converts the result with Lua truthiness.
+
+Map/`value` and `value`/Map likewise evaluate left to right and begin with
+`luaV_rawequalobj`. A raw-unequal pair continues only when both run-time values
+are tables and `checknoTM` does not prove `__eq` absent from both; that narrow
+case calls `luaV_equalobj`. A non-table dynamic value therefore cannot enter
+table metamethod dispatch. Plain `value`/`value`, Arrays, Functions, nominal
+values, and Options retain their previous comparison paths.
+
+Each metamethod-aware branch stores one boolean result. The potentially
+calling `luaV_equalobj` path restores `_base` before later stack-root use, and
+`~=` negates the already materialized result rather than redispatching or
+reevaluating either operand.
 
 ## Records
 
@@ -635,9 +730,11 @@ takes the sign of the divisor, as floored division requires.
 exponent `2` is special-cased as `b * b` (where `b` is the base hoisted
 into a float temp), every other exponent uses `pow(b, e)` — both
 operands are materialized into float temps first, so each is evaluated
-once. **Equality on dynamic values**: when both operands are
-`TValue`-represented (`value` or options), `==`/`~=` compile to
-`luaV_rawequalobj(&l, &r)` and its negation. **`and`/`or`** specialize on static truthiness: boolean
+once. **Equality on ordinary dynamic values**: when both operands are
+`TValue`-represented (`value` or options), `==`/`~=` normally compile to
+`luaV_rawequalobj(&l, &r)` and its negation. The narrowly selected
+[Map/`value` path](#equality-codebinaryop) adds table `__eq` after a failed raw
+check; `value`/`value` remains raw. **`and`/`or`** specialize on static truthiness: boolean
 operands become C `&&`/`||`; statically truthy/falsy sides short-circuit
 at compile time. In the general case the left operand is first
 **materialized into a temp of its own type** and the truthiness test

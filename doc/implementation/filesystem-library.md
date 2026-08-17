@@ -93,9 +93,8 @@ notification remain available to the next polling Task.
 ## One-to-one drain mapping
 
 `poll` detaches the currently buffered raw Array and installs a fresh one before
-classification, so callbacks that arrive while `lstat` is pending append to the
-next batch. It allocates an equally indexed `{WatcherEvent}` and maps every
-`WatcherNotification` to exactly one result:
+classification, so callbacks that arrive while `lstat` is pending append to a
+follow-on batch. It maps every `WatcherNotification` to exactly one result:
 
 - a negative native status closes the registration and becomes `error`;
 - `UV_RENAME` takes precedence and an asynchronous facade `lstat` chooses
@@ -112,6 +111,24 @@ registration is retired. A missing directly watched file is likewise emitted
 as `deleted` and retired regardless of its native event bit. An `OperationError`
 raised by one mapping becomes that notification's `WatcherEvent.error`; there
 is no raw-batch rollback or watcher reset.
+
+Mapping a deletion can stop a registration, and mapping a native error can
+retire and close one, after callbacks from that registration have already
+entered the follow-on Array. After each detached batch is mapped, the drain
+scans the fresh Array. If any notification now names a registration whose dense
+index is zero, the drain detaches and maps that entire follow-on batch in
+callback order before returning. Pulling the complete Array, instead of
+filtering only the retired registration's records, preserves callback order
+across registrations. A batch containing only live registrations remains
+buffered for the next `poll`.
+
+The extension is bounded: deletion retirement calls `uv_fs_event_stop`, while
+native-error retirement proceeds directly to close, and the waiting close has
+completed before either mapping returns. No further callback can then enter for
+that registration. A follow-on batch may retire another finite live
+registration, in which case the same rule repeats. No raw notification is
+discarded or merged, and a retirement-causing `poll` leaves no already-copied
+event for that retired registration to leak into the next call.
 
 ## Stopping and closing handles
 

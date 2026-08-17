@@ -758,13 +758,14 @@ function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]],
     local tmptype = (types.is_direct_c(typ) and
         cdeclarator.adjust_parameter_type(typ)) or typ
     if isgc then
-        local slot = newslot(ctx)
+        local depth = reserveslot(ctx)
+        local slot = slotat(depth)
         return render([[
             $DECL = $INIT;
         ]], {
             DECL = cvardecl(ctx, tmptype, tmpname),
             INIT = initializer or initval(typ)
-        }), tmpname, slot
+        }), tmpname, slot, stackslotat(depth)
     else
         return render([[
             $DECL = $INIT;

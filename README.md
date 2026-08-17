@@ -726,14 +726,22 @@ build installs the current checkout, including the combined `titan.so` and
 `titan.a` support/standard-library providers. The rockspec's command backend
 enters `spec/support/run_rock_tests.sh`, which invokes `make rock-test`: the
 Busted tree runs first, followed by the same aggregate native executable.
-Busted 2.3 does not provide a shard option, so local `-j4` does not split the
-Busted spec files; many compiler specs also share fixed checkout-root artifact
-names. The Linux compiler CI job supplies the missing isolation externally: it
-runs four measured file groups in private prepared-tree copies, schedules at
-most two groups concurrently to match the private runner's two CPUs, caps nested
-Make and `titanc` work at one slot per worker, streams tagged output, then merges
-their separate LuaCov stats. Individual Busted invocations and the native
-aggregate remain unsharded.
+Busted 2.3 does not provide a shard option, and many compiler specs share fixed
+checkout-root artifact names. For an unfiltered run with no forwarded Busted
+arguments, `rock-test` therefore runs the eight retained runtime/packaging specs
+once, then externally partitions the compiler/language specs into four measured
+groups in private checkout copies. Every worker has private general and ccache
+temporary directories. It runs four workers by default, with nested Make and
+`titanc` work capped at one slot per worker; set
+`TITAN_ROCK_TEST_JOBS=1` through `4` to lower that concurrency. A nonempty
+`BUSTED_FILTER` or any forwarded Busted argument preserves the single-process
+Busted path. `TITAN_FILTER` alone does not disable compiler sharding, and the
+native aggregate remains one executable.
+
+The Linux compiler CI job uses the same measured partition but retains its own
+coverage runner: it schedules at most two groups concurrently to match the
+private runner's two CPUs, streams tagged output, then merges their separate
+LuaCov stats. Local shards do not collect LuaCov data.
 `BUSTED_FILTER` and `TITAN_FILTER` are independent Lua-pattern selectors;
 filtering one domain does not skip the other, so use a leaf target when only one
 is wanted. A Titan filter changes execution only—the build still compiles all
@@ -741,6 +749,7 @@ is wanted. A Titan filter changes execution only—the build still compiles all
 
 ```sh
 $ make stdlib-test
+$ TITAN_ROCK_TEST_JOBS=4 make rock-test
 $ make busted-test BUSTED_FILTER='parser'
 $ make titan-stdlib-test TITAN_FILTER='^http[.]tests[.]test_client'
 $ make titan-stdlib-test-build

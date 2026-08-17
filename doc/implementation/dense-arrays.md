@@ -316,7 +316,8 @@ The checker accepts:
 
 It does not admit `value`, Float, a foreign C integer, or another compatible
 key type as an integer Map. The distinction determines whether code generation
-uses the explicit Array hint or Lua's ordinary Map-border search.
+uses the explicit Array hint or metamethod-aware ordinary-table length for a
+Map. A metatable does not make any rejected Map key type admissible.
 
 ### Positional constructors
 
@@ -439,9 +440,14 @@ in raw-visible Map storage.
 
 ### Length
 
-Array lowering uses `titan_array_length`/the guarded hint. Integer-Map lowering
-uses `luaH_getn(L, map)` and therefore retains Lua-border semantics. Other Map
-key types fail in the checker.
+Array lowering uses `titan_array_length`/the guarded hint and remains entirely
+separate from Map metamethod dispatch. Integer-Map lowering first uses cached
+`TM_LEN` absence to keep `luaH_getn(L, map)` as its likely raw path and
+therefore retains Lua-border semantics when `__len` is absent. When it may be
+present, lowering boxes the Map and calls `luaV_objlen` with a reserved stack
+result, restores `_base`, and requires the result's exact integer tag before
+unboxing. Other Map key types fail in the checker. The complete generated shape
+is in [Code generator: constructs](codegen-constructs.md#length-code_map_length).
 
 ## Exact and generic call paths
 

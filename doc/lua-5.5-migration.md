@@ -146,10 +146,11 @@ This use requires Titan to own every relevant mutation:
 * growth is bounded by Titan's exact mirror of Lua 5.5's private `MAXASIZE`
   expression, with no hash fallback.
 
-Integer-keyed Maps remain ordinary Tables and `#map` deliberately calls
-`luaH_getn`, retaining Lua's valid-border semantics. The complete ownership,
-GC, and proxy protocol is in
-[Dense Arrays](implementation/dense-arrays.md#authoritative-lenhint-and-resizing).
+Integer-keyed Maps remain ordinary Tables. `#map` keeps `luaH_getn` as its raw
+path, retaining Lua's valid-border semantics when `__len` is absent, and uses
+`luaV_objlen` when that metamethod may exist; Titan then requires its result to
+have the exact integer tag. The complete ownership, GC, and proxy protocol is
+in [Dense Arrays](implementation/dense-arrays.md#authoritative-lenhint-and-resizing).
 
 ### Values and type checks
 

@@ -102,14 +102,21 @@ not add epicycles around what may be a misunderstood simpler design.
   wrappers preserve the Make jobserver through guarded recursive recipe lines,
   and `ltitanlib.o`
   waits for the prefix Lua installation that owns its public headers. Busted
-  2.3 has no native shard option. Local Busted invocations remain serial, while
-  the Linux compiler consumer externally partitions its complete file set into
-  four measured longest-first groups and schedules at most two concurrently.
+  2.3 has no native shard option. An exact unfiltered local `rock-test` instead
+  runs the eight retained runtime/packaging specs serially, then externally
+  partitions the complete compiler/language file set into four measured
+  longest-first groups in private checkout copies. It defaults to four workers,
+  accepts `TITAN_ROCK_TEST_JOBS=1` through `4`, gives each worker private
+  general and ccache temporary directories, and caps nested Make/Titan work at
+  one slot per worker. A Busted filter or forwarded argument preserves the
+  single-process path; a Titan-only filter does not disable compiler sharding.
+  The Linux compiler consumer uses the same partition and schedules at most two
+  workers concurrently.
   Each group runs in a private extraction of the prepared checkout, because
   compiler specs share checkout-root artifact names; tagged Busted output
-  streams to the job log, each group owns one LuaCov stats file, and the job
-  merges all four only after every worker passes. The installed prefix is shared
-  read-only. The
+  streams to the job log. In Linux coverage CI each group owns one LuaCov stats
+  file, and the job merges all four only after every worker passes; local shards
+  do not collect LuaCov. The installed prefix is shared read-only. The
   aggregate native Titan suite also remains one fast executable.
 
   1. `test-linux-stdlib` is the prepared-tree producer. It prepares a clean
@@ -330,8 +337,11 @@ not add epicycles around what may be a misunderstood simpler design.
   test backend that enters `run_rock_tests.sh`. The adapter passes ordinary
   appended arguments only to Busted, maps `BUSTED_FILTER` and `TITAN_FILTER`
   independently, and invokes `make rock-test`; the latter runs the Busted tree
-  and the one aggregate native Titan suite. Filtering one domain does not skip
-  the other, so use its leaf Make target when only that domain is wanted.
+  and the one aggregate native Titan suite. Its exact unfiltered path runs the
+  retained runtime/packaging specs once and the compiler/language specs in four
+  isolated local shards; filtered or otherwise customized Busted runs remain
+  serial. Filtering one domain does not skip the other, so use its leaf Make
+  target when only that domain is wanted.
   `luarocks test` does **not** build the rock-under-test, so `make test` runs
   `luarocks make` first.
 - **Bash for bounded native tests.** `spec/support/run_with_timeout.sh` starts

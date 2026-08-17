@@ -603,7 +603,10 @@ option value instead of constructing an incomparable `nil?`. The checker then
 calls the symmetric `types.comparable` classifier on the adjusted pair. A
 successful ComparisonPlan may carry a gradual injection when exactly one
 comparable operand is Value; only
-then is the other operand boxed for raw equality. The checker never uses a
+then is the other operand boxed into the common equality representation. Code
+generation normally compares that representation raw, but retains the plan's
+original operand types so a Map/`value` pair can add Lua table `__eq` after a
+failed raw check. A `value`/`value` pair remains raw. The checker never uses a
 directional assignment or coercion to make any other incomparable original
 pair comparable. Numbers are **not** promoted: a mixed Integer/Float pair (either
 order, and likewise two options over Integer/Float) is compared by
@@ -754,7 +757,10 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   `Type.Integer`. Other Map key types receive the dedicated
   “not an integer-keyed map” diagnostic. This is exact resolved-type
   classification, not `types.compatible`; code generation gives Arrays their
-  maintained length and integer Maps Lua's ordinary border.
+  maintained length and gives integer Maps Lua table length: an inline ordinary
+  border when `__len` is absent, or metamethod dispatch followed by an exact
+  integer result guard when it is present. The metatable behavior changes no
+  checker type or admissibility rule.
 * **Record constructor omissions.** In a Nominal record context, explicit
   visible fields are checked in source order. Each absent field then gets the
   same `nil_can_adjust_to` test as an omitted named formal; an accepted field is

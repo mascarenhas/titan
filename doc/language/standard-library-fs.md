@@ -283,6 +283,14 @@ An unrelated call to the blocked Task's public `resume` method merely causes
 `poll` to recheck its state; while registrations remain and no event is
 buffered, it suspends again instead of returning an empty Array.
 
+Classification may suspend while more native callbacks are copied. If one of
+those callbacks belongs to a registration retired by the current `poll`, that
+poll also drains the complete follow-on callback batch in order. This keeps the
+retirement boundary complete: after a deletion event retires a direct file or
+watched root, the next `poll` cannot return an already-copied notification for
+that retired registration. Notifications for registrations that remain live
+normally stay buffered for the next `poll`.
+
 ```titan
 union WatcherEvent
   created: string
@@ -312,7 +320,9 @@ Filesystem notifications are hints rather than a journal. The operating
 system or libuv may combine, duplicate, or omit changes, and the target may
 change again before drain-time classification. Applications must not assume
 one notification per filesystem operation, exact counts, or a total order.
-Events copied before `stop` or `clear` remain buffered for a final `poll`.
+Events copied before `stop` or `clear` remain observable. A poll that crosses
+that registration's retirement drains its complete follow-on callback batch;
+otherwise they remain buffered for a final `poll`.
 
 ## Temporary files and working directory
 

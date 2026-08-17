@@ -8,18 +8,36 @@ set -euo pipefail
 
 if [[ ${TITAN_ROCK_TEST_INTERNAL:-0} == 1 ]]; then
     busted_args=()
+    forwarded_count=0
     if [[ ${TITAN_ROCK_TEST_FORWARDED:-0} == 1 ]]; then
         count=${TITAN_ROCK_TEST_ARGC:-}
         [[ $count =~ ^[0-9]+$ ]] || {
             echo "error: invalid forwarded Busted argument count" >&2
             exit 2
         }
+        forwarded_count=$count
         for ((index = 0; index < count; index++)); do
             printf -v name 'TITAN_ROCK_TEST_ARG_%d' "$index"
             busted_args+=("${!name}")
         done
     fi
     busted_args+=("$@")
+    if (( forwarded_count == 0 && $# == 0 )) &&
+        [[ -z ${BUSTED_FILTER:-} ]]; then
+        # This value is supplied by Make from its fixed, whitespace-free
+        # repository paths. Keep the retained runtime/packaging specs serial
+        # before the isolated compiler workers start.
+        stdlib_spec_list=${TITAN_ROCK_TEST_STDLIB_SPECS:-}
+        stdlib_specs=()
+        IFS=' ' read -r -a stdlib_specs <<< "$stdlib_spec_list"
+        if (( ${#stdlib_specs[@]} != 8 )); then
+            echo "error: invalid retained Busted spec list" >&2
+            exit 2
+        fi
+        export TITAN_PROBE_CACHE_DISABLE=1
+        "${BUSTED:-busted}" "${stdlib_specs[@]}"
+        exec bash spec/support/run_parallel_compiler_tests.sh
+    fi
     if [[ -n ${BUSTED_FILTER:-} ]]; then
         busted_args+=("--filter=$BUSTED_FILTER")
     fi

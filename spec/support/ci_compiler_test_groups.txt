@@ -67,6 +67,7 @@
 4 spec/coder/generics_spec.lua 31.911
 1 spec/coder/interfaces_spec.lua 9.501
 4 spec/coder/line_directives_spec.lua 2.064
+3 spec/coder/map_metamethods_spec.lua 2.400
 1 spec/coder/multi_module_grouping_spec.lua 2.549
 2 spec/coder/multi_module_libraries_spec.lua 41.714
 2 spec/coder/multi_module_path_runtime_spec.lua 8.380
