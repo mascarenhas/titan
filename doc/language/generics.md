@@ -479,8 +479,8 @@ accepting any valid Lua value, and testing that operand `is T` is consequently
 true. Casting a `T` to a closed type, such as `x as integer`, applies that closed
 type's ordinary checked written cast. For `T: I`, the corresponding `as T` and
 `is T` operations instead perform the ordinary cast or test for the erased
-Interface `I`; they cannot discover an implementation from a bare record hidden
-in `value`.
+Interface `I`; they accept an exact wrapper or a compiler-witnessed wrapper
+entry on bare full userdata, without structurally inspecting the erased value.
 
 ### Constrained parameters
 
@@ -653,8 +653,8 @@ end
 The write commits and the bad value may be copied, compared uniformly, returned
 through generic code, or overwritten without raising. It cannot reach an
 integer-native operation, integer callback, or FFI integer boundary without the
-strict projection. This Transient/Shallow rule avoids run-time witnesses and
-provenance tracking while preserving representation safety.
+strict projection. This Transient/Shallow rule avoids per-value generic type
+witnesses and provenance tracking while preserving representation safety.
 
 A constrained store is narrower. If `T: Show`, a statically known implementing
 record is first adapted to `Show` on the forward edge. A literal `value` must
@@ -671,9 +671,10 @@ only on a later strict integer read. A directly constructed monomorphic
 `{integer}` keeps its ordinary eager writer policy.
 
 For `T: I`, `{T}` erases to `{I}` and uses the Interface writer: dynamic ingress
-must become the exact erased Interface before storage. Maps follow the same
-constraint-carrier write and strict-read rule. There is no generic writer kind
-and no deep traversal of existing container contents.
+must become the erased Interface before storage, either by already carrying
+the exact wrapper or through a compiler-witnessed metatable entry. Maps follow
+the same constraint-carrier write and strict-read rule. There is no generic
+writer kind and no deep traversal of existing container contents.
 
 ### Static applications and shared run-time identity
 
@@ -731,8 +732,8 @@ Lua has no syntax or API for supplying Titan type arguments. An exported generic
 declaration presents its real constraint-erased application:
 
 - an unconstrained position is `value` and accepts any ordinary Lua value;
-- a constrained position is the erased Interface and uses the ordinary dynamic
-  Interface cast; and
+- a constrained position is the erased Interface and uses the ordinary
+  exact-or-compiler-witnessed dynamic Interface cast; and
 - a known outer record, union, Array, Map, Option, or function shape retains its
   normal outer boundary behavior.
 
@@ -937,8 +938,8 @@ Version one deliberately has:
 - no polymorphic lambdas, local let-polymorphism, generic function types, or
   first-class values that remain polymorphic;
 - no generic `foreign function` declarations;
-- no monomorphization, run-time dictionaries, witnesses, application tags,
-  specialization caches, or deep homogeneous-heap guarantee;
+- no monomorphization, run-time dictionaries, generic type witnesses,
+  application tags, specialization caches, or deep homogeneous-heap guarantee;
 - no provenance- or taint-based projection-check elision; and
 - no magic iterator Interface conversion beyond Titan's existing four-value
   [`for ... in`](statements.md#the-generic-for--in) protocol.

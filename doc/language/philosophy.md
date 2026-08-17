@@ -78,10 +78,11 @@ when their contents are observed. The canonical split is the
 [the implementation documentation](../implementation/lua-interop-internals.md).)
 
 Interfaces keep that boundary explicit. A statically known satisfying record
-or union converts by constructing a nominal wrapper; Lua and `value` can pass
-an existing exact wrapper but never discover an implementation from a bare
-value. This preserves a faithful userdata representation and a well-defined
-error instead of adding hidden structural search at a dynamic edge.
+or union converts by constructing a nominal wrapper and causes its generated
+module to advertise that checked pair. Lua and `value` can pass an existing
+exact wrapper or use that compiler witness to wrap bare full userdata. This
+preserves a faithful userdata representation and a well-defined error without
+adding structural method search at a dynamic edge.
 
 **Fail early instead of falling back.** Where Lua reacts to an unexpected
 value by taking a slower generic path — coercing, consulting a
@@ -118,7 +119,11 @@ Nominal [Interfaces](interfaces.md) add behavioral abstraction without turning
 record or union layout structural. Direct concrete calls stay specialized;
 conversion constructs a compact wrapper whose declaration-order vtable
 supports calls through the Interface contract. Wrapper allocation and identity
-are visible consequences of requesting that abstraction.
+are visible consequences of requesting that abstraction. Once compiled code
+contains such a conversion, module initialization also advertises that checked
+pair on the concrete metatable. A later `value` or Lua boundary can therefore
+recover the same abstraction from bare userdata without structural reflection;
+unwitnessed matching method sets remain irrelevant.
 
 **Pay-as-you-go dynamism.** Static types are the default, but Lua is next
 door, and pretending otherwise would make the boundary unusable. The
@@ -199,7 +204,9 @@ contract for conditional non-exact target wrappers: eligible source closures
 get a consumer-local native adapter and strict relay, while other values retain
 the generic fallback. This adds no provider ABI surface. It also adds nominal Interface declarations,
 structural record/union satisfaction at statically known conversion sites,
-fresh wrappers, concrete downcasts, and exact-wrapper-only dynamic boundaries.
+fresh wrappers, concrete downcasts, and compiler-witnessed dynamic Interface
+boundaries. The discovery protocol adds private generated functions and
+per-state metatable entries without changing the provider ABI.
 These coordinated representation changes accounted for that ABI advance; ABI
 0.21 retained the language model while advancing the matched Lua runtime to
 5.5.1, and ABIs 0.22 through 0.25 retain that model.

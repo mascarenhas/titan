@@ -1262,7 +1262,13 @@ substitution, recursive; error on missing keys). Key facts:
   total. Because a
   function-typed cast from `value` defers callability checking until
   invocation, `value is <function type>` is always true and a noncallable value
-  still fails when called. Retain exact raw-subtype probes such as
+  still fails when called. Dynamic Interface discovery has one deliberate
+  trusted-protocol exception: `value is I` accepts exact wrapper identity or
+  any non-nil witness entry on the candidate userdata metatable without
+  invoking it, while `value as I` calls that entry. Compiler-generated
+  witnesses therefore agree, but forged debug/native non-callable entries can
+  make `is` true and the corresponding `as` raise normally. Retain exact
+  raw-subtype probes such as
   `lua_isinteger` only when identity or representation tag, rather than cast
   success, is semantically significant.
 - **Treat ABI bumps as clean-start prototype boundaries.** Titan is still a

@@ -170,7 +170,9 @@ the deliberate deferred case: the boxed carrier is preserved and every call
 performs exact/branded/non-Titan dispatch, so a non-callable value raises
 before a function operation can use it. A guard never performs automatic
 numeric conversion, truthiness, Option introduction/force, or pointer
-conversion. The strict rules are therefore:
+conversion. The compiler-witnessed Interface row is the named exception that
+may construct a fresh wrapper after an exact-wrapper miss. The strict rules
+are therefore:
 
 | Target | Strict observation |
 | --- | --- |
@@ -180,7 +182,8 @@ conversion. The strict rules are therefore:
 | `string` | string tag only |
 | Array | canonical proxy/shared-metatable check; contents deferred |
 | Map | table check; keys and values deferred |
-| record/union/Interface | exact nominal metatable |
+| record/union | exact nominal metatable |
+| Interface | exact nominal wrapper metatable, or non-nil compiler-witnessed entry on a bare full userdata's metatable |
 | Function | boxed value; exact/strict call dispatch verifies use |
 | `T?` | nil, or the recursive strict guard for `T` |
 | C integer/float | their explicit tagged/range policy |
@@ -220,7 +223,8 @@ The initial target matrix is:
 | Array | validate only the canonical outer Array representation |
 | Map | validate only the outer table representation |
 | Function | preserve the boxed value; invocation decides callability |
-| record/union/Interface | exact nominal metatable; an Interface requires an existing wrapper |
+| record/union | exact nominal metatable |
+| Interface | exact nominal wrapper metatable, or call a non-nil compiler-witnessed entry on a bare full userdata's metatable |
 | `T?` | preserve nil; otherwise recursively apply the dynamic plan for `T` |
 | C integer/float | explicit numeric/tag/range policy |
 | owned C userdata | exact owned metatable |
@@ -232,14 +236,21 @@ nil. The corresponding `is` predicate reports whether that same conversion
 would succeed without returning the converted value. It is not a separate
 tag-only implementation.
 
-The Interface dynamic case accepts only an already constructed wrapper
-with the exact target Interface metatable (or nil for an optional target).
-It never discovers that a bare record/union implements the Interface and
-never constructs a wrapper after the concrete static owner and method mapping
-have been erased. Concrete record/union-to-Interface conversion remains one
-checker-planned direct outer coercion; it is neither consistency nor
-structural subtyping. The complete matcher, wrapper plan, and adjustment
-boundary are documented in [Interfaces](interfaces.md).
+The Interface strict and dynamic leaves share one exact-or-witnessed codegen
+operation. An exact wrapper succeeds immediately. Otherwise a full userdata's
+metatable is raw-indexed by the target Interface metatable. A missing entry
+fails normally; a present entry is called with the userdata and its single
+result is trusted as the fresh wrapper. Option plans preserve nil before
+reaching that leaf. The predicate form tests only exact identity or non-nil
+entry presence and never calls the value.
+
+This changes no type relation or checker plan. Concrete
+record/union-to-Interface conversion remains one checker-planned direct outer
+coercion; it is neither consistency nor structural subtyping. The compiler
+advertises a pair only when generated code contains such an actual wrapper
+site, so discovery is nominal compiler evidence rather than a run-time method
+search. The complete matcher, wrapper plan, and adjustment boundary are
+documented in [Interfaces](interfaces.md).
 
 ## Checked C scalar conversions
 
@@ -281,8 +292,10 @@ when containment is not statically proven.
 `as` and `is` consume the same `CoercionPlan` or explicit-conversion plan.
 The cast commits only after its predicate succeeds; the test returns that
 predicate without converting or raising. Dynamic and strict boxed lowering,
-Option recursion, and `TValue` stores reuse the same acceptance logic so a
-successful `is` cannot precede a failing corresponding cast.
+Option recursion, and `TValue` stores reuse the same acceptance logic. The
+deliberately permissive Interface protocol is the exception at the unsafe
+debug/native boundary: `is` tests only non-nil witness presence, whereas the
+cast calls that value and may inherit a forged entry's ordinary Lua error.
 
 `written_cast(source, target)` selects identity, direct coercion, dynamic
 coercion from `value`, gradual/callable view, or one separately enumerated

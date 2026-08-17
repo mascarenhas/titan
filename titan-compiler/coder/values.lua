@@ -28,7 +28,34 @@ function codethrow(loc, template, params)
     }, true)
 end
 
-function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]], loc --[[:table]])
+-- Dynamic Interface discovery is a code-generation property of a nominal
+-- target. The checker continues to emit the ordinary nominal plan; resolve the
+-- descriptor here only to select the richer runtime lowering.
+function coder._is_interface_nominal(typ)
+    local resolved = types.normalize(typ)
+    if not resolved or resolved._tag ~= "Type.Nominal" then return false end
+    local owner = types.registry[resolved.fqtn]
+    return owner ~= nil and owner._tag == "Type.Interface"
+end
+
+function coder._may_discover_interface(typ)
+    local resolved = types.normalize(typ)
+    if not resolved then return false end
+    if resolved._tag == "Type.Option" then
+        return coder._may_discover_interface(resolved.base)
+    end
+    return coder._is_interface_nominal(resolved)
+end
+
+function coder._rebase_after_interface_discovery(ctx, typ)
+    if not ctx.tlcontext or not coder._may_discover_interface(typ) then
+        return ""
+    end
+    ctx.uses_base_off = true
+    return "_base = restorestack(L, _base_off);"
+end
+
+function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]], loc --[[:table]], retain_interface_result --[[:boolean?]])
     local tag
     if typ._tag == "Type.Integer" then
         return render([[
@@ -213,26 +240,9 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
             CHECKANDSET = checkandset(ctx, typ.base, "&" .. cvar, exp, loc)
         })
     elseif typ._tag == "Type.Nominal" then
-        return render([[
-            if (TITAN_LIKELY(ttisfulluserdata($EXP))) {
-              Udata* _ud = uvalue($EXP);
-              if (TITAN_LIKELY(_ud->metatable == $MT)) {
-                $VAR = _ud;
-              } else {
-                lua_pushlightuserdata(L, (void*)_ud->metatable);
-                if (lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TNIL) {
-                    lua_pop(L, 1);
-                    setuvalue(L, s2v(L->top.p), _ud); L->top.p++;
-                    $THROWNIL
-                } else {
-                    $THROWUD
-                }
-              }
-            } else {
-              $THROWPRIM
-            }
-        ]], {
-            MT = coder._nominal_metatable_expr(ctx, typ),
+        local metatable = coder._nominal_metatable_expr(ctx, typ)
+        local common = {
+            MT = metatable,
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
@@ -242,7 +252,84 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
             THROWNIL = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "luaL_tolstring(L, -1, NULL)" }),
             THROWUD = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_tostring(L, -1)" }),
             THROWPRIM = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_typename(L, ttype($EXP))" })
-        })
+        }
+        if not coder._is_interface_nominal(typ) then
+            return render([[
+                if (TITAN_LIKELY(ttisfulluserdata($EXP))) {
+                  Udata* _ud = uvalue($EXP);
+                  if (TITAN_LIKELY(_ud->metatable == $MT)) {
+                    $VAR = _ud;
+                  } else {
+                    lua_pushlightuserdata(L, (void*)_ud->metatable);
+                    if (lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TNIL) {
+                        lua_pop(L, 1);
+                        setuvalue(L, s2v(L->top.p), _ud); L->top.p++;
+                        $THROWNIL
+                    } else {
+                        $THROWUD
+                    }
+                  }
+                } else {
+                  $THROWPRIM
+                }
+            ]], common)
+        end
+
+        common.RESTORE_TOP = retain_interface_result and "" or
+            "L->top.p = restorestack(L, _titan_interface_call);"
+        return render([[
+            if (TITAN_LIKELY(ttisfulluserdata($EXP))) {
+                Udata *_ud = uvalue($EXP);
+                Table *_titan_interface_target = $MT;
+                if (TITAN_LIKELY(
+                        _ud->metatable == _titan_interface_target)) {
+                    $VAR = _ud;
+                } else {
+                    TValue _titan_interface_key;
+                    TValue _titan_interface_witness;
+                    lu_byte _titan_interface_witness_tag = LUA_VNIL;
+                    if (_ud->metatable != NULL) {
+                        sethvalue(L, &_titan_interface_key,
+                            _titan_interface_target);
+                        _titan_interface_witness_tag = luaH_get(
+                            _ud->metatable, &_titan_interface_key,
+                            &_titan_interface_witness);
+                    }
+                    if (TITAN_LIKELY(
+                            !tagisempty(_titan_interface_witness_tag))) {
+                        ptrdiff_t _titan_interface_call =
+                            savestack(L, L->top.p);
+                        titan_ensure_stack(L, 2);
+                        StkId _titan_interface_func =
+                            restorestack(L, _titan_interface_call);
+                        setobj2s(L, _titan_interface_func,
+                            &_titan_interface_witness);
+                        setuvalue(L,
+                            s2v(_titan_interface_func + 1), _ud);
+                        L->top.p = _titan_interface_func + 2;
+                        luaD_callnoyield(L,
+                            restorestack(L, _titan_interface_call), 1);
+                        $VAR = uvalue(s2v(restorestack(
+                            L, _titan_interface_call)));
+                        $RESTORE_TOP
+                    } else {
+                        lua_pushlightuserdata(
+                            L, (void *)_ud->metatable);
+                        if (lua_rawget(
+                                L, LUA_REGISTRYINDEX) == LUA_TNIL) {
+                            lua_pop(L, 1);
+                            setuvalue(L, s2v(L->top.p), _ud);
+                            L->top.p++;
+                            $THROWNIL
+                        } else {
+                            $THROWUD
+                        }
+                    }
+                }
+            } else {
+                $THROWPRIM
+            }
+        ]], common)
     else
         error("invalid type " .. types.tostring(typ))
     end
@@ -585,7 +672,9 @@ end
 -- The per-type emitter below is deliberately not an authorization oracle: the
 -- plan operation is validated first, Option recursion consumes `inner`, and a
 -- checked unavailable marker emits a well-behaved boundary error.
-function coder._dynamiccheckandget(ctx, plan, typ, cvar, exp, loc, use)
+function coder._dynamiccheckandget(
+        ctx, plan, typ, cvar, exp, loc, use,
+        retain_interface_result)
     plan = coder._checked_dynamic_plan(plan, typ, use)
     if plan == false then
         return render([[
@@ -613,16 +702,20 @@ function coder._dynamiccheckandget(ctx, plan, typ, cvar, exp, loc, use)
             VAR = cvar,
             PRESENT = coder._dynamiccheckandset(
                 ctx, plan.inner, typ.base, "&" .. cvar, exp, loc,
-                (use or "dynamic boundary") .. " Option present value"),
+                (use or "dynamic boundary") .. " Option present value",
+                retain_interface_result),
         })
     end
-    return checkandget(ctx, typ, cvar, exp, loc)
+    return checkandget(ctx, typ, cvar, exp, loc,
+        retain_interface_result)
 end
 
 -- Derive the boxed-store form from the exact same native-result plan.  This is
 -- the single path used by Lua formals, module/record writes, Array writers,
 -- and any other genuine Lua sink, preventing representation-specific drift.
-function coder._dynamiccheckandset(ctx, plan, typ, dst, src, loc, use)
+function coder._dynamiccheckandset(
+        ctx, plan, typ, dst, src, loc, use,
+        retain_interface_result)
     local name = fresh_lowering_name(ctx, "_titan_dynamic_value_")
     return render([[
         {
@@ -634,7 +727,8 @@ function coder._dynamiccheckandset(ctx, plan, typ, dst, src, loc, use)
         DECL = cvardecl(ctx, typ, name),
         INIT = initval(typ),
         CHECK = coder._dynamiccheckandget(
-            ctx, plan, typ, name, src, loc, use),
+            ctx, plan, typ, name, src, loc, use,
+            retain_interface_result),
         STORE = setslot(typ, dst, name),
     })
 end
@@ -666,7 +760,8 @@ function coder._planned_value_projection_get(ctx, node, cvar, source)
         return coder._dynamiccheckandget(
             ctx, assert(cast.dynamic,
                 "dynamic written cast lacks its embedded plan"),
-            node._type, cvar, source, node.loc, "written value as")
+            node._type, cvar, source, node.loc, "written value as",
+            nil)
     elseif cast.op == "explicit"
            and cast.conversion
            and cast.conversion.op == "unsafe_dynamic_c_pointer" then
@@ -1500,7 +1595,9 @@ end
 -- categories already use exact outer-kind/metatable checks in `checkandget`;
 -- Option recurses here so its present arm cannot accidentally regain the
 -- coercive numeric/truthiness policy.
-function coder._strictcheckandget(ctx, plan, typ, cvar, exp, loc, use)
+function coder._strictcheckandget(
+        ctx, plan, typ, cvar, exp, loc, use,
+        retain_interface_result)
     plan = coder._checked_gradual_guard(plan, typ, use)
     if plan == false then
         return render([[
@@ -1592,16 +1689,20 @@ function coder._strictcheckandget(ctx, plan, typ, cvar, exp, loc, use)
             CHECK = coder._strictcheckandsetmixed(
                 ctx, plan.inner, typ.base, "&" .. cvar, exp, loc,
                 (use or "strict gradual observation")
-                    .. " Option present value"),
+                    .. " Option present value",
+                retain_interface_result),
         })
     end
-    return checkandget(ctx, typ, cvar, exp, loc)
+    return checkandget(ctx, typ, cvar, exp, loc,
+        retain_interface_result)
 end
 
 -- Box the result of the same strict observation.  Keeping this mechanically
 -- derived from `strictcheckandget` prevents the old function-argument versus
 -- field-write split from reappearing for strict paths.
-function coder._strictcheckandset(ctx, plan, typ, dst, src, loc, use)
+function coder._strictcheckandset(
+        ctx, plan, typ, dst, src, loc, use,
+        retain_interface_result)
     local name = fresh_lowering_name(ctx, "_titan_strict_value_")
     return render([[
         {
@@ -1613,7 +1714,8 @@ function coder._strictcheckandset(ctx, plan, typ, dst, src, loc, use)
         DECL = cvardecl(ctx, typ, name),
         INIT = initval(typ),
         CHECK = coder._strictcheckandget(
-            ctx, plan, typ, name, src, loc, use),
+            ctx, plan, typ, name, src, loc, use,
+            retain_interface_result),
         STORE = setslot(typ, dst, name),
     })
 end
@@ -1622,11 +1724,13 @@ end
 -- as the canonical Lua proxy.  Normalize only those two sanctioned shapes;
 -- all leaf observations still use the strict tag policy above.
 function coder._strictcheckandgetmixed(
-        ctx, plan, typ, cvar, exp, loc, use)
+        ctx, plan, typ, cvar, exp, loc, use,
+        retain_interface_result)
     plan = coder._checked_gradual_guard(plan, typ, use)
     if plan == false then
         return coder._strictcheckandget(
-            ctx, plan, typ, cvar, exp, loc, use)
+            ctx, plan, typ, cvar, exp, loc, use,
+            retain_interface_result)
     end
     if typ._tag == "Type.Array" then
         return render([[
@@ -1688,15 +1792,18 @@ function coder._strictcheckandgetmixed(
             CHECK = coder._strictcheckandsetmixed(
                 ctx, plan.inner, typ.base, "&" .. cvar, exp, loc,
                 (use or "strict gradual observation")
-                    .. " Option present value"),
+                    .. " Option present value",
+                retain_interface_result),
         })
     end
     return coder._strictcheckandget(
-        ctx, plan, typ, cvar, exp, loc, use)
+        ctx, plan, typ, cvar, exp, loc, use,
+        retain_interface_result)
 end
 
 function coder._strictcheckandsetmixed(
-        ctx, plan, typ, dst, src, loc, use)
+        ctx, plan, typ, dst, src, loc, use,
+        retain_interface_result)
     local name = fresh_lowering_name(ctx, "_titan_strict_mixed_value_")
     return render([[
         {
@@ -1708,7 +1815,8 @@ function coder._strictcheckandsetmixed(
         DECL = cvardecl(ctx, typ, name),
         INIT = initval(typ),
         CHECK = coder._strictcheckandgetmixed(
-            ctx, plan, typ, name, src, loc, use),
+            ctx, plan, typ, name, src, loc, use,
+            retain_interface_result),
         STORE = setslot(typ, dst, name),
     })
 end

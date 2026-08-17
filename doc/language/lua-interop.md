@@ -140,7 +140,7 @@ declared type:
 | `{K:V}` (map) | any table; the contents are **not** checked here | the *same* table — aliased, not copied |
 | record type | a userdata created by that same record type (from any module instance) | a userdata carrying the record's metatable |
 | union type | a userdata created by that exact union type | the same opaque union userdata |
-| Interface type | an existing wrapper of that exact nominal Interface type; never a bare record or union | the same Interface wrapper userdata |
+| Interface type | an existing exact wrapper, or bare full userdata whose metatable advertises a compiler-witnessed wrapper for that Interface | the existing wrapper or a fresh wrapper returned by the witness |
 | function type | any boxed value; callability/signature is deferred to invocation | the same boxed value; an unadjusted Titan declaration is its canonical source closure, while a realized callable adjustment is its fresh wrapper |
 | `T?` (option) | `nil`, or a value accepted by the same dynamic rule as `T` | `nil`, or whatever `T` produces |
 | `value` | anything | the value, unchanged |
@@ -205,10 +205,12 @@ This target table is an application of the single
 [normative boundary matrix](types.md#normative-boundary-matrix), which is
 authoritative when another chapter discusses the same edge.
 
-Interface targets use exact nominal wrapper identity. Lua may supply an
-already-constructed wrapper of the requested Interface type, but a bare record
-or union is never inspected and dynamically wrapped merely because its Titan
-methods would satisfy that Interface structurally.
+Interface targets first use exact nominal wrapper identity. Lua may also
+supply bare full userdata whose metatable has a non-nil entry under the target
+Interface metatable. Generated modules register that entry only when they
+contain an actual statically checked concrete-to-Interface wrapper site, and
+the entry constructs a fresh wrapper. Titan never inspects the erased value's
+methods or infers structural satisfaction at run time.
 
 A raw C pointer has no corresponding dynamic target rule: lightuserdata proves
 only that an address was boxed, not its pointee type. Titan therefore rejects
@@ -500,31 +502,42 @@ ordinary lookup and no fields, constructors, statics, implementation names, or
 vtable reflection. Lua may read a method as a callable or invoke it with colon
 syntax; every write to the wrapper is rejected.
 
-Lua obtains such a wrapper only when Titan has already performed a statically
-checked record/union-to-Interface conversion:
+Lua obtains such a wrapper directly from a statically checked conversion, or
+indirectly by sending bare userdata through an Interface sink after a loaded
+module has compiled and registered that concrete/Interface pair:
 
 ```lua
 local m = require "sample"
 local box = m.make_box()       -- a bare record userdata
-local sink = m.wrap(box)       -- Titan returns an Interface wrapper
 
+m.use(box)                     -- accepted: compiled m.wrap registered its pair at init
+local sink = m.wrap(box)       -- Titan returns an Interface wrapper
 m.use(sink)                    -- accepted: exact wrapper
-assert(not pcall(m.use, box))  -- rejected: no dynamic structural discovery
 sink:put(1)                    -- ordinary Interface method call
 ```
 
-The exact-wrapper-only rule is uniform for Interface-typed function arguments,
+The exact-or-witnessed rule is uniform for Interface-typed function arguments,
 module-variable writes, record-field writes, non-nil Array writes, and results
 entering Titan from a non-Titan callable. For `I?`, nil is accepted first and a
-present value must be an exact `I` wrapper. A raw Lua Map write is not
-intercepted; the later typed Titan read strictly rejects a bare record or
-wrong-Interface wrapper.
+present value follows the same rule. A raw Lua Map write is not intercepted;
+the later typed Titan read performs the same strict exact-or-witnessed
+Interface observation.
 
-Calling a method checks the receiver's exact Interface identity, dynamically
-converts its explicit Lua arguments under the method signature, dispatches
-through the wrapper, and converts results for Lua. Debug-library or C-API
+Witness registration is per Lua state and happens when the generated module
+initializes, not when the wrapper source path executes. Merely having matching
+methods does not suffice, and a static `r is I` emits no witness. When several
+modules register the same pair, the first non-nil entry wins. Every successful
+witness call returns a fresh wrapper.
+
+Calling a method checks or discovers the receiver's Interface identity,
+dynamically converts its explicit Lua arguments under the method signature,
+dispatches through the wrapper, and converts results for Lua. Debug-library or C-API
 mutation of the wrapper's protected internals is outside Titan's safety
-contract. See [Interfaces](interfaces.md#lua-behavior).
+contract. Discovery likewise trusts the raw candidate-metatable entry: `is`
+observes only non-nil presence, while conversion calls it without validating
+the userdata as a Titan record/union or the entry as a function. Forged entries
+are programmer-responsible and inherit ordinary Lua call behavior. See
+[Interfaces](interfaces.md#lua-behavior).
 
 ## Module variables from Lua
 

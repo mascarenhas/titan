@@ -474,6 +474,10 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
             ID = pair.id,
             COUNT = c_integer_literal(#pair.methods),
         }))
+        local wrapper_sig, wrapper_body =
+            coder._emit_interface_pair_wrapper(pair)
+        table.insert(sigs, wrapper_sig)
+        table.insert(code, wrapper_body)
         for index, mapping in ipairs(pair.methods) do
             local entry = mapping.slot_kind == "adapter"
                 and assert(pair.adapter_ids[index])
@@ -487,6 +491,41 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
                 METHOD = entry,
             }))
         end
+        table.insert(interface_pair_inits, render([[
+            {
+                Table *_titan_interface_concrete_metatable =
+                    hvalue(&_mod->uv[$CONCRETE_METATABLE].uv);
+                Table *_titan_interface_target_metatable =
+                    hvalue(&_mod->uv[$INTERFACE_METATABLE].uv);
+                TValue _titan_interface_key;
+                TValue _titan_interface_existing;
+                sethvalue(L, &_titan_interface_key,
+                    _titan_interface_target_metatable);
+                lu_byte _titan_interface_existing_tag = luaH_get(
+                    _titan_interface_concrete_metatable,
+                    &_titan_interface_key,
+                    &_titan_interface_existing);
+                if (tagisempty(_titan_interface_existing_tag)) {
+                    titan_ensure_stack(L, 3);
+                    sethvalue(L, s2v(L->top.p),
+                        _titan_interface_concrete_metatable);
+                    L->top.p++;
+                    sethvalue(L, s2v(L->top.p),
+                        _titan_interface_target_metatable);
+                    L->top.p++;
+                    titan_pushmodule(L, _mod);
+                    lua_pushcclosure(L, $WRAPPER, 1);
+                    lua_rawset(L, -3);
+                    lua_pop(L, 1);
+                }
+            }
+        ]], {
+            CONCRETE_METATABLE =
+                c_integer_literal(pair.concrete_metatable_slot),
+            INTERFACE_METATABLE =
+                c_integer_literal(pair.interface_metatable_slot),
+            WRAPPER = pair.wrapper_id,
+        }))
     end
 
     -- Closure-adapter emission is deliberately a growing drain: nested

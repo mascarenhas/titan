@@ -1634,6 +1634,7 @@ function codeindexarray(ctx, node)
     local ccheck = coder._strictcheckandgetmixed(
         ctx, node._read_guard, typ, tmpname, "_s", node.loc,
         "typed Array read")
+    local crebase = coder._rebase_after_interface_discovery(ctx, typ)
     if types.is_gc(typ) then
         cset = setslot(typ, tmpslot, tmpname)
     end
@@ -1661,6 +1662,7 @@ function codeindexarray(ctx, node)
             const TValue *_s = &_av;
 
             $CCHECK
+            $REBASE
             $CSET
     }]], {
         CTMP = ctmp,
@@ -1669,6 +1671,7 @@ function codeindexarray(ctx, node)
         CAEXP = caexp,
         CIEXP = ciexp,
         CCHECK = ccheck,
+        REBASE = crebase,
         CSET = cset,
     })
     return stats, tmpname
@@ -1683,6 +1686,7 @@ function codeindexmap(ctx, node)
     local ccheck = coder._strictcheckandgetmixed(
         ctx, node._read_guard, typ, tmpname, "_s", node.loc,
         "typed Map read")
+    local crebase = coder._rebase_after_interface_discovery(ctx, typ)
     if types.is_gc(typ) then
         cset = setslot(typ, tmpslot, tmpname)
     end
@@ -1701,6 +1705,7 @@ function codeindexmap(ctx, node)
             const TValue* _s;
             $CTABLEKEY
             $CCHECK
+            $REBASE
             $CSET
     }]], {
         CTMP = ctmp,
@@ -1714,6 +1719,7 @@ function codeindexmap(ctx, node)
         CTABLEKEY = get_table_key(
             ctx, ktyp, "_t", tmpkslot, tmpkstack, "_s"),
         CCHECK = ccheck,
+        REBASE = crebase,
         CSET = cset,
     })
     return stats, tmpname
@@ -2244,22 +2250,33 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         -- `value as T` consumes the broader Lua-boundary conversion plan.
         local cstats, cexp = codeexp(ctx, node.exp, iscondition)
         local ctmps, tmpnames = newtmp(ctx, node.exp._type)
-        local ctmpt, tmpnamet = newtmp(ctx, node.target)
+        local may_discover =
+            coder._may_discover_interface(node.target)
+        local ctmpt, tmpnamet, tmpslott =
+            newtmp(ctx, node.target, may_discover)
         local cget = coder._planned_value_projection_get(
             ctx, node, tmpnamet, "&" .. tmpnames)
+        local cset = tmpslott
+            and setslot(node.target, tmpslott, tmpnamet) or ""
+        local crebase =
+            coder._rebase_after_interface_discovery(ctx, node.target)
         return render([[
             $EXPSTATS
             $TMPSOURCE
             $SOURCE = $EXP;
             $TMPTARGET
             $CHECKANDGET
+            $REBASE
+            $ANCHOR
         ]], {
             EXPSTATS = cstats,
             TMPSOURCE = ctmps,
             SOURCE = tmpnames,
             TMPTARGET = ctmpt,
             EXP = cexp,
-            CHECKANDGET = cget
+            CHECKANDGET = cget,
+            REBASE = crebase,
+            ANCHOR = cset,
         }), tmpnamet
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Value" then
         -- cast to value from any type

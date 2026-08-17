@@ -1237,16 +1237,21 @@ function coder._code_adjustment_value(
         assert(adjustment.guard
                and adjustment.guard.op == "option",
             "structural Option view lacks its strict guard plan")
-        -- The successful guard neither allocates nor changes ownership. Keep
-        -- both sides in C temporaries; the enclosing sink publishes any actual
-        -- local/result/allocation home it requires.
+        -- Most successful guards only borrow the existing payload. A present
+        -- Interface leaf may dynamically construct a wrapper, so give that
+        -- result the ordinary traced temporary used by other GC-producing
+        -- expressions until the enclosing sink publishes it.
         local csrc, srcname = newtmp(ctx, source_type, false)
-        local cdst, dstname = newtmp(ctx, target, false)
+        local needs_anchor = coder._may_discover_interface(target)
+        local cdst, dstname, dstslot =
+            newtmp(ctx, target, needs_anchor)
         return render([[
             $CSRC
             $SRCNAME = $RAW;
             $CDST
             $CHECK
+            $REBASE
+            $ANCHOR
         ]], {
             CSRC = csrc,
             SRCNAME = srcname,
@@ -1255,6 +1260,8 @@ function coder._code_adjustment_value(
             CHECK = coder._strictcheckandget(
                 ctx, adjustment.guard, target, dstname, "&" .. srcname,
                 loc, "structural Option view"),
+            REBASE = coder._rebase_after_interface_discovery(ctx, target),
+            ANCHOR = dstslot and setslot(target, dstslot, dstname) or "",
         }), dstname
     end
     assert(adjustment.kind == "direct_coercion"
@@ -1832,17 +1839,27 @@ function codevaluecall(ctx, node)
                     "generic call lacks checker strict result guards")
                 assert(plans[i] ~= nil,
                     "generic call result lacks its checker strict guard")
-                table.insert(reads, coder._strictcheckandget(
+                local check = coder._strictcheckandget(
                     ctx, plans[i], visible_types[i], visnames[i], source,
-                    node.loc, "branded Titan callable result"))
+                    node.loc, "branded Titan callable result")
+                local anchor = coder._may_discover_interface(
+                        visible_types[i]) and visslots[i]
+                    and setslot(visible_types[i], visslots[i], visnames[i])
+                    or ""
+                table.insert(reads, check .. "\n" .. anchor)
             else
                 local plans = assert(node._lua_result_dynamic_plans,
                     "generic call lacks checker dynamic result plans")
                 assert(plans[i] ~= nil,
                     "generic call result lacks its checker dynamic plan")
-                table.insert(reads, coder._dynamiccheckandget(
+                local check = coder._dynamiccheckandget(
                     ctx, plans[i], visible_types[i], visnames[i], source,
-                    node.loc, "non-Titan Lua callable result"))
+                    node.loc, "non-Titan Lua callable result")
+                local anchor = coder._may_discover_interface(
+                        visible_types[i]) and visslots[i]
+                    and setslot(visible_types[i], visslots[i], visnames[i])
+                    or ""
+                table.insert(reads, check .. "\n" .. anchor)
             end
         end
         return table.concat(reads, "\n")
@@ -1880,6 +1897,10 @@ function codevaluecall(ctx, node)
             local readone
             local source = "s2v(restorestack(L, _vc_func) + "
                 .. c_integer_literal(abi_nresults) .. " + _vri)"
+            local result_root = coder._may_discover_interface(flexrun.elem)
+                and flexrun.root_depth and
+                ("s2v(" .. stackslotat(flexrun.root_depth)
+                    .. " + _vri)") or nil
             if strict then
                 assert(node._strict_open_result_guard_plan ~= nil,
                     "open generic call result lacks its checker strict guard")
@@ -1896,6 +1917,8 @@ function codevaluecall(ctx, node)
                     flexrun.args .. "[_vri]", source, node.loc,
                     "non-Titan Lua callable flexible result")
             end
+            local immediate_anchor = result_root and setslot(
+                flexrun.elem, result_root, flexrun.args .. "[_vri]") or ""
             return render([[
             int _vc_flexraw = _vc_raw - $NFIXED;
             if (_vc_flexraw < 0) _vc_flexraw = 0;
@@ -1912,6 +1935,7 @@ function codevaluecall(ctx, node)
             $DESC.n_args = (lu_byte)_vc_keep;
             for (int _vri = 0; _vri < _vc_keep; _vri++) {
                 $READONE
+                $IMMEDIATE_ANCHOR
             }
             $ANCHORRUN
         ]], {
@@ -1923,6 +1947,7 @@ function codevaluecall(ctx, node)
             COL = c_integer_literal(node.loc.col),
             DESC = flexrun.desc,
             READONE = readone,
+            IMMEDIATE_ANCHOR = immediate_anchor,
             ANCHORRUN = coder._anchor_result_run(flexrun),
         })
         end

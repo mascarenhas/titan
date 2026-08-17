@@ -872,6 +872,12 @@ public standard-module interfaces and exact entries for `titan.fs.stat` and
 `TValue` optional cancellation-action parameter to `titan.async.suspend`. All
 other ABI-0.24 serialized layouts, generated layouts, and runtime contracts are
 retained.
+Compiler-witnessed dynamic Interface discovery retains ABI 0.25 as well. It
+adds only translation-unit-private wrapper functions, ordinary one-upvalue
+closures, and raw entries in per-state nominal metatables; the serialized type
+graph, wrapper/vtable layout, exported symbols, and module-userdata prefix are
+unchanged. Older ABI-0.25 objects remain loadable but do not advertise pairs
+they were not compiled to witness.
 The active marker is `_0_25`, the search variable is `TITAN_PATH_0_25`, and the
 provider namespace is `lib/titan/0.25`; older providers are rejected before
 interface rehydration. Existing 0.24 artifacts remain separately versioned and
@@ -914,7 +920,8 @@ Udata *counter_init(lua_State *L) {
            $LOADMODULES1 (dlopen dynamic deps), $INITMODULES (dep inits),
            $LOADGLOBALS (symbols published by transitive RTLD_GLOBAL deps),
            $INITRECORDS (record, union, and Interface metatables),
-           $INITFUNCTAGS, $INITPAIRS (Interface method payloads),
+           $INITFUNCTAGS, $INITPAIRS (Interface method payloads and
+           conditional concrete-metatable witness registration),
            $INITARRAYWRITERS (module-local writer closures), then canonical
            function closures; $INITNAMES (trace names), $INITVARS (variable
            initializers); install public nominal namespaces into their uv
@@ -929,7 +936,7 @@ Udata *counter_init(lua_State *L) {
             $LOADMODULES2  /* re-stitch directly imported function pointers */
             $LOADGLOBALS   /* re-stitch transitive global symbols */
             $INITFUNCTAGS  /* restore exact function identities first */
-            $INITPAIRS     /* then Interface payload function pointers */
+            $INITPAIRS     /* then Interface payloads/witness registration */
             $INITNAMES     /* then trace names for those restored pointers */
         }
         return _mod;
@@ -954,6 +961,15 @@ Idempotency works at two independent levels:
   identity is the metatable, a
   per-Lua-state object cached in a `_mod` user value rather than a C static, so
   this branch no longer re-fetches any tag cache.
+
+`$INITPAIRS` serves both native and per-state work. It fills each private
+exact/adjusted pair array after function pointers are available, then raw-checks
+`concrete_metatable[target_Interface_metatable]`. A nil entry receives the
+pair's private C witness closure with the emitting `_mod` as upvalue 0; a
+non-nil entry is preserved. Thus equivalent compiled conversion sites obey
+first-writer wins in one state, while every fresh state receives its own
+registration. The closure and metatables are traced Lua objects, not semantic C
+global state.
 
 *Detail:* the re-initialization branch substitutes `$LOADMODULES2` only
 when the dynamic-load list has more than one entry (`#loadmods > 1` in

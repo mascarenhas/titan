@@ -361,6 +361,14 @@ values retain the concrete owner's module Udata and the concrete record/union
 receiver. The payload is copied from a process-static pair array and is not a
 GC graph; both user-value stores need ordinary Udata backward barriers.
 
+For every pair whose static wrapper construction is emitted, initialization
+may also store a one-upvalue witness closure in the concrete metatable under
+the target Interface metatable object. Both key and closure are traced table
+entries; the closure retains the emitting module, whose uservalues retain any
+imported concrete owner and cached metatables. Canonical nominal metatables are
+also owned by the registry. This is ordinary stock-Lua reachability, not a new
+root table or untraced cache.
+
 Wrapper allocation follows the fresh-object rule below: the concrete source is
 frozen once in an untraced C temporary while its ordinary provenance remains
 live, and the new Udata receives its own root immediately before its metatable
@@ -376,6 +384,13 @@ roots only for newly allocated converted objects. Raw descriptors and
 allocation-free destination runs receive no parallel root range. See
 [Interfaces](interfaces.md#wrapper-representation) for the complete layout and
 dispatch contract.
+
+When the witness is called, its concrete input already occupies a traced
+argument slot. The new Interface Udata replaces that slot before its metatable
+and uservalues are published; user value 1 then retains the input. No special
+root is needed for either object beyond that VM slot and the wrapper's normal
+strong edge. `luaS_newudata` may grow the stack, so saved offsets are restored
+before slot access even though Lua heap objects themselves do not move.
 
 ## The module userdata
 

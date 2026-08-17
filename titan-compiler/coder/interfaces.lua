@@ -1469,7 +1469,7 @@ function coder._emit_interface_adapter_operation(
     elseif operation.kind == "gradual_guard" then
         code = coder._strictcheckandget(
             ctx, operation.guard, operation.target,
-            destination, "&" .. source, loc, use)
+            destination, "&" .. source, loc, use, true)
     else
         error(use .. " has unsupported operation "
             .. tostring(operation.kind))
@@ -2165,6 +2165,44 @@ function coder._interface_symbol_fragment(name)
     return table.concat(bytes)
 end
 
+-- Emit the common two-uservalue Interface wrapper body. Static conversions
+-- and dynamic-discovery witnesses differ only in how they name the fresh
+-- Udata and address its traced result slot; keep the representation, barriers,
+-- and vtable copy identical here.
+function coder._render_interface_wrapper_allocation(args)
+    return render([[
+        $SOURCE_STATS
+        $WRAPPER_DECL
+        {
+            Udata *_titan_interface_concrete_module = $CONCRETE_MODULE;
+            Table *_titan_interface_metatable = $INTERFACE_METATABLE;
+            $WRAPPER = luaS_newudata(
+                L, sizeof($VTABLE), 2);
+            $AFTER_ALLOCATION
+            setuvalue(L, $WRAPPER_SLOT, $WRAPPER);
+            $WRAPPER->metatable = _titan_interface_metatable;
+            setuvalue(L, &$WRAPPER->uv[0].uv,
+                _titan_interface_concrete_module);
+            luaC_barrierback(L, obj2gco($WRAPPER),
+                &$WRAPPER->uv[0].uv);
+            setuvalue(L, &$WRAPPER->uv[1].uv, $CONCRETE_VALUE);
+            luaC_barrierback(L, obj2gco($WRAPPER),
+                &$WRAPPER->uv[1].uv);
+            memcpy(getudatamem($WRAPPER), $VTABLE, sizeof($VTABLE));
+        }
+    ]], {
+        SOURCE_STATS = args.source_stats or "",
+        WRAPPER_DECL = args.wrapper_decl or "",
+        WRAPPER = assert(args.wrapper),
+        WRAPPER_SLOT = assert(args.wrapper_slot),
+        CONCRETE_MODULE = assert(args.concrete_module),
+        CONCRETE_VALUE = assert(args.concrete_value),
+        INTERFACE_METATABLE = assert(args.interface_metatable),
+        AFTER_ALLOCATION = args.after_allocation or "",
+        VTABLE = assert(args.vtable),
+    })
+end
+
 -- Validate and inventory one concrete/Interface pair. Exact slots point
 -- directly at the concrete method; adjusted slots carry one checker-frozen
 -- adapter plan and receive a deterministic private adapter symbol.
@@ -2197,15 +2235,31 @@ function coder._interface_pair(ctx, conversion)
     local prior = tlcontext.interface_pairs[key]
     local entry = prior
     if not entry then
-        local pair_fragment =
+        local concrete_fragment =
             coder._interface_symbol_fragment(concrete.name)
+        local interface_fragment =
+            coder._interface_symbol_fragment(interface.name)
+        local pair_fragment =
+            concrete_fragment
             .. "_to_"
-            .. coder._interface_symbol_fragment(interface.name)
+            .. interface_fragment
+        local concrete_metatable_slot =
+            type2metatable(ctx, conversion.concrete_type)
+        local interface_metatable_slot =
+            type2metatable(ctx, conversion.interface_type)
         entry = {
             key = key,
             id = tlcontext.prefix .. "interface_pair_" .. pair_fragment,
+            wrapper_id = coder._function_prefix(
+                tlcontext.module, concrete_fragment)
+                .. "_\\u2131_" .. interface_fragment
+                .. "_\\u2131_wrapper",
             concrete = concrete,
             interface = interface,
+            concrete_module =
+                coder._interface_owner_module_expr(ctx, concrete),
+            concrete_metatable_slot = concrete_metatable_slot,
+            interface_metatable_slot = interface_metatable_slot,
             methods = conversion.methods,
             adapter_ids = {},
         }
@@ -2214,6 +2268,10 @@ function coder._interface_pair(ctx, conversion)
     else
         assert(entry.concrete == concrete
                and entry.interface == interface
+               and entry.concrete_metatable_slot
+                    == type2metatable(ctx, conversion.concrete_type)
+               and entry.interface_metatable_slot
+                    == type2metatable(ctx, conversion.interface_type)
                and #entry.methods == #conversion.methods,
             use .. " disagrees with an existing pair obligation")
     end
@@ -2289,6 +2347,47 @@ function coder._interface_pair(ctx, conversion)
     return entry
 end
 
+-- Emit the private Lua-stack witness advertised from the concrete metatable.
+-- Its only upvalue is the emitting module. The incoming concrete Udata already
+-- occupies stack slot 1; replace that same traced slot with the fresh Interface
+-- value and return it without going through the public Lua API.
+function coder._emit_interface_pair_wrapper(pair)
+    local signature = render("static int $NAME(lua_State *L);", {
+        NAME = pair.wrapper_id,
+    })
+    local allocation = coder._render_interface_wrapper_allocation({
+        wrapper_decl = "Udata *_titan_interface_wrapper = NULL;",
+        wrapper = "_titan_interface_wrapper",
+        wrapper_slot =
+            "s2v(restorestack(L, _titan_interface_result))",
+        concrete_module = pair.concrete_module,
+        concrete_value = "_titan_interface_concrete",
+        interface_metatable = render("hvalue(&_mod->uv[$SLOT].uv)", {
+            SLOT = c_integer_literal(pair.interface_metatable_slot),
+        }),
+        vtable = pair.id,
+    })
+    local body = render([[
+        static int $NAME(lua_State *L) {
+            StkId _titan_interface_func = L->ci->func.p;
+            CClosure *_titan_interface_witness =
+                clCvalue(s2v(_titan_interface_func));
+            Udata *_mod =
+                uvalue(&_titan_interface_witness->upvalue[0]);
+            Udata *_titan_interface_concrete =
+                uvalue(s2v(_titan_interface_func + 1));
+            ptrdiff_t _titan_interface_result =
+                savestack(L, _titan_interface_func + 1);
+            $ALLOCATION
+            return 1;
+        }
+    ]], {
+        NAME = pair.wrapper_id,
+        ALLOCATION = allocation,
+    })
+    return signature, body
+end
+
 -- Build the exact two-uservalue wrapper from an already authorized scalar
 -- conversion. Freeze the concrete source once in C for lexical stability; its
 -- ordinary traced home (or immediate allocation/result root) remains live while
@@ -2309,45 +2408,23 @@ function coder._code_interface_wrapper(
         wrapper_decl, wrapper, wrapper_slot =
             newtmp(ctx, conversion.interface_type, true)
     end
-    local metatable_slot =
-        type2metatable(ctx, conversion.interface_type)
-    local concrete_module =
-        coder._interface_owner_module_expr(ctx, conversion.concrete)
 
     -- luaS_newudata may relocate the Lua stack. The fresh destination root is
     -- addressed by saved offset, so force the ordinary `_base_off` preamble and
     -- rebase immediately after allocation before publishing it.
     ctx.uses_base_off = true
-    return render([[
-        $SOURCE_STATS
-        $WRAPPER_DECL
-        {
-            Udata *_titan_interface_concrete_module = $CONCRETE_MODULE;
-            Table *_titan_interface_metatable =
-                hvalue(&_mod->uv[$METATABLE_SLOT].uv);
-            $WRAPPER = luaS_newudata(
-                L, sizeof($VTABLE), 2);
-            _base = restorestack(L, _base_off);
-            setuvalue(L, $WRAPPER_SLOT, $WRAPPER);
-            $WRAPPER->metatable = _titan_interface_metatable;
-            setuvalue(L, &$WRAPPER->uv[0].uv,
-                _titan_interface_concrete_module);
-            luaC_barrierback(L, obj2gco($WRAPPER),
-                &$WRAPPER->uv[0].uv);
-            setuvalue(L, &$WRAPPER->uv[1].uv, $CONCRETE_VALUE);
-            luaC_barrierback(L, obj2gco($WRAPPER),
-                &$WRAPPER->uv[1].uv);
-            memcpy(getudatamem($WRAPPER), $VTABLE, sizeof($VTABLE));
-        }
-    ]], {
-        SOURCE_STATS = frozen_stats,
-        WRAPPER_DECL = wrapper_decl,
-        WRAPPER = wrapper,
-        WRAPPER_SLOT = wrapper_slot,
-        CONCRETE_MODULE = concrete_module,
-        CONCRETE_VALUE = concrete_value,
-        METATABLE_SLOT = c_integer_literal(metatable_slot),
-        VTABLE = pair.id,
+    return coder._render_interface_wrapper_allocation({
+        source_stats = frozen_stats,
+        wrapper_decl = wrapper_decl,
+        wrapper = wrapper,
+        wrapper_slot = wrapper_slot,
+        concrete_module = pair.concrete_module,
+        concrete_value = concrete_value,
+        interface_metatable = render("hvalue(&_mod->uv[$SLOT].uv)", {
+            SLOT = c_integer_literal(pair.interface_metatable_slot),
+        }),
+        after_allocation = "_base = restorestack(L, _base_off);",
+        vtable = pair.id,
     }), wrapper
 end
 

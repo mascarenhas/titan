@@ -251,7 +251,7 @@ raised as run-time errors via `luaL_error`:
 | `value` | anything, copied with `setobj2t` | never fails |
 | `T?` | nil, otherwise the same dynamic plan as `T`; in particular `boolean?` uses Lua truthiness for every non-nil value | the base type's message |
 | record or union | a full userdata whose metatable equals the nominal owner's metatable | three-way message, below |
-| Interface | only an existing wrapper with the exact target Interface metatable; a bare record or union is never discovered dynamically | `type error, expected <interface> but found %s` |
+| Interface | an existing exact wrapper, or bare full userdata whose metatable has a non-nil compiler-witnessed entry under the target Interface metatable; the entry is called for one trusted result | missing witness: `type error, expected <interface> but found %s`; forged non-callable entries raise Lua's ordinary call error |
 | function | any Lua value, copied unchanged; exact/strict/Lua dispatch checks it when Titan later calls it | the later call either dispatches or raises Lua's ordinary non-callable error |
 | C integer | strict: integer tag; dynamic: integer or exactly integral float that first fits `lua_Integer`; both then check the C target interval and `_Bool` admits only 0/1 | expected-tag, integer-representation, or target-range error |
 | C float | strict: float tag; dynamic: either numeric tag; both then check the C target range | expected-tag or target-range error |
@@ -265,8 +265,8 @@ nested beneath an Option. The complete policy and its C-expression exceptions
 are normative in
 [Type relations and boundary plans](type-relations-and-boundaries.md#checked-c-scalar-conversions).
 
-The nominal case compares the userdata's metatable against the owner's
-metatable (read per-Lua-state from the `_mod` user value caching it) and,
+The record/union nominal case compares the userdata's metatable against the
+owner's metatable (read per-Lua-state from the `_mod` user value caching it) and,
 on match, uses the userdata directly as the record value (there is no
 wrapper to unwrap) — full excerpt and identity mechanism in
 [values and the GC](values-and-gc.md#wrap-and-unwrap-at-the-boundary).
@@ -277,6 +277,17 @@ FQTN, found through the registry's reverse metatable→name entry
 formatted through `luaL_tolstring`; anything else reports `lua_typename`
 (`expected test.Rec but found number`). The spec asserts the two
 working shapes.
+
+The Interface leaf keeps that exact metatable comparison as its fast path.
+After a mismatch it requires full userdata with a metatable and performs an
+internal raw table lookup keyed by the canonical target Interface metatable.
+A present entry and the original userdata are placed in traced VM slots and
+called through `luaD_callnoyield` for one result. No record-kind, callability,
+or returned-wrapper validation is added. Stack positions are saved as offsets
+and reacquired after the call can grow the stack; a native `_base` is restored,
+while a Lua-stack entry reloads from `L->ci->func.p`. The argument/result slots
+already provide the required reachability, so discovery adds no parallel GC
+root range.
 
 ### The integer check
 
@@ -331,7 +342,9 @@ Strict Titan observations use the separate `GuardPlan` renderer: implicit
 `value` projections, Array reads, Map reads, realized callable-adapter
 components, and branded exact-tag-mismatch arguments/results accept the
 runtime representation required by the static target and otherwise raise. They
-never invoke this dynamic conversion path.
+never use the broad dynamic numeric/truthiness policy. Compiler-witnessed
+Interface discovery is the named shared-leaf exception: an exact-wrapper miss
+may perform the same raw lookup and witness call under either plan.
 
 ## Records from Lua
 
@@ -509,15 +522,17 @@ inspect or mutate their representation.
 
 An Interface wrapper is a protected full userdata whose `__index` map exposes
 the Interface's public methods and whose `__newindex` rejects every write. The
-method closure first checks the receiver's exact Interface metatable, applies
-the Interface signature's dynamic argument plans, and then loads the
-declaration-order payload entry. It invokes that entry with wrapper user value
-0 as the concrete owner's `_mod` and user value 1 as the concrete receiver.
+method closure first applies the exact-or-witnessed Interface conversion to its
+receiver, applies the Interface signature's dynamic argument plans, and then
+loads the declaration-order payload entry. It invokes that entry with wrapper
+user value 0 as the concrete owner's `_mod` and user value 1 as the concrete
+receiver.
 
-Lua can retain and call a wrapper produced by Titan, or pass it back through a
-sink expecting the same nominal Interface. It cannot hand a bare Titan record
-or union to such a sink and ask the boundary to discover an implementation:
-the concrete static type and checked method mapping are no longer available.
+Lua can retain and call a wrapper produced by Titan, pass it back through a
+sink expecting the same nominal Interface, or pass bare full userdata whose
+metatable advertises a compiler-witnessed pair. The generated witness recovers
+the already checked mapping rather than rediscovering methods. A bare
+record/union with no initialized witness still fails.
 Bound Interface methods use the same three-role closure split as other Titan
 functions, with the wrapper captured before the strict trailer. See
 [Interfaces](interfaces.md#four-dispatch-paths).
@@ -645,6 +660,12 @@ inventory:
 | `"Titan function type <serialized type> tag"` | a shared light-userdata identity tag for each first-class function type |
 
 The UUID-string constants are defined in `titan-runtime/titan.h`.
+
+Interface witnesses add no registry key. They are ordinary traced entries at
+raw `concrete_metatable[target_Interface_metatable]`; the value is the first
+registered one-upvalue wrapper closure for that compiler-observed pair. The
+registry roots both canonical metatables through their existing keys, and the
+entry itself roots the closure and its emitting-module upvalue.
 
 ## Four shared-library loading paths
 

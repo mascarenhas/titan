@@ -32,13 +32,13 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
                 "strict Titan function parameter lacks its checker guard")
             return coder._strictcheckandget(
                 tlcontext, strict_plans[index], param, cvar, slot, loc,
-                "strict Titan function parameter")
+                "strict Titan function parameter", true)
         end
         assert(dynamic_plans[index] ~= nil,
             "genuine Lua function parameter lacks its checker plan")
         return coder._dynamiccheckandget(
             tlcontext, dynamic_plans[index], param, cvar, slot, loc,
-            "genuine Lua function parameter")
+            "genuine Lua function parameter", true)
     end
     local storage = options.storage or "static"
     local stats = {}
@@ -52,7 +52,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
     end
     for i, param in ipairs(params) do
         local pname = "_param_" .. tostring(i)
-        local slot = "s2v(func + " .. (i + hidden) .. ")"
+        local slot = "s2v(L->ci->func.p + " .. (i + hidden) .. ")"
         table.insert(pnames, pname)
         table.insert(stats, cvardecl(tlcontext, param, pname)
             .. " = " .. initval(param) .. ";")
@@ -139,16 +139,18 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             readone = coder._strictcheckandget(
                 tlcontext, options.strict_vararg_plan, varargtype,
                 "_varargs->args[_vj]",
-                "s2v(_vfunc + " .. (nfixed + hidden) .. " + 1 + _vj)",
-                loc, "strict Titan variadic parameter")
+                "s2v(L->ci->func.p + " .. (nfixed + hidden)
+                    .. " + 1 + _vj)",
+                loc, "strict Titan variadic parameter", true)
         else
             assert(options.dynamic_vararg_plan ~= nil,
                 "genuine Lua variadic parameter lacks its checker plan")
             readone = coder._dynamiccheckandget(
                 tlcontext, options.dynamic_vararg_plan, varargtype,
                 "_varargs->args[_vj]",
-                "s2v(_vfunc + " .. (nfixed + hidden) .. " + 1 + _vj)",
-                loc, "genuine Lua variadic parameter")
+                "s2v(L->ci->func.p + " .. (nfixed + hidden)
+                    .. " + 1 + _vj)",
+                loc, "genuine Lua variadic parameter", true)
         end
         table.insert(stats, render([[
             ptrdiff_t _vcount = _nargs - $NFIXED;
@@ -163,9 +165,9 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             _varargs_ud->nuvalue = 0; _varargs_ud->metatable = NULL;
             setuvalue(L, s2v(L->top.p), _varargs_ud);
             L->top.p++;
-            /* recompute the arg base AFTER the lua_checkstack/push that may have
-               relocated the Lua stack, so the surplus-arg slot reads are valid */
-            StkId _vfunc = L->ci->func.p;
+            /* Every surplus-argument read is based on the current CallInfo:
+               an Interface witness call may relocate the stack between loop
+               iterations. */
             $ELEM_CT *_varargs_args = ($ELEM_CT *)getudatamem(_varargs_ud);
             $STRUCT _varargs_desc = { _nvarargs, _varargs_args };
             $STRUCT *_varargs = &_varargs_desc;

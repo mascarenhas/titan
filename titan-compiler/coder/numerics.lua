@@ -518,6 +518,43 @@ function coder._code_boxed_is_integer(ctx, source)
     }), result
 end
 
+-- Interface `is` is the non-invoking twin of dynamic discovery. Exact wrappers
+-- retain the likely fast path; otherwise a non-nil raw metatable entry is
+-- sufficient, even when debug/foreign code installed a non-callable value.
+function coder._code_interface_discovery_predicate(ctx, target, source)
+    local cresult, result = newtmp(ctx, types.Boolean())
+    return render([[
+        $CRESULT
+        {
+            Table *_titan_interface_target = $TARGET;
+            $RESULT = 0;
+            if (ttisfulluserdata($SOURCE)) {
+                Udata *_titan_interface_candidate = uvalue($SOURCE);
+                if (_titan_interface_candidate->metatable ==
+                        _titan_interface_target) {
+                    $RESULT = 1;
+                } else if (_titan_interface_candidate->metatable != NULL) {
+                    TValue _titan_interface_key;
+                    TValue _titan_interface_witness;
+                    sethvalue(L, &_titan_interface_key,
+                        _titan_interface_target);
+                    lu_byte _titan_interface_witness_tag = luaH_get(
+                        _titan_interface_candidate->metatable,
+                        &_titan_interface_key,
+                        &_titan_interface_witness);
+                    $RESULT = !tagisempty(
+                        _titan_interface_witness_tag);
+                }
+            }
+        }
+    ]], {
+        CRESULT = cresult,
+        RESULT = result,
+        SOURCE = source,
+        TARGET = coder._nominal_metatable_expr(ctx, target),
+    }), result
+end
+
 -- Return setup statements and a C boolean expression for the non-raising form
 -- of one checker-owned DynamicCoercionPlan.  This is the predicate twin of
 -- `dynamiccheckandget`: in particular Option recurses through the embedded
@@ -567,6 +604,10 @@ function coder._code_dynamic_predicate(ctx, plan, target, source)
     elseif op == "nominal" then
         assert(resolved._tag == "Type.Nominal",
             "current nominal dynamic lowering requires a nominal value type")
+        if coder._is_interface_nominal(resolved) then
+            return coder._code_interface_discovery_predicate(
+                ctx, resolved, source)
+        end
         return "", render([[
             (ttisfulluserdata($SOURCE)
                 && uvalue($SOURCE)->metatable == $META)
@@ -643,6 +684,10 @@ function coder._code_strict_predicate(ctx, plan, target, source)
     elseif op == "nominal" then
         assert(resolved._tag == "Type.Nominal",
             "strict nominal predicate requires a nominal value type")
+        if coder._is_interface_nominal(resolved) then
+            return coder._code_interface_discovery_predicate(
+                ctx, resolved, source)
+        end
         return "", render([[
             (ttisfulluserdata($SOURCE)
                 && uvalue($SOURCE)->metatable == $META)
