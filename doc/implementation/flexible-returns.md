@@ -614,6 +614,13 @@ results during the allocation-free native-to-stack-entry handoff. Stack pointers
 are recomputed from saved offsets after any operation that can relocate the
 stack.
 
+An Interface result observed through `value`, a strict generic path, or a
+non-Titan Lua call may now invoke a compiler-witnessed wrapper closure after an
+exact-metatable miss. The candidate, entry, and returned wrapper remain in
+ordinary traced VM slots; no additional root inventory is needed. Because the
+VM call can grow the stack, consumers still restore saved offsets (and native
+`_base`) before reading or publishing the result.
+
 ## GC, errors, and pending returns
 
 The generated C and allocating/nested-`finally` stress coverage enforce the

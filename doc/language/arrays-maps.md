@@ -58,9 +58,10 @@ an actual Lua float, and a boolean slot an actual boolean; a typed read does
 not narrow an integral float, promote an integer, apply truthiness, introduce
 or force an Option, or assert a raw C pointer. It either produces `T` or raises
 before native code sees a value of the wrong representation.
-For an Interface element type, that strict guard requires an existing wrapper
-of the exact nominal Interface type; it never wraps a bare record or union
-found in the slot.
+For an Interface element type, that strict guard first accepts an existing
+exact wrapper. It may also wrap bare full userdata when its metatable has a
+compiler-witnessed entry for the target Interface; it does not inspect methods
+or infer structural satisfaction from the stored value.
 
 The checker must be able to build that guard. If `T?` is not guardable, the
 indexing expression is rejected at compile time rather than compiled as an
@@ -322,10 +323,12 @@ limit.
 
 Every result is checked with the same strict target guard as an Array element
 before Titan uses it, whether it came from the Map's raw slot or from
-`__index`. In particular, an `__index` result does not cross a dynamic
-conversion boundary: an `integer` value still requires an actual Lua integer,
-a `float` requires an actual Lua float, and nominal values require their exact
-tag. A final nil remains the ordinary absent `V?` result.
+`__index`. In particular, an `__index` result does not gain general dynamic
+numeric or truthiness conversion: an `integer` value still requires an actual
+Lua integer and a `float` requires an actual Lua float. Records and unions
+require their exact nominal tag. The named Interface strict-guard exception
+allows a compiler-witnessed metatable entry to construct a wrapper. A final nil
+remains the ordinary absent `V?` result.
 
 Writing from typed Titan code adjusts both the key and value. A present entry
 is updated directly without consulting `__newindex`. For an absent key,
@@ -354,8 +357,9 @@ regardless of whether the observed value came from exact Titan code, a Titan
 `{value}` view, raw Lua mutation, or `__index`. For example, a Lua float `2.0`
 stored in or returned for a `{string: integer}` Map raises when Titan reads it
 as `integer`; the read does not apply the integral-float dynamic coercion.
-Likewise, a bare record supplied for a Map whose value view is an Interface
-raises on the typed read rather than being wrapped.
+Likewise, a bare record supplied for a Map whose value view is an Interface is
+wrapped on the typed read only when an initialized generated module has
+advertised that exact concrete/Interface pair; otherwise it raises.
 This asymmetry is deliberate: genuine-Lua function arguments and intercepted
 Array writes are dynamic boundaries, while observing a Map value performs only
 the strict typed guard.
@@ -454,8 +458,10 @@ dynamic conversion cannot produce. Function arguments, exported
 module-variable writes, public record-field writes, and non-Titan Lua callable
 results use the exact same target rules; see the
 [normative boundary matrix](types.md#normative-boundary-matrix).
-For an Interface element type, the writer accepts only an existing exact
-Interface wrapper; a bare satisfying record or union from Lua is rejected.
+For an Interface element type, the writer accepts an existing exact Interface
+wrapper or calls a compiler-witnessed entry advertised on a bare full
+userdata's metatable. A merely structurally satisfying record/union with no
+loaded witness is rejected.
 
 Writing nil is deletion and bypasses the writer entirely. If a non-nil
 conversion fails, capacity, deterministic length, and existing contents are
@@ -509,9 +515,12 @@ performed through it.
 ## Performance summary
 
 Array positive reads and in-capacity writes are direct array-slot operations.
-They do not perform a hash lookup, metatable dispatch, registry lookup, or
-length scan. In particular, a typed read never loads or compares the writer;
-the shared proxy metatable remains the fast outer tag even for nested Arrays.
+The outer backing-slot access and exact-guard fast paths do not perform a hash
+lookup, metatable dispatch, registry lookup, or length scan. A witnessed
+Interface element is the exception after the slot load: its strict guard
+raw-looks up the candidate metatable and may enter the VM to construct a
+wrapper. In every case, a typed read never loads or compares the writer; the
+shared proxy metatable remains the fast outer tag even for nested Arrays.
 `#array` is O(1). Growth is amortized; a tail deletion may scan backward over
 holes. The Array's one private hash entry, proxy, second user-value slot, and
 GC edge to the writer (and through it, when needed, the constructing module)

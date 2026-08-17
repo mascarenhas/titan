@@ -283,7 +283,7 @@ through explicitly named plans:
 | satisfying `R?` | `I?` | preserve nil; wrap a present `R` |
 | `I` | `I?` | ordinary Option introduction |
 | `I?` | `I` | ordinary checked force |
-| `value` | `I?` | preserve nil; a present value must already be an exact `I` wrapper |
+| `value` | `I?` | preserve nil; a present value follows the exact-or-compiler-witnessed dynamic `I` rule |
 
 These plans do not make `R` and `I` gradually consistent and do not authorize
 general coercion lifting. Written casts are deliberately narrower:
@@ -475,10 +475,14 @@ boundary error (see [Lua interoperability](lua-interop.md)). A `T?` return
 value simply arrives in Lua as nil or as the value.
 
 For an Interface base `I`, “the dynamic conversion for `I`” means exact
-wrapper identity. Nil is accepted first for `I?`; a present existing `I`
-wrapper is accepted; and a bare record or union is rejected even if its static
-Titan type would satisfy `I`. Lua never performs structural implementation
-discovery or constructs an Interface wrapper.
+wrapper identity or compiler-witnessed metatable discovery. Nil is accepted
+first for `I?`; a present existing `I` wrapper is accepted; and bare full
+userdata is accepted when its metatable has a non-nil wrapper entry registered
+by an initialized module that compiled that concrete/Interface pair. The entry
+constructs a fresh wrapper. Titan does not structurally inspect methods at run
+time, so an otherwise satisfying record/union remains rejected when no loaded
+conversion site witnessed the pair. `is I?` tests entry presence without
+calling it.
 
 ```lua
 -- Titan (greet.titan)

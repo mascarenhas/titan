@@ -51,7 +51,7 @@ use the chapters below for the normative language reference.
 | [The type system](types.md) | All Titan types; equality, symmetric non-transitive consistency, direct coercions, gradual views, callable adjustment, the normative boundary matrix, inference, and `value`. |
 | [Generics](generics.md) | Explicit type parameters and Interface constraints, applied nominal types, local instantiation, rigid-body capabilities, constraint erasure, shallow run-time checks, eligible FFI arguments, and generic Tasks. |
 | [Type aliases](type-aliases.md) | Transparent compile-time type names, preserved record/union static namespaces, visibility, nominal re-exports, and alias cycles. |
-| [Interfaces](interfaces.md) | Nominal behavioral types, structural satisfaction by records and unions, wrapper conversions, method calls, options, casts, Lua interoperation, and separate compilation. |
+| [Interfaces](interfaces.md) | Nominal behavioral types, structural satisfaction by records and unions, wrapper conversions, compiler-witnessed dynamic discovery, method calls, options, casts, Lua interoperation, and separate compilation. |
 | [Option types](option-types.md) | `T?`: nil-tolerant types — syntax, semantics, defaulting with `or`, and how `nil` flows through arrays, maps, and the Lua boundary. |
 | [Expressions](expressions.md) | Literals and escapes, operators and precedence, Lua-faithful arithmetic, concatenation, `and`/`or`, explicit casts with `as`, non-raising type tests with `is`, constructors, calls. |
 | [Statements](statements.md) | Declarations and inference, assignment and multiple assignment, control flow, the numeric `for`, `defer`, `return`. |
@@ -105,8 +105,10 @@ Interfaces were introduced in ABI 0.20 and remain part of ABI 0.25. A record
 or union satisfies an Interface structurally at a statically known conversion
 site, but the conversion constructs a fresh wrapper; it is not subtyping or
 gradual consistency and does not lift through containers or functions. Dynamic
-boundaries accept only an existing wrapper of the exact nominal Interface type:
-Lua and `value` never discover an implementation from a bare record or union.
+boundaries accept an existing exact wrapper or a bare full userdata whose
+metatable advertises a pair witnessed by compiled conversion code. Lua and
+`value` do not structurally search methods, and an unwitnessed record or union
+remains rejected.
 
 ### First-class functions
 

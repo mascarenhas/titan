@@ -17,22 +17,54 @@ local function run_argv(argv)
     return ok == true, output, why, code
 end
 
-local function interface_pair_id(prefix, concrete, interface)
-    local function fragment(name)
-        local bytes = {}
-        for index = 1, #name do
-            bytes[index] = ("%02x"):format(name:byte(index))
-        end
-        return table.concat(bytes)
+local function interface_symbol_fragment(name)
+    local bytes = {}
+    for index = 1, #name do
+        bytes[index] = ("%02x"):format(name:byte(index))
     end
+    return table.concat(bytes)
+end
+
+local function interface_pair_id(prefix, concrete, interface)
     return prefix .. "interface_pair_"
-        .. fragment(concrete) .. "_to_" .. fragment(interface)
+        .. interface_symbol_fragment(concrete) .. "_to_"
+        .. interface_symbol_fragment(interface)
+end
+
+local function interface_wrapper_id(prefix, concrete, interface)
+    return prefix .. "\\u2133_" .. interface_symbol_fragment(concrete)
+        .. "_\\u2131_" .. interface_symbol_fragment(interface)
+        .. "_\\u2131_wrapper"
 end
 
 local function normalize_c_whitespace(source)
     source = source:gsub("%s+", " ")
     return (source:gsub(
         "%s*([%(%)%[%]{},;*=/+<>!&|?:.%%%-])%s*", "%1"))
+end
+
+local function generated_function(source, marker)
+    local search = 1
+    while true do
+        local start = assert(source:find(marker, search, true),
+            "generated C function not found: " .. marker)
+        local line_end = source:find("\n", start, true) or (#source + 1)
+        local brace = source:find("{", start, true)
+        if brace and brace < line_end then
+            local depth = 0
+            for index = brace, #source do
+                local byte = source:sub(index, index)
+                if byte == "{" then
+                    depth = depth + 1
+                elseif byte == "}" then
+                    depth = depth - 1
+                    if depth == 0 then return source:sub(start, index) end
+                end
+            end
+            error("unterminated generated C function: " .. marker)
+        end
+        search = line_end + 1
+    end
 end
 
 describe("interfaces (end-to-end)", function()
@@ -415,20 +447,16 @@ describe("interfaces (end-to-end)", function()
             assert(collected[1]:get() == 51)
             assert(collected[2]:get() == 52)
 
-            -- Lua and written dynamic Interface sinks accept only an existing
-            -- exact wrapper, never a bare implementing record/union.
+            -- A statically witnessed concrete/Interface pair is discoverable
+            -- from a bare implementing record at every dynamic boundary.
             local bare = test.unwrap_box(present)
-            ok, err = pcall(test.call_getter, bare)
-            assert(not ok)
-            assert(tostring(err):match("test.Getter"))
-            assert(not test.is_getter(bare))
-            ok, err = pcall(test.as_getter, bare)
-            assert(not ok)
-            assert(tostring(err):match("test.Getter"))
+            assert(test.call_getter(bare) == 42)
+            assert(test.is_getter(bare))
+            local discovered = test.as_getter(bare)
+            assert(discovered:get() == 42)
+            assert(not rawequal(discovered, bare))
             local get = present.get
-            ok, err = pcall(get, bare)
-            assert(not ok)
-            assert(tostring(err):match("test.Getter"))
+            assert(get(bare) == 42)
             assert(not pcall(function() present.get = get end))
             assert(not pcall(function() return present.missing end))
 
@@ -452,6 +480,381 @@ describe("interfaces (end-to-end)", function()
             assert(present:get() == 42)
             assert(bound() == 42)
         ]])
+    end)
+
+    it("discovers witnessed records and unions through dynamic Interface checks",
+    function()
+        local source = [[
+            interface Getter
+                function get(): integer
+            end
+
+            interface Scorer
+                function score(): integer
+            end
+
+            interface DynamicProducer
+                function produce(): Getter
+            end
+
+            record Box
+                item: integer
+            end
+
+            record Unwitnessed
+                item: integer
+            end
+
+            record ValueProducer
+                item: value
+            end
+
+            union Choice
+                number: integer
+                empty
+            end
+
+            function Box:get(): integer
+                return self.item
+            end
+
+            function Unwitnessed:get(): integer
+                return self.item
+            end
+
+            function ValueProducer:produce(): value
+                return self.item
+            end
+
+            function Choice:score(): integer
+                case self
+                when number: n then
+                    return n
+                else
+                    return 0
+                end
+            end
+
+            -- These wrapping sites inventory the pairs during code generation.
+            -- The Lua test deliberately never executes either function.
+            function witness_box(box: Box): Getter
+                return box
+            end
+
+            function witness_box_again(box: Box): Getter
+                return box
+            end
+
+            function witness_choice(choice: Choice): Scorer
+                return choice
+            end
+
+            function make_dynamic_producer(item: value): DynamicProducer
+                return ValueProducer.new(item)
+            end
+
+            function bare_box(item: integer): value
+                return Box.new(item)
+            end
+
+            function bare_unwitnessed(item: integer): value
+                return Unwitnessed.new(item)
+            end
+
+            function bare_choice(item: integer): value
+                return Choice.number(item)
+            end
+
+            function is_getter(value_: value): boolean
+                return value_ is Getter
+            end
+
+            function as_getter(value_: value): Getter
+                return value_ as Getter
+            end
+
+            function implicit_getter(value_: value): Getter
+                return value_
+            end
+
+            function optional_getter(value_: value): Getter?
+                return value_ as Getter?
+            end
+
+            function optional_view_getter(value_: value?): Getter?
+                return value_
+            end
+
+            function call_getter(getter: Getter): integer
+                return getter:get()
+            end
+
+            function is_scorer(value_: value): boolean
+                return value_ is Scorer
+            end
+
+            function as_scorer(value_: value): Scorer
+                return value_ as Scorer
+            end
+
+            function call_scorer(scorer: Scorer): integer
+                return scorer:score()
+            end
+
+            function array_read_getter(value_: value): Getter
+                local source: {value} = {value_}
+                local observed: {Getter} = source
+                return observed[1]
+            end
+
+            function map_read_getter(value_: value): Getter
+                local source: {string: value} = {
+                    ["item"] = value_,
+                }
+                local observed: {string: Getter} = source
+                return observed["item"]
+            end
+
+            function dynamic_result_getter(producer: value): Getter
+                return producer()
+            end
+
+            function dynamic_result_getters(producer: value): {Getter}
+                return {producer()}
+            end
+
+            function fixed_entry(
+                first: Getter,
+                label: string,
+                second: Getter
+            ): integer
+                return first:get() * 100 + #label * 10 + second:get()
+            end
+
+            function variadic_entry(
+                head: Getter,
+                label: string,
+                ...: Getter
+            ): integer
+                local total = head:get() * 100000 + #label * 10000 + #...
+                local i = 1
+                while i <= #... do
+                    local getter = ...[i]
+                    total = total + getter:get()
+                    i = i + 1
+                end
+                return total
+            end
+        ]]
+        local csrc = h.compile_and_read_c(source)
+        local box_wrapper = interface_wrapper_id(
+            "test_", "test.Box", "test.Getter")
+        local choice_wrapper = interface_wrapper_id(
+            "test_", "test.Choice", "test.Scorer")
+        local producer_wrapper = interface_wrapper_id(
+            "test_", "test.ValueProducer", "test.DynamicProducer")
+        for _, wrapper in ipairs({
+            box_wrapper, choice_wrapper, producer_wrapper,
+        }) do
+            local body = generated_function(
+                csrc, "static int " .. wrapper .. "(lua_State *L)")
+            assert.truthy(body:find("upvalue[0]", 1, true), body)
+            assert.truthy(body:find("L->ci->func.p", 1, true), body)
+            assert.matches("_titan_interface_func%s*%+%s*1", body)
+            assert.truthy(body:find("luaS_newudata", 1, true), body)
+            assert.truthy(body:find("->metatable", 1, true), body)
+            assert.truthy(body:find("->uv[0].uv", 1, true), body)
+            assert.truthy(body:find("->uv[1].uv", 1, true), body)
+            assert.truthy(body:find("memcpy", 1, true), body)
+            assert.matches("return%s+1%s*;", body)
+            assert.not_matches("%f[%w]lua_[%w_]*%s*%(", body)
+            assert.not_matches("%f[%w]luaL_[%w_]*%s*%(", body)
+
+            local escaped = wrapper:gsub("(%W)", "%%%1")
+            local _, definitions = csrc:gsub(
+                "static%s+int%s+" .. escaped .. "%s*%b()%s*{", "")
+            assert.equal(1, definitions)
+        end
+        assert.is_nil(csrc:find(
+            interface_wrapper_id(
+                "test_", "test.Unwitnessed", "test.Getter"), 1, true))
+
+        local init = normalize_c_whitespace(generated_function(
+            csrc, "test_init("))
+        local function occurrences(source_, fragment)
+            local positions = {}
+            local start = 1
+            while true do
+                local position = source_:find(fragment, start, true)
+                if not position then return positions end
+                positions[#positions + 1] = position
+                start = position + #fragment
+            end
+        end
+        for _, registration in ipairs({
+            {
+                pair = interface_pair_id(
+                    "test_", "test.Box", "test.Getter"),
+                wrapper = box_wrapper,
+            },
+            {
+                pair = interface_pair_id(
+                    "test_", "test.Choice", "test.Scorer"),
+                wrapper = choice_wrapper,
+            },
+            {
+                pair = interface_pair_id(
+                    "test_", "test.ValueProducer",
+                    "test.DynamicProducer"),
+                wrapper = producer_wrapper,
+            },
+        }) do
+            local fills = occurrences(init,
+                registration.pair .. "[0]=titan_cast_func(")
+            local closures = occurrences(init,
+                "lua_pushcclosure(L," .. registration.wrapper .. ",1);")
+            assert.equal(2, #fills)
+            assert.equal(2, #closures)
+            for index = 1, 2 do
+                local conditional = assert(init:find(
+                    "if(tagisempty(_titan_interface_existing_tag)){",
+                    fills[index], true))
+                local rawset = assert(init:find(
+                    "lua_rawset(L,-3);", closures[index], true))
+                assert.is_true(fills[index] < conditional)
+                assert.is_true(conditional < closures[index])
+                assert.is_true(closures[index] < rawset)
+            end
+        end
+
+        local called, callerr = h.call("test", [[
+            local getter_meta = assert(debug.getregistry()
+                ["Titan interface test.Getter metatable"])
+            local scorer_meta = assert(debug.getregistry()
+                ["Titan interface test.Scorer metatable"])
+            local bare = test.bare_box(41)
+            local box_meta = assert(debug.getmetatable(bare))
+            local real_witness = assert(rawget(box_meta, getter_meta))
+            assert(type(real_witness) == "function")
+
+            assert(test.is_getter(bare))
+            assert(test.as_getter(bare):get() == 41)
+            assert(test.implicit_getter(bare):get() == 41)
+            assert(test.optional_getter(bare):get() == 41)
+            assert(test.optional_getter(nil) == nil)
+            assert(test.optional_view_getter(bare):get() == 41)
+            assert(test.optional_view_getter(nil) == nil)
+            assert(test.call_getter(bare) == 41)
+            assert(test.array_read_getter(bare):get() == 41)
+            assert(test.map_read_getter(bare):get() == 41)
+            assert(test.dynamic_result_getter(function()
+                return bare
+            end):get() == 41)
+            local dynamic_results = test.dynamic_result_getters(function()
+                return bare, test.bare_box(44)
+            end)
+            assert(#dynamic_results == 2)
+            assert(dynamic_results[1]:get() == 41)
+            assert(dynamic_results[2]:get() == 44)
+            local producer = test.make_dynamic_producer(bare)
+            assert(producer:produce():get() == 41)
+
+            local choice = test.bare_choice(42)
+            local choice_meta = assert(debug.getmetatable(choice))
+            assert(type(rawget(choice_meta, scorer_meta)) == "function")
+            assert(test.is_scorer(choice))
+            assert(test.as_scorer(choice):score() == 42)
+            assert(test.call_scorer(choice) == 42)
+
+            local unwitnessed = test.bare_unwitnessed(43)
+            assert(not test.is_getter(unwitnessed))
+            local ok, err = pcall(test.as_getter, unwitnessed)
+            assert(not ok)
+            assert(tostring(err):find("test.Getter", 1, true), tostring(err))
+            ok, err = pcall(test.call_getter, unwitnessed)
+            assert(not ok)
+            assert(tostring(err):find("test.Getter", 1, true), tostring(err))
+
+            -- A large Lua witness forces the nested call to need substantial
+            -- stack capacity. Fixed entries also retain many surplus arguments;
+            -- variadic entries must revisit every relocated input slot.
+            local witness_source = { "return function(candidate)" }
+            for i = 1, 180 do
+                witness_source[#witness_source + 1] =
+                    ("local slot_%d = %d"):format(i, i)
+            end
+            witness_source[#witness_source + 1] = "calls = calls + 1"
+            witness_source[#witness_source + 1] =
+                "return wrapped(candidate) end"
+            local witness_env = { calls = 0, wrapped = real_witness }
+            local relocating_witness = assert(load(
+                table.concat(witness_source, "\n"),
+                "=(relocating Interface witness)", "t", witness_env))()
+            rawset(box_meta, getter_meta, relocating_witness)
+            assert(test.is_getter(bare))
+            assert(witness_env.calls == 0)
+
+            local surplus = {}
+            for i = 1, 170 do surplus[i] = i end
+            assert(test.fixed_entry(
+                test.bare_box(3), "mark", test.bare_box(4),
+                table.unpack(surplus)) == 344)
+            assert(witness_env.calls == 2)
+
+            local tail = {}
+            local tail_sum = 0
+            for i = 1, 80 do
+                tail[i] = test.bare_box(i)
+                tail_sum = tail_sum + i
+            end
+            assert(test.variadic_entry(
+                test.bare_box(5), "abc", table.unpack(tail)) ==
+                500000 + 30000 + 80 + tail_sum)
+            assert(witness_env.calls == 83)
+            rawset(box_meta, getter_meta, real_witness)
+
+            local fake = assert(io.tmpfile())
+            local original_meta = assert(debug.getmetatable(fake))
+            debug.setmetatable(fake, { [getter_meta] = real_witness })
+            assert(test.is_getter(fake))
+            local forged = test.as_getter(fake)
+            assert(type(forged) == "userdata")
+            assert(rawequal(debug.getuservalue(forged, 2), fake))
+            forged = nil
+            collectgarbage("collect")
+
+            debug.setmetatable(fake, {})
+            assert(not test.is_getter(fake))
+            ok, err = pcall(test.as_getter, fake)
+            assert(not ok)
+            assert(tostring(err):find("test.Getter", 1, true), tostring(err))
+
+            debug.setmetatable(fake, { [getter_meta] = false })
+            assert(test.is_getter(fake))
+            ok, err = pcall(test.as_getter, fake)
+            assert(not ok)
+            assert(tostring(err):find("attempt to call", 1, true),
+                tostring(err))
+            debug.setmetatable(fake, original_meta)
+            fake:close()
+
+            for _, mode in ipairs({ "incremental", "generational" }) do
+                collectgarbage("collect")
+                if mode == "incremental" then
+                    collectgarbage("incremental", 1, 1, 1)
+                else
+                    collectgarbage("generational", 1, 1)
+                end
+                for i = 1, 30 do
+                    local dynamic = test.bare_box(i)
+                    local getter = test.as_getter(dynamic)
+                    dynamic = nil
+                    collectgarbage("step", 1000)
+                    assert(getter:get() == i)
+                end
+            end
+        ]])
+        assert.truthy(called, callerr)
     end)
 
     it("executes every frozen callable-shape adapter action", function()
@@ -1254,8 +1657,10 @@ describe("interfaces (end-to-end)", function()
                 end
             end
         ]]
-        local csrc = normalize_c_whitespace(
-            h.compile_and_read_c(source))
+        local raw_csrc = h.compile_and_read_c(source)
+        local csrc = normalize_c_whitespace(raw_csrc)
+        local initializer = normalize_c_whitespace(generated_function(
+            raw_csrc, "test_init("))
         local pair = interface_pair_id(
             "test_", "test.Caller", "test.Callback")
         local function locate(fragment, start)
@@ -1264,27 +1669,38 @@ describe("interfaces (end-to-end)", function()
                 .. fragment)
             return position
         end
+        local function locate_initializer(fragment, start)
+            local position = initializer:find(fragment, start or 1, true)
+            assert.truthy(position,
+                "missing generated initializer fragment: " .. fragment)
+            return position
+        end
 
         assert.matches("static TitanInterfaceMethod "
             .. pair .. "%[1%];", csrc)
 
-        -- The generated constructor follows the exact allocation/rooting
+        -- The generated module initializer follows the exact allocation/rooting
         -- protocol and performs no allocating/raising work after publishing
         -- the half-built wrapper and before installing both ownership edges.
         local allocation =
-            locate("L,sizeof(" .. pair .. "),2);")
+            locate_initializer("L,sizeof(" .. pair .. "),2);")
         local rebase =
-            locate("_base=restorestack(L,_base_off);", allocation)
+            locate_initializer(
+                "_base=restorestack(L,_base_off);", allocation)
         local anchor =
-            locate("setuvalue(L,s2v((restorestack(L,_base_off)", rebase)
+            locate_initializer(
+                "setuvalue(L,s2v((restorestack(L,_base_off)", rebase)
         local metatable =
-            locate("->metatable=_titan_interface_metatable;", anchor)
-        local module_value = locate("->uv[0].uv,", metatable)
+            locate_initializer(
+                "->metatable=_titan_interface_metatable;", anchor)
+        local module_value = locate_initializer("->uv[0].uv,", metatable)
         local module_barrier =
-            locate("luaC_barrierback", module_value)
-        local self_value = locate("->uv[1].uv,", module_barrier)
-        local self_barrier = locate("luaC_barrierback", self_value)
-        local payload = locate(
+            locate_initializer("luaC_barrierback", module_value)
+        local self_value = locate_initializer(
+            "->uv[1].uv,", module_barrier)
+        local self_barrier = locate_initializer(
+            "luaC_barrierback", self_value)
+        local payload = locate_initializer(
             "memcpy(getudatamem(", self_barrier)
         assert.is_true(allocation < rebase
             and rebase < anchor
@@ -1294,7 +1710,7 @@ describe("interfaces (end-to-end)", function()
             and module_barrier < self_value
             and self_value < self_barrier
             and self_barrier < payload)
-        local published = csrc:sub(anchor, payload)
+        local published = initializer:sub(anchor, payload)
         assert.is_nil(published:find("luaS_newudata", 1, true))
         assert.is_nil(published:find("luaL_error", 1, true))
 

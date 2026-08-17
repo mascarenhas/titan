@@ -437,10 +437,12 @@ checking callability and creates no wrapper. See
 [Closure adjustment wrappers](closure-adjustment-wrappers.md#implicit-adjustment-as-and-is).
 
 An Interface target is the deliberate exception where both strict projection
-and broad dynamic conversion have the same acceptance condition: the value
-must already contain a wrapper of that exact nominal Interface type. Neither
-operation discovers that a bare record or union satisfies the Interface.
-Written concrete/Interface casts have their own exact rows rather than
+and broad dynamic conversion use the same lookup condition. They accept
+an existing exact nominal wrapper, or bare full userdata whose metatable has a
+non-nil wrapper entry registered by an initialized module that compiled that
+concrete/Interface pair. The entry constructs a fresh wrapper; Titan does not
+search the erased value's methods. Written concrete/Interface casts have their
+own exact rows rather than
 inheriting every implicit Option composition. In particular, a satisfying
 `R as/is I` is admitted, but `R? as/is I`, `R as/is I?`, and `R? as/is I?`
 are not; `I? as/is R` is the explicit force-and-downcast/test, while target
@@ -451,15 +453,18 @@ An option cast `o as T` unwraps the option, raising
 implicit option unwrap; see [option types](option-types.md)). The C rows belong
 to the FFI; see [the C FFI](ffi.md).
 
-The expression `exp is type` asks whether the corresponding written
-`exp as type` cast would complete successfully. The checker admits exactly
+The expression `exp is type` applies the non-raising acceptance predicate for
+the corresponding written `exp as type` operation. The checker admits exactly
 the same source/target relations for both forms; an inadmissible test is the
 same compile-time `cannot cast 'T1' to 'T2'` error. `is` evaluates `exp`
 exactly once and returns a `boolean`. A cast mismatch becomes `false` instead
 of raising, but an error raised while evaluating `exp` still propagates.
 The test does not narrow the static type of a variable in either branch.
 
-For the admitted casts that can fail, the test uses the same checks as `as`:
+For ordinary admitted casts that can fail, the test uses the same checks as
+`as`. The deliberate trusted-protocol exception is an Interface witness: `is`
+checks only non-nil entry presence, while `as` subsequently calls that entry,
+so debug/native code can forge an entry for which `is` is true but `as` raises.
 
 * `value is integer` accepts Lua integers and exact integral floats within
   Lua's integer range; `value is float` accepts either numeric representation.
@@ -467,10 +472,12 @@ For the admitted casts that can fail, the test uses the same checks as `as`:
   corresponding cast. This includes C target ranges, `_Bool`'s 0/1
   restriction, finite/range checks for floating narrowing, and the same rule
   recursively beneath an Option.
-* Checked primitive targets, Maps, Arrays, records, unions, Interfaces, and owned-C targets use
-  the same Lua tag or exact metatable identity as their casts. In particular,
-  an ordinary Lua table is a Map, not an Array proxy, and distinct record
-  types do not match.
+* Checked primitive targets, Maps, Arrays, records, unions, and owned-C targets
+  use the same Lua tag or exact metatable identity as their casts. An
+  Interface test also accepts a non-nil compiler-witnessed entry on a bare
+  full userdata's metatable, but tests only presence and never calls the entry.
+  In particular, an ordinary Lua table is a Map, not an Array proxy, and
+  distinct record types do not match.
 * `r is I` for a statically satisfying concrete record or union is always true
   and allocates no Interface wrapper. Likewise, an admitted non-exact
   Function-to-Function `f is B` allocates no closure wrapper; it tests the

@@ -296,7 +296,7 @@ For an Interface `I`:
 | `I` | a distinct Interface `J` | rejected |
 | satisfying record/union `R` | `I` | direct coercion; construct a fresh wrapper |
 | non-satisfying record/union | `I` | rejected with the first declaration-order method failure |
-| `value` | `I` | strict implicit projection or explicit dynamic check; exact existing `I` wrapper only |
+| `value` | `I` | strict implicit projection or explicit dynamic check; an exact existing `I` wrapper, or bare full userdata whose metatable advertises a compiler-witnessed `R -> I` wrapper |
 | `I` | `value` | gradual boxed injection |
 | `I` | record/union `R` | no implicit relation; only the explicit concrete test/downcast described below |
 
@@ -422,7 +422,7 @@ rule:
 | satisfying `R?` | `I?` | propagate nil; wrap a present `R` |
 | `I` | `I?` | ordinary Option introduction |
 | `I?` | `I` | ordinary force; nil raises |
-| `value` | `I?` | nil propagates; a present value must already be an exact `I` wrapper |
+| `value` | `I?` | nil propagates; a present value follows the exact-or-witnessed dynamic `I` rule |
 
 ```titan
 function optional(r: R?): I?
@@ -441,8 +441,8 @@ the following are the complete Interface-specific rows to keep separate:
 - `I? as R` raises for nil and otherwise performs the concrete downcast;
 - `I? as I` performs the ordinary exact Option force, while `I? is I` is
   false for nil and true for a present exact `I`;
-- `value as/is I?` accepts nil or an existing exact `I` wrapper, never a bare
-  satisfying record or union;
+- `value as/is I?` accepts nil or applies the exact-or-witnessed `I` rule to a
+  present full userdata;
 - `R as/is I` is admitted only when the statically known record or union
   satisfies `I`; `as` constructs a wrapper and `is` is allocation-free; and
 - direct C `TValue as/is I` or `I?` is inadmissible.
@@ -463,26 +463,43 @@ function dynamic(r: R)
     local i2 = wrapped as I -- succeeds: wrapped already holds an I
 
     local bare: value = r
-    local i3 = bare as I    -- raises: no dynamic implementation discovery
+    local i3 = bare as I    -- succeeds after an initialized module witnesses R -> I
 end
 ```
 
 An implicit `value -> I` projection and a written `value as/is I` are
-different operations, but this target has the same acceptance condition for
-both: the value must already carry the exact nominal `I` wrapper. The written
-form uses Titan's broader dynamic-coercion machinery; it still cannot build
-the missing declaration-order vtable after the concrete static type has been
-erased.
+different operations in general, but this target has the same acceptance
+condition for both. An existing exact `I` wrapper takes the fast path.
+Otherwise the value must be full userdata whose metatable has a non-nil raw
+entry under `I`'s canonical metatable. The compiler installs such an entry
+only for a concrete record/union pair whose static wrapper construction it has
+actually emitted. The entry is called with the bare userdata and constructs a
+fresh Interface wrapper. Titan does not inspect the erased value's methods or
+repeat structural satisfaction at run time.
 
-The same exact-wrapper-only dynamic rule applies at every genuine Lua sink
-whose target is `I` or present `I?`: function formals, exported module
-variables, public record fields, non-nil Array writes, and results entering
-Titan from a non-Titan Lua callable. Raw Lua Map writes are not intercepted;
-a later typed read strictly requires the exact wrapper and rejects a bare
-implementer.
+The same exact-or-witnessed rule applies at every genuine Lua sink whose
+target is `I` or present `I?`: function formals, exported module variables,
+public record fields, non-nil Array writes, and results entering Titan from a
+non-Titan Lua callable. It also applies to strict `value` projections and typed
+Array/Map observations. Raw Lua Map writes are not intercepted, but a later
+typed read may discover a registered witness for the stored userdata.
+
+Witnesses are per Lua state. A module that emits a real `R -> I` wrapper site
+registers its wrapper function during initialization even if that source path
+never executes. Merely declaring `R`, proving `r is I` statically, or having a
+matching method set does not advertise a pair. If several initialized modules
+advertise the same pair, the first non-nil metatable entry wins and later
+initializers do not replace it.
+
+Dynamic `value is I` uses the same exact-wrapper fast path and raw lookup, but
+never calls the entry or constructs a wrapper. It therefore reports true for
+any non-nil advertised entry, including one forged to a non-function by debug
+or native code; the corresponding `as I` then attempts the ordinary call and
+may raise. This presence-only test is distinct from the checker's static
+`r is I`, which is compile-time satisfaction evidence and emits no witness.
 
 A C `TValue` has no direct relation to an Interface target. Convert the whole
-slot to `value` first, then apply the exact-wrapper rule:
+slot to `value` first, then apply the exact-or-witnessed rule:
 
 ```titan
 -- `tv` has an imported C TValue type:
@@ -582,8 +599,9 @@ the metatable. Public Interface methods are available through `__index`; every
 write is rejected. There are no fields, constructors, statics, implementation
 names, or vtable-reflection members.
 
-Lua can obtain a wrapper only from Titan code that has already performed the
-static concrete-to-Interface coercion:
+Lua can obtain a wrapper either directly from a static Titan conversion or by
+passing bare Titan userdata through a dynamic Interface sink after some loaded
+module has witnessed that concrete/Interface pair:
 
 ```titan
 interface Sink
@@ -612,25 +630,31 @@ end
 ```lua
 local m = require "sample"
 local box = m.make_box()
-local sink = m.wrap(box)
 
+m.use(box)                          -- accepted: compiled wrap advertises the pair at init
+local sink = m.wrap(box)
 m.use(sink)                         -- accepted: exact Sink wrapper
-assert(not pcall(m.use, box))       -- rejected: bare Box is not wrapped
 ```
 
 Every Interface-typed Lua argument, module/record-field write, Array write, or
-non-Titan callable result follows that exact-wrapper-only rule. Lua never asks
-Titan to discover that a bare record/union implements the Interface. For `I?`,
-nil is accepted first and every present value follows the same exact check.
+non-Titan callable result follows the exact-or-witnessed rule. For `I?`, nil is
+accepted first and every present value follows the same lookup. Each
+successful witnessed conversion constructs a fresh wrapper, so Lua should
+retain the wrapper if identity matters.
 
 Lua calls Interface methods with ordinary colon syntax. The generic method
-entry checks that argument 1 has the exact Interface metatable, applies the
-normal dynamic conversion to the declared arguments, dispatches through the
-wrapper, and converts results for Lua. Reading a method produces a callable;
-calling it with a receiver of the wrong Interface raises an error naming the
-Interface and method. The metatable is protected, and debug-library or C-API
-mutation of its private uservalues or payload is outside Titan's safety
-contract.
+entry applies the exact-or-witnessed Interface conversion to argument 1,
+applies the normal dynamic conversion to the declared arguments, dispatches
+through the wrapper, and converts results for Lua. Reading a method produces a
+callable; calling it with a receiver that cannot become that Interface raises
+an error naming the Interface and method. The metatable is protected, and
+debug-library or C-API mutation of its private uservalues or payload is outside
+Titan's safety contract. That same boundary applies to the witness table:
+discovery raw-reads the candidate userdata's metatable using the Interface
+metatable as key. `is` reports only whether the entry is non-nil; conversion
+calls it without checking that the userdata is a Titan record/union or that
+the entry is callable, and trusts its one result. Forged entries therefore inherit
+ordinary Lua call errors and side effects and are programmer-responsible.
 
 The Interface declaration itself is type-only, so a Lua module object exposes
 no `mod.InterfaceName` namespace. Lua's builtin `require "io"` remains its
@@ -683,7 +707,10 @@ end
 ```
 
 `consumer` imports `api`, not `provider`. The wrapper built by `bridge`
-retains the provider module and concrete value. The serialized `api.Scorer`
+retains the provider module and concrete value. Its compiled conversion also
+registers a per-state witness, so a bare `provider.Counter` erased to `value`
+can later cross an `api.Scorer` boundary in `consumer` without `consumer`
+importing `provider`. The serialized `api.Scorer`
 descriptor supplies nominal identity, method order, and signatures; the
 Interface owner supplies the canonical per-state metatable; and the wrapper
 payload supplies the exact or adjusted concrete entries. This contract is the
@@ -699,8 +726,12 @@ Interface bound and metatable entries into the separated nominal callable
 family. ABI 0.24 retains that representation while extending generic declaration
 metadata, including applied Interface constraints. ABI 0.25 retains that
 Interface representation while changing the public `titan.fs` and
-`titan.async` interfaces and exact signatures. Prior-ABI providers are rejected
-rather than adapted in place.
+`titan.async` interfaces and exact signatures. Compiler-witnessed discovery
+adds only private generated functions and per-state metatable entries; it does
+not change the serialized schema, wrapper layout, exported symbols, or ABI.
+Older same-ABI objects remain loadable but do not advertise pairs they were
+not compiled to witness. Prior-ABI providers are rejected rather than adapted
+in place.
 
 ## Version-one boundaries
 
@@ -715,8 +746,8 @@ Interface v1 deliberately does not add:
 - a transitive or structurally lifted implementation relation;
 - whole-container or general callable lifting of concrete-to-Interface
   coercion;
-- dynamic discovery that a `value` or Lua value holding a bare record/union
-  implements an Interface;
+- runtime structural matching of a bare record/union that no initialized
+  compiled conversion site has witnessed;
 - conversion from one Interface to another through the hidden concrete value;
 - reflection over implementer names or vtable contents;
 - wrapper interning, special equality, hashing, or ordering;

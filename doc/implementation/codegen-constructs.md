@@ -798,7 +798,11 @@ the stored plan rather than treating every unequal pair as a scalar cast:
 3. **Written `value as T`** consumes the embedded
    `DynamicCoercionPlan`: integral in-range floats may produce integers,
    integers may produce floats, booleans use truthiness, and Option recurses.
-   The same plan's non-raising form implements `is`.
+   The same plan's non-raising form implements `is`. For an Interface leaf,
+   `checkandget` accepts the exact wrapper or raw-looks up a
+   compiler-witnessed entry on a bare full userdata's metatable and calls it
+   for one result. Implicit/strict Interface guards use that same leaf; no
+   checker plan changes.
 4. **T → `value`** uses `setboxed` into a `TValue` temp — records and unions
    remain their Udata and Arrays become their canonical proxy. No new slot:
    the source stays anchored where it was.
@@ -836,10 +840,11 @@ aggregate.
 * A written `value is T` backed by a `DynamicCoercionPlan`: integer tests
   accept an integer tag or an exact integral float that passes
   `lua_numbertointeger`; float tests accept either numeric tag;
-  primitive/Map tests use `ttis*`; Array, nominal record/union, owned-C, and
-  Interface tests compare the same exact metatable. An Interface target accepts
-  only an existing exact wrapper; it never constructs a wrapper from a bare
-  record or union at a dynamic boundary.
+  primitive/Map tests use `ttis*`; Array, nominal record/union, and owned-C
+  tests compare the expected metatable. An Interface test accepts that exact
+  wrapper or a non-nil raw entry under the target Interface metatable on a bare
+  full userdata's metatable. It never calls or validates the entry and remains
+  allocation-free.
 * A target `Option(T)` first accepts nil, then recursively applies the same
   dynamic plan for `T`. Thus direct `value as boolean` and present
   `value as boolean?` both use truthiness, while nil is preserved;

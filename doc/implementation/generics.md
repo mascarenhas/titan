@@ -2,9 +2,9 @@
 
 Titan implements generics as a **generic-aware surface checker over an erased,
 ordinary core**. Each generic owner or callable has one declared scheme and one
-native implementation. Type applications are closed by the checker, but no type
-argument, dictionary, witness, specialization key, or provenance bit reaches
-run time.
+native implementation. Type applications are closed by the checker, but no
+generic type argument, dictionary, per-application witness, specialization key,
+or provenance bit reaches run time.
 
 The central pipeline is:
 
@@ -546,7 +546,7 @@ For a closed use, the pass implements the selected direction rules:
 | Closed statically accepted value → unconstrained `T` | Apply any already selected ordinary source adjustment, then box to `value`; no erasure-induced tag test. |
 | Literal `value` → unconstrained `T` | Transport the raw `TValue`; do not convert it to the closed instantiation. |
 | Closed record/union → `T:I` | Construct the existing Interface wrapper selected by surface checking, then use the erased `I` carrier. |
-| Literal `value` → `T:I` | Run the existing checked `value -> erase(I)` dynamic Interface cast immediately. |
+| Literal `value` → `T:I` | Run the existing exact-or-compiler-witnessed `value -> erase(I)` dynamic Interface cast immediately. |
 | Rigid result → the same constraint carrier or `value` | Transport/box only; no precise projection. |
 | Unconstrained rigid result → a more precise closed type | Run the existing strict gradual guard before unboxing or any representation-sensitive use. |
 | Constrained erased Interface → closed record/union | Use the existing checked Interface downcast/backing-owner test and recover the wrapper's backing value. |
@@ -645,8 +645,8 @@ then a dependent child is guarded when eliminated.
 
 The generated Lua entry for a generic declaration uses the actual erased
 signature. Unconstrained positions use ordinary dynamic `value`; constrained
-positions use the exact erased Interface and its normal dynamic cast. Known
-outer shapes keep today's Lua checks. Dependent unconstrained Lua writes may
+positions use the erased Interface and its normal exact-or-witnessed dynamic
+cast. Known outer shapes keep today's Lua checks. Dependent unconstrained Lua writes may
 therefore delay their error until a closed Titan projection; fixed owner-
 independent fields keep their eager policy. Applied nominal `as/is` checks one
 owner metatable only.
@@ -747,8 +747,8 @@ types.serialize(ast._declared_type)
 ```
 
 rather than serialization of erased `ast._type`. Generated C does not contain a
-generic dispatch switch, type argument, witness, or instantiation table. Two
-closed applications of one declaration have the same symbols and native entry;
+generic dispatch switch, type argument, per-application witness, or
+instantiation table. Two closed applications of one declaration have the same symbols and native entry;
 only their caller-side ordinary adjustments differ.
 
 ## Compiled metadata and ABI 0.24
@@ -757,8 +757,8 @@ ABI 0.24 serializes the frozen declared module graph. The schema adds structural
 scopes, dense binder descriptors, rigid parameter references, applied nominal
 arguments, function/method/constructor schemes, generic owner descriptors, and
 public forwarding aliases. It does not serialize expression inference cells,
-erased AST annotations, run-time argument values, application witnesses, or
-provenance summaries.
+erased AST annotations, run-time argument values, generic application
+witnesses, or provenance summaries.
 
 The closed validator proves:
 
@@ -898,7 +898,7 @@ the snapshot in registration order. Delivery ignores each listener error
 independently and does not consult a mutable `live` bit again. Duplicate source
 callbacks remain distinct, and removal during delivery cannot mutate or skip
 the snapshot. The remover, registration, adjusted listener, and Task links are
-ordinary traced state—never generic witnesses.
+ordinary traced state—never generic type witnesses.
 
 ## Failure boundaries and review checklist
 

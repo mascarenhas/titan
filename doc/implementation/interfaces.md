@@ -5,7 +5,10 @@ representation. A record or union does not acquire an Interface supertype.
 Instead, the checker may authorize one direct concrete-to-Interface coercion
 at a statically known use site, and the coder lowers that coercion to a fresh
 wrapper containing the concrete receiver, its owning module, and an ordered
-method table.
+method table. Code generation also advertises every emitted pair on the
+concrete metatable so later strict/dynamic Interface observations can construct
+that same wrapper after type erasure. This discovery extension changes no
+checker relation or serialized type information.
 
 The language-visible contract is in
 [Interfaces](../language/interfaces.md). This chapter describes the parser,
@@ -168,6 +171,10 @@ invocation: this Interface path calls a known method with concrete self, while a
 closure wrapper recovers and calls its penultimate immediate source closure. See
 [Closure adjustment wrappers](closure-adjustment-wrappers.md#one-frozen-callableadapterplan).
 
+The existing frozen immediate nominal guard is already a possible rebase
+point. Code generation now uses that allowance when an Interface guard invokes
+a witness; no checker relation, adapter-plan field, or root inventory changes.
+
 For a finite flexible-result request, the adapter first consumes any surplus
 fixed concrete results before asking the concrete flexible tail for more.
 Discarded concrete tail values therefore remain unevaluated by the gradual
@@ -177,9 +184,12 @@ Concrete/Interface pair obligations are collected on demand only in a
 translation unit that constructs the wrapper. Their key is the fully qualified
 concrete name followed by the fully qualified Interface name. The list is
 sorted bytewise before emission, and private adapter symbols encode both names
-injectively plus the declaration-order slot. Allocation-free `is` tests
-validate their frozen mapping without registering a pair, so discovery order
-does not affect generated identities.
+injectively plus the declaration-order slot. Each pair also receives one
+deterministic private wrapper-witness symbol in the emitting
+module/concrete/Interface native hierarchy. Allocation-free static `is` tests
+validate their frozen mapping without registering a pair, so only a real
+wrapper construction causes a pair to be advertised and discovery order does
+not affect generated identities.
 
 ## Wrapper representation
 
@@ -212,6 +222,19 @@ This happens on both module-initialization branches and before a user module
 initializer can construct a wrapper. Each wrapper copies the complete array
 with `memcpy`; pair arrays and wrappers are not interned.
 
+The same pair emits one private `lua_CFunction` witness. It captures the
+emitting module in upvalue 0 and receives a bare concrete Udata in stack slot
+1. Using Lua internals rather than the public Lua API, it allocates the same
+two-uservalue Interface representation, replaces slot 1 with the result,
+publishes the target Interface metatable, concrete-owner module, and original
+concrete self with the ordinary barriers, copies the filled pair array, and
+returns one value. The incoming argument remains traced through allocation.
+The result then replaces that argument slot before its metatable and uservalues
+are published; no GC-capable operation occurs between that replacement and the
+direct store of the concrete into user value 1. No parallel rooting scheme is
+needed. Saved stack offsets, rather than stale `StkId` pointers, span the
+allocation.
+
 Wrapper construction evaluates the concrete value exactly once into an untraced
 C temporary, relying on its ordinary allocation/result/semantic/VM provenance.
 It resolves the concrete-owner module, obtains the Interface metatable from the
@@ -231,6 +254,15 @@ The concrete module is `_mod` when the concrete type belongs to the current
 module. Otherwise the translation unit retains or recovers the concrete
 owner's module Udata in a private module slot. It never substitutes the
 Interface owner or emitting module.
+
+During initialization, after nominal metatables have been recovered and the
+pair array has been filled, generated code raw-reads the concrete metatable at
+the target Interface metatable key. A nil entry is replaced with a C closure
+for the witness, capturing the current emitting module; any non-nil entry is
+left untouched. Registration is repeated for every Lua state and on either
+initialization path, while equivalent modules in one state obey first-writer
+wins. The ordinary initialization code may use the Lua API; only the generated
+witness body itself is restricted to direct stack manipulation.
 
 ## Native entry ABI and adjustment entries
 
@@ -318,12 +350,12 @@ metatable method map stores one closure per public method, capturing the
 Interface owner's module so argument and result conversion uses the
 Interface signature's identities.
 
-The entry dynamically checks argument 1 as the exact Interface receiver,
-applies the ordinary Lua-boundary dynamic plans to the declared arguments,
-loads the wrapper slot, then invokes the selected payload with the concrete
-module and concrete self. Returning through the entry boxes results for Lua.
-A bare record or union never reaches the payload because it fails the exact
-Interface metatable check first.
+The entry dynamically converts argument 1 through the exact-or-witnessed
+Interface path, applies the ordinary Lua-boundary dynamic plans to the declared
+arguments, loads the resulting wrapper slot, then invokes the selected payload
+with the concrete module and concrete self. Returning through the entry boxes
+results for Lua. A bare record or union reaches the payload only after a
+registered witness has constructed that wrapper.
 
 ### Strict Titan generic calls
 
@@ -376,18 +408,33 @@ their own private cache slot and recover the exact registry metatable during
 initialization. Interfaces consume no importer-reconstructed public-prefix
 slot.
 
-The central dynamic plan for an Interface target is the ordinary exact nominal
-metatable check. It is shared by written `value as/is I` and genuine Lua sinks:
-function arguments, exported module and record writes, non-nil Array writes,
-and results returned by a non-Titan callable. It accepts only an existing
-wrapper of that exact Interface. It never calls the structural matcher and
-never constructs a wrapper after the concrete static type has been erased.
-An `I?` plan accepts nil first and applies the same exact check to a present
-value.
+The central nominal leaf for an Interface target first performs the ordinary
+exact-wrapper metatable check. Otherwise it requires full userdata with a
+metatable and raw-reads that candidate metatable using the target Interface
+metatable TValue as key. A missing entry takes the existing nominal type-error
+path. A present entry is pushed with the candidate userdata and invoked through
+`luaD_callnoyield` for one result; the returned Udata is trusted as the
+Interface value without a second metatable or result-shape check.
 
-Typed Array/Map reads and strict callable observations remain gradual guards,
-not Lua-boundary coercions. Raw Lua Map mutation is not intercepted; the later
-typed read must observe an exact wrapper.
+This exact-or-witnessed leaf is shared by written `value as I`, implicit
+`value -> I` projection, genuine Lua sinks, typed Array/Map reads, strict
+callable observations, exported module/record writes, Array writers, and
+non-Titan callable results. `I?` accepts nil first and recurses for a present
+value. It never calls the checker structural matcher: only an initialized
+compiled wrapper site advertises a pair.
+
+The non-raising `is` form uses the same exact check and raw lookup but does not
+call the entry. Any non-nil value therefore counts as present. Discovery does
+not verify that the candidate metatable belongs to a Titan record/union and
+does not verify callability; forged debug/native entries are outside Titan's
+safety contract and retain ordinary Lua call errors and effects.
+
+The VM call keeps the candidate, looked-up entry, and result in traced stack
+slots. It may grow the stack, so generated native code saves offsets and
+restores `_base`, while Lua-stack entry code reacquires slots from the current
+`CallInfo`. This is stack-address hygiene rather than an additional object-root
+inventory: metatables are traced objects, modules are registry/upvalue rooted,
+and a successful wrapper retains the concrete through user value 1.
 
 ## Tests and concrete downcasts
 
@@ -395,6 +442,11 @@ For a statically satisfying concrete value, `r is I` reuses the checked
 ordered mapping but emits no pair array, adapter, or wrapper. It evaluates the
 operand once and returns true. A failed structural pair is rejected by the
 checker rather than becoming false at run time.
+
+For `value is I` and the corresponding strict predicate, code generation uses
+exact Interface metatable identity or non-nil raw witness presence. It neither
+invokes nor validates the entry, and therefore remains allocation-free. This
+run-time predicate cannot itself cause a pair to be inventoried.
 
 The reverse written operation is independent of satisfaction. `i is R` and
 `i as R` read user value 1 and compare the concrete Udata's metatable with the
@@ -451,8 +503,13 @@ module and nominal symbols. Interface artifacts follow the native hierarchy
 introduced in ABI 0.23 and retained through ABI 0.25:
 `<module>_\u2133_<owner>_\u2131_<member><role>`, matching record and
 union callables. Pair arrays and adjustment entries are private to
-the translation unit that needs a concrete/Interface conversion and do not
-add serialized metadata or public symbols.
+the translation unit that needs a concrete/Interface conversion; its witness
+function and per-state closure/metatable entry are private as well. None add
+serialized metadata or public symbols. Because concrete and Interface owners
+recover canonical metatables per state, a witness initialized from one DSO or
+archive can be discovered by an unrelated consumer without a direct concrete
+import. Older same-ABI objects remain valid but advertise no pair they were not
+compiled to witness.
 
 ## ABI, GC, and failure boundaries
 
@@ -476,7 +533,9 @@ public `titan.fs` and `titan.async` signatures. The generalized callable
 action graph, `nil_fill_result`, and first-class closure wrappers add no
 Interface schema/payload slot or provider symbol. Target wrapper adapters and
 strict relays are consumer-private and use existing signatures, so there is no
-new native-layout bump. A 0.24 provider is rejected before its metadata is
+new native-layout bump. Dynamic discovery likewise adds only private witness
+code, ordinary one-upvalue closures, and raw per-state metatable entries, so it
+requires no ABI bump. A 0.24 provider is rejected before its metadata is
 decoded or any native value crosses the ABI-0.25 boundary; there is no
 compatibility adapter, migration, or cleanup path, and separately versioned
 0.20 through 0.24 artifacts remain preserved.
@@ -489,6 +548,13 @@ upvalue 4. Native adapters keep inputs in C, root newly allocated converted
 objects individually, and root every live GC-bearing fixed/open native source
 result immediately after return. Raw descriptors/C arrays and allocation-free
 input/destination runs never become roots.
+
+A witness closure strongly retains its emitting module; that module's traced
+uservalues retain imported owners and cached metatables, while the Lua registry
+owns every canonical nominal metatable. During a witness call the bare input is
+an argument stack value, the new wrapper replaces that same traced slot, and
+its user value 1 retains the input before return. The discovery protocol needs
+no additional GC root beyond these existing edges.
 
 All type mismatches raise through the ordinary Titan/Lua error path. Wrapper
 allocation can fail before publication without leaving external native

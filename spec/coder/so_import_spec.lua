@@ -164,6 +164,20 @@ describe(".so-only cross-module imports", function()
                     local convert: (value) -> value = value_:convert
                     return convert(input)
                 end
+
+                function is_incrementer(value_: value): boolean
+                    return value_ is api.Incrementer
+                end
+
+                function is_dynamic(value_: value): boolean
+                    return value_ is api.Dynamic
+                end
+
+                function explicit_incrementer(
+                    value_: value
+                ): api.Incrementer
+                    return value_ as api.Incrementer
+                end
             ]] },
             { name = "interface_provider", src = [[
                 bias: integer = 1
@@ -179,6 +193,10 @@ describe(".so-only cross-module imports", function()
                 function Box:convert(input: integer): integer
                     return self.n + input + bias
                 end
+
+                function bare(n: integer): value
+                    return Box.new(n)
+                end
             ]] },
             { name = "interface_bridge", src = [[
                 local api = import "interface_api"
@@ -189,6 +207,14 @@ describe(".so-only cross-module imports", function()
                     local incrementer: api.Incrementer =
                         provider.Box.new(n)
                     return consumer.use(incrementer)
+                end
+
+                function make_incrementer(n: integer): api.Incrementer
+                    return provider.Box.new(n)
+                end
+
+                function make_dynamic(n: integer): api.Dynamic
+                    return provider.Box.new(n)
                 end
 
                 function run_adjusted(n: integer): integer
@@ -208,11 +234,52 @@ describe(".so-only cross-module imports", function()
         })
         assert.truthy(ok, err)
 
-        local rok, out = call("interface_bridge", [[
-            assert(interface_bridge.run(40) == 43)
-            assert(interface_bridge.run_adjusted(20) == 41)
+        -- Load the Interface owner and concrete provider before the bridge so a
+        -- preexisting discovery entry can be installed. Bridge initialization
+        -- must retain it while publishing the unseeded adjusted pair.
+        local rok, out = call("interface_api", [[
+            local provider = require "interface_provider"
+            local consumer = require "interface_consumer"
+            local bare = provider.bare(40)
+            local concrete_meta = assert(debug.getmetatable(bare))
+            local registry = debug.getregistry()
+            local incrementer_meta = assert(registry[
+                "Titan interface interface_api.Incrementer metatable"])
+            local dynamic_meta = assert(registry[
+                "Titan interface interface_api.Dynamic metatable"])
+            local replacement
+            local sentinel_calls = 0
+            local sentinel = function(candidate)
+                sentinel_calls = sentinel_calls + 1
+                assert(rawequal(candidate, bare))
+                return replacement
+            end
+            rawset(concrete_meta, incrementer_meta, sentinel)
+
+            local bridge = require "interface_bridge"
+            assert(rawequal(
+                rawget(concrete_meta, incrementer_meta), sentinel))
+            local generated = rawget(concrete_meta, dynamic_meta)
+            assert(type(generated) == "function")
+            assert(not rawequal(generated, sentinel))
+
+            replacement = bridge.make_incrementer(7)
+            assert(consumer.is_incrementer(bare))
+            assert(sentinel_calls == 0)
+            assert(consumer.use(bare) == 10)
+            assert(sentinel_calls == 1)
+            local explicit = consumer.explicit_incrementer(bare)
+            assert(consumer.use(explicit) == 10)
+            assert(sentinel_calls == 2)
+
+            assert(consumer.is_dynamic(bare))
+            assert(consumer.use_dynamic(bare, 20) == 61)
+            assert(bridge.make_dynamic(9):convert(1) == 11)
+
+            assert(bridge.run(40) == 43)
+            assert(bridge.run_adjusted(20) == 41)
             local ok, err =
-                pcall(interface_bridge.reject_adjusted, 1.0)
+                pcall(bridge.reject_adjusted, 1.0)
             assert(not ok)
             assert(tostring(err):find("expected integer", 1, true),
                 tostring(err))

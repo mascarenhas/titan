@@ -296,8 +296,8 @@ back to this matrix rather than defining competing conversion rules.
 | --- | --- | --- |
 | Ordinary typed Titan declaration, assignment, argument, return, or constructor slot | Exact identity, one direct outer coercion, a gradual view, or a directional callable adjustment must exist. Ordinary coercions never lift through an Array, Map, Function, or nominal member. | The checker-selected direct conversion is performed; a same-representation Array/Map gradual view preserves the object. An exact Function edge preserves its source closure; a non-exact one follows the conditional wrapper row below. |
 | Statically known non-exact Function `A -> B` adjustment (implicit or written `as`) | One checker-frozen directional `CallablePlan`, including only its named argument/result/tail actions and strict component operations. | Evaluate the operand once. An exact branded Titan `A` closure with upvalue room becomes a fresh target-`B` wrapper; other values stay unchanged for generic dispatch. No cache or equality unwrapping is used. |
-| Implicit `value -> T` in a typed Titan context | Strict gradual projection; `T` must be guardable. This is not the broad dynamic coercion used by written casts or Lua. | The exact tag, shape, or nominal identity required for `T` is checked. No integral-float narrowing, integer-to-float conversion, truthiness, Option introduction/force, or pointer assertion is added by the guard. A Function target preserves the boxed value and creates no static adjustment wrapper. |
-| Typed Titan Array element or Map value read | Strict target guard, regardless of which static view was used to write the slot or whether a Map value came from a raw entry, Lua, or `__index`. The checker rejects a read whose optional result type is not guardable. | An accepted read either produces the requested value or raises before Titan uses it. Array reads never invoke the Array's Lua writer. Map reads do not track write provenance, and an `__index` result receives the same exact guard rather than dynamic conversion. |
+| Implicit `value -> T` in a typed Titan context | Strict gradual projection; `T` must be guardable. This is not the broad dynamic coercion used by written casts or Lua. | The exact tag, shape, or nominal identity required for `T` is checked, subject to the compiler-witnessed Interface row below. No integral-float narrowing, integer-to-float conversion, truthiness, Option introduction/force, or pointer assertion is added by the guard. A Function target preserves the boxed value and creates no static adjustment wrapper. |
+| Typed Titan Array element or Map value read | Strict target guard, regardless of which static view was used to write the slot or whether a Map value came from a raw entry, Lua, or `__index`. The checker rejects a read whose optional result type is not guardable. | An accepted read either produces the requested value or raises before Titan uses it. Array reads never invoke the Array's Lua writer. Map reads do not track write provenance, and an `__index` result receives the same strict guard, including the named Interface witness rule, rather than general dynamic conversion. |
 | Written `v as T` / `v is T` with `v: value` | Shared dynamic coercion, except for the explicitly unsafe raw-C-pointer rule below. | `as` converts or raises; `is` tests acceptance without returning the converted value or raising for a mismatch. Both evaluate `v` once. A Function target remains unwrapped and defers callability. |
 | Genuine Lua function argument, exported module-variable write, public record-field write, non-nil Array-element write, or result from a non-Titan Lua callable entering Titan | The same dynamic coercion as the preceding row. | Equal target types accept, reject, and convert the same values at all of these boundaries. |
 | Lua writes `nil` to an Array proxy | Deletion is recognized before element conversion. | The position is removed; the writer is not called, and an out-of-capacity deletion does not allocate. |
@@ -307,7 +307,7 @@ back to this matrix rather than defining competing conversion rules.
 | Genuine Lua call of a Titan function or realized wrapper | The closure's coercive Lua entry. | An ordinary closure uses its source contract. A wrapper copies `source->f`, preserving whatever Lua surface its immediate source value already carries—ultimately the original declaration's—rather than synthesizing target `B`'s entry. |
 | Titan call of a non-Titan Lua callable | Ordinary Lua call, followed by the dynamic boundary for results entering Titan. | Callability follows Lua, including `__call`; requested result types use dynamic coercion. |
 | `value as/is` a raw C pointer | Written, explicitly unsafe pointer assertion only. Implicit gradual projection, typed container reads, callable adjustment, and non-Titan Lua-result conversion to a raw pointer are rejected. | The written operation may accept the lightuserdata/nil representation, but cannot prove the pointee type. See [the FFI policy](ffi.md#casts-and-coercions). |
-| Interface target | A statically known satisfying record/union-to-Interface edge constructs a fresh wrapper. Dynamic conversion accepts only an existing wrapper of that exact nominal Interface type (or nil for an option); it never discovers an implementation from a bare record or union. | Wrapper construction is one direct outer coercion and does not lift through containers or callable components. Calls through the wrapper use the Interface's method contract. See [Interfaces](interfaces.md). |
+| Interface target | A statically known satisfying record/union-to-Interface edge constructs a fresh wrapper and causes its generated module to advertise that pair at initialization. Strict and dynamic observation accept an existing exact wrapper or bare full userdata whose metatable has a non-nil compiler-witnessed entry under the target Interface metatable (or nil for an option). | A witnessed entry is called to construct a fresh wrapper; `is` tests only entry presence. No structural method search occurs at run time, and ordinary wrapper construction still does not lift through containers or callable components. See [Interfaces](interfaces.md). |
 
 For every row marked **dynamic coercion**, the target rules are the same:
 
@@ -315,9 +315,11 @@ For every row marked **dynamic coercion**, the target rules are the same:
   produces an integer; `float` accepts either numeric representation and
   produces a float.
 * `boolean` applies Lua truthiness, so `value is boolean` is total.
-* `string`, records, unions, Interfaces, and owned C userdata require their
-  exact run-time category or nominal metatable. An Interface target accepts
-  only its existing exact wrapper, not a bare structural implementer.
+* `string`, records, unions, and owned C userdata require their exact run-time
+  category or nominal metatable. An Interface target first accepts its exact
+  wrapper, then may raw-discover a compiler-witnessed wrapper entry on a bare
+  full userdata's metatable. This is registered nominal evidence, not a
+  structural method search.
 * an Array target validates the canonical Titan proxy; a Map target validates
   a table. Neither operation walks contents, and later typed reads remain
   strict.
@@ -652,8 +654,9 @@ implicit gradual projection. Ordinary numeric and Option conversions can
 still be requested simply by placing an expression in a typed context.
 Interface casts additionally provide explicit wrapper construction from a
 statically satisfying record or union and exact-concrete downcasts from an
-Interface wrapper; dynamic casts to an Interface accept only an existing exact
-wrapper. A written non-exact Function-to-Function `as` uses the same
+Interface wrapper; dynamic casts to an Interface accept an existing exact
+wrapper or call a compiler-witnessed metatable entry for bare full userdata.
+A written non-exact Function-to-Function `as` uses the same
 conditional fresh wrapper as an implicit callable adjustment. Its corresponding
 `is` test checks admission but remains allocation-free. A written or implicit
 `value -> Function` edge remains a dynamic boxed projection and creates no
