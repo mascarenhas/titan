@@ -438,24 +438,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         CClosure *_fn = clCvalue(s2v(func));
         ]]
     end
-    local module_setup
-    if strict and options.callable_adapter then
-        -- The wrapper deliberately retains the immediate source closure's
-        -- module in upvalue 0. Its consumer-local strict relay, however, must
-        -- interpret target nominal/Array/owned-C identities through the
-        -- consumer module that froze and emitted this adapter. Recover that
-        -- already initialized module through its ordinary idempotent init
-        -- entry, then refresh `func` because the registry lookup may relocate
-        -- the Lua stack.
-        module_setup = render([[
-            Udata *_mod = $INIT(L);
-            func = L->ci->func.p;
-        ]], {
-            INIT = tlcontext.prefix .. "init",
-        })
-    else
-        module_setup = "Udata *_mod = uvalue(&_fn->upvalue[0]);"
-    end
+    local module_setup = "Udata *_mod = uvalue(&_fn->upvalue[0]);"
     return render([[
     $STORAGE int $LUANAME(lua_State *L) {
         StkId func = L->ci->func.p;
@@ -495,8 +478,6 @@ function coder._emit_callable_adapter(tlcontext, site)
         "callable adapter emission", {})
     local ctx = newcontext(tlcontext)
     local roots = coder._interface_adapter_allocate_roots(ctx, adapter)
-    local identities =
-        coder._interface_adapter_identity_prelude(ctx, adapter)
     local loc = adapter.location
     local argument_sources =
         coder._emit_interface_adapter_argument_sources(
@@ -564,12 +545,10 @@ function coder._emit_callable_adapter(tlcontext, site)
         site.native, adapter.target, false)
     local native_body = render([[
         static TITAN_NOINLINE $SIGNATURE {
-            (void)_mod;
             $LINE$GC_POLL
             $ROOT_PREAMBLE
             $ARGUMENT_SOURCES
             $FLEX_VALIDATION
-            $IDENTITIES
             $ARGUMENTS
             $CALL
             $RESULTS
@@ -584,7 +563,6 @@ function coder._emit_callable_adapter(tlcontext, site)
         ROOT_PREAMBLE = root_preamble,
         ARGUMENT_SOURCES = argument_sources,
         FLEX_VALIDATION = flex_validation,
-        IDENTITIES = identities,
         ARGUMENTS = arguments,
         CALL = call,
         RESULTS = results,
@@ -607,11 +585,6 @@ function coder._emit_callable_adapter(tlcontext, site)
                 and adapter.strict_relay.vararg.guard or nil,
         })
     local declarations = table.concat({
-        -- The consumer-local strict relay recovers this module's per-state
-        -- identity slots instead of mistaking the captured source module for
-        -- its target context. Adapter declarations precede the generated init
-        -- definition, so provide the ordinary external prototype here.
-        "Udata *" .. tlcontext.prefix .. "init(lua_State *L);",
         "static TITAN_NOINLINE "
             .. coder._callable_adapter_signature(
                 site.native, adapter.target, false) .. ";",

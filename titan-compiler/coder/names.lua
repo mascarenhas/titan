@@ -537,10 +537,6 @@ end
 function array_metatable_kind(ctx, isconst)
     assert(type(isconst) == "boolean",
         "Array metatable lookup requires a const qualifier")
-    if ctx.interface_adapter_array_metatables then
-        return assert(ctx.interface_adapter_array_metatables[isconst],
-            "Interface adapter lacks the requested Array metatable")
-    end
     local tlcontext = ctx.tlcontext or ctx
     local slot = isconst
         and tlcontext.const_array_metatable_upvalue
@@ -550,6 +546,7 @@ function array_metatable_kind(ctx, isconst)
         INDEX = c_integer_literal(slot),
     })
 end
+coder.array_metatable_kind = array_metatable_kind
 
 function array_metatable(ctx, typ)
     typ = assert(types.normalize(typ),
@@ -614,28 +611,15 @@ function owned_c_metatable(ctx, typ)
     return entry.slot
 end
 
--- Most generated code reaches nominal/owned-C identities through module
--- uservalue slots. A private Interface adapter may be emitted in a third
--- bridge module while its `_mod` operand is deliberately the concrete
--- owner's module. Such an adapter resolves the identities it needs from the
--- per-state registry on entry and supplies stack-neutral local expressions
--- through these two override maps.
+-- Generated code reaches nominal/owned-C identities through module
+-- uservalue slots. Functions and adapters receive their owning module as `_mod`.
 function coder._nominal_metatable_expr(ctx, typ)
-    local overrides = ctx.interface_adapter_nominal_metatables
-    if overrides and overrides[typ.fqtn] then
-        return overrides[typ.fqtn]
-    end
     return render("hvalue(&_mod->uv[$I].uv)", {
         I = c_integer_literal(type2metatable(ctx, typ)),
     })
 end
 
 function coder._owned_c_metatable_expr(ctx, typ)
-    local key = owned_c_metatable_key(typ)
-    local overrides = ctx.interface_adapter_owned_c_metatables
-    if overrides and overrides[key] then
-        return overrides[key]
-    end
     return render("hvalue(&_mod->uv[$I].uv)", {
         I = c_integer_literal(owned_c_metatable(ctx, typ)),
     })

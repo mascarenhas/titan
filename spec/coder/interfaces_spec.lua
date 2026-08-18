@@ -1,6 +1,7 @@
-require "titan-compiler.coder.core"
+local core = require "titan-compiler.coder.core"
+require "titan-compiler.coder.names"
+local coder = core.coder
 local h = require "spec.support.helpers"
-local coder = require "titan-compiler.coder"
 local coder_interfaces = require "titan-compiler.coder.interfaces"
 local types = require "titan-compiler.types"
 local cdriver = require "c-parser.cdriver"
@@ -97,7 +98,7 @@ describe("interfaces (end-to-end)", function()
         end
     end)
 
-    it("keys adapter-owned C identities to the emitting module", function()
+    it("resolves adapter-owned C identities via module upvalue slots", function()
         local cint = types.CInteger("int", true, 3, 32)
         local owned = types.COwned(cint, false)
         local tlcontext = {
@@ -106,61 +107,23 @@ describe("interfaces (end-to-end)", function()
             upvalue = 0,
         }
         local ctx = { tlcontext = tlcontext }
-        local generated = coder_interfaces._interface_adapter_identity_prelude(
-            ctx, {
-                concrete_owner_module = "provider",
-                arguments = {{
-                    operation = {
-                        kind = "gradual_guard",
-                        timing = "immediate",
-                        target = owned,
-                    },
-                }},
-                results = {},
-            })
-        local registry_name = "Titan owned C bridge "
-            .. types.tostring(owned) .. " metatable"
-        assert.truthy(generated:find(registry_name, 1, true), generated)
-        assert.is_nil(generated:find(
-            "Titan owned C provider ", 1, true))
+        local expr = coder._owned_c_metatable_expr(ctx, owned)
+        assert.truthy(expr:find("hvalue(&_mod->uv[", 1, true), expr)
         assert.is_truthy(
             tlcontext.owned_c_metatables[types.tostring(owned)])
-        local lookup = assert(generated:find(
-            "titan_registry_get_string_table", 1, true))
-        local rebase = assert(generated:find(
-            "_base = restorestack(L, _base_off);", lookup, true))
-        assert.is_true(lookup < rebase)
-        assert_no_identity_stack_api(generated)
     end)
 
-    it("reads mutable and const Array adapter identities without stack API",
+    it("resolves mutable and const Array adapter identities via module upvalue slots",
     function()
-        local generated =
-            coder_interfaces._interface_adapter_identity_prelude({}, {
-                arguments = {
-                    { operation = {
-                        kind = "gradual_guard",
-                        timing = "immediate",
-                        target = types.Array(types.Integer(), false),
-                    } },
-                    { operation = {
-                        kind = "gradual_guard",
-                        timing = "immediate",
-                        target = types.Array(types.Integer(), true),
-                    } },
-                },
-                results = {},
-            })
-        local lookup = assert(generated:find(
-            "titan_array_cached_metatables", 1, true))
-        local rebase = assert(generated:find(
-            "_base = restorestack(L, _base_off);", lookup, true))
-        assert.truthy(generated:find(
-            "_ia_array_metatable", 1, true), generated)
-        assert.truthy(generated:find(
-            "_ia_const_array_metatable", 1, true), generated)
-        assert.is_true(lookup < rebase)
-        assert_no_identity_stack_api(generated)
+        local tlcontext = {
+            array_metatable_upvalue = 1,
+            const_array_metatable_upvalue = 2,
+        }
+        local ctx = { tlcontext = tlcontext }
+        local mut_expr = coder.array_metatable_kind(ctx, false)
+        local const_expr = coder.array_metatable_kind(ctx, true)
+        assert.equal("hvalue(&_mod->uv[1].uv)", mut_expr)
+        assert.equal("hvalue(&_mod->uv[2].uv)", const_expr)
     end)
 
     it("polls before an Interface adapter allocates callable views", function()
@@ -1428,13 +1391,6 @@ describe("interfaces (end-to-end)", function()
             "titan_ensure_stack%(L,(%d+)%)", definition)))
         local rooted = tonumber(assert(csrc:match(
             "L%->top%.p%+=(%d+);", definition)))
-        -- Cached identity reads do not consume transient Lua stack slots.
-        assert.equal(rooted, reserved)
-        local identity = assert(csrc:find(
-            "titan_array_cached_metatables", definition, true))
-        local rebase = assert(csrc:find(
-            "_base=restorestack(L,_base_off);", identity, true))
-        assert.is_true(identity < rebase)
         local demand_guard = assert(
             csrc:find("_flexout==NULL", definition, true))
         local negative_guard = assert(
@@ -1442,6 +1398,9 @@ describe("interfaces (end-to-end)", function()
         local concrete_call = assert(csrc:find(
             "test_\\u2133_Concrete_\\u2131_produce_titanmethod(",
             negative_guard, true))
+        local adapter_body = csrc:sub(definition, concrete_call)
+        assert.is_nil(adapter_body:find("titan_array_cached_metatables", 1, true))
+        assert.is_nil(adapter_body:find("titan_registry_get_string_table", 1, true))
         assert_no_identity_stack_api(
             csrc:sub(definition, concrete_call - 1))
         assert.is_true(definition < demand_guard
@@ -1619,31 +1578,16 @@ describe("interfaces (end-to-end)", function()
             "test_\\u2133_ProtectorImpl_\\u2131_protect_titanmethod(",
             start, true))
         local body = csrc:sub(start, stop)
-        local reserve = assert(csrc:find(
-            "titan_ensure_stack(L,", start, true))
-        local lookup = assert(csrc:find(
-            "titan_registry_get_string_table", reserve, true))
-        local identity = assert(csrc:find(
-            '"Titan interface test.Item metatable"',
-            lookup, true))
-        local rebase = assert(csrc:find(
-            "_base=restorestack(L,_base_off);",
-            identity, true))
-        local conversion = assert(csrc:find(
-            "_ia_concrete_arg_1", rebase, true))
-        local before_identity = csrc:sub(start, identity - 1)
-        assert.falsy(before_identity:find(
-            "setuvalue(L,s2v((restorestack(L,_base_off)",
-            1, true), before_identity)
-        assert.falsy(before_identity:find(
-            "setobj2t(L,s2v((restorestack(L,_base_off)",
-            1, true), before_identity)
+        local reserve = assert(body:find(
+            "titan_ensure_stack(L,", 1, true))
+        assert.is_nil(body:find("titan_registry_get_string_table", 1, true))
+        assert.is_nil(body:find("titan_array_cached_metatables", 1, true))
+        local identity = assert(body:find("hvalue(&_mod->uv[", 1, true))
+        local conversion = assert(body:find(
+            "_ia_concrete_arg_2", identity, true))
         assert_no_identity_stack_api(body)
-        assert.is_true(reserve < lookup
-            and lookup < identity
-            and identity < rebase
-            and rebase < conversion
-            and conversion < stop)
+        assert.is_true(reserve < identity
+            and identity < conversion)
 
         local called, callerr = h.call("test", [[
             for _, mode in ipairs({"incremental", "generational"}) do

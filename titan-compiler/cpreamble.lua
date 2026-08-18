@@ -46,14 +46,6 @@ static TITAN_UNUSED inline lu_byte titan_registry_get_string(
         hvalue(&G(L)->l_registry), registry_key, result);
 }
 
-static TITAN_UNUSED inline Table *titan_registry_get_string_table(
-        lua_State *L, const char *key) {
-    TValue value;
-    lu_byte tag = titan_registry_get_string(L, key, &value);
-    lua_assert(!tagisempty(tag) && ttistable(&value));
-    (void)tag;
-    return hvalue(&value);
-}
 
 /*
  * Set one of Titan's bounded process-lifetime string-keyed registry entries

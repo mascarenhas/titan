@@ -3872,8 +3872,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 28, 26, 27, 28 }, shard_counts)
-            assert.equal(109, assigned_count)
+            assert.same({ 29, 26, 27, 28 }, shard_counts)
+            assert.equal(110, assigned_count)
 
             assert.equal(1, count_literal(sanitizer_job,
                     "name: sanitizer (ubuntu-24.04, ASan+UBSan)"),

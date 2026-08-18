@@ -357,21 +357,17 @@ If the shared frozen graph can allocate a nested callable view, the synthesized
 native adapter polls the collector at entry before reserving stack space or
 establishing `_base`; no poll enters a fresh closure's construction window.
 
-The adapter reserves only its actually rooted range. Identity setup reads
-already-published nominal and owned-C metatables directly from the registry
-table, and reads the already-published mutable/const Array pair through a
-stack-neutral runtime helper. String interning during those internal lookups
-can allocate, so it records `_base` as an offset, addresses rooted slots through
-`restorestack`, and rebases after each lookup. It also always rebases after the
-concrete native call before reading result homes.
-Direct nested `luaF_newCclosure` construction may allocate/raise but is not a
-rebase point. A compile-time assertion keeps the adapter's 200-element backing
-bound aligned with the runtime constant.
+The adapter reserves only its actually rooted range. Type identity setup resolves
+nominal and owned-C metatables and mutable/const Array metatables directly from the
+adapter's module uservalue slots `_mod->uv[slot]` without any Lua registry lookup.
+Because `_mod` is the module where the interface cast occurred (which owns the adapter
+and has seen both the interface and the concrete types in scope), all required type
+identities are available as static module uservalue slots.
 
 Adapters resolve any Array, nominal, or owned-C identities needed by immediate
-guards at entry. This is necessary because an adapter may be emitted outside
-both nominal owners while its `_mod` still deliberately names only the
-concrete owner.
+guards from `_mod->uv[slot]`. When calling the concrete method, the adapter forwards
+`concrete_mod` (the concrete type's owning module, resolved from `_mod` or imported
+module uservalue slots) and `_self` (the unwrapped concrete record or union).
 
 ## Four dispatch paths
 

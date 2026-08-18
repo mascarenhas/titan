@@ -41,6 +41,7 @@
 2 spec/checker/type_tests_spec.lua 6.725
 4 spec/checker/unions_spec.lua 1.308
 3 spec/checker/variadic_spec.lua 1.436
+1 spec/coder/adapter_registry_elimination_spec.lua 1.223
 2 spec/coder/backtrace_spec.lua 2.613
 1 spec/coder/bound_methods_spec.lua 2.818
 4 spec/coder/c_ffi_allocation_constructors_spec.lua 2.847

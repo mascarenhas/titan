@@ -1107,16 +1107,12 @@ function coder._validate_interface_adapter(
     coder._interface_closed_record(module_operand, {
         parameter = true, provenance = true,
         owner = true, module = true,
-        forwards_unchanged = true,
-        emitter_module_is_forbidden = true,
     }, use .. " concrete module operand")
     assert(module_operand.parameter == "_mod"
            and module_operand.provenance
-               == "interface_wrapper_uservalue_0"
+               == "adapter_owner_module"
            and module_operand.owner == concrete
-           and module_operand.module == owner_module
-           and module_operand.forwards_unchanged == true
-           and module_operand.emitter_module_is_forbidden == true,
+           and module_operand.module == owner_module,
         use .. " changes concrete-owner module provenance")
     local closure_operand = adapter.hidden_operands.closure
     coder._interface_closed_record(closure_operand, {
@@ -1233,136 +1229,7 @@ function coder._adapter_error_kind(adapter)
         and "callable adapter" or "Interface adapter"
 end
 
-function coder._interface_adapter_collect_identity(
-        inventory, typ)
-    typ = types.normalize(typ)
-    if not typ then return end
-    if typ._tag == "Type.Array" then
-        assert(type(typ.isconst) == "boolean",
-            "Interface adapter Array identity lacks a const qualifier")
-        inventory.arrays[typ.isconst] = true
-    elseif typ._tag == "Type.Option" then
-        coder._interface_adapter_collect_identity(
-            inventory, typ.base)
-    elseif typ._tag == "Type.Nominal" then
-        inventory.nominals[typ.fqtn] = typ
-    elseif typ._tag == "Type.Record"
-           or typ._tag == "Type.Union" then
-        inventory.nominals[typ.name] =
-            types.Nominal(typ.name)
-    elseif typ._tag == "Type.COwned" then
-        inventory.owned_c[owned_c_metatable_key(typ)] = typ
-    end
-end
 
-function coder._interface_adapter_identity_inventory(adapter)
-    local inventory = {
-        arrays = {},
-        nominals = {},
-        owned_c = {},
-    }
-    local function operation(op)
-        if op.kind == "gradual_inject" then
-            if coder._interface_injection_may_relocate(op.source) then
-                coder._interface_adapter_collect_identity(
-                    inventory, op.source)
-            end
-        elseif op.kind == "gradual_guard"
-               and op.timing == "immediate" then
-            coder._interface_adapter_collect_identity(
-                inventory, op.target)
-        end
-    end
-    for _, action in ipairs(adapter.arguments) do
-        if action.operation then operation(action.operation) end
-    end
-    for _, action in ipairs(adapter.results) do
-        if action.operation then operation(action.operation) end
-    end
-    return inventory
-end
-
-function coder._interface_adapter_identity_prelude(
-        ctx, adapter)
-    local inventory =
-        coder._interface_adapter_identity_inventory(adapter)
-    local code = {}
-    local has_array = inventory.arrays[false] or inventory.arrays[true]
-    ctx.interface_adapter_array_metatables = nil
-    ctx.interface_adapter_nominal_metatables = {}
-    ctx.interface_adapter_owned_c_metatables = {}
-    if has_array then
-        ctx.interface_adapter_array_metatables = {
-            [false] = "_ia_array_metatable",
-            [true] = "_ia_const_array_metatable",
-        }
-        code[#code + 1] = [[
-            Table *_ia_array_metatable;
-            Table *_ia_const_array_metatable;
-            titan_array_cached_metatables(
-                L, &_ia_array_metatable, &_ia_const_array_metatable);
-            _base = restorestack(L, _base_off);
-        ]]
-    end
-
-    local nominal_names = {}
-    for name in pairs(inventory.nominals) do
-        nominal_names[#nominal_names + 1] = name
-    end
-    table.sort(nominal_names, util.bytewise_less)
-    for _, name in ipairs(nominal_names) do
-        local owner = assert(types.registry[name],
-            "Interface adapter nominal is absent from registry: " .. name)
-        assert(owner._tag == "Type.Record"
-               or owner._tag == "Type.Union"
-               or owner._tag == "Type.Interface",
-            "Interface adapter nominal has invalid owner "
-                .. tostring(owner._tag))
-        local kind = owner._tag == "Type.Record" and "record"
-            or owner._tag == "Type.Union" and "union"
-            or "interface"
-        local cvar = "_ia_nominal_metatable_"
-            .. coder._interface_symbol_fragment(name)
-        ctx.interface_adapter_nominal_metatables[name] = cvar
-        code[#code + 1] = render([[
-            Table *$CVAR = titan_registry_get_string_table(
-                L, "Titan $KIND $TYPE metatable");
-            _base = restorestack(L, _base_off);
-        ]], {
-            KIND = kind,
-            TYPE = name,
-            CVAR = cvar,
-        })
-    end
-
-    local owned_names = {}
-    for name in pairs(inventory.owned_c) do
-        owned_names[#owned_names + 1] = name
-    end
-    table.sort(owned_names, util.bytewise_less)
-    for _, name in ipairs(owned_names) do
-        local typ = inventory.owned_c[name]
-        -- COwned identities are private to the translation unit performing
-        -- the conversion, not to the record whose method is being called.
-        -- Inventory the emitter-owned metatable so module initialization
-        -- creates it, then resolve that exact registry identity without ever
-        -- indexing the inbound concrete-owner `_mod`.
-        owned_c_metatable(ctx, typ)
-        local cvar = "_ia_owned_c_metatable_"
-            .. coder._interface_symbol_fragment(name)
-        ctx.interface_adapter_owned_c_metatables[name] = cvar
-        code[#code + 1] = render([[
-            Table *$CVAR = titan_registry_get_string_table(
-                L, "Titan owned C $MODULE $TYPE metatable");
-            _base = restorestack(L, _base_off);
-        ]], {
-            MODULE = ctx.tlcontext.module,
-            TYPE = types.tostring(typ),
-            CVAR = cvar,
-        })
-    end
-    return table.concat(code, "\n")
-end
 
 function coder._interface_adapter_allocate_roots(ctx, adapter)
     -- Keep this in lockstep with titan-runtime/titan.h's TITAN_VARARG_MAX.
@@ -1744,7 +1611,9 @@ function coder._emit_interface_adapter_call(
         args = { "L", "_ia_source_mod", "_ia_source" }
         invocation_name = "_ia_source_fp"
     else
-        args = { "L", "_mod", "NULL", "_self" }
+        local concrete_mod = coder._interface_owner_module_expr(
+            ctx, adapter.concrete_owner)
+        args = { "L", concrete_mod, "NULL", "_self" }
         invocation_name = method_name(adapter.concrete_method)
     end
     for index = 1, #concrete.params do
@@ -2022,8 +1891,6 @@ function coder._emit_interface_adapter(
     local ctx = newcontext(tlcontext)
     local roots =
         coder._interface_adapter_allocate_roots(ctx, adapter)
-    local identities =
-        coder._interface_adapter_identity_prelude(ctx, adapter)
     local loc = {
         -- Native traceback filtering recognizes generated Titan frames by a
         -- `.titan` line-table source. The separately registered symbol name is
@@ -2107,7 +1974,6 @@ function coder._emit_interface_adapter(
             $ROOT_PREAMBLE
             $ARGUMENT_SOURCES
             $FLEX_VALIDATION
-            $IDENTITIES
             $ARGUMENTS
             $CALL
             $RESULTS
@@ -2121,7 +1987,6 @@ function coder._emit_interface_adapter(
         ROOT_PREAMBLE = root_preamble,
         ARGUMENT_SOURCES = argument_sources,
         FLEX_VALIDATION = flex_validation,
-        IDENTITIES = identities,
         ARGUMENTS = arguments,
         CALL = call,
         RESULTS = results,
@@ -2167,7 +2032,6 @@ function coder._render_interface_wrapper_allocation(args)
         $SOURCE_STATS
         $WRAPPER_DECL
         {
-            Udata *_titan_interface_concrete_module = $CONCRETE_MODULE;
             Table *_titan_interface_metatable = $INTERFACE_METATABLE;
             $FIELD_STATS
             $WRAPPER = luaS_newudata(
@@ -2175,8 +2039,7 @@ function coder._render_interface_wrapper_allocation(args)
             $AFTER_ALLOCATION
             setuvalue(L, $WRAPPER_SLOT, $WRAPPER);
             $WRAPPER->metatable = _titan_interface_metatable;
-            setuvalue(L, &$WRAPPER->uv[0].uv,
-                _titan_interface_concrete_module);
+            setuvalue(L, &$WRAPPER->uv[0].uv, _mod);
             luaC_barrierback(L, obj2gco($WRAPPER),
                 &$WRAPPER->uv[0].uv);
             setuvalue(L, &$WRAPPER->uv[1].uv, $CONCRETE_VALUE);
@@ -2190,7 +2053,6 @@ function coder._render_interface_wrapper_allocation(args)
         WRAPPER_DECL = args.wrapper_decl or "",
         WRAPPER = assert(args.wrapper),
         WRAPPER_SLOT = assert(args.wrapper_slot),
-        CONCRETE_MODULE = assert(args.concrete_module),
         CONCRETE_VALUE = assert(args.concrete_value),
         INTERFACE_METATABLE = assert(args.interface_metatable),
         FIELD_STATS = args.field_stats or "",
@@ -2337,8 +2199,6 @@ function coder._interface_pair(ctx, conversion, loc)
                 .. "_\\u2131_allocate",
             concrete = concrete,
             interface = interface,
-            concrete_module =
-                coder._interface_owner_module_expr(ctx, concrete),
             concrete_metatable_slot = concrete_metatable_slot,
             interface_metatable_slot = interface_metatable_slot,
             fields = conversion.fields,
@@ -2418,8 +2278,8 @@ function coder._interface_pair(ctx, conversion, loc)
                 mapping.source, mapping.target),
             use .. " has an inconsistent exactness marker")
         all_exact = all_exact and mapping.exact
-        if mapping.exact then
-            assert(mapping.slot_kind == "exact"
+        if mapping.slot_kind == "exact" then
+            assert(mapping.exact
                    and mapping.interface_adapter == nil,
                 use .. " has a malformed exact mapping")
         else
@@ -2480,7 +2340,6 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
             wrapper = "_titan_interface_wrapper",
             wrapper_slot =
                 "s2v(restorestack(L, _titan_interface_result))",
-            concrete_module = pair.concrete_module,
             concrete_value = "_titan_interface_concrete",
             interface_metatable = render(
                 "hvalue(&_mod->uv[$SLOT].uv)", {
@@ -2526,7 +2385,6 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
         wrapper_decl = "Udata *" .. wrapper .. " = NULL;",
         wrapper = wrapper,
         wrapper_slot = wrapper_root,
-        concrete_module = pair.concrete_module,
         concrete_value = "_titan_interface_concrete",
         interface_metatable = render("hvalue(&_mod->uv[$SLOT].uv)", {
             SLOT = c_integer_literal(pair.interface_metatable_slot),
@@ -2640,7 +2498,6 @@ function coder._code_interface_wrapper(
             wrapper_decl = wrapper_decl,
             wrapper = wrapper,
             wrapper_slot = wrapper_slot,
-            concrete_module = pair.concrete_module,
             concrete_value = concrete_value,
             interface_metatable = render(
                 "hvalue(&_mod->uv[$SLOT].uv)", {

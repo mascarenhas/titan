@@ -71,6 +71,7 @@ function interface_relation_policy(st, options)
         if implementation then
             implementation._surface_concrete = concrete
             implementation._surface_interface = interface
+            implementation.cast_module = policy.visibility
             return implementation
         end
         return false
@@ -1151,7 +1152,7 @@ freeze_callable_adapter_plan = function(raw, source, target, loc, context)
 end
 
 local function make_interface_adapter(
-        concrete, interface, mapping)
+        concrete, interface, mapping, cast_module)
     interface_adapter_assert(
         mapping and mapping.required and mapping.concrete,
         "method mapping lacks descriptors")
@@ -1172,7 +1173,8 @@ local function make_interface_adapter(
             mapping.source, mapping.target),
         "method mapping exactness is inconsistent")
 
-    if mapping.exact then
+    local owner_module = nominal_module(concrete.name)
+    if mapping.exact and (not cast_module or owner_module == cast_module) then
         mapping.slot_kind = "exact"
         mapping.interface_adapter = nil
         return nil
@@ -1211,11 +1213,9 @@ local function make_interface_adapter(
         hidden_operands = {
             concrete_owner_module = {
                 parameter = "_mod",
-                provenance = "interface_wrapper_uservalue_0",
+                provenance = "adapter_owner_module",
                 owner = concrete,
                 module = owner_module,
-                forwards_unchanged = true,
-                emitter_module_is_forbidden = true,
             },
             closure = {
                 parameter = "_fn",
@@ -1366,7 +1366,7 @@ freeze_interface_implementation = function(implementation, seen)
         freeze_interface_field_adjustment(mapping.adjustment, seen)
     end
     for _, mapping in ipairs(implementation.methods) do
-        interface_adapters.make(concrete, interface, mapping)
+        interface_adapters.make(concrete, interface, mapping, implementation.cast_module)
     end
 end
 

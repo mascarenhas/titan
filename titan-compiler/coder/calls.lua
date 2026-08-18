@@ -1129,7 +1129,9 @@ function coder._emit_callable_adapter_value(
                     luaF_newCclosure(L, _ca_nup + 1);
                 _ca_wrapper->f = _ca_source->f;
                 for (int _ca_i = 0; _ca_i < _ca_nup - 1; _ca_i++) {
-                    if (_ca_i == 1) {
+                    if (_ca_i == 0) {
+                        setuvalue(L, &_ca_wrapper->upvalue[_ca_i], _mod);
+                    } else if (_ca_i == 1) {
                         setpvalue(&_ca_wrapper->upvalue[_ca_i],
                             (void *)$TARGET_TAG);
                     } else if (_ca_i == 2) {

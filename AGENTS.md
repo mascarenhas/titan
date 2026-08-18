@@ -1302,14 +1302,21 @@ substitution, recursive; error on missing keys). Key facts:
   Lua's `MAXUPVAL` limit. Debug/C mutation or extraction of the private closure
   upvalues opts out of Titan's invariants.
 
-  The uniform `_fn` parameter was ABI 0.6; `_mod`/record `Udata` was 0.7;
-  metatable record identity was 0.8; native vararg descriptors evolved through
-  0.9 and 0.10; local records, aliases, named arguments, and flexible returns
-  were 0.11 through 0.14; the `titan.uv` folder split was 0.15; prefix
-  containers were 0.16; dense Arrays were 0.17; the promoted libuv callback
-  contract was 0.18; union/variant schemas and the public nominal-static
-  closure prefix were 0.19; and the Array writer plus strict function-entry
-  closure protocol is ABI 0.20.
+- The invariant for the `_mod` parameter of any generated function, method,
+  or adapter is that it must always be the `_mod` of the module that
+  function, method, or adapter belongs to (the module in which it was
+  compiled). For a callable adapter (created when casting a closure to a
+  compatible function type), `wrapper->upvalue[0]` is initialized with the
+  adapter's module `_mod`, and the wrapped closure's own `_mod` is recovered
+  from `source->upvalue[0]` when delegating to the source native entry. For an
+  interface wrapper, `wrapper->uv[0]` stores `_mod` of the module where the
+  cast to the interface took place. When an interface method is called across
+  module boundaries (`owner_module ~= cast_module`), the interface adapter
+  resolves `concrete_mod` from `_mod->uv[slot]` and passes it as `_mod` to the
+  concrete method entry. Because `_mod` is always the module that compiled the
+  adapter, all nominal, array, and owned-C metatables and type tags are
+  resolved statically from `_mod->uv[slot]` in that module, completely
+  eliminating dynamic Lua registry lookups in adapters.
 - A dynamically imported module is loaded from its transient
   `Type.Module.file` with `RTLD_LAZY | RTLD_GLOBAL` before it is initialized.
   `file` defaults to the exact logical path, is overwritten by prefix-container

@@ -1412,14 +1412,8 @@ describe("interfaces (typechecker)", function()
             assert.equal(mapping.source, plan.concrete_signature)
             assert.equal("test", plan.concrete_owner_module)
             assert.equal(
-                "interface_wrapper_uservalue_0",
+                "adapter_owner_module",
                 plan.hidden_operands.concrete_owner_module.provenance)
-            assert.is_true(
-                plan.hidden_operands.concrete_owner_module
-                    .forwards_unchanged)
-            assert.is_true(
-                plan.hidden_operands.concrete_owner_module
-                    .emitter_module_is_forbidden)
             assert.equal("NULL",
                 plan.hidden_operands.closure.concrete_call_value)
             assert.is_true(
