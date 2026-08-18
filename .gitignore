@@ -85,3 +85,6 @@
 /.titan-tests/
 /luacov.stats.out
 /luacov.report.out
+
+# Local trees for testing and experimentation
+/.local-builds/
