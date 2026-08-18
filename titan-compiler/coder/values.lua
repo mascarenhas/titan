@@ -249,8 +249,8 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
             EXP = exp,
             VAR = cvar,
             NAME = types.tostring(typ),
-            THROWNIL = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "luaL_tolstring(L, -1, NULL)" }),
-            THROWUD = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_tostring(L, -1)" }),
+            THROWUNKNOWN = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', '"userdata"' }),
+            THROWNAMED = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "getstr(tsvalue(&_titan_nominal_name))" }),
             THROWPRIM = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_typename(L, ttype($EXP))" })
         }
         if not coder._is_interface_nominal(typ) then
@@ -260,13 +260,18 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
                   if (TITAN_LIKELY(_ud->metatable == $MT)) {
                     $VAR = _ud;
                   } else {
-                    lua_pushlightuserdata(L, (void*)_ud->metatable);
-                    if (lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TNIL) {
-                        lua_pop(L, 1);
-                        setuvalue(L, s2v(L->top.p), _ud); L->top.p++;
-                        $THROWNIL
+                    TValue _titan_nominal_key;
+                    TValue _titan_nominal_name;
+                    setpvalue(&_titan_nominal_key,
+                        (void *)_ud->metatable);
+                    lu_byte _titan_nominal_name_tag = luaH_get(
+                        hvalue(&G(L)->l_registry),
+                        &_titan_nominal_key, &_titan_nominal_name);
+                    if (tagisempty(_titan_nominal_name_tag)
+                            || !ttisstring(&_titan_nominal_name)) {
+                        $THROWUNKNOWN
                     } else {
-                        $THROWUD
+                        $THROWNAMED
                     }
                   }
                 } else {
@@ -313,16 +318,19 @@ function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:string]
                             L, _titan_interface_call)));
                         $RESTORE_TOP
                     } else {
-                        lua_pushlightuserdata(
-                            L, (void *)_ud->metatable);
-                        if (lua_rawget(
-                                L, LUA_REGISTRYINDEX) == LUA_TNIL) {
-                            lua_pop(L, 1);
-                            setuvalue(L, s2v(L->top.p), _ud);
-                            L->top.p++;
-                            $THROWNIL
+                        TValue _titan_nominal_key;
+                        TValue _titan_nominal_name;
+                        setpvalue(&_titan_nominal_key,
+                            (void *)_ud->metatable);
+                        lu_byte _titan_nominal_name_tag = luaH_get(
+                            hvalue(&G(L)->l_registry),
+                            &_titan_nominal_key,
+                            &_titan_nominal_name);
+                        if (tagisempty(_titan_nominal_name_tag)
+                                || !ttisstring(&_titan_nominal_name)) {
+                            $THROWUNKNOWN
                         } else {
-                            $THROWUD
+                            $THROWNAMED
                         }
                     }
                 }

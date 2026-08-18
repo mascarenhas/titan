@@ -438,24 +438,45 @@ LUAI_FUNC const void *titan_publish_function_type_tag(
 */
 LUAI_FUNC void titan_array_metatables(lua_State *L, Table **mutable_out,
                                       Table **const_out);
+/* Read the already-initialized canonical pair without changing L->top. The
+** internal string lookup can allocate, so generated callers must restore any
+** saved StkId after this returns. */
+LUAI_FUNC void titan_array_cached_metatables(lua_State *L,
+                                             Table **mutable_out,
+                                             Table **const_out);
 LUAI_FUNC Table *titan_array_metatable(lua_State *L);
-LUAI_FUNC Table *titan_const_array_metatable(lua_State *L);
+static l_inline Table *titan_const_array_metatable(lua_State *L) {
+  Table *mutable_metatable;
+  Table *const_metatable;
+  titan_array_metatables(L, &mutable_metatable, &const_metatable);
+  cast_void(mutable_metatable);
+  return const_metatable;
+}
+LUAI_FUNC Table *titan_array_new_impl(lua_State *L, Table *metatable,
+                                      lua_Unsigned capacity,
+                                      const TValue *writer, int mutable,
+                                      StkId result);
 LUAI_FUNC Table *titan_array_new(lua_State *L, Table *metatable,
                                  lua_Unsigned capacity,
-                                 const TValue *writer);
-LUAI_FUNC Table *titan_const_array_new(lua_State *L, Table *metatable,
-                                       lua_Unsigned capacity);
+                                 const TValue *writer, StkId result);
+static l_inline Table *titan_const_array_new(lua_State *L, Table *metatable,
+                                              lua_Unsigned capacity,
+                                              StkId result) {
+  return titan_array_new_impl(L, metatable, capacity, NULL, 0, result);
+}
 /*
-** Both conversion helpers require the source backing to be rooted by the
-** caller on entry. shallow_copy additionally establishes its own stack root
-** before allocating the const destination, whose physical array size and
-** logical length match the source. freeze preserves the backing/proxy
-** identities, installs the const metatable with Lua's object barrier, and
-** clears the writer uservalue.
+** Constructors and shallow_copy receive an active caller-owned result stack
+** slot and leave the returned backing rooted there without changing L->top.
+** shallow_copy additionally requires the source backing to remain rooted in a
+** distinct slot while it allocates the const destination. freeze requires its
+** backing to be rooted by the caller, preserves the backing/proxy identities,
+** installs the const metatable with Lua's object barrier, and clears the writer
+** uservalue. All three helpers are trusted compiler-internal operations.
 */
 LUAI_FUNC Table *titan_array_shallow_copy(lua_State *L, Table *source,
                                           Table *mutable_metatable,
-                                          Table *const_metatable);
+                                          Table *const_metatable,
+                                          StkId result);
 LUAI_FUNC Table *titan_array_freeze(lua_State *L, Table *backing,
                                     Table *mutable_metatable,
                                     Table *const_metatable);
@@ -469,10 +490,16 @@ LUAI_FUNC lu_byte titan_array_get(Table *backing, lua_Integer index,
 LUAI_FUNC void titan_array_set_stack(lua_State *L, Table *backing,
                                      lua_Integer index, int value_index);
 LUAI_FUNC Udata *titan_array_try_proxy(Table *backing, Table *metatable);
-/* Rejects a null/collapsed tag pair before testing either exact identity. */
-LUAI_FUNC Udata *titan_array_try_proxy_either(Table *backing,
-                                              Table *mutable_metatable,
-                                              Table *const_metatable);
+/* Reject a null/collapsed tag pair before testing either exact identity. */
+static l_inline Udata *titan_array_try_proxy_either(
+    Table *backing, Table *mutable_metatable, Table *const_metatable) {
+  Udata *proxy;
+  if (mutable_metatable == NULL || const_metatable == NULL ||
+      mutable_metatable == const_metatable)
+    return NULL;
+  proxy = titan_array_try_proxy(backing, mutable_metatable);
+  return proxy != NULL ? proxy : titan_array_try_proxy(backing, const_metatable);
+}
 LUAI_FUNC Udata *titan_array_require_proxy(lua_State *L, Table *backing,
                                            Table *metatable);
 LUAI_FUNC Table *titan_array_try_backing(const TValue *value,

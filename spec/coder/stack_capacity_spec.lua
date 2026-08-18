@@ -21,7 +21,7 @@ local function read_file(path)
     return contents
 end
 
-local function unchecked_raw_calls(path)
+local function public_stack_checks(path)
     local contents = read_file(path)
     local failures = {}
     local search = 1
@@ -29,14 +29,11 @@ local function unchecked_raw_calls(path)
         local at = contents:find(
             "lua_checkstack%s*%(%s*L%s*,", search)
         if not at then break end
-        local prefix = contents:sub(math.max(1, at - 32), at - 1)
-        if not prefix:match("!%s*$") then
-            local line = 1
-            for _ in contents:sub(1, at):gmatch("\n") do
-                line = line + 1
-            end
-            failures[#failures + 1] = path .. ":" .. tostring(line)
+        local line = 1
+        for _ in contents:sub(1, at):gmatch("\n") do
+            line = line + 1
         end
+        failures[#failures + 1] = path .. ":" .. tostring(line)
         search = at + 1
     end
     return failures
@@ -51,18 +48,20 @@ describe("generated Lua-stack capacity", function()
             "static TITAN_UNUSED inline void titan_ensure_stack",
             1, true))
         assert.truthy(prefix:find(
-            "if (TITAN_UNLIKELY(!lua_checkstack(L, slots)))",
+            "luaD_checkstack(L, slots);",
             1, true))
         assert.truthy(prefix:find(
-            'luaL_error(L, "stack overflow in Titan generated code")',
+            "L->ci->top.p = L->top.p + slots;",
             1, true))
+        assert.falsy(prefix:find("lua_checkstack%s*%(", 1), prefix)
+        assert.falsy(prefix:find("luaL_error", 1, true), prefix)
     end)
 
-    it("has no generated raw reservation that ignores failure", function()
+    it("has no generated public stack-capacity check", function()
         local failures = {}
         for _, path in ipairs(source_inventory.lua_files(
                 "titan-compiler")) do
-            for _, failure in ipairs(unchecked_raw_calls(path)) do
+            for _, failure in ipairs(public_stack_checks(path)) do
                 failures[#failures + 1] = failure
             end
         end
@@ -112,10 +111,12 @@ describe("generated Lua-stack capacity", function()
             1, true))
         assert.truthy(csrc:find(
             "titan_ensure_stack(L, 10);", 1, true))
-        local _, closure_reservations = csrc:gsub(
-            "titan_ensure_stack%(L, 6%);", "")
-        assert.is_true(closure_reservations >= 2,
-            "lambda and bound-method construction must both reserve six slots")
+        local _, direct_closures = csrc:gsub(
+            "luaF_newCclosure%(L, 6%);", "")
+        assert.is_true(direct_closures >= 2,
+            "lambda and bound-method construction must both be direct")
+        assert.falsy(csrc:find(
+            "titan_ensure_stack(L, 6);", 1, true), csrc)
         assert.truthy(csrc:find(
             "titan_ensure_stack(L, 1);", 1, true))
         assert.truthy(csrc:find(
@@ -126,7 +127,7 @@ describe("generated Lua-stack capacity", function()
             "titan_ensure_stack(L, 3);", 1, true))
 
         local _, calls = csrc:gsub("titan_ensure_stack%(L,", "")
-        assert.is_true(calls >= 12,
+        assert.is_true(calls >= 10,
             "representative module omitted stack-reserving paths")
     end)
 end)

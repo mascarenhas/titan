@@ -154,10 +154,11 @@ canonical proxy Udata. The proxy has exactly two traced user values: `uv[0]`
 points back to the backing Table; mutable `uv[1]` holds the module-cached
 genuine-Lua writer closure, while const `uv[1]` is nil. The mutable closure in
 turn traces its owning module Udata. `titan_array_new` and
-`titan_const_array_new` root the writer-or-nil, backing, and proxy independently
-while they allocate and link them, install the two user values through Lua's
-API, and apply the backing Table's back barrier after the key-0 reverse link.
-No user-value edge is untraced.
+`titan_const_array_new` use one caller-provided traced result slot: it first
+roots the backing, then roots the proxy after the proxy already points back to
+that backing, and finally leaves the completed backing/proxy cycle there. They
+install the metatable and two user values directly with Lua-internal stores and
+barriers, never through the public stack API. No user-value edge is untraced.
 
 A canonical Titan **source** function is a `CClosure`. Its header is `_mod`,
 canonical function-type tag, native-entry pointer, and opaque closure brand;
@@ -285,11 +286,13 @@ if (TITAN_LIKELY(ttisfulluserdata($EXP))) {
   if (TITAN_LIKELY(_ud->metatable == hvalue(&_mod->uv[META].uv))) {
     $VAR = _ud;
   } else {
-    lua_pushlightuserdata(L, _ud->metatable);
-    if(lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TNIL) {
-        /* not a Titan record: describe the userdata itself */  $THROW...
+    TValue key, name;
+    setpvalue(&key, (void *)_ud->metatable);
+    lu_byte tag = luaH_get(hvalue(&G(L)->l_registry), &key, &name);
+    if (tagisempty(tag) || !ttisstring(&name)) {
+        /* not a named Titan nominal: report static "userdata" */ $THROW...
     } else {
-        /* another Titan record: registry gave its name */ $THROW...
+        /* another Titan nominal: use getstr(tsvalue(&name)) */ $THROW...
     }
   }
 } else { /* not even a userdata */ $THROW... }
@@ -303,10 +306,14 @@ userdata. All three failure arms raise the run-time error
 `file:line:col: type error, expected %s but found %s`, with the
 expected name printed as the FQTN and the found name taken from the
 reverse metatable→name registry entry when the value is some *other*
-Titan record (a non-record userdata has no such entry, so the message
-falls back to stringifying the value) — the spec suite asserts both
+Titan nominal. The lookup uses `luaH_get` directly on `G(L)->l_registry`, so it
+does not push or pop Lua stack slots. A userdata without a reverse entry reports
+the static name `userdata`; it neither consults `__name` nor invokes
+`__tostring`. The spec
+suite asserts both
 `expected test.Rec but found test.Point` and
-`expected test.Rec but found number` (`spec/coder_spec.lua`).
+`expected test.Rec but found number` (`spec/coder/coder_spec.lua`), and proves
+that an unknown userdata's `__tostring` is not called.
 
 ### Why one object
 
@@ -455,12 +462,7 @@ A function whose body needs `nslots > 0` anchor slots gets this preamble
 ```c
 luaC_checkGC(L);
 /* function preamble: reserve needed stack space */
-if (L->stack_last.p - L->top.p > $NSLOTS) {
-    if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
-} else {
-    if (TITAN_UNLIKELY(!lua_checkstack(L, $NSLOTS)))
-        luaD_throw(L, LUA_ERRMEM);
-}
+titan_ensure_stack(L, $NSLOTS);
 StkId _base = L->top.p;
 L->top.p += $NSLOTS;
 for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
@@ -468,10 +470,10 @@ for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
 }
 ```
 
-The fast path bumps `L->ci->top.p` (the current call's allowed stack
-ceiling) only when needed, skipping the `lua_checkstack` call when room
-already exists; the slow path may reallocate the stack and propagates
-`LUA_ERRMEM` if it cannot reserve the slots. Slots are
+The translation-unit-local `titan_ensure_stack` calls Lua's internal raising
+`luaD_checkstack` path and then extends `L->ci->top.p` (the current call's
+allowed stack ceiling) exactly as the public API would. It does not cross the
+public Lua stack API. Slots are
 nil-initialized through Lua's stack-aware `setnilvalue2s` macro so a
 collection arriving before a slot's first real store sees nil rather than
 stack garbage. Anchor slots are addressed as
@@ -485,10 +487,8 @@ slots the same way, though with an unconditional `titan_ensure_stack`
 and no entry GC poll.
 
 Every other generated path that reserves capacity before raw `L->top.p`
-writes calls the translation-unit-local `titan_ensure_stack`. The helper
-checks `lua_checkstack` and raises a normal Lua error if capacity cannot be
-reserved; generated code never continues to a raw push or slot write after a
-false result.
+writes calls the same helper. Internal stack growth raises on failure, so
+generated code never continues to a raw push or slot write without capacity.
 
 ### 2. Home roots, shadow slots, and borrowed C copies
 
@@ -549,11 +549,14 @@ to order, and no forward-barriered cross-link to install.
 
 Container literals preserve the same rooting rule with a different order:
 every Array element expression is first evaluated into an appropriately boxed
-or internal anchored temp. `titan_array_new` then roots the backing Table and
-proxy Udata independently while it builds their key-0/uservalue cycle; after
-it returns, generated code anchors the backing result before filling positive
-array slots from those temps. The constructor records its highest non-nil
-position in `lenhint`; resizes save and restore that authoritative length.
+or internal anchored temp. Generated code supplies `titan_array_new` an active
+result slot. The helper roots the backing there before resizing, temporarily
+roots the proxy there after directly installing its metatable/uservalues, and
+then leaves the completed backing in that same slot after building the
+key-0/uservalue cycle. It never changes `L->top` or uses the public Lua stack
+API. Generated code then fills positive array slots from the element temps.
+The constructor records its highest non-nil position in `lenhint`; resizes save
+and restore that authoritative length.
 Map constructors root their ordinary Table plus key and value temps, boxing an
 Array used as a raw-visible key or value. See
 [Dense Arrays](dense-arrays.md#runtime-construction).

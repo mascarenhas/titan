@@ -760,7 +760,7 @@ describe("closures (end-to-end)", function()
         ]])
     end)
 
-    it("keeps direct and bound receivers in C until real transport",
+    it("constructs lambdas and bound methods without Lua-stack assembly",
     function()
         local csrc = h.compile_and_read_c([[
             record Counter
@@ -778,33 +778,85 @@ describe("closures (end-to-end)", function()
             function bind(value_: Counter): () -> integer
                 return value_:get
             end
+
+            function capture(value_: integer): () -> integer
+                local captured = value_
+                return function (): integer
+                    return captured
+                end
+            end
         ]])
-        local declaration = assert(csrc:find(
-            "TValue test_\\u2133_bind_titan(", 1, true))
-        local first = assert(csrc:find(
-            "TValue test_\\u2133_bind_titan(", declaration + 1, true))
-        local last = assert(csrc:find(
-            "static int test_\\u2133_bind_titanentry_lua", first, true))
-        local body = csrc:sub(first, last - 1)
-        local ensure = assert(body:find(
-            "titan_ensure_stack(L, 6);", 1, true))
-        local before = body:sub(1, ensure - 1)
+
+        local function native_body(name)
+            local signature = "TValue test_\\u2133_" .. name .. "_titan("
+            local declaration = assert(csrc:find(signature, 1, true))
+            local first = assert(csrc:find(
+                signature, declaration + 1, true))
+            local last = assert(csrc:find(
+                "static int test_\\u2133_" .. name .. "_titanentry_lua",
+                first, true))
+            return csrc:sub(first, last - 1)
+        end
+
+        local function direct_closure(body, expected_lua_entry)
+            local closure = assert(body:match(
+                "CClosure%s+%*(_tmp_%d+_closure)%s*=%s*"
+                    .. "luaF_newCclosure%(L,%s*6%);"))
+            local allocation = assert(body:find(
+                "CClosure *" .. closure
+                    .. " = luaF_newCclosure(L, 6);", 1, true))
+            local entry = assert(body:find(
+                closure .. "->f = " .. expected_lua_entry .. ";",
+                allocation, true))
+            local module = assert(body:find(
+                "setuvalue(L, &" .. closure .. "->upvalue[0]",
+                entry, true))
+            local strict = assert(body:find(
+                "setfvalue(&" .. closure .. "->upvalue[5]",
+                module, true))
+            local root = assert(body:find(
+                "setclCvalue(L, s2v((restorestack(L, _base_off)",
+                strict, true))
+            local debt = assert(body:find(
+                "luaC_checkGC(L);", root, true))
+            local rebase = assert(body:find(
+                "_base = restorestack(L, _base_off);", debt, true))
+            assert.is_true(allocation < entry and entry < module
+                and module < strict and strict < root
+                and root < debt and debt < rebase)
+            for _, forbidden in ipairs({
+                "titan_pushmodule(L,", "lua_pushlightuserdata(L,",
+                "lua_pushcfunction(L,", "lua_pushcclosure(L,",
+            }) do
+                assert.falsy(body:find(forbidden, 1, true), body)
+            end
+            return closure, allocation, root
+        end
+
+        local body = native_body("bind")
+        local closure, allocation, root = direct_closure(
+            body,
+            "test_\\u2133_Counter_\\u2131_get_titanentry_boundlua")
+        local before = body:sub(1, allocation - 1)
         assert.matches(
             "Udata%s*%*%s*_tmp_%d+%s*=%s*0;%s*"
                 .. "_tmp_%d+%s*=%s*_param_value_;",
             before)
         assert.falsy(before:find("setuvalue(L", 1, true), before)
-        local upvalue = assert(body:find(
-            "setuvalue(L, s2v(L->top.p)", ensure, true))
-        local allocation = assert(body:find(
-            "lua_pushcclosure%(L,%s*test_\\u2133_Counter_" ..
-                "\\u2131_get_titanentry_boundlua,%s*6%);",
-            upvalue))
-        local root = assert(body:find(
-            "setobj2t(L, s2v((restorestack(L, _base_off)",
+        local self = assert(body:find(
+            "setuvalue(L, &" .. closure .. "->upvalue[4]",
             allocation, true))
-        assert.is_true(ensure < upvalue
-            and upvalue < allocation and allocation < root)
+        assert.is_true(allocation < self and self < root)
+
+        local lambda_body = native_body("capture")
+        local lambda_closure, lambda_allocation, lambda_root =
+            direct_closure(lambda_body,
+                "test_lambda_0_titanentry_lua")
+        local capture = assert(lambda_body:find(
+            "setivalue(&" .. lambda_closure .. "->upvalue[4]",
+            lambda_allocation, true))
+        assert.is_true(lambda_allocation < capture
+            and capture < lambda_root)
 
         local call_declaration = assert(csrc:find(
             "lua_Integer test_\\u2133_call_titan(", 1, true))
@@ -821,6 +873,45 @@ describe("closures (end-to-end)", function()
         assert.falsy(call_body:sub(freeze, native_call):find(
             "setuvalue(L", 1, true), call_body)
         assert.is_true(freeze < native_call)
+    end)
+
+    it("keeps directly constructed callables alive across collector modes",
+    function()
+        run_coder([[
+            record Counter
+                total: integer
+            end
+
+            function Counter:add(delta: integer): integer
+                self.total = self.total + delta
+                return self.total
+            end
+
+            function make_lambda(start: integer): (integer) -> integer
+                local total = start
+                return function (delta: integer): integer
+                    total = total + delta
+                    return total
+                end
+            end
+
+            function make_bound(start: integer): (integer) -> integer
+                return Counter.new(start):add
+            end
+        ]], [[
+            for _, mode in ipairs({"incremental", "generational"}) do
+                collectgarbage(mode)
+                for i = 1, 30 do
+                    local lambda = test.make_lambda(i)
+                    local bound = test.make_bound(i)
+                    collectgarbage("collect")
+                    assert(lambda(1) == i + 1)
+                    assert(lambda(2) == i + 3)
+                    assert(bound(3) == i + 3)
+                    assert(bound(4) == i + 7)
+                end
+            end
+        ]])
     end)
 
     it("a module var initialized with a const-receiver bound method ref runs", function()

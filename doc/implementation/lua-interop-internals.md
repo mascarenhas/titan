@@ -133,8 +133,8 @@ Walking through it:
 * **Argument count adjustment.** Too few arguments are padded by writing nils to fresh Lua stack slots before any
   parameter is read; the later `checkandget` calls then accept or reject
   those nils according to the declared parameter types.
-  `titan_ensure_stack` raises normally if `lua_checkstack` cannot reserve
-  them; a successful reservation can relocate the stack, so the wrapper reloads
+  `titan_ensure_stack` uses Lua's internal raising growth path and extends the
+  active frame limit; a successful reservation can relocate the stack, so the wrapper reloads
   `func = L->ci->func.p` before filling the new slots. A fixed-parameter
   wrapper deliberately ignores surplus Lua arguments. An input-variadic
   wrapper converts the surplus into an element-typed `TitanVargX` descriptor,
@@ -274,10 +274,12 @@ wrapper to unwrap) — full excerpt and identity mechanism in
 The failure message is always `type error, expected %s but found %s`,
 with three arms for the found part: another Titan record or union reports its
 FQTN, found through the registry's reverse metatable→name entry
-(`expected test.Rec but found test.Point`); an unknown full userdata is
-formatted through `luaL_tolstring`; anything else reports `lua_typename`
-(`expected test.Rec but found number`). The spec asserts the two
-working shapes.
+(`expected test.Rec but found test.Point`). The generated native path reads
+that entry directly with `luaH_get` from `G(L)->l_registry`; an unknown full
+userdata reports the static name `userdata`, without consulting `__name` or
+invoking `__tostring`. Anything else reports
+`lua_typename` (`expected test.Rec but found number`). The coder spec asserts
+the named, primitive, and unknown-userdata shapes.
 
 The Interface leaf keeps that exact metatable comparison as its fast path.
 After a mismatch it requires full userdata with a metatable and performs an

@@ -357,12 +357,13 @@ If the shared frozen graph can allocate a nested callable view, the synthesized
 native adapter polls the collector at entry before reserving stack space or
 establishing `_base`; no poll enters a fresh closure's construction window.
 
-The adapter reserves a separate transient identity-setup range—one slot for
-ordinary registry lookup, or three when Array metatable creation must remain
-possible—but advances `L->top` only across the actually rooted range. It records
-`_base` as an offset, addresses rooted slots through `restorestack` across
-identity setup, rebases after each immediate guard allowed to move the stack,
-and always rebases after the concrete native call before reading result homes.
+The adapter reserves only its actually rooted range. Identity setup reads
+already-published nominal and owned-C metatables directly from the registry
+table, and reads the already-published mutable/const Array pair through a
+stack-neutral runtime helper. String interning during those internal lookups
+can allocate, so it records `_base` as an offset, addresses rooted slots through
+`restorestack`, and rebases after each lookup. It also always rebases after the
+concrete native call before reading result homes.
 Direct nested `luaF_newCclosure` construction may allocate/raise but is not a
 rebase point. A compile-time assertion keeps the adapter's 200-element backing
 bound aligned with the runtime constant.

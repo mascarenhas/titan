@@ -304,13 +304,18 @@ merely structurally similar proxy.
 Add runtime helpers that preserve the proxy/backing cycle and GC barriers:
 
 - const construction installs the const proxy with no writer;
-- shallow copy roots the source, allocates the const backing/proxy with an
-  array part pre-sized to the source's exact physical `asize`, copies every
-  present TValue only through logical `lenhint`, preserves holes and length,
-  and returns the new `Table *` without growth reallocations;
-- in-place freeze validates an unescaped mutable canonical proxy, changes that
-  proxy to the const metatable with the required Lua object barrier, clears its
-  writer, and returns the same backing.
+- construction receives a caller-owned traced result slot and uses Lua-internal
+  allocation, field stores, and barriers without changing `L->top` or calling
+  the public Lua stack API;
+- shallow copy relies on a distinct caller-owned source root, allocates the
+  const backing/proxy directly into the result slot with an array part
+  pre-sized to the source's exact physical `asize`, copies every present TValue
+  only through logical `lenhint`, preserves holes and length, and returns the
+  new `Table *` without growth reallocations or stack effects;
+- in-place freeze debug-asserts an unescaped mutable canonical proxy, changes
+  that proxy to the const metatable through direct Lua-internal fields with the
+  required object barrier/finalizer bookkeeping, clears its writer, and returns
+  the same backing without a stack effect.
 
 Contextual const constructors use the const constructor directly. Written
 mutable-to-const casts use the checker-selected copy/freeze helper, then apply

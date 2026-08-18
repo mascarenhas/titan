@@ -68,37 +68,40 @@ choose.
 
 ## Runtime construction
 
-`titan_array_new(L, metatable, capacity, writer)` creates the complete pair
-before it returns a native `Table *`:
+`titan_array_new(L, metatable, capacity, writer, result)` creates the complete
+pair before it returns a native `Table *`. `result` is an active, caller-owned
+stack slot distinct from the rooted writer:
 
-1. validate the requested capacity and require a writer `CClosure`;
-2. copy/root the writer in a scanned Lua stack slot;
-3. allocate the table and root it in a separate scanned slot;
-4. allocate a zero-byte, two-uservalue Udata and independently root it;
-5. set the proxy metatable with the ordinary Lua API;
-6. call `luaH_resize(L, backing, capacity, 1)`;
-7. initialize logical length to zero, without dereferencing `lenhint` when
+1. assert the compiler-guaranteed metatable, writer, capacity, and result-slot
+   preconditions;
+2. allocate the table and publish it in `result`;
+3. call `luaH_resize(L, backing, capacity, 1)`;
+4. initialize logical length to zero, without dereferencing `lenhint` when
    `asize == 0`;
-8. install the backing Table in proxy user value 1;
-9. install the writer closure in proxy user value 2;
-10. insert `0 -> proxy` in the already-sized hash; and
-11. apply the stock barriers and publish only after every edge exists.
+5. allocate a zero-byte, two-uservalue Udata with `luaS_newudata`;
+6. write its metatable, backing, and writer fields directly;
+7. temporarily publish the proxy in `result`;
+8. insert `0 -> proxy` in the already-sized hash;
+9. apply the stock barriers and restore the backing to `result`; and
+10. poll the collector only after the complete cycle is rooted.
 
-`titan_const_array_new(L, const_metatable, capacity)` uses the same internal
-constructor but requires the const canonical metatable and stores nil in user
-value 2. A constructor checked under a const Array target calls this helper
-directly and never creates a transient mutable proxy.
+`titan_const_array_new(L, const_metatable, capacity, result)` uses the same
+internal constructor but requires the const canonical metatable and stores nil
+in user value 2. A constructor checked under a const Array target calls this
+helper directly and never creates a transient mutable proxy.
 
 The empty case deliberately requests `luaH_resize(L, t, 0, 1)`. Its array part
 has size zero, but its non-dummy one-node hash still owns key 0.
+Bundled Lua 5.5 has no capacity-taking variant of `luaH_new`; this
+`luaH_new`-then-`luaH_resize` sequence is the same internal construction shape
+used by Lua's own table-creation paths, without involving the public stack API.
 
-Both objects and the writer-or-nil slot stay in independent scanned roots
-across every allocation.
-This is necessary even though the links eventually form a cycle:
-`luaH_resize` can allocate before either edge exists, and `luaH_setint` can
-force an emergency full collection under Lua's `HARDMEMTESTS` before the
-caller's later barrier. A C local `Table *`, `Udata *`, or `TValue` is not a
-GC root.
+The caller keeps the mutable writer rooted. The one result slot first roots the
+backing, then the proxy whose first user value already traces that backing, and
+finally the completed backing/proxy cycle. This ordering is necessary because
+`luaH_resize` can allocate before either edge exists and `luaH_setint` can force
+an emergency full collection under Lua's `HARDMEMTESTS`. A C local `Table *`,
+`Udata *`, or `TValue` is not a GC root. The helper never changes `L->top`.
 
 Constructor lowering fills the positive array slots after the pair exists.
 It then stores the highest non-nil produced position as the final length.
@@ -491,18 +494,20 @@ in raw-visible Map storage.
 ### Mutable-to-const lowering
 
 A copy-mode `array_freeze` calls `titan_array_shallow_copy`. The helper
-validates the source's mutable canonical proxy, roots its backing across
-destination allocation, and preallocates the destination array part to the
-source's physical `asize` exactly. It copies only present slots through the
-source's logical length, barriers every collectable destination value, and
-then restores that logical length. Spare physical capacity remains empty;
-holes and trailing-length semantics are preserved.
+asserts the source's mutable canonical proxy, relies on the caller's distinct
+source root across destination allocation, and publishes the destination into
+the caller-provided result slot. Its array part is preallocated to the source's
+physical `asize` exactly. It copies only present slots through the source's
+logical length, barriers every collectable destination value, and then restores
+that logical length. Spare physical capacity remains empty; holes and
+trailing-length semantics are preserved.
 
 A checker-proven freeze-mode plan calls `titan_array_freeze`. It validates the
-mutable proxy, installs the const canonical metatable through Lua's metatable
-API so the object barrier is applied, clears user value 2 to nil, and returns
-the unchanged `Table *`. Neither helper performs an element conversion. The
-in-place path is sound only because the checker proved that no mutable
+mutable proxy with debug assertions, installs the const canonical metatable by
+writing the userdata directly and applying Lua's internal object barrier and
+finalizer bookkeeping, clears user value 2 to nil, and returns the unchanged
+`Table *`. Neither helper performs an element conversion or changes `L->top`.
+The in-place path is sound only because the checker proved that no mutable
 reference remains observable.
 
 ### Length
@@ -555,9 +560,9 @@ Array-typed call edge.
 
 Standalone `main(args: {string}): integer` uses the same ordinary Array
 constructor and supplies a fixed generated `{string}` writer closure. The
-driver pushes it as a full C closure with one private dummy upvalue and keeps
-it rooted on the Lua stack while `titan_array_new` installs it; no global
-per-type writer registry is involved.
+driver creates it as a full C closure with one private dummy upvalue and keeps
+it rooted on the Lua stack while `titan_array_new` writes the backing into a
+separate traced result slot; no global per-type writer registry is involved.
 Generated startup stores C `argv[1..argc-1]` at Titan positions `1..argc-1`,
 sets length to `argc - 1`, and never writes user data at key 0.
 

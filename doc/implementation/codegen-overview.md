@@ -689,16 +689,12 @@ The checker computes, for each `ExpFunction`, the ordered de-duplicated
 list of enclosing-function declarations it captures (see
 [the type checker](checker.md#closures-capture-analysis-and-lambda-inference)); the coder
 turns that list into the `upvalue[4 + i]` slots in agreed order. At the
-use site the closure is built by pushing the four header upvalues then,
-in capture-list order, each capture — the box `Udata*` for a boxed
-capture, or the copied value for a by-value capture — followed by the strict
-entry trailer, and calling
-`lua_pushcclosure` (preceded by
-`titan_ensure_stack(L, 5 + ncaptured)`, which raises if
-`lua_checkstack` cannot reserve the capacity, since the capture pushes are raw
-transient stack pushes, not
-slot-reserved). `lua_pushcclosure` moves the pushed upvalues into the new
-white closure, so no barrier is needed at construction.
+use site the coder allocates the exact closure with `luaF_newCclosure`, fills
+the four header upvalues, captures, and strict-entry trailer directly while the
+closure is white, then publishes it into its traced result slot before paying
+the allocation's GC debt. No capture transits through `L->top`, and no barrier
+is needed before publication. The post-publication collector poll may relocate
+the Lua stack, so generated code restores `_base` from `_base_off` afterward.
 
 Lua permits at most 255 C-closure upvalues. Five structural source slots leave
 **250 captures**; the checker rejects the first larger capture list so code

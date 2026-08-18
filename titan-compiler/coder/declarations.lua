@@ -293,7 +293,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             L->top.p += $NRET;
             $DECL = $NAME($PARAMS);
             /* the native callee may have grown (and thus relocated) the Lua
-               stack via lua_checkstack, so recompute the return slot pointer
+               stack, so recompute the return slot pointer
                from the saved offset before writing through it */
             StkId _firstret = restorestack(L, _firstret_off);
             $SETSLOT;
@@ -495,7 +495,7 @@ function coder._emit_callable_adapter(tlcontext, site)
         "callable adapter emission", {})
     local ctx = newcontext(tlcontext)
     local roots = coder._interface_adapter_allocate_roots(ctx, adapter)
-    local identities, identity_scratch =
+    local identities =
         coder._interface_adapter_identity_prelude(ctx, adapter)
     local loc = adapter.location
     local argument_sources =
@@ -543,7 +543,7 @@ function coder._emit_callable_adapter(tlcontext, site)
     local root_preamble
     if ctx.nslots > 0 then
         root_preamble = render([[
-            titan_ensure_stack(L, $NRESERVE);
+            titan_ensure_stack(L, $NSLOTS);
             StkId _base = L->top.p;
             L->top.p += $NSLOTS;
             for (StkId _ia_slot = L->top.p - 1;
@@ -553,16 +553,6 @@ function coder._emit_callable_adapter(tlcontext, site)
             ptrdiff_t _base_off = savestack(L, _base);
         ]], {
             NSLOTS = c_integer_literal(ctx.nslots),
-            NRESERVE = c_integer_literal(
-                ctx.nslots + identity_scratch),
-        })
-    elseif identity_scratch > 0 then
-        root_preamble = render([[
-            titan_ensure_stack(L, $NRESERVE);
-            StkId _base = L->top.p;
-            ptrdiff_t _base_off = savestack(L, _base);
-        ]], {
-            NRESERVE = c_integer_literal(identity_scratch),
         })
     else
         root_preamble = [[
@@ -1187,12 +1177,7 @@ function codefuncdec(tlcontext, node)
         table.insert(stats, 1, render([[
         $ENTRYGC
         /* function preamble: reserve needed stack space */
-        if (L->stack_last.p - L->top.p > $NSLOTS) {
-            if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
-        } else {
-            if (TITAN_UNLIKELY(!lua_checkstack(L, $NSLOTS)))
-                luaD_throw(L, LUA_ERRMEM);
-        }
+        titan_ensure_stack(L, $NSLOTS);
         StkId _base = L->top.p;
         L->top.p += $NSLOTS;
         for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
@@ -1284,12 +1269,7 @@ function codeinitializerdec(tlcontext, node)
         table.insert(stats, 1, render([[
         $ENTRYGC
         /* function preamble: reserve needed stack space */
-        if (L->stack_last.p - L->top.p > $NSLOTS) {
-            if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
-        } else {
-            if (TITAN_UNLIKELY(!lua_checkstack(L, $NSLOTS)))
-                luaD_throw(L, LUA_ERRMEM);
-        }
+        titan_ensure_stack(L, $NSLOTS);
         StkId _base = L->top.p;
         L->top.p += $NSLOTS;
         for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
@@ -1477,8 +1457,8 @@ function lambda_register(tlcontext, node)
     end
 end
 
--- Read a captured variable in the CURRENT function, for pushing into a nested
--- lambda's closure. Returns (boxexpr, valuestats, valueexpr): for a boxed
+-- Read a captured variable in the CURRENT function for direct initialization
+-- of a nested lambda's closure. Returns (boxexpr, valuestats, valueexpr): for a boxed
 -- capture, `boxexpr` is the C expression for the box `Udata*`; for a by-value
 -- capture, `valueexpr` (with prelude `valuestats`) is the C value expression.
 -- A capture that is itself captured by the current function (transitive) is
@@ -1506,68 +1486,76 @@ end
 -- upvalue[0]=_mod, [1]=type tag, [2]=native ptr, [3]=closure brand,
 -- [4+i]=captured variable i, and the strict LCF in the final upvalue, then
 -- return the closure value
--- (anchored in a gc temp). The capture pushes are transient raw stack pushes
--- (guarded by lua_checkstack, consumed by lua_pushcclosure), not
--- nslots-accounted.
+-- (anchored in a gc temp). The upvalues are initialized directly while the
+-- closure is white; they never transit through the Lua stack.
 function codelambda(ctx, node)
     local tlcontext = ctx.tlcontext
     lambda_register(tlcontext, node)
     local ncap = #node._captures
-    local stats = {}
-    -- lua_checkstack can relocate the Lua stack; this function therefore needs
-    -- _base recomputed from its saved offset afterwards (like a value call).
+    local nup = 5 + ncap
+    local cdecl, tmpname, tmpslot = newtmp(ctx, node._type, true)
+    local closurename = tmpname .. "_closure"
+    local capturestats = {}
+
+    -- The debt check after publication may run the collector and re-enter code
+    -- that relocates the Lua stack. Recompute _base from its saved offset after
+    -- it, as for any other stack-relocating operation.
     ctx.uses_base_off = true
-    table.insert(stats, render([[
-        titan_ensure_stack(L, $NPUSH);
-        titan_pushmodule(L, _mod);
-        lua_pushlightuserdata(L, (void*)$FUNCTAG);
-        lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
-        lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
-    ]], {
-        NPUSH = c_integer_literal(5 + ncap),
-        FUNCTAG = function_type_tag(tlcontext, node._type),
-        NATIVE = node._lambda_native,
-    }))
-    for _, decl in ipairs(node._captures) do
+    for i, decl in ipairs(node._captures) do
         local captype = decl._type
         local boxexpr, vstats, vexpr = read_capture(ctx, decl)
+        local dst = render("&$CLOSURE->upvalue[$INDEX]", {
+            CLOSURE = closurename,
+            INDEX = c_integer_literal(4 + i - 1),
+        })
         if boxexpr then
-            table.insert(stats, render([[
-                setuvalue(L, s2v(L->top.p), $BOX); L->top.p++;
-            ]], { BOX = boxexpr }))
+            table.insert(capturestats, render([[
+                setuvalue(L, $DST, $BOX);
+            ]], { DST = dst, BOX = boxexpr }))
         else
-            table.insert(stats, render([[
+            table.insert(capturestats, render([[
                 $VSTATS
-                $SETSLOT L->top.p++;
+                $SETSLOT
             ]], {
                 VSTATS = vstats,
-                SETSLOT = setslot(captype, "s2v(L->top.p)", vexpr),
+                SETSLOT = setslot(captype, dst, vexpr),
             }))
         end
     end
-    table.insert(stats, render([[
-        lua_pushcfunction(L, $STRICTNAME);
-    ]], {
-        STRICTNAME = node._lambda_strict,
-    }))
-    -- lua_pushcclosure moves the pushed upvalues into the fresh (white) closure,
-    -- so no barrier is needed at creation. The result closure is on top.
-    local cdecl, tmpname, tmpslot = newtmp(ctx, node._type, true)
-    table.insert(stats, render([[
-        lua_pushcclosure(L, $LUANAME, $NUP);
-        _base = restorestack(L, _base_off);
+
+    -- No barrier is needed while initializing a fresh white closure. Publish it
+    -- into its traced result slot before paying the allocation's GC debt.
+    local stats = render([[
         $CDECL
-        setobj2t(L, $TMPSLOT, s2v(L->top.p - 1));
-        $GETSLOT;
-        L->top.p--;
+        lua_assert($NUP <= MAXUPVAL);
+        CClosure *$CLOSURE = luaF_newCclosure(L, $NUP);
+        $CLOSURE->f = $LUANAME;
+        setuvalue(L, &$CLOSURE->upvalue[0], _mod);
+        setpvalue(&$CLOSURE->upvalue[1], (void *)$FUNCTAG);
+        setpvalue(&$CLOSURE->upvalue[2],
+            titan_cast_func(void *, $NATIVE));
+        setpvalue(&$CLOSURE->upvalue[3], TITAN_FUNCTION_CLOSURE_BRAND);
+        $CAPTURES
+        setfvalue(&$CLOSURE->upvalue[$STRICTINDEX], $STRICTNAME);
+        lua_assert(iswhite($CLOSURE));
+        setclCvalue(L, $TMPSLOT, $CLOSURE);
+        setclCvalue(L, &$TMPNAME, $CLOSURE);
+        luaC_checkGC(L);
+        _base = restorestack(L, _base_off);
     ]], {
+        NUP = c_integer_literal(nup),
+        CLOSURE = closurename,
         LUANAME = node._lambda_lua,
-        NUP = c_integer_literal(5 + ncap),
         CDECL = cdecl,
+        FUNCTAG = function_type_tag(tlcontext, node._type),
+        NATIVE = node._lambda_native,
+        CAPTURES = table.concat(capturestats, "\n"),
+        STRICTINDEX = c_integer_literal(nup - 1),
+        STRICTNAME = node._lambda_strict,
         TMPSLOT = tmpslot,
-        GETSLOT = getslot(node._type, tmpname, "s2v(L->top.p - 1)"),
-    }))
-    return table.concat(stats, "\n"), tmpname
+        TMPNAME = tmpname,
+    })
+    return stats, tmpname
 end
 
 -- Use-site code for a bound method reference `obj:m`: evaluate the receiver once
@@ -1628,8 +1616,7 @@ function codemethodref(ctx, node)
     ctx.uses_base_off = true
     local stats = {}
 
-    -- 1. evaluate the receiver once into a C temp (self: Udata*). Its eventual
-    -- stack push below is real closure-upvalue transport, not a tracing copy.
+    -- 1. evaluate the receiver once into a C temp (self: Udata*).
     local rtype = node.exp._type
     local rstat, rexp = codeexp(ctx, node.exp)
     local rdecl, rname = newtmp(ctx, rtype, false)
@@ -1637,37 +1624,38 @@ function codemethodref(ctx, node)
     table.insert(stats, rdecl)
     table.insert(stats, rname .. " = " .. rexp .. ";")
 
-    -- 2. push the six upvalues and build the closure
+    -- 2. initialize the fresh white closure directly, publish its initial root,
+    -- then pay the allocation's GC debt and recover any relocated stack base.
+    local cdecl, tmpname, tmpslot = newtmp(ctx, ftype, true)
+    local closurename = tmpname .. "_closure"
     table.insert(stats, render([[
-        titan_ensure_stack(L, 6);
-        titan_pushmodule(L, $MODEXPR);
-        lua_pushlightuserdata(L, (void*)$FUNCTAG);
-        lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
-        lua_pushlightuserdata(L, TITAN_FUNCTION_CLOSURE_BRAND);
-        $PUSHSELF L->top.p++;
-        lua_pushcfunction(L, $STRICTNAME);
+        $CDECL
+        CClosure *$CLOSURE = luaF_newCclosure(L, 6);
+        $CLOSURE->f = $LUANAME;
+        setuvalue(L, &$CLOSURE->upvalue[0], $MODEXPR);
+        setpvalue(&$CLOSURE->upvalue[1], (void *)$FUNCTAG);
+        setpvalue(&$CLOSURE->upvalue[2],
+            titan_cast_func(void *, $NATIVE));
+        setpvalue(&$CLOSURE->upvalue[3], TITAN_FUNCTION_CLOSURE_BRAND);
+        $SETSELF
+        setfvalue(&$CLOSURE->upvalue[5], $STRICTNAME);
+        lua_assert(iswhite($CLOSURE));
+        setclCvalue(L, $TMPSLOT, $CLOSURE);
+        setclCvalue(L, &$TMPNAME, $CLOSURE);
+        luaC_checkGC(L);
+        _base = restorestack(L, _base_off);
     ]], {
+        CDECL = cdecl,
+        CLOSURE = closurename,
+        LUANAME = luaname,
         MODEXPR = modexpr,
         FUNCTAG = function_type_tag(tlcontext, ftype),
         NATIVE = nativename,
-        PUSHSELF = setslot(rtype, "s2v(L->top.p)", rname),
+        SETSELF = setslot(rtype,
+            "&" .. closurename .. "->upvalue[4]", rname),
         STRICTNAME = strictname,
-    }))
-
-    -- 3. consume the freshly allocated closure and publish its initial root
-    local cdecl, tmpname, tmpslot = newtmp(ctx, ftype, true)
-    table.insert(stats, render([[
-        lua_pushcclosure(L, $LUANAME, 6);
-        _base = restorestack(L, _base_off);
-        $CDECL
-        setobj2t(L, $TMPSLOT, s2v(L->top.p - 1));
-        $GETSLOT;
-        L->top.p--;
-    ]], {
-        LUANAME = luaname,
-        CDECL = cdecl,
         TMPSLOT = tmpslot,
-        GETSLOT = getslot(ftype, tmpname, "s2v(L->top.p - 1)"),
+        TMPNAME = tmpname,
     }))
     return table.concat(stats, "\n"), tmpname
 end
@@ -1756,12 +1744,7 @@ function codelambdadec(tlcontext, node)
         table.insert(stats, 1, render([[
         $ENTRYGC
         /* function preamble: reserve needed stack space */
-        if (L->stack_last.p - L->top.p > $NSLOTS) {
-            if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
-        } else {
-            if (TITAN_UNLIKELY(!lua_checkstack(L, $NSLOTS)))
-                luaD_throw(L, LUA_ERRMEM);
-        }
+        titan_ensure_stack(L, $NSLOTS);
         StkId _base = L->top.p;
         L->top.p += $NSLOTS;
         for(StkId _s = L->top.p - 1; _base <= _s; _s--) {

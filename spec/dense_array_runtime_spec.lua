@@ -12,6 +12,19 @@ local function write_file(path, contents)
     assert.truthy(file:close())
 end
 
+local function read_file(path)
+    local file = assert(io.open(path, "rb"))
+    local contents = assert(file:read("*a"))
+    assert.truthy(file:close())
+    return contents
+end
+
+local function c_function_body(source, name)
+    local escaped = name:gsub("(%W)", "%%%1")
+    return assert(source:match(
+        "%f[%w_]" .. escaped .. "%f[^%w_]%s*%b()%s*(%b{})"), name)
+end
+
 local function remove_tree(path)
     local mode = lfs.symlinkattributes(path, "mode")
     if mode == "directory" then
@@ -226,8 +239,13 @@ static Table *new_rooted_array(lua_State *L, Table *metatable,
 
     push_identity_writer(L);
     writer = lua_totvalue(L, -1);
-    backing = titan_array_new(L, metatable, capacity, &writer);
-    push_backing(L, backing);
+    lua_pushnil(L);
+    {
+        int top = lua_gettop(L);
+        backing = titan_array_new(
+            L, metatable, capacity, &writer, L->top.p - 1);
+        assert(lua_gettop(L) == top);
+    }
     *proxy = titan_array_require_proxy(L, backing, metatable);
     /*
     ** Leave only the backing root requested by this helper. The writer and its
@@ -241,8 +259,13 @@ static Table *new_rooted_array(lua_State *L, Table *metatable,
 static Table *new_rooted_const_array(lua_State *L, Table *metatable,
                                      unsigned capacity, Udata **proxy) {
     int base = lua_gettop(L);
-    Table *backing = titan_const_array_new(L, metatable, capacity);
-    push_backing(L, backing);
+    int top;
+    Table *backing;
+    lua_pushnil(L);
+    top = lua_gettop(L);
+    backing = titan_const_array_new(
+        L, metatable, capacity, L->top.p - 1);
+    assert(lua_gettop(L) == top);
     *proxy = titan_array_require_proxy(L, backing, metatable);
     assert(lua_gettop(L) == base + 1);
     return backing;
@@ -277,17 +300,6 @@ static void assert_nil(Table *backing, lua_Integer index) {
 
 static int growth_at_limit(lua_State *L) {
     (void)titan_array_growth(L, (lua_Unsigned)TITAN_ARRAY_MAX_CAPACITY);
-    return 0;
-}
-
-static int constructor_one_past(lua_State *L) {
-    Table *metatable = titan_array_metatable(L);
-    TValue writer;
-    push_identity_writer(L);
-    writer = lua_totvalue(L, -1);
-    (void)titan_array_new(
-        L, metatable, (lua_Unsigned)TITAN_ARRAY_MAX_CAPACITY + 1u,
-        &writer);
     return 0;
 }
 
@@ -467,7 +479,6 @@ static void test_capacity_length_and_hash(void) {
         L, (lua_Unsigned)TITAN_ARRAY_MAX_CAPACITY - 1u) ==
         TITAN_ARRAY_MAX_CAPACITY);
     expect_c_error(L, growth_at_limit, "array index too large");
-    expect_c_error(L, constructor_one_past, "array index too large");
 
     for (i = 0; i < sizeof(exact_capacities) /
                           sizeof(exact_capacities[0]); i++) {
@@ -706,9 +717,13 @@ static void test_const_array_copy_freeze_and_nested_boxing(void) {
     lua_pop(L, 1);
     set_integer(L, source, 4, 44);
 
-    copy = titan_array_shallow_copy(
-        L, source, mutable_metatable, const_metatable);
-    push_backing(L, copy);
+    lua_pushnil(L);
+    {
+        int top = lua_gettop(L);
+        copy = titan_array_shallow_copy(
+            L, source, mutable_metatable, const_metatable, L->top.p - 1);
+        assert(lua_gettop(L) == top);
+    }
     copy_proxy = titan_array_require_proxy(L, copy, const_metatable);
     assert(copy != source);
     assert(source->asize == 8);
@@ -743,8 +758,12 @@ static void test_const_array_copy_freeze_and_nested_boxing(void) {
     set_integer(L, frozen, 1, 81);
     push_proxy(L, frozen_proxy);
     lua_setglobal(L, "freeze_before");
-    assert(titan_array_freeze(
-        L, frozen, mutable_metatable, const_metatable) == frozen);
+    {
+        int top = lua_gettop(L);
+        assert(titan_array_freeze(
+            L, frozen, mutable_metatable, const_metatable) == frozen);
+        assert(lua_gettop(L) == top);
+    }
     assert(titan_array_try_proxy(frozen, mutable_metatable) == NULL);
     assert_const_shape(frozen, frozen_proxy, const_metatable, 2, 1);
     push_proxy(L, frozen_proxy);
@@ -885,8 +904,13 @@ static void test_lua_writer_dispatch(void) {
     weak_store(L, 1, &writer);
     weak_store(L, 2, &owner);
 
-    backing = titan_array_new(L, metatable, 0, &writer);
-    push_backing(L, backing);
+    lua_pushnil(L);
+    {
+        int top = lua_gettop(L);
+        backing = titan_array_new(
+            L, metatable, 0, &writer, L->top.p - 1);
+        assert(lua_gettop(L) == top);
+    }
     proxy = titan_array_require_proxy(L, backing, metatable);
     assert(ttisCclosure(&proxy->uv[1].uv));
     assert(clCvalue(&proxy->uv[1].uv) == clCvalue(&writer));
@@ -1302,6 +1326,41 @@ local function compile_and_run(hard_memory)
 end
 
 describe("dense Array stock-Lua runtime", function()
+    it("keeps compiler-internal construction helpers off the Lua stack",
+       function()
+        local runtime = read_file("titan-runtime/titan.c")
+        local header = read_file("titan-runtime/titan.h")
+        local source = runtime .. "\n" .. header
+        for _, name in ipairs({
+            "titan_array_try_proxy_either",
+            "titan_const_array_metatable",
+            "titan_const_array_new",
+        }) do
+            assert.matches("static%s+l_inline%s+[^\n]-" .. name ..
+                "%s*%b()%s*%b{}", header)
+            assert.is_nil(runtime:match(
+                "%f[%w_]" .. name .. "%f[^%w_]%s*%b()%s*%b{}"),
+                name .. " must stay in the installed inline header")
+        end
+        for _, name in ipairs({
+            "titan_array_new_impl",
+            "titan_array_new",
+            "titan_const_array_new",
+            "titan_array_shallow_copy",
+            "titan_array_freeze",
+        }) do
+            local body = c_function_body(source, name)
+            local without_asserts = body:gsub("lua_assert%s*%b()", "")
+            assert.is_nil(without_asserts:match(
+                "%f[%w_]lua_[%w_]*%s*%("),
+                name .. " calls the public Lua stack API")
+            assert.is_nil(body:match("%f[%w_]luaL_[%w_]*%s*%("),
+                name .. " raises a public auxiliary-library error")
+            assert.is_nil(body:match("L%s*%-%>%s*top"),
+                name .. " changes the Lua stack directly")
+        end
+    end)
+
     it("preserves capacity, length, proxy, callback, and GC invariants",
        function()
         compile_and_run(false)

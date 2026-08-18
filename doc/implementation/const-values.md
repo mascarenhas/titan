@@ -196,20 +196,27 @@ structurally similar userdata.
 
 `titan_array_new` requires the writer and mutable metatable.
 `titan_const_array_new` requires the const metatable and writes nil to the
-second user value. Both establish the complete backing/proxy cycle under stack
-roots before publication.
+second user value. Both receive an already-live generated result slot, publish
+the backing there before resizing it, temporarily publish the proxy there while
+installing the key-0 reverse link, and leave the backing in the same slot. They
+use `luaH_new`, an exact `luaH_resize`, `luaS_newudata`, direct metatable and
+uservalue stores, and the corresponding GC barriers; they never change
+`L->top` or call the public Lua stack API.
 
-`titan_array_shallow_copy` roots the mutable source backing, constructs a const
+`titan_array_shallow_copy` requires the mutable source to remain rooted in a
+caller-owned slot distinct from its result slot. It constructs a const
 destination whose array part preallocates the source's physical `asize`
-exactly, copies each present array slot only through the logical length,
-applies a backing barrier for each collectable value, and restores the exact
-length so spare capacity, holes, and trailing semantics are preserved.
+exactly, copies each present array slot only through the logical length, applies
+a backing barrier for each collectable value, and restores the exact length so
+spare capacity, holes, and trailing semantics are preserved. It is likewise
+stack-neutral.
 
 `titan_array_freeze` is used only after the checker linear proof. It validates
-the canonical mutable proxy, installs the const metatable through Lua's
-metatable API (and therefore the required object barrier), clears the writer
-user value to nil, and returns the same backing. The backing/proxy identity is
-preserved only on this semantically unobservable optimization path.
+the canonical mutable proxy with debug assertions, writes the const metatable
+directly with Lua's internal object barrier and finalizer bookkeeping, clears
+the writer user value to nil, and returns the same backing without touching the
+Lua stack. The backing/proxy identity is preserved only on this semantically
+unobservable optimization path.
 
 Every generated module reserves consecutive private cache slots for the
 mutable and const Array metatables. Names, boxing/unboxing, strict guards,

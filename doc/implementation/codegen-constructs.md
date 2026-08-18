@@ -265,8 +265,9 @@ writer inventory for the constructor's final element type, and chooses the
 qualified constructor from the checked Array context. A mutable constructor
 passes the cached writer to `titan_array_new`; a const constructor calls
 `titan_const_array_new`, whose second proxy user value is nil. Both receive the
-exact initial capacity and fill only positive array-part slots. The
-writer-or-nil, backing, and proxy are independently rooted across allocation;
+exact initial capacity and an active traced result slot, which the stack-neutral
+runtime helper uses to root and publish the backing/proxy cycle without a
+public Lua stack operation. They then fill only positive array-part slots;
 collectable element stores barrier the backing Table.
 
 The final logical length is the highest non-nil produced position, so trailing

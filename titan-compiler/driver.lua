@@ -4142,19 +4142,18 @@ static int pmain(lua_State *L) {
         lua_pushlightuserdata(L, &titan_main_array_writer_key);
         lua_pushcclosure(L, titan_main_string_array_writer, 1);
         writer = lua_totvalue(L, -1);
+        lua_pushnil(L);                 /* traced constructor result slot */
         arguments = titan_array_new(
-            L, array_metatable, nargs, &writer);
-        lua_pop(L, 1);
+            L, array_metatable, nargs, &writer, L->top.p - 1);
+        lua_remove(L, -2);              /* discard writer, keep backing */
         Udata *proxy =
             titan_array_require_proxy(L, arguments, array_metatable);
-        TValue proxy_value;
 
         /* Root the canonical proxy/backing cycle before allocating argv
          * strings. The program name is deliberately excluded: Titan's
          * positive-only argument Array is argv[1..argc-1] at indices
          * 1..argc-1, and index 0 remains the private owner backlink. */
-        setuvalue(L, &proxy_value, proxy);
-        lua_pushtvalue(L, proxy_value);
+        setuvalue(L, s2v(L->top.p - 1), proxy);
         for (i = 1; i < argc; i++) {
             lua_pushstring(L, argv[i]);
             titan_array_set_stack(L, arguments, (lua_Integer)i, -1);

@@ -363,7 +363,8 @@ function codearray(ctx, node, target)
     -- module-global upvalue is not necessarily remembered until the caller's
     -- post-expression barrier, while constructor/open-run work can allocate.
     -- The caller copies this rooted result into its final owner afterward.
-    local ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
+    local ctmp, tmpname, tmpslot, tmpstackslot =
+        newtmp(ctx, node._type, true)
     local inputstats, slots, openrun =
         coder._materialize_positional_inputs(ctx, node, node._type.elem)
     local stats = {}
@@ -389,24 +390,23 @@ function codearray(ctx, node, target)
         if node._type.isconst then
             return render([[
                 $TMPNAME = titan_const_array_new(
-                    L, $META, $CAPACITY);
+                    L, $META, $CAPACITY, $TMPSTACKSLOT);
                 _base = restorestack(L, _base_off);
-                sethvalue(L, $TMPSLOT, $TMPNAME);
             ]], {
                 TMPNAME = tmpname,
-                TMPSLOT = tmpslot,
+                TMPSTACKSLOT = tmpstackslot,
                 META = array_metatable(ctx, node._type),
                 CAPACITY = capacity,
             })
         end
         return render([[
             $TMPNAME = titan_array_new(
-                L, $META, $CAPACITY, &_mod->uv[$WRITER].uv);
+                L, $META, $CAPACITY, &_mod->uv[$WRITER].uv,
+                $TMPSTACKSLOT);
             _base = restorestack(L, _base_off);
-            sethvalue(L, $TMPSLOT, $TMPNAME);
         ]], {
             TMPNAME = tmpname,
-            TMPSLOT = tmpslot,
+            TMPSTACKSLOT = tmpstackslot,
             META = array_metatable(ctx, node._type),
             CAPACITY = capacity,
             WRITER = c_integer_literal(writer.slot),
@@ -2021,28 +2021,35 @@ function coder._code_array_freeze(ctx, node)
            and (cast.mode == "copy" or cast.mode == "freeze"),
         "Array freeze cast lacks a checker-selected lowering mode")
     local source_stats, source = materialize(ctx, node.exp)
-    local target_decl, target_name, target_slot =
+    local target_decl, target_name, target_slot, target_stack_slot =
         newtmp(ctx, node._type, true)
-    local helper = cast.mode == "freeze"
-        and "titan_array_freeze" or "titan_array_shallow_copy"
-    ctx.uses_base_off = true
-    return render([[
-        $SOURCE_STATS
-        $TARGET_DECL
-        $TARGET = $HELPER(
-            L, $SOURCE, $MUTABLE_META, $CONST_META);
-        _base = restorestack(L, _base_off);
-        sethvalue(L, $TARGET_SLOT, $TARGET);
-    ]], {
+    local args = {
         SOURCE_STATS = source_stats,
         TARGET_DECL = target_decl,
         TARGET = target_name,
-        HELPER = helper,
         SOURCE = source,
         MUTABLE_META = array_metatable(ctx, node.exp._type),
         CONST_META = array_metatable(ctx, node._type),
         TARGET_SLOT = target_slot,
-    }), target_name
+        TARGET_STACK_SLOT = target_stack_slot,
+    }
+    if cast.mode == "freeze" then
+        return render([[
+            $SOURCE_STATS
+            $TARGET_DECL
+            $TARGET = titan_array_freeze(
+                L, $SOURCE, $MUTABLE_META, $CONST_META);
+            sethvalue(L, $TARGET_SLOT, $TARGET);
+        ]], args), target_name
+    end
+    return render([[
+        $SOURCE_STATS
+        $TARGET_DECL
+        $TARGET = titan_array_shallow_copy(
+            L, $SOURCE, $MUTABLE_META, $CONST_META,
+            $TARGET_STACK_SLOT);
+        _base = restorestack(L, _base_off);
+    ]], args), target_name
 end
 
 -- Generate code for expression 'node'

@@ -1287,11 +1287,8 @@ function coder._interface_adapter_identity_prelude(
     local inventory =
         coder._interface_adapter_identity_inventory(adapter)
     local code = {}
-    -- A registry lookup needs one API result slot. First creation of the
-    -- canonical Array-metatable pair can temporarily hold both metatables,
-    -- their pair table, and callback closure operands.
     local has_array = inventory.arrays[false] or inventory.arrays[true]
-    local scratch_slots = has_array and 8 or 0
+    ctx.interface_adapter_array_metatables = nil
     ctx.interface_adapter_nominal_metatables = {}
     ctx.interface_adapter_owned_c_metatables = {}
     if has_array then
@@ -1302,8 +1299,9 @@ function coder._interface_adapter_identity_prelude(
         code[#code + 1] = [[
             Table *_ia_array_metatable;
             Table *_ia_const_array_metatable;
-            titan_array_metatables(
+            titan_array_cached_metatables(
                 L, &_ia_array_metatable, &_ia_const_array_metatable);
+            _base = restorestack(L, _base_off);
         ]]
     end
 
@@ -1313,7 +1311,6 @@ function coder._interface_adapter_identity_prelude(
     end
     table.sort(nominal_names, util.bytewise_less)
     for _, name in ipairs(nominal_names) do
-        scratch_slots = math.max(scratch_slots, 1)
         local owner = assert(types.registry[name],
             "Interface adapter nominal is absent from registry: " .. name)
         assert(owner._tag == "Type.Record"
@@ -1328,19 +1325,12 @@ function coder._interface_adapter_identity_prelude(
             .. coder._interface_symbol_fragment(name)
         ctx.interface_adapter_nominal_metatables[name] = cvar
         code[#code + 1] = render([[
-            luaL_getmetatable(
+            Table *$CVAR = titan_registry_get_string_table(
                 L, "Titan $KIND $TYPE metatable");
-            if (TITAN_UNLIKELY(!ttistable(s2v(L->top.p - 1)))) {
-                luaL_error(L,
-                    "missing per-state metatable for Interface adapter type %s",
-                    $DISPLAY);
-            }
-            Table *$CVAR = hvalue(s2v(L->top.p - 1));
-            lua_pop(L, 1);
+            _base = restorestack(L, _base_off);
         ]], {
             KIND = kind,
             TYPE = name,
-            DISPLAY = c_string_literal(name),
             CVAR = cvar,
         })
     end
@@ -1351,7 +1341,6 @@ function coder._interface_adapter_identity_prelude(
     end
     table.sort(owned_names, util.bytewise_less)
     for _, name in ipairs(owned_names) do
-        scratch_slots = math.max(scratch_slots, 1)
         local typ = inventory.owned_c[name]
         -- COwned identities are private to the translation unit performing
         -- the conversion, not to the record whose method is being called.
@@ -1363,21 +1352,16 @@ function coder._interface_adapter_identity_prelude(
             .. coder._interface_symbol_fragment(name)
         ctx.interface_adapter_owned_c_metatables[name] = cvar
         code[#code + 1] = render([[
-            luaL_getmetatable(
+            Table *$CVAR = titan_registry_get_string_table(
                 L, "Titan owned C $MODULE $TYPE metatable");
-            if (TITAN_UNLIKELY(!ttistable(s2v(L->top.p - 1)))) {
-                luaL_error(L,
-                    "missing per-state owned-C metatable in Interface adapter");
-            }
-            Table *$CVAR = hvalue(s2v(L->top.p - 1));
-            lua_pop(L, 1);
+            _base = restorestack(L, _base_off);
         ]], {
             MODULE = ctx.tlcontext.module,
             TYPE = types.tostring(typ),
             CVAR = cvar,
         })
     end
-    return table.concat(code, "\n"), scratch_slots
+    return table.concat(code, "\n")
 end
 
 function coder._interface_adapter_allocate_roots(ctx, adapter)
@@ -2038,7 +2022,7 @@ function coder._emit_interface_adapter(
     local ctx = newcontext(tlcontext)
     local roots =
         coder._interface_adapter_allocate_roots(ctx, adapter)
-    local identities, identity_scratch =
+    local identities =
         coder._interface_adapter_identity_prelude(ctx, adapter)
     local loc = {
         -- Native traceback filtering recognizes generated Titan frames by a
@@ -2098,12 +2082,8 @@ function coder._emit_interface_adapter(
     local root_preamble
     if ctx.nslots > 0 then
         root_preamble = render([[
-            /*
-             * Rooted scratch occupies NSLOTS entries. Identity setup later
-             * uses transient API slots, so reserve them without adding them
-             * to the GC-visible rooted range.
-            */
-            titan_ensure_stack(L, $NRESERVE);
+            /* Rooted scratch occupies NSLOTS entries. */
+            titan_ensure_stack(L, $NSLOTS);
             StkId _base = L->top.p;
             L->top.p += $NSLOTS;
             for (StkId _ia_slot = L->top.p - 1;
@@ -2113,17 +2093,6 @@ function coder._emit_interface_adapter(
             ptrdiff_t _base_off = savestack(L, _base);
         ]], {
             NSLOTS = c_integer_literal(ctx.nslots),
-            NRESERVE =
-                c_integer_literal(ctx.nslots + identity_scratch),
-        })
-    elseif identity_scratch > 0 then
-        root_preamble = render([[
-            /* Reserve transient Interface identity-setup results. */
-            titan_ensure_stack(L, $NRESERVE);
-            StkId _base = L->top.p;
-            ptrdiff_t _base_off = savestack(L, _base);
-        ]], {
-            NRESERVE = c_integer_literal(identity_scratch),
         })
     else
         root_preamble = [[

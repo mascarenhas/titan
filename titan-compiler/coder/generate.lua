@@ -653,12 +653,12 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives)
 
     local nslots = initctx.nslots
 
-    -- A lambda or bound-method-ref initializer (codelambda/codemethodref) can
-    -- relocate the Lua stack via lua_checkstack, so it recomputes `_base` from a
-    -- saved offset (`_base = restorestack(L, _base_off);`). Declare `_base_off`
-    -- alongside `_base` in the init-var prologue when any such initializer is
-    -- present. (Both codelambda and codemethodref reserve a gc temp, so
-    -- nslots > 0 whenever uses_base_off is set, and `_base` is always declared.)
+    -- A lambda or bound-method-ref initializer (codelambda/codemethodref) pays
+    -- the fresh closure's GC debt after publishing its traced result. That check
+    -- can re-enter code and relocate the Lua stack, so the initializer
+    -- recomputes `_base` from a saved offset. Declare `_base_off` alongside
+    -- `_base` when any such initializer is present. (Both lowerings reserve a
+    -- gc temp, so nslots > 0 and `_base` is always declared.)
     local baseoff = initctx.uses_base_off
         and "\n            ptrdiff_t _base_off = savestack(L, _base);" or ""
     if nslots > 0 then

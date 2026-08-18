@@ -247,7 +247,8 @@ describe("dense Array code generation and boundaries", function()
         -- trailing nils for the final length.
         assert.match(
             "titan_array_new%(%s*L, [^,]+, 4, " ..
-            "&_mod%->uv%[%d+%]%.uv%);", fixed_flat)
+            "&_mod%->uv%[%d+%]%.uv, " ..
+            "%(restorestack%(L, _base_off%) %+ %d+%)%);", fixed_flat)
         assert.match(backscan, fixed_flat)
         assert.match(
             "unsigned _array_length = 4; .*" ..
@@ -260,7 +261,8 @@ describe("dense Array code generation and boundaries", function()
         assert.match(
             "titan_array_new%(%s*L, [^,]+, " ..
             "%(%(lua_Unsigned%)1 %+ %(lua_Unsigned%)_vacount%)%s*, " ..
-            "&_mod%->uv%[%d+%]%.uv%);",
+            "&_mod%->uv%[%d+%]%.uv, " ..
+            "%(restorestack%(L, _base_off%) %+ %d+%)%);",
             opened_flat)
         assert.match(backscan, opened_flat)
         assert.match(
@@ -338,7 +340,8 @@ describe("dense Array code generation and boundaries", function()
         local call_count = 0
         for call in flat:gmatch("titan_array_new%b()") do
             local slot = assert(call:match(
-                ", &_mod%->uv%[(%d+)%]%.uv%)$"))
+                ", &_mod%->uv%[(%d+)%]%.uv, " ..
+                "%(restorestack%(L, _base_off%) %+ %d+%)%)$"))
             assert.is_true(writer_slots[slot])
             call_counts[slot] = (call_counts[slot] or 0) + 1
             call_count = call_count + 1
@@ -356,7 +359,8 @@ describe("dense Array code generation and boundaries", function()
             local body = generated_function(csrc, marker):gsub("%s+", " ")
             local call = assert(body:match("titan_array_new%b()"))
             return assert(call:match(
-                ", &_mod%->uv%[(%d+)%]%.uv%)$"))
+                ", &_mod%->uv%[(%d+)%]%.uv, " ..
+                "%(restorestack%(L, _base_off%) %+ %d+%)%)$"))
         end
         assert.equal(
             constructor_writer("test_\\u2133_ints_one_titan(lua_State *L"),
@@ -1458,9 +1462,15 @@ describe("dense Array code generation and boundaries", function()
             "lua_pushcclosure%(L, titan_main_string_array_writer, 1%);",
             entrypoint)
         assert.match("writer = lua_totvalue%(L, %-1%);", entrypoint)
+        assert.match("lua_pushnil%(L%); /%* traced constructor result slot %*/",
+            entrypoint)
         assert.match(
             "arguments = titan_array_new%(%s*" ..
-            "L, array_metatable, nargs, &writer%);", entrypoint)
+            "L, array_metatable, nargs, &writer, L%->top%.p %- 1%);",
+            entrypoint)
+        assert.match(
+            "lua_remove%(L, %-2%); /%* discard writer, keep backing %*/",
+            entrypoint)
 
         local empty, empty_why, empty_status =
             h.call_app("./dense_array_args")

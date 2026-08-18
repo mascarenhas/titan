@@ -457,8 +457,9 @@ with nil, then builds the struct from every argument beyond `nfixed`:
    `_varargs->args[j]` and pass `_start = 0`. The strict adapter excludes its
    hidden original-closure argument from `_vcount`.
 
-The entry first calls `titan_ensure_stack`, which raises normally if
-`lua_checkstack` cannot reserve the payload anchor. The arg-base pointer
+The entry first calls `titan_ensure_stack`, which uses Lua's internal raising
+growth path to reserve the payload anchor and extend the active frame limit.
+The arg-base pointer
 (`_vfunc`) is recomputed after that reservation/push because it may have
 relocated the stack.
 

@@ -35,9 +35,12 @@ handler's rule is:
 This prevents stale-trace reuse while still supporting bare re-raise.
 When a Titan catch re-raises the original error, codegen first writes the
 saved catch-local `traceback` back to `TITAN_BACKTRACE_KEY`, sets the pin,
-pushes the saved `error`, and calls `lua_error`. The handler sees the pin
-and preserves the original deep trace. A fresh `raise <exp>` leaves the
-pin clear, so the handler captures a new trace at the new raise site.
+places the saved `error` in the single top slot required by Lua's error ABI,
+and calls `lua_error`. The registry writes use `luaH_*` and the registry
+`Table` directly; they neither call the public stack API nor change
+`L->top`. The handler sees the pin and preserves the original deep trace. A
+fresh `raise <exp>` leaves the pin clear, so the handler captures a new trace
+at the new raise site.
 
 Coroutines use one extra registry slot, `TITAN_TRACE_APPEND_KEY`, for
 uncaught errors in a dead coroutine. The coroutine entry stages its own
@@ -52,7 +55,14 @@ When a boundary catches an error for a Titan `catch`, it snapshots the
 trace into a reserved stack slot and then clears both the trace slot and
 the pin. A fully handled catch therefore leaves `titan.backtrace()` as
 `nil`; the handled trace is available only through the catch-local
-`traceback`.
+`traceback`. Snapshot and clear also access `G(L)->l_registry` through the
+internal table machinery without pushing registry keys or values. String-key
+lookup can allocate while interning the fixed key, so generated recovery
+restores `_base` from its saved offset before it writes any reserved slot.
+The lookup tag is checked before its result: an absent trace (for example on
+an exceptional low-level error path that did not populate the registry) falls
+back to the empty traceback string without inspecting an uninitialized
+`TValue`.
 
 ### libbacktrace and frame merging
 
